@@ -91,6 +91,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Error handling config (for RLOO-N advantage estimator)
         self._error_handling_config = self._harbor_config_builder.get_error_handling_config()
 
+        # TIS (Truncated Importance Sampling) config
+        # Only show TIS-related warnings when collect_rollout_details is enabled
+        self._collect_rollout_details = self._harbor_config_builder.get_collect_rollout_details()
+
         logger.info(
             f"TerminalBenchGenerator initialized with HarborConfigBuilder. "
             f"Exposed fields: {list(self._harbor_config_builder._harbor_cfg.keys())}. "
@@ -674,15 +678,16 @@ class TerminalBenchGenerator(GeneratorInterface):
                         # This allows partial training on trajectories that have valid logprobs
                         rollout_logprobs_list.append([0.0] * len(output.response_ids))
 
-                if missing_logprobs_count > 0:
+                if missing_logprobs_count > 0 and self._collect_rollout_details:
+                    # Only warn about missing logprobs if TIS is expected (collect_rollout_details=true)
                     logger.warning(
                         f"TIS mode: {missing_logprobs_count}/{num_trials} trajectories missing logprobs "
                         f"(likely due to context length errors). Filled with zeros. "
                         f"These trajectories will have no gradient contribution from TIS."
                     )
-            elif missing_logprobs_count > 0:
+            elif missing_logprobs_count > 0 and self._collect_rollout_details:
                 # All trajectories missing logprobs - this is a problem for TIS
-                # Log error and let TIS assertion fail with better context
+                # Only log error if TIS is expected (collect_rollout_details=true)
                 logger.error(
                     f"TIS mode: ALL {num_trials} trajectories missing logprobs. "
                     f"This batch cannot be used for TIS training. "

@@ -566,6 +566,27 @@ class HarborConfigBuilder:
                 return int(value)
         return default
 
+    def get_collect_rollout_details(self, default: bool = False) -> bool:
+        """
+        Check if rollout details collection is enabled (for TIS in async training).
+
+        When true, Harbor collects per-token logprobs during rollout, which are
+        needed for Truncated Importance Sampling (TIS) to correct for off-policy
+        bias in async training.
+
+        Args:
+            default: Default value if not specified in config.
+
+        Returns:
+            True if rollout details collection is enabled.
+        """
+        mapping = AGENT_SCHEMA.fields.get("collect_rollout_details")
+        if mapping:
+            value = self._harbor_cfg.get("collect_rollout_details", mapping.default)
+            if value is not None:
+                return bool(value)
+        return default
+
     def build_trial_config(
         self,
         task_path: str,

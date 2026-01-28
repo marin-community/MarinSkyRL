@@ -413,12 +413,24 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         model_name = served_model_name if served_model_name else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        # vLLM 0.10+ requires model_config as second argument
-        models = OpenAIServingModels(
-            engine_client=engine,
-            model_config=model_config,
-            base_model_paths=base_model_paths,
-        )
+
+        # vLLM API compatibility:
+        # - vLLM 0.10-0.12: model_config is required as a parameter
+        # - vLLM 0.13+: model_config is removed (obtained internally from engine_client)
+        vllm_version = version.parse(vllm.__version__)
+        needs_model_config = vllm_version < version.parse("0.13.0")
+
+        if needs_model_config:
+            models = OpenAIServingModels(
+                engine_client=engine,
+                model_config=model_config,
+                base_model_paths=base_model_paths,
+            )
+        else:
+            models = OpenAIServingModels(
+                engine_client=engine,
+                base_model_paths=base_model_paths,
+            )
 
         # TODO(Charlie): adding custom chat template for chat completion. Hacky!
         if custom_chat_template_path:
@@ -430,27 +442,45 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
-        # vLLM 0.10+ requires model_config parameter
-        self.openai_serving_chat = OpenAIServingChat(
-            engine_client=engine,
-            model_config=model_config,
-            models=models,
-            response_role="assistant",
-            request_logger=None,
-            chat_template=custom_chat_template_content,
-            chat_template_content_format="auto",
-            **openai_kwargs,
-        )
+        # vLLM 0.10-0.12: model_config required; vLLM 0.13+: model_config removed
+        if needs_model_config:
+            self.openai_serving_chat = OpenAIServingChat(
+                engine_client=engine,
+                model_config=model_config,
+                models=models,
+                response_role="assistant",
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
+                **openai_kwargs,
+            )
+        else:
+            self.openai_serving_chat = OpenAIServingChat(
+                engine_client=engine,
+                models=models,
+                response_role="assistant",
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
+                **openai_kwargs,
+            )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
-        # vLLM 0.10+ requires model_config parameter
-        self.openai_serving_completion = OpenAIServingCompletion(
-            engine_client=engine,
-            model_config=model_config,
-            models=models,
-            request_logger=None,
-        )
+        # vLLM 0.10-0.12: model_config required; vLLM 0.13+: model_config removed
+        if needs_model_config:
+            self.openai_serving_completion = OpenAIServingCompletion(
+                engine_client=engine,
+                model_config=model_config,
+                models=models,
+                request_logger=None,
+            )
+        else:
+            self.openai_serving_completion = OpenAIServingCompletion(
+                engine_client=engine,
+                models=models,
+                request_logger=None,
+            )
         return engine
 
     async def _load_lora_from_disk(self, lora_path: str):
