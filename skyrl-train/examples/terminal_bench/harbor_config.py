@@ -125,6 +125,13 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "override_storage_mb": FieldMapping("override_storage_mb"),
         "override_gpus": FieldMapping("override_gpus"),
         "environment_type": FieldMapping("type"),  # Maps to EnvironmentConfig.type
+        "import_path": FieldMapping("import_path"),  # Custom environment class
+        # Pool-based environment kwargs (for PooledDaytonaDinDEnvironment)
+        "pool_size": FieldMapping("pool_size", field_type="kwargs"),
+        "acquire_timeout": FieldMapping("acquire_timeout", field_type="kwargs"),
+        "env_cpu": FieldMapping("cpu", field_type="kwargs"),  # env_ prefix to avoid conflict with override_cpus
+        "env_memory_gb": FieldMapping("memory_gb", field_type="kwargs"),
+        "env_disk_gb": FieldMapping("disk_gb", field_type="kwargs"),
     }
 )
 
@@ -387,19 +394,29 @@ class HarborConfigBuilder:
     def _build_environment_config(self) -> EnvironmentConfig:
         """Build EnvironmentConfig from config."""
         env_fields = {}
+        env_kwargs = {}
 
         for yaml_key, mapping in ENVIRONMENT_SCHEMA.fields.items():
             value = self._get_field_value(yaml_key, mapping, self._cfg)
             if value is not None:
-                if mapping.harbor_field == "type":
+                if mapping.field_type == "kwargs":
+                    # Pass through to environment kwargs
+                    env_kwargs[mapping.harbor_field] = value
+                elif mapping.harbor_field == "type":
                     # Special handling for environment type
                     if isinstance(value, str):
                         value = EnvironmentType(value)
-                env_fields[mapping.harbor_field] = value
+                    env_fields[mapping.harbor_field] = value
+                else:
+                    env_fields[mapping.harbor_field] = value
 
-        # Default to Daytona if not specified
-        if "type" not in env_fields:
+        # Default to Daytona if neither type nor import_path specified
+        if "type" not in env_fields and "import_path" not in env_fields:
             env_fields["type"] = EnvironmentType.DAYTONA
+
+        # Add kwargs if any were collected
+        if env_kwargs:
+            env_fields["kwargs"] = env_kwargs
 
         return EnvironmentConfig(**env_fields)
 
