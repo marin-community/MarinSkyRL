@@ -121,9 +121,24 @@ class DistributedTorchRayActor:
 
     @staticmethod
     def _get_current_node_ip():
+        # Debug: understand where the IP comes from
+        import socket
+        hostname = socket.gethostname()
+
+        # Check if Ray has a global node set
+        global_node = ray._private.worker._global_node
+        global_node_ip = global_node.node_ip_address if global_node else "None (no global node)"
+
+        # What does get_node_ip_address() return?
         address = ray._private.services.get_node_ip_address()
-        # strip ipv6 address
-        return address.strip("[]")
+
+        logging.info(f"[ipv4-debug] hostname={hostname}")
+        logging.info(f"[ipv4-debug] _global_node.node_ip_address={global_node_ip}")
+        logging.info(f"[ipv4-debug] get_node_ip_address()={address}")
+
+        # strip ipv6 address brackets if present
+        result = address.strip("[]")
+        return result
 
     def get_ray_node_id(self):
         return ray.get_runtime_context().get_node_id()
@@ -265,10 +280,22 @@ class Worker(DistributedTorchRayActor):
         assert inference_engine_client is not None
 
         if torch.distributed.get_rank() == 0:
+            # Debug: understand where master_addr comes from
+            import socket as sock_module
+            hostname = sock_module.gethostname()
+            global_node = ray._private.worker._global_node
+            global_node_ip = global_node.node_ip_address if global_node else "None"
+
             master_addr = ray._private.services.get_node_ip_address()
+
+            logging.info(f"[weight-sync] hostname={hostname}")
+            logging.info(f"[weight-sync] _global_node.node_ip_address={global_node_ip}")
+            logging.info(f"[weight-sync] get_node_ip_address()={master_addr}")
+
             with socket.socket() as sock:
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
+            logging.info(f"[weight-sync] Using master_addr={master_addr}, master_port={master_port}")
 
             num_inference_engines, tensor_parallel_size, pipeline_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
