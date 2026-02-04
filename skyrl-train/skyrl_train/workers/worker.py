@@ -24,6 +24,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl_train.utils.ipv4_patch import enable_ipv4_hostname_patch
 from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
@@ -54,6 +55,9 @@ class DistributedTorchRayActor:
             level=logging.INFO,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
+        # Enable IPv4 hostname patch early, before any c10d operations
+        enable_ipv4_hostname_patch()
+
         self._world_size = world_size
         self._rank = rank
         self._local_rank = local_rank
