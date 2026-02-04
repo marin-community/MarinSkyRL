@@ -414,21 +414,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
 
-        # vLLM API compatibility:
-        # - vLLM 0.10-0.12: model_config is required as a parameter
-        # - vLLM 0.13+: model_config is removed (obtained internally from engine_client)
-        vllm_version = version.parse(vllm.__version__)
-        needs_model_config = vllm_version < version.parse("0.13.0")
-
-        if needs_model_config:
+        # vLLM API compatibility via try/except:
+        # - vLLM >= 0.13: model_config removed (obtained internally from engine_client)
+        # - vLLM < 0.13: model_config is required as a parameter
+        # Try newer API first, fall back to older API if TypeError
+        try:
+            models = OpenAIServingModels(
+                engine_client=engine,
+                base_model_paths=base_model_paths,
+            )
+        except TypeError:
+            logger.info(f"vLLM {vllm.__version__}: using legacy API with model_config")
             models = OpenAIServingModels(
                 engine_client=engine,
                 model_config=model_config,
-                base_model_paths=base_model_paths,
-            )
-        else:
-            models = OpenAIServingModels(
-                engine_client=engine,
                 base_model_paths=base_model_paths,
             )
 
@@ -442,11 +441,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
-        # vLLM 0.10-0.12: model_config required; vLLM 0.13+: model_config removed
-        if needs_model_config:
+        # Try newer API first, fall back to older API if TypeError
+        try:
             self.openai_serving_chat = OpenAIServingChat(
                 engine_client=engine,
-                model_config=model_config,
                 models=models,
                 response_role="assistant",
                 request_logger=None,
@@ -454,9 +452,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 chat_template_content_format="auto",
                 **openai_kwargs,
             )
-        else:
+        except TypeError:
             self.openai_serving_chat = OpenAIServingChat(
                 engine_client=engine,
+                model_config=model_config,
                 models=models,
                 response_role="assistant",
                 request_logger=None,
@@ -467,17 +466,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
-        # vLLM 0.10-0.12: model_config required; vLLM 0.13+: model_config removed
-        if needs_model_config:
+        # Try newer API first, fall back to older API if TypeError
+        try:
             self.openai_serving_completion = OpenAIServingCompletion(
                 engine_client=engine,
-                model_config=model_config,
                 models=models,
                 request_logger=None,
             )
-        else:
+        except TypeError:
             self.openai_serving_completion = OpenAIServingCompletion(
                 engine_client=engine,
+                model_config=model_config,
                 models=models,
                 request_logger=None,
             )
