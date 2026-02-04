@@ -211,6 +211,8 @@ trainer:
 generator:
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16" # should match dtype for inference engine
+  # Timeout multiplier for API requests (used by VerifiersGenerator)
+  timeout_multiplier: 1.0
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
