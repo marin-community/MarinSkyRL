@@ -132,6 +132,11 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "env_cpu": FieldMapping("cpu", field_type="kwargs"),  # env_ prefix to avoid conflict with override_cpus
         "env_memory_gb": FieldMapping("memory_gb", field_type="kwargs"),
         "env_disk_gb": FieldMapping("disk_gb", field_type="kwargs"),
+        # Daytona snapshot support (for reducing rate limits with many sandboxes)
+        # auto_snapshot: Automatically create/reuse snapshots based on Dockerfile hash
+        # snapshot_template_name: Use explicit snapshot name template (e.g., "harbor__{name}__snapshot")
+        "auto_snapshot": FieldMapping("auto_snapshot", field_type="kwargs", default=False),
+        "snapshot_template_name": FieldMapping("snapshot_template_name", field_type="kwargs"),
     }
 )
 
