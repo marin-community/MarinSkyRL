@@ -785,29 +785,28 @@ class TerminalBenchGenerator(GeneratorInterface):
                 exception_type=exception_type,
             )
 
-        # Check for missing verifier result (trial ran but didn't produce valid output)
-        if not result.verifier_result:
-            # Try to get exception info from the result
-            exception_info = getattr(result, "exception_info", None)
+        # Check for exception_info BEFORE verifier_result - Harbor may return both
+        # when a trial had an error (e.g., AgentTimeoutError, ContextLengthExceededError)
+        # but the verifier still ran on the rolled-back state.
+        exception_info = getattr(result, "exception_info", None)
+        if exception_info is not None:
             exception_type = "UnknownError"
             exclude_from_baseline = False
 
-            if exception_info:
-                # Extract exception type from exception_info if available
-                if hasattr(exception_info, "exception_type"):
-                    exception_type = exception_info.exception_type
-                elif hasattr(exception_info, "__class__"):
-                    exception_type = type(exception_info).__name__
+            if hasattr(exception_info, "exception_type"):
+                exception_type = exception_info.exception_type
+            elif hasattr(exception_info, "__class__"):
+                exception_type = type(exception_info).__name__
 
-                # Create a mock exception to classify
-                class MockException(Exception):
-                    pass
-                MockException.__name__ = exception_type
-                exclude_from_baseline, _ = self._classify_exception(MockException())
+            # Create a mock exception to classify
+            class MockException(Exception):
+                pass
+            MockException.__name__ = exception_type
+            exclude_from_baseline, _ = self._classify_exception(MockException())
 
             logger.warning(
-                f"Trajectory {trajectory_id} failed: No verifier result. "
-                f"Exception info: {exception_info} "
+                f"Trajectory {trajectory_id} failed with Harbor exception: "
+                f"{exception_info.exception_message if hasattr(exception_info, 'exception_message') else exception_info} "
                 f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
             )
             return TerminalBenchAgentOutput(
@@ -819,6 +818,24 @@ class TerminalBenchGenerator(GeneratorInterface):
                 trajectory_id=trajectory_id,
                 exclude_from_baseline=exclude_from_baseline,
                 exception_type=exception_type,
+            )
+
+        # Check for missing verifier result (trial ran but didn't produce valid output)
+        # Note: exception_info is already handled above, so if we reach here it's None
+        if not result.verifier_result:
+            logger.warning(
+                f"Trajectory {trajectory_id} failed: No verifier result and no exception info. "
+                f"This is unexpected - marking as infrastructure failure."
+            )
+            return TerminalBenchAgentOutput(
+                response_ids=[0],
+                reward=0,
+                stop_reason="error",
+                loss_mask=[0],
+                prompt_ids=[0],
+                trajectory_id=trajectory_id,
+                exclude_from_baseline=True,  # Infrastructure issue - exclude from baseline
+                exception_type="MissingVerifierResult",
             )
 
         # Extract data from successful trial
