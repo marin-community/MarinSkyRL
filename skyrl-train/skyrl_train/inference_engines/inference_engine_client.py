@@ -330,6 +330,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             if "error" in partial_response or partial_response.get("object", "") == "error":
                 error_info = partial_response.get("error", partial_response)
                 error_msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+
+                # Handle continue_final_message errors by falling back to fresh request.
+                # This can happen when chat templates (e.g., Qwen3 thinking) modify assistant
+                # content in ways that make vLLM unable to find the continuation point.
+                if "continue_final_message" in error_msg and accum.completion_tokens > 0:
+                    logger.warning(
+                        f"continue_final_message failed (chat template incompatibility). "
+                        f"Discarding {accum.completion_tokens} accumulated tokens and retrying fresh request."
+                    )
+                    # Reset accumulator and retry with original request
+                    accum = AccumulatedResponse()
+                    response_role = None
+                    continue
+
                 raise RuntimeError(f"Inference engine error: {error_msg}")
 
             # 1.3. Parse partial response and in-place update accumulators.
