@@ -32,7 +32,6 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.utils import torch_dtype_to_str
-from skyrl_train.utils.ipv4_patch import enable_ipv4_hostname_patch
 from skyrl_train.inference_engines.sglang.ipc_utils import (
     serialize_ipc_request,
     deserialize_ipc_request,
@@ -242,10 +241,6 @@ class SGLangWeightLoader(WeightLoader):
         Returns:
             Tuple of (success, message).
         """
-        # Enable IPv4 hostname patch before creating the process group
-        # This prevents c10d from using IB hostnames that resolve to IPv6
-        enable_ipv4_hostname_patch()
-
         obj = InitWeightsUpdateGroupReqInput(
             master_address=master_address,
             master_port=master_port,

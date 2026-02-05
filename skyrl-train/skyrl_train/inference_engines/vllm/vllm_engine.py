@@ -36,7 +36,6 @@ from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
-from skyrl_train.utils.ipv4_patch import enable_ipv4_hostname_patch
 import time
 from packaging import version
 
@@ -87,10 +86,6 @@ class WorkerWrap:
         override_existing: bool = False,
     ):
         """Init torch process group for model weights update"""
-        # Enable IPv4 hostname patch before creating the process group
-        # This prevents c10d from using IB hostnames that resolve to IPv6
-        enable_ipv4_hostname_patch()
-
         assert torch.distributed.is_initialized(), "default torch process group must be initialized"
         assert group_name != "", "group name must not be empty"
 
