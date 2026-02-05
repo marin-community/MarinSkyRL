@@ -325,6 +325,13 @@ class InferenceEngineClient(InferenceEngineInterface):
                 {"json": cur_request_json, "headers": headers}
             )
 
+            # 1.2.1. Check for error response from vLLM/sglang.
+            # Error responses have "error" key (vLLM) or "object"="error" (sglang), not "choices".
+            if "error" in partial_response or partial_response.get("object", "") == "error":
+                error_info = partial_response.get("error", partial_response)
+                error_msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                raise RuntimeError(f"Inference engine error: {error_msg}")
+
             # 1.3. Parse partial response and in-place update accumulators.
             finish_reason, stop_reason, response_role, aborted_without_generating = (
                 _parse_partial_response_and_inplace_update_accum(
