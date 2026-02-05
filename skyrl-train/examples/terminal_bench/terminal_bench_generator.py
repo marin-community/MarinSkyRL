@@ -270,6 +270,11 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         async with self._orchestrator_lock:
             if self._orchestrator is not None and self._orchestrator_started:
+                # Mark as not started BEFORE shutdown to prevent race condition.
+                # This ensures concurrent generate() calls fail fast rather than
+                # trying to submit to an orchestrator that's in the process of
+                # shutting down (which can take time with wait=True).
+                self._orchestrator_started = False
                 try:
                     logger.info("Shutting down shared QueueOrchestrator...")
                     await self._orchestrator.shutdown(wait=True)
@@ -277,7 +282,6 @@ class TerminalBenchGenerator(GeneratorInterface):
                 except Exception as e:
                     logger.warning(f"Error during orchestrator shutdown: {e}")
                 finally:
-                    self._orchestrator_started = False
                     self._orchestrator = None
 
     async def start_eval_session(
