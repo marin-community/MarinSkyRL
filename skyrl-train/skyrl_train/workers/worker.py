@@ -676,6 +676,10 @@ class PolicyWorkerBase(Worker):
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
 
+        # Clear fragmented GPU memory before training to avoid OOM at step boundaries
+        # (matches CriticWorkerBase.ppo_train behavior)
+        torch.cuda.empty_cache()
+
         micro_batches_per_mini_batch = (
             self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
         )
