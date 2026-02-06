@@ -489,21 +489,39 @@ class TerminalBenchGenerator(GeneratorInterface):
             trajectory_ids.append(trajectory_id)
 
         # Get the active orchestrator (eval or training)
+        # Note: We check without lock first for performance, then re-check with lock if needed
         active_orchestrator = self._get_active_orchestrator()
         orchestrator_started = (
             self._eval_session_active if is_eval else self._orchestrator_started
         )
 
         # Check if orchestrator is available
+        # If it appears unavailable, acquire lock and re-check to avoid race condition
+        # where multiple workers see temporary False state during restart
         if not orchestrator_started or active_orchestrator is None:
-            logger.error(
-                "QueueOrchestrator not available. Was startup() called? "
-                "Attempting emergency restart..."
-            )
-            restart_success = await self._restart_orchestrator()
-            if not restart_success:
-                logger.error("Emergency orchestrator restart failed. Returning all-failed output.")
-                return self._create_all_failed_output(trajectory_ids, "OrchestratorNotStarted")
+            async with self._orchestrator_lock:
+                # Re-check after acquiring lock - another worker may have restarted
+                active_orchestrator = self._get_active_orchestrator()
+                orchestrator_started = (
+                    self._eval_session_active if is_eval else self._orchestrator_started
+                )
+                if orchestrator_started and active_orchestrator is not None:
+                    # Another worker already restarted, continue with the fresh orchestrator
+                    logger.debug("Orchestrator was restarted by another worker, continuing")
+                else:
+                    # Still unavailable, we need to restart
+                    logger.warning(
+                        "QueueOrchestrator not available. Was startup() called? "
+                        "Attempting emergency restart..."
+                    )
+            # Release lock before calling _restart_orchestrator (it acquires its own lock)
+            if not orchestrator_started or active_orchestrator is None:
+                restart_success = await self._restart_orchestrator()
+                if not restart_success:
+                    logger.error("Emergency orchestrator restart failed. Returning all-failed output.")
+                    return self._create_all_failed_output(trajectory_ids, "OrchestratorNotStarted")
+                # Refresh the orchestrator reference after restart
+                active_orchestrator = self._get_active_orchestrator()
 
         # Submit trials to active orchestrator with restart logic on failure
         results: List[TrialResult | Exception] = []

@@ -19,7 +19,7 @@ import sys
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from tqdm import tqdm
-from skyrl_train.utils import Timer
+from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
@@ -521,6 +521,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     log_payload = {
                         **self.all_metrics,
                         **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                        **get_system_memory_metrics(),
                     }
                     self.tracker.log(log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
                     await self.callback_handler.call_event_async(

@@ -31,7 +31,7 @@ from skyrl_train.dataset.preprocess import (
 )
 from skyrl_train.utils import ppo_utils, trainer_utils
 from skyrl_train.utils.io import io
-from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
@@ -441,6 +441,7 @@ class RayPPOTrainer:
                     log_payload = {
                         **self.all_metrics,
                         **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                        **get_system_memory_metrics(),
                     }
                     self.tracker.log(log_payload, step=self.global_step, commit=True)
                     # Call on_log callbacks
