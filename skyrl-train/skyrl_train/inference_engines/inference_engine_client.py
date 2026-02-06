@@ -335,16 +335,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 # This can happen when chat templates (e.g., Qwen3 thinking) modify assistant
                 # content in ways that make vLLM unable to find the continuation point.
                 if "continue_final_message" in error_msg and accum.completion_tokens > 0:
-                    # Log detailed diagnostic info to help identify the mismatch
-                    from skyrl_train.utils.logging_utils import ContentMismatchDiagnostics
-                    diagnostics = ContentMismatchDiagnostics.from_accumulator(
-                        content=accum.content,
-                        token_count=accum.completion_tokens,
-                        token_ids=accum.token_ids,
-                        response_role=response_role,
-                        error_message=error_msg,
+                    logger.warning(
+                        f"continue_final_message failed after {accum.completion_tokens} tokens, retrying fresh"
                     )
-                    logger.warning(diagnostics.format_log_message("continue_final_message failed"))
                     # Reset accumulator and retry with original request
                     accum = AccumulatedResponse()
                     response_role = None
