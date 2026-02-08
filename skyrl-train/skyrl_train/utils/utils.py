@@ -598,6 +598,17 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    # Harbor distributed containers mode for HPC multi-node jobs
+    # This enables Harbor to spread container workload across Ray nodes
+    if os.environ.get("HARBOR_DISTRIBUTED_CONTAINERS"):
+        logger.info("Exporting HARBOR_DISTRIBUTED_CONTAINERS to ray runtime env")
+        env_vars["HARBOR_DISTRIBUTED_CONTAINERS"] = os.environ["HARBOR_DISTRIBUTED_CONTAINERS"]
+
+    # RAY_ADDRESS is needed by Harbor's distributed pool to connect to the cluster
+    if os.environ.get("RAY_ADDRESS"):
+        logger.info("Exporting RAY_ADDRESS to ray runtime env")
+        env_vars["RAY_ADDRESS"] = os.environ["RAY_ADDRESS"]
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
