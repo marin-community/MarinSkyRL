@@ -652,6 +652,156 @@ class LoggingCallback(TrainerCallback):
         return control
 
 
+@register_callback("vllm_stats")
+class VLLMStatsCallback(TrainerCallback):
+    """
+    Callback for collecting and logging vLLM inference engine statistics.
+
+    This callback queries vLLM engines directly for their stats (prompt/generation
+    throughput, KV cache usage, request counts) bypassing Ray's log-to-driver
+    functionality which can be unreliable.
+
+    Stats are logged to both console (loguru) and wandb (if available).
+
+    Args:
+        log_every_steps: Log stats every N steps. Default 1 (every step).
+        log_to_console: Whether to log stats to console via loguru. Default True.
+        log_to_wandb: Whether to log stats to wandb. Default True.
+        console_log_level: Log level for console output ("info", "debug"). Default "info".
+    """
+
+    def __init__(
+        self,
+        log_every_steps: int = 1,
+        log_to_console: bool = True,
+        log_to_wandb: bool = True,
+        console_log_level: str = "info",
+    ):
+        self.log_every_steps = log_every_steps
+        self.log_to_console = log_to_console
+        self.log_to_wandb = log_to_wandb
+        self.console_log_level = console_log_level.lower()
+        self._wandb_available: Optional[bool] = None
+        self._inference_engine_client = None
+
+    def on_train_begin(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        """Cache reference to inference engine client at training start."""
+        trainer = kwargs.get("trainer")
+        if trainer is not None:
+            self._inference_engine_client = getattr(trainer, "inference_engine_client", None)
+            if self._inference_engine_client is None:
+                logger.warning(
+                    "VLLMStatsCallback: No inference_engine_client found on trainer. "
+                    "Stats collection will be disabled."
+                )
+        return control
+
+    async def on_step_end_async(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        """Query engines for stats and log them."""
+        if self.log_every_steps <= 0:
+            return control
+
+        if state.global_step % self.log_every_steps != 0:
+            return control
+
+        if self._inference_engine_client is None:
+            return control
+
+        try:
+            stats = await self._inference_engine_client.get_stats()
+            self._log_stats(stats, state.global_step)
+        except Exception as e:
+            logger.warning(f"VLLMStatsCallback: Failed to collect stats: {e}")
+
+        return control
+
+    def _log_stats(self, stats: Dict[str, Any], global_step: int) -> None:
+        """Log stats to console and wandb."""
+        num_engines = stats.get("num_engines", 0)
+        if num_engines == 0:
+            return
+
+        # Build log message
+        msg = (
+            f"vLLM Stats (step {global_step}): "
+            f"engines={num_engines}, "
+            f"running={stats['total_running_reqs']}, "
+            f"waiting={stats['total_waiting_reqs']}, "
+            f"prompt_tp={stats['avg_prompt_throughput']:.1f} tok/s, "
+            f"gen_tp={stats['avg_generation_throughput']:.1f} tok/s, "
+            f"gpu_kv_cache={stats['avg_gpu_cache_usage_perc']:.1f}%, "
+            f"prefix_hit={stats['avg_prefix_cache_hit_rate']:.1f}%"
+        )
+
+        # Log to console
+        if self.log_to_console:
+            if self.console_log_level == "debug":
+                logger.debug(msg)
+            else:
+                logger.info(msg)
+
+        # Log to wandb
+        if self.log_to_wandb:
+            self._log_to_wandb(stats, global_step)
+
+    def _log_to_wandb(self, stats: Dict[str, Any], global_step: int) -> None:
+        """Log stats to wandb if available."""
+        # Lazy check for wandb availability
+        if self._wandb_available is None:
+            try:
+                import wandb
+                self._wandb_available = wandb.run is not None
+            except ImportError:
+                self._wandb_available = False
+
+        if not self._wandb_available:
+            return
+
+        try:
+            import wandb
+
+            # Log aggregated metrics
+            wandb.log(
+                {
+                    "vllm/num_engines": stats["num_engines"],
+                    "vllm/total_running_reqs": stats["total_running_reqs"],
+                    "vllm/total_waiting_reqs": stats["total_waiting_reqs"],
+                    "vllm/avg_prompt_throughput": stats["avg_prompt_throughput"],
+                    "vllm/avg_generation_throughput": stats["avg_generation_throughput"],
+                    "vllm/avg_gpu_cache_usage_perc": stats["avg_gpu_cache_usage_perc"],
+                    "vllm/avg_prefix_cache_hit_rate": stats["avg_prefix_cache_hit_rate"],
+                },
+                step=global_step,
+            )
+
+            # Also log per-engine metrics if there are multiple engines
+            if stats["num_engines"] > 1:
+                for i, engine_stats in enumerate(stats.get("engines", [])):
+                    wandb.log(
+                        {
+                            f"vllm/engine_{i}/prompt_throughput": engine_stats.get("avg_prompt_throughput", 0.0),
+                            f"vllm/engine_{i}/generation_throughput": engine_stats.get("avg_generation_throughput", 0.0),
+                            f"vllm/engine_{i}/running_reqs": engine_stats.get("num_running_reqs", 0),
+                            f"vllm/engine_{i}/waiting_reqs": engine_stats.get("num_waiting_reqs", 0),
+                            f"vllm/engine_{i}/gpu_cache_usage": engine_stats.get("gpu_cache_usage_perc", 0.0),
+                            f"vllm/engine_{i}/prefix_cache_hit": engine_stats.get("prefix_cache_hit_rate", 0.0),
+                        },
+                        step=global_step,
+                    )
+        except Exception as e:
+            logger.warning(f"VLLMStatsCallback: Failed to log to wandb: {e}")
+
+
 def create_default_callbacks(cfg: "DictConfig") -> List[TrainerCallback]:
     """
     Create the default set of callbacks based on trainer configuration.
@@ -751,6 +901,19 @@ def create_default_callbacks(cfg: "DictConfig") -> List[TrainerCallback]:
             if harbor:
                 agent_name = getattr(harbor, "name", None)
         callbacks.append(DatabaseRegistrationCallback(agent_name=agent_name))
+
+    # vLLM stats callback (enabled when using vLLM backend)
+    # This collects engine stats directly, bypassing unreliable Ray log-to-driver
+    generator_backend = getattr(cfg.generator, "backend", None)
+    vllm_stats_interval = getattr(cfg.generator, "vllm_stats_interval", 1)
+    if generator_backend == "vllm" and vllm_stats_interval > 0:
+        callbacks.append(
+            VLLMStatsCallback(
+                log_every_steps=vllm_stats_interval,
+                log_to_console=True,
+                log_to_wandb=True,
+            )
+        )
 
     # Logging callback (always enabled)
     callbacks.append(LoggingCallback())

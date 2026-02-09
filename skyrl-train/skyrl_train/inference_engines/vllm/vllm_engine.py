@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator
 from dataclasses import dataclass
 from loguru import logger
@@ -376,25 +377,71 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
     """
     A fixed version of LoggingStatLogger that actually logs during the record method.
     The log method is otherwise not called in the VLLM codebase.
+
+    Also stores latest stats in a class-level registry for programmatic access
+    (used by VLLMStatsCallback to bypass Ray log-to-driver unreliability).
     """
+
+    # Class-level registry mapping engine IDs to their latest stats
+    _stats_registry: Dict[int, Dict[str, Any]] = {}
+    _registry_lock = threading.Lock()
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.log_interval = 5
+        self._engine_id: Optional[int] = None
+
+    def set_engine_id(self, engine_id: int) -> None:
+        """Set the engine ID for this stat logger instance."""
+        self._engine_id = engine_id
 
     def record(self, *args: Any, **kwargs: Any) -> None:
         super().record(*args, **kwargs)
+
+        # Store current stats in registry if engine ID is set
+        if self._engine_id is not None:
+            stats = {
+                "avg_prompt_throughput": getattr(self, "avg_prompt_throughput", 0.0),
+                "avg_generation_throughput": getattr(self, "avg_generation_throughput", 0.0),
+                "num_running_reqs": getattr(self, "num_running_reqs", 0),
+                "num_waiting_reqs": getattr(self, "num_waiting_reqs", 0),
+                "gpu_cache_usage_perc": getattr(self, "gpu_cache_usage_perc", 0.0),
+                "prefix_cache_hit_rate": getattr(self, "prefix_cache_hit_rate", 0.0),
+                "timestamp": time.time(),
+            }
+            with V1LoggingStatLoggerFixed._registry_lock:
+                V1LoggingStatLoggerFixed._stats_registry[self._engine_id] = stats
+
         now = time.monotonic()
         if now - self.last_log_time > self.log_interval:
             self.log()
             self.last_log_time = now
 
+    @classmethod
+    def get_stats_by_engine_id(cls, engine_id: int) -> Optional[Dict[str, Any]]:
+        """Get the latest stats for a given engine ID."""
+        with cls._registry_lock:
+            return cls._stats_registry.get(engine_id)
+
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
 
     def __init__(self, *args, **kwargs):
+        # Generate unique engine ID before calling super().__init__() which calls _create_engine
+        self._stats_engine_id = id(self)
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
+
+    def _create_stat_logger_factory(self):
+        """Create a factory that produces stat loggers with the engine ID set."""
+        engine_id = self._stats_engine_id
+
+        def factory(*args, **kwargs):
+            logger_instance = V1LoggingStatLoggerFixed(*args, **kwargs)
+            logger_instance.set_engine_id(engine_id)
+            return logger_instance
+
+        return factory
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
@@ -402,7 +449,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # TODO (erictang000): potentially enable log requests for a debugging mode
         custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
-        stat_loggers = [V1LoggingStatLoggerFixed]
+        # Use factory to inject engine ID into stat logger
+        stat_loggers = [self._create_stat_logger_factory()]
         engine_args = vllm.AsyncEngineArgs(**kwargs)
 
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
@@ -721,6 +769,36 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get current vLLM engine statistics.
+
+        Returns a dict with the following keys:
+        - avg_prompt_throughput: Average prompt tokens per second
+        - avg_generation_throughput: Average generation tokens per second
+        - num_running_reqs: Number of currently running requests
+        - num_waiting_reqs: Number of requests waiting in queue
+        - gpu_cache_usage_perc: GPU KV cache usage percentage
+        - prefix_cache_hit_rate: Prefix cache hit rate percentage
+        - timestamp: Unix timestamp when stats were recorded
+        - engine_id: Unique identifier for this engine instance
+
+        Used by VLLMStatsCallback to collect and aggregate stats across engines.
+        """
+        stats = V1LoggingStatLoggerFixed.get_stats_by_engine_id(self._stats_engine_id)
+        if stats is None:
+            # Return empty stats if no data recorded yet
+            stats = {
+                "avg_prompt_throughput": 0.0,
+                "avg_generation_throughput": 0.0,
+                "num_running_reqs": 0,
+                "num_waiting_reqs": 0,
+                "gpu_cache_usage_perc": 0.0,
+                "prefix_cache_hit_rate": 0.0,
+                "timestamp": time.time(),
+            }
+        stats["engine_id"] = self._stats_engine_id
+        return stats
 
     async def abort_generation(self) -> None:
         """

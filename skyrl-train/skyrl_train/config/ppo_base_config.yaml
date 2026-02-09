@@ -238,6 +238,9 @@ generator:
   # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
   # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
   enable_ray_prometheus_stats: false
+  # Log vLLM engine stats (throughput, KV cache, request counts) every N steps.
+  # Stats are logged to console and wandb. Set to 0 to disable.
+  vllm_stats_interval: 1
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]

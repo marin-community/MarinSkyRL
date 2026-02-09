@@ -533,6 +533,61 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def teardown(self):
         return await self._run_on_all_engines("teardown")
 
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get aggregated statistics from all vLLM inference engines.
+
+        Queries each engine for its current stats and returns aggregated metrics:
+        - Individual engine stats in 'engines' list
+        - Aggregated totals and averages
+
+        Returns:
+            Dict with keys:
+            - engines: List of per-engine stats dicts
+            - num_engines: Total number of engines
+            - total_running_reqs: Sum of running requests across all engines
+            - total_waiting_reqs: Sum of waiting requests across all engines
+            - avg_prompt_throughput: Mean prompt throughput across engines
+            - avg_generation_throughput: Mean generation throughput across engines
+            - avg_gpu_cache_usage_perc: Mean GPU cache usage across engines
+            - avg_prefix_cache_hit_rate: Mean prefix cache hit rate across engines
+
+        Used by VLLMStatsCallback to log engine stats without relying on
+        Ray's log-to-driver functionality.
+        """
+        engine_stats_list = await self._run_on_all_engines("get_stats")
+        num_engines = len(engine_stats_list)
+
+        if num_engines == 0:
+            return {
+                "engines": [],
+                "num_engines": 0,
+                "total_running_reqs": 0,
+                "total_waiting_reqs": 0,
+                "avg_prompt_throughput": 0.0,
+                "avg_generation_throughput": 0.0,
+                "avg_gpu_cache_usage_perc": 0.0,
+                "avg_prefix_cache_hit_rate": 0.0,
+            }
+
+        # Aggregate stats
+        total_running = sum(s.get("num_running_reqs", 0) for s in engine_stats_list)
+        total_waiting = sum(s.get("num_waiting_reqs", 0) for s in engine_stats_list)
+        avg_prompt_tp = sum(s.get("avg_prompt_throughput", 0.0) for s in engine_stats_list) / num_engines
+        avg_gen_tp = sum(s.get("avg_generation_throughput", 0.0) for s in engine_stats_list) / num_engines
+        avg_gpu_cache = sum(s.get("gpu_cache_usage_perc", 0.0) for s in engine_stats_list) / num_engines
+        avg_prefix_hit = sum(s.get("prefix_cache_hit_rate", 0.0) for s in engine_stats_list) / num_engines
+
+        return {
+            "engines": engine_stats_list,
+            "num_engines": num_engines,
+            "total_running_reqs": total_running,
+            "total_waiting_reqs": total_waiting,
+            "avg_prompt_throughput": avg_prompt_tp,
+            "avg_generation_throughput": avg_gen_tp,
+            "avg_gpu_cache_usage_perc": avg_gpu_cache,
+            "avg_prefix_cache_hit_rate": avg_prefix_hit,
+        }
+
     def tp_size(self) -> int:
         raise NotImplementedError("InferenceEngineClient does not implement tp_size()")
 
