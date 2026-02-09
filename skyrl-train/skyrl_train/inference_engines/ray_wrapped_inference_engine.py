@@ -65,6 +65,14 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def abort_generation(self) -> None:
         return await self.inference_engine_actor.abort_generation.remote()
 
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get vLLM engine statistics from the remote actor.
+
+        Returns statistics about the inference engine including throughput,
+        KV cache usage, and request counts. Used by VLLMStatsCallback.
+        """
+        return await self.inference_engine_actor.get_stats.remote()
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
