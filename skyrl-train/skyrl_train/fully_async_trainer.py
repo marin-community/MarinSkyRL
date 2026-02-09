@@ -154,15 +154,18 @@ class _AsyncStalenessManager:
         return min(producer_concurrency_capacity, producer_staleness_capacity)
 
     async def acquire_submission_slot(self) -> None:
-        """Block until there is capacity, then reserve a slot (increments submitted and running).
+        """Reserve a slot for generation (increments submitted and running).
 
-        This method always uses the latest current version tracked internally, which is
-        updated by `notify_capacity_change(new_global_step)`.
+        This method no longer blocks on staleness capacity. Concurrency is managed by
+        the number of workers (num_parallel_generation_workers), and stale groups are
+        discarded at consumption time in convert_generation_group_mini_batch_to_training_input().
+
+        This approach maximizes vLLM utilization by allowing all workers to submit work
+        immediately, rather than blocking when the staleness budget is exceeded.
         """
         async with self._cond:
-            while self._compute_capacity_unlocked() <= 0:
-                await self._cond.wait()
-            # Reserve slot
+            # No blocking - just increment counters
+            # Concurrency is naturally bounded by num_parallel_generation_workers
             self._stat.submitted += 1
             self._stat.running += 1
 
@@ -725,42 +728,70 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
     ) -> TrainingInputBatch:
-        """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch."""
+        """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch.
+
+        Stale groups (staleness > max_staleness_steps) are discarded rather than trained on.
+        This is the deadline-based staleness control approach: instead of blocking workers
+        at submission time, we allow all workers to submit freely and discard stale results
+        at consumption time. This maximizes vLLM utilization.
+        """
         generator_outputs = []
         uids = []
         stalenesses = []
-        staleness_violation_count = 0
+        discarded_count = 0
+        discarded_uids = []
         group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
+
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
+
+            # Discard stale groups instead of training on them
+            if cur_staleness > self.max_staleness_steps:
+                logger.info(
+                    f"Discarding stale group uid={cur_generated_output_group.uid} "
+                    f"staleness={cur_staleness} > max={self.max_staleness_steps}"
+                )
+                discarded_count += 1
+                discarded_uids.append(cur_generated_output_group.uid)
+                continue  # Skip this group
+
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
 
-            # Check staleness violation.
-            if cur_staleness > self.max_staleness_steps:
-                # TODO(Charlie): should we drop, drop and resample, or just log?
-                logger.warning(
-                    "Staleness control violated despite using AsyncStalenessManager: "
-                    f"cur_staleness={cur_staleness}, max_staleness_steps={self.max_staleness_steps}.\n"
-                    "If this happens too often, consider increasing max_staleness_steps, adjusting "
-                    "trainer.fully_async.num_parallel_generation_workers, or adjusting generation-training GPU allocation.\n"
-                    "See https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager for more details."
-                )
-                staleness_violation_count += 1
+        # Handle edge case: all groups were discarded
+        if len(generator_outputs) == 0:
+            raise RuntimeError(
+                f"All {len(cur_generation_group_mini_batch)} groups in mini-batch were stale and discarded. "
+                f"Consider increasing max_staleness_steps (currently {self.max_staleness_steps}) or "
+                f"reducing generation latency variance."
+            )
+
+        # Log discard statistics
+        total_groups = len(cur_generation_group_mini_batch)
+        kept_groups = len(generator_outputs)
+        if discarded_count > 0:
+            logger.warning(
+                f"Discarded {discarded_count}/{total_groups} stale groups this step "
+                f"(effective batch: {kept_groups} groups, {kept_groups * group_size} samples)"
+            )
 
         generator_output = concatenate_generator_outputs(generator_outputs)
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
 
         # Log staleness statistics for this step
+        total_groups = len(cur_generation_group_mini_batch)
         self.all_metrics.update(
             {
                 "async/staleness_mean": sum(stalenesses) / len(stalenesses),
                 "async/staleness_max": max(stalenesses),
                 "async/staleness_min": min(stalenesses),
                 "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
-                "async/staleness_violation_count": staleness_violation_count,
+                "async/discarded_count": discarded_count,
+                "async/discard_rate": discarded_count / total_groups if total_groups > 0 else 0.0,
+                "async/effective_batch_groups": len(generator_outputs),
+                "async/effective_batch_samples": len(generator_outputs) * group_size,
             }
         )
 
