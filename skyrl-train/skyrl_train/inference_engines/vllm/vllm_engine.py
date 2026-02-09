@@ -400,17 +400,37 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
         """Set the engine ID for this stat logger instance."""
         self._engine_id = engine_id
 
-    def record(self, *args: Any, **kwargs: Any) -> None:
-        super().record(*args, **kwargs)
+    def record(self, scheduler_stats=None, iteration_stats=None, *args: Any, **kwargs: Any) -> None:
+        super().record(scheduler_stats, iteration_stats, *args, **kwargs)
 
         # Accumulate stats in registry if engine ID is set
         if self._engine_id is not None:
-            current_prompt_tp = getattr(self, "avg_prompt_throughput", 0.0)
-            current_gen_tp = getattr(self, "avg_generation_throughput", 0.0)
-            current_running = getattr(self, "num_running_reqs", 0)
-            current_waiting = getattr(self, "num_waiting_reqs", 0)
-            current_cache_usage = getattr(self, "gpu_cache_usage_perc", 0.0)
-            current_prefix_hit = getattr(self, "prefix_cache_hit_rate", 0.0)
+            # Extract stats from vLLM v1 API:
+            # - scheduler_stats contains request counts and cache usage
+            # - Throughput is computed by parent class and stored in self attributes after super().record()
+            current_running = 0
+            current_waiting = 0
+            current_cache_usage = 0.0
+            current_prefix_hit = 0.0
+
+            if scheduler_stats is not None:
+                current_running = getattr(scheduler_stats, "num_running_reqs", 0)
+                current_waiting = getattr(scheduler_stats, "num_waiting_reqs", 0)
+                current_cache_usage = getattr(scheduler_stats, "kv_cache_usage", 0.0) * 100.0  # Convert to percentage
+
+                # Extract prefix cache hit rate from prefix_cache_stats
+                prefix_cache_stats = getattr(scheduler_stats, "prefix_cache_stats", None)
+                if prefix_cache_stats is not None:
+                    hits = getattr(prefix_cache_stats, "hits", 0)
+                    misses = getattr(prefix_cache_stats, "misses", 0)
+                    total = hits + misses
+                    current_prefix_hit = (hits / total * 100.0) if total > 0 else 0.0
+
+            # Throughput is computed by parent class LoggingStatLogger after super().record()
+            # These are stored as instance attributes
+            current_prompt_tp = getattr(self, "last_prompt_throughput", 0.0) or 0.0
+            current_gen_tp = getattr(self, "last_generation_throughput", 0.0) or 0.0
+
             is_active = current_running > 0 or current_waiting > 0
 
             with V1LoggingStatLoggerFixed._registry_lock:
