@@ -731,17 +731,34 @@ class VLLMStatsCallback(TrainerCallback):
         if num_engines == 0:
             return
 
-        # Build log message
+        # Build log message with both peak and median stats
+        total_samples = stats.get("total_samples", 0)
+        total_active = stats.get("total_active_samples", 0)
+
+        # Use new field names if available, fall back to legacy
+        peak_running = stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0))
+        peak_waiting = stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0))
+        peak_prompt_tp = stats.get("avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0))
+        peak_gen_tp = stats.get("avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0))
+        peak_kv_cache = stats.get("avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0))
+
+        median_running = stats.get("avg_median_running_reqs", 0.0)
+        median_waiting = stats.get("avg_median_waiting_reqs", 0.0)
+        median_prompt_tp = stats.get("avg_median_prompt_throughput", 0.0)
+        median_gen_tp = stats.get("avg_median_generation_throughput", 0.0)
+        median_kv_cache = stats.get("avg_median_gpu_cache_usage_perc", 0.0)
+
         msg = (
             f"vLLM Stats (step {global_step}): "
             f"engines={num_engines}, "
-            f"running={stats['total_running_reqs']}, "
-            f"waiting={stats['total_waiting_reqs']}, "
-            f"prompt_tp={stats['avg_prompt_throughput']:.1f} tok/s, "
-            f"gen_tp={stats['avg_generation_throughput']:.1f} tok/s, "
-            f"gpu_kv_cache={stats['avg_gpu_cache_usage_perc']:.1f}%, "
-            f"prefix_hit={stats['avg_prefix_cache_hit_rate']:.1f}%"
+            f"running(peak/med)={peak_running}/{median_running:.0f}, "
+            f"waiting(peak/med)={peak_waiting}/{median_waiting:.0f}, "
+            f"prompt_tp(peak/med)={peak_prompt_tp:.1f}/{median_prompt_tp:.1f} tok/s, "
+            f"gen_tp(peak/med)={peak_gen_tp:.1f}/{median_gen_tp:.1f} tok/s, "
+            f"kv_cache(peak/med)={peak_kv_cache:.1f}/{median_kv_cache:.1f}%"
         )
+        if total_samples > 0:
+            msg += f", samples={total_active}/{total_samples}"
 
         # Log to console
         if self.log_to_console:
@@ -770,16 +787,27 @@ class VLLMStatsCallback(TrainerCallback):
         try:
             import wandb
 
-            # Log aggregated metrics
+            # Log aggregated metrics (peak and median values accumulated throughout the step)
             wandb.log(
                 {
                     "vllm/num_engines": stats["num_engines"],
-                    "vllm/total_running_reqs": stats["total_running_reqs"],
-                    "vllm/total_waiting_reqs": stats["total_waiting_reqs"],
-                    "vllm/avg_prompt_throughput": stats["avg_prompt_throughput"],
-                    "vllm/avg_generation_throughput": stats["avg_generation_throughput"],
-                    "vllm/avg_gpu_cache_usage_perc": stats["avg_gpu_cache_usage_perc"],
-                    "vllm/avg_prefix_cache_hit_rate": stats["avg_prefix_cache_hit_rate"],
+                    # Peak metrics
+                    "vllm/peak_running_reqs": stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0)),
+                    "vllm/peak_waiting_reqs": stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0)),
+                    "vllm/peak_prompt_throughput": stats.get("avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0)),
+                    "vllm/peak_generation_throughput": stats.get("avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0)),
+                    "vllm/peak_gpu_cache_usage_perc": stats.get("avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0)),
+                    "vllm/peak_prefix_cache_hit_rate": stats.get("avg_peak_prefix_cache_hit_rate", stats.get("avg_prefix_cache_hit_rate", 0.0)),
+                    # Median metrics
+                    "vllm/median_running_reqs": stats.get("avg_median_running_reqs", 0.0),
+                    "vllm/median_waiting_reqs": stats.get("avg_median_waiting_reqs", 0.0),
+                    "vllm/median_prompt_throughput": stats.get("avg_median_prompt_throughput", 0.0),
+                    "vllm/median_generation_throughput": stats.get("avg_median_generation_throughput", 0.0),
+                    "vllm/median_gpu_cache_usage_perc": stats.get("avg_median_gpu_cache_usage_perc", 0.0),
+                    "vllm/median_prefix_cache_hit_rate": stats.get("avg_median_prefix_cache_hit_rate", 0.0),
+                    # Metadata
+                    "vllm/total_samples": stats.get("total_samples", 0),
+                    "vllm/total_active_samples": stats.get("total_active_samples", 0),
                 },
                 step=global_step,
             )
@@ -789,12 +817,27 @@ class VLLMStatsCallback(TrainerCallback):
                 for i, engine_stats in enumerate(stats.get("engines", [])):
                     wandb.log(
                         {
-                            f"vllm/engine_{i}/prompt_throughput": engine_stats.get("avg_prompt_throughput", 0.0),
-                            f"vllm/engine_{i}/generation_throughput": engine_stats.get("avg_generation_throughput", 0.0),
-                            f"vllm/engine_{i}/running_reqs": engine_stats.get("num_running_reqs", 0),
-                            f"vllm/engine_{i}/waiting_reqs": engine_stats.get("num_waiting_reqs", 0),
-                            f"vllm/engine_{i}/gpu_cache_usage": engine_stats.get("gpu_cache_usage_perc", 0.0),
-                            f"vllm/engine_{i}/prefix_cache_hit": engine_stats.get("prefix_cache_hit_rate", 0.0),
+                            # Peak metrics per engine
+                            f"vllm/engine_{i}/peak_prompt_throughput": engine_stats.get(
+                                "peak_prompt_throughput", engine_stats.get("avg_prompt_throughput", 0.0)
+                            ),
+                            f"vllm/engine_{i}/peak_generation_throughput": engine_stats.get(
+                                "peak_generation_throughput", engine_stats.get("avg_generation_throughput", 0.0)
+                            ),
+                            f"vllm/engine_{i}/peak_running_reqs": engine_stats.get(
+                                "peak_running_reqs", engine_stats.get("num_running_reqs", 0)
+                            ),
+                            f"vllm/engine_{i}/peak_waiting_reqs": engine_stats.get(
+                                "peak_waiting_reqs", engine_stats.get("num_waiting_reqs", 0)
+                            ),
+                            f"vllm/engine_{i}/peak_gpu_cache_usage": engine_stats.get(
+                                "peak_gpu_cache_usage_perc", engine_stats.get("gpu_cache_usage_perc", 0.0)
+                            ),
+                            # Median metrics per engine
+                            f"vllm/engine_{i}/median_prompt_throughput": engine_stats.get("median_prompt_throughput", 0.0),
+                            f"vllm/engine_{i}/median_generation_throughput": engine_stats.get("median_generation_throughput", 0.0),
+                            f"vllm/engine_{i}/median_running_reqs": engine_stats.get("median_running_reqs", 0.0),
+                            f"vllm/engine_{i}/median_waiting_reqs": engine_stats.get("median_waiting_reqs", 0.0),
                         },
                         step=global_step,
                     )

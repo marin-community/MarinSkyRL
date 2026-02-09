@@ -378,11 +378,16 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
     A fixed version of LoggingStatLogger that actually logs during the record method.
     The log method is otherwise not called in the VLLM codebase.
 
-    Also stores latest stats in a class-level registry for programmatic access
+    Also stores aggregated stats in a class-level registry for programmatic access
     (used by VLLMStatsCallback to bypass Ray log-to-driver unreliability).
+
+    Stats are accumulated throughout a step:
+    - Request counts (running, waiting): track peak and median values
+    - Throughput metrics: track peak and median values observed during active periods
+    - Cache metrics: track peak and median usage
     """
 
-    # Class-level registry mapping engine IDs to their latest stats
+    # Class-level registry mapping engine IDs to their accumulated stats
     _stats_registry: Dict[int, Dict[str, Any]] = {}
     _registry_lock = threading.Lock()
 
@@ -398,30 +403,151 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
     def record(self, *args: Any, **kwargs: Any) -> None:
         super().record(*args, **kwargs)
 
-        # Store current stats in registry if engine ID is set
+        # Accumulate stats in registry if engine ID is set
         if self._engine_id is not None:
-            stats = {
-                "avg_prompt_throughput": getattr(self, "avg_prompt_throughput", 0.0),
-                "avg_generation_throughput": getattr(self, "avg_generation_throughput", 0.0),
-                "num_running_reqs": getattr(self, "num_running_reqs", 0),
-                "num_waiting_reqs": getattr(self, "num_waiting_reqs", 0),
-                "gpu_cache_usage_perc": getattr(self, "gpu_cache_usage_perc", 0.0),
-                "prefix_cache_hit_rate": getattr(self, "prefix_cache_hit_rate", 0.0),
-                "timestamp": time.time(),
-            }
+            current_prompt_tp = getattr(self, "avg_prompt_throughput", 0.0)
+            current_gen_tp = getattr(self, "avg_generation_throughput", 0.0)
+            current_running = getattr(self, "num_running_reqs", 0)
+            current_waiting = getattr(self, "num_waiting_reqs", 0)
+            current_cache_usage = getattr(self, "gpu_cache_usage_perc", 0.0)
+            current_prefix_hit = getattr(self, "prefix_cache_hit_rate", 0.0)
+            is_active = current_running > 0 or current_waiting > 0
+
             with V1LoggingStatLoggerFixed._registry_lock:
-                V1LoggingStatLoggerFixed._stats_registry[self._engine_id] = stats
+                existing = V1LoggingStatLoggerFixed._stats_registry.get(self._engine_id)
+
+                if existing is None:
+                    # Initialize with sample lists for median calculation
+                    V1LoggingStatLoggerFixed._stats_registry[self._engine_id] = {
+                        # Sample lists for computing median (only active samples)
+                        "_samples_prompt_tp": [current_prompt_tp] if is_active else [],
+                        "_samples_gen_tp": [current_gen_tp] if is_active else [],
+                        "_samples_running": [current_running] if is_active else [],
+                        "_samples_waiting": [current_waiting] if is_active else [],
+                        "_samples_cache": [current_cache_usage] if is_active else [],
+                        "_samples_prefix_hit": [current_prefix_hit] if is_active else [],
+                        # Peak values
+                        "_peak_prompt_tp": current_prompt_tp,
+                        "_peak_gen_tp": current_gen_tp,
+                        "_peak_running": current_running,
+                        "_peak_waiting": current_waiting,
+                        "_peak_cache": current_cache_usage,
+                        "_peak_prefix_hit": current_prefix_hit,
+                        # Counters
+                        "_num_samples": 1,
+                        "_num_active_samples": 1 if is_active else 0,
+                        "timestamp": time.time(),
+                    }
+                else:
+                    # Update peak values
+                    existing["_peak_prompt_tp"] = max(existing["_peak_prompt_tp"], current_prompt_tp)
+                    existing["_peak_gen_tp"] = max(existing["_peak_gen_tp"], current_gen_tp)
+                    existing["_peak_running"] = max(existing["_peak_running"], current_running)
+                    existing["_peak_waiting"] = max(existing["_peak_waiting"], current_waiting)
+                    existing["_peak_cache"] = max(existing["_peak_cache"], current_cache_usage)
+                    existing["_peak_prefix_hit"] = max(existing["_peak_prefix_hit"], current_prefix_hit)
+
+                    # Append to sample lists (only for active samples to get meaningful medians)
+                    if is_active:
+                        existing["_samples_prompt_tp"].append(current_prompt_tp)
+                        existing["_samples_gen_tp"].append(current_gen_tp)
+                        existing["_samples_running"].append(current_running)
+                        existing["_samples_waiting"].append(current_waiting)
+                        existing["_samples_cache"].append(current_cache_usage)
+                        existing["_samples_prefix_hit"].append(current_prefix_hit)
+                        existing["_num_active_samples"] += 1
+
+                    existing["_num_samples"] += 1
+                    existing["timestamp"] = time.time()
 
         now = time.monotonic()
         if now - self.last_log_time > self.log_interval:
             self.log()
             self.last_log_time = now
 
+    @staticmethod
+    def _compute_median(samples: List[float]) -> float:
+        """Compute median of a list of samples."""
+        if not samples:
+            return 0.0
+        sorted_samples = sorted(samples)
+        n = len(sorted_samples)
+        mid = n // 2
+        if n % 2 == 0:
+            return (sorted_samples[mid - 1] + sorted_samples[mid]) / 2.0
+        return sorted_samples[mid]
+
     @classmethod
-    def get_stats_by_engine_id(cls, engine_id: int) -> Optional[Dict[str, Any]]:
-        """Get the latest stats for a given engine ID."""
+    def get_stats_by_engine_id(cls, engine_id: int, reset: bool = True) -> Optional[Dict[str, Any]]:
+        """Get the accumulated stats for a given engine ID.
+
+        Args:
+            engine_id: The engine ID to get stats for.
+            reset: If True, reset the accumulated stats after reading (default True).
+                   This ensures each training step gets fresh stats.
+
+        Returns:
+            Dict with accumulated stats, or None if no stats recorded yet.
+            Includes peak values, median values, and computed averages.
+        """
         with cls._registry_lock:
-            return cls._stats_registry.get(engine_id)
+            stats = cls._stats_registry.get(engine_id)
+            if stats is None:
+                return None
+
+            # Compute medians from sample lists
+            median_prompt_tp = cls._compute_median(stats["_samples_prompt_tp"])
+            median_gen_tp = cls._compute_median(stats["_samples_gen_tp"])
+            median_running = cls._compute_median(stats["_samples_running"])
+            median_waiting = cls._compute_median(stats["_samples_waiting"])
+            median_cache = cls._compute_median(stats["_samples_cache"])
+            median_prefix_hit = cls._compute_median(stats["_samples_prefix_hit"])
+
+            # Compute means from sample lists
+            num_active = stats["_num_active_samples"]
+            if num_active > 0:
+                mean_prompt_tp = sum(stats["_samples_prompt_tp"]) / num_active
+                mean_gen_tp = sum(stats["_samples_gen_tp"]) / num_active
+            else:
+                mean_prompt_tp = 0.0
+                mean_gen_tp = 0.0
+
+            result = {
+                # Peak values
+                "peak_prompt_throughput": stats["_peak_prompt_tp"],
+                "peak_generation_throughput": stats["_peak_gen_tp"],
+                "peak_running_reqs": stats["_peak_running"],
+                "peak_waiting_reqs": stats["_peak_waiting"],
+                "peak_gpu_cache_usage_perc": stats["_peak_cache"],
+                "peak_prefix_cache_hit_rate": stats["_peak_prefix_hit"],
+                # Median values
+                "median_prompt_throughput": median_prompt_tp,
+                "median_generation_throughput": median_gen_tp,
+                "median_running_reqs": median_running,
+                "median_waiting_reqs": median_waiting,
+                "median_gpu_cache_usage_perc": median_cache,
+                "median_prefix_cache_hit_rate": median_prefix_hit,
+                # Mean values
+                "mean_prompt_throughput": mean_prompt_tp,
+                "mean_generation_throughput": mean_gen_tp,
+                # Legacy field names for backwards compatibility (use peak values)
+                "avg_prompt_throughput": stats["_peak_prompt_tp"],
+                "avg_generation_throughput": stats["_peak_gen_tp"],
+                "num_running_reqs": stats["_peak_running"],
+                "num_waiting_reqs": stats["_peak_waiting"],
+                "gpu_cache_usage_perc": stats["_peak_cache"],
+                "prefix_cache_hit_rate": stats["_peak_prefix_hit"],
+                # Metadata
+                "timestamp": stats["timestamp"],
+                "num_samples": stats["_num_samples"],
+                "num_active_samples": stats["_num_active_samples"],
+            }
+
+            if reset:
+                # Reset for next step
+                del cls._stats_registry[engine_id]
+
+            return result
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
@@ -771,30 +897,53 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._handle_openai_request(request_payload, endpoint="/completions")
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Get current vLLM engine statistics.
+        """Get accumulated vLLM engine statistics for the current step.
 
         Returns a dict with the following keys:
-        - avg_prompt_throughput: Average prompt tokens per second
-        - avg_generation_throughput: Average generation tokens per second
-        - num_running_reqs: Number of currently running requests
-        - num_waiting_reqs: Number of requests waiting in queue
-        - gpu_cache_usage_perc: GPU KV cache usage percentage
-        - prefix_cache_hit_rate: Prefix cache hit rate percentage
-        - timestamp: Unix timestamp when stats were recorded
+        - peak_*: Peak values observed during the step
+        - median_*: Median values across active samples
+        - mean_*: Mean values across active samples
+        - num_samples: Total number of stat samples collected
+        - num_active_samples: Number of samples with active requests
+        - timestamp: Unix timestamp of last sample
         - engine_id: Unique identifier for this engine instance
+
+        Note: Stats are reset after reading to provide fresh stats per training step.
 
         Used by VLLMStatsCallback to collect and aggregate stats across engines.
         """
-        stats = V1LoggingStatLoggerFixed.get_stats_by_engine_id(self._stats_engine_id)
+        # Reset=True ensures each training step gets fresh stats
+        stats = V1LoggingStatLoggerFixed.get_stats_by_engine_id(self._stats_engine_id, reset=True)
         if stats is None:
             # Return empty stats if no data recorded yet
             stats = {
+                # Peak values
+                "peak_prompt_throughput": 0.0,
+                "peak_generation_throughput": 0.0,
+                "peak_running_reqs": 0,
+                "peak_waiting_reqs": 0,
+                "peak_gpu_cache_usage_perc": 0.0,
+                "peak_prefix_cache_hit_rate": 0.0,
+                # Median values
+                "median_prompt_throughput": 0.0,
+                "median_generation_throughput": 0.0,
+                "median_running_reqs": 0.0,
+                "median_waiting_reqs": 0.0,
+                "median_gpu_cache_usage_perc": 0.0,
+                "median_prefix_cache_hit_rate": 0.0,
+                # Mean values
+                "mean_prompt_throughput": 0.0,
+                "mean_generation_throughput": 0.0,
+                # Legacy field names
                 "avg_prompt_throughput": 0.0,
                 "avg_generation_throughput": 0.0,
                 "num_running_reqs": 0,
                 "num_waiting_reqs": 0,
                 "gpu_cache_usage_perc": 0.0,
                 "prefix_cache_hit_rate": 0.0,
+                # Metadata
+                "num_samples": 0,
+                "num_active_samples": 0,
                 "timestamp": time.time(),
             }
         stats["engine_id"] = self._stats_engine_id
