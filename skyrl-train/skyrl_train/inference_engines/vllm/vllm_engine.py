@@ -400,14 +400,21 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
         """Set the engine ID for this stat logger instance."""
         self._engine_id = engine_id
 
-    def record(self, scheduler_stats=None, iteration_stats=None, *args: Any, **kwargs: Any) -> None:
-        super().record(scheduler_stats, iteration_stats, *args, **kwargs)
+    def record(self, *args: Any, **kwargs: Any) -> None:
+        # Call parent with original arguments - important to preserve vLLM's calling convention
+        super().record(*args, **kwargs)
 
         # Accumulate stats in registry if engine ID is set
         if self._engine_id is not None:
-            # Extract stats from vLLM v1 API:
-            # - scheduler_stats contains request counts and cache usage
-            # - Throughput is computed by parent class and stored in self attributes after super().record()
+            # Extract scheduler_stats from vLLM v1 API:
+            # vLLM calls record(scheduler_stats, iteration_stats, ...) with positional args
+            # or record(scheduler_stats=..., iteration_stats=...) with keyword args
+            scheduler_stats = None
+            if args:
+                scheduler_stats = args[0]
+            elif "scheduler_stats" in kwargs:
+                scheduler_stats = kwargs["scheduler_stats"]
+
             current_running = 0
             current_waiting = 0
             current_cache_usage = 0.0
