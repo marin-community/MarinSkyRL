@@ -800,7 +800,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        logger.info(f"Example generated: {vis}")
+        logger.debug(f"Example generated: {vis}")
 
         return self.convert_to_training_input(generator_output, uids)
 

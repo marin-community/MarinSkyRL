@@ -104,6 +104,14 @@ AGENT_SCHEMA = SectionSchema(
         # When false, disables creation of episode-* folders with debug.json, prompt.txt, response.txt
         # This reduces disk I/O for RL training where SkyRL uses TrialResult directly
         "enable_episode_logging": FieldMapping("enable_episode_logging", field_type="kwargs", default=True),
+        # Terminal session recording (asciinema)
+        # When false, disables recording.cast file generation
+        # This significantly reduces disk I/O for RL training
+        "record_terminal_session": FieldMapping("record_terminal_session", field_type="kwargs", default=True),
+        # Pane logging control
+        # When false, disables terminus_2.pane file generation
+        # This reduces disk I/O for RL training
+        "enable_pane_logging": FieldMapping("enable_pane_logging", field_type="kwargs", default=True),
     }
 )
 
