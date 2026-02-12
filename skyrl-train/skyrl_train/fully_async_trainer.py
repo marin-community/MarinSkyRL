@@ -274,14 +274,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert (
             # otherwise wasted throughput
             self.mini_batch_size <= self.num_parallel_generation_workers
-            and
-            # otherwise would never use all workers due to capacity constraint
-            self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
         ), (
-            "Invalid num_parallel_generation_workers, the following must hold: "
-            "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
-            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
+            "Invalid num_parallel_generation_workers, must be >= mini_batch_size. Got: "
+            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}"
         )
+        # NOTE: Upper-bound guard (workers <= mini_batch_size * (max_staleness_steps + 1))
+        # commented out to allow scaling num_parallel_generation_workers independently of
+        # max_staleness_steps. Stale groups are discarded at consumption time in
+        # convert_generation_group_mini_batch_to_training_input(), so exceeding the
+        # capacity formula is safe — it just means some groups may be discarded.
+        #
+        # assert (
+        #     self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
+        # ), (
+        #     "Invalid num_parallel_generation_workers, the following must hold: "
+        #     "num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
+        #     f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
+        # )
 
         # Initialize base trainer
         super().__init__(*args, **kwargs)
@@ -678,12 +687,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
                 # 2. Acquire capacity slot.
+                # Capture global_step pessimistically at submission time (before
+                # generation starts) so the staleness value for the whole group
+                # reflects the earliest possible step, not a later one.
                 slot_acquired = False
+                global_step_at_start = self.global_step  # pessimistic: capture BEFORE slot acquisition
                 await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
 
                 # 3. Generate one rollout group
-                global_step_at_start = self.global_step  # for staleness control
 
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
