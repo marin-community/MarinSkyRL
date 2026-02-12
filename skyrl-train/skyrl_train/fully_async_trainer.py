@@ -425,9 +425,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
-            # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
+            # Buffer of completed generation, size bounded by num_parallel_generation_workers.
             generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
+                maxsize=self.num_parallel_generation_workers
             )
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers

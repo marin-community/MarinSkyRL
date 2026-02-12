@@ -70,8 +70,34 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"creating LLM with bundle_indices={bundle_indices}")
 
+    # Set NUMA CPU affinity for single-GPU (TP=1) inference actors.
+    # For TP>1, affinity is set per-worker via WorkerWrap.set_numa_affinity().
+    if kwargs.get("distributed_executor_backend") != "ray":
+        try:
+            from skyrl_train.utils.numa import set_numa_affinity_for_gpu
+            cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            if cuda_devs:
+                gpu_ids = [int(x) for x in cuda_devs.split(",")]
+                if len(gpu_ids) == 1:
+                    set_numa_affinity_for_gpu(gpu_ids[0])
+        except Exception:
+            pass
+
 
 class WorkerWrap:
+    def set_numa_affinity(self):
+        """Set CPU affinity to match this worker's GPU NUMA node.
+
+        Called via collective_rpc for TP>1 configurations so each
+        vLLM EngineCore process binds to its GPU's local CPUs.
+        """
+        try:
+            from skyrl_train.utils.numa import set_numa_affinity_for_gpu
+            gpu_id = self.device.index if self.device is not None else 0
+            set_numa_affinity_for_gpu(gpu_id)
+        except Exception:
+            pass
+
     def test_rpc(self, *args, **kwargs):
         """Test RPC call to worker"""
         return args, kwargs
@@ -167,6 +193,13 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
+
+        # Set NUMA affinity for TP>1 workers via collective_rpc
+        if self._tp_size > 1 or self._pp_size > 1:
+            try:
+                self.llm.collective_rpc("set_numa_affinity")
+            except Exception:
+                pass
 
         # Weight loader is created by subclass after engine initialization
         self._weight_loader = None

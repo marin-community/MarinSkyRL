@@ -4,7 +4,6 @@ import os
 import socket
 from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
-from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
 from collections import defaultdict
 
@@ -41,7 +40,6 @@ from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
 from omegaconf import DictConfig
 from pathlib import Path
 
-_SET_AFFINITY = False
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -153,56 +151,19 @@ class DistributedTorchRayActor:
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
 
-    # TODO(tgriggs): For numa affinity, pass in the Worker._local_rank for the second arg here. Distinguish 'rank' and 'local_rank' differ here.
     def _set_numa_affinity(self, rank):
-        def local_rank_to_real_gpu_id(local_rank):
-            cuda_visible_devices = [
-                int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(",")
-            ]
-            return cuda_visible_devices[local_rank]
+        """Set CPU + memory affinity to match the GPU for this rank.
 
-        rank = local_rank_to_real_gpu_id(rank)
-
-        global _SET_AFFINITY
-        if _SET_AFFINITY:
-            return
-
-        from ctypes.util import find_library
-
-        class bitmask_t(Structure):
-            _fields_ = [
-                ("size", c_ulong),
-                ("maskp", POINTER(c_ulong)),
-            ]
-
+        Uses shared NUMA utility that auto-detects GPU-to-CPU NUMA topology
+        via nvidia-smi topo. Handles GH200 unified memory correctly.
+        """
         try:
-            LIBNUMA = CDLL(find_library("numa"))
+            from skyrl_train.utils.numa import set_numa_affinity_for_gpu
+            cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+            gpu_id = int(cuda_devs[rank]) if cuda_devs[0] else rank
+            set_numa_affinity_for_gpu(gpu_id)
         except Exception as e:
-            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
-            _SET_AFFINITY = True
-            return
-
-        LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
-        LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
-        LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_run_on_node_mask.restype = c_int
-        LIBNUMA.numa_set_membind.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_set_membind.restype = c_void_p
-        LIBNUMA.numa_num_configured_nodes.argtypes = []
-        LIBNUMA.numa_num_configured_nodes.restype = c_int
-
-        def numa_bind(nid: int):
-            bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
-            LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
-
-        numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        if numa_nodes <= 0:
-            numa_nodes = 1
-        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
-        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
-        numa_bind(target_nid)
-        _SET_AFFINITY = True
+            logger.debug(f"NUMA affinity setup skipped: {e}")
 
 
 class Worker(DistributedTorchRayActor):
