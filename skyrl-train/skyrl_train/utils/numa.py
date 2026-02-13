@@ -306,11 +306,39 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
 
     cpu_list, numa_node = affinity
 
-    # Try os.sched_setaffinity first (doesn't need libnuma)
+    # Try os.sched_setaffinity (doesn't need libnuma)
+    target_cpus = set(cpu_list)
     try:
-        os.sched_setaffinity(0, cpu_list)
+        allowed_cpus = os.sched_getaffinity(0)
+    except (OSError, AttributeError):
+        allowed_cpus = None
+
+    if allowed_cpus is not None and not target_cpus.issubset(allowed_cpus):
+        overlap = target_cpus & allowed_cpus
+        logger.warning(
+            f"NUMA affinity: target CPUs {cpu_list[0]}-{cpu_list[-1]} (NUMA {numa_node}) "
+            f"not fully within allowed cpuset {min(allowed_cpus)}-{max(allowed_cpus)} "
+            f"({len(allowed_cpus)} CPUs). This is likely a SLURM cgroup restriction. "
+            f"Consider adding '--cpu-bind=none' to srun or setting "
+            f"'TaskPluginParam=none' in slurm.conf."
+        )
+        if overlap:
+            target_cpus = overlap
+            logger.info(
+                f"NUMA affinity: falling back to {len(overlap)} overlapping CPUs "
+                f"for GPU {gpu_id}"
+            )
+        else:
+            logger.warning(
+                f"NUMA affinity: no overlap between target and allowed CPUs for GPU {gpu_id}, "
+                f"skipping CPU binding"
+            )
+            return
+
+    try:
+        os.sched_setaffinity(0, target_cpus)
         logger.info(
-            f"NUMA affinity: bound process to CPUs {cpu_list[0]}-{cpu_list[-1]} "
+            f"NUMA affinity: bound process to CPUs {min(target_cpus)}-{max(target_cpus)} "
             f"(NUMA node {numa_node}) for GPU {gpu_id}"
         )
     except (OSError, AttributeError) as e:
