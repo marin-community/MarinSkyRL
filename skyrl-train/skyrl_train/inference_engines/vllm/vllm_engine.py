@@ -80,18 +80,28 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
     # inherit the parent's CPU affinity, so NUMA binding set here would be lost.
     # Disabling V1 multiprocessing forces EngineCore to run in the same process,
     # where our affinity settings take effect.
-    if kwargs.get("distributed_executor_backend") != "ray":
+    executor_backend = kwargs.get("distributed_executor_backend")
+    logger.info(
+        f"setup_envvars_for_vllm: distributed_executor_backend={executor_backend}, "
+        f"SKYRL_ENABLE_NUMA_AFFINITY={os.environ.get('SKYRL_ENABLE_NUMA_AFFINITY', '<unset>')}, "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}, "
+        f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
+    )
+    if executor_backend != "ray":
         try:
             from skyrl_train.utils.numa import is_numa_affinity_enabled, set_numa_affinity_for_gpu
-            if is_numa_affinity_enabled():
+            numa_enabled = is_numa_affinity_enabled()
+            logger.info(f"setup_envvars_for_vllm: numa_enabled={numa_enabled}")
+            if numa_enabled:
                 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+                logger.info("setup_envvars_for_vllm: set VLLM_ENABLE_V1_MULTIPROCESSING=0 for NUMA affinity")
                 cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "")
                 if cuda_devs:
                     gpu_ids = [int(x) for x in cuda_devs.split(",")]
                     if len(gpu_ids) == 1:
                         set_numa_affinity_for_gpu(gpu_ids[0])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"setup_envvars_for_vllm: NUMA affinity setup failed: {e}")
 
 
 class WorkerWrap:
@@ -191,9 +201,15 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
+        logger.info(
+            f"BaseVLLMInferenceEngine: vllm_v1_disable_multiproc={vllm_v1_disable_multiproc}, "
+            f"vllm.__version__={vllm.__version__}, "
+            f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
+        )
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
             # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            logger.info("BaseVLLMInferenceEngine: set VLLM_ENABLE_V1_MULTIPROCESSING=0")
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
