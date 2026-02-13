@@ -72,14 +72,24 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
     # Set NUMA CPU affinity for single-GPU (TP=1) inference actors.
     # For TP>1, affinity is set per-worker via WorkerWrap.set_numa_affinity().
+    #
+    # When NUMA affinity is enabled, we also disable vLLM V1 multiprocessing.
+    # vLLM's V1 engine spawns EngineCore as a separate subprocess using
+    # multiprocessing with start_method="spawn" (forced when running inside a
+    # Ray actor — see vllm.utils._maybe_force_spawn). Spawned processes do NOT
+    # inherit the parent's CPU affinity, so NUMA binding set here would be lost.
+    # Disabling V1 multiprocessing forces EngineCore to run in the same process,
+    # where our affinity settings take effect.
     if kwargs.get("distributed_executor_backend") != "ray":
         try:
-            from skyrl_train.utils.numa import set_numa_affinity_for_gpu
-            cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-            if cuda_devs:
-                gpu_ids = [int(x) for x in cuda_devs.split(",")]
-                if len(gpu_ids) == 1:
-                    set_numa_affinity_for_gpu(gpu_ids[0])
+            from skyrl_train.utils.numa import is_numa_affinity_enabled, set_numa_affinity_for_gpu
+            if is_numa_affinity_enabled():
+                os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+                cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+                if cuda_devs:
+                    gpu_ids = [int(x) for x in cuda_devs.split(",")]
+                    if len(gpu_ids) == 1:
+                        set_numa_affinity_for_gpu(gpu_ids[0])
         except Exception:
             pass
 
