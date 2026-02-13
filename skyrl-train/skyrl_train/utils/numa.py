@@ -24,6 +24,18 @@ def is_numa_affinity_enabled() -> bool:
     return os.environ.get("SKYRL_ENABLE_NUMA_AFFINITY", "0") == "1"
 
 
+def _nvidia_smi_env() -> Dict[str, str]:
+    """Get environment for nvidia-smi subprocesses with CUDA_VISIBLE_DEVICES removed.
+
+    nvidia-smi respects CUDA_VISIBLE_DEVICES on some driver versions, which remaps
+    GPU indices (e.g., physical GPU 2 becomes GPU0). We need the real physical
+    indices to map GPUs to their correct NUMA nodes, so we strip the variable.
+    """
+    env = os.environ.copy()
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    return env
+
+
 @lru_cache(maxsize=1)
 def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
     """Parse nvidia-smi topo -m to get GPU -> (cpu_list, numa_node) mapping.
@@ -36,6 +48,7 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
         result = subprocess.run(
             ["nvidia-smi", "topo", "-m"],
             capture_output=True, text=True, timeout=10,
+            env=_nvidia_smi_env(),
         )
         if result.returncode != 0:
             return None
@@ -98,6 +111,7 @@ def _get_sysfs_gpu_numa_map() -> Optional[Dict[int, int]]:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=10,
+            env=_nvidia_smi_env(),
         )
         if result.returncode != 0:
             return None
