@@ -4,6 +4,11 @@ On GH200 nodes, each GPU has its own NUMA node for HBM memory (e.g., nodes 4, 12
 which is separate from the CPU NUMA node (0, 1, 2, 3). This module detects the correct
 CPU NUMA affinity for each GPU and binds the calling process accordingly.
 
+Detection strategy (in priority order):
+1. nvidia-smi topo -m (most direct, but fails under proxychains/CUDA_VISIBLE_DEVICES)
+2. Pure sysfs + numactl (no nvidia-smi needed — enumerates NVIDIA PCI devices, reads
+   their NUMA nodes, then maps GPU NUMA nodes to CPU NUMA nodes via distance matrix)
+
 Activation: Set SKYRL_ENABLE_NUMA_AFFINITY=1 in the environment. When unset, all functions
 are no-ops to avoid interfering with systems that don't need NUMA binding.
 """
@@ -36,6 +41,10 @@ def _nvidia_smi_env() -> Dict[str, str]:
     return env
 
 
+# ---------------------------------------------------------------------------
+# Method 1: nvidia-smi topo -m (fastest, but unreliable under proxychains)
+# ---------------------------------------------------------------------------
+
 @lru_cache(maxsize=1)
 def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
     """Parse nvidia-smi topo -m to get GPU -> (cpu_list, numa_node) mapping.
@@ -52,7 +61,7 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
         )
         if result.returncode != 0:
             return None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
 
     gpu_map = {}
@@ -99,58 +108,159 @@ def _parse_cpu_range(cpu_str: str) -> List[int]:
     return cpus
 
 
-@lru_cache(maxsize=1)
-def _get_sysfs_gpu_numa_map() -> Optional[Dict[int, int]]:
-    """Fallback: Get GPU -> CPU NUMA node mapping from sysfs.
+# ---------------------------------------------------------------------------
+# Method 2: Pure sysfs + numactl (no nvidia-smi needed)
+# ---------------------------------------------------------------------------
 
-    Reads /sys/bus/pci/devices/<bus_id>/numa_node for each GPU.
-    On GH200, this returns the GPU's HBM NUMA node (4, 12, 20, 28),
-    NOT the CPU NUMA node. We then need to find the closest CPU NUMA node.
+@lru_cache(maxsize=1)
+def _enumerate_gpus_from_sysfs() -> Optional[Dict[int, int]]:
+    """Enumerate NVIDIA GPUs and their NUMA nodes directly from sysfs.
+
+    Scans /sys/bus/pci/devices/ for NVIDIA GPUs (vendor 0x10de, class 0x03xxxx)
+    and reads their numa_node. GPUs are ordered by PCI bus ID, matching nvidia-smi
+    GPU index ordering.
+
+    Returns:
+        Dict mapping GPU index (0-based, ordered by bus ID) to NUMA node ID,
+        or None on failure.
+    """
+    pci_base = "/sys/bus/pci/devices"
+    nvidia_gpus = []
+    try:
+        for dev in sorted(os.listdir(pci_base)):
+            dev_path = os.path.join(pci_base, dev)
+            try:
+                with open(os.path.join(dev_path, "vendor")) as f:
+                    vendor = f.read().strip()
+                with open(os.path.join(dev_path, "class")) as f:
+                    dev_class = f.read().strip()
+                # NVIDIA vendor = 0x10de, display/3D controller class = 0x03xxxx
+                if vendor == "0x10de" and dev_class.startswith("0x03"):
+                    with open(os.path.join(dev_path, "numa_node")) as f:
+                        numa = int(f.read().strip())
+                    nvidia_gpus.append((dev, numa))
+            except (FileNotFoundError, ValueError):
+                continue
+    except FileNotFoundError:
+        return None
+
+    if not nvidia_gpus:
+        return None
+
+    result = {i: numa for i, (_, numa) in enumerate(nvidia_gpus)}
+    logger.debug(f"NUMA: sysfs GPU enumeration: {result}")
+    return result
+
+
+@lru_cache(maxsize=1)
+def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
+    """Parse numactl --hardware to get NUMA node -> CPU list mapping.
+
+    Returns:
+        Dict mapping NUMA node ID to list of CPU IDs (only nodes with CPUs),
+        or None on failure.
     """
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
+            ["numactl", "--hardware"],
             capture_output=True, text=True, timeout=10,
-            env=_nvidia_smi_env(),
         )
         if result.returncode != 0:
             return None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
 
-    gpu_numa_map = {}
-    for line in result.stdout.strip().splitlines():
-        parts = line.split(",")
-        if len(parts) != 2:
-            continue
-        gpu_idx = int(parts[0].strip())
-        bus_id = parts[1].strip().lower()
+    node_cpus = {}
+    for line in result.stdout.splitlines():
+        # Match lines like "node 0 cpus: 0 1 2 3 ... 71"
+        match = re.match(r"^node\s+(\d+)\s+cpus:\s*(.+)$", line)
+        if match:
+            node_id = int(match.group(1))
+            cpu_str = match.group(2).strip()
+            if cpu_str:
+                cpus = [int(c) for c in cpu_str.split()]
+                if cpus:
+                    node_cpus[node_id] = cpus
 
-        # sysfs uses lowercase without leading domain zeros sometimes
-        # Try multiple path formats
-        numa_node = _read_pci_numa_node(bus_id)
-        if numa_node is not None:
-            gpu_numa_map[gpu_idx] = numa_node
+    if node_cpus:
+        logger.debug(
+            f"NUMA: numactl found {len(node_cpus)} nodes with CPUs: "
+            f"{{{k}: {v[0]}-{v[-1]} for k, v in sorted(node_cpus.items())}}}"
+        )
+    return node_cpus if node_cpus else None
 
-    return gpu_numa_map if gpu_numa_map else None
+
+def _find_closest_cpu_numa_node(
+    gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]
+) -> Optional[int]:
+    """Find the CPU NUMA node closest to a GPU NUMA node using the kernel distance matrix.
+
+    On GH200, GPU NUMA nodes (4, 12, 20, 28) have no CPUs — their HBM memory lives
+    there. The closest CPU NUMA node (0, 1, 2, 3) is the one on the same SoC,
+    determined by reading /sys/devices/system/node/nodeN/distance.
+    """
+    if gpu_numa_node in cpu_nodes:
+        return gpu_numa_node  # GPU NUMA node has CPUs directly
+
+    # Read distance from gpu_numa_node to all other nodes
+    dist_path = f"/sys/devices/system/node/node{gpu_numa_node}/distance"
+    try:
+        with open(dist_path) as f:
+            distances = [int(d) for d in f.read().strip().split()]
+    except (FileNotFoundError, ValueError):
+        logger.debug(f"NUMA: could not read distance matrix for node {gpu_numa_node}")
+        return None
+
+    # Find the CPU node with the smallest distance
+    best_node = None
+    best_dist = float("inf")
+    for node_id in cpu_nodes:
+        if node_id < len(distances) and distances[node_id] < best_dist:
+            best_dist = distances[node_id]
+            best_node = node_id
+
+    if best_node is not None:
+        logger.debug(
+            f"NUMA: GPU NUMA node {gpu_numa_node} -> closest CPU NUMA node {best_node} "
+            f"(distance={best_dist})"
+        )
+    return best_node
 
 
-def _read_pci_numa_node(bus_id: str) -> Optional[int]:
-    """Read NUMA node from sysfs for a PCI device."""
-    # nvidia-smi reports bus_id like "00000009:01:00.0"
-    # sysfs paths may use different formats
-    candidates = [bus_id, bus_id.lstrip("0") if bus_id.startswith("0") else bus_id]
-    for bid in candidates:
-        path = f"/sys/bus/pci/devices/{bid}/numa_node"
-        try:
-            with open(path) as f:
-                val = int(f.read().strip())
-                if val >= 0:
-                    return val
-        except (FileNotFoundError, ValueError):
-            continue
+def _get_affinity_via_sysfs_numactl(gpu_physical_id: int) -> Optional[Tuple[List[int], int]]:
+    """Get GPU CPU affinity using sysfs GPU enumeration + numactl, no nvidia-smi.
+
+    Steps:
+    1. Enumerate NVIDIA GPUs from /sys/bus/pci/devices/ to get GPU -> NUMA node map
+    2. Parse numactl --hardware to get NUMA node -> CPU list map
+    3. If GPU's NUMA node has no CPUs (GH200 HBM node), find the closest CPU NUMA node
+       via the kernel distance matrix
+    """
+    gpu_numa_map = _enumerate_gpus_from_sysfs()
+    if not gpu_numa_map or gpu_physical_id not in gpu_numa_map:
+        return None
+
+    gpu_numa = gpu_numa_map[gpu_physical_id]
+
+    numactl = _parse_numactl_hardware()
+    if not numactl:
+        return None
+
+    # Direct match: GPU's NUMA node has CPUs
+    if gpu_numa in numactl:
+        return (numactl[gpu_numa], gpu_numa)
+
+    # GH200 case: GPU NUMA node is HBM-only, find closest CPU NUMA node
+    closest = _find_closest_cpu_numa_node(gpu_numa, numactl)
+    if closest is not None:
+        return (numactl[closest], closest)
+
     return None
 
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def get_gpu_cpu_affinity(gpu_physical_id: int) -> Optional[Tuple[List[int], int]]:
     """Get the optimal CPU list and NUMA node for a GPU.
@@ -161,24 +271,15 @@ def get_gpu_cpu_affinity(gpu_physical_id: int) -> Optional[Tuple[List[int], int]
     Returns:
         Tuple of (cpu_list, numa_node) or None if detection fails.
     """
-    # Primary: nvidia-smi topo (most reliable, handles GH200 correctly)
+    # Method 1: nvidia-smi topo (most direct, but fails under proxychains)
     topo = _parse_nvidia_smi_topo()
     if topo and gpu_physical_id in topo:
         return topo[gpu_physical_id]
 
-    # Fallback: sysfs (may return GPU NUMA node instead of CPU NUMA node on GH200)
-    sysfs_map = _get_sysfs_gpu_numa_map()
-    if sysfs_map and gpu_physical_id in sysfs_map:
-        numa_node = sysfs_map[gpu_physical_id]
-        # Try to get CPU list for this NUMA node
-        cpu_list_path = f"/sys/devices/system/node/node{numa_node}/cpulist"
-        try:
-            with open(cpu_list_path) as f:
-                cpus = _parse_cpu_range(f.read().strip())
-                if cpus:
-                    return (cpus, numa_node)
-        except (FileNotFoundError, ValueError):
-            pass
+    # Method 2: sysfs + numactl (no nvidia-smi needed, handles GH200 correctly)
+    result = _get_affinity_via_sysfs_numactl(gpu_physical_id)
+    if result is not None:
+        return result
 
     return None
 
@@ -202,7 +303,7 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
 
     affinity = get_gpu_cpu_affinity(gpu_id)
     if affinity is None:
-        logger.debug(f"NUMA affinity: could not detect topology for GPU {gpu_id}")
+        logger.warning(f"NUMA affinity: could not detect topology for GPU {gpu_id}")
         return
 
     cpu_list, numa_node = affinity
@@ -215,7 +316,7 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
             f"(NUMA node {numa_node}) for GPU {gpu_id}"
         )
     except (OSError, AttributeError) as e:
-        logger.debug(f"NUMA affinity: os.sched_setaffinity failed: {e}")
+        logger.warning(f"NUMA affinity: os.sched_setaffinity failed: {e}")
         return
 
     # Also set memory binding via libnuma if available
