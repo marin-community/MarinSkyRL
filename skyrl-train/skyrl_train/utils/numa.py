@@ -183,10 +183,8 @@ def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
                     node_cpus[node_id] = cpus
 
     if node_cpus:
-        logger.debug(
-            f"NUMA: numactl found {len(node_cpus)} nodes with CPUs: "
-            f"{{{k}: {v[0]}-{v[-1]} for k, v in sorted(node_cpus.items())}}}"
-        )
+        node_summary = {k: f"{v[0]}-{v[-1]}" for k, v in sorted(node_cpus.items())}
+        logger.debug(f"NUMA: numactl found {len(node_cpus)} nodes with CPUs: {node_summary}")
     return node_cpus if node_cpus else None
 
 
