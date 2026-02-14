@@ -282,12 +282,23 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            new_optimizer = optim.AdamW(
-                fsdp_module.parameters(),
-                lr=optim_config.lr,
-                betas=optim_config.adam_betas,
-                weight_decay=optim_config.weight_decay,
-            )
+            # Resolve optimizer class dynamically from torch.optim
+            optimizer_name = optim_config.get("optimizer", "AdamW")
+            optimizer_cls = getattr(optim, optimizer_name, None)
+            if optimizer_cls is None or not (isinstance(optimizer_cls, type) and issubclass(optimizer_cls, optim.Optimizer)):
+                raise ValueError(
+                    f"Unknown optimizer '{optimizer_name}'. "
+                    f"Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop)."
+                )
+
+            optimizer_kwargs = {"lr": optim_config.lr, "weight_decay": optim_config.weight_decay}
+            if optimizer_name in ("AdamW", "Adam", "NAdam", "RAdam", "Adamax"):
+                optimizer_kwargs["betas"] = optim_config.adam_betas
+            extra = optim_config.get("optimizer_kwargs", {})
+            if extra:
+                optimizer_kwargs.update(extra)
+
+            new_optimizer = optimizer_cls(fsdp_module.parameters(), **optimizer_kwargs)
 
             lr_scheduler = get_scheduler(
                 optim_config.scheduler,

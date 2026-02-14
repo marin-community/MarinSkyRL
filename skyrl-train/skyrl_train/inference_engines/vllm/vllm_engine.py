@@ -676,6 +676,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             if ray_loggers:
                 stat_loggers.extend(ray_loggers)
 
+        # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
+        # vLLM's get_open_port() queries a free port then releases the socket;
+        # if multiple engines on the same node call it simultaneously, they can
+        # get the same port.  A random delay desynchronises the calls.
+        import random, time
+        _stagger = random.uniform(1.5, 3.0)
+        logger.info(f"Engine startup stagger: sleeping {_stagger:.2f}s to avoid port collisions")
+        time.sleep(_stagger)
+
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
