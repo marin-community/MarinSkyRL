@@ -577,6 +577,14 @@ class InferenceEngineClient(InferenceEngineInterface):
                 "avg_median_waiting_reqs": 0.0,
                 "avg_median_gpu_cache_usage_perc": 0.0,
                 "avg_median_prefix_cache_hit_rate": 0.0,
+                # Per-request latency stats
+                "avg_latency_prefill_mean": 0.0, "max_latency_prefill_p90": 0.0, "avg_latency_prefill_median": 0.0,
+                "avg_latency_decode_mean": 0.0, "max_latency_decode_p90": 0.0, "avg_latency_decode_median": 0.0,
+                "avg_latency_e2e_mean": 0.0, "max_latency_e2e_p90": 0.0, "avg_latency_e2e_median": 0.0,
+                "avg_latency_queued_mean": 0.0, "max_latency_queued_p90": 0.0, "avg_latency_queued_median": 0.0,
+                "avg_latency_ttft_mean": 0.0, "max_latency_ttft_p90": 0.0, "avg_latency_ttft_median": 0.0,
+                "total_finished_requests": 0,
+                "total_preempted_reqs": 0,
                 # Legacy field names for backwards compatibility
                 "total_running_reqs": 0,
                 "total_waiting_reqs": 0,
@@ -639,6 +647,31 @@ class InferenceEngineClient(InferenceEngineInterface):
         total_samples = sum(s.get("num_samples", 0) for s in engine_stats_list)
         total_active_samples = sum(s.get("num_active_samples", 0) for s in engine_stats_list)
 
+        # Aggregate per-request latency stats (weighted average across engines by finished request count)
+        latency_keys = ["prefill", "decode", "e2e", "queued", "ttft"]
+        latency_agg = {}
+        total_finished = sum(s.get("latency_num_finished_requests", 0) for s in engine_stats_list)
+        total_preempted = sum(s.get("total_preempted_reqs", 0) for s in engine_stats_list)
+        for key in latency_keys:
+            if total_finished > 0:
+                # Weighted mean across engines
+                latency_agg[f"avg_latency_{key}_mean"] = sum(
+                    s.get(f"latency_{key}_mean", 0.0) * s.get("latency_num_finished_requests", 0)
+                    for s in engine_stats_list
+                ) / total_finished
+                # Max of p90s across engines (worst-case engine)
+                latency_agg[f"max_latency_{key}_p90"] = max(
+                    (s.get(f"latency_{key}_p90", 0.0) for s in engine_stats_list), default=0.0
+                )
+                # Avg of medians across engines
+                latency_agg[f"avg_latency_{key}_median"] = sum(
+                    s.get(f"latency_{key}_median", 0.0) for s in engine_stats_list
+                ) / num_engines
+            else:
+                latency_agg[f"avg_latency_{key}_mean"] = 0.0
+                latency_agg[f"max_latency_{key}_p90"] = 0.0
+                latency_agg[f"avg_latency_{key}_median"] = 0.0
+
         return {
             "engines": engine_stats_list,
             "num_engines": num_engines,
@@ -656,6 +689,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             "avg_median_waiting_reqs": avg_median_waiting,
             "avg_median_gpu_cache_usage_perc": avg_median_gpu_cache,
             "avg_median_prefix_cache_hit_rate": avg_median_prefix_hit,
+            # Aggregated per-request latency stats (seconds)
+            **latency_agg,
+            "total_finished_requests": total_finished,
+            "total_preempted_reqs": total_preempted,
             # Legacy field names for backwards compatibility (use peak values)
             "total_running_reqs": total_peak_running,
             "total_waiting_reqs": total_peak_waiting,

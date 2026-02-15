@@ -492,6 +492,42 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     total = hits + misses
                     current_prefix_hit = (hits / total * 100.0) if total > 0 else 0.0
 
+            # Extract iteration_stats (second positional arg) for per-request latency data
+            iteration_stats = None
+            if len(args) > 1:
+                iteration_stats = args[1]
+            elif "iteration_stats" in kwargs:
+                iteration_stats = kwargs["iteration_stats"]
+
+            # Collect per-request latency samples from finished requests
+            finished_prefill_times: List[float] = []
+            finished_decode_times: List[float] = []
+            finished_e2e_latencies: List[float] = []
+            finished_queued_times: List[float] = []
+            finished_ttfts: List[float] = []
+            finished_num_preempted = 0
+            if iteration_stats is not None:
+                # Time-to-first-token samples from this iteration
+                ttft_iter = getattr(iteration_stats, "time_to_first_tokens_iter", None)
+                if ttft_iter:
+                    finished_ttfts.extend(ttft_iter)
+                # Preemption count
+                finished_num_preempted = getattr(iteration_stats, "num_preempted_reqs", 0)
+                # Per-request stats from completed requests
+                for req in getattr(iteration_stats, "finished_requests", []):
+                    prefill_t = getattr(req, "prefill_time", 0.0)
+                    decode_t = getattr(req, "decode_time", 0.0)
+                    e2e_t = getattr(req, "e2e_latency", 0.0)
+                    queued_t = getattr(req, "queued_time", 0.0)
+                    if prefill_t > 0:
+                        finished_prefill_times.append(prefill_t)
+                    if decode_t > 0:
+                        finished_decode_times.append(decode_t)
+                    if e2e_t > 0:
+                        finished_e2e_latencies.append(e2e_t)
+                    if queued_t > 0:
+                        finished_queued_times.append(queued_t)
+
             # Throughput is computed by parent class LoggingStatLogger after super().record()
             # These are stored as instance attributes
             current_prompt_tp = getattr(self, "last_prompt_throughput", 0.0) or 0.0
@@ -512,6 +548,13 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         "_samples_waiting": [current_waiting] if is_active else [],
                         "_samples_cache": [current_cache_usage] if is_active else [],
                         "_samples_prefix_hit": [current_prefix_hit] if is_active else [],
+                        # Per-request latency samples (accumulated from finished requests)
+                        "_samples_prefill_time": list(finished_prefill_times),
+                        "_samples_decode_time": list(finished_decode_times),
+                        "_samples_e2e_latency": list(finished_e2e_latencies),
+                        "_samples_queued_time": list(finished_queued_times),
+                        "_samples_ttft": list(finished_ttfts),
+                        "_total_preempted": finished_num_preempted,
                         # Peak values
                         "_peak_prompt_tp": current_prompt_tp,
                         "_peak_gen_tp": current_gen_tp,
@@ -532,6 +575,14 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     existing["_peak_waiting"] = max(existing["_peak_waiting"], current_waiting)
                     existing["_peak_cache"] = max(existing["_peak_cache"], current_cache_usage)
                     existing["_peak_prefix_hit"] = max(existing["_peak_prefix_hit"], current_prefix_hit)
+
+                    # Accumulate per-request latency samples
+                    existing["_samples_prefill_time"].extend(finished_prefill_times)
+                    existing["_samples_decode_time"].extend(finished_decode_times)
+                    existing["_samples_e2e_latency"].extend(finished_e2e_latencies)
+                    existing["_samples_queued_time"].extend(finished_queued_times)
+                    existing["_samples_ttft"].extend(finished_ttfts)
+                    existing["_total_preempted"] += finished_num_preempted
 
                     # Append to sample lists (only for active samples to get meaningful medians)
                     if is_active:
@@ -598,6 +649,23 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 mean_prompt_tp = 0.0
                 mean_gen_tp = 0.0
 
+            # Compute per-request latency statistics
+            prefill_samples = stats["_samples_prefill_time"]
+            decode_samples = stats["_samples_decode_time"]
+            e2e_samples = stats["_samples_e2e_latency"]
+            queued_samples = stats["_samples_queued_time"]
+            ttft_samples = stats["_samples_ttft"]
+
+            def _mean(s: List[float]) -> float:
+                return sum(s) / len(s) if s else 0.0
+
+            def _p90(s: List[float]) -> float:
+                if not s:
+                    return 0.0
+                sorted_s = sorted(s)
+                idx = int(len(sorted_s) * 0.9)
+                return sorted_s[min(idx, len(sorted_s) - 1)]
+
             result = {
                 # Peak values
                 "peak_prompt_throughput": stats["_peak_prompt_tp"],
@@ -616,6 +684,24 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 # Mean values
                 "mean_prompt_throughput": mean_prompt_tp,
                 "mean_generation_throughput": mean_gen_tp,
+                # Per-request latency stats (seconds)
+                "latency_prefill_mean": _mean(prefill_samples),
+                "latency_prefill_median": cls._compute_median(prefill_samples),
+                "latency_prefill_p90": _p90(prefill_samples),
+                "latency_decode_mean": _mean(decode_samples),
+                "latency_decode_median": cls._compute_median(decode_samples),
+                "latency_decode_p90": _p90(decode_samples),
+                "latency_e2e_mean": _mean(e2e_samples),
+                "latency_e2e_median": cls._compute_median(e2e_samples),
+                "latency_e2e_p90": _p90(e2e_samples),
+                "latency_queued_mean": _mean(queued_samples),
+                "latency_queued_median": cls._compute_median(queued_samples),
+                "latency_queued_p90": _p90(queued_samples),
+                "latency_ttft_mean": _mean(ttft_samples),
+                "latency_ttft_median": cls._compute_median(ttft_samples),
+                "latency_ttft_p90": _p90(ttft_samples),
+                "latency_num_finished_requests": len(e2e_samples),
+                "total_preempted_reqs": stats["_total_preempted"],
                 # Legacy field names for backwards compatibility (use peak values)
                 "avg_prompt_throughput": stats["_peak_prompt_tp"],
                 "avg_generation_throughput": stats["_peak_gen_tp"],
@@ -1029,6 +1115,24 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 # Mean values
                 "mean_prompt_throughput": 0.0,
                 "mean_generation_throughput": 0.0,
+                # Per-request latency stats
+                "latency_prefill_mean": 0.0,
+                "latency_prefill_median": 0.0,
+                "latency_prefill_p90": 0.0,
+                "latency_decode_mean": 0.0,
+                "latency_decode_median": 0.0,
+                "latency_decode_p90": 0.0,
+                "latency_e2e_mean": 0.0,
+                "latency_e2e_median": 0.0,
+                "latency_e2e_p90": 0.0,
+                "latency_queued_mean": 0.0,
+                "latency_queued_median": 0.0,
+                "latency_queued_p90": 0.0,
+                "latency_ttft_mean": 0.0,
+                "latency_ttft_median": 0.0,
+                "latency_ttft_p90": 0.0,
+                "latency_num_finished_requests": 0,
+                "total_preempted_reqs": 0,
                 # Legacy field names
                 "avg_prompt_throughput": 0.0,
                 "avg_generation_throughput": 0.0,

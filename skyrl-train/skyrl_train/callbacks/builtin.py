@@ -748,6 +748,18 @@ class VLLMStatsCallback(TrainerCallback):
         median_gen_tp = stats.get("avg_median_generation_throughput", 0.0)
         median_kv_cache = stats.get("avg_median_gpu_cache_usage_perc", 0.0)
 
+        # Latency stats
+        prefill_mean = stats.get("avg_latency_prefill_mean", 0.0)
+        prefill_p90 = stats.get("max_latency_prefill_p90", 0.0)
+        decode_mean = stats.get("avg_latency_decode_mean", 0.0)
+        decode_p90 = stats.get("max_latency_decode_p90", 0.0)
+        e2e_mean = stats.get("avg_latency_e2e_mean", 0.0)
+        e2e_p90 = stats.get("max_latency_e2e_p90", 0.0)
+        queued_mean = stats.get("avg_latency_queued_mean", 0.0)
+        ttft_mean = stats.get("avg_latency_ttft_mean", 0.0)
+        total_finished = stats.get("total_finished_requests", 0)
+        total_preempted = stats.get("total_preempted_reqs", 0)
+
         msg = (
             f"vLLM Stats (step {global_step}): "
             f"engines={num_engines}, "
@@ -757,6 +769,14 @@ class VLLMStatsCallback(TrainerCallback):
             f"gen_tp(peak/med)={peak_gen_tp:.1f}/{median_gen_tp:.1f} tok/s, "
             f"kv_cache(peak/med)={peak_kv_cache:.1f}/{median_kv_cache:.1f}%"
         )
+        if total_finished > 0:
+            msg += (
+                f", prefill(mean/p90)={prefill_mean:.2f}/{prefill_p90:.2f}s"
+                f", decode(mean/p90)={decode_mean:.2f}/{decode_p90:.2f}s"
+                f", e2e(mean/p90)={e2e_mean:.2f}/{e2e_p90:.2f}s"
+                f", queued={queued_mean:.2f}s, ttft={ttft_mean:.2f}s"
+                f", finished={total_finished}, preempted={total_preempted}"
+            )
         if total_samples > 0:
             msg += f", samples={total_active}/{total_samples}"
 
@@ -805,6 +825,19 @@ class VLLMStatsCallback(TrainerCallback):
                     "vllm/median_generation_throughput": stats.get("avg_median_generation_throughput", 0.0),
                     "vllm/median_gpu_cache_usage_perc": stats.get("avg_median_gpu_cache_usage_perc", 0.0),
                     "vllm/median_prefix_cache_hit_rate": stats.get("avg_median_prefix_cache_hit_rate", 0.0),
+                    # Per-request latency (seconds)
+                    "vllm/latency_prefill_mean": stats.get("avg_latency_prefill_mean", 0.0),
+                    "vllm/latency_prefill_p90": stats.get("max_latency_prefill_p90", 0.0),
+                    "vllm/latency_decode_mean": stats.get("avg_latency_decode_mean", 0.0),
+                    "vllm/latency_decode_p90": stats.get("max_latency_decode_p90", 0.0),
+                    "vllm/latency_e2e_mean": stats.get("avg_latency_e2e_mean", 0.0),
+                    "vllm/latency_e2e_p90": stats.get("max_latency_e2e_p90", 0.0),
+                    "vllm/latency_queued_mean": stats.get("avg_latency_queued_mean", 0.0),
+                    "vllm/latency_queued_p90": stats.get("max_latency_queued_p90", 0.0),
+                    "vllm/latency_ttft_mean": stats.get("avg_latency_ttft_mean", 0.0),
+                    "vllm/latency_ttft_p90": stats.get("max_latency_ttft_p90", 0.0),
+                    "vllm/total_finished_requests": stats.get("total_finished_requests", 0),
+                    "vllm/total_preempted_reqs": stats.get("total_preempted_reqs", 0),
                     # Metadata
                     "vllm/total_samples": stats.get("total_samples", 0),
                     "vllm/total_active_samples": stats.get("total_active_samples", 0),
@@ -838,6 +871,17 @@ class VLLMStatsCallback(TrainerCallback):
                             f"vllm/engine_{i}/median_generation_throughput": engine_stats.get("median_generation_throughput", 0.0),
                             f"vllm/engine_{i}/median_running_reqs": engine_stats.get("median_running_reqs", 0.0),
                             f"vllm/engine_{i}/median_waiting_reqs": engine_stats.get("median_waiting_reqs", 0.0),
+                            # Per-engine latency stats
+                            f"vllm/engine_{i}/latency_prefill_mean": engine_stats.get("latency_prefill_mean", 0.0),
+                            f"vllm/engine_{i}/latency_prefill_p90": engine_stats.get("latency_prefill_p90", 0.0),
+                            f"vllm/engine_{i}/latency_decode_mean": engine_stats.get("latency_decode_mean", 0.0),
+                            f"vllm/engine_{i}/latency_decode_p90": engine_stats.get("latency_decode_p90", 0.0),
+                            f"vllm/engine_{i}/latency_e2e_mean": engine_stats.get("latency_e2e_mean", 0.0),
+                            f"vllm/engine_{i}/latency_e2e_p90": engine_stats.get("latency_e2e_p90", 0.0),
+                            f"vllm/engine_{i}/latency_queued_mean": engine_stats.get("latency_queued_mean", 0.0),
+                            f"vllm/engine_{i}/latency_ttft_mean": engine_stats.get("latency_ttft_mean", 0.0),
+                            f"vllm/engine_{i}/finished_requests": engine_stats.get("latency_num_finished_requests", 0),
+                            f"vllm/engine_{i}/preempted_reqs": engine_stats.get("total_preempted_reqs", 0),
                         },
                         step=global_step,
                     )

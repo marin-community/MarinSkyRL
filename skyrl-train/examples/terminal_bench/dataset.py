@@ -78,7 +78,7 @@ class TerminalBenchTaskDataset:
             "prompt": str(self.task_paths[index]),
             "env_class": None,
             "env_extras": {"data_source": str(self.task_paths[index])},
-            "uid": str(index),
+            "uid": self.task_paths[index].name,
         }
 
     def __len__(self) -> int:
@@ -92,7 +92,7 @@ class TerminalBenchTaskDataset:
                 "prompt": str(task_path),
                 "env_class": None,
                 "env_extras": {"data_source": str(task_path)},
-                "uid": str(index),
+                "uid": task_path.name,
             }
 
     def get_task_paths(self) -> List[Path]:
