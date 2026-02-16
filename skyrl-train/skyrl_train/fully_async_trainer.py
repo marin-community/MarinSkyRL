@@ -29,7 +29,7 @@ from skyrl_train.generators.utils import prepare_generator_input, concatenate_ge
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Tuple, Iterable, Set
+from typing import List, Optional, Tuple, Iterable, Set
 import inspect
 from skyrl_train.callbacks import TrainerState
 
@@ -460,10 +460,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         buffer_pbar.close()
 
                     # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                    with Timer("convert_to_training_input", self.all_timings):
-                        training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input, cur_generation_group_mini_batch
-                        )
+                    #    If all groups are stale, wait for more fresh data instead of crashing.
+                    training_input = None
+                    while training_input is None:
+                        with Timer("convert_to_training_input", self.all_timings):
+                            training_input = await asyncio.to_thread(
+                                self.convert_generation_group_mini_batch_to_training_input, cur_generation_group_mini_batch
+                            )
+                        if training_input is None:
+                            logger.info("Waiting for fresh generation data (refilling mini-batch)...")
+                            cur_generation_group_mini_batch = []
+                            while len(cur_generation_group_mini_batch) < self.mini_batch_size:
+                                cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
 
                     # 3. Run training and update consumed UIDs.
                     with Timer("run_training", self.all_timings):
@@ -739,13 +747,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
-    ) -> TrainingInputBatch:
+    ) -> Optional[TrainingInputBatch]:
         """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch.
 
         Stale groups (staleness > max_staleness_steps) are discarded rather than trained on.
         This is the deadline-based staleness control approach: instead of blocking workers
         at submission time, we allow all workers to submit freely and discard stale results
         at consumption time. This maximizes vLLM utilization.
+
+        Returns None if all groups in the mini-batch were stale, signaling the caller to
+        wait for fresh data rather than crash.
         """
         generator_outputs = []
         uids = []
@@ -771,13 +782,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
 
-        # Handle edge case: all groups were discarded
+        # Handle edge case: all groups were discarded — signal caller to wait and retry
         if len(generator_outputs) == 0:
-            raise RuntimeError(
-                f"All {len(cur_generation_group_mini_batch)} groups in mini-batch were stale and discarded. "
-                f"Consider increasing max_staleness_steps (currently {self.max_staleness_steps}) or "
-                f"reducing generation latency variance."
+            logger.warning(
+                f"All {len(cur_generation_group_mini_batch)} groups in mini-batch were stale and discarded "
+                f"(max_staleness_steps={self.max_staleness_steps}). "
+                f"Training will wait for fresh generation data."
             )
+            return None
 
         # Log discard statistics
         total_groups = len(cur_generation_group_mini_batch)
