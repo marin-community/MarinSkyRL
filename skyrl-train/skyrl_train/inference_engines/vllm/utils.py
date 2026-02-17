@@ -15,4 +15,9 @@ def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if tool_parser is not None:
         openai_kwargs["tool_parser"] = tool_parser
 
+    # Sampling params for OpenAI-style requests (Harbor terminal-bench rollouts)
+    openai_sampling = engine_kwargs.pop("openai_sampling_params", None)
+    if openai_sampling is not None:
+        openai_kwargs["openai_sampling_params"] = openai_sampling
+
     return openai_kwargs

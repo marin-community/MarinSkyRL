@@ -743,6 +743,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
+        # Store sampling params for OpenAI-style requests (Harbor rollouts)
+        self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
 
         # TODO (erictang000): potentially enable log requests for a debugging mode
@@ -992,13 +994,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 
-        # TODO(Charlie): Hacky! We are hijacking to update the sampling params.
-        # Can we allow Harbor to use customized sampling params?
+        # Apply configured sampling params from generator config.
+        # Harbor requests may include their own sampling params; we override
+        # with the SkyRL generator config so rollout exploration is consistent.
+        sp = getattr(self, "_openai_sampling_params", {})
         body.update({
-            "temperature": 1.0,
-            "top_p": 1.0,
-            "top_k": -1,
-            "min_p": 0.0,
+            "temperature": sp.get("temperature", 1.0),
+            "top_p": sp.get("top_p", 1.0),
+            "top_k": sp.get("top_k", -1),
+            "min_p": sp.get("min_p", 0.0),
         })
 
         # 1. Build request

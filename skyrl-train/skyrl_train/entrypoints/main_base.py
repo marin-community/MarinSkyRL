@@ -58,7 +58,10 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "max_num_seqs": cfg.generator.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
-        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "engine_init_kwargs": {
+            **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
+            "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+        },
         "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
     }
 
