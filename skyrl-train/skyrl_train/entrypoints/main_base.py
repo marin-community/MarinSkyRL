@@ -336,12 +336,31 @@ class BasePPOExp:
         return trainer
 
     def run(self):
-        trainer = self._setup_trainer()
-        # Start the training loop
-        asyncio.run(trainer.train())
+        trainer = None
+        try:
+            trainer = self._setup_trainer()
+            # Start the training loop
+            asyncio.run(trainer.train())
+        finally:
+            # Clean up any resources that were created, even if _setup_trainer()
+            # or train() failed.  When the skyrl_entrypoint actor dies (e.g. SIGABRT)
+            # and Ray retries it, the original actor's sub-actors (policy, ref,
+            # inference engines) may still hold GPUs.  Cleaning up here ensures
+            # those resources are released before the process exits.
+            if trainer is not None:
+                try:
+                    # generator.shutdown() is async; run it in a fresh event loop
+                    # since asyncio.run() above may have already closed the loop.
+                    asyncio.run(trainer.generator.shutdown())
+                except Exception as e:
+                    logger.warning(f"Error shutting down generator: {e}")
+                try:
+                    trainer.cleanup_ray_actors()
+                except Exception as e:
+                    logger.warning(f"Error cleaning up Ray actors: {e}")
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)

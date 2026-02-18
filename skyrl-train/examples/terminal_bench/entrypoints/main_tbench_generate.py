@@ -79,7 +79,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
         asyncio.run(generator.generate(input_batch))
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
     exp = TerminalBenchGenerateExp(cfg)
