@@ -198,6 +198,25 @@ class RayPPOTrainer:
             )
         return eval_metrics
 
+    def cleanup_ray_actors(self):
+        """Kill all managed Ray actors for proper teardown.
+
+        Called during shutdown to ensure all Ray actors (policy, critic, ref models)
+        are terminated, preventing orphaned processes when training fails mid-step
+        (e.g., due to node failures or SIGTERM).
+        """
+        for model_name, model in [
+            ("policy_model", self.policy_model),
+            ("critic_model", self.critic_model),
+            ("ref_model", self.ref_model),
+        ]:
+            if model is not None:
+                try:
+                    logger.info(f"Killing {model_name} actors...")
+                    model.kill_actors()
+                except Exception as e:
+                    logger.warning(f"Error killing {model_name} actors: {e}")
+
     async def train(self):
         """
         Main training loop for PPO
@@ -220,6 +239,12 @@ class RayPPOTrainer:
                 logger.info("Generator shutdown complete")
             except Exception as e:
                 logger.warning(f"Generator shutdown error (non-fatal): {e}")
+            # Kill all Ray actors to prevent orphaned processes
+            try:
+                self.cleanup_ray_actors()
+                logger.info("Ray actor cleanup complete")
+            except Exception as e:
+                logger.warning(f"Ray actor cleanup error (non-fatal): {e}")
 
     async def _train_loop(self):
         """

@@ -1,8 +1,11 @@
 """
 Main entrypoint for training on terminal bench tasks.
 """
+import signal
+import sys
 import ray
 import hydra
+from loguru import logger
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.utils import validate_cfg
@@ -29,7 +32,22 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
 
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+
+    def _sigterm_handler(signum, frame):
+        logger.warning("Received SIGTERM on head node, shutting down Ray...")
+        ray.shutdown()
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    try:
+        ray.get(skyrl_entrypoint.remote(cfg))
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        raise
+    finally:
+        logger.info("Shutting down Ray on head node...")
+        ray.shutdown()
 
 
 if __name__ == "__main__":

@@ -607,6 +607,18 @@ class PPORayActorGroup:
         object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
         return await dispatch_class.async_collect(self.actor_infos, object_refs)
 
+    def kill_actors(self, no_restart: bool = True) -> None:
+        """Kill all Ray actors in this group for proper teardown.
+
+        Args:
+            no_restart: If True, prevents Ray from restarting the actors.
+        """
+        for actor in self._actor_handlers:
+            try:
+                ray.kill(actor, no_restart=no_restart)
+            except Exception:
+                pass  # Actor may already be dead
+
 
 class PolicyWorkerBase(Worker):
     def __init__(self, **kwargs):

@@ -2,7 +2,10 @@
 Main entrypoint for async training.
 """
 
+import signal
+import sys
 import hydra
+from loguru import logger
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
@@ -69,7 +72,24 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
 
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+
+    # Register SIGTERM handler so that cluster preemption / job scheduler
+    # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
+    def _sigterm_handler(signum, frame):
+        logger.warning("Received SIGTERM on head node, shutting down Ray...")
+        ray.shutdown()
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    try:
+        ray.get(skyrl_entrypoint.remote(cfg))
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        raise
+    finally:
+        logger.info("Shutting down Ray on head node...")
+        ray.shutdown()
 
 
 if __name__ == "__main__":

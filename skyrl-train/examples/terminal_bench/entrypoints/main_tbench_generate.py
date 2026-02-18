@@ -2,6 +2,8 @@
 Main entrypoint for generating rollouts on terminal bench tasks.
 """
 
+import signal
+import sys
 import ray
 import asyncio
 import hydra
@@ -90,7 +92,22 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
 
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+
+    def _sigterm_handler(signum, frame):
+        logger.warning("Received SIGTERM on head node, shutting down Ray...")
+        ray.shutdown()
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    try:
+        ray.get(skyrl_entrypoint.remote(cfg))
+    except Exception as e:
+        logger.error(f"Generation failed: {e}")
+        raise
+    finally:
+        logger.info("Shutting down Ray on head node...")
+        ray.shutdown()
 
 
 if __name__ == "__main__":

@@ -343,7 +343,14 @@ class InferenceEngineClient(InferenceEngineInterface):
                     response_role = None
                     continue
 
-                raise RuntimeError(f"Inference engine error: {error_msg}")
+                # Return the error response dict instead of raising, so that
+                # the HTTP endpoint can forward it with the correct status code
+                # (e.g., 400 for context length errors). Raising RuntimeError here
+                # would cause the endpoint to wrap it as a generic HTTP 500, which
+                # breaks LiteLLM's error classification in downstream consumers
+                # like Harbor.
+                logger.warning(f"Inference engine error: {error_msg}")
+                return partial_response
 
             # 1.3. Parse partial response and in-place update accumulators.
             finish_reason, stop_reason, response_role, aborted_without_generating = (

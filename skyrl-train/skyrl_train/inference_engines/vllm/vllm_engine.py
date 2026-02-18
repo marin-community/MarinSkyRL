@@ -745,6 +745,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
+        if self._openai_sampling_params:
+            logger.warning(
+                f"OpenAI API sampling params overridden: "
+                f"temperature={self._openai_sampling_params.get('temperature', 1.0)}, "
+                f"top_p={self._openai_sampling_params.get('top_p', 1.0)}, "
+                f"top_k={self._openai_sampling_params.get('top_k', -1)}"
+            )
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
 
         # TODO (erictang000): potentially enable log requests for a debugging mode
