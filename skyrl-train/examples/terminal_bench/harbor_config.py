@@ -325,8 +325,43 @@ class HarborConfigBuilder:
             "output_cost_per_token": model_info_cfg.get("output_cost_per_token", 0),
         }
 
+        # Extract PRM (Process Reward Model) config for mid-trial thrashing detection.
+        # When enabled, the PRM's should_terminate() is passed as turn_callback to
+        # terminus-2, allowing early termination of thrashing agents.
+        self._turn_callback = self._build_prm_turn_callback(terminal_bench_cfg)
+
         # Validate config and issue warnings
         self._validate_config()
+
+    @staticmethod
+    def _build_prm_turn_callback(terminal_bench_cfg: DictConfig):
+        """Build a PRM turn_callback from the ``prm`` config section.
+
+        Returns:
+            A callable ``(turn, trajectory_steps, messages) -> bool`` if a PRM
+            is configured, or ``None`` if disabled (``prm.name`` is null/empty).
+        """
+        prm_cfg = terminal_bench_cfg.get("prm", None)
+        if prm_cfg is None:
+            return None
+
+        if isinstance(prm_cfg, DictConfig):
+            prm_cfg = OmegaConf.to_container(prm_cfg, resolve=True)
+
+        prm_name = prm_cfg.get("name", None)
+        if not prm_name:
+            return None
+
+        # Lazy import so the prm package is only required when actually used.
+        from prm import get_prm  # noqa: E402
+
+        prm_kwargs = {k: v for k, v in prm_cfg.items() if k != "name"}
+        prm_instance = get_prm(prm_name, **prm_kwargs)
+        logger.info(
+            f"PRM '{prm_name}' enabled as turn_callback "
+            f"(params: {prm_kwargs})"
+        )
+        return prm_instance.as_turn_callback()
 
     def _extract_harbor_fields_legacy(self, cfg: DictConfig) -> Dict[str, Any]:
         """Extract harbor-related fields from legacy flat config structure."""
@@ -655,6 +690,10 @@ class HarborConfigBuilder:
             "session_id": session_id,
             "model_info": self._model_info,
         })
+
+        # Inject PRM turn_callback if configured
+        if self._turn_callback is not None:
+            agent_kwargs["turn_callback"] = self._turn_callback
 
         # Get agent name from harbor config (defaults to "terminus-2")
         # This is the Harbor AgentName value directly (e.g., "terminus-2", "oracle")
