@@ -316,6 +316,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
         )
+        # Tracked at instance level so the finally block in train() can cancel
+        # them even when an exception skips the per-epoch epilogue.
+        self._active_generator_tasks: List[asyncio.Task] = []
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -347,6 +350,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             timings=dict(self.all_timings),
         )
 
+    def _cancel_generator_tasks(self) -> None:
+        """Cancel any active generator tasks left over from an abnormal exit.
+
+        Normally the per-epoch epilogue cancels these, but if an exception
+        breaks out of the inner training loop the epilogue is skipped.
+        """
+        tasks = self._active_generator_tasks
+        if not tasks:
+            return
+        n_running = sum(1 for t in tasks if not t.done())
+        if n_running:
+            logger.warning(
+                f"Cancelling {n_running} orphaned generator tasks from abnormal train loop exit"
+            )
+            for t in tasks:
+                t.cancel()
+        self._active_generator_tasks = []
+
     async def train(self):
         """
         Main fully async training loop for PPO
@@ -364,7 +385,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         try:
             await self._train_loop()
+        except Exception as e:
+            logger.error(f"Train loop failed at global_step {self.global_step}: {e}", exc_info=True)
+            raise
         finally:
+            # Cancel any orphaned generator tasks that survived an early exit
+            # (the per-epoch epilogue only runs on normal loop completion).
+            self._cancel_generator_tasks()
+
             # Ensure generator cleanup happens even if training fails
             try:
                 await self.generator.shutdown()
@@ -436,11 +464,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 maxsize=self.num_parallel_generation_workers
             )
 
-            # Maintain self.num_parallel_generation_workers concurrent group-generation workers
-            generator_tasks = [
+            # Maintain self.num_parallel_generation_workers concurrent group-generation workers.
+            # Stored on self so the finally block in train() can cancel them on abnormal exit.
+            self._active_generator_tasks = [
                 asyncio.create_task(self._run_generate_for_a_group_loop(generation_output_group_buffer))
                 for _ in range(self.num_parallel_generation_workers)
             ]
+            generator_tasks = self._active_generator_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
@@ -605,6 +635,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await asyncio.gather(*generator_tasks, return_exceptions=True)
             except Exception:
                 pass
+            self._active_generator_tasks = []
 
             # Per-epoch reset/validation for data loading and staleness management
             assert all(
