@@ -393,18 +393,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_generator_tasks()
 
-            # Ensure generator cleanup happens even if training fails
-            try:
-                await self.generator.shutdown()
-                logger.info("Generator shutdown complete")
-            except Exception as e:
-                logger.warning(f"Generator shutdown error (non-fatal): {e}")
-            # Kill all Ray actors to prevent orphaned processes
-            try:
-                self.cleanup_ray_actors()
-                logger.info("Ray actor cleanup complete")
-            except Exception as e:
-                logger.warning(f"Ray actor cleanup error (non-fatal): {e}")
+            await self._teardown()
 
     async def _train_loop(self):
         """

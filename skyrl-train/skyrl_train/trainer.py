@@ -198,12 +198,40 @@ class RayPPOTrainer:
             )
         return eval_metrics
 
-    def cleanup_ray_actors(self):
-        """Kill all managed Ray actors for proper teardown.
+    # ------------------------------------------------------------------
+    # Teardown helpers
+    # ------------------------------------------------------------------
 
-        Called during shutdown to ensure all Ray actors (policy, critic, ref models)
-        are terminated, preventing orphaned processes when training fails mid-step
-        (e.g., due to node failures or SIGTERM).
+    @staticmethod
+    async def _guarded_async(coro, *, timeout: float, label: str) -> None:
+        """Await *coro* with a timeout, logging but never raising on failure."""
+        try:
+            await asyncio.wait_for(coro, timeout=timeout)
+            logger.info(f"{label} complete")
+        except asyncio.TimeoutError:
+            logger.warning(f"{label} timed out after {timeout}s, proceeding with cleanup")
+        except Exception as e:
+            logger.warning(f"{label} error (non-fatal): {e}")
+
+    @staticmethod
+    def _guarded_sync(fn, *, label: str) -> None:
+        """Call *fn()*, logging but never raising on failure."""
+        try:
+            fn()
+            logger.info(f"{label} complete")
+        except Exception as e:
+            logger.warning(f"{label} error (non-fatal): {e}")
+
+    def cleanup_ray_actors(self):
+        """Public alias for :meth:`_kill_ray_actors` (used by entrypoints)."""
+        return self._kill_ray_actors()
+
+    def _kill_ray_actors(self):
+        """Kill all managed Ray actors (models + inference engines).
+
+        Terminates policy, critic, and ref-model actor groups as well as
+        inference engine actors (vLLM / SGLang workers) that would otherwise
+        keep running until the node dies.
         """
         for model_name, model in [
             ("policy_model", self.policy_model),
@@ -216,6 +244,37 @@ class RayPPOTrainer:
                     model.kill_actors()
                 except Exception as e:
                     logger.warning(f"Error killing {model_name} actors: {e}")
+
+        # Kill inference engine actors.  These are not covered by the model
+        # actor groups above.
+        if self.inference_engine_client is not None:
+            from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+
+            n_killed = 0
+            for engine in self.inference_engine_client.engines:
+                if isinstance(engine, RayWrappedInferenceEngine):
+                    try:
+                        ray.kill(engine.inference_engine_actor, no_restart=True)
+                        n_killed += 1
+                    except Exception:
+                        pass  # Actor may already be dead
+            if n_killed:
+                logger.info(f"Killed {n_killed} inference engine actor(s)")
+
+    async def _teardown(self) -> None:
+        """Best-effort cleanup after training ends (normal or abnormal).
+
+        Each step uses a timeout so a blocked operation cannot prevent
+        subsequent cleanup from running.  Errors are logged as warnings
+        but never re-raised.
+        """
+        await self._guarded_async(
+            self.generator.shutdown(), timeout=60, label="Generator shutdown",
+        )
+        await self._guarded_async(
+            self.inference_engine_client.teardown(), timeout=30, label="Inference engine teardown",
+        )
+        self._guarded_sync(self._kill_ray_actors, label="Ray actor cleanup")
 
     async def train(self):
         """
@@ -233,18 +292,7 @@ class RayPPOTrainer:
         try:
             await self._train_loop()
         finally:
-            # Ensure generator cleanup happens even if training fails
-            try:
-                await self.generator.shutdown()
-                logger.info("Generator shutdown complete")
-            except Exception as e:
-                logger.warning(f"Generator shutdown error (non-fatal): {e}")
-            # Kill all Ray actors to prevent orphaned processes
-            try:
-                self.cleanup_ray_actors()
-                logger.info("Ray actor cleanup complete")
-            except Exception as e:
-                logger.warning(f"Ray actor cleanup error (non-fatal): {e}")
+            await self._teardown()
 
     async def _train_loop(self):
         """
