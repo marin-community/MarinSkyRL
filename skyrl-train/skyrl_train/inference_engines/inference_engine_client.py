@@ -837,6 +837,35 @@ class InferenceEngineClient(InferenceEngineInterface):
             f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}"
         )
 
+    def shutdown_http_endpoint(self) -> None:
+        """Shut down the HTTP endpoint server.
+
+        Must be called during teardown BEFORE killing inference engines.
+        Otherwise in-flight requests get forwarded to dead engines, receive
+        ActorDiedError, and the retry logic keeps the process alive
+        indefinitely.
+        """
+        if not self.enable_http_endpoint:
+            return
+
+        from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+            shutdown_server,
+        )
+
+        try:
+            shutdown_server(
+                host=self.http_endpoint_host,
+                port=self.http_endpoint_port,
+                max_wait_seconds=10,
+            )
+        except Exception as e:
+            logger.warning(f"HTTP endpoint shutdown error (non-fatal): {e}")
+
+        if self._server_thread is not None and self._server_thread.is_alive():
+            self._server_thread.join(timeout=5)
+            if self._server_thread.is_alive():
+                logger.warning("HTTP endpoint thread did not exit within 5s")
+
 
 # ----------------------------------------------
 # Helper methods for _chat_completion_with_retry

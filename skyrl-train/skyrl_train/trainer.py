@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import shutil
+import threading
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -267,7 +268,21 @@ class RayPPOTrainer:
         Each step uses a timeout so a blocked operation cannot prevent
         subsequent cleanup from running.  Errors are logged as warnings
         but never re-raised.
+
+        Order matters:
+        1. HTTP endpoint shutdown – cuts off the request path so in-flight
+           Harbor trials get connection-refused instead of retrying against
+           dead inference engines indefinitely.
+        2. Generator shutdown – waits for QueueOrchestrator to drain (should
+           be fast now that trials can't make new requests).
+        3. Inference engine teardown – sends teardown RPC to each engine.
+        4. Ray actor cleanup – force-kills remaining actors.
         """
+        if self.inference_engine_client is not None:
+            self._guarded_sync(
+                self.inference_engine_client.shutdown_http_endpoint,
+                label="HTTP endpoint shutdown",
+            )
         await self._guarded_async(
             self.generator.shutdown(), timeout=60, label="Generator shutdown",
         )
@@ -275,6 +290,29 @@ class RayPPOTrainer:
             self.inference_engine_client.teardown(), timeout=30, label="Inference engine teardown",
         )
         self._guarded_sync(self._kill_ray_actors, label="Ray actor cleanup")
+
+        # Safety net: force-exit the process if it's still alive after a
+        # generous grace period.  After this point, asyncio.run() will try to
+        # cancel remaining tasks (_cancel_all_tasks).  If orphaned tasks are
+        # stuck in retry loops (e.g. Harbor trials retrying against dead
+        # inference engines), that cleanup hangs indefinitely.  The watchdog
+        # ensures the process eventually terminates.
+        self._start_exit_watchdog(timeout=120)
+
+    @staticmethod
+    def _start_exit_watchdog(timeout: int = 120) -> None:
+        """Start a daemon thread that force-exits the process after *timeout* seconds."""
+
+        def _force_exit():
+            logger.error(
+                f"Process still alive {timeout}s after teardown — "
+                "forcing exit to prevent zombie process"
+            )
+            os._exit(1)
+
+        t = threading.Timer(timeout, _force_exit)
+        t.daemon = True
+        t.start()
 
     async def train(self):
         """
