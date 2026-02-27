@@ -11,3 +11,11 @@ prm:
   similarity_threshold: 0.5
   min_turns: 10
   check_interval: 3
+
+# Post-training trace upload to HuggingFace
+# When enabled, the OT-Agent launcher uploads Harbor traces after training completes.
+trace_upload:
+  enabled: false
+  repo_org: DCAgent
+  episodes: last
+  dataset_type: SFT

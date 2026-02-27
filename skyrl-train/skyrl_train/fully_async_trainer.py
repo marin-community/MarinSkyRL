@@ -327,6 +327,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        max_steps = getattr(self.cfg.trainer, 'max_steps', None)
+        if max_steps is not None and max_steps > 0:
+            self.total_training_steps = min(self.total_training_steps, max_steps)
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
@@ -594,12 +597,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 9. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
 
-                # 10. Check for early stopping
+                # 10. Check for max_steps
+                if self.global_step > self.total_training_steps:
+                    logger.info(f"Reached max training steps ({self.total_training_steps})")
+                    break
+
+                # 11. Check for early stopping
                 if self._control.should_training_stop:
                     logger.info("Training stopped early by callback")
                     break
 
-            # 11. Per-epoch epilogue.
+            # 12. Per-epoch epilogue.
             # Call on_epoch_end callbacks
             epoch_state = self._create_trainer_state(epoch=epoch)
             self._control.reset()
@@ -635,6 +643,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             ), f"We expect all generation output to be consumed by the training worker at end of an epoch, got {generation_output_group_buffer.qsize()}."
             await self.async_train_dataloader.reset_at_epoch_end()
             await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
+
+            if self.global_step > self.total_training_steps:
+                break
 
             if self._control.should_training_stop:
                 logger.info("Training stopped early by callback at epoch end")

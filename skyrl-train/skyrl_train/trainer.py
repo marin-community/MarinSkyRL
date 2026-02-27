@@ -138,6 +138,9 @@ class RayPPOTrainer:
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
         self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        max_steps = getattr(self.cfg.trainer, 'max_steps', None)
+        if max_steps is not None and max_steps > 0:
+            self.total_training_steps = min(self.total_training_steps, max_steps)
 
     def _create_trainer_state(self, epoch: int) -> TrainerState:
         """
@@ -569,7 +572,12 @@ class RayPPOTrainer:
 
                 del training_input, generator_output
 
-                # 11. Check for early stopping
+                # 11. Check for max_steps
+                if self.global_step > self.total_training_steps:
+                    logger.info(f"Reached max training steps ({self.total_training_steps})")
+                    break
+
+                # 12. Check for early stopping
                 if self._control.should_training_stop:
                     logger.info("Training stopped early by callback")
                     break
@@ -580,6 +588,9 @@ class RayPPOTrainer:
             self._control = await self.callback_handler.call_event_async(
                 "on_epoch_end", epoch_state, self._control, trainer=self
             )
+
+            if self.global_step > self.total_training_steps:
+                break
 
             if self._control.should_training_stop:
                 logger.info("Training stopped early by callback at epoch end")
