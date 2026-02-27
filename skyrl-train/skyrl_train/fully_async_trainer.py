@@ -383,13 +383,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             await self.generator.startup()
             logger.info("Generator startup complete")
         except Exception as e:
-            logger.error(f"Generator startup failed: {e}")
+            logger.opt(depth=0).error("Generator startup failed: " + str(e))
             raise
 
         try:
             await self._train_loop()
         except Exception as e:
-            logger.error(f"Train loop failed at global_step {self.global_step}: {e}", exc_info=True)
+            logger.opt(exception=True).error("Train loop failed at global_step " + str(self.global_step) + ": " + str(e))
             raise
         finally:
             # Cancel any orphaned generator tasks that survived an early exit
@@ -771,8 +771,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             finally:
                 return
         except Exception as e:
-            logger.error(f"Generator worker errored out with exception: {e}")
-            logger.error(f"Traceback: \n{traceback.format_exc()}")
+            logger.opt(exception=True).error("Generator worker errored out with exception: " + str(e))
             if "slot_acquired" in locals() and slot_acquired:
                 raise RuntimeError("Generation workers should only run into error when they finish running.")
             sys.exit(1)

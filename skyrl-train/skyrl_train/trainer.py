@@ -327,7 +327,7 @@ class RayPPOTrainer:
             await self.generator.startup()
             logger.info("Generator startup complete")
         except Exception as e:
-            logger.error(f"Generator startup failed: {e}")
+            logger.opt(depth=0).error("Generator startup failed: " + str(e))
             raise
 
         try:
