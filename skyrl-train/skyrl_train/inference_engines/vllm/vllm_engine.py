@@ -51,6 +51,14 @@ class Logprob:
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"  # TODO(Charlie): may not be needed.
+
+    # When custom all-reduce is disabled (e.g. for TP=2 on H100 where
+    # SymmMemCommunicator rendezvous fails), also disable symmetric memory
+    # via env var — the engine arg alone doesn't prevent SymmMemCommunicator
+    # from being instantiated.
+    if kwargs.get("disable_custom_all_reduce"):
+        os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+        logger.info("setup_envvars_for_vllm: set VLLM_ALLREDUCE_USE_SYMM_MEM=0 (disable_custom_all_reduce=True)")
     if kwargs.get("distributed_executor_backend") == "ray":
         # a hack to make the script work.
         # stop ray from manipulating *_VISIBLE_DEVICES
