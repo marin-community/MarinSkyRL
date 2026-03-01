@@ -130,9 +130,8 @@ class EvaluationCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        if self.eval_steps > 0:
-            if state.global_step % self.eval_steps == 0 or state.is_last_step:
-                control.should_evaluate = True
+        if self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
+            control.should_evaluate = True
         return control
 
 

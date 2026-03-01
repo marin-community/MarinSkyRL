@@ -638,9 +638,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             assert all(
                 t.done() for t in generator_tasks
             ), "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
-            assert (
-                generation_output_group_buffer.qsize() == 0
-            ), f"We expect all generation output to be consumed by the training worker at end of an epoch, got {generation_output_group_buffer.qsize()}."
+            # Drain any generation outputs that arrived after the training loop
+            # stopped consuming (race between producer enqueue and consumer exit).
+            n_drained = 0
+            while not generation_output_group_buffer.empty():
+                try:
+                    generation_output_group_buffer.get_nowait()
+                    n_drained += 1
+                except asyncio.QueueEmpty:
+                    break
+            if n_drained > 0:
+                logger.warning(
+                    f"Drained {n_drained} unconsumed generation output(s) at epoch boundary "
+                    f"(global_step={self.global_step}). These were generated with stale weights "
+                    f"and arrived after the training loop stopped consuming."
+                )
             await self.async_train_dataloader.reset_at_epoch_end()
             await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
