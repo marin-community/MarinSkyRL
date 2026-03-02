@@ -5,7 +5,7 @@ This file implements ``StepWiseGenerator`` for step-wise training
 import copy
 from uuid import uuid4
 import skyrl_gym
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Tuple
 from tqdm.asyncio import tqdm
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
@@ -60,6 +60,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
+        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> List[AgentLoopOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -108,6 +109,8 @@ class StepWiseGenerator(SkyRLGymGenerator):
         per_step_rewards: List[Tuple[float, int]] = []
         step_id = 0
         per_step_outputs: List[AgentLoopOutput] = []
+        # Capture global_step at first inference for accurate staleness tracking
+        captured_global_step: Optional[int] = None
         while not done:
 
             if retokenize_chat_history:
@@ -124,6 +127,10 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
+            # Capture global_step after first inference returns — at this point the vLLM
+            # engine has definitively served the request with its current weights.
+            if captured_global_step is None and global_step_fn is not None:
+                captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
@@ -202,6 +209,10 @@ class StepWiseGenerator(SkyRLGymGenerator):
             # in-place update to per-token reward
             per_step_output.reward = per_token_reward
 
+        # Attach captured global_step to the first per-step output
+        if per_step_outputs and captured_global_step is not None:
+            per_step_outputs[0].captured_global_step = captured_global_step
+
         await self._run_in_executor_if_available(env.close)
 
         return per_step_outputs
@@ -236,6 +247,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
                     max_input_length,
                     sampling_params=sampling_params,
                     trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
+                    global_step_fn=self.global_step_fn,
                 )
             )
 
@@ -285,6 +297,17 @@ class StepWiseGenerator(SkyRLGymGenerator):
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
+        # Extract the actual global_step captured at first inference (for accurate staleness).
+        # Each element in all_outputs is a List[AgentLoopOutput] (one per step in the trajectory).
+        actual_global_step = None
+        for step_outputs in all_outputs:
+            for output in step_outputs:
+                if output.captured_global_step is not None:
+                    actual_global_step = output.captured_global_step
+                    break
+            if actual_global_step is not None:
+                break
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
             "response_ids": responses,
@@ -295,6 +318,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
             "is_last_step": is_last_step,
+            "actual_global_step": actual_global_step,
         }
 
         return generator_output

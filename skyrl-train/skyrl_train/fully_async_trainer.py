@@ -456,6 +456,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 maxsize=self.num_parallel_generation_workers
             )
 
+            # Provide the generator with a live reference to global_step so it can
+            # capture the step at first vLLM inference (for accurate staleness tracking).
+            self.generator.global_step_fn = lambda: self.global_step
+
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers.
             # Stored on self so the finally block in train() can cancel them on abnormal exit.
             self._active_generator_tasks = [
@@ -764,12 +768,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
+                # Prefer the actual global_step captured at first vLLM inference (more accurate
+                # staleness) over the pessimistic capture at task pickup time.
+                actual_step = cur_generator_output.get("actual_global_step")
+                staleness_step = actual_step if actual_step is not None else global_step_at_start
                 try:
                     generation_output_group_buffer.put_nowait(
                         GeneratedOutputGroup(
                             generator_output=cur_generator_output,
                             uid=uids[0],
-                            global_step_when_scheduled=global_step_at_start,
+                            global_step_when_scheduled=staleness_step,
                         )
                     )
                 except asyncio.QueueFull:
@@ -839,14 +847,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             return None
 
-        # Log discard statistics
+        # Log discard and effective batch statistics (always, not just when discarding)
         total_groups = len(cur_generation_group_mini_batch)
         kept_groups = len(generator_outputs)
-        if discarded_count > 0:
-            logger.warning(
-                f"Discarded {discarded_count}/{total_groups} stale groups this step "
-                f"(effective batch: {kept_groups} groups, {kept_groups * group_size} samples)"
-            )
+        discard_rate = discarded_count / total_groups if total_groups > 0 else 0.0
+        logger.info(
+            f"Step {self.global_step}: effective_batch={kept_groups * group_size} samples "
+            f"({kept_groups}/{total_groups} groups), discard_rate={discard_rate:.1%}"
+        )
 
         generator_output = concatenate_generator_outputs(generator_outputs)
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."

@@ -9,7 +9,7 @@ import asyncio
 import copy
 from uuid import uuid4
 import skyrl_gym
-from typing import List, Dict, Any, Optional, Union, Tuple
+from typing import Callable, List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
 from dataclasses import dataclass
@@ -39,6 +39,7 @@ class AgentLoopOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
+    captured_global_step: Optional[int] = None
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -99,6 +100,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
+        # Optional callback to get trainer's current global_step (for accurate staleness tracking).
+        # Set by the fully-async trainer before generation workers start.
+        self.global_step_fn: Optional[Callable[[], int]] = None
+
     def _validate_cfg(self, generator_cfg: DictConfig):
         if getattr(generator_cfg.sampling_params, "logprobs", None) is not None and not generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
@@ -124,6 +129,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
+        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -185,6 +191,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
+        # Capture global_step at first inference for accurate staleness tracking
+        captured_global_step: Optional[int] = None
 
         while not done:
 
@@ -203,6 +211,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
             engine_output = await self.inference_engine_client.generate(engine_input)
+            # Capture global_step after first inference returns — at this point the vLLM
+            # engine has definitively served the request with its current weights.
+            if captured_global_step is None and global_step_fn is not None:
+                captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
@@ -328,6 +340,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_ids=prompt_ids,
             rollout_logprobs=rollout_logprobs,
             env_metrics=env_metrics,
+            captured_global_step=captured_global_step,
         )
 
     async def generate_batched(
@@ -453,6 +466,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     max_input_length,
                     sampling_params=sampling_params,
                     trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
+                    global_step_fn=self.global_step_fn,
                 )
             )
 
@@ -492,6 +506,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
+        # Extract the actual global_step captured at first inference (for accurate staleness).
+        # All agent_loops in a group share the same vLLM engines, so take the first non-None.
+        actual_global_step = None
+        for output in all_outputs:
+            if output.captured_global_step is not None:
+                actual_global_step = output.captured_global_step
+                break
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
             "response_ids": responses,
@@ -500,6 +522,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
+            "actual_global_step": actual_global_step,
         }
 
         return generator_output

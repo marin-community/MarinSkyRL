@@ -962,7 +962,12 @@ class RayPPOTrainer:
             "reward/avg_raw_reward": mean_raw_reward,
         }
         self.all_metrics.update(reward_metrics)
-        logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_raw_reward}")
+        effective_samples = self.all_metrics.get("async/effective_batch_samples", "N/A")
+        logger.info(
+            f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, "
+            f"reward/avg_raw_reward: {mean_raw_reward} "
+            f"(effective_batch={effective_samples} samples)"
+        )
 
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards

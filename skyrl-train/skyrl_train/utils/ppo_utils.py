@@ -1003,6 +1003,7 @@ def compute_rloo_n_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     exclude_from_baseline: Optional[np.ndarray] = None,
+    config=None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1036,6 +1037,12 @@ def compute_rloo_n_outcome_advantage(
     scores = token_level_rewards.sum(dim=-1)
     bsz = scores.shape[0]
 
+    # Minimum included samples per group for a reliable leave-one-out baseline.
+    # Groups below this threshold get advantage=0 for all samples.
+    min_group_size = 2  # backwards-compatible default
+    if config is not None:
+        min_group_size = getattr(config, 'rloo_n_min_group_size', 2)
+
     # Default: include all samples in baseline
     if exclude_from_baseline is None:
         exclude_from_baseline = np.zeros(bsz, dtype=bool)
@@ -1059,11 +1066,8 @@ def compute_rloo_n_outcome_advantage(
         id2mean = {}
         for group_id in set(index):
             included = id2included_scores[group_id]
-            if len(included) == 0:
-                # All samples excluded - no valid baseline
-                id2mean[group_id] = torch.tensor(0.0, device=scores.device)
-            elif len(included) == 1:
-                # Only one included sample - baseline is 0 (no other samples to compare)
+            if len(included) < min_group_size:
+                # Below minimum group size — can't compute reliable baseline
                 id2mean[group_id] = torch.tensor(0.0, device=scores.device)
             else:
                 id2mean[group_id] = torch.mean(torch.stack(included))
@@ -1081,11 +1085,11 @@ def compute_rloo_n_outcome_advantage(
             included_scores = id2included_scores[group_id]
             n_included = len(included_scores)
 
-            if n_included <= 1:
-                # Can't compute leave-one-out with 0 or 1 included samples
+            if n_included < min_group_size:
+                # Below minimum group size — zero advantage for all included samples
                 logger_.warning(
-                    f"RLOO-N: Group {group_id} has only {n_included} included sample(s), "
-                    f"setting advantage to 0"
+                    f"RLOO-N: Group {group_id} has {n_included} included sample(s) "
+                    f"(min_group_size={min_group_size}), setting advantage to 0"
                 )
                 scores[i] = 0.0
             else:
@@ -1100,10 +1104,15 @@ def compute_rloo_n_outcome_advantage(
             1 for group_id in set(index)
             if len(id2included_scores[group_id]) == 0
         )
-        if n_excluded > 0:
+        n_groups_below_min = sum(
+            1 for group_id in set(index)
+            if 0 < len(id2included_scores[group_id]) < min_group_size
+        )
+        if n_excluded > 0 or n_groups_below_min > 0:
             logger_.info(
                 f"RLOO-N: {n_excluded}/{bsz} samples excluded from baseline, "
-                f"{n_groups_all_excluded} groups had all samples excluded"
+                f"{n_groups_all_excluded} groups had all samples excluded, "
+                f"{n_groups_below_min} groups below min_group_size={min_group_size}"
             )
 
         scores = scores.unsqueeze(-1) * response_mask

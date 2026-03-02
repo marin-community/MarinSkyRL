@@ -45,6 +45,9 @@ class GeneratorOutput(TypedDict):
     # When True, the sample is masked from loss AND excluded from group baseline calculation.
     # This allows distinguishing infrastructure failures (exclude) from agent failures (include with zero reward).
     exclude_from_baseline: Optional[List[bool]]
+    # Actual global_step captured at first vLLM inference (for accurate staleness tracking).
+    # Scalar — same for all samples in a group since they share one generation episode.
+    actual_global_step: Optional[int]
 
 
 class GeneratorInterface(ABC):
