@@ -657,6 +657,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     f"(global_step={self.global_step}). These were generated with stale weights "
                     f"and arrived after the training loop stopped consuming."
                 )
+                # Reconcile staleness counters for drained items.  Items in the
+                # buffer may have been fully accepted (on_rollout_accepted ran)
+                # or orphaned (put_nowait succeeded but on_rollout_accepted was
+                # interrupted by CancelledError — those are already handled by
+                # the CancelledError fix above).  Only undo accepted/submitted
+                # for properly-accepted items that were never consumed.
+                consumed = (self.global_step - 1) * self.mini_batch_size
+                n_accepted_surplus = self._staleness_manager._stat.accepted - consumed
+                if n_accepted_surplus > 0:
+                    self._staleness_manager._stat.accepted -= n_accepted_surplus
+                    self._staleness_manager._stat.submitted -= n_accepted_surplus
             await self.async_train_dataloader.reset_at_epoch_end()
             await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
@@ -783,17 +794,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 except asyncio.QueueFull:
                     raise AssertionError("Generation buffer should never be full given staleness control.")
                 await self._staleness_manager.on_rollout_accepted()
+                slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:
-            # If a slot was acquired but we exit early, release running count
-            try:
-                if "slot_acquired" in locals() and slot_acquired:
-                    raise RuntimeError("Generation workers should only be cancelled when they finish running.")
-            finally:
-                return
+            # If a slot was acquired but generation was cancelled before
+            # on_rollout_accepted() ran, undo the slot acquisition so that
+            # validate_state_at_epoch_end() sees running == 0 and
+            # submitted == accepted.  We adjust the counters synchronously
+            # because we cannot reliably `await` inside a CancelledError
+            # handler (the next await would re-raise CancelledError).
+            if "slot_acquired" in locals() and slot_acquired:
+                self._staleness_manager._stat.submitted -= 1
+                self._staleness_manager._stat.running -= 1
+            return
         except Exception as e:
             logger.opt(exception=True).error("Generator worker errored out with exception: " + str(e))
             if "slot_acquired" in locals() and slot_acquired:
-                raise RuntimeError("Generation workers should only run into error when they finish running.")
+                self._staleness_manager._stat.submitted -= 1
+                self._staleness_manager._stat.running -= 1
             sys.exit(1)
 
     async def async_sync_policy_weights_to_inference_engines(self):
