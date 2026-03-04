@@ -197,7 +197,7 @@ class WorkerWrap:
 
     # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
     def destroy_weights_update_group(self):
-        if not self._model_update_group:
+        if not getattr(self, "_model_update_group", None):
             warnings.warn("No model update group to destroy")
             return
         destroy_process_group(self._model_update_group)
