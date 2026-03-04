@@ -95,6 +95,12 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Only show TIS-related warnings when collect_rollout_details is enabled
         self._collect_rollout_details = self._harbor_config_builder.get_collect_rollout_details()
 
+        # Tracked exception types for per-step error counters.
+        # Sourced from the retry config's exclude_exceptions (the terminal failures
+        # that Harbor will NOT retry).  These are always emitted as generate/ metrics
+        # so that dashboards see a consistent zero-baseline time-series.
+        self._tracked_exceptions = self._harbor_config_builder.get_exclude_exceptions()
+
         logger.info(
             f"TerminalBenchGenerator initialized with HarborConfigBuilder. "
             f"Exposed fields: {list(self._harbor_config_builder._harbor_cfg.keys())}. "
@@ -652,7 +658,12 @@ class TerminalBenchGenerator(GeneratorInterface):
         rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
         rollout_metrics["generate/num_masked_trajectories"] = num_masked_trajectories
 
-        # Log exception type breakdown for debugging
+        # Per-step error counters for tracked exception types.
+        # Pre-populate with zeros so every configured exception appears as a
+        # consistent time-series on dashboards, then overlay actual counts.
+        for exc_type in self._tracked_exceptions:
+            rollout_metrics[f"generate/errors/{exc_type}"] = 0
+
         exception_counts: Dict[str, int] = {}
         for output in all_outputs:
             if output.exception_type:
@@ -660,7 +671,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         if exception_counts:
             logger.info(f"Exception breakdown: {exception_counts}")
             for exc_type, count in exception_counts.items():
-                rollout_metrics[f"generate/exception_{exc_type}"] = count
+                rollout_metrics[f"generate/errors/{exc_type}"] = count
 
         logger.info(
             f"Batch generation complete: {num_trials - num_failed_trajectories}/{num_trials} successful, "

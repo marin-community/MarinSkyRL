@@ -1128,7 +1128,13 @@ class RayPPOTrainer:
             ]
         for key, value in training_input.metadata.items():
             if key not in ["uids", "trajectory_ids"]:
-                new_training_input.metadata[key] = copy.deepcopy(value)
+                # Extend numpy bool arrays so they stay aligned with the padded batch
+                if key == "exclude_from_baseline" and isinstance(value, np.ndarray):
+                    new_training_input.metadata[key] = np.concatenate(
+                        [value, np.ones(pad_size, dtype=value.dtype)]
+                    )
+                else:
+                    new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 
     @torch.no_grad()
