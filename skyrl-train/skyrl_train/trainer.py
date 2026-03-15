@@ -1261,18 +1261,19 @@ class RayPPOTrainer:
                 }
             )
         # Always log KL divergence as a diagnostic, even when not used as penalty
-        _kl = compute_approx_kl(
-            action_log_probs,
-            base_log_probs,
-            loss_mask=training_input["loss_mask"],
-            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-        )
-        _kl_mean = masked_mean(_kl, training_input["loss_mask"], dim=-1).mean().item()
-        _kl_max = torch.max(_kl.abs(), dim=-1)[0].mean().item()
-        self.all_metrics.update({
-            "reward/policy_ref_kl": _kl_mean,
-            "reward/policy_ref_kl_max": _kl_max,
-        })
+        if base_log_probs is not None:
+            _kl = compute_approx_kl(
+                action_log_probs,
+                base_log_probs,
+                loss_mask=training_input["loss_mask"],
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
+            _kl_mean = masked_mean(_kl, training_input["loss_mask"], dim=-1).mean().item()
+            _kl_max = torch.max(_kl.abs(), dim=-1)[0].mean().item()
+            self.all_metrics.update({
+                "reward/policy_ref_kl": _kl_mean,
+                "reward/policy_ref_kl_max": _kl_max,
+            })
 
         return training_input
 
