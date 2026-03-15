@@ -200,7 +200,7 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # Shaper strategy (pass_ratio, effective_pass_ratio, weighted, threshold, binary_partial, original)
         "reward_shaper": FieldMapping("reward_shaper", default="pass_ratio"),
         # Whether to enable reward shaping (if False, uses original binary reward)
-        "enable_reward_shaping": FieldMapping("enable_reward_shaping", default=True),
+        "enable_reward_shaping": FieldMapping("enable_reward_shaping", default=False),
         # Fallback to original reward if parsing fails
         "reward_shaping_fallback": FieldMapping("reward_shaping_fallback", default=True),
         # Threshold shaper params

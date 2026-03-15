@@ -910,8 +910,19 @@ class TerminalBenchGenerator(GeneratorInterface):
         else:
             reward = original_reward
 
-        # Validate chat history structure
-        if not chat_history or len(chat_history) < 2 or chat_history[0]["role"] != "user":
+        # Separate system messages from the conversation.
+        # Some agents (e.g. terminus-kira) include a system prompt;
+        # others (e.g. terminus-2) do not.
+        system_msgs = []
+        conversation = []
+        for msg in (chat_history or []):
+            if msg["role"] == "system":
+                system_msgs.append(msg)
+            else:
+                conversation.append(msg)
+
+        # Validate: need at least a user message and one response
+        if len(conversation) < 2 or conversation[0]["role"] != "user":
             # Invalid chat history is typically an infrastructure/serialization issue
             logger.warning(
                 f"Trajectory {trajectory_id} failed: Invalid chat history structure. "
@@ -929,8 +940,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
 
         # Process successful trial
-        # Use the first message as the prompt (assume no system messages)
-        prompt = [chat_history[0]]
+        # Prompt = system messages (if any) + first user message
+        prompt = system_msgs + [conversation[0]]
         prompt_ids = self.tokenizer.apply_chat_template(
             prompt,
             add_generation_prompt=False,
@@ -940,7 +951,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         initial_prompt_length = len(prompt_ids)
 
         # Process response messages (everything after the first message)
-        response_messages = chat_history[1:]
+        response_messages = conversation[1:]
 
         # Extract per-turn logprobs from Harbor's rollout_details (required for TIS)
         rollout_details = getattr(result.agent_result, "rollout_details", None)
