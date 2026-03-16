@@ -241,6 +241,10 @@ ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={
         # Enable RLOO-N style error handling (exclude infrastructure failures from baseline)
         "enable_error_classification": FieldMapping("enable_error_classification", default=False),
+        # Exceptions to pass through (ignore exception, use verifier reward normally).
+        # The verifier still runs after these errors in Harbor, so we get a real reward.
+        # Use for soft limits like timeout/context-length where partial work is evaluated.
+        "passthrough_exceptions": FieldMapping("passthrough_exceptions", default=[]),
         # Exceptions to mask (exclude from baseline, no gradient contribution)
         # These are treated as "neutral" - infrastructure issues, not agent failures
         "mask_exceptions": FieldMapping("mask_exceptions", default=[
@@ -257,7 +261,7 @@ ERROR_HANDLING_SCHEMA = SectionSchema(
             "AgentTimeoutError",
             "ContextLengthExceededError",
         ]),
-        # Default treatment for unclassified exceptions ("mask" or "zero")
+        # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
         "default_error_treatment": FieldMapping("default_error_treatment", default="zero"),
     }
 )
@@ -656,15 +660,17 @@ class HarborConfigBuilder:
         Get error handling configuration for RLOO-N advantage estimator.
 
         This controls how different exception types are treated:
+        - "passthrough" exceptions: Ignore exception, use verifier reward normally
         - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
         - "zero" exceptions: Included in baseline with reward=0 (agent failures)
 
         Returns:
             Dict with keys:
                 - enable_error_classification: bool - whether to classify errors
+                - passthrough_exceptions: Set[str] - exception names to pass through (use verifier reward)
                 - mask_exceptions: Set[str] - exception names to mask (exclude from baseline)
                 - zero_exceptions: Set[str] - exception names to zero (include with reward=0)
-                - default_error_treatment: str - "mask" or "zero" for unclassified errors
+                - default_error_treatment: str - "mask", "zero", or "passthrough" for unclassified errors
         """
         config = {}
 
@@ -672,7 +678,7 @@ class HarborConfigBuilder:
             value = self._get_field_value(yaml_key, mapping, self._cfg)
             if value is not None:
                 # Convert lists to sets for faster lookup
-                if yaml_key in ("mask_exceptions", "zero_exceptions"):
+                if yaml_key in ("passthrough_exceptions", "mask_exceptions", "zero_exceptions"):
                     if isinstance(value, (list, tuple)):
                         value = set(value)
                     elif isinstance(value, str):

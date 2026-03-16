@@ -741,17 +741,24 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         return generator_output
 
-    def _classify_exception(self, exception: Exception) -> tuple[bool, str]:
+    # Sentinel: returned by _classify_exception when the exception should be
+    # treated as if it never happened (fall through to normal verifier flow).
+    _PASSTHROUGH = object()
+
+    def _classify_exception(self, exception: Exception) -> tuple[bool | object, str]:
         """
-        Classify an exception as infrastructure failure (mask) or agent failure (zero).
+        Classify an exception as infrastructure failure (mask), agent failure
+        (zero), or passthrough (ignore the exception and use the verifier
+        reward as-is).
 
         Args:
             exception: The exception to classify.
 
         Returns:
-            Tuple of (exclude_from_baseline, exception_type_name)
-            - exclude_from_baseline=True: Infrastructure failure, exclude from RLOO-N baseline
-            - exclude_from_baseline=False: Agent failure, include in baseline with reward=0
+            Tuple of (treatment, exception_type_name)
+            - treatment=True: Infrastructure failure, exclude from RLOO-N baseline
+            - treatment=False: Agent failure, include in baseline with reward=0
+            - treatment=_PASSTHROUGH: Ignore exception, use verifier result normally
         """
         exception_type = type(exception).__name__
 
@@ -759,9 +766,15 @@ class TerminalBenchGenerator(GeneratorInterface):
         if not self._error_handling_config.get("enable_error_classification", False):
             return False, exception_type
 
+        passthrough_exceptions = self._error_handling_config.get("passthrough_exceptions", set())
         mask_exceptions = self._error_handling_config.get("mask_exceptions", set())
         zero_exceptions = self._error_handling_config.get("zero_exceptions", set())
         default_treatment = self._error_handling_config.get("default_error_treatment", "zero")
+
+        # Check if this exception type should be passed through (use verifier reward)
+        if exception_type in passthrough_exceptions:
+            logger.debug(f"Exception {exception_type} classified as PASSTHROUGH (use verifier reward)")
+            return self._PASSTHROUGH, exception_type
 
         # Check if this exception type should be masked (excluded from baseline)
         if exception_type in mask_exceptions:
@@ -774,6 +787,9 @@ class TerminalBenchGenerator(GeneratorInterface):
             return False, exception_type
 
         # Default treatment for unclassified exceptions
+        if default_treatment == "passthrough":
+            logger.debug(f"Exception {exception_type} not in config, using default: PASSTHROUGH")
+            return self._PASSTHROUGH, exception_type
         exclude = (default_treatment == "mask")
         logger.debug(
             f"Exception {exception_type} not in config, using default treatment: "
@@ -814,13 +830,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 exception_type=exception_type,
             )
 
-        # Check for exception_info BEFORE verifier_result - Harbor may return both
-        # when a trial had an error (e.g., AgentTimeoutError, ContextLengthExceededError)
-        # but the verifier still ran on the rolled-back state.
+        # Check for exception_info - Harbor may return both exception_info AND
+        # verifier_result when a trial had an error (e.g., AgentTimeoutError,
+        # ContextLengthExceededError) but the verifier still ran.
         exception_info = getattr(result, "exception_info", None)
         if exception_info is not None:
             exception_type = "UnknownError"
-            exclude_from_baseline = False
 
             if hasattr(exception_info, "exception_type"):
                 exception_type = exception_info.exception_type
@@ -831,23 +846,51 @@ class TerminalBenchGenerator(GeneratorInterface):
             class MockException(Exception):
                 pass
             MockException.__name__ = exception_type
-            exclude_from_baseline, _ = self._classify_exception(MockException())
+            treatment, _ = self._classify_exception(MockException())
 
-            logger.warning(
-                f"Trajectory {trajectory_id} failed with Harbor exception: "
-                f"{exception_info.exception_message if hasattr(exception_info, 'exception_message') else exception_info} "
-                f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
-            )
-            return TerminalBenchAgentOutput(
-                response_ids=[0],
-                reward=0,
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
-                trajectory_id=trajectory_id,
-                exclude_from_baseline=exclude_from_baseline,
-                exception_type=exception_type,
-            )
+            # Passthrough: ignore the exception and fall through to normal
+            # verifier processing. The agent hit a soft limit (timeout, context
+            # length) but the verifier still ran and produced a real reward.
+            if treatment is self._PASSTHROUGH:
+                if result.verifier_result:
+                    logger.info(
+                        f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH, "
+                        f"using verifier reward"
+                    )
+                    # Fall through to normal processing below
+                else:
+                    # Passthrough requested but no verifier result — treat as mask
+                    logger.warning(
+                        f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH "
+                        f"but no verifier result available, masking instead"
+                    )
+                    return TerminalBenchAgentOutput(
+                        response_ids=[0],
+                        reward=0,
+                        stop_reason="error",
+                        loss_mask=[0],
+                        prompt_ids=[0],
+                        trajectory_id=trajectory_id,
+                        exclude_from_baseline=True,
+                        exception_type=exception_type,
+                    )
+            else:
+                exclude_from_baseline = bool(treatment)
+                logger.warning(
+                    f"Trajectory {trajectory_id} failed with Harbor exception: "
+                    f"{exception_info.exception_message if hasattr(exception_info, 'exception_message') else exception_info} "
+                    f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
+                )
+                return TerminalBenchAgentOutput(
+                    response_ids=[0],
+                    reward=0,
+                    stop_reason="error",
+                    loss_mask=[0],
+                    prompt_ids=[0],
+                    trajectory_id=trajectory_id,
+                    exclude_from_baseline=exclude_from_baseline,
+                    exception_type=exception_type,
+                )
 
         # Check for missing verifier result (trial ran but didn't produce valid output)
         # Note: exception_info is already handled above, so if we reach here it's None
