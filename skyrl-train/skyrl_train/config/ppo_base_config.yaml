@@ -112,9 +112,9 @@ trainer:
     # RLOO-N: minimum included samples per group for leave-one-out baseline.
     # Groups below this threshold get advantage=0 for all samples.
     rloo_n_min_group_size: 4
-    # RLOO-N: skip groups where all included samples have reward=0.
-    # These groups produce zero advantage anyway but can still contribute
-    # noisy gradients that push the policy toward entropy collapse.
+    # RLOO-N: skip groups where all included samples have the same reward.
+    # Zero-variance groups produce zero RLOO advantage but can still
+    # contribute noisy gradients that push the policy toward entropy collapse.
     rloo_n_filter_zero_reward_groups: true
     # GAE parameters
     lambd: 1.0

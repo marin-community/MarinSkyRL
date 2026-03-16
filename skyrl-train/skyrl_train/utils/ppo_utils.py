@@ -1064,29 +1064,33 @@ def compute_rloo_n_outcome_advantage(
                 id2included_scores[group_id].append(scores[i])
                 id2included_indices[group_id].append(i)
 
-        # Detect all-zero-reward groups: these produce zero RLOO advantage
-        # mathematically, but training on them still contributes noise that
-        # can push the policy toward entropy collapse. Filter them out.
-        id2zero_reward = {}
-        n_zero_reward_groups = 0
-        n_zero_reward_samples = 0
+        # Detect zero-variance reward groups: when all included samples have
+        # the same reward, RLOO advantage is mathematically zero. Training on
+        # these groups contributes noise that can push the policy toward
+        # entropy collapse. Filter them out.
+        # This handles binary reward (all 0 or all 1), shaped reward where
+        # all samples tie, and any other constant-reward scenario.
+        id2no_variance = {}
+        n_no_variance_groups = 0
+        n_no_variance_samples = 0
         for group_id in set(index):
             included = id2included_scores[group_id]
-            if filter_zero_reward_groups and len(included) > 0:
-                all_zero = all(s.item() == 0.0 for s in included)
-                id2zero_reward[group_id] = all_zero
-                if all_zero:
-                    n_zero_reward_groups += 1
-                    n_zero_reward_samples += len(included) + len(id2excluded_indices[group_id])
+            if filter_zero_reward_groups and len(included) > 1:
+                stacked = torch.stack(included)
+                has_no_variance = (stacked.max() - stacked.min()).item() == 0.0
+                id2no_variance[group_id] = has_no_variance
+                if has_no_variance:
+                    n_no_variance_groups += 1
+                    n_no_variance_samples += len(included) + len(id2excluded_indices[group_id])
             else:
-                id2zero_reward[group_id] = False
+                id2no_variance[group_id] = False
 
         # Second pass: compute baselines using only included samples
         id2mean = {}
         for group_id in set(index):
             included = id2included_scores[group_id]
-            if id2zero_reward.get(group_id, False):
-                # All-zero group — skip entirely
+            if id2no_variance.get(group_id, False):
+                # Zero-variance group — skip entirely
                 id2mean[group_id] = torch.tensor(0.0, device=scores.device)
             elif len(included) < min_group_size:
                 # Below minimum group size — can't compute reliable baseline
@@ -1103,8 +1107,8 @@ def compute_rloo_n_outcome_advantage(
                 scores[i] = 0.0
                 continue
 
-            if id2zero_reward.get(group_id, False):
-                # All-zero-reward group — zero advantage, no gradient
+            if id2no_variance.get(group_id, False):
+                # Zero-variance reward group — zero advantage, no gradient
                 scores[i] = 0.0
                 continue
 
@@ -1136,13 +1140,13 @@ def compute_rloo_n_outcome_advantage(
             if 0 < len(id2included_scores[group_id]) < min_group_size
         )
         n_total_groups = len(set(index))
-        if n_excluded > 0 or n_groups_below_min > 0 or n_zero_reward_groups > 0:
+        if n_excluded > 0 or n_groups_below_min > 0 or n_no_variance_groups > 0:
             logger_.info(
                 f"RLOO-N: {n_excluded}/{bsz} samples excluded from baseline, "
                 f"{n_groups_all_excluded} groups had all samples excluded, "
                 f"{n_groups_below_min} groups below min_group_size={min_group_size}"
-                + (f", {n_zero_reward_groups}/{n_total_groups} groups filtered "
-                   f"(all-zero reward, {n_zero_reward_samples} samples)" if n_zero_reward_groups > 0 else "")
+                + (f", {n_no_variance_groups}/{n_total_groups} groups filtered "
+                   f"(zero reward variance, {n_no_variance_samples} samples)" if n_no_variance_groups > 0 else "")
             )
 
         scores = scores.unsqueeze(-1) * response_mask
