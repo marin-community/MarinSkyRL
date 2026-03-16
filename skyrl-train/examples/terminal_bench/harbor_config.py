@@ -197,7 +197,10 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
     fields={
         # Parser for test output (pytest, unittest, generic, or None for auto-detect)
         "reward_parser": FieldMapping("reward_parser", default=None),
-        # Shaper strategy (pass_ratio, effective_pass_ratio, weighted, threshold, binary_partial, original)
+        # Shaper strategy:
+        #   Verifier-based: pass_ratio, effective_pass_ratio, weighted, threshold, binary_partial, original
+        #   Trajectory-based: thinking_length, format_quality
+        #   Composite: composite (weighted combination of verifier + trajectory shapers)
         "reward_shaper": FieldMapping("reward_shaper", default="pass_ratio"),
         # Whether to enable reward shaping (if False, uses original binary reward)
         "enable_reward_shaping": FieldMapping("enable_reward_shaping", default=False),
@@ -209,6 +212,16 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # Binary partial shaper params
         "partial_threshold": FieldMapping("partial_threshold", default=0.9),
         "partial_credit": FieldMapping("partial_credit", default=0.5),
+        # Thinking length shaper params
+        "thinking_target_tokens": FieldMapping("thinking_target_tokens", default=750),
+        "thinking_sigma_tokens": FieldMapping("thinking_sigma_tokens", default=250),
+        "thinking_min_turns_ratio": FieldMapping("thinking_min_turns_ratio", default=0.5),
+        # Format quality shaper params
+        "format_required_fields": FieldMapping("format_required_fields", default=None),
+        "format_penalize_truncated": FieldMapping("format_penalize_truncated", default=True),
+        # Composite shaper params
+        "composite_components": FieldMapping("composite_components", default=None),
+        "composite_verifier_shaper": FieldMapping("composite_verifier_shaper", default="pass_ratio"),
     }
 )
 
@@ -549,16 +562,59 @@ class HarborConfigBuilder:
             if value is not None:
                 config[yaml_key] = value
 
-        # Build shaper kwargs from threshold/partial params
+        # Build shaper kwargs from shaper-specific params
         shaper_kwargs = {}
+
+        # Threshold shaper params
         if "reward_threshold" in config:
             shaper_kwargs["threshold"] = config.pop("reward_threshold")
         if "below_threshold_scale" in config:
             shaper_kwargs["below_threshold_scale"] = config.pop("below_threshold_scale")
+
+        # Binary partial shaper params
         if "partial_threshold" in config:
             shaper_kwargs["partial_threshold"] = config.pop("partial_threshold")
         if "partial_credit" in config:
             shaper_kwargs["partial_credit"] = config.pop("partial_credit")
+
+        # Thinking length shaper params
+        if "thinking_target_tokens" in config:
+            shaper_kwargs["target_tokens"] = config.pop("thinking_target_tokens")
+        if "thinking_sigma_tokens" in config:
+            shaper_kwargs["sigma_tokens"] = config.pop("thinking_sigma_tokens")
+        if "thinking_min_turns_ratio" in config:
+            shaper_kwargs["min_thinking_turns_ratio"] = config.pop("thinking_min_turns_ratio")
+
+        # Format quality shaper params
+        if "format_required_fields" in config:
+            val = config.pop("format_required_fields")
+            if val is not None:
+                shaper_kwargs["required_fields"] = val
+        if "format_penalize_truncated" in config:
+            shaper_kwargs["penalize_truncated_json"] = config.pop("format_penalize_truncated")
+
+        # Composite shaper params
+        if "composite_components" in config:
+            val = config.pop("composite_components")
+            if val is not None:
+                shaper_kwargs["components"] = val
+        if "composite_verifier_shaper" in config:
+            shaper_kwargs["verifier_shaper"] = config.pop("composite_verifier_shaper")
+
+        # Pass trajectory shaper kwargs through for composite mode
+        trajectory_shaper_kwargs = {}
+        if "target_tokens" in shaper_kwargs or "sigma_tokens" in shaper_kwargs:
+            trajectory_shaper_kwargs["thinking_length"] = {
+                k: shaper_kwargs[k] for k in ["target_tokens", "sigma_tokens", "min_thinking_turns_ratio"]
+                if k in shaper_kwargs
+            }
+        if "required_fields" in shaper_kwargs or "penalize_truncated_json" in shaper_kwargs:
+            trajectory_shaper_kwargs["format_quality"] = {
+                k: shaper_kwargs[k] for k in ["required_fields", "penalize_truncated_json"]
+                if k in shaper_kwargs
+            }
+        if trajectory_shaper_kwargs:
+            shaper_kwargs["trajectory_shaper_kwargs"] = trajectory_shaper_kwargs
 
         config["shaper_kwargs"] = shaper_kwargs
 

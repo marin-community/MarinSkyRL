@@ -902,6 +902,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 shaper_name=self._reward_shaping_config.get("reward_shaper", "pass_ratio"),
                 shaper_kwargs=self._reward_shaping_config.get("shaper_kwargs", {}),
                 fallback_to_original=self._reward_shaping_config.get("reward_shaping_fallback", True),
+                chat_history=chat_history,
             )
             if reward != original_reward:
                 logger.debug(

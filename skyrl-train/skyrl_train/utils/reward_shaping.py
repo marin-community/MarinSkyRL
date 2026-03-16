@@ -31,10 +31,11 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
 
@@ -741,6 +742,382 @@ class OriginalRewardShaper(RewardShaper):
 
 
 # =============================================================================
+# Trajectory-Based Reward Shapers
+# =============================================================================
+#
+# These shapers operate on the agent's conversation trajectory rather than
+# (or in addition to) test output. They reward behavioral qualities like
+# thinking before acting and producing well-formatted responses.
+
+
+# Shared regex for extracting <think>...</think> blocks from content
+_THINK_BLOCK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def _extract_chat_history(chat_history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Safely extract and validate chat history."""
+    if not chat_history or not isinstance(chat_history, list):
+        return []
+    return chat_history
+
+
+def _get_assistant_messages(chat_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract assistant messages from chat history."""
+    return [m for m in chat_history if m.get("role") == "assistant"]
+
+
+class TrajectoryRewardShaper(ABC):
+    """
+    Abstract base class for trajectory-based reward shapers.
+
+    These shapers compute reward signals from the agent's conversation
+    trajectory (chat_history) rather than test output. They can be used
+    standalone or combined with verifier-based shapers via CompositeShaper.
+    """
+
+    @classmethod
+    @abstractmethod
+    def name(cls) -> str:
+        """Return the shaper name for registry lookup."""
+        pass
+
+    @abstractmethod
+    def shape(
+        self,
+        chat_history: List[Dict[str, Any]],
+        original_reward: float,
+    ) -> float:
+        """
+        Compute shaped reward from agent trajectory.
+
+        Args:
+            chat_history: List of message dicts with 'role' and 'content' keys.
+            original_reward: The original reward from the verifier.
+
+        Returns:
+            Shaped reward value in [0, 1].
+        """
+        pass
+
+
+class ThinkingLengthShaper(TrajectoryRewardShaper):
+    """
+    Rewards thinking blocks of moderate length, penalizing too-short
+    (rushing) or too-long (wasting context) thinking.
+
+    Uses a Gaussian curve centered on `target_tokens` with width `sigma`.
+    The reward is averaged across all assistant turns that contain thinking.
+    Turns without thinking blocks get reward 0.
+
+    Config params:
+        target_tokens: Center of the Gaussian (default: 750)
+        sigma_tokens: Width of the Gaussian (default: 250)
+        min_thinking_turns_ratio: Minimum fraction of assistant turns that
+            should contain thinking (default: 0.5). If fewer turns think,
+            the reward is scaled down proportionally.
+    """
+
+    def __init__(
+        self,
+        target_tokens: int = 750,
+        sigma_tokens: int = 250,
+        min_thinking_turns_ratio: float = 0.5,
+        **kwargs,
+    ):
+        self.target_tokens = target_tokens
+        self.sigma_tokens = sigma_tokens
+        self.min_thinking_turns_ratio = min_thinking_turns_ratio
+
+    @classmethod
+    def name(cls) -> str:
+        return "thinking_length"
+
+    def _count_think_tokens_approx(self, content: str) -> int:
+        """Count approximate tokens in <think> blocks (chars / 4)."""
+        total_chars = 0
+        for match in _THINK_BLOCK_PATTERN.finditer(content):
+            total_chars += len(match.group(1))
+        return total_chars // 4  # rough char-to-token ratio
+
+    def shape(
+        self,
+        chat_history: List[Dict[str, Any]],
+        original_reward: float,
+    ) -> float:
+        assistant_msgs = _get_assistant_messages(_extract_chat_history(chat_history))
+        if not assistant_msgs:
+            return 0.0
+
+        turn_rewards = []
+        turns_with_thinking = 0
+
+        for msg in assistant_msgs:
+            content = msg.get("content", "") or ""
+            think_tokens = self._count_think_tokens_approx(content)
+
+            if think_tokens > 0:
+                turns_with_thinking += 1
+                # Gaussian reward centered on target
+                exponent = -0.5 * ((think_tokens - self.target_tokens) / self.sigma_tokens) ** 2
+                turn_rewards.append(math.exp(exponent))
+            else:
+                turn_rewards.append(0.0)
+
+        if not turn_rewards:
+            return 0.0
+
+        # Average turn reward
+        avg_reward = sum(turn_rewards) / len(turn_rewards)
+
+        # Penalize if too few turns have thinking
+        thinking_ratio = turns_with_thinking / len(assistant_msgs)
+        if thinking_ratio < self.min_thinking_turns_ratio:
+            avg_reward *= thinking_ratio / self.min_thinking_turns_ratio
+
+        return min(1.0, max(0.0, avg_reward))
+
+
+class FormatQualityShaper(TrajectoryRewardShaper):
+    """
+    Rewards well-formed JSON responses from the Terminus-2 agent.
+
+    Parses each assistant message to check if it contains valid JSON with
+    the expected structure (analysis, plan, commands). Rewards the fraction
+    of turns with clean, parseable responses.
+
+    This shaper does a lightweight structural check — it doesn't re-run
+    the full Terminus parser, but checks for the key structural elements
+    that indicate a well-formed response.
+
+    Config params:
+        required_fields: Fields that must be present for a "clean" parse
+            (default: ["analysis", "plan", "commands"])
+        penalize_truncated_json: Whether to penalize responses where JSON
+            appears truncated / auto-closed (default: True)
+    """
+
+    # Match a JSON object (greedy, may need cleanup)
+    _JSON_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
+
+    def __init__(
+        self,
+        required_fields: Optional[List[str]] = None,
+        penalize_truncated_json: bool = True,
+        **kwargs,
+    ):
+        self.required_fields = required_fields or ["analysis", "plan", "commands"]
+        self.penalize_truncated_json = penalize_truncated_json
+
+    @classmethod
+    def name(cls) -> str:
+        return "format_quality"
+
+    def _score_message(self, content: str) -> float:
+        """Score a single assistant message for JSON format quality.
+
+        Returns:
+            1.0: Clean, valid JSON with all required fields
+            0.5: Valid JSON but missing some fields or truncated
+            0.0: No valid JSON found
+        """
+        if not content:
+            return 0.0
+
+        # Strip thinking blocks before checking JSON
+        content_no_think = _THINK_BLOCK_PATTERN.sub("", content).strip()
+        if not content_no_think:
+            return 0.0
+
+        # Try to find JSON object
+        json_match = self._JSON_PATTERN.search(content_no_think)
+        if not json_match:
+            return 0.0
+
+        json_str = json_match.group(0)
+
+        # Try to parse
+        try:
+            import json
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Check if it looks like truncated JSON (common failure mode)
+            if self.penalize_truncated_json and json_str.count("{") != json_str.count("}"):
+                return 0.0
+            # Try adding closing braces
+            try:
+                fixed = json_str
+                while fixed.count("{") > fixed.count("}"):
+                    fixed += "}"
+                parsed = json.loads(fixed)
+            except (json.JSONDecodeError, Exception):
+                return 0.0
+            # Parsed with auto-fix — partial credit
+            return self._check_fields(parsed, partial=True)
+
+        return self._check_fields(parsed, partial=False)
+
+    def _check_fields(self, parsed: dict, partial: bool) -> float:
+        """Check if parsed JSON has required fields."""
+        if not isinstance(parsed, dict):
+            return 0.0
+
+        present = sum(1 for f in self.required_fields if f in parsed)
+        total = len(self.required_fields)
+
+        if total == 0:
+            return 1.0
+
+        field_ratio = present / total
+
+        if partial:
+            # Auto-fixed JSON — cap at 0.5
+            return min(0.5, field_ratio * 0.5)
+
+        return field_ratio
+
+    def shape(
+        self,
+        chat_history: List[Dict[str, Any]],
+        original_reward: float,
+    ) -> float:
+        assistant_msgs = _get_assistant_messages(_extract_chat_history(chat_history))
+        if not assistant_msgs:
+            return 0.0
+
+        scores = [self._score_message(msg.get("content", "")) for msg in assistant_msgs]
+        return sum(scores) / len(scores)
+
+
+class CompositeShaper:
+    """
+    Combines multiple reward signals (verifier-based + trajectory-based)
+    into a single weighted reward.
+
+    Each component is identified by name and assigned a weight. The final
+    reward is a weighted average of all components, normalized to [0, 1].
+
+    Config params:
+        components: Dict mapping component name to weight, e.g.:
+            {"verifier": 0.5, "thinking_length": 0.3, "format_quality": 0.2}
+        verifier_shaper: Name of the verifier-based shaper to use for the
+            "verifier" component (default: "pass_ratio")
+        trajectory_shapers: Dict mapping trajectory shaper names to their
+            kwargs, e.g.: {"thinking_length": {"target_tokens": 750}}
+    """
+
+    def __init__(
+        self,
+        components: Optional[Dict[str, float]] = None,
+        verifier_shaper: str = "pass_ratio",
+        trajectory_shaper_kwargs: Optional[Dict[str, Dict]] = None,
+        **kwargs,
+    ):
+        self.components = components or {
+            "verifier": 0.5,
+            "thinking_length": 0.3,
+            "format_quality": 0.2,
+        }
+        self.verifier_shaper_name = verifier_shaper
+        self.trajectory_shaper_kwargs = trajectory_shaper_kwargs or {}
+
+        # Instantiate trajectory shapers
+        self._trajectory_shapers: Dict[str, TrajectoryRewardShaper] = {}
+        for comp_name in self.components:
+            if comp_name == "verifier":
+                continue
+            if comp_name in _TRAJECTORY_SHAPER_REGISTRY:
+                shaper_kwargs = self.trajectory_shaper_kwargs.get(comp_name, {})
+                self._trajectory_shapers[comp_name] = _TRAJECTORY_SHAPER_REGISTRY[comp_name](**shaper_kwargs)
+            else:
+                logger.warning(
+                    f"CompositeShaper: unknown trajectory shaper '{comp_name}', "
+                    f"available: {list(_TRAJECTORY_SHAPER_REGISTRY.keys())}"
+                )
+
+        # Normalize weights
+        total_weight = sum(self.components.values())
+        if total_weight > 0:
+            self._normalized_weights = {k: v / total_weight for k, v in self.components.items()}
+        else:
+            self._normalized_weights = self.components
+
+    @classmethod
+    def name(cls) -> str:
+        return "composite"
+
+    def shape(
+        self,
+        parsed: Optional[ParsedTestResult],
+        original_reward: float,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> float:
+        """
+        Compute composite reward from verifier results and trajectory.
+
+        Args:
+            parsed: Parsed test results (may be None if parsing failed)
+            original_reward: Original binary reward from verifier
+            chat_history: Agent conversation trajectory
+
+        Returns:
+            Weighted composite reward in [0, 1]
+        """
+        component_rewards = {}
+
+        # Verifier component
+        if "verifier" in self._normalized_weights:
+            if parsed is not None:
+                verifier_shaper = get_reward_shaper(self.verifier_shaper_name)
+                component_rewards["verifier"] = verifier_shaper.shape(parsed, original_reward)
+            else:
+                component_rewards["verifier"] = original_reward
+
+        # Trajectory components
+        for comp_name, shaper in self._trajectory_shapers.items():
+            component_rewards[comp_name] = shaper.shape(
+                chat_history or [], original_reward
+            )
+
+        # Weighted sum
+        final_reward = 0.0
+        for comp_name, weight in self._normalized_weights.items():
+            reward = component_rewards.get(comp_name, 0.0)
+            final_reward += weight * reward
+
+        return min(1.0, max(0.0, final_reward))
+
+
+# =============================================================================
+# Trajectory Shaper Registry
+# =============================================================================
+
+_TRAJECTORY_SHAPER_REGISTRY: Dict[str, Type[TrajectoryRewardShaper]] = {}
+
+
+def register_trajectory_shaper(shaper_cls: Type[TrajectoryRewardShaper]) -> Type[TrajectoryRewardShaper]:
+    """Register a trajectory-based shaper class."""
+    _TRAJECTORY_SHAPER_REGISTRY[shaper_cls.name()] = shaper_cls
+    return shaper_cls
+
+
+register_trajectory_shaper(ThinkingLengthShaper)
+register_trajectory_shaper(FormatQualityShaper)
+
+
+def get_trajectory_shaper(name: str, **kwargs) -> TrajectoryRewardShaper:
+    """Get a trajectory-based reward shaper by name."""
+    if name not in _TRAJECTORY_SHAPER_REGISTRY:
+        available = ", ".join(_TRAJECTORY_SHAPER_REGISTRY.keys())
+        raise ValueError(f"Unknown trajectory shaper '{name}'. Available: {available}")
+    return _TRAJECTORY_SHAPER_REGISTRY[name](**kwargs)
+
+
+def list_trajectory_shapers() -> List[str]:
+    """List all registered trajectory shaper names."""
+    return list(_TRAJECTORY_SHAPER_REGISTRY.keys())
+
+
+# =============================================================================
 # Registry
 # =============================================================================
 
@@ -885,11 +1262,16 @@ def shape_reward_from_output(
     shaper_name: str = "pass_ratio",
     shaper_kwargs: Optional[Dict] = None,
     fallback_to_original: bool = True,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> float:
     """
     Parse test output and compute shaped reward in one call.
 
-    This is the main entry point for reward shaping.
+    This is the main entry point for reward shaping. Supports three modes:
+
+    1. Verifier-based shapers (pass_ratio, threshold, etc.) — use test output
+    2. Trajectory-based shapers (thinking_length, format_quality) — use chat history
+    3. Composite shaper — weighted combination of verifier + trajectory signals
 
     Args:
         stdout: Test output string (verifier stdout)
@@ -898,11 +1280,35 @@ def shape_reward_from_output(
         shaper_name: Shaper to use (default: "pass_ratio")
         shaper_kwargs: Additional kwargs for shaper
         fallback_to_original: If True, return original_reward on parse failure
+        chat_history: Agent conversation trajectory (for trajectory-based shapers)
 
     Returns:
         Shaped reward value in [0, 1]
     """
-    # Handle missing output
+    kwargs = shaper_kwargs or {}
+
+    # Handle composite shaper separately — it combines verifier + trajectory
+    if shaper_name == "composite":
+        parsed = parse_test_output(stdout, parser_name) if stdout else None
+        composite = CompositeShaper(**kwargs)
+        shaped = composite.shape(parsed, original_reward, chat_history)
+        logger.debug(
+            f"Composite shaped reward: {original_reward:.3f} -> {shaped:.3f} "
+            f"(components={list(composite.components.keys())})"
+        )
+        return shaped
+
+    # Handle trajectory-based shapers
+    if shaper_name in _TRAJECTORY_SHAPER_REGISTRY:
+        shaper = get_trajectory_shaper(shaper_name, **kwargs)
+        shaped = shaper.shape(chat_history or [], original_reward)
+        logger.debug(
+            f"Trajectory shaped reward: {original_reward:.3f} -> {shaped:.3f} "
+            f"(shaper={shaper_name})"
+        )
+        return shaped
+
+    # Verifier-based shapers — need test output
     if not stdout:
         if fallback_to_original:
             return original_reward
@@ -928,7 +1334,7 @@ def shape_reward_from_output(
     )
 
     # Shape reward
-    shaper = get_reward_shaper(shaper_name, **(shaper_kwargs or {}))
+    shaper = get_reward_shaper(shaper_name, **kwargs)
     shaped = shaper.shape(parsed, original_reward)
 
     logger.debug(
