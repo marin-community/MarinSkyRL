@@ -219,6 +219,9 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # Format quality shaper params
         "format_required_fields": FieldMapping("format_required_fields", default=None),
         "format_penalize_truncated": FieldMapping("format_penalize_truncated", default=True),
+        # Command quality shaper params
+        "command_quality_error_penalty_weight": FieldMapping("command_quality_error_penalty_weight", default=1.0),
+        "command_quality_min_turns": FieldMapping("command_quality_min_turns", default=2),
         # Composite shaper params
         "composite_components": FieldMapping("composite_components", default=None),
         "composite_verifier_shaper": FieldMapping("composite_verifier_shaper", default="pass_ratio"),
@@ -593,6 +596,12 @@ class HarborConfigBuilder:
         if "format_penalize_truncated" in config:
             shaper_kwargs["penalize_truncated_json"] = config.pop("format_penalize_truncated")
 
+        # Command quality shaper params
+        if "command_quality_error_penalty_weight" in config:
+            shaper_kwargs["error_penalty_weight"] = config.pop("command_quality_error_penalty_weight")
+        if "command_quality_min_turns" in config:
+            shaper_kwargs["min_turns"] = config.pop("command_quality_min_turns")
+
         # Composite shaper params
         if "composite_components" in config:
             val = config.pop("composite_components")
@@ -611,6 +620,11 @@ class HarborConfigBuilder:
         if "required_fields" in shaper_kwargs or "penalize_truncated_json" in shaper_kwargs:
             trajectory_shaper_kwargs["format_quality"] = {
                 k: shaper_kwargs[k] for k in ["required_fields", "penalize_truncated_json"]
+                if k in shaper_kwargs
+            }
+        if "error_penalty_weight" in shaper_kwargs or "min_turns" in shaper_kwargs:
+            trajectory_shaper_kwargs["command_quality"] = {
+                k: shaper_kwargs[k] for k in ["error_penalty_weight", "min_turns"]
                 if k in shaper_kwargs
             }
         if trajectory_shaper_kwargs:

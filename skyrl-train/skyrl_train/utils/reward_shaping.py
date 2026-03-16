@@ -988,6 +988,123 @@ class FormatQualityShaper(TrajectoryRewardShaper):
         return sum(scores) / len(scores)
 
 
+class CommandQualityShaper(TrajectoryRewardShaper):
+    """
+    Rewards episodes where the agent's commands produce clean execution
+    (no errors) and penalizes episodes with many invalid commands.
+
+    Scores each user message (environment response) for signs of command
+    errors: shell error messages, help/usage dumps (indicating wrong syntax),
+    Python tracebacks, permission errors, etc.
+
+    The score per turn is:
+        1.0: Clean output — no error indicators detected
+        0.0: Clear error — error pattern matched in environment output
+
+    Episode score is the ratio of clean turns to total command turns.
+
+    Config params:
+        error_penalty_weight: How much to weight error turns vs clean turns
+            (default: 1.0, meaning errors count equally against clean turns)
+        min_turns: Minimum number of command turns required to produce a
+            non-trivial score (default: 2). Episodes with fewer turns get 0.5.
+    """
+
+    # Shell error patterns (matched against user messages = environment output)
+    _ERROR_PATTERNS = [
+        # Command not found / bad syntax
+        re.compile(r"command not found", re.IGNORECASE),
+        re.compile(r"No such file or directory", re.IGNORECASE),
+        re.compile(r"Permission denied", re.IGNORECASE),
+        re.compile(r"not recognized as an? (internal|external) command", re.IGNORECASE),
+        re.compile(r"cannot execute binary file", re.IGNORECASE),
+        # Help/usage dumps (tool printed usage = wrong invocation)
+        re.compile(r"^[Uu]sage:\s+\S+", re.MULTILINE),
+        re.compile(r"^Try '.*--help'", re.MULTILINE),
+        re.compile(r"unrecognized option", re.IGNORECASE),
+        re.compile(r"invalid option", re.IGNORECASE),
+        re.compile(r"unknown option", re.IGNORECASE),
+        re.compile(r"illegal option", re.IGNORECASE),
+        # Python tracebacks
+        re.compile(r"^Traceback \(most recent call last\)", re.MULTILINE),
+        re.compile(r"^SyntaxError:", re.MULTILINE),
+        re.compile(r"^NameError:", re.MULTILINE),
+        re.compile(r"^TypeError:", re.MULTILINE),
+        re.compile(r"^ModuleNotFoundError:", re.MULTILINE),
+        re.compile(r"^ImportError:", re.MULTILINE),
+        re.compile(r"^FileNotFoundError:", re.MULTILINE),
+        # Git errors
+        re.compile(r"fatal: not a git repository", re.IGNORECASE),
+        re.compile(r"fatal: ", re.IGNORECASE),
+        re.compile(r"error: pathspec .* did not match", re.IGNORECASE),
+        # General error markers
+        re.compile(r"^ERROR:", re.MULTILINE),
+        re.compile(r"^Error:", re.MULTILINE),
+        re.compile(r"^\[ERROR\]", re.MULTILINE),
+        # Segfault / killed
+        re.compile(r"Segmentation fault", re.IGNORECASE),
+        re.compile(r"^Killed$", re.MULTILINE),
+    ]
+
+    def __init__(
+        self,
+        error_penalty_weight: float = 1.0,
+        min_turns: int = 2,
+        **kwargs,
+    ):
+        self.error_penalty_weight = error_penalty_weight
+        self.min_turns = min_turns
+
+    @classmethod
+    def name(cls) -> str:
+        return "command_quality"
+
+    def _score_turn(self, env_output: str) -> float:
+        """Score a single environment response (user message).
+
+        Returns:
+            1.0: No error patterns detected (clean execution)
+            0.0: Error pattern matched
+        """
+        if not env_output or not env_output.strip():
+            # Empty output — not an error, but not informative either
+            return 1.0
+
+        for pattern in self._ERROR_PATTERNS:
+            if pattern.search(env_output):
+                return 0.0
+
+        return 1.0
+
+    def shape(
+        self,
+        chat_history: List[Dict[str, Any]],
+        original_reward: float,
+    ) -> float:
+        messages = _extract_chat_history(chat_history)
+        if not messages:
+            return 0.5
+
+        # User messages after the first one are environment responses to commands.
+        # The first user message is the task prompt — skip it.
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        command_turns = user_msgs[1:] if len(user_msgs) > 1 else []
+
+        if len(command_turns) < self.min_turns:
+            return 0.5  # Not enough data to judge
+
+        scores = [self._score_turn(m.get("content", "")) for m in command_turns]
+        n_clean = sum(s for s in scores)
+        n_error = len(scores) - n_clean
+
+        # Weighted ratio: clean / (clean + weight * error)
+        denominator = n_clean + self.error_penalty_weight * n_error
+        if denominator == 0:
+            return 0.5
+
+        return n_clean / denominator
+
+
 class CompositeShaper:
     """
     Combines multiple reward signals (verifier-based + trajectory-based)
@@ -1102,6 +1219,7 @@ def register_trajectory_shaper(shaper_cls: Type[TrajectoryRewardShaper]) -> Type
 
 register_trajectory_shaper(ThinkingLengthShaper)
 register_trajectory_shaper(FormatQualityShaper)
+register_trajectory_shaper(CommandQualityShaper)
 
 
 def get_trajectory_shaper(name: str, **kwargs) -> TrajectoryRewardShaper:
