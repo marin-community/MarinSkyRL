@@ -273,6 +273,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
+        all_prompt_logprobs: Optional[List] = None
 
         for output in outputs:
             # TODO(tgriggs): Support n>1 sampling.
@@ -294,6 +295,23 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     del token_logprobs
             response_logprobs.append(_logprobs)
 
+            # Extract prompt_logprobs if available (used for teacher scoring)
+            if hasattr(output, "prompt_logprobs") and output.prompt_logprobs is not None:
+                if all_prompt_logprobs is None:
+                    all_prompt_logprobs = []
+                # Convert vLLM's List[Optional[Dict[int, Logprob]]] to
+                # List[Optional[Dict[int, float]]] (extract .logprob from Logprob objects)
+                prompt_lps = []
+                for pos_logprobs in output.prompt_logprobs:
+                    if pos_logprobs is None:
+                        prompt_lps.append(None)
+                    else:
+                        prompt_lps.append({
+                            token_id: lp.logprob if hasattr(lp, "logprob") else lp
+                            for token_id, lp in pos_logprobs.items()
+                        })
+                all_prompt_logprobs.append(prompt_lps)
+
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
@@ -302,6 +320,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
+            prompt_logprobs=all_prompt_logprobs,
         )
 
     def _get_engine(self):

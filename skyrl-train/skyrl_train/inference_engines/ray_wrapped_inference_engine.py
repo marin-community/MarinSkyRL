@@ -103,6 +103,7 @@ def create_ray_wrapped_inference_engines(
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
+    max_logprobs: int = 1,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -228,7 +229,7 @@ def create_ray_wrapped_inference_engines(
                     noset_visible_devices=noset_visible_devices,
                     max_num_batched_tokens=max_num_batched_tokens,
                     max_num_seqs=max_num_seqs,
-                    max_logprobs=1,  # only need chosen-token logprobs
+                    max_logprobs=max_logprobs,
                     enable_ray_prometheus_stats=enable_ray_prometheus_stats,
                     **dp_kwargs,
                     **engine_init_kwargs,

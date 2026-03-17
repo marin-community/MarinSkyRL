@@ -326,6 +326,24 @@ generator:
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}
 
+# Teacher model configuration for distillation.
+# When teacher.model_path is set, a separate vLLM inference engine is created for the teacher.
+# The teacher engine is used to score student-generated sequences (on-policy distillation)
+# or generate its own completions (off-policy distillation).
+teacher:
+  model_path: null                          # null = no teacher. Set to HF path or local path.
+  top_k_logprobs: 256                       # K for top-K logprobs from teacher
+  num_inference_engines: 1
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_pipeline_parallel_size: 1
+  gpu_memory_utilization: 0.9
+  enforce_eager: false
+  backend: vllm
+  # Arbitrary vLLM kwargs passed directly to the engine constructor.
+  # Supports quantization, kv_cache_dtype, enable_expert_parallel, max_model_len, etc.
+  # CLI usage: +teacher.engine_init_kwargs.quantization=awq
+  engine_init_kwargs: {}
+
 environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:

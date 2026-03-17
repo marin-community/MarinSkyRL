@@ -25,6 +25,11 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
+    # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
+    # inner list is prompt positions, dict maps token_id → logprob.
+    # Only populated when SamplingParams(prompt_logprobs=K) is used.
+    prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

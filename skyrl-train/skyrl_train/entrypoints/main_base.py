@@ -92,6 +92,49 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
+def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
+    """Create vLLM inference engines for the teacher model (distillation).
+
+    Unlike the student engines, teacher engines:
+    - Use the teacher model path (not policy model path)
+    - Set max_logprobs to top_k_logprobs (not 1)
+    - Don't enable sleep mode (teacher doesn't share GPU with training)
+    - Don't set up weight sync (teacher weights are static)
+    """
+    from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+
+    teacher_cfg = cfg.teacher
+    engine_kwargs = {
+        "num_inference_engines": teacher_cfg.num_inference_engines,
+        "tensor_parallel_size": teacher_cfg.inference_engine_tensor_parallel_size,
+        "pipeline_parallel_size": teacher_cfg.inference_engine_pipeline_parallel_size,
+        "model_dtype": "auto",
+        "pretrain": teacher_cfg.model_path,
+        "seed": cfg.trainer.seed,
+        "vllm_v1_disable_multiproc": False,
+        "enable_prefix_caching": False,
+        "enforce_eager": teacher_cfg.enforce_eager,
+        "expert_parallel_size": 1,
+        "data_parallel_size": 1,
+        "shared_pg": None,  # teacher gets its own placement group
+        "gpu_memory_utilization": teacher_cfg.gpu_memory_utilization,
+        "inference_engine_enable_sleep": False,  # teacher doesn't share GPU
+        "async_engine": False,
+        "max_num_batched_tokens": None,
+        "max_num_seqs": None,
+        "tokenizer": tokenizer,
+        "backend": teacher_cfg.backend,
+        "engine_init_kwargs": {
+            **OmegaConf.to_container(teacher_cfg.engine_init_kwargs, resolve=True),
+        },
+        "enable_ray_prometheus_stats": False,
+        "max_logprobs": teacher_cfg.top_k_logprobs,
+    }
+
+    engines = create_ray_wrapped_inference_engines(**engine_kwargs)
+    return engines
+
+
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
     # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
     return create_remote_inference_engines(

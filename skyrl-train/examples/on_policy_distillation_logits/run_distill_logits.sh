@@ -1,43 +1,48 @@
 set -x
 
-# Running on policy distillation for Math on the DAPO math dataset, with eval on AIME 2024.
-# Uses Qwen-3-1.7B-Base as the student model and an RL trained Qwen-3-4B as the teacher model
+# On-policy distillation with teacher logits.
+# Uses a vLLM-served teacher model (supports AWQ/GPTQ quantization).
+#
+# Setup:
 # bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/on_policy_distillation/run_on_policy_distill_math_qwen3_1.7b.sh
+# bash examples/on_policy_distillation_logits/run_distill_logits.sh
 
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 LOGGER=wandb
 
-# On Policy Distillation args
-# set this to the huggingface/local path of your teacher model
-TEACHER_MODEL="$HOME/ckpts/dapo_qwen3_4b_base/global_step_90/"
-STUDENT_MODEL="Qwen/Qwen3-1.7B-Base"
+# Teacher model (set this to your teacher model path)
+# For AWQ quantized models, also add: +teacher.engine_init_kwargs.quantization=awq
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-4B}"
+STUDENT_MODEL="${STUDENT_MODEL:-Qwen/Qwen3-1.7B-Base}"
+
+# On-policy distillation args
 ADVANTAGE_ESTIMATOR="no_op"
 POLICY_LOSS="importance_sampling"
-USE_KL_IN_REWARD=true # this adds the kl penalty to the advantage
-USE_KL_LOSS=false # turns off kl loss in the loss since we are using it directly in the reward
+USE_KL_IN_REWARD=true
+USE_KL_LOSS=false
 
-# Placement args
+# Placement args (adjust to your GPU setup)
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=8
-INFERENCE_ENGINE_TP_SIZE=1
+NUM_STUDENT_ENGINES=8
+STUDENT_ENGINE_TP_SIZE=1
+NUM_TEACHER_ENGINES=1
+TEACHER_ENGINE_TP_SIZE=1
 
-# sampling params
+# Sampling params
 TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
 
-# repro run parameters
+# Training params
 TRAIN_BATCH_SIZE=512
 MINI_BATCH_SIZE=512
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true
 LR=1e-5
 
-uv run --isolated --extra vllm -m examples.on_policy_distillation.main_on_policy_distill \
+python -m examples.on_policy_distillation_logits.main_on_policy_distill_logits \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator=$ADVANTAGE_ESTIMATOR \
@@ -48,8 +53,12 @@ uv run --isolated --extra vllm -m examples.on_policy_distillation.main_on_policy
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
+  generator.num_inference_engines=$NUM_STUDENT_ENGINES \
+  generator.inference_engine_tensor_parallel_size=$STUDENT_ENGINE_TP_SIZE \
+  teacher.model_path=$TEACHER_MODEL \
+  teacher.num_inference_engines=$NUM_TEACHER_ENGINES \
+  teacher.inference_engine_tensor_parallel_size=$TEACHER_ENGINE_TP_SIZE \
+  teacher.top_k_logprobs=256 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
@@ -61,7 +70,7 @@ uv run --isolated --extra vllm -m examples.on_policy_distillation.main_on_policy
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=2048 \
-  generator.enforce_eager=$ENFORCE_EAGER \
+  generator.enforce_eager=true \
   generator.sampling_params.max_generate_length=8192 \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
@@ -82,12 +91,11 @@ uv run --isolated --extra vllm -m examples.on_policy_distillation.main_on_policy
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="aime_on_policy_distillation" \
-  trainer.run_name="on_policy_distillation_aime_qwen3_1.7b_base_from_4b" \
+  trainer.project_name="on_policy_distillation_logits" \
+  trainer.run_name="distill_logits_${STUDENT_MODEL##*/}_from_${TEACHER_MODEL##*/}" \
   trainer.resume_mode=latest \
-  trainer.export_path="$HOME/exports/aime_on_policy_distill_1.7b_base_from_4b" \
-  trainer.hf_save_interval=10 \
+  trainer.export_path="$HOME/exports/distill_logits" \
   trainer.max_ckpts_to_keep=3 \
   trainer.ckpt_interval=10 \
-  trainer.ckpt_path="$HOME/ckpts/aime_on_policy_distill_1.7b_base_from_4b" \
+  trainer.ckpt_path="$HOME/ckpts/distill_logits" \
   $@
