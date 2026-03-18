@@ -100,10 +100,27 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
     - Set max_logprobs to top_k_logprobs (not 1)
     - Don't enable sleep mode (teacher doesn't share GPU with training)
     - Don't set up weight sync (teacher weights are static)
+
+    Also loads the teacher's own tokenizer for cross-model distillation.
+
+    Returns:
+        Tuple of (engines, teacher_tokenizer).
     """
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
     teacher_cfg = cfg.teacher
+
+    # Load teacher's own tokenizer for cross-model retokenization.
+    # The teacher vLLM engine uses its own tokenizer internally for vocab
+    # validation, so we must send it token IDs in its own vocabulary.
+    teacher_tokenizer = AutoTokenizer.from_pretrained(
+        teacher_cfg.model_path, trust_remote_code=True
+    )
+    logger.info(
+        f"Loaded teacher tokenizer: {teacher_cfg.model_path} "
+        f"(vocab_size={teacher_tokenizer.vocab_size})"
+    )
+
     engine_kwargs = {
         "num_inference_engines": teacher_cfg.num_inference_engines,
         "tensor_parallel_size": teacher_cfg.inference_engine_tensor_parallel_size,
@@ -122,7 +139,7 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
         "async_engine": False,
         "max_num_batched_tokens": None,
         "max_num_seqs": None,
-        "tokenizer": tokenizer,
+        "tokenizer": teacher_tokenizer,
         "backend": teacher_cfg.backend,
         "engine_init_kwargs": {
             **OmegaConf.to_container(teacher_cfg.engine_init_kwargs, resolve=True),
@@ -132,7 +149,7 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
     }
 
     engines = create_ray_wrapped_inference_engines(**engine_kwargs)
-    return engines
+    return engines, teacher_tokenizer
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):

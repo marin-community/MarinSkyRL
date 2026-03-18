@@ -31,14 +31,21 @@ class DistillationTrainer(RayPPOTrainer):
         super().__init__(*args, **kwargs)
         self.teacher_client: Optional[TeacherInferenceEngineClient] = None
 
-    def setup_teacher_engine(self, teacher_engines):
+    def setup_teacher_engine(self, teacher_engines, student_tokenizer=None, teacher_tokenizer=None):
         """Initialize the teacher inference engine client.
 
         Called by the experiment class after teacher engines are created.
+
+        Args:
+            teacher_engines: List of teacher inference engine instances.
+            student_tokenizer: Student model tokenizer (for cross-model retokenization).
+            teacher_tokenizer: Teacher model tokenizer (for cross-model retokenization).
         """
         self.teacher_client = TeacherInferenceEngineClient(
             inference_engines=teacher_engines,
             top_k_logprobs=self.cfg.teacher.top_k_logprobs,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
         )
         logger.info(
             f"Teacher engine initialized: model={self.cfg.teacher.model_path}, "
@@ -84,18 +91,28 @@ class DistillationTrainer(RayPPOTrainer):
             prompt_token_ids.append(seq[:prompt_len])
             response_token_ids.append(seq[prompt_len:])
 
-        # Score with teacher (synchronous wrapper around async call)
-        # This runs the teacher vLLM forward pass
-        loop = asyncio.new_event_loop()
-        try:
-            teacher_output: TeacherScoringOutput = loop.run_until_complete(
-                self.teacher_client.score_sequences(
-                    prompt_token_ids=prompt_token_ids,
-                    response_token_ids=response_token_ids,
+        # Score with teacher (synchronous wrapper around async call).
+        # Use a dedicated thread with its own event loop to avoid conflicts
+        # with Ray's/uvloop's event loop (loop.run_until_complete() inside
+        # an existing async context raises RuntimeError).
+        import concurrent.futures
+
+        def _run_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(
+                    self.teacher_client.score_sequences(
+                        prompt_token_ids=prompt_token_ids,
+                        response_token_ids=response_token_ids,
+                    )
                 )
-            )
-        finally:
-            loop.close()
+            finally:
+                loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_in_thread)
+            teacher_output: TeacherScoringOutput = future.result()
 
         # Store teacher scoring results in training input
         training_input["teacher_top_k_logprobs"] = teacher_output.top_k_logprobs
