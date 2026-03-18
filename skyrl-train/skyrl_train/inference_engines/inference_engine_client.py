@@ -136,8 +136,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
+        prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
+        add_prompt_logprobs = False
 
         for indices, result in zip(indices_list, results):
             for local_idx, original_idx in enumerate(indices):
@@ -147,12 +149,16 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
+                if result.get("prompt_logprobs") is not None:
+                    add_prompt_logprobs = True
+                    prompt_logprobs[original_idx] = result["prompt_logprobs"][local_idx]
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
+            prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
 
     async def _generate_single_with_retry(
@@ -247,11 +253,17 @@ class InferenceEngineClient(InferenceEngineInterface):
             final_text_response = text_response
         else:
             final_text_response = self.tokenizer.decode(accum_response_ids, skip_special_tokens=True)
+
+        # Propagate prompt_logprobs from the last partial response (only meaningful
+        # for teacher scoring where max_tokens=1 and num_turns=1).
+        final_prompt_logprobs = partial_response.get("prompt_logprobs") if partial_response else None
+
         return InferenceEngineOutput(
             responses=[final_text_response],
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
+            prompt_logprobs=final_prompt_logprobs,
         )
 
     async def _chat_completion_with_retry(
