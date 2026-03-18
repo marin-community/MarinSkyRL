@@ -219,6 +219,10 @@ class _AsyncDataloader:
 
         # Reset in case the dataloader loaded the state from the checkpoint, which we do not want.
         self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)
+        # Re-create the iterator so get_next_non_consumed_data() starts from
+        # the beginning of the dataset (not the exhausted iterator from __init__).
+        self._iter = enumerate(self._train_dataloader)
+        self._exhausted = False
 
     async def reset_at_epoch_end(self) -> None:
         async with self._lock:
