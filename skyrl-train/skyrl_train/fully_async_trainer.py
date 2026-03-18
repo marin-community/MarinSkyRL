@@ -413,11 +413,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self._staleness_manager.load_state_from_checkpoint(
                         self.global_step + 1
                     )  # +1 due to we haven't incremented yet
-                    expected_consumed_in_epoch = self.mini_batch_size * (self.global_step % self.num_steps_per_epoch)
-                    assert len(loaded_consumed_data_uids_set) == expected_consumed_in_epoch, (
-                        "Unexpected number of consumed data UIDs. Got: "
-                        f"{len(loaded_consumed_data_uids_set)} != {expected_consumed_in_epoch}"
-                    )
+                    # Only validate consumed UIDs if not at an epoch boundary.
+                    # At epoch boundaries, _consumed_data_uids is cleared by
+                    # reset_at_epoch_end() before checkpointing, so the loaded
+                    # set is correctly empty — no assertion needed.
+                    steps_into_epoch = self.global_step % self.num_steps_per_epoch
+                    if steps_into_epoch != 0:
+                        expected_consumed_in_epoch = self.mini_batch_size * steps_into_epoch
+                        assert len(loaded_consumed_data_uids_set) == expected_consumed_in_epoch, (
+                            "Unexpected number of consumed data UIDs. Got: "
+                            f"{len(loaded_consumed_data_uids_set)} != {expected_consumed_in_epoch}"
+                        )
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
