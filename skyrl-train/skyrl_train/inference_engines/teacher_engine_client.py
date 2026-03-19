@@ -235,14 +235,16 @@ class TeacherInferenceEngineClient:
                 prompt_lengths.append(len(prompt))
 
         # Truncate sequences that exceed max_model_len to avoid vLLM rejection.
-        # We truncate from the response end (keep prompt, trim response tail).
+        # Reserve 1 token for max_tokens=1 in the scoring request (vLLM requires
+        # prompt_length + max_tokens <= max_model_len).
         if self.max_model_len is not None:
+            limit = self.max_model_len - 1  # -1 for the max_tokens=1 output slot
             for i in range(len(full_sequences)):
-                if len(full_sequences[i]) > self.max_model_len:
+                if len(full_sequences[i]) > limit:
                     original_len = len(full_sequences[i])
-                    full_sequences[i] = full_sequences[i][: self.max_model_len]
+                    full_sequences[i] = full_sequences[i][:limit]
                     logger.warning(
-                        f"Truncated sequence {i} from {original_len} to {self.max_model_len} tokens "
+                        f"Truncated sequence {i} from {original_len} to {limit} tokens "
                         f"for teacher scoring (prompt_len={prompt_lengths[i]})"
                     )
 
