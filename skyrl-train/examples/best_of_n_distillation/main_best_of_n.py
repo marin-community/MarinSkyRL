@@ -136,10 +136,14 @@ class BestOfNDistillationExp(BasePPOExp):
         trainer = super()._setup_trainer()
 
         if self.cfg.teacher.model_path is not None:
-            teacher_engines = create_teacher_inference_engines_from_config(
+            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(
                 self.cfg, self.tokenizer
             )
-            trainer.setup_teacher_engine(teacher_engines)
+            trainer.setup_teacher_engine(
+                teacher_engines,
+                student_tokenizer=self.tokenizer,
+                teacher_tokenizer=teacher_tokenizer,
+            )
 
         return trainer
 
