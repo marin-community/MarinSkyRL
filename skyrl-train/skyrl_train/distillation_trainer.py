@@ -41,11 +41,14 @@ class DistillationTrainer(RayPPOTrainer):
             student_tokenizer: Student model tokenizer (for cross-model retokenization).
             teacher_tokenizer: Teacher model tokenizer (for cross-model retokenization).
         """
+        # Extract max_model_len from teacher engine_init_kwargs if available
+        teacher_max_model_len = getattr(self.cfg.teacher, "engine_init_kwargs", {}).get("max_model_len", None)
         self.teacher_client = TeacherInferenceEngineClient(
             inference_engines=teacher_engines,
             top_k_logprobs=self.cfg.teacher.top_k_logprobs,
             student_tokenizer=student_tokenizer,
             teacher_tokenizer=teacher_tokenizer,
+            max_model_len=teacher_max_model_len,
         )
         logger.info(
             f"Teacher engine initialized: model={self.cfg.teacher.model_path}, "

@@ -117,12 +117,14 @@ class TeacherInferenceEngineClient:
         top_k_logprobs: int = 256,
         student_tokenizer=None,
         teacher_tokenizer=None,
+        max_model_len: Optional[int] = None,
     ):
         self.inference_engines = inference_engines
         self.top_k_logprobs = top_k_logprobs
         self._engine_idx = 0  # simple round-robin
         self.student_tokenizer = student_tokenizer
         self.teacher_tokenizer = teacher_tokenizer
+        self.max_model_len = max_model_len
 
         # Determine if we need cross-tokenizer remapping
         self._needs_retokenization = (
@@ -231,6 +233,18 @@ class TeacherInferenceEngineClient:
             for prompt, response in zip(prompt_token_ids, response_token_ids):
                 full_sequences.append(list(prompt) + list(response))
                 prompt_lengths.append(len(prompt))
+
+        # Truncate sequences that exceed max_model_len to avoid vLLM rejection.
+        # We truncate from the response end (keep prompt, trim response tail).
+        if self.max_model_len is not None:
+            for i in range(len(full_sequences)):
+                if len(full_sequences[i]) > self.max_model_len:
+                    original_len = len(full_sequences[i])
+                    full_sequences[i] = full_sequences[i][: self.max_model_len]
+                    logger.warning(
+                        f"Truncated sequence {i} from {original_len} to {self.max_model_len} tokens "
+                        f"for teacher scoring (prompt_len={prompt_lengths[i]})"
+                    )
 
         # Use vLLM with prompt_logprobs to score (generate max_tokens=1 to get prompt logprobs)
         engine = self._next_engine()
