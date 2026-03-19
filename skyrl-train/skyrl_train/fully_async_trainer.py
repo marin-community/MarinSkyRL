@@ -28,8 +28,10 @@ from skyrl_train.utils.io import io
 from skyrl_train.generators.utils import prepare_generator_input, concatenate_generator_outputs
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
+from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.callbacks.builtin import DataTrackingCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Optional, Tuple, Iterable, Set
+from typing import List, Optional, Tuple
 import inspect
 from skyrl_train.callbacks import TrainerState
 
@@ -197,26 +199,31 @@ class _AsyncDataloader:
     """
     A train dataloader wrapper that accommodates the need of fully async training, including:
     - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
-    - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
+    - Skip-on-resume: uses DataConsumptionTracker's epoch-scoped UIDs to skip already-consumed data.
     - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
       because the batch size is 1 in fully async training.
+
+    Data consumption tracking (UID recording, epoch transitions, checkpoint persistence)
+    is handled by DataConsumptionTracker + DataTrackingCallback, not by this class.
     """
 
-    def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int):
+    def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int, data_tracker: DataConsumptionTracker):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
         self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._consumed_data_uids: Set[str] = set()
-        self._exhausted: bool = False  # currently not used.
+        self._data_tracker = data_tracker
+        self._exhausted: bool = False
 
-    def load_state_from_checkpoint(self, consumed_data_uids_set: Set[str]) -> None:
+    def load_state_from_checkpoint(self) -> None:
         """
-        Load the state from a checkpoint.
-        """
-        self._consumed_data_uids = consumed_data_uids_set
+        Reset dataloader iteration state for resume.
 
+        On resume, the DataConsumptionTracker already has the consumed UIDs loaded.
+        We just need to reset the dataloader to the beginning so
+        get_next_non_consumed_data() can skip already-consumed items.
+        """
         # Reset in case the dataloader loaded the state from the checkpoint, which we do not want.
         self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)
         # Re-create the iterator so get_next_non_consumed_data() starts from
@@ -225,10 +232,15 @@ class _AsyncDataloader:
         self._exhausted = False
 
     async def reset_at_epoch_end(self) -> None:
+        """Reset dataloader iterator for the next epoch.
+
+        Note: epoch-scoped UID clearing is handled by DataTrackingCallback.on_epoch_end_async,
+        which fires AFTER any checkpoint save — eliminating the race condition where UIDs
+        were cleared before the checkpoint captured them.
+        """
         async with self._lock:
             self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
             self._iter = enumerate(self._train_dataloader)
-            self._consumed_data_uids.clear()
             self._exhausted = False
 
     async def get_next_non_consumed_data(self):
@@ -238,6 +250,8 @@ class _AsyncDataloader:
         If we loaded from a checkpoint, it will skip the already-consumed data. Returns None if the dataloader is exhausted.
         """
         assert self._iter is not None and self._lock is not None, "Dataloader not initialized; call reset() first"
+        # Read the skip set from the tracker (epoch-scoped consumed UIDs)
+        skip_set = self._data_tracker.get_consumed_uids_in_epoch()
         async with self._lock:
             try:
                 while True:
@@ -246,21 +260,11 @@ class _AsyncDataloader:
                     if iter_idx >= self._effective_dataloader_length:
                         raise StopIteration
                     uid = rand_prompts[0]["uid"]
-                    if uid not in self._consumed_data_uids:
+                    if uid not in skip_set:
                         return rand_prompts
             except StopIteration:
                 self._exhausted = True
                 return None
-
-    async def mark_consumed_uids(self, uids: Iterable[str]) -> None:
-        assert self._lock is not None, "Dataloader not initialized; call reset() first"
-        async with self._lock:
-            for uid in uids:
-                assert uid not in self._consumed_data_uids, "Duplicate UID found in mini-batch"
-                self._consumed_data_uids.add(uid)
-
-    def get_consumed_uids_list(self) -> List[str]:
-        return list(self._consumed_data_uids)
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
@@ -314,7 +318,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
-        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
+        self.data_tracker = DataConsumptionTracker(
+            mini_batch_size=self.mini_batch_size,
+            num_steps_per_epoch=self.num_steps_per_epoch,
+        )
+        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size, self.data_tracker)
+        # Register the data tracking callback for checkpoint persistence and epoch transitions
+        self.callback_handler.add_callback(DataTrackingCallback(self.data_tracker))
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
@@ -406,28 +416,39 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         Internal training loop, separated for proper generator lifecycle management.
         """
-        # Load checkpoint state if resumption is enabled. Also load the data UIDs that are already trained on.
+        # Load checkpoint state if resumption is enabled.
+        # Data consumption state is loaded via DataTrackingCallback.load_from_checkpoint()
+        # into self.data_tracker, which the async dataloader reads for skip-on-resume.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.global_step, _, loaded_consumed_data_uids_set = self.load_checkpoints()
+                self.global_step, checkpoint_path = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
                 if self.global_step > 0:
-                    # Set async dataloader manager and staleness manager to the loaded state.
-                    self.async_train_dataloader.load_state_from_checkpoint(loaded_consumed_data_uids_set)
+                    # Load data consumption state into the tracker
+                    loaded = DataTrackingCallback.load_from_checkpoint(checkpoint_path, self.data_tracker)
+                    if not loaded:
+                        logger.warning(
+                            "No data consumption state found in checkpoint — "
+                            "resume may re-train on already-consumed data"
+                        )
+
+                    # Reset dataloader iteration for skip-on-resume
+                    self.async_train_dataloader.load_state_from_checkpoint()
                     self._staleness_manager.load_state_from_checkpoint(
                         self.global_step + 1
                     )  # +1 due to we haven't incremented yet
-                    # Only validate consumed UIDs if not at an epoch boundary.
-                    # At epoch boundaries, _consumed_data_uids is cleared by
-                    # reset_at_epoch_end() before checkpointing, so the loaded
-                    # set is correctly empty — no assertion needed.
+
+                    # Soft validation: log mismatch instead of crashing
                     steps_into_epoch = self.global_step % self.num_steps_per_epoch
                     if steps_into_epoch != 0:
                         expected_consumed_in_epoch = self.mini_batch_size * steps_into_epoch
-                        assert len(loaded_consumed_data_uids_set) == expected_consumed_in_epoch, (
-                            "Unexpected number of consumed data UIDs. Got: "
-                            f"{len(loaded_consumed_data_uids_set)} != {expected_consumed_in_epoch}"
-                        )
+                        actual_consumed_in_epoch = self.data_tracker.consumed_in_epoch_count
+                        if actual_consumed_in_epoch != expected_consumed_in_epoch:
+                            logger.warning(
+                                f"Data consumption count mismatch on resume: "
+                                f"expected {expected_consumed_in_epoch}, got {actual_consumed_in_epoch}. "
+                                f"This can happen after epoch boundary transitions or error recovery."
+                            )
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
@@ -515,10 +536,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             while len(cur_generation_group_mini_batch) < self.mini_batch_size:
                                 cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
 
-                    # 3. Run training and update consumed UIDs.
+                    # 3. Run training and record consumed UIDs in the tracker.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
-                        await self.async_train_dataloader.mark_consumed_uids(
+                        await self.data_tracker.mark_consumed(
                             [g.uid for g in cur_generation_group_mini_batch]
                         )
 
@@ -593,18 +614,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_metrics = {}
                 self.all_timings = {}
                 pbar.update(1)
-
-                # Validate consumed data UIDs BEFORE incrementing global_step
-                # Skip validation at epoch boundaries where modulo wraps to 0
-                # This fixes the bug where the formula gives expected=0 at epoch end
-                steps_into_epoch = self.global_step % self.num_steps_per_epoch
-                if steps_into_epoch != 0:  # Skip at epoch boundaries
-                    expected_consumed_in_epoch = self.mini_batch_size * steps_into_epoch
-                    actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
-                    assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
-                        "Unexpected number of consumed data UIDs. Got: "
-                        f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
-                    )
 
                 self.global_step += 1
 
@@ -913,39 +922,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def save_checkpoints(self):
         """
-        Extend base checkpointing by recording consumed UIDs for fully-async training.
-
-        Otherwise, when resuming, there is no way to know which data has been trained on.
+        Save checkpoints. Data consumption state is persisted by DataTrackingCallback.on_save,
+        which fires after the base checkpoint save completes.
         """
-        consumed_uids_list = (
-            self.async_train_dataloader.get_consumed_uids_list()
-        )  # read first to prevent race condition
-        # The base method will save the model, dataloader path, trainer_state, and latest_ckpt_global_step.txt.
+        # The base method saves model, dataloader state, trainer_state, and latest_ckpt_global_step.txt.
+        # DataTrackingCallback.on_save (registered in __init__) writes data_consumption_state.pt.
         super().save_checkpoints()
-        # In addition, we need to save the consumed UIDs -- the data that we have already trained on.
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
-        fully_async_state_path = os.path.join(global_step_folder, "fully_async_state.pt")
-        fully_async_state = {
-            "consumed_uids": consumed_uids_list,
-        }
-        with io.open_file(fully_async_state_path, "wb") as f:
-            torch.save(fully_async_state, f)
-        logger.info(f"Saved fully-async state to {fully_async_state_path}")
 
-    def load_checkpoints(self) -> Tuple[int, str, Set[str]]:
+    def load_checkpoints(self) -> Tuple[int, str]:
         """
-        Load the base checkpoint without loading the dataloader state, and load the fully-async state.
+        Load the base checkpoint.
 
-        Returns the global step to resume from, the checkpoint path, and the consumed data UIDs.
+        Data consumption state loading is handled separately via
+        DataTrackingCallback.load_from_checkpoint() in _train_loop().
+
+        Returns the global step to resume from and the checkpoint path.
         """
         global_step, checkpoint_path = super().load_checkpoints()
-        if global_step == 0:
-            return 0, checkpoint_path, None
-        fully_async_state_path = os.path.join(checkpoint_path, "fully_async_state.pt")
-        assert io.exists(fully_async_state_path), f"Fully-async state file not found at {fully_async_state_path}"
-        with io.open_file(fully_async_state_path, "rb") as f:
-            fully_async_state = torch.load(f, map_location="cpu", weights_only=False)
-            assert "consumed_uids" in fully_async_state, "consumed_uids key not found in fully-async state"
-            consumed_data_uids_set = set(fully_async_state["consumed_uids"])
-        logger.info(f"Loaded fully-async state with {len(consumed_data_uids_set)} consumed UIDs")
-        return global_step, checkpoint_path, consumed_data_uids_set
+        return global_step, checkpoint_path

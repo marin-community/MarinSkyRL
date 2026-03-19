@@ -1143,3 +1143,129 @@ def create_callbacks_from_config(cfg: "DictConfig") -> List[TrainerCallback]:
 def get_available_callback_types() -> List[str]:
     """Get list of available callback type names for YAML configs."""
     return list(CALLBACK_REGISTRY.keys())
+
+
+@register_callback("data_tracking")
+class DataTrackingCallback(TrainerCallback):
+    """
+    Persists data consumption state as a checkpoint artifact via the callback system.
+
+    This replaces the inline fully_async_state.pt writing/loading that was previously
+    embedded in the fully async trainer. By using the callback system:
+    - Epoch-end UID clearing happens AFTER checkpoint saves (no more race condition)
+    - Data state persistence is decoupled from trainer implementation
+    - Backward compatible with legacy fully_async_state.pt checkpoints
+
+    Hooks used:
+    - on_save: writes data_consumption_state.pt to the checkpoint directory
+    - on_epoch_end_async: clears epoch-scoped UIDs via tracker.on_epoch_end()
+    """
+
+    error_behavior = "raise"  # data tracking errors should stop training
+    ARTIFACT_NAME = "data_consumption_state.pt"
+
+    def __init__(self, tracker: "DataConsumptionTracker"):
+        from skyrl_train.utils.data_tracker import DataConsumptionTracker
+
+        assert isinstance(tracker, DataConsumptionTracker)
+        self._tracker = tracker
+
+    def on_save(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        import dataclasses
+        import os
+
+        import torch
+
+        from skyrl_train.utils.io import io
+
+        trainer = kwargs.get("trainer")
+        if trainer is None:
+            logger.warning("DataTrackingCallback.on_save: no trainer in kwargs, skipping")
+            return control
+
+        ckpt_path = os.path.join(
+            trainer.cfg.trainer.ckpt_path,
+            f"global_step_{state.global_step}",
+        )
+        data_state = self._tracker.get_state()
+        data_state.global_step = state.global_step
+        artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
+        with io.open_file(artifact_path, "wb") as f:
+            torch.save(dataclasses.asdict(data_state), f)
+        logger.info(
+            f"Saved data consumption state to {artifact_path} "
+            f"(epoch={data_state.epoch}, consumed_in_epoch={len(data_state.consumed_uids_in_epoch)}, "
+            f"total={data_state.total_samples_consumed})"
+        )
+        return control
+
+    async def on_epoch_end_async(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        await self._tracker.on_epoch_end()
+        return control
+
+    @staticmethod
+    def load_from_checkpoint(
+        ckpt_path: str,
+        tracker: "DataConsumptionTracker",
+    ) -> bool:
+        """Load data consumption state from a checkpoint directory.
+
+        Tries the new data_consumption_state.pt first, then falls back to
+        legacy fully_async_state.pt for backward compatibility.
+
+        Returns True if state was loaded, False if no artifact found.
+        """
+        import os
+
+        import torch
+
+        from skyrl_train.utils.data_tracker import DataConsumptionState
+        from skyrl_train.utils.io import io
+
+        # Try new format first
+        artifact_path = os.path.join(ckpt_path, DataTrackingCallback.ARTIFACT_NAME)
+        if io.exists(artifact_path):
+            with io.open_file(artifact_path, "rb") as f:
+                raw = torch.load(f, map_location="cpu", weights_only=False)
+            state = DataConsumptionState(**raw)
+            tracker.load_state(state)
+            return True
+
+        # Fall back to legacy fully_async_state.pt
+        legacy_path = os.path.join(ckpt_path, "fully_async_state.pt")
+        if io.exists(legacy_path):
+            with io.open_file(legacy_path, "rb") as f:
+                legacy = torch.load(f, map_location="cpu", weights_only=False)
+            if "consumed_uids" in legacy:
+                consumed = legacy["consumed_uids"]
+                # Reconstruct a DataConsumptionState from legacy format.
+                # We don't know the exact epoch or total, so estimate from global_step.
+                # Extract global_step from the checkpoint directory name.
+                dir_name = os.path.basename(ckpt_path)
+                global_step = int(dir_name.split("_")[-1]) if "global_step_" in dir_name else 0
+                state = DataConsumptionState(
+                    global_step=global_step,
+                    epoch=global_step // tracker._num_steps_per_epoch,
+                    consumed_uids_in_epoch=list(consumed),
+                    total_samples_consumed=len(consumed)
+                    + (global_step // tracker._num_steps_per_epoch)
+                    * tracker._num_steps_per_epoch
+                    * tracker._mini_batch_size,
+                )
+                tracker.load_state(state)
+                logger.info(
+                    f"Loaded legacy fully_async_state.pt with {len(consumed)} consumed UIDs"
+                )
+                return True
+
+        return False

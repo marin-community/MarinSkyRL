@@ -20,6 +20,7 @@ from .builtin import (
     ProgressCallback,
     LoggingCallback,
     DefaultCallbackHandler,
+    DataTrackingCallback,
     # YAML configuration support
     CALLBACK_REGISTRY,
     register_callback,
@@ -43,6 +44,7 @@ __all__ = [
     "ProgressCallback",
     "LoggingCallback",
     "DefaultCallbackHandler",
+    "DataTrackingCallback",
     # YAML configuration support
     "CALLBACK_REGISTRY",
     "register_callback",
