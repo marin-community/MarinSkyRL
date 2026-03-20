@@ -43,12 +43,14 @@ class DistillationTrainer(RayPPOTrainer):
         """
         # Extract max_model_len from teacher engine_init_kwargs if available
         teacher_max_model_len = getattr(self.cfg.teacher, "engine_init_kwargs", {}).get("max_model_len", None)
+        scoring_chunk_size = getattr(self.cfg.teacher, "scoring_chunk_size", 64)
         self.teacher_client = TeacherInferenceEngineClient(
             inference_engines=teacher_engines,
             top_k_logprobs=self.cfg.teacher.top_k_logprobs,
             student_tokenizer=student_tokenizer,
             teacher_tokenizer=teacher_tokenizer,
             max_model_len=teacher_max_model_len,
+            scoring_chunk_size=scoring_chunk_size,
         )
         logger.info(
             f"Teacher engine initialized: model={self.cfg.teacher.model_path}, "

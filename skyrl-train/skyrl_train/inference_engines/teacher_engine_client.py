@@ -118,6 +118,7 @@ class TeacherInferenceEngineClient:
         student_tokenizer=None,
         teacher_tokenizer=None,
         max_model_len: Optional[int] = None,
+        scoring_chunk_size: int = 64,
     ):
         self.inference_engines = inference_engines
         self.top_k_logprobs = top_k_logprobs
@@ -125,6 +126,8 @@ class TeacherInferenceEngineClient:
         self.student_tokenizer = student_tokenizer
         self.teacher_tokenizer = teacher_tokenizer
         self.max_model_len = max_model_len
+        # Process prompt_logprobs in chunks to avoid teacher vLLM OOM
+        self.scoring_chunk_size = scoring_chunk_size
 
         # Determine if we need cross-tokenizer remapping
         self._needs_retokenization = (
@@ -248,23 +251,53 @@ class TeacherInferenceEngineClient:
                         f"for teacher scoring (prompt_len={prompt_lengths[i]})"
                     )
 
-        # Use vLLM with prompt_logprobs to score (generate max_tokens=1 to get prompt logprobs)
-        engine = self._next_engine()
-        input_batch: InferenceEngineInput = {
-            "prompts": None,
-            "prompt_token_ids": full_sequences,
-            "sampling_params": {
-                "max_tokens": 1,  # We only want prompt_logprobs, not generation
-                "prompt_logprobs": k,
-                "temperature": 1.0,
-            },
-            "session_ids": None,
-        }
+        # Score in chunks to avoid teacher vLLM OOM from accumulating
+        # prompt_logprobs across all sequences simultaneously.
+        chunk_size = self.scoring_chunk_size
+        if chunk_size >= B:
+            engine = self._next_engine()
+            input_batch: InferenceEngineInput = {
+                "prompts": None,
+                "prompt_token_ids": full_sequences,
+                "sampling_params": {
+                    "max_tokens": 1,
+                    "prompt_logprobs": k,
+                    "temperature": 1.0,
+                },
+                "session_ids": None,
+            }
+            output = await engine.generate(input_batch)
+            return self._extract_response_logprobs(
+                output, prompt_lengths, response_token_ids, k, response_alignments
+            )
 
-        output = await engine.generate(input_batch)
+        # Chunked scoring: process chunk_size sequences at a time
+        logger.info(f"Chunked teacher scoring: {B} sequences in chunks of {chunk_size}")
+        merged_prompt_logprobs = []
+        for start in range(0, B, chunk_size):
+            end = min(start + chunk_size, B)
+            engine = self._next_engine()
+            input_batch: InferenceEngineInput = {
+                "prompts": None,
+                "prompt_token_ids": full_sequences[start:end],
+                "sampling_params": {
+                    "max_tokens": 1,
+                    "prompt_logprobs": k,
+                    "temperature": 1.0,
+                },
+                "session_ids": None,
+            }
+            chunk_output = await engine.generate(input_batch)
+            chunk_plp = chunk_output.get("prompt_logprobs")
+            if chunk_plp is not None:
+                merged_prompt_logprobs.extend(chunk_plp)
+            else:
+                merged_prompt_logprobs.extend([None] * (end - start))
+            logger.info(f"  Teacher scoring chunk {start}-{end}/{B} complete")
 
+        merged_output = {"prompt_logprobs": merged_prompt_logprobs}
         return self._extract_response_logprobs(
-            output, prompt_lengths, response_token_ids, k, response_alignments
+            merged_output, prompt_lengths, response_token_ids, k, response_alignments
         )
 
     def _extract_response_logprobs(
