@@ -12,7 +12,7 @@ from skyrl_train.generators.utils import (
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
-from skyrl_train.utils.reward_shaping import shape_reward_from_output
+from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -44,6 +44,8 @@ class TerminalBenchAgentOutput:
     exclude_from_baseline: bool = False
     # Store the exception type for debugging/logging
     exception_type: Optional[str] = None
+    # Per-component reward breakdown (composite shaper only)
+    reward_components: Optional[Dict[str, float]] = None
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -728,6 +730,23 @@ class TerminalBenchGenerator(GeneratorInterface):
                     f"and if context length errors are preventing logprob collection."
                 )
 
+        # Aggregate per-component reward metrics (composite shaper only)
+        component_outputs = [o for o in all_outputs if o.reward_components is not None]
+        if component_outputs:
+            component_names = set()
+            for o in component_outputs:
+                component_names.update(o.reward_components.keys())
+            component_metrics = {}
+            for name in sorted(component_names):
+                values = [o.reward_components.get(name, 0.0) for o in component_outputs]
+                avg = sum(values) / len(values) if values else 0.0
+                component_metrics[f"reward/component_{name}"] = avg
+            rollout_metrics.update(component_metrics)
+            logger.info(
+                f"Reward component averages (n={len(component_outputs)}): "
+                + ", ".join(f"{k.split('_', 2)[-1]}={v:.3f}" for k, v in sorted(component_metrics.items()))
+            )
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
             "response_ids": [output.response_ids for output in all_outputs],
@@ -936,20 +955,35 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
 
         # Apply reward shaping if enabled
+        reward_components: Optional[Dict[str, float]] = None
         if self._reward_shaping_config.get("enable_reward_shaping", True):
             verifier_stdout = getattr(result.verifier_result, "stdout", None)
-            reward = shape_reward_from_output(
-                stdout=verifier_stdout,
-                original_reward=original_reward,
-                parser_name=self._reward_shaping_config.get("reward_parser"),
-                shaper_name=self._reward_shaping_config.get("reward_shaper", "pass_ratio"),
-                shaper_kwargs=self._reward_shaping_config.get("shaper_kwargs", {}),
-                fallback_to_original=self._reward_shaping_config.get("reward_shaping_fallback", True),
-                chat_history=chat_history,
-            )
+            shaper_name = self._reward_shaping_config.get("reward_shaper", "pass_ratio")
+            shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
+
+            # For composite shaper, capture per-component breakdown
+            if shaper_name == "composite":
+                reward, reward_components = shape_reward_with_components(
+                    stdout=verifier_stdout,
+                    original_reward=original_reward,
+                    parser_name=self._reward_shaping_config.get("reward_parser"),
+                    shaper_kwargs=shaper_kwargs,
+                    chat_history=chat_history,
+                )
+            else:
+                reward = shape_reward_from_output(
+                    stdout=verifier_stdout,
+                    original_reward=original_reward,
+                    parser_name=self._reward_shaping_config.get("reward_parser"),
+                    shaper_name=shaper_name,
+                    shaper_kwargs=shaper_kwargs,
+                    fallback_to_original=self._reward_shaping_config.get("reward_shaping_fallback", True),
+                    chat_history=chat_history,
+                )
             if reward != original_reward:
                 logger.debug(
                     f"Trajectory {trajectory_id}: reward shaped {original_reward:.3f} -> {reward:.3f}"
+                    + (f" (components={reward_components})" if reward_components else "")
                 )
         else:
             reward = original_reward
@@ -1030,4 +1064,5 @@ class TerminalBenchGenerator(GeneratorInterface):
             trajectory_id=trajectory_id,
             rollout_logprobs=rollout_logprobs,
             summarization_count=summarization_count,
+            reward_components=reward_components,
         )

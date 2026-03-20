@@ -35,7 +35,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 from loguru import logger
 
@@ -1130,9 +1130,10 @@ class CompositeShaper:
         **kwargs,
     ):
         self.components = components or {
-            "verifier": 0.5,
-            "thinking_length": 0.3,
-            "format_quality": 0.2,
+            "verifier": 0.55,
+            "thinking_length": 0.15,
+            "format_quality": 0.15,
+            "command_quality": 0.15,
         }
         self.verifier_shaper_name = verifier_shaper
         self.trajectory_shaper_kwargs = trajectory_shaper_kwargs or {}
@@ -1179,6 +1180,23 @@ class CompositeShaper:
         Returns:
             Weighted composite reward in [0, 1]
         """
+        final_reward, _ = self.shape_with_components(parsed, original_reward, chat_history)
+        return final_reward
+
+    def shape_with_components(
+        self,
+        parsed: Optional[ParsedTestResult],
+        original_reward: float,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Compute composite reward and return per-component breakdown.
+
+        Returns:
+            Tuple of (final_reward, component_rewards_dict)
+            where component_rewards_dict maps component name to its raw
+            (unweighted) reward value in [0, 1].
+        """
         component_rewards = {}
 
         # Verifier component
@@ -1201,7 +1219,7 @@ class CompositeShaper:
             reward = component_rewards.get(comp_name, 0.0)
             final_reward += weight * reward
 
-        return min(1.0, max(0.0, final_reward))
+        return min(1.0, max(0.0, final_reward)), component_rewards
 
 
 # =============================================================================
@@ -1409,10 +1427,10 @@ def shape_reward_from_output(
     if shaper_name == "composite":
         parsed = parse_test_output(stdout, parser_name) if stdout else None
         composite = CompositeShaper(**kwargs)
-        shaped = composite.shape(parsed, original_reward, chat_history)
+        shaped, component_rewards = composite.shape_with_components(parsed, original_reward, chat_history)
         logger.debug(
             f"Composite shaped reward: {original_reward:.3f} -> {shaped:.3f} "
-            f"(components={list(composite.components.keys())})"
+            f"(components={component_rewards})"
         )
         return shaped
 
@@ -1461,3 +1479,23 @@ def shape_reward_from_output(
     )
 
     return shaped
+
+
+def shape_reward_with_components(
+    stdout: Optional[str],
+    original_reward: float,
+    parser_name: Optional[str] = None,
+    shaper_kwargs: Optional[Dict] = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[float, Dict[str, float]]:
+    """
+    Composite-only variant that returns per-component reward breakdown.
+
+    Returns:
+        Tuple of (final_reward, component_rewards) where component_rewards
+        maps each component name to its raw (unweighted) reward in [0, 1].
+    """
+    kwargs = shaper_kwargs or {}
+    parsed = parse_test_output(stdout, parser_name) if stdout else None
+    composite = CompositeShaper(**kwargs)
+    return composite.shape_with_components(parsed, original_reward, chat_history)
