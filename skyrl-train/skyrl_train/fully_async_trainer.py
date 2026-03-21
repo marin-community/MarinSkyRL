@@ -29,7 +29,7 @@ from skyrl_train.generators.utils import prepare_generator_input, concatenate_ge
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
-from skyrl_train.callbacks.builtin import DataTrackingCallback
+from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Optional, Tuple
 import inspect
@@ -325,6 +325,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size, self.data_tracker)
         # Register the data tracking callback for checkpoint persistence and epoch transitions
         self.callback_handler.add_callback(DataTrackingCallback(self.data_tracker))
+        # Register buffer checkpoint callback for saving/restoring generation buffer on resume
+        self.callback_handler.add_callback(BufferCheckpointCallback())
+        self._generation_output_group_buffer = None
+        self._pending_buffer_restore_path = None
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
@@ -385,6 +389,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 t.cancel()
         self._active_generator_tasks = []
 
+    def _restore_buffer_from_checkpoint(self, buffer, checkpoint_path: str) -> None:
+        """Restore generation buffer items from a checkpoint (best-effort)."""
+        try:
+            items = BufferCheckpointCallback.load_buffer_items(checkpoint_path)
+            if not items:
+                return
+
+            restored = 0
+            for item in items:
+                try:
+                    buffer.put_nowait(item)
+                    self._staleness_manager._stat.accepted += 1
+                    self._staleness_manager._stat.submitted += 1
+                    restored += 1
+                except asyncio.QueueFull:
+                    logger.warning(
+                        f"Generation buffer full after restoring {restored}/{len(items)} items, "
+                        "skipping remaining"
+                    )
+                    break
+
+            if restored > 0:
+                logger.info(f"Restored {restored} generation buffer items from checkpoint")
+        except Exception as e:
+            logger.warning(f"Failed to restore generation buffer from checkpoint (best-effort): {e}")
+
     async def train(self):
         """
         Main fully async training loop for PPO
@@ -431,6 +461,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             "No data consumption state found in checkpoint — "
                             "resume may re-train on already-consumed data"
                         )
+
+                    # Store checkpoint path for buffer restore after queue creation
+                    self._pending_buffer_restore_path = checkpoint_path
 
                     # Reset dataloader iteration for skip-on-resume
                     self.async_train_dataloader.load_state_from_checkpoint()
@@ -486,6 +519,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
                 maxsize=self.num_parallel_generation_workers
             )
+
+            # Store buffer ref for checkpoint callback access
+            self._generation_output_group_buffer = generation_output_group_buffer
+
+            # Restore buffer from checkpoint if resuming
+            if self._pending_buffer_restore_path is not None:
+                self._restore_buffer_from_checkpoint(
+                    generation_output_group_buffer, self._pending_buffer_restore_path
+                )
+                self._pending_buffer_restore_path = None
 
             # Provide the generator with a live reference to global_step so it can
             # capture the step at first vLLM inference (for accurate staleness tracking).

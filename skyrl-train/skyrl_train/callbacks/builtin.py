@@ -1269,3 +1269,110 @@ class DataTrackingCallback(TrainerCallback):
                 return True
 
         return False
+
+
+class BufferCheckpointCallback(TrainerCallback):
+    """Best-effort save/restore of the async generation buffer at checkpoint time.
+
+    Saves all pending GeneratedOutputGroup items from the asyncio.Queue so that
+    on resume the buffer can be restored without re-generating from scratch.
+    """
+
+    ARTIFACT_NAME = "generation_buffer_state.pt"
+    error_behavior = "warn"
+
+    def on_save(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        import os
+
+        import torch
+
+        from skyrl_train.utils.io import io
+
+        trainer = kwargs.get("trainer")
+        if trainer is None:
+            logger.warning("BufferCheckpointCallback.on_save: no trainer in kwargs, skipping")
+            return control
+
+        buf = getattr(trainer, "_generation_output_group_buffer", None)
+        if buf is None:
+            return control
+
+        try:
+            # Drain-and-restore: non-destructive snapshot of the queue.
+            # Safe because on_save runs synchronously within the event loop —
+            # no generation worker can interleave between drain and restore.
+            items = []
+            while not buf.empty():
+                try:
+                    items.append(buf.get_nowait())
+                except Exception:
+                    break
+            # Put them all back
+            for item in items:
+                buf.put_nowait(item)
+
+            if not items:
+                return control
+
+            serialized = []
+            for item in items:
+                serialized.append({
+                    "generator_output": dict(item.generator_output),
+                    "uid": item.uid,
+                    "global_step_when_scheduled": item.global_step_when_scheduled,
+                })
+
+            ckpt_path = os.path.join(
+                trainer.cfg.trainer.ckpt_path,
+                f"global_step_{state.global_step}",
+            )
+            artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
+            with io.open_file(artifact_path, "wb") as f:
+                torch.save(serialized, f)
+            logger.info(
+                f"Saved {len(serialized)} generation buffer items to {artifact_path}"
+            )
+        except Exception as e:
+            logger.warning(f"BufferCheckpointCallback.on_save failed (best-effort): {e}")
+
+        return control
+
+    @staticmethod
+    def load_buffer_items(ckpt_path: str):
+        """Load buffer items from a checkpoint directory.
+
+        Returns a list of GeneratedOutputGroup, or empty list if no file found.
+        """
+        import os
+
+        import torch
+
+        from skyrl_train.fully_async_trainer import GeneratedOutputGroup
+        from skyrl_train.generators.base import GeneratorOutput
+        from skyrl_train.utils.io import io
+
+        artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
+        if not io.exists(artifact_path):
+            return []
+
+        try:
+            with io.open_file(artifact_path, "rb") as f:
+                serialized = torch.load(f, map_location="cpu", weights_only=False)
+
+            items = []
+            for entry in serialized:
+                gen_out: GeneratorOutput = entry["generator_output"]
+                items.append(GeneratedOutputGroup(
+                    generator_output=gen_out,
+                    uid=entry["uid"],
+                    global_step_when_scheduled=entry["global_step_when_scheduled"],
+                ))
+            return items
+        except Exception as e:
+            logger.warning(f"BufferCheckpointCallback.load_buffer_items failed: {e}")
+            return []
