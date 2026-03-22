@@ -30,6 +30,74 @@ except ImportError:
 CHUNK_SIZE = 1024
 
 
+class _EntropyFromLogits(torch.autograd.Function):
+    """Memory-efficient entropy computation via activation checkpointing.
+
+    Standard entropy computation with requires_grad=True retains the full
+    (batch, seq, vocab_size) softmax tensor in the computation graph for
+    backward. For large-vocab models (e.g. Qwen3 with 152K vocab), this
+    can add ~18GB per 32K-token sequence in bf16.
+
+    This custom autograd function saves only the raw logits (which are
+    already stored by the model's backward pass) and recomputes softmax
+    during backward, trading ~1 extra softmax computation for ~18GB of
+    peak VRAM savings.
+
+    Forward:  H = logsumexp(x) - sum(softmax(x) * x)
+    Backward: dH/dx_i = p_i * (E[x] - x_i)  where p = softmax(x), E[x] = sum(p * x)
+    """
+
+    @staticmethod
+    def forward(ctx, logits, attention_mask):
+        # logits: (batch, seq_chunk, vocab)
+        # Compute entropy using the numerically stable formulation
+        p = F.softmax(logits, dim=-1)
+        mean_logit = (p * logits).sum(-1)  # (batch, seq_chunk)
+        entropy = torch.logsumexp(logits, dim=-1) - mean_logit  # (batch, seq_chunk)
+
+        if attention_mask is not None:
+            entropy = entropy * attention_mask
+
+        # Save only logits and mask for backward — NOT the (batch, seq, vocab) softmax
+        ctx.save_for_backward(logits, attention_mask)
+        return entropy
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        logits, attention_mask = ctx.saved_tensors
+
+        # Recompute softmax (the key memory saving — avoid storing it from forward)
+        p = F.softmax(logits, dim=-1)
+        mean_logit = (p * logits).sum(-1, keepdim=True)  # (batch, seq_chunk, 1)
+
+        # dH/dx_i = p_i * (E[x] - x_i)
+        grad_logits = p * (mean_logit - logits)  # (batch, seq_chunk, vocab)
+
+        if attention_mask is not None:
+            grad_logits = grad_logits * attention_mask.unsqueeze(-1)
+
+        grad_logits = grad_logits * grad_output.unsqueeze(-1)
+        return grad_logits, None  # None for attention_mask
+
+
+def _memory_efficient_entropy_from_logits(logits, attention_mask=None):
+    """Apply _EntropyFromLogits in chunks along the sequence dimension."""
+    chunk_size = CHUNK_SIZE
+    num_chunks = (logits.size(1) + chunk_size - 1) // chunk_size
+    entropy_tensor = torch.zeros(
+        (logits.shape[0], logits.shape[1]), dtype=logits.dtype, device=logits.device
+    )
+
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, logits.size(1))
+        chunk = logits[:, start_idx:end_idx]
+        chunk_mask = attention_mask[:, start_idx:end_idx] if attention_mask is not None else None
+        entropy_tensor[:, start_idx:end_idx] = _EntropyFromLogits.apply(chunk, chunk_mask)
+
+    return entropy_tensor
+
+
 def chunked_cross_entropy_from_log_probs(
     logprobs: Float[torch.Tensor, "batch_size seqlen vocab_size"], requires_grad: bool = False
 ) -> Float[torch.Tensor, "batch_size seqlen"]:
@@ -84,8 +152,13 @@ def chunked_entropy_from_logits(
                 f"Expected attention_mask shape: ({logits.shape[0]}, {logits.shape[1]})"
             )
 
-    cm = nullcontext() if requires_grad else torch.no_grad()
-    with cm:
+    if requires_grad:
+        # Use memory-efficient custom autograd: recomputes softmax in backward
+        # instead of storing the full (batch, seq, vocab_size) tensor.
+        # Saves ~18GB for 32K-token Qwen3 (152K vocab) sequences.
+        return _memory_efficient_entropy_from_logits(logits, attention_mask)
+
+    with torch.no_grad():
         # Calculate entropy in chunks to avoid OOM
         chunk_size = CHUNK_SIZE
         num_chunks = (logits.size(1) + chunk_size - 1) // chunk_size
