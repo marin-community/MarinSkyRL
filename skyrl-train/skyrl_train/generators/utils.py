@@ -218,10 +218,11 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
-    # For each example, pass@n = 1 if any trajectory achieves full success (reward >= 1.0).
-    # This threshold handles shaped rewards correctly: partial credit (e.g. 3/10 tests = 0.3)
-    # no longer inflates pass@n, only fully solved tasks count.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r >= 1.0 for r in v)) / len(
+    # For each example, pass@n = 1 if any trajectory achieves a positive reward.
+    # With binary rewards, this means any success. With shaped rewards (e.g. pass_ratio),
+    # this means any partial progress. Using > 0.0 rather than >= 1.0 because shaped
+    # rewards may never reach 1.0 (e.g. 9/10 tests = 0.9).
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0.0 for r in v)) / len(
         uid_to_trajectory_rewards
     )
 
