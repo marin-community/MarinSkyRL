@@ -178,10 +178,242 @@ class WorkerWrap:
             device=self.device,
         )
 
+    @staticmethod
+    def _apply_fp8_weight_loader_patches():
+        """Patch Fp8LinearMethod.process_weights_after_loading to preserve weight_loader.
+
+        Following verl's approach: after FP8 processing creates new Parameter objects,
+        copy custom attributes (weight_loader, output_dim, input_dim, subclass_type)
+        from the original specialized parameter so weight sync can reload weights.
+        """
+        import os
+        if os.environ.get("SKYRL_FUSE_WEIGHTS", "0") != "1":
+            return
+
+        try:
+            from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+        except ImportError:
+            return
+
+        original_process = Fp8LinearMethod.process_weights_after_loading
+
+        def patched_process(self_method, layer, *args, **kwargs):
+            # Save original param attributes before processing
+            saved_attrs = {}
+            for pname, param in layer.named_parameters():
+                attrs = {}
+                for attr in ('weight_loader', 'output_dim', 'input_dim',
+                             '_output_dim', '_input_dim', 'packed_dim',
+                             'packed_factor', 'tp_rank', 'tp_size',
+                             'logical_widths', 'output_sizes'):
+                    if hasattr(param, attr):
+                        attrs[attr] = getattr(param, attr)
+                attrs['subclass_type'] = type(param)
+                saved_attrs[pname] = attrs
+
+            # Call original process_weights_after_loading
+            result = original_process(layer, *args, **kwargs)
+
+            # Restore attributes on new parameters
+            for pname, param in layer.named_parameters():
+                if pname in saved_attrs:
+                    for attr, value in saved_attrs[pname].items():
+                        try:
+                            setattr(param, attr, value)
+                        except (AttributeError, TypeError):
+                            pass
+
+            return result
+
+        Fp8LinearMethod.process_weights_after_loading = patched_process
+
+    def begin_weight_update(self) -> None:
+        """Start accumulating weights for batched load_weights call.
+
+        When SKYRL_FUSE_WEIGHTS=1, weights are accumulated instead of loaded
+        immediately. Call end_weight_update() to flush and apply them all at once
+        via model.load_weights(), which handles packed module mapping (qkv_proj, gate_up_proj).
+        Weights are stored on CPU to avoid GPU OOM during accumulation.
+        """
+        self._accumulated_weights = []
+
+    def _is_fp8_model(self):
+        """Check if the model uses FP8 quantization."""
+        quant_config = getattr(self.model_runner.model, 'quant_config', None)
+        if quant_config is None:
+            return False
+        from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+        return isinstance(quant_config, Fp8Config)
+
+    def _quantize_weights_for_fp8(self, weights):
+        """Quantize BF16 weights to FP8 before loading into FP8 model.
+
+        Follows verl's approach: quantize each weight tensor to FP8 with
+        per-tensor scale, then yield (name, fp8_tensor) and (name_scale, scale).
+        Non-linear weights (layernorm, embedding) are passed through as-is.
+        """
+        import torch
+        from vllm._custom_ops import scaled_fp8_quant
+
+        model = self.model_runner.model
+        # Build set of parameter names that are FP8 quantized
+        # These are the linear layer weights (not biases, not layernorms, not embeddings)
+        fp8_param_names = set()
+        for name, module in model.named_modules():
+            from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+            if hasattr(module, 'quant_method') and isinstance(module.quant_method, Fp8LinearMethod):
+                for pname, _ in module.named_parameters():
+                    if 'weight' in pname and 'scale' not in pname:
+                        full_name = f"{name}.{pname}" if name else pname
+                        fp8_param_names.add(full_name)
+
+        for name, tensor in weights:
+            # Check if this weight maps to an FP8-quantized parameter
+            # The name might be "layers.0.self_attn.q_proj.weight" but the
+            # FP8 param is "layers.0.self_attn.qkv_proj.weight"
+            # We need to check the ORIGINAL unfused name against the fused params
+            is_fp8 = False
+            packed_mapping = getattr(model, 'packed_modules_mapping', {})
+            # Reverse mapping: q_proj -> qkv_proj, gate_proj -> gate_up_proj
+            reverse_map = {}
+            for fused, originals in packed_mapping.items():
+                for orig in originals:
+                    reverse_map[orig] = fused
+
+            # Try to find the FP8 param name
+            check_name = name
+            parts = name.rsplit('.', 2)
+            if len(parts) >= 2:
+                module_part = parts[-2]  # e.g. "q_proj"
+                if module_part in reverse_map:
+                    check_name = name.replace(module_part, reverse_map[module_part])
+
+            if check_name in fp8_param_names or name in fp8_param_names:
+                is_fp8 = True
+
+            if is_fp8 and tensor.dtype != torch.float8_e4m3fn:
+                # Move to GPU, quantize, move back to CPU
+                gpu_tensor = tensor.to(device='cuda', dtype=torch.bfloat16)
+                fp8_tensor, scale = scaled_fp8_quant(gpu_tensor)
+                yield (name, fp8_tensor.cpu())
+                # Yield the scale with the FUSED param name
+                scale_name = check_name.replace('.weight', '.weight_scale')
+                yield (scale_name, scale.cpu())
+                del gpu_tensor, fp8_tensor
+            else:
+                yield (name, tensor)
+
+    def _restore_param_subclasses(self, model):
+        """Temporarily restore param __class__ to subclass_type for weight loading.
+
+        After process_weights_after_loading, params are plain Parameter but have
+        subclass_type saved. Restoring __class__ makes weight_loader dispatch work.
+        Returns list of (param, original_class) for cleanup.
+        """
+        patched = []
+        for name, param in model.named_parameters():
+            subclass_type = getattr(param, 'subclass_type', None)
+            if subclass_type is not None and type(param) != subclass_type:
+                original_class = type(param)
+                param.__class__ = subclass_type
+                patched.append((param, original_class))
+        return patched
+
+    def _undo_param_subclasses(self, patched):
+        """Undo the temporary __class__ patching."""
+        for param, original_class in patched:
+            param.__class__ = original_class
+
+    def end_weight_update(self) -> None:
+        """Flush accumulated weights via model.load_weights().
+
+        For FP8 models: quantizes BF16 weights to FP8 before loading,
+        following verl's approach. Also temporarily restores param subclass
+        types so weight_loader dispatch works correctly with FP8 params.
+        """
+        import gc
+        if hasattr(self, "_accumulated_weights") and self._accumulated_weights:
+            model = self.model_runner.model
+            if self._is_fp8_model():
+                import torch
+                import gc
+                from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+                from vllm._custom_ops import scaled_fp8_quant
+
+                # Receiver-side FP8 quantization: BF16 weights arrive via NCCL,
+                # fuse stacked params, quantize to FP8, write directly to model.
+                weight_index = {name: tensor for name, tensor in self._accumulated_weights}
+                stacked = [
+                    ("qkv_proj", "q_proj", "q"),
+                    ("qkv_proj", "k_proj", "k"),
+                    ("qkv_proj", "v_proj", "v"),
+                    ("gate_up_proj", "gate_proj", 0),
+                    ("gate_up_proj", "up_proj", 1),
+                ]
+
+                for mname, module in model.named_modules():
+                    if not (hasattr(module, 'quant_method') and isinstance(module.quant_method, Fp8LinearMethod)):
+                        continue
+                    param = module.weight
+                    device = param.device
+                    is_stacked = any(mname.endswith(pn) for pn, _, _ in stacked)
+
+                    if is_stacked:
+                        shard_list = []
+                        for param_name, weight_name, shard_id in stacked:
+                            if not mname.endswith(param_name):
+                                continue
+                            src_name = mname.replace(param_name, weight_name) + ".weight"
+                            if src_name in weight_index:
+                                shard_list.append(weight_index[src_name])
+                        if shard_list:
+                            full_bf16 = torch.cat(shard_list, dim=0).to(
+                                device=device, dtype=torch.bfloat16, non_blocking=True)
+                            torch.cuda.current_stream().synchronize()
+                            fp8_full, scale = scaled_fp8_quant(full_bf16)
+                            param.data.copy_(fp8_full)
+                            if hasattr(module, 'weight_scale'):
+                                module.weight_scale.data.copy_(scale.squeeze())
+                            del full_bf16, fp8_full, scale, shard_list
+                    else:
+                        src_name = mname + ".weight"
+                        if src_name in weight_index:
+                            bf16_w = weight_index[src_name].to(
+                                device=device, dtype=torch.bfloat16, non_blocking=True)
+                            torch.cuda.current_stream().synchronize()
+                            fp8_w, scale = scaled_fp8_quant(bf16_w)
+                            param.data.copy_(fp8_w)
+                            if hasattr(module, 'weight_scale'):
+                                module.weight_scale.data.copy_(scale.squeeze())
+                            del bf16_w, fp8_w, scale
+
+                # Load non-FP8 params (layernorms, embeddings)
+                params_dict = dict(model.named_parameters())
+                for name, tensor in self._accumulated_weights:
+                    if name in params_dict:
+                        param = params_dict[name]
+                        if param.dtype != torch.float8_e4m3fn:
+                            param.data.copy_(tensor.to(device=param.device, dtype=param.dtype))
+
+                del weight_index
+
+                gc.collect()
+                torch.cuda.empty_cache()
+            else:
+                model.load_weights(weights=iter(self._accumulated_weights))
+            self._accumulated_weights.clear()
+            del self._accumulated_weights
+            gc.collect()
+            import torch
+            torch.cuda.empty_cache()
+
     def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights using the receiver.
 
         This method is called via collective_rpc from VLLMWeightLoader.
+
+        When SKYRL_FUSE_WEIGHTS=1 and begin_weight_update() was called,
+        weights are accumulated on CPU instead of loaded immediately.
 
         Args:
             request: Weight update request with names, dtypes, shapes, etc.
@@ -190,10 +422,16 @@ class WorkerWrap:
         for name, tensor in self._weight_receiver.receive_weights(request):
             weight_list.append((name, tensor))
 
-        self.model_runner.model.load_weights(weights=weight_list)
-
-        for weight in weight_list:
-            del weight
+        if hasattr(self, "_accumulated_weights"):
+            # Batched mode: move to CPU and accumulate for later flush
+            for name, tensor in weight_list:
+                self._accumulated_weights.append((name, tensor.cpu()))
+            del weight_list
+        else:
+            # Immediate mode (default): load right away
+            self.model_runner.model.load_weights(weights=weight_list)
+            for weight in weight_list:
+                del weight
 
     # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
     def destroy_weights_update_group(self):
@@ -225,6 +463,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._is_lora = kwargs.get("enable_lora", False)
 
+        if "rope_scaling" in kwargs:
+            kwargs.pop("rope_scaling")
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
 
@@ -1006,6 +1246,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Use the weight loader to coordinate weight transfer
         return await self._weight_loader.load_weights(request)
 
+    async def begin_weight_update(self):
+        """Signal engines to start accumulating weights for batched loading."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("begin_weight_update")
+
+    async def end_weight_update(self):
+        """Flush accumulated weights via model.load_weights()."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("end_weight_update")
+
     async def teardown(self):
         await self._destroy_weights_update_group()
 
@@ -1251,9 +1501,13 @@ class VLLMWeightTransferReceiver:
 
     def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via torch.distributed.broadcast."""
+        import os
+        _fuse = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+            if not _fuse:
+                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+            # Always receive in sender's dtype, load_weights handles conversion
             weight = torch.empty(shape, dtype=dtype, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self.model_update_group)
             yield name, weight

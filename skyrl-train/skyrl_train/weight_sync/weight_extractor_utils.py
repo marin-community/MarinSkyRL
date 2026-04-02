@@ -1,10 +1,95 @@
 """Utility functions for weight extraction."""
 
+import os
 from collections import defaultdict
 from typing import Dict, List, Callable, Iterator, Any
 import torch
 
 from skyrl_train.weight_sync import WeightChunk
+
+import logging
+logger = logging.getLogger(__name__)
+
+# vLLM fuses certain layers (gate+up → gate_up_proj, q+k+v → qkv_proj).
+# When SKYRL_FUSE_WEIGHTS=1, we fuse policy weights before syncing so shapes
+# match the inference engine.  This is required for FP8 quantized engines
+# but safe to enable for BF16 too (vLLM always uses fused layers).
+_FUSE_WEIGHTS = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
+
+# Mapping: fused_name_suffix -> list of source suffixes (in concat order)
+_FUSE_RULES = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+}
+
+
+def _maybe_fuse_module_weights(
+    module_names: List[str],
+    module_tensors: List[torch.Tensor],
+    module_shapes: List[List[int]],
+    module_dtypes: List[str],
+) -> tuple:
+    """Fuse separate proj weights into vLLM's packed format.
+
+    For example, gate_proj.weight + up_proj.weight → gate_up_proj.weight
+    Only active when SKYRL_FUSE_WEIGHTS=1.
+    Returns (names, tensors, shapes, dtypes) with fused entries replacing originals.
+    """
+    if not _FUSE_WEIGHTS:
+        return module_names, module_tensors, module_shapes, module_dtypes
+
+    # Index tensors by their short name (e.g. "gate_proj.weight")
+    name_to_idx = {}
+    for i, name in enumerate(module_names):
+        parts = name.split(".")
+        if len(parts) >= 2:
+            short = f"{parts[-2]}.{parts[-1]}"  # e.g. "gate_proj.weight"
+            name_to_idx[short] = i
+
+    fused_names = []
+    fused_tensors = []
+    fused_shapes = []
+    fused_dtypes = []
+    consumed = set()
+
+    for fused_suffix, source_suffixes in _FUSE_RULES.items():
+        # Check weight and bias separately
+        for param_type in ["weight", "bias"]:
+            source_keys = [f"{s}.{param_type}" for s in source_suffixes]
+            indices = [name_to_idx.get(k) for k in source_keys]
+
+            if all(idx is not None for idx in indices):
+                # All source tensors present — fuse them
+                tensors_to_cat = [module_tensors[idx] for idx in indices]
+                fused_tensor = torch.cat(tensors_to_cat, dim=0).contiguous()
+
+                # Build fused name: replace source suffix with fused suffix
+                base = ".".join(module_names[indices[0]].split(".")[:-2])
+                fused_name = f"{base}.{fused_suffix}.{param_type}"
+
+                fused_names.append(fused_name)
+                fused_tensors.append(fused_tensor)
+                fused_shapes.append(list(fused_tensor.shape))
+                fused_dtypes.append(module_dtypes[indices[0]])
+
+                for idx in indices:
+                    consumed.add(idx)
+
+    # Add non-fused params unchanged
+    for i in range(len(module_names)):
+        if i not in consumed:
+            fused_names.append(module_names[i])
+            fused_tensors.append(module_tensors[i])
+            fused_shapes.append(module_shapes[i])
+            fused_dtypes.append(module_dtypes[i])
+
+    if consumed:
+        logger.debug(
+            f"Fused {len(consumed)} params into {len(consumed) - len([n for n in fused_names if any(s in n for s in _FUSE_RULES)])} "
+            f"packed params for module {module_names[0].rsplit('.', 2)[0]}"
+        )
+
+    return fused_names, fused_tensors, fused_shapes, fused_dtypes
 
 
 def yield_module_grouped_chunks(
@@ -23,6 +108,10 @@ def yield_module_grouped_chunks(
     from the parameter name. For example:
     "model.layers.0.self_attn.q_proj.weight" -> "model.layers.0.self_attn"
 
+    When SKYRL_FUSE_WEIGHTS=1, fuses gate_proj+up_proj→gate_up_proj and
+    q_proj+k_proj+v_proj→qkv_proj to match vLLM's packed module format.
+    This enables FP8 quantized inference with weight sync.
+
     Args:
         params: Dictionary mapping parameter names to parameter objects
         dtype: Target dtype for inference
@@ -33,6 +122,9 @@ def yield_module_grouped_chunks(
     Yields:
         WeightChunk objects containing all parameters for each module (or batched modules if threshold set)
     """
+    if _FUSE_WEIGHTS:
+        logger.info("SKYRL_FUSE_WEIGHTS=1: will fuse gate/up and q/k/v weights for vLLM packed format")
+
     # Group parameters by module for FlashRL
     # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
     # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
@@ -74,6 +166,12 @@ def yield_module_grouped_chunks(
             module_shapes.append(shape)
             module_dtypes.append(str(dtype))
             module_size += tensor.nbytes
+
+        # Fuse weights if enabled (gate+up → gate_up_proj, q+k+v → qkv_proj)
+        module_names, module_tensors, module_shapes, module_dtypes = _maybe_fuse_module_weights(
+            module_names, module_tensors, module_shapes, module_dtypes
+        )
+        module_size = sum(t.nbytes for t in module_tensors)
 
         # Check if adding this module would exceed threshold
         if current_size > 0 and current_size + module_size > threshold_bytes:

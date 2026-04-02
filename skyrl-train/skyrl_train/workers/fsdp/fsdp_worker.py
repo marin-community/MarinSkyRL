@@ -225,7 +225,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return
 
         # Extract weights using the initialized extractor
+        import os
+        _fuse_weights = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
+
         if not self.use_cuda_ipc:
+            # Signal engines to start accumulating weights (for FP8 batched quantization)
+            if _fuse_weights and torch.distributed.get_rank() == 0:
+                await inference_engine_client.begin_weight_update()
+
             # Broadcast path: one chunk per parameter
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
                 # Each chunk contains one parameter
@@ -254,6 +261,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
+
+            # Flush accumulated weights (triggers FP8 quantization on receiver)
+            if _fuse_weights and torch.distributed.get_rank() == 0:
+                await inference_engine_client.end_weight_update()
         else:
             # CUDA IPC path: batched chunks (batching handled by extractor)
             from torch.multiprocessing.reductions import reduce_tensor
