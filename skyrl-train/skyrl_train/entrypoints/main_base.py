@@ -432,6 +432,13 @@ def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 
+    # Set FP8 fuse_weights env vars from config (must happen before Ray init
+    # so all workers inherit them).
+    if getattr(cfg.generator, "fuse_weights", False):
+        os.environ["SKYRL_FUSE_WEIGHTS"] = "1"
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        logger.info("FP8 fuse_weights enabled: set SKYRL_FUSE_WEIGHTS=1, VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+
     initialize_ray(cfg)
 
     # Register SIGTERM handler so that cluster preemption / job scheduler

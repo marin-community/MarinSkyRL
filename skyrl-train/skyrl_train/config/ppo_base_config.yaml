@@ -229,6 +229,10 @@ generator:
   num_inference_engines: 1
   backend: "vllm"
   weight_sync_backend: "nccl"
+  # Fuse gate/up and q/k/v weights before NCCL sync for FP8 inference compatibility.
+  # When true, sets SKYRL_FUSE_WEIGHTS=1 and VLLM_ALLOW_INSECURE_SERIALIZATION=1.
+  # Requires vLLM with FP8 weight sync patches (marianna13/vllm fp8_weight_sync).
+  fuse_weights: false
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
