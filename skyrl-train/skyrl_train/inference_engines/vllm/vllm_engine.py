@@ -11,17 +11,40 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ErrorResponse,
-    CompletionRequest,
-    CompletionResponse,
-)
-from vllm.v1.metrics.loggers import LoggingStatLogger
+# vLLM 0.16+ reorganized entrypoints into sub-packages.
+# Try new paths first, fall back to old paths for backwards compatibility.
+try:
+    # vLLM >= 0.16
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+        ChatCompletionResponse,
+    )
+    from vllm.entrypoints.openai.completion.protocol import (
+        CompletionRequest,
+        CompletionResponse,
+    )
+    from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+except ImportError:
+    # vLLM < 0.16 (old flat layout)
+    from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+    from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+    from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        ChatCompletionResponse,
+        ErrorResponse,
+        CompletionRequest,
+        CompletionResponse,
+    )
+
+try:
+    from vllm.v1.metrics.loggers import LoggingStatLogger
+except ImportError:
+    LoggingStatLogger = None  # Not available in all vLLM versions
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
