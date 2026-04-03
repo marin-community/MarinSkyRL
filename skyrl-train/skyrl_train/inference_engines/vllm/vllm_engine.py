@@ -64,6 +64,14 @@ import time
 from packaging import version
 
 
+def _parse_vllm_version() -> version.Version:
+    """Parse vllm.__version__, treating 'dev' or other invalid strings as 999.0.0."""
+    try:
+        return _parse_vllm_version()
+    except version.InvalidVersion:
+        return version.parse("999.0.0")
+
+
 @dataclass
 class Logprob:
     logprob: float
@@ -1050,7 +1058,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         stat_loggers = [self._create_stat_logger_factory()]
         engine_args = vllm.AsyncEngineArgs(**kwargs)
 
-        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+        if _parse_vllm_version() >= version.parse("0.10.0"):
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         else:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
@@ -1320,7 +1328,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+            if _parse_vllm_version() >= version.parse("0.10.0"):
                 from vllm.entrypoints.openai.protocol import ErrorInfo
 
                 return ErrorResponse(
@@ -1351,7 +1359,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+            if _parse_vllm_version() >= version.parse("0.10.0"):
                 from vllm.entrypoints.openai.protocol import ErrorInfo
 
                 return ErrorResponse(
