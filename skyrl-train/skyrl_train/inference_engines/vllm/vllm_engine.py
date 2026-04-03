@@ -67,7 +67,7 @@ from packaging import version
 def _parse_vllm_version() -> version.Version:
     """Parse vllm.__version__, treating 'dev' or other invalid strings as 999.0.0."""
     try:
-        return _parse_vllm_version()
+        return version.Version(vllm.__version__)
     except version.InvalidVersion:
         return version.parse("999.0.0")
 
