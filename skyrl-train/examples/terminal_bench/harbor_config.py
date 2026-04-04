@@ -112,6 +112,10 @@ AGENT_SCHEMA = SectionSchema(
         # When false, disables terminus_2.pane file generation
         # This reduces disk I/O for RL training
         "enable_pane_logging": FieldMapping("enable_pane_logging", field_type="kwargs", default=True),
+        # Trajectory configuration (dict passed as trajectory_config kwarg to Terminus-2)
+        # raw_content: If True, save raw LLM responses (including <think> blocks) in trajectory
+        # linear_history: If True, split trajectory into separate files on summarization
+        "trajectory_config": FieldMapping("trajectory_config", field_type="kwargs"),
     }
 )
 
