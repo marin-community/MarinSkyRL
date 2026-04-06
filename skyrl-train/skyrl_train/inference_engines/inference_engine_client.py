@@ -18,6 +18,7 @@ from omegaconf import DictConfig
 import threading
 from loguru import logger
 import random
+import ray.exceptions
 from dataclasses import dataclass, field
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
@@ -53,18 +54,53 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.generation_paused_event = threading.Event()
+        self._dead_engines: set[int] = set()
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
         logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 
+    def _mark_engine_dead(self, engine_idx: int, error: Exception) -> None:
+        """Mark an engine as dead and log a warning."""
+        if engine_idx not in self._dead_engines:
+            self._dead_engines.add(engine_idx)
+            remaining = len(self.engines) - len(self._dead_engines)
+            logger.warning(
+                f"Inference engine {engine_idx} died ({type(error).__name__}). "
+                f"{remaining}/{len(self.engines)} engines remaining."
+            )
+            if remaining == 0:
+                logger.error("All inference engines have died!")
+
+    def _pick_fallback_engine(self, exclude_idx: int) -> int | None:
+        """Pick a random live engine, excluding the given index."""
+        live = [
+            i for i in range(len(self.engines))
+            if i not in self._dead_engines and i != exclude_idx
+        ]
+        return random.choice(live) if live else None
+
+    def _resolve_engine_idx(self, engine_idx: int) -> int:
+        """If the chosen engine is dead, pick a fallback. Raises if all are dead."""
+        if engine_idx not in self._dead_engines:
+            return engine_idx
+        fallback = self._pick_fallback_engine(engine_idx)
+        if fallback is None:
+            raise RuntimeError("All inference engines have died")
+        return fallback
+
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """
-        Call a method on all engines concurrently and gather the results.
+        Call a method on all live engines concurrently and gather the results.
         """
-        assert len(self.engines) > 0, "No engines to call method on"
+        live_engines = [
+            engine for i, engine in enumerate(self.engines)
+            if i not in self._dead_engines
+        ]
+        if not live_engines:
+            raise RuntimeError("All inference engines have died")
 
-        awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in self.engines]
+        awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -104,6 +140,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             assert len(engine_idx_to_prompt_ids) == 1
             ((engine_idx, prompt_ids_list),) = engine_idx_to_prompt_ids.items()
             assert prompt_ids_list == [0], "Single prompt should map to index [0]"
+            engine_idx = self._resolve_engine_idx(engine_idx)
             original_prompt_ids = prompt_token_ids[0]
             return await self._generate_single_with_retry(
                 engine_idx=engine_idx,
@@ -115,11 +152,18 @@ class InferenceEngineClient(InferenceEngineInterface):
         if self.generation_paused_event.is_set():
             raise RuntimeError("pause_generation is unsupported for batched InferenceEngineClient.generate().")
 
-        # 2. Generate responses concurrently
+        # 2. Generate responses concurrently (with failover for dead engines)
         tasks: list[asyncio.Task] = []
-        indices_list: list[list[int]] = []  # the original prompt indices that each task works on
+        indices_list: list[list[int]] = []
+        task_engine_idxs: list[int] = []
+
+        # Reroute prompts away from known-dead engines
+        rerouted_mapping: dict[int, list[int]] = {}
         for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
-            # index prompt_token_ids with prompt_ids
+            resolved = self._resolve_engine_idx(engine_idx)
+            rerouted_mapping.setdefault(resolved, []).extend(prompt_ids)
+
+        for engine_idx, prompt_ids in rerouted_mapping.items():
             cur_prompt_token_ids = [prompt_token_ids[i] for i in prompt_ids]
             engine_input = InferenceEngineInput(
                 prompt_token_ids=cur_prompt_token_ids,
@@ -127,8 +171,25 @@ class InferenceEngineClient(InferenceEngineInterface):
             )
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
+            task_engine_idxs.append(engine_idx)
 
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 2.1. Handle engine deaths: retry failed tasks on fallback engines
+        for i, result in enumerate(results):
+            if isinstance(result, (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError)):
+                self._mark_engine_dead(task_engine_idxs[i], result)
+                fallback = self._pick_fallback_engine(task_engine_idxs[i])
+                if fallback is None:
+                    raise RuntimeError("All inference engines have died") from result
+                cur_prompt_token_ids = [prompt_token_ids[j] for j in indices_list[i]]
+                engine_input = InferenceEngineInput(
+                    prompt_token_ids=cur_prompt_token_ids,
+                    sampling_params=sampling_params,
+                )
+                results[i] = await self.engines[fallback].generate(engine_input)
+            elif isinstance(result, BaseException):
+                raise result
 
         # 3. Reconstruct output in original order
         n = len(prompt_token_ids)
@@ -226,7 +287,20 @@ class InferenceEngineClient(InferenceEngineInterface):
 
             # 3.2. Send the request.
             logger.debug(f"generate() request sent (including potential retries): {engine_input}")
-            partial_response: InferenceEngineOutput = await self.engines[engine_idx].generate(engine_input)
+            try:
+                partial_response: InferenceEngineOutput = await self.engines[engine_idx].generate(engine_input)
+            except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+                self._mark_engine_dead(engine_idx, e)
+                fallback = self._pick_fallback_engine(engine_idx)
+                if fallback is None:
+                    raise RuntimeError("All inference engines have died") from e
+                engine_idx = fallback
+                # Reset accumulation — new engine has no prior context
+                accum_response_ids = []
+                accum_response_logprobs = []
+                num_turns = 0
+                stop_reason = "abort"
+                continue
 
             # 3.3. Parse the partial response.
             assert len(partial_response["response_ids"]) == 1, "Expected exactly one response."
@@ -333,9 +407,22 @@ class InferenceEngineClient(InferenceEngineInterface):
 
             # 1.2. Send the request.
             logger.debug(f"/chat/completions request sent (including potential retries): {cur_request_json}")
-            partial_response = await self.engines[engine_idx].chat_completion(
-                {"json": cur_request_json, "headers": headers}
-            )
+            try:
+                partial_response = await self.engines[engine_idx].chat_completion(
+                    {"json": cur_request_json, "headers": headers}
+                )
+            except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+                self._mark_engine_dead(engine_idx, e)
+                fallback = self._pick_fallback_engine(engine_idx)
+                if fallback is None:
+                    raise RuntimeError("All inference engines have died") from e
+                engine_idx = fallback
+                # Reset accumulator — new engine has no prior context
+                accum = AccumulatedResponse()
+                base_response = None
+                response_role = None
+                finish_reason = "abort"
+                continue
 
             # 1.2.1. Check for error response from vLLM/sglang.
             # Error responses have "error" key (vLLM) or "object"="error" (sglang), not "choices".
@@ -399,13 +486,12 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = request_payload["json"].pop("session_id", None)
-        # print(f"CHARLIE session_id: {session_id}")
         if session_id is None:
-            # if session_id is not provided, we'll use a random engine
             engine_idx = random.randint(0, len(self.engines) - 1)
         else:
             assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
             engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
+        engine_idx = self._resolve_engine_idx(engine_idx)
 
         # Always use the retry loop which also issues the first request inside
         return await self._chat_completion_with_retry(engine_idx, request_payload)
@@ -451,19 +537,43 @@ class InferenceEngineClient(InferenceEngineInterface):
             session_ids=session_id_list,
         )
 
-        # 2. Generate responses concurrently
+        # 2. Generate responses concurrently (with failover for dead engines)
         tasks: list[asyncio.Task] = []
         indices_list: list[list[int]] = []  # the original prompt indices that each task works on
+        task_engine_idxs: list[int] = []  # engine idx for each task (for failover)
+
+        # Reroute prompts away from known-dead engines before dispatching
+        rerouted_mapping: dict[int, list[int]] = {}
         for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
+            resolved = self._resolve_engine_idx(engine_idx)
+            rerouted_mapping.setdefault(resolved, []).extend(prompt_ids)
+
+        for engine_idx, prompt_ids in rerouted_mapping.items():
             cur_prompt = [prompt[i] for i in prompt_ids]
-            # reuse the exact same request except for the prompt
             cur_json = dict(body)
             cur_json["prompt"] = cur_prompt
             coro = self.engines[engine_idx].completion({"json": cur_json, "headers": headers})
             tasks.append(asyncio.create_task(coro))
             indices_list.append(prompt_ids)
+            task_engine_idxs.append(engine_idx)
 
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 2.1. Handle engine deaths: retry failed tasks on fallback engines
+        for i, result in enumerate(results):
+            if isinstance(result, (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError)):
+                self._mark_engine_dead(task_engine_idxs[i], result)
+                fallback = self._pick_fallback_engine(task_engine_idxs[i])
+                if fallback is None:
+                    raise RuntimeError("All inference engines have died") from result
+                cur_prompt = [prompt[j] for j in indices_list[i]]
+                cur_json = dict(body)
+                cur_json["prompt"] = cur_prompt
+                results[i] = await self.engines[fallback].completion(
+                    {"json": cur_json, "headers": headers}
+                )
+            elif isinstance(result, BaseException):
+                raise result
 
         # 3. Check for errors.
         # results can be ErrorResponse or CompletionResponse. If one of the sub-requests fails, we
@@ -528,7 +638,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         tasks = []
         rank_offset_count = rank_offset
 
-        for engine in self.engines:
+        for i, engine in enumerate(self.engines):
+            if i in self._dead_engines:
+                continue
             tasks.append(
                 engine.init_weight_update_communicator(
                     master_addr=master_addr,
