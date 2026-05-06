@@ -770,6 +770,18 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
+        # Per-token probability-change diagnostics (visibility into which
+        # tokens carry the gradient signal — see compute_log_ratio_diagnostics
+        # for metric semantics). Computed outside the autocast block so the
+        # math runs in fp32. Cheap (small tensors, simple ops).
+        from skyrl_train.utils.ppo_utils import compute_log_ratio_diagnostics
+
+        ratio_diag = compute_log_ratio_diagnostics(
+            log_probs=action_log_probs,
+            old_log_probs=old_action_log_probs,
+            loss_mask=loss_mask,
+        )
+
         # entropy loss
         with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
             # batch_size, seqlen
@@ -816,6 +828,11 @@ class PolicyWorkerBase(Worker):
             "ppo_clip_ratio": clip_ratio,
             "policy_entropy": entropy.item(),
         }
+        # Per-token log-ratio diagnostics — visibility into which tokens
+        # carry the gradient signal (heaviest-hit token, fraction of tokens
+        # with large probability changes, per-position aggregations).
+        # Trainer prefixes these with "policy/" before sending to wandb.
+        status.update(ratio_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
