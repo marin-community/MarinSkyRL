@@ -554,6 +554,139 @@ def _safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> 
     return y.to(out_dtype or delta.dtype)
 
 
+def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10) -> dict:
+    """The full key set the diagnostic emits, with all values zero.
+
+    Used as a fallback so every rank contributes identical keys to
+    `strategy.all_reduce(status)` even if a rank's input is empty/all-padded
+    or the helper raises. Mismatched keysets across ranks deadlock the per-key
+    NCCL all_reduce (this killed v2 and v3 of the diagnostic).
+    """
+    keys_base = ["log_ratio_abs_mean", "log_ratio_abs_max",
+                 "n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct",
+                 "log_ratio_abs_p99"]
+    keys_pos = [f"log_ratio_abs_pos{i * (100 // n_position_buckets):02d}" for i in range(n_position_buckets)]
+    return {k: 0.0 for k in keys_base + keys_pos}
+
+
+def compute_log_ratio_diagnostics(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    n_position_buckets: int = 10,
+) -> dict:
+    """Per-token probability-change diagnostics — v4 (all-ranks, full key set always).
+
+    v1 (reverted in 741bc3f8) crashed Perlmutter 52563046 with NCCL timeouts:
+    ran inside training_step (64×/global_step), used .quantile() and boolean
+    indexing, issued 17 sequential .item() syncs → per-rank latency variance.
+
+    v2 (fixed v1's latency, but introduced a new bug) gated to rank 0 only so
+    other ranks skipped the call. Their `status` dict was missing the diagnostic
+    keys, and the downstream `strategy.all_reduce(status)` iterates per-key →
+    keys mismatched across ranks → NCCL hang. Killed Perlmutter 52593758 at
+    global_step 1.
+
+    v3: drop the rank-0 gate. Every rank runs the diagnostic on the same shapes
+    (each rank's micro-batch), so all_reduce sees identical keysets. The mean-
+    reduced values are slightly different from rank-0-only (averaged across
+    ranks rather than one rank's view) but more statistically robust. Counts
+    (n_tokens_dp_gt_*) are mean-reduced into per-rank averages — multiply by
+    world_size at read-time for global totals if needed.
+
+    Caller must still gate this to:
+      - last micro-batch of a global_step (to avoid 64× redundant work)
+      - AFTER optimizer step (so the GPU is idle in the gap, not contending
+        with a pending NCCL collective)
+
+    Per-call cost (CPU-measured, see /tmp/diagnostic_scaling_results.json):
+        B=512 T=4096:   ~30 ms (vs v1: ~112 ms)
+        B=512 T=16384: ~117 ms (vs v1: ~441 ms)
+    On CUDA, expected to be 5-10× faster than CPU because the bottleneck is
+    GPU compute, not stream sync (only 2 syncs total in v2 vs 17 in v1).
+
+    Op-level swaps:
+      - .quantile(0.99) → torch.topk(k=N/100).values.min() (~10× faster, no sort)
+      - x[mask.bool()] → (x * mask) sum/max ops (no boolean indexing copy)
+      - 10 Python-loop bucket means → 1 scatter_add call
+      - 17 .item() calls → 2 syncs (one for k, one for final stack→tolist)
+
+    Returns the same metric set as v1 (so wandb keys are unchanged):
+
+        log_ratio_abs_mean       — mean of |log r_t| over masked tokens
+        log_ratio_abs_p99        — ~p99 of |log r_t| (topk approximation)
+        log_ratio_abs_max        — max of |log r_t| in this batch
+        n_tokens_dp_gt_1pct      — count of tokens whose probability changed by >1%
+        n_tokens_dp_gt_10pct     — count of tokens whose probability changed by >10%
+        n_tokens_dp_gt_50pct     — count of tokens whose probability changed by >50%
+        log_ratio_abs_pos00..90  — mean |log r_t| per relative-position bucket
+
+    (log_ratio_abs_std dropped — std of all valid is more honestly captured by
+    looking at p99 vs mean, and computing it cleanly without boolean indexing
+    requires another sync.)
+
+    Threshold rationale: |log r_t| > log(1+x) means the probability ratio
+    moved by more than x. log(1.01) ≈ 0.01, log(1.10) ≈ 0.095, log(1.50) ≈ 0.405.
+    We use 0.01 / 0.10 / 0.50 as approximate thresholds.
+
+    Always returns the full key set (zeros where input is empty/all-padded), so
+    downstream `strategy.all_reduce(status)` sees identical keys on every rank.
+    Returning a partial/empty dict on some ranks would deadlock the per-key
+    NCCL all_reduce — that bug killed v3 (Perlmutter 52616953, watchdog timeout
+    on a NumelIn=1 ALLREDUCE).
+    """
+    zero_metrics = _log_ratio_diag_zero_metrics(n_position_buckets)
+
+    if log_probs.numel() == 0:
+        return zero_metrics
+
+    abs_log_ratio = (log_probs - old_log_probs).detach().abs().clamp(max=20.0).float()
+    mask_f = loss_mask.float()
+    masked = abs_log_ratio * mask_f
+
+    # SYNC #1 (early, unavoidable): need int n_valid to determine topk's k.
+    n_valid_int = int(mask_f.sum().item())
+    if n_valid_int == 0:
+        return zero_metrics
+    n_valid_t = torch.as_tensor(float(n_valid_int), device=log_probs.device)
+
+    # Build all GPU-resident scalar tensors first; no sync until the final stack.
+    out_tensors = {
+        "log_ratio_abs_mean":   masked.sum() / n_valid_t,
+        "log_ratio_abs_max":    masked.max(),
+        "n_tokens_dp_gt_1pct":  ((abs_log_ratio > 0.01) * mask_f).sum(),
+        "n_tokens_dp_gt_10pct": ((abs_log_ratio > 0.10) * mask_f).sum(),
+        "n_tokens_dp_gt_50pct": ((abs_log_ratio > 0.50) * mask_f).sum(),
+    }
+
+    # p99 via topk, no sort. Sentinel masks out invalid positions.
+    sentinel = torch.tensor(-1.0e9, device=log_probs.device, dtype=abs_log_ratio.dtype)
+    flat = torch.where(mask_f.bool(), abs_log_ratio, sentinel).flatten()
+    k = max(1, n_valid_int // 100)
+    out_tensors["log_ratio_abs_p99"] = torch.topk(flat, k=min(k, flat.numel()), largest=True).values.min()
+
+    # Per-position bucket means via single scatter_add (no Python-loop allocations).
+    B, T = log_probs.shape
+    seq_lens = mask_f.sum(dim=-1, keepdim=True).clamp(min=1)
+    positions = torch.arange(T, device=log_probs.device, dtype=torch.float32).unsqueeze(0).expand(B, T)
+    buckets = (positions / seq_lens * n_position_buckets).clamp(0, n_position_buckets - 1).long()
+    bsums = torch.zeros(n_position_buckets, device=log_probs.device, dtype=torch.float32)
+    bcounts = torch.zeros(n_position_buckets, device=log_probs.device, dtype=torch.float32)
+    bsums.scatter_add_(0, buckets.flatten(), masked.flatten())
+    bcounts.scatter_add_(0, buckets.flatten(), mask_f.flatten())
+    bucket_means = bsums / bcounts.clamp(min=1)
+
+    # SYNC #2 (final): stack everything, transfer once.
+    keys = list(out_tensors.keys())
+    base_vals = torch.stack([out_tensors[k].float() for k in keys]).cpu().tolist()
+    metrics = dict(zip(keys, base_vals))
+    bucket_vals = bucket_means.cpu().tolist()
+    for i in range(n_position_buckets):
+        metrics[f"log_ratio_abs_pos{i * (100 // n_position_buckets):02d}"] = bucket_vals[i]
+
+    return metrics
+
+
 @register_policy_loss(PolicyLossType.REGULAR)
 @register_policy_loss(PolicyLossType.DUAL_CLIP)
 def ppo_policy_loss(

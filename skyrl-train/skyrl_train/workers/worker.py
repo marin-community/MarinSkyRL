@@ -800,10 +800,33 @@ class PolicyWorkerBase(Worker):
         self.strategy.backward(loss, self.model, self.optimizer)
 
         grad_norm = None
+        ratio_diag = {}
         if (local_step + 1) % accumulation_steps == 0:
             grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
+
+            # Per-token log-ratio diagnostics — runs on every rank on the last
+            # micro-batch of each global_step, AFTER the optimizer step. The
+            # downstream `strategy.all_reduce(status)` iterates per-key, so all
+            # ranks MUST contribute the same key set or the per-key NCCL all_reduce
+            # deadlocks. v2 violated this with rank-0-only gating (52593758); v3
+            # violated it via early returns inside the helper when n_valid==0
+            # (52616953 — watchdog timeout on a NumelIn=1 ALLREDUCE). v4 wraps
+            # in try/except and falls back to a zeros dict with the full key set.
+            from skyrl_train.utils.ppo_utils import (
+                compute_log_ratio_diagnostics,
+                _log_ratio_diag_zero_metrics,
+            )
+            try:
+                ratio_diag = compute_log_ratio_diagnostics(
+                    log_probs=action_log_probs,
+                    old_log_probs=old_action_log_probs,
+                    loss_mask=loss_mask,
+                )
+            except Exception as _e:
+                logger.warning(f"compute_log_ratio_diagnostics failed: {_e!r}; emitting zeros")
+                ratio_diag = _log_ratio_diag_zero_metrics()
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
@@ -816,6 +839,11 @@ class PolicyWorkerBase(Worker):
             "ppo_clip_ratio": clip_ratio,
             "policy_entropy": entropy.item(),
         }
+        # Per-token log-ratio diagnostics — visibility into which tokens
+        # carry the gradient signal (heaviest-hit token, fraction of tokens
+        # with large probability changes, per-position aggregations).
+        # Trainer prefixes these with "policy/" before sending to wandb.
+        status.update(ratio_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
