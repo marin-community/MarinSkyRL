@@ -799,6 +799,34 @@ class PolicyWorkerBase(Worker):
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
+        # Per-token log-ratio diagnostics — v5 accumulates across all micro-batches
+        # of the global_step (sum + count + concat-of-topk) and finalizes once at
+        # the end. v4 ran only on the LAST micro-batch, which with
+        # `update_epochs_per_batch=1` gave a noisy single-sample view (action_log_probs
+        # is always computed BEFORE optimizer_step within a step, so the per-batch
+        # ratio reflects only vLLM↔FSDP precision noise — averaging across all
+        # micro-batches makes that signal more representative). The final scalar
+        # dict has the same wandb keys as v4 so the downstream per-key
+        # all_reduce(status) stays keyset-compatible.
+        from skyrl_train.utils.ppo_utils import (
+            _empty_log_ratio_accumulator,
+            compute_log_ratio_partial,
+            merge_log_ratio_partial,
+            finalize_log_ratio_metrics,
+            _log_ratio_diag_zero_metrics,
+        )
+        if local_step % accumulation_steps == 0 or getattr(self, "_ratio_diag_acc", None) is None:
+            self._ratio_diag_acc = _empty_log_ratio_accumulator(device=action_log_probs.device)
+        try:
+            partial = compute_log_ratio_partial(
+                log_probs=action_log_probs,
+                old_log_probs=old_action_log_probs,
+                loss_mask=loss_mask,
+            )
+            merge_log_ratio_partial(self._ratio_diag_acc, partial)
+        except Exception as _e:
+            logger.warning(f"compute_log_ratio_partial failed at local_step={local_step}: {_e!r}; skipping this micro-batch")
+
         grad_norm = None
         ratio_diag = {}
         if (local_step + 1) % accumulation_steps == 0:
@@ -806,27 +834,15 @@ class PolicyWorkerBase(Worker):
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
 
-            # Per-token log-ratio diagnostics — runs on every rank on the last
-            # micro-batch of each global_step, AFTER the optimizer step. The
-            # downstream `strategy.all_reduce(status)` iterates per-key, so all
-            # ranks MUST contribute the same key set or the per-key NCCL all_reduce
-            # deadlocks. v2 violated this with rank-0-only gating (52593758); v3
-            # violated it via early returns inside the helper when n_valid==0
-            # (52616953 — watchdog timeout on a NumelIn=1 ALLREDUCE). v4 wraps
-            # in try/except and falls back to a zeros dict with the full key set.
-            from skyrl_train.utils.ppo_utils import (
-                compute_log_ratio_diagnostics,
-                _log_ratio_diag_zero_metrics,
-            )
+            # Finalize the accumulated diagnostics. Every rank must emit identical
+            # keys (the full set from _log_ratio_diag_zero_metrics) — the per-key
+            # all_reduce(status) deadlocks otherwise (killed v2/v3 of this diag).
             try:
-                ratio_diag = compute_log_ratio_diagnostics(
-                    log_probs=action_log_probs,
-                    old_log_probs=old_action_log_probs,
-                    loss_mask=loss_mask,
-                )
+                ratio_diag = finalize_log_ratio_metrics(self._ratio_diag_acc)
             except Exception as _e:
-                logger.warning(f"compute_log_ratio_diagnostics failed: {_e!r}; emitting zeros")
+                logger.warning(f"finalize_log_ratio_metrics failed: {_e!r}; emitting zeros")
                 ratio_diag = _log_ratio_diag_zero_metrics()
+            self._ratio_diag_acc = None  # reset for next global_step
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)

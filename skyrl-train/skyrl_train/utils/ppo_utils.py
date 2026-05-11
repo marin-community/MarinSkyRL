@@ -687,6 +687,166 @@ def compute_log_ratio_diagnostics(
     return metrics
 
 
+# ---------------------------------------------------------------------------
+# v5: cross-micro-batch accumulation
+# ---------------------------------------------------------------------------
+# v4 ran the full diagnostic only on the LAST micro-batch of each global_step
+# (gated by `(local_step + 1) % accumulation_steps == 0`). With
+# `update_epochs_per_batch=1`, the forward pass that produces `action_log_probs`
+# happens BEFORE optimizer_step for every micro-batch, so a single micro-batch's
+# log-ratio reflects only the vLLM↔FSDP precision delta — and observing that
+# delta on just one of 16 micro-batches yields a noisy sample.
+#
+# v5 changes the gating: every micro-batch contributes its partial stats to a
+# per-rank accumulator; the last micro-batch finalizes (divides sums by counts,
+# extracts p99 from the concatenated topk samples). The final scalar metric set
+# is identical to v4's (same wandb keys), so downstream all_reduce(status) stays
+# keyset-compatible across ranks.
+def _empty_log_ratio_accumulator(device, n_position_buckets: int = 10) -> dict:
+    """Zero-initialized per-rank accumulator for log-ratio diagnostics.
+
+    All tensors live on `device`. `topk_abs` is an empty 1-D tensor that grows
+    via torch.cat in `merge_log_ratio_partial`.
+    """
+    return {
+        "abs_sum":    torch.zeros((), device=device, dtype=torch.float32),
+        "n_valid":    torch.zeros((), device=device, dtype=torch.float32),
+        "abs_max":    torch.zeros((), device=device, dtype=torch.float32),
+        "n_gt_1pct":  torch.zeros((), device=device, dtype=torch.float32),
+        "n_gt_10pct": torch.zeros((), device=device, dtype=torch.float32),
+        "n_gt_50pct": torch.zeros((), device=device, dtype=torch.float32),
+        "topk_abs":   torch.zeros((0,), device=device, dtype=torch.float32),
+        "bsums":      torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
+        "bcounts":    torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
+    }
+
+
+def compute_log_ratio_partial(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    n_position_buckets: int = 10,
+) -> dict:
+    """Compute per-micro-batch partial stats for cross-batch log-ratio
+    accumulation. Returns a dict of GPU tensors matching the accumulator schema
+    in `_empty_log_ratio_accumulator`.
+
+    One sync per call (`int(mask_f.sum().item())`) — used to set `k_local` for
+    the topk so it never reaches into padded positions. With 16 micro-batches
+    per global_step, total per-step sync overhead is ~16 ms; finalize adds 1
+    more for the GPU→CPU stack transfer.
+
+    `topk_abs` stores this micro-batch's top-1%-of-valid values. At finalize,
+    the concatenated tensor across micro-batches is the global "top of top"
+    sample; its min approximates p99.
+    """
+    device = log_probs.device
+
+    if log_probs.numel() == 0:
+        return _empty_log_ratio_accumulator(device, n_position_buckets)
+
+    abs_log_ratio = (log_probs - old_log_probs).detach().abs().clamp(max=20.0).float()
+    mask_f = loss_mask.float()
+    masked = abs_log_ratio * mask_f
+
+    # SYNC #1 (per micro-batch): need n_valid_int to bound k_local. Without it,
+    # using flat.numel()//100 contaminates the topk with masked zeros when the
+    # response is short relative to context length (common at high max_seq_len).
+    n_valid_int = int(mask_f.sum().item())
+    if n_valid_int == 0:
+        return _empty_log_ratio_accumulator(device, n_position_buckets)
+
+    # Topk over masked-aware flat. Sentinel ensures topk never picks a padded
+    # position when k_local <= n_valid (always true by construction).
+    sentinel = torch.tensor(-1.0e9, device=device, dtype=abs_log_ratio.dtype)
+    flat = torch.where(mask_f.bool(), abs_log_ratio, sentinel).flatten()
+    k_local = max(1, n_valid_int // 100)
+    topk_abs = torch.topk(flat, k=min(k_local, flat.numel()), largest=True).values.float()
+
+    # Per-position bucket sums via single scatter_add (no Python loop allocs).
+    B, T = log_probs.shape
+    seq_lens = mask_f.sum(dim=-1, keepdim=True).clamp(min=1)
+    positions = torch.arange(T, device=device, dtype=torch.float32).unsqueeze(0).expand(B, T)
+    buckets = (positions / seq_lens * n_position_buckets).clamp(0, n_position_buckets - 1).long()
+    bsums = torch.zeros(n_position_buckets, device=device, dtype=torch.float32)
+    bcounts = torch.zeros(n_position_buckets, device=device, dtype=torch.float32)
+    bsums.scatter_add_(0, buckets.flatten(), masked.flatten())
+    bcounts.scatter_add_(0, buckets.flatten(), mask_f.flatten())
+
+    return {
+        "abs_sum":    masked.sum().float(),
+        "n_valid":    torch.as_tensor(float(n_valid_int), device=device, dtype=torch.float32),
+        "abs_max":    masked.max().float(),
+        "n_gt_1pct":  ((abs_log_ratio > 0.01) * mask_f).sum().float(),
+        "n_gt_10pct": ((abs_log_ratio > 0.10) * mask_f).sum().float(),
+        "n_gt_50pct": ((abs_log_ratio > 0.50) * mask_f).sum().float(),
+        "topk_abs":   topk_abs,
+        "bsums":      bsums,
+        "bcounts":    bcounts,
+    }
+
+
+def merge_log_ratio_partial(acc: dict, partial: dict) -> None:
+    """In-place merge: additive for sums/counts, max for abs_max, concat for
+    topk_abs. Mutates `acc`.
+    """
+    acc["abs_sum"]    = acc["abs_sum"]    + partial["abs_sum"]
+    acc["n_valid"]    = acc["n_valid"]    + partial["n_valid"]
+    acc["abs_max"]    = torch.maximum(acc["abs_max"], partial["abs_max"])
+    acc["n_gt_1pct"]  = acc["n_gt_1pct"]  + partial["n_gt_1pct"]
+    acc["n_gt_10pct"] = acc["n_gt_10pct"] + partial["n_gt_10pct"]
+    acc["n_gt_50pct"] = acc["n_gt_50pct"] + partial["n_gt_50pct"]
+    acc["topk_abs"]   = torch.cat([acc["topk_abs"], partial["topk_abs"]])
+    acc["bsums"]      = acc["bsums"]      + partial["bsums"]
+    acc["bcounts"]    = acc["bcounts"]    + partial["bcounts"]
+
+
+def finalize_log_ratio_metrics(acc: dict, n_position_buckets: int = 10) -> dict:
+    """Reduce the accumulator to the same scalar metric dict that v4 returned.
+
+    One sync (final stack→CPU transfer). Returns the full keyset always
+    (zeros where input was empty), so downstream per-key `all_reduce(status)`
+    stays keyset-compatible across ranks — the bug that killed v2/v3.
+    """
+    device = acc["abs_sum"].device
+
+    n_valid_safe = acc["n_valid"].clamp(min=1.0)
+    abs_mean = acc["abs_sum"] / n_valid_safe
+    abs_max = acc["abs_max"]
+
+    # Global p99 from concatenated per-mb topks. Each micro-batch contributed
+    # its top-1%-of-valid; the concatenation is ≈ top 1% of the global token
+    # set, and its min is ≈ p99. Slight bias when micro-batches are heavily
+    # heterogeneous in size, but monitoring-grade accuracy is sufficient.
+    if acc["topk_abs"].numel() > 0:
+        abs_p99 = acc["topk_abs"].min()
+    else:
+        abs_p99 = torch.zeros((), device=device, dtype=torch.float32)
+
+    bucket_means = acc["bsums"] / acc["bcounts"].clamp(min=1.0)
+
+    base_keys = [
+        "log_ratio_abs_mean", "log_ratio_abs_max",
+        "n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct",
+        "log_ratio_abs_p99",
+    ]
+    base_vals = torch.stack([
+        abs_mean.float(),
+        abs_max.float(),
+        acc["n_gt_1pct"].float(),
+        acc["n_gt_10pct"].float(),
+        acc["n_gt_50pct"].float(),
+        abs_p99.float(),
+    ]).cpu().tolist()
+    metrics = dict(zip(base_keys, base_vals))
+
+    bucket_vals = bucket_means.cpu().tolist()
+    for i in range(n_position_buckets):
+        metrics[f"log_ratio_abs_pos{i * (100 // n_position_buckets):02d}"] = bucket_vals[i]
+
+    return metrics
+
+
 @register_policy_loss(PolicyLossType.REGULAR)
 @register_policy_loss(PolicyLossType.DUAL_CLIP)
 def ppo_policy_loss(
