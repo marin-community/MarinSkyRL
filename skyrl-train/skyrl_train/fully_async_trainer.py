@@ -505,6 +505,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._control.should_evaluate and self.eval_dataset is not None:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
+                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
                 self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
             self._control.should_evaluate = False
 
@@ -649,6 +650,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         **{f"timing/{k}": v for k, v in self.all_timings.items()},
                         **get_system_memory_metrics(),
                     }
+                    self._log_metrics_stdout(log_payload, step=self.global_step, kind="train")
                     self.tracker.log(log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
                     await self.callback_handler.call_event_async(
                         "on_log", step_state, self._control, logs=log_payload, trainer=self

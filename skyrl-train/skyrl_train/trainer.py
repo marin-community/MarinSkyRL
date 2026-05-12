@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import shutil
@@ -384,6 +385,7 @@ class RayPPOTrainer:
         if self._control.should_evaluate and self.eval_dataset is not None:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
+                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
             self._control.should_evaluate = False
 
@@ -557,6 +559,7 @@ class RayPPOTrainer:
                         **{f"timing/{k}": v for k, v in self.all_timings.items()},
                         **get_system_memory_metrics(),
                     }
+                    self._log_metrics_stdout(log_payload, step=self.global_step, kind="train")
                     self.tracker.log(log_payload, step=self.global_step, commit=True)
                     # Call on_log callbacks
                     await self.callback_handler.call_event_async(
@@ -1670,6 +1673,23 @@ class RayPPOTrainer:
                 )
             )
         logger.info("Successfully saved model weights.")
+
+    def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
+        """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""
+        def _coerce(v):
+            try:
+                if isinstance(v, (int, float, bool, str)) or v is None:
+                    return v
+                if hasattr(v, "item"):
+                    return v.item()
+                return float(v)
+            except Exception:
+                return str(v)
+        try:
+            serialised = json.dumps({k: _coerce(v) for k, v in payload.items()}, sort_keys=True)
+        except Exception as e:
+            serialised = f'{{"_serialize_error": "{e}"}}'
+        logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")
 
     def update_ref_with_policy(self):
         """
