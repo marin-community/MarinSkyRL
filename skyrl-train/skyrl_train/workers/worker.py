@@ -645,11 +645,22 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        # Lazily instantiate ZClip (and StaleClip if installed) on first call.
-        if not hasattr(self, "_z_clip"):
+        # Per-batch stale_min for StaleClip (None for sync RL, populated for async).
+        stale_min = train_data.metadata.get("stale_min")
+        # Lazily instantiate spike-mitigation objects on first call.
+        if not hasattr(self, "_stale_clip"):
+            from skyrl_train.utils.stale_clip import StaleClip
             from skyrl_train.utils.zclip import ZClip
 
+            sc_cfg = getattr(self.cfg.trainer.algorithm, "stale_clip", None)
             zc_cfg = getattr(self.cfg.trainer.algorithm, "z_clip", None)
+            self._stale_clip = StaleClip(
+                alpha=getattr(sc_cfg, "alpha", 0.3) if sc_cfg is not None else 0.3,
+                entropy_threshold=getattr(sc_cfg, "entropy_threshold", 0.15) if sc_cfg is not None else 0.15,
+                entropy_window=getattr(sc_cfg, "entropy_window", 10) if sc_cfg is not None else 10,
+                min_lr_scale=getattr(sc_cfg, "min_lr_scale", 0.1) if sc_cfg is not None else 0.1,
+                enabled=getattr(sc_cfg, "enabled", False) if sc_cfg is not None else False,
+            )
             self._z_clip = ZClip(
                 alpha=getattr(zc_cfg, "alpha", 0.97) if zc_cfg is not None else 0.97,
                 z_thresh=getattr(zc_cfg, "z_thresh", 2.5) if zc_cfg is not None else 2.5,
@@ -665,6 +676,8 @@ class PolicyWorkerBase(Worker):
                 else False,
                 enabled=getattr(zc_cfg, "enabled", False) if zc_cfg is not None else False,
             )
+        # Stash for training_step to consume (avoids changing its signature).
+        self._current_stale_min = stale_min
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
@@ -851,18 +864,35 @@ class PolicyWorkerBase(Worker):
         ratio_diag = {}
         spike_diag = {}
         if (local_step + 1) % accumulation_steps == 0:
+            # StaleClip: read rolling entropy from prior steps' history; decide LR scale
+            # for THIS step's optimizer.step(). The current micro-batch entropy is pushed
+            # to the history AFTER the step so it informs the next step (decoupling
+            # the decision from the value that step itself produced).
+            stale_clip = getattr(self, "_stale_clip", None)
             z_clip = getattr(self, "_z_clip", None)
+            stale_min = getattr(self, "_current_stale_min", None)
+            lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
+
             grad_norm = self.strategy.optimizer_step(
                 self.optimizer,
                 self.model,
                 self.scheduler,
                 name="actor",
                 z_clip=z_clip,
+                stale_clip_lr_scale=lr_scale,
             )
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
 
-            # Surface ZClip decisions for wandb / stdout.
+            # Now push this step's entropy to the rolling window for next step.
+            if stale_clip is not None:
+                stale_clip.update_entropy(entropy.item())
+
+            # Surface decisions for logging.
+            if stale_clip is not None and stale_clip.enabled:
+                for k, v in stale_clip.last_decision.items():
+                    if isinstance(v, (int, float)):
+                        spike_diag[f"stale_clip/{k}"] = float(v)
             if z_clip is not None and z_clip.enabled:
                 for k, v in z_clip.last_decision.items():
                     if isinstance(v, (int, float)):
@@ -894,7 +924,7 @@ class PolicyWorkerBase(Worker):
         # with large probability changes, per-position aggregations).
         # Trainer prefixes these with "policy/" before sending to wandb.
         status.update(ratio_diag)
-        # Spike-mitigation decisions (ZClip / StaleClip). Empty when disabled.
+        # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
         status.update(spike_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()

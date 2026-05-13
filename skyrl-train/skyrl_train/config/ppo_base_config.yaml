@@ -169,6 +169,20 @@ trainer:
       clip_factor: 1.0         # multiplier on adaptive threshold (0.5-0.9 = aggressive)
       skip_update_on_spike: false  # if true, EMA stats are not updated when a spike is detected
 
+    # StaleClip — predictive LR damping when an all-stale batch lands in a
+    # concentrated-policy regime. Hypothesis: stale_min=0 provides an on-policy
+    # anchor that keeps IS-corrected gradients bounded; when stale_min > 0 AND
+    # entropy is below threshold, IS correlation amplifies and Adam spikes.
+    # Damping factor:
+    #   scale = 1.0 if rolling_entropy >= entropy_threshold OR stale_min == 0
+    #         = max(min_lr_scale, 1 - alpha * stale_min) otherwise
+    stale_clip:
+      enabled: false
+      alpha: 0.3               # damping rate per unit of stale_min
+      entropy_threshold: 0.15  # rolling entropy must be below this to engage
+      entropy_window: 10       # rolling-window size for entropy mean
+      min_lr_scale: 0.1        # floor on the damping scale (e.g. 0.1 = 10× cut max)
+
   # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
     # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,

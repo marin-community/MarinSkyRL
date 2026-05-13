@@ -1346,6 +1346,11 @@ class RayPPOTrainer:
         Run the training step for the policy and critic models (this is overlapped if colocate_all is False).
         """
         data.metadata["global_step"] = self.global_step
+        # Plumb the batch's minimum staleness to the worker for StaleClip.
+        # For sync RL this is absent (always 0); for fully_async_trainer it is
+        # populated alongside the other staleness metrics. Workers treat None
+        # as "no signal" and skip damping.
+        data.metadata["stale_min"] = self.all_metrics.get("async/staleness_min")
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):

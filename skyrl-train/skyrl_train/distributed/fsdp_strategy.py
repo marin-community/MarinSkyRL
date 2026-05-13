@@ -163,13 +163,16 @@ class FSDPStrategy(DistributedStrategy):
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step.
 
-        Optional kwargs (passed through from the policy worker for spike
-        mitigation):
-          - z_clip: a ``ZClip`` instance. If enabled, the static
-            ``self.max_norm`` clip is augmented by an adaptive z-score-based
-            tighter clip applied in-place after the initial clip_grad_norm_.
+        Optional kwargs (passed through from policy worker for spike mitigation):
+          - z_clip: a ``ZClip`` instance. If enabled, the static ``self.max_norm``
+            clip is augmented by an adaptive z-score-based tighter clip applied
+            in-place after the initial clip_grad_norm_.
+          - stale_clip_lr_scale: a multiplier (default 1.0) applied to every
+            param_group's lr for this single ``optimizer.step()`` call, then
+            restored. Used by StaleClip for predictive LR damping.
         """
         z_clip = kwargs.get("z_clip", None)
+        stale_clip_lr_scale = float(kwargs.get("stale_clip_lr_scale", 1.0))
 
         grad_norm = None
         if isinstance(model, HFModelWrapper):
@@ -201,6 +204,9 @@ class FSDPStrategy(DistributedStrategy):
             grad_norm_value = float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
             effective_max = z_clip.compute_max_norm(grad_norm_value)
             if effective_max is not None and effective_max > 0:
+                # After the first clip, the current grad-vector norm is
+                # min(grad_norm_value, self.max_norm). Apply additional scaling
+                # only if effective_max is tighter than that.
                 post_static_clip_norm = (
                     self.max_norm if (self.max_norm > 0 and grad_norm_value > self.max_norm) else grad_norm_value
                 )
@@ -210,7 +216,20 @@ class FSDPStrategy(DistributedStrategy):
                         if p.grad is not None:
                             p.grad.data.mul_(extra_scale)
 
+        # StaleClip: temporarily scale every param_group's lr by the damping
+        # factor for this one optimizer.step() call, then restore.
+        original_lrs = None
+        if stale_clip_lr_scale != 1.0 and abs(stale_clip_lr_scale - 1.0) > 1e-12:
+            original_lrs = [pg["lr"] for pg in optimizer.param_groups]
+            for pg in optimizer.param_groups:
+                pg["lr"] = pg["lr"] * stale_clip_lr_scale
+
         optimizer.step()
+
+        if original_lrs is not None:
+            for pg, lr in zip(optimizer.param_groups, original_lrs):
+                pg["lr"] = lr
+
         if scheduler is not None:
             scheduler.step()
         optimizer.zero_grad()
