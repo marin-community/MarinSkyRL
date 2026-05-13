@@ -645,6 +645,26 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
+        # Lazily instantiate ZClip (and StaleClip if installed) on first call.
+        if not hasattr(self, "_z_clip"):
+            from skyrl_train.utils.zclip import ZClip
+
+            zc_cfg = getattr(self.cfg.trainer.algorithm, "z_clip", None)
+            self._z_clip = ZClip(
+                alpha=getattr(zc_cfg, "alpha", 0.97) if zc_cfg is not None else 0.97,
+                z_thresh=getattr(zc_cfg, "z_thresh", 2.5) if zc_cfg is not None else 2.5,
+                warmup_steps=getattr(zc_cfg, "warmup_steps", 25) if zc_cfg is not None else 25,
+                max_grad_norm=self.cfg.trainer.policy.optimizer_config.max_grad_norm,
+                clip_option=getattr(zc_cfg, "clip_option", "adaptive_scaling")
+                if zc_cfg is not None
+                else "adaptive_scaling",
+                clip_factor=getattr(zc_cfg, "clip_factor", 1.0) if zc_cfg is not None else 1.0,
+                mode=getattr(zc_cfg, "mode", "zscore") if zc_cfg is not None else "zscore",
+                skip_update_on_spike=getattr(zc_cfg, "skip_update_on_spike", False)
+                if zc_cfg is not None
+                else False,
+                enabled=getattr(zc_cfg, "enabled", False) if zc_cfg is not None else False,
+            )
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
@@ -829,10 +849,24 @@ class PolicyWorkerBase(Worker):
 
         grad_norm = None
         ratio_diag = {}
+        spike_diag = {}
         if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+            z_clip = getattr(self, "_z_clip", None)
+            grad_norm = self.strategy.optimizer_step(
+                self.optimizer,
+                self.model,
+                self.scheduler,
+                name="actor",
+                z_clip=z_clip,
+            )
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
+
+            # Surface ZClip decisions for wandb / stdout.
+            if z_clip is not None and z_clip.enabled:
+                for k, v in z_clip.last_decision.items():
+                    if isinstance(v, (int, float)):
+                        spike_diag[f"z_clip/{k}"] = float(v)
 
             # Finalize the accumulated diagnostics. Every rank must emit identical
             # keys (the full set from _log_ratio_diag_zero_metrics) — the per-key
@@ -860,6 +894,8 @@ class PolicyWorkerBase(Worker):
         # with large probability changes, per-position aggregations).
         # Trainer prefixes these with "policy/" before sending to wandb.
         status.update(ratio_diag)
+        # Spike-mitigation decisions (ZClip / StaleClip). Empty when disabled.
+        status.update(spike_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 

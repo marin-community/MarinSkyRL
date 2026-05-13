@@ -151,10 +151,24 @@ trainer:
       ppo_kl_coef: 1.0
     
     # cispo parameters (only used when policy_loss_type: "cispo")
-    cispo: 
+    cispo:
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
-  
+
+    # ZClip — reactive grad-norm spike mitigation via EMA z-score.
+    # Port of https://github.com/bluorion-com/ZClip. When enabled, replaces the
+    # static `policy.optimizer_config.max_grad_norm` clip with an adaptive one
+    # whose ceiling drops when grad_norm is an outlier vs recent EMA.
+    z_clip:
+      enabled: false
+      alpha: 0.97              # EMA smoothing for mean/var of grad_norm
+      z_thresh: 2.5            # z-score threshold for spike detection
+      warmup_steps: 25         # collect grad_norms before EMA initialization
+      mode: "zscore"           # "zscore" or "percentile"
+      clip_option: "adaptive_scaling"   # "adaptive_scaling" or "mean" (only for mode=zscore)
+      clip_factor: 1.0         # multiplier on adaptive threshold (0.5-0.9 = aggressive)
+      skip_update_on_spike: false  # if true, EMA stats are not updated when a spike is detected
+
   # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
     # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,

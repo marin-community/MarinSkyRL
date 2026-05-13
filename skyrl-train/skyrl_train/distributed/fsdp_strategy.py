@@ -161,7 +161,16 @@ class FSDPStrategy(DistributedStrategy):
         name="model",
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
-        """Perform optimizer step"""
+        """Perform optimizer step.
+
+        Optional kwargs (passed through from the policy worker for spike
+        mitigation):
+          - z_clip: a ``ZClip`` instance. If enabled, the static
+            ``self.max_norm`` clip is augmented by an adaptive z-score-based
+            tighter clip applied in-place after the initial clip_grad_norm_.
+        """
+        z_clip = kwargs.get("z_clip", None)
+
         grad_norm = None
         if isinstance(model, HFModelWrapper):
             model = model.model
@@ -184,6 +193,22 @@ class FSDPStrategy(DistributedStrategy):
                 logger.warning(f"grad_norm is not finite: {grad_norm}")
             optimizer.zero_grad()
             return grad_norm
+
+        # ZClip: ask for an adaptive effective max_norm based on grad_norm history.
+        # Gradients have already been clipped to self.max_norm above; if ZClip
+        # wants a tighter clip we apply additional in-place scaling.
+        if z_clip is not None and z_clip.enabled and grad_norm is not None:
+            grad_norm_value = float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
+            effective_max = z_clip.compute_max_norm(grad_norm_value)
+            if effective_max is not None and effective_max > 0:
+                post_static_clip_norm = (
+                    self.max_norm if (self.max_norm > 0 and grad_norm_value > self.max_norm) else grad_norm_value
+                )
+                if post_static_clip_norm > 0 and effective_max < post_static_clip_norm:
+                    extra_scale = effective_max / post_static_clip_norm
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p.grad.data.mul_(extra_scale)
 
         optimizer.step()
         if scheduler is not None:
