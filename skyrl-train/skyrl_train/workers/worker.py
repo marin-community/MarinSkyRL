@@ -886,7 +886,17 @@ class PolicyWorkerBase(Worker):
 
             # Now push this step's entropy to the rolling window for next step.
             if stale_clip is not None:
-                stale_clip.update_entropy(entropy.item())
+                # All-reduce the entropy across DP ranks so every rank pushes
+                # an IDENTICAL value into its rank-local entropy_history. Without
+                # this, each rank's rolling_entropy diverges from the others,
+                # ranks straddle the entropy_threshold differently, and they
+                # make different `triggered`/`scale` decisions inside the same
+                # optimizer step — drifting the parameter shards apart.
+                # Smoking gun (Perlmutter 52905223): metrics show
+                #   triggered=0.625 / scale=0.8125 at stale_min=1
+                # = 5/8 ranks applying scale=0.7 and 3/8 applying 1.0.
+                entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
+                stale_clip.update_entropy(entropy_global)
 
             # Surface decisions for logging.
             if stale_clip is not None and stale_clip.enabled:
