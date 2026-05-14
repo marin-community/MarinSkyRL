@@ -36,6 +36,16 @@ class ZClip:
         warmup_steps: Steps to collect grad_norms before initializing
             the EMA. During warmup, no adaptive clipping is applied
             (only the static ``max_grad_norm`` floor, if set).
+            NOTE: tuned to 3 for short (60-80 step) RL ablations. On
+            Perlmutter 52905139 the prior 25-step warmup left ZClip
+            still in warmup_remaining=3 when a collapse-onset grad
+            spike landed (1.30 then 1.26 at steps 22-23), so the
+            mechanism never got the chance to engage. Trade-off: a
+            very short warmup means the EMA mean/var is noisy for the
+            first ~10 steps post-warmup, which can cause false
+            triggers if the first 3 samples happen to be unusually
+            low. For longer runs (>200 steps) consider raising back
+            toward 25.
         max_grad_norm: Hard ceiling for the effective clip — the
             returned value is always min(adaptive_clip, max_grad_norm).
             Set to None to let ZClip return arbitrarily large clips,
@@ -61,7 +71,7 @@ class ZClip:
         self,
         alpha: float = 0.97,
         z_thresh: float = 2.5,
-        warmup_steps: int = 25,
+        warmup_steps: int = 3,
         max_grad_norm: Optional[float] = None,
         clip_option: str = "adaptive_scaling",
         clip_factor: float = 1.0,
