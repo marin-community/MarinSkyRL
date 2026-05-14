@@ -352,23 +352,30 @@ class HarborConfigBuilder:
         # Extract PRM (Process Reward Model) config for mid-trial thrashing detection.
         # When enabled, the PRM's should_terminate() is passed as turn_callback to
         # terminus-2, allowing early termination of thrashing agents.
-        self._turn_callback = self._build_prm_turn_callback(terminal_bench_cfg)
+        self._turn_callback = self._build_prm_turn_callback()
 
         # Validate config and issue warnings
         self._validate_config()
 
-    @staticmethod
-    def _build_prm_turn_callback(terminal_bench_cfg: DictConfig):
+    def _build_prm_turn_callback(self):
         """Build a PRM turn_callback from the ``prm`` config section.
+
+        Reads from ``terminal_bench.harbor.prm`` (the standard location, already
+        normalized into ``self._harbor_cfg``). Older flat-config layouts that
+        had ``terminal_bench.prm`` at the top level are no longer supported —
+        every prod config nests ``prm`` under ``harbor``.
 
         Returns:
             A callable ``(turn, trajectory_steps, messages) -> bool`` if a PRM
             is configured, or ``None`` if disabled (``prm.name`` is null/empty).
         """
-        prm_cfg = terminal_bench_cfg.get("prm", None)
+        prm_cfg = self._harbor_cfg.get("prm", None)
         if prm_cfg is None:
             return None
 
+        # ``self._harbor_cfg`` is already a plain dict (OmegaConf.to_container'd
+        # in __init__), but be defensive in case a future caller passes a
+        # DictConfig in directly.
         if isinstance(prm_cfg, DictConfig):
             prm_cfg = OmegaConf.to_container(prm_cfg, resolve=True)
 
@@ -398,6 +405,12 @@ class HarborConfigBuilder:
 
         return harbor_fields
 
+    # Harbor-block keys that are SkyRL extensions handled outside HARBOR_SCHEMA
+    # (so the schema validator doesn't flag them as "unknown"). PRM lives here
+    # because it's consumed directly by _build_prm_turn_callback to construct
+    # a turn_callback, not by the schema-based field-mapping pipeline.
+    SKYRL_EXTENSION_KEYS = frozenset({"prm"})
+
     def _validate_config(self) -> None:
         """Validate config and issue warnings for unknown/unsupported fields."""
         all_exposed = _get_all_exposed_fields()
@@ -405,6 +418,11 @@ class HarborConfigBuilder:
 
         for key, value in self._harbor_cfg.items():
             if value is None:
+                continue
+
+            if key in self.SKYRL_EXTENSION_KEYS:
+                # Handled by a dedicated builder (e.g. _build_prm_turn_callback);
+                # not part of the schema-driven field mapping.
                 continue
 
             if key not in all_exposed:
