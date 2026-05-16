@@ -39,7 +39,25 @@ except ImportError:
     # Unified Harbor.
     from harbor.trial.hooks import TrialEvent  # type: ignore[attr-defined]
 
-    OrchestratorEvent = TrialEvent  # type: ignore[assignment]
+    # Legacy callers reference `OrchestratorEvent.TRIAL_COMPLETED`. Unified
+    # Harbor's TrialEvent enum doesn't have that member (its terminal event is
+    # `END`), so a bare `OrchestratorEvent = TrialEvent` alias would explode at
+    # attribute access time. Provide a wrapper class that maps the legacy
+    # `TRIAL_COMPLETED` name onto `TrialEvent.END` and re-exposes every other
+    # TrialEvent member by its actual name. The values are real TrialEvent enum
+    # instances, so they're accepted by the underlying TrialQueue.add_hook(...).
+    class OrchestratorEvent:  # type: ignore[no-redef]
+        """Legacy enum-shaped re-export. `TRIAL_COMPLETED` → `TrialEvent.END`."""
+
+        TRIAL_COMPLETED = TrialEvent.END
+        # Mirror unified TrialEvent so newer callers can still use the right names.
+        START = TrialEvent.START
+        ENVIRONMENT_START = TrialEvent.ENVIRONMENT_START
+        AGENT_START = TrialEvent.AGENT_START
+        VERIFICATION_START = TrialEvent.VERIFICATION_START
+        END = TrialEvent.END
+        CANCEL = TrialEvent.CANCEL
+
     TRIAL_COMPLETED_EVENT = TrialEvent.END
     _UNIFIED_HARBOR = True
 
