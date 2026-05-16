@@ -18,9 +18,14 @@ from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_rew
 from omegaconf import DictConfig
 from pathlib import Path
 
-# Harbor orchestrator and trial imports
-from harbor.orchestrators.queue import QueueOrchestrator
-from harbor.orchestrators.base import OrchestratorEvent
+# Harbor orchestrator and trial imports.
+# QueueOrchestrator + OrchestratorEvent come through a compat shim because
+# Harbor removed ``harbor.orchestrators`` in favor of ``harbor.trial.queue``
+# and ``harbor.trial.hooks``. See _harbor_compat.py for the wrapper.
+from examples.terminal_bench._harbor_compat import (
+    OrchestratorEvent,
+    QueueOrchestrator,
+)
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
 from harbor.callbacks import create_rollback_hook
