@@ -25,10 +25,10 @@ from pathlib import Path
 from examples.terminal_bench._harbor_compat import (
     OrchestratorEvent,
     QueueOrchestrator,
+    create_rollback_hook,
 )
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
-from harbor.callbacks import create_rollback_hook
 
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder

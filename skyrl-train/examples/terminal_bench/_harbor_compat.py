@@ -133,10 +133,69 @@ else:
             return self._queue
 
 
+# ---------------------------------------------------------------------------
+# create_rollback_hook: legacy callback OR no-op stub
+# ---------------------------------------------------------------------------
+# Legacy Harbor had `harbor.callbacks.create_rollback_hook(...)` which built a
+# callback that, on certain exception types (ContextLengthExceededError,
+# AgentTimeoutError), truncated `agent_result.rollout_details` to the last
+# complete turn so RL training never saw a prompt-without-response pair.
+#
+# Unified Harbor removed the `harbor.callbacks` package entirely along with
+# the rollback feature. There is no in-tree replacement.
+#
+# We expose a no-op fallback so SkyRL can keep its existing import and
+# `add_hook(TRIAL_COMPLETED_EVENT, rollback_hook)` calls working. The trade-off
+# on unified Harbor: rollout_details may contain incomplete turns on the
+# specific exception types listed above. If this degrades training, port the
+# full logic from harbor commit ca3294a4:src/harbor/callbacks/rollback_on_exception.py
+# into this file.
+
+try:
+    from harbor.callbacks import create_rollback_hook  # type: ignore[import-not-found]
+    _ROLLBACK_HOOK_SOURCE = "legacy"
+except ImportError:
+    import logging as _logging
+    _rollback_log = _logging.getLogger(__name__)
+    _rollback_warning_emitted = False
+
+    async def _noop_rollback_hook(event: Any) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    def create_rollback_hook(  # type: ignore[no-redef]
+        exception_types: Optional[Iterable[str]] = None,
+        on_complete_failure: str = "mark_metadata",
+        preserve_partial_logprobs: bool = False,
+    ):
+        """No-op rollback hook for unified Harbor (harbor.callbacks removed).
+
+        Returns an awaitable that does nothing. rollout_details on the trial
+        result are left as-is; downstream callers that depend on truncation
+        on ContextLengthExceededError / AgentTimeoutError may see incomplete
+        turns. See module docstring above for the porting path.
+        """
+        global _rollback_warning_emitted
+        if not _rollback_warning_emitted:
+            _rollback_log.warning(
+                "create_rollback_hook: harbor.callbacks is gone on unified "
+                "Harbor; returning a no-op stub. rollout_details may include "
+                "incomplete turns when trials end with %s. "
+                "Port harbor commit ca3294a4 callbacks/rollback_on_exception.py "
+                "into _harbor_compat.py if RL training needs the truncation.",
+                sorted(exception_types) if exception_types else "any exception",
+            )
+            _rollback_warning_emitted = True
+        return _noop_rollback_hook
+
+    _ROLLBACK_HOOK_SOURCE = "noop"
+
+
 __all__ = [
     "OrchestratorEvent",
     "TrialEvent",
     "TRIAL_COMPLETED_EVENT",
     "QueueOrchestrator",
+    "create_rollback_hook",
     "_UNIFIED_HARBOR",
+    "_ROLLBACK_HOOK_SOURCE",
 ]
