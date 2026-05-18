@@ -676,6 +676,17 @@ class PolicyWorkerBase(Worker):
                 else False,
                 enabled=getattr(zc_cfg, "enabled", False) if zc_cfg is not None else False,
             )
+            # If load_checkpoint() stashed prior ZClip / StaleClip state from a
+            # resumed run, restore it now that the objects exist. This keeps
+            # warmup_buffer + EMA stats coherent across chain-restarts.
+            if hasattr(self, "_z_clip_state_to_restore"):
+                self._z_clip.load_state_dict(self._z_clip_state_to_restore)
+                delattr(self, "_z_clip_state_to_restore")
+            if hasattr(self, "_stale_clip_state_to_restore"):
+                load_fn = getattr(self._stale_clip, "load_state_dict", None)
+                if load_fn is not None:
+                    load_fn(self._stale_clip_state_to_restore)
+                delattr(self, "_stale_clip_state_to_restore")
         # Stash for training_step to consume (avoids changing its signature).
         self._current_stale_min = stale_min
         dataloader = BatchIterator(
@@ -953,6 +964,17 @@ class PolicyWorkerBase(Worker):
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+        # Persist ZClip / StaleClip state alongside the model so warmup
+        # counters and EMA stats survive chain-restarts. Without this,
+        # warmup_buffer resets to [] on every resume and (with default
+        # warmup_steps=25 + 60-80 step ablations) ZClip never engages.
+        client_state = {}
+        if hasattr(self, "_z_clip") and self._z_clip is not None:
+            client_state["z_clip_state"] = self._z_clip.state_dict()
+        if hasattr(self, "_stale_clip") and self._stale_clip is not None:
+            sc_state = getattr(self._stale_clip, "state_dict", lambda: None)()
+            if sc_state is not None:
+                client_state["stale_clip_state"] = sc_state
         self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -960,6 +982,7 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
+            client_state=client_state,
         )
 
     def load_checkpoint(
@@ -973,6 +996,14 @@ class PolicyWorkerBase(Worker):
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states,
         )
+        # Restore ZClip / StaleClip state if present. The actual ZClip/StaleClip
+        # objects are lazy-instantiated on the first ppo_train() call, so we
+        # stash the loaded state on self and apply it inside ppo_train.
+        client_state = (states or {}).get("client_state") or {}
+        if "z_clip_state" in client_state:
+            self._z_clip_state_to_restore = client_state["z_clip_state"]
+        if "stale_clip_state" in client_state:
+            self._stale_clip_state_to_restore = client_state["stale_clip_state"]
         return states
 
     def save_hf_model(self, export_dir: str, tokenizer):
