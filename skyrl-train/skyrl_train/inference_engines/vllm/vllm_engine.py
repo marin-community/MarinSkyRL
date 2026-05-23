@@ -1072,13 +1072,54 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
         # vLLM's get_open_port() queries a free port then releases the socket;
         # if multiple engines on the same node call it simultaneously, they can
-        # get the same port.  A random delay desynchronises the calls.
+        # get the same port. A random pre-startup delay desynchronises the
+        # within-job case.
+        #
+        # The retry loop below additionally addresses the *cross-job* race
+        # we hit on Jupiter A3 RL chain restarts (job 485102, 2026-05-23):
+        # Slurm reaps the prior chain leader on TIMEOUT, allocates the same
+        # nodes to the next-in-chain immediately, but kernel socket TIME_WAIT
+        # can hold the prior holder's bound port for up to ~60 s. A 1.5-3 s
+        # stagger doesn't bridge that gap, so without a retry the new chain
+        # head exits 1 in ~20 min with EADDRINUSE and the chain visibly
+        # "loses" a restart slot until the next dependency-satisfied slot
+        # finally gets a fresh port.
+        #
+        # 5 attempts with exponential backoff (15→30→60→120→240 s) bridges
+        # the TIME_WAIT window cleanly while staying well under the outer
+        # wait_for_engine_startup deadline.
         import random, time
-        _stagger = random.uniform(1.5, 3.0)
-        logger.info(f"Engine startup stagger: sleeping {_stagger:.2f}s to avoid port collisions")
-        time.sleep(_stagger)
+        from torch.distributed import DistNetworkError
 
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+        _MAX_INIT_ATTEMPTS = 5
+        _BACKOFF_BASE_SEC = 15.0
+        engine = None
+        for _attempt in range(_MAX_INIT_ATTEMPTS):
+            _stagger = random.uniform(1.5, 3.0)
+            logger.info(
+                f"Engine startup stagger: sleeping {_stagger:.2f}s "
+                f"(attempt {_attempt + 1}/{_MAX_INIT_ATTEMPTS}) to avoid port collisions"
+            )
+            time.sleep(_stagger)
+            try:
+                engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+                break
+            except DistNetworkError as e:
+                msg = str(e)
+                if "EADDRINUSE" not in msg and "already in use" not in msg.lower():
+                    raise
+                if _attempt == _MAX_INIT_ATTEMPTS - 1:
+                    logger.error(
+                        f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up"
+                    )
+                    raise
+                _backoff = _BACKOFF_BASE_SEC * (2 ** _attempt)
+                logger.warning(
+                    f"Engine init hit EADDRINUSE on attempt {_attempt + 1}/{_MAX_INIT_ATTEMPTS}; "
+                    f"retrying in {_backoff:.0f}s (likely kernel socket TIME_WAIT from prior job): {msg.splitlines()[0]}"
+                )
+                time.sleep(_backoff)
+        assert engine is not None  # loop either breaks with engine set or raises
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
