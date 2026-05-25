@@ -242,11 +242,23 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
 
         # Register rollback hook to ensure conversation consistency on exceptions.
-        # When a trial fails with ContextLengthExceededError or AgentTimeoutError,
-        # this hook rolls back rollout_details to the last complete turn, ensuring
-        # that any turn with a prompt has a matching response (and logprobs if collected).
+        # When a trial fails with one of the gated exception types, this hook
+        # rolls back rollout_details to the last complete turn, ensuring that
+        # any turn with a prompt has a matching response (and logprobs if
+        # collected). v2 broaden (2026-05-25): added `ValueError` because the
+        # vLLM serving_chat path raises ValueError for 32k-token validation
+        # failures (request exceeds max_input_tokens). Those used to be
+        # bypassing the rollback path and leaving dangling Ray ObjectRefs,
+        # which the v6a / v3 maxgn09 post-mortem identified as the dominant
+        # trigger of the Ray ref_count race that's still killing chain links
+        # even after the original ContextLengthExceededError / AgentTimeoutError
+        # patch landed (commit f8205b1).
         rollback_hook = create_rollback_hook(
-            exception_types={"ContextLengthExceededError", "AgentTimeoutError"},
+            exception_types={
+                "ContextLengthExceededError",
+                "AgentTimeoutError",
+                "ValueError",
+            },
             on_complete_failure="mark_metadata",
             preserve_partial_logprobs=False,
         )
@@ -390,9 +402,14 @@ class TerminalBenchGenerator(GeneratorInterface):
                 retry_config=self._retry_config,
             )
 
-            # Register rollback hook for eval orchestrator (same as training)
+            # Register rollback hook for eval orchestrator (same as training).
+            # See the training-side comment above re: ValueError addition.
             rollback_hook = create_rollback_hook(
-                exception_types={"ContextLengthExceededError", "AgentTimeoutError"},
+                exception_types={
+                    "ContextLengthExceededError",
+                    "AgentTimeoutError",
+                    "ValueError",
+                },
                 on_complete_failure="mark_metadata",
                 preserve_partial_logprobs=False,
             )

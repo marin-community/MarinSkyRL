@@ -309,10 +309,20 @@ except ImportError:
                         )
 
                 self._add_rollback_metadata(result, rollback_result)
-                self._logger.debug(
-                    "Rollback complete for %s: action=%s",
+                # v2 (2026-05-25): elevated from debug → info so we get
+                # observable per-trial confirmation that the rollback hook
+                # actually fired. Previously the only signal was a missing
+                # warning when the legacy stub no-op'd; INFO lets us count
+                # invocations directly (`grep "rollback_hook fired" .out`)
+                # and correlate against the Ray ref_count warning rate.
+                self._logger.info(
+                    "rollback_hook fired: trial=%s exc=%s action=%s "
+                    "orig_turns=%d final_turns=%d",
                     result.trial_name,
+                    exception_type,
                     rollback_result.action.value,
+                    rollback_result.original_turn_count,
+                    rollback_result.final_turn_count,
                 )
 
             def _rollback_to_last_complete_turn(self, result) -> "_RollbackResult":
