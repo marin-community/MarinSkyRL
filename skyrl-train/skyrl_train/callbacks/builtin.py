@@ -195,8 +195,13 @@ class HFHubUploadCallback(TrainerCallback):
         upload_on_train_end: Whether to upload the final model when training ends.
         private: Whether to create a private repository.
         revision: Branch to upload to (default: "main").
-        path_in_repo_prefix: Prefix for upload path (default: "checkpoints").
-            Models are uploaded to "{prefix}/step_{N}/".
+        upload_mode: "latest" (default) uploads each saved step to the repo ROOT,
+            overwriting the previous root weights so the repo is always
+            from_pretrained-able with zero per-step bloat. "all" additionally
+            archives each step under "{path_in_repo_prefix}/step_{N}/" while still
+            keeping the newest weights at root.
+        path_in_repo_prefix: Prefix for the per-step archive path used only in
+            "all" mode (default: "checkpoints"). Archives go to "{prefix}/step_{N}/".
     """
 
     def __init__(
@@ -206,6 +211,7 @@ class HFHubUploadCallback(TrainerCallback):
         upload_on_train_end: bool = True,
         private: bool = False,
         revision: str = "main",
+        upload_mode: str = "latest",
         path_in_repo_prefix: str = "checkpoints",
     ):
         import os
@@ -215,6 +221,7 @@ class HFHubUploadCallback(TrainerCallback):
         self.upload_on_train_end = upload_on_train_end
         self.private = private
         self.revision = revision
+        self.upload_mode = upload_mode
         self.path_in_repo_prefix = path_in_repo_prefix
         self._pending_uploads: List[int] = []  # Steps that need uploading
         self._export_path: Optional[str] = None
@@ -317,21 +324,32 @@ class HFHubUploadCallback(TrainerCallback):
                 logger.warning(f"HFHubUploadCallback: Model path not found: {model_path}")
                 continue
 
-            path_in_repo = f"{self.path_in_repo_prefix}/step_{step}"
-
-            try:
-                logger.info(f"HFHubUploadCallback: Uploading {model_path} to {self.repo_id}/{path_in_repo}")
-                api.upload_folder(
-                    folder_path=str(model_path),
-                    repo_id=self.repo_id,
-                    path_in_repo=path_in_repo,
-                    repo_type="model",
-                    revision=self.revision,
-                    commit_message=f"Upload checkpoint at step {step}",
+            # Always upload the step to the repo ROOT (path_in_repo="" => repo root in
+            # huggingface_hub), overwriting prior root weights. Whichever step uploads
+            # last naturally wins root, keeping the repo from_pretrained-able. In "all"
+            # mode we additionally archive each step under "{prefix}/step_{N}/".
+            upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
+            if self.upload_mode == "all":
+                archive_path = f"{self.path_in_repo_prefix}/step_{step}"
+                upload_targets.append(
+                    (archive_path, f"Archive checkpoint at step {step}")
                 )
-                logger.info(f"HFHubUploadCallback: Successfully uploaded step {step}")
-            except Exception as e:
-                logger.error(f"HFHubUploadCallback: Failed to upload step {step}: {e}")
+
+            for path_in_repo, commit_message in upload_targets:
+                dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
+                try:
+                    logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
+                    api.upload_folder(
+                        folder_path=str(model_path),
+                        repo_id=self.repo_id,
+                        path_in_repo=path_in_repo,
+                        repo_type="model",
+                        revision=self.revision,
+                        commit_message=commit_message,
+                    )
+                    logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
+                except Exception as e:
+                    logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
 
         self._pending_uploads.clear()
 
@@ -961,6 +979,7 @@ def create_default_callbacks(cfg: "DictConfig") -> List[TrainerCallback]:
     if hf_hub_repo_id and hf_save_interval > 0:
         hf_hub_private = getattr(cfg.trainer, "hf_hub_private", False)
         hf_hub_revision = getattr(cfg.trainer, "hf_hub_revision", "main")
+        hf_upload_mode = getattr(cfg.trainer, "hf_upload_mode", "latest")
         callbacks.append(
             HFHubUploadCallback(
                 repo_id=hf_hub_repo_id,
@@ -968,6 +987,7 @@ def create_default_callbacks(cfg: "DictConfig") -> List[TrainerCallback]:
                 upload_on_train_end=True,
                 private=hf_hub_private,
                 revision=hf_hub_revision,
+                upload_mode=hf_upload_mode,
             )
         )
 
