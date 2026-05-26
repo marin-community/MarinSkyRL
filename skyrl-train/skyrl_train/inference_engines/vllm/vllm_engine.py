@@ -1257,17 +1257,54 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return final_output
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        """Generate responses using vLLM's async engine."""
+        """Generate responses using vLLM's async engine.
+
+        v2 (2026-05-26): wrapped in try/except to explicitly abort all
+        sibling in-flight vLLM requests when any task in this batch raises
+        (typical case: vLLM serving_chat ValueError on 32k-token validation).
+        Without this, the failed task unwinds Python but its sibling tasks'
+        Ray ObjectRefs leak into the entrypoint actor's distributed-refcount
+        state — that's the `reference_count.cc:1619` SIGABRT pattern that's
+        been killing the v3 maxgn09_hint chain links one after another even
+        after the harbor rollback_on_exception hook landed (the hook fires
+        AFTER the trial, but the ObjectRefs leak DURING the generate batch).
+        See agent_logs/2026-05-25_v6a-agrs_507771_moe_combine_stack_pinned.md
+        and project_ray_workercrashed_harbor_rollback.md for the chain of
+        evidence.
+        """
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
         tasks = []
+        request_ids: list[str] = []
         for prompt in prompt_token_ids:
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
             request_id = str(uuid4().hex)
+            request_ids.append(request_id)
             task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
             tasks.append(task)
-        outputs = await asyncio.gather(*tasks)
+        try:
+            outputs = await asyncio.gather(*tasks)
+        except BaseException as e:
+            # Cancel any sibling asyncio tasks still in flight.
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            # Abort their vLLM-side request state so Ray releases the
+            # ObjectRefs and the entrypoint's distributed-refcount table
+            # doesn't accumulate orphan entries. We tolerate failures of
+            # the abort itself — the goal is best-effort cleanup, not a
+            # second hard exception.
+            try:
+                engine = self._get_engine()
+                await engine.abort(request_ids)
+            except Exception as abort_exc:
+                logger.warning(
+                    "generate() failed with %r and vllm engine.abort cleanup "
+                    "also failed with %r — Ray ObjectRefs may leak",
+                    e, abort_exc,
+                )
+            raise
 
         return self._postprocess_outputs(outputs)
 
