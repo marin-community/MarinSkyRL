@@ -54,6 +54,42 @@ def _get_fd_usage() -> tuple:
         return -1, -1, -1, 0.0
 
 
+def _get_mem_usage() -> tuple:
+    """Get this process's RSS + system available memory (Linux /proc).
+
+    Added 2026-05-28 to test the OOM hypothesis: the driver aborts in
+    `uv__epoll_ctl_prep` with plenty of FD headroom, so the suspected cause is
+    host memory exhaustion (ENOMEM), not file descriptors. Self-contained
+    (no psutil) — reads /proc directly.
+
+    Returns:
+        Tuple of (rss_kb, mem_avail_kb, mem_total_kb, system_percent_used).
+        Returns (-1, -1, -1, 0.0) on any failure (e.g. /proc unavailable).
+    """
+    try:
+        rss_kb = -1
+        with open(f"/proc/{os.getpid()}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_kb = int(line.split()[1])
+                    break
+        mem_avail_kb = mem_total_kb = -1
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    mem_avail_kb = int(line.split()[1])
+                elif line.startswith("MemTotal:"):
+                    mem_total_kb = int(line.split()[1])
+        system_pct = (
+            (mem_total_kb - mem_avail_kb) / mem_total_kb * 100
+            if mem_total_kb > 0
+            else 0.0
+        )
+        return rss_kb, mem_avail_kb, mem_total_kb, system_pct
+    except Exception:
+        return -1, -1, -1, 0.0
+
+
 def _log_status() -> None:
     """Log current file descriptor status with the [fd-monitor] prefix."""
     current, soft, hard, percent = _get_fd_usage()
@@ -83,6 +119,33 @@ def _log_status() -> None:
             "[fd-monitor] Consider reducing --n_concurrent or increasing ulimit -n",
             flush=True,
         )
+
+    # Memory telemetry (RSS + system available) — the suspected cause of the
+    # driver SIGABRT once FDs were ruled out (see
+    # agent_logs/2026-05-28_fresh_a3_chain_crash_not_fd.md).
+    rss_kb, avail_kb, total_kb, sys_pct = _get_mem_usage()
+    if rss_kb >= 0 and total_kb > 0:
+        if sys_pct >= 95:
+            mlevel = "CRITICAL"
+        elif sys_pct >= 85:
+            mlevel = "WARNING"
+        elif sys_pct >= 70:
+            mlevel = "INFO"
+        else:
+            mlevel = "OK"
+        gib = 1048576.0  # KiB per GiB
+        print(
+            f"[fd-monitor] [{timestamp}] {mlevel}: RSS {rss_kb / gib:.2f} GiB | "
+            f"node mem {(total_kb - avail_kb) / gib:.1f}/{total_kb / gib:.1f} GiB used "
+            f"({sys_pct:.1f}%), avail {avail_kb / gib:.1f} GiB",
+            flush=True,
+        )
+        if sys_pct >= 85:
+            print(
+                "[fd-monitor] Node memory pressure HIGH — consider reducing "
+                "n_concurrent_trials / num_parallel_generation_workers",
+                flush=True,
+            )
 
 
 def _run(stop_event: threading.Event, interval: int) -> None:
