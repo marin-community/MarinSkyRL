@@ -1437,21 +1437,48 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
+            #
+            # Input-overflow (VLLMValidationError raised at serving.py during
+            # input validation, e.g. "You passed 32769 input tokens ... context
+            # length is only 32768") is a *deterministic* client error: retrying
+            # the identical over-budget prompt can never succeed. Classify it as
+            # HTTP 400 (BAD_REQUEST) so that downstream LiteLLM/Harbor map it to
+            # a ContextWindowExceededError (non-retryable) instead of treating a
+            # generic 500 as a transient server error and retrying. Retrying the
+            # doomed request across many concurrent trials is what exhausts the
+            # entrypoint actor's file descriptors and aborts its uvloop event
+            # loop (uv__epoll_ctl_prep SIGABRT) -> ray.WorkerCrashedError.
+            # See project notes: nemotron-junit a3 #11 (chain 521442-448).
+            is_input_overflow = False
+            try:
+                from vllm.exceptions import VLLMValidationError
+
+                if isinstance(e, VLLMValidationError):
+                    param = getattr(e, "parameter", None)
+                    is_input_overflow = param == "input_tokens" or "input tokens" in str(e)
+            except ImportError:
+                # Older vLLM without VLLMValidationError: fall back to message match.
+                is_input_overflow = "input tokens" in str(e) and "context length" in str(e)
+
+            status = HTTPStatus.BAD_REQUEST if is_input_overflow else HTTPStatus.INTERNAL_SERVER_ERROR
+            if is_input_overflow:
+                logger.warning("Input-overflow rejected by vLLM serving (returning 400, non-retryable): %s", e)
+
             if _parse_vllm_version() >= version.parse("0.10.0"):
                 from vllm.entrypoints.openai.protocol import ErrorInfo
 
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
-                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                        type=status.phrase,
+                        code=status.value,
                     ),
                 ).model_dump()
             else:
                 return ErrorResponse(
                     message=str(e),
-                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    type=status.phrase,
+                    code=status.value,
                 ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
