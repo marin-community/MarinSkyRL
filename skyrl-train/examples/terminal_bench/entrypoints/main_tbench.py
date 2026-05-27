@@ -14,6 +14,7 @@ from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
 from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
+from examples.terminal_bench.fd_monitor import start_fd_monitor
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trainer import RayPPOTrainer
 
@@ -92,6 +93,11 @@ class TerminalBenchExp(BasePPOExp):
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
+    # Start the file-descriptor monitor on the driver process. This is the
+    # process whose logs show "(skyrl_entrypoint pid=...)" and which FD-aborts
+    # (uv__epoll_ctl_prep SIGABRT) on long a3 RL chains. Self-contained daemon
+    # thread; only runs here (the driver), not in the per-rank Ray workers.
+    start_fd_monitor()
     exp = TerminalBenchExp(cfg)
     exp.run()
 
