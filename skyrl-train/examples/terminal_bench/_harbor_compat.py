@@ -21,6 +21,7 @@ Drop this file once we drop pre-unification Harbor support.
 from __future__ import annotations
 
 import asyncio
+import gc
 from typing import Any, Iterable, Optional
 
 
@@ -309,6 +310,49 @@ except ImportError:
                         )
 
                 self._add_rollback_metadata(result, rollback_result)
+
+                # ----------------------------------------------------------------
+                # Ray distributed-refcount leak fix (2026-05-28)
+                # ----------------------------------------------------------------
+                # Trigger: high-volume AgentTimeoutError trials that abort with
+                # ZERO rollout collected (action=NONE reason="rollout_details_not_
+                # collected", or CLEARED / no_agent_result). On job 53509359
+                # 2487/2506 hook firings were exactly this shape — the timeout
+                # cancelled harbor's terminus_2 loop *between* LiteLLM calls, so
+                # the in-flight vLLM request's `async_success_handler` background
+                # tasks + their closures (which transitively reference the trial's
+                # Ray ObjectRefs via the request kwargs dict) were orphaned. Those
+                # circular refs only get reclaimed on a full GC pass; on a busy RL
+                # run the GC lags far enough that the entrypoint actor's Ray
+                # distributed-refcount table grows unbounded until
+                # `reference_count.cc:1619` ("ref already removed") floods and the
+                # worker SIGABRTs (~6h on 53509359). See agent_log
+                # notes/ot-agent/agent_logs/2026-05-28_maxgn09_53509359_second_abort.md.
+                #
+                # Harbor's `_safe_litellm_await` (Option 3, lite_llm.py:245) does
+                # the same gc.collect() but only fires inside the LiteLLM call's
+                # own `except BaseException` branch — which does NOT reliably run
+                # when `asyncio.wait_for` (trial.py:457) cancels the agent between
+                # turns. This TRIAL_COMPLETED/END hook, by contrast, fires in
+                # harbor's `finally`/`_cleanup_and_finalize` (trial.py:1398 ->
+                # :529) for EVERY trial, on the entrypoint actor's own event loop
+                # — the same process that owns the refcount table. Forcing a GC
+                # here on the empty-rollout branches breaks those cycles promptly
+                # so the refcount table drains per-trial instead of accumulating.
+                #
+                # Gated to the empty / cleared branches only: successful trials
+                # (and partially-complete TRUNCATED/NORMALIZED ones) carry a live,
+                # consistent rollout we must not disturb, and a gc.collect() on
+                # every successful trial would be a needless per-trial stall at
+                # high n_concurrent_trials. TIS-agnostic: this neither reads nor
+                # mutates rollout_details / logprobs — it only reclaims orphaned
+                # Python objects, so behavior is identical with use_tis on or off.
+                if rollback_result.action in (
+                    _RollbackAction.NONE,
+                    _RollbackAction.CLEARED,
+                ) and rollback_result.final_turn_count == 0:
+                    self._release_dangling_refs()
+
                 # v2 (2026-05-25): elevated from debug → info so we get
                 # observable per-trial confirmation that the rollback hook
                 # actually fired. Previously the only signal was a missing
@@ -480,6 +524,26 @@ except ImportError:
                     "timestamp": _datetime.now().isoformat(),
                     **rollback_result.details,
                 }
+
+            def _release_dangling_refs(self) -> None:
+                """Reclaim orphaned Ray ObjectRefs left by a zero-rollout trial.
+
+                Called only on the empty-rollout / cleared branches (an
+                AgentTimeoutError / ContextLengthExceededError trial that aborted
+                before producing any usable turn). A double gc.collect() breaks
+                the circular references between LiteLLM ``Logging`` objects, their
+                request-kwargs dicts, and the Ray ObjectRef closures held by
+                orphaned ``async_success_handler`` background tasks — the same two
+                passes harbor's ``_safe_litellm_await`` uses (catches generational
+                cycles a single pass misses). Best-effort: cleanup must never
+                crash the hook. See the leak comment in ``__call__`` and
+                notes/ot-agent/agent_logs/2026-05-28_maxgn09_53509359_second_abort.md.
+                """
+                try:
+                    gc.collect()
+                    gc.collect()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    pass
 
         def create_rollback_hook(  # type: ignore[no-redef]
             on_complete_failure: str = "mark_metadata",
