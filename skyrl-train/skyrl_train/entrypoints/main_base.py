@@ -447,24 +447,6 @@ class BasePPOExp:
 
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Force the orchestrator onto CPython's stock asyncio event loop (epoll),
-    # NOT uvloop. Ray installs uvloop globally in every worker by default
-    # (RAY_USE_UVLOOP defaults True -> ray/_private/workers/default_worker.py:221
-    # -> try_install_uvloop -> uvloop.install()). libuv's epoll-ctl machinery
-    # SIGABRTs this orchestrator under Daytona sandbox-teardown socket churn
-    # (uv__epoll_ctl_prep / uv__io_poll asserts; present across libuv 1.45-1.49+).
-    # Resetting the policy HERE -- before exp.run()'s asyncio.run() at
-    # main_base.py:403/414 creates the loop -- makes both asyncio.run() calls
-    # build a stock SelectorEventLoop with no libuv code path. This orchestrator
-    # is network-RTT-bound (vLLM/Daytona), so uvloop's throughput edge is moot.
-    # Done in-code (not via the RAY_USE_UVLOOP=0 env var) to avoid
-    # sbatch->srun->ray-start->worker env-propagation brittleness.
-    #
-    # DEPRECATION NOTE: asyncio.set_event_loop_policy() emits a DeprecationWarning
-    # on Python 3.12+ and the event-loop-policy system is slated for removal
-    # (~3.16). It still works on our 3.12 runtime and is the same mechanism
-    # uvloop/Ray themselves use. To future-proof when the policy API is removed,
-    # drop this line and instead pass an explicit loop to the asyncio.run() calls
     # NOTE: the uvloop->stock-asyncio reset that prevents the libuv epoll SIGABRT
     # lives in BasePPOExp.run() (the shared chokepoint all entrypoints funnel
     # through), NOT here -- terminal_bench and other entrypoints use their own
