@@ -385,3 +385,22 @@ environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:
   # skyrl_gym: config/skyrl_gym_config/default.yaml
+
+# K-actor rollout fan-out (fully-async terminal_bench path only).
+# Default OFF: when enabled=false the trainer never constructs the dispatcher
+# or coordinators, and the rollout code path is byte-for-byte identical to the
+# single-process behavior. See examples/terminal_bench/rollout_coordinator.py
+# and notes/ot-agent/RL/architecture/skyrl_harbor_rollout_fanout_design.md.
+rollout:
+  fanout:
+    # Master flag. false => no behavior change.
+    enabled: false
+    # K: number of RolloutCoordinator actor processes. Each gets its own event
+    # loop, TerminalBenchGenerator, QueueOrchestrator/semaphore (n_concurrent//K),
+    # litellm cache, and Daytona client (connection_pool_maxsize//K).
+    # enabled=true + num_coordinators=1 is behavior-identical modulo one RPC hop.
+    num_coordinators: 4
+    # CPUs requested per coordinator bundle in the SPREAD PlacementGroup.
+    # Each coordinator is a single-event-loop CPU-bound orchestrator; a small
+    # value (4-8) is plenty and keeps the PG schedulable on busy nodes.
+    cpus_per_coordinator: 8

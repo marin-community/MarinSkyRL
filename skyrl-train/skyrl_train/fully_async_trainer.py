@@ -33,6 +33,7 @@ from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpoint
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Optional, Tuple
 import inspect
+from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 
 
@@ -303,6 +304,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Initialize base trainer
         super().__init__(*args, **kwargs)
 
+        # K-actor rollout fan-out gate. Resolved in _maybe_enable_rollout_fanout()
+        # at train() start; initialized False so the flag is always defined
+        # (e.g. if train() is never reached, the weight-sync block stays a no-op).
+        self._rollout_fanout_enabled = False
+
         # Some async-specific validations
         assert (
             self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
@@ -415,14 +421,65 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         except Exception as e:
             logger.warning(f"Failed to restore generation buffer from checkpoint (best-effort): {e}")
 
+    def _maybe_enable_rollout_fanout(self) -> None:
+        """If ``rollout.fanout.enabled``, replace self.generator with a K-actor
+        RolloutDispatcher. Default OFF => no-op (self.generator unchanged, code
+        path byte-for-byte identical to today).
+
+        The dispatcher is generator-interface-compatible (startup/generate/
+        shutdown + eval-session passthrough + global_step_fn), so the rest of the
+        train loop is untouched. The staleness/async buffer stays single-loop in
+        this trainer (it must NOT be distributed — same code class as the prior
+        all_reduce key-mismatch NCCL deadlocks). The dispatcher owns no staleness
+        state; it only shards generate() and ships back compact GeneratorOutput.
+        """
+        rollout_cfg = OmegaConf.select(self.cfg, "rollout.fanout")
+        self._rollout_fanout_enabled = bool(
+            rollout_cfg is not None and getattr(rollout_cfg, "enabled", False)
+        )
+        if not self._rollout_fanout_enabled:
+            return
+
+        # Import lazily so the non-fanout path never imports the coordinator
+        # module (and its heavy transitive Harbor import on the dispatcher).
+        from examples.terminal_bench.rollout_coordinator import RolloutDispatcher
+
+        terminal_bench_cfg = OmegaConf.select(self.cfg, "terminal_bench_config")
+        if terminal_bench_cfg is None:
+            raise ValueError(
+                "rollout.fanout.enabled=true requires cfg.terminal_bench_config "
+                "(the terminal_bench RL path). Disable fan-out for other generators."
+            )
+
+        num_coordinators = int(getattr(rollout_cfg, "num_coordinators", 4))
+        cpus_per_coordinator = int(getattr(rollout_cfg, "cpus_per_coordinator", 8))
+        logger.info(
+            f"Rollout fan-out ENABLED: replacing single-process generator with "
+            f"RolloutDispatcher (K={num_coordinators}, cpus_per_coordinator="
+            f"{cpus_per_coordinator})."
+        )
+        self.generator = RolloutDispatcher(
+            cfg=self.cfg,
+            generator_cfg=self.cfg.generator,
+            terminal_bench_cfg=terminal_bench_cfg,
+            num_coordinators=num_coordinators,
+            cpus_per_coordinator=cpus_per_coordinator,
+        )
+
     async def train(self):
         """
         Main fully async training loop for PPO
         """
         self.global_step = 0
 
+        # Optionally swap the single-process generator for a K-actor rollout
+        # dispatcher (gated; default OFF => no-op, self.generator unchanged).
+        self._maybe_enable_rollout_fanout()
+
         # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
-        # This must happen before any generate() calls
+        # This must happen before any generate() calls. When fan-out is enabled,
+        # self.generator is now the RolloutDispatcher, whose startup() builds the
+        # PlacementGroup + K coordinators and starts each coordinator's generator.
         try:
             await self.generator.startup()
             logger.info("Generator startup complete")
@@ -588,10 +645,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                     # 4. After training: pause generation, sync weights, resume.
+                    #    Weight-sync quiescing under fan-out: before broadcasting
+                    #    fresh weights we also barrier-pause every RolloutCoordinator
+                    #    (stop admitting new trials + drain in-flight) so no rollout
+                    #    straddles the weight swap. Symmetric resume afterward.
+                    #    Default OFF => _rollout_fanout_enabled is False and this is
+                    #    a no-op (identical to today).
                     with Timer("sync_weights", self.all_timings):
+                        if self._rollout_fanout_enabled:
+                            await self.generator.pause()
                         await self.inference_engine_client.pause_generation()
                         await self.async_sync_policy_weights_to_inference_engines()
                         await self.inference_engine_client.resume_generation()
+                        if self._rollout_fanout_enabled:
+                            await self.generator.resume()
 
                 # 5. Log status and update metrics
                 logger.info(status)
