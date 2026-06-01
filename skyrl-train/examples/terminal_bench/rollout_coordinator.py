@@ -54,10 +54,36 @@ import itertools
 from typing import List, Optional
 
 import ray
-from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+
+
+def _log():
+    """Lazily fetch the loguru logger INSIDE the calling function.
+
+    CRITICAL (do not refactor back to a module-top ``from loguru import
+    logger``): the ``RolloutCoordinator`` class below is a ``@ray.remote`` actor
+    that Ray exports to workers via ``export_actor_class``, which cloudpickles
+    the class *by value* (its module ``examples.terminal_bench.rollout_coordinator``
+    is not importable on the workers). Cloudpickle's by-value class export walks
+    every method's ``__globals__`` for the names the bytecode references
+    (``co_names``) and pickles those objects too. Under the forced ``spawn`` start
+    method (``main_base.py``), ``skyrl_train.utils.utils.configure_ray_worker_logging``
+    has already called ``logger.add(sys.stderr, enqueue=True, ...)`` in this
+    process, so the loguru singleton's handler holds a live
+    ``multiprocessing.SimpleQueue``. If any method referenced a module-global
+    ``logger``, cloudpickle would try to pickle that singleton -> its
+    ``SimpleQueue`` -> ``assert_spawning`` -> ``RuntimeError: SimpleQueue objects
+    should only be shared between processes through inheritance`` (the crash this
+    fix targets). By importing inside the function, ``logger`` is a *local*, not a
+    captured module-global, so it is never walked during class export. The actual
+    log records are emitted at runtime inside the actor process, where the
+    per-process loguru singleton is perfectly usable.
+    """
+    from loguru import logger
+
+    return logger
 
 
 def _scale_terminal_bench_cfg(
@@ -92,7 +118,7 @@ def _scale_terminal_bench_cfg(
         full = int(harbor["n_concurrent_trials"])
         per_actor = max(1, full // num_coordinators)
         harbor["n_concurrent_trials"] = per_actor
-        logger.info(
+        _log().info(
             f"[RolloutCoordinator] scaled n_concurrent_trials {full} -> {per_actor} "
             f"(// {num_coordinators})"
         )
@@ -105,7 +131,7 @@ def _scale_terminal_bench_cfg(
             full_pool = int(env_kwargs["connection_pool_maxsize"])
             per_actor_pool = max(1, full_pool // num_coordinators)
             env_kwargs["connection_pool_maxsize"] = per_actor_pool
-            logger.info(
+            _log().info(
                 f"[RolloutCoordinator] scaled connection_pool_maxsize {full_pool} -> "
                 f"{per_actor_pool} (// {num_coordinators})"
             )
@@ -148,7 +174,7 @@ class RolloutCoordinator:
         try:
             start_fd_monitor()
         except Exception as e:  # pragma: no cover - best-effort
-            logger.warning(
+            _log().warning(
                 f"[RolloutCoordinator {shard_idx}] start_fd_monitor failed: {e}"
             )
 
@@ -191,7 +217,7 @@ class RolloutCoordinator:
         self._inflight_zero = asyncio.Event()
         self._inflight_zero.set()
 
-        logger.info(
+        _log().info(
             f"[RolloutCoordinator {shard_idx}/{num_coordinators}] constructed "
             f"(http={generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port})"
         )
@@ -199,11 +225,11 @@ class RolloutCoordinator:
     async def startup(self) -> None:
         """Create the coordinator's QueueOrchestrator (mirrors generator.startup)."""
         await self._generator.startup()
-        logger.info(f"[RolloutCoordinator {self._shard_idx}] startup complete")
+        _log().info(f"[RolloutCoordinator {self._shard_idx}] startup complete")
 
     async def shutdown(self) -> None:
         await self._generator.shutdown()
-        logger.info(f"[RolloutCoordinator {self._shard_idx}] shutdown complete")
+        _log().info(f"[RolloutCoordinator {self._shard_idx}] shutdown complete")
 
     async def run_shard(
         self, sub_batch: GeneratorInput, global_step: Optional[int]
@@ -249,12 +275,12 @@ class RolloutCoordinator:
         """
         self._running_event.clear()
         await self._inflight_zero.wait()
-        logger.debug(f"[RolloutCoordinator {self._shard_idx}] paused (drained)")
+        _log().debug(f"[RolloutCoordinator {self._shard_idx}] paused (drained)")
 
     async def resume(self) -> None:
         """Resume admitting new shards (symmetric to pause)."""
         self._running_event.set()
-        logger.debug(f"[RolloutCoordinator {self._shard_idx}] resumed")
+        _log().debug(f"[RolloutCoordinator {self._shard_idx}] resumed")
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
@@ -321,7 +347,7 @@ class RolloutDispatcher:
         # only coordinator with the eval orchestrator). See start_eval_session.
         self._eval_session_active = False
 
-        logger.info(
+        _log().info(
             f"[RolloutDispatcher] configured num_coordinators={num_coordinators}, "
             f"cpus_per_coordinator={cpus_per_coordinator}"
         )
@@ -350,7 +376,7 @@ class RolloutDispatcher:
         ]
         self._pg = placement_group(bundles, strategy="SPREAD")
         await self._pg.ready()
-        logger.info(
+        _log().info(
             f"[RolloutDispatcher] PlacementGroup ready: {self._num_coordinators} bundles "
             f"x {self._cpus_per_coordinator} CPU (SPREAD)"
         )
@@ -375,7 +401,7 @@ class RolloutDispatcher:
         # Barrier on every coordinator's startup so the orchestrators exist
         # before the first generate() RPC.
         await asyncio.gather(*[a.startup.remote() for a in self._actors])
-        logger.info(
+        _log().info(
             f"[RolloutDispatcher] {self._num_coordinators} coordinators started"
         )
 
@@ -407,14 +433,14 @@ class RolloutDispatcher:
                     *[a.shutdown.remote() for a in self._actors], return_exceptions=True
                 )
             except Exception as e:  # pragma: no cover - best-effort
-                logger.warning(f"[RolloutDispatcher] coordinator shutdown error: {e}")
+                _log().warning(f"[RolloutDispatcher] coordinator shutdown error: {e}")
         if self._pg is not None:
             try:
                 from ray.util.placement_group import remove_placement_group
 
                 remove_placement_group(self._pg)
             except Exception as e:  # pragma: no cover - best-effort
-                logger.warning(f"[RolloutDispatcher] remove_placement_group error: {e}")
+                _log().warning(f"[RolloutDispatcher] remove_placement_group error: {e}")
             self._pg = None
         self._actors = []
 
