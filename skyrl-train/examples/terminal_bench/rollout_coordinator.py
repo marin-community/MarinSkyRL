@@ -292,9 +292,22 @@ class RolloutDispatcher:
         num_coordinators: int,
         cpus_per_coordinator: int,
     ):
-        self.cfg = cfg
-        self._generator_cfg = generator_cfg
-        self._terminal_bench_cfg = terminal_bench_cfg
+        # Detach each config to a parent-ref-free, object-free OmegaConf copy
+        # BEFORE it can cross a `.remote()` boundary. The live `cfg` tree (under
+        # the forced `spawn` start method) transitively reaches a wandb-class
+        # `multiprocessing.SimpleQueue`, which cannot be pickled into a Ray actor
+        # ("SimpleQueue objects should only be shared between processes through
+        # inheritance"). The `to_container(resolve=True)` round-trip severs
+        # OmegaConf parent back-references and drops any attached live object;
+        # it changes only HOW configs are shipped, not their values. Mirrors the
+        # pattern already used by `_scale_terminal_bench_cfg` in this file.
+        self.cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+        self._generator_cfg = OmegaConf.create(
+            OmegaConf.to_container(generator_cfg, resolve=True)
+        )
+        self._terminal_bench_cfg = OmegaConf.create(
+            OmegaConf.to_container(terminal_bench_cfg, resolve=True)
+        )
         self._num_coordinators = num_coordinators
         self._cpus_per_coordinator = cpus_per_coordinator
 
