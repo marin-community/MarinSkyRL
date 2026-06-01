@@ -260,27 +260,24 @@ class RolloutCoordinator:
                 self._inflight_zero.set()
 
     async def pause(self) -> None:
-        """Stop admitting new shards and wait for in-flight ones to drain.
+        """No-op (weight sync no longer drains at the trial level).
 
-        Weight-sync quiescing: the dispatcher barriers on
-        ``ray.get([a.pause.remote() for a in actors])`` before broadcasting
-        fresh weights. ``run_shard`` awaits ``_running_event`` at the top, so
-        once we clear it no new generate() begins; we then wait for currently
-        executing shards to finish so no rollout straddles the weight swap.
-
-        Because the dispatcher's staleness manager already bounds the number of
-        groups in flight (``num_parallel_generation_workers``), the in-flight
-        set here is small and drains quickly. This is a bounded-drain, matching
-        the single-loop ``pause_generation`` semantics.
+        We deliberately do NOT drain in-flight shards for weight sync. The
+        inference engines are a shared HTTP backend; the trainer's stock
+        engine-level ``inference_engine_client.pause/sync/resume`` already
+        propagates fresh weights to every coordinator's subsequent requests,
+        and rollouts straddling the swap are accounted for as STALE by the
+        dispatcher's ``max_staleness_steps`` bookkeeping (exactly like stock
+        fully_async). A coordinator-level hard-drain is unnecessary for
+        correctness and previously stalled the step boundary when long-running
+        trials never drained. Kept as a no-op so the dispatcher's pause()/
+        resume() interface remains valid; returns immediately.
         """
-        self._running_event.clear()
-        await self._inflight_zero.wait()
-        _log().debug(f"[RolloutCoordinator {self._shard_idx}] paused (drained)")
+        return None
 
     async def resume(self) -> None:
-        """Resume admitting new shards (symmetric to pause)."""
-        self._running_event.set()
-        _log().debug(f"[RolloutCoordinator {self._shard_idx}] resumed")
+        """No-op (symmetric to :meth:`pause`)."""
+        return None
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(
@@ -451,12 +448,20 @@ class RolloutDispatcher:
         return await actor.run_shard.remote(input_batch, global_step)
 
     async def pause(self) -> None:
-        """Barrier-pause every coordinator (weight-sync quiescing)."""
-        await asyncio.gather(*[a.pause.remote() for a in self._actors])
+        """No-op (weight sync no longer drains the fan-out).
+
+        Weight propagation is handled entirely by the trainer's stock
+        engine-level ``inference_engine_client.pause/sync/resume`` against the
+        shared HTTP inference backend; we do not barrier-pause/drain the K
+        coordinators. In-flight rollouts that span the swap return as STALE and
+        are bounded by ``max_staleness_steps``. Kept as a no-op so the
+        ``GeneratorInterface``-compatible surface still exposes pause()/resume().
+        """
+        return None
 
     async def resume(self) -> None:
-        """Barrier-resume every coordinator."""
-        await asyncio.gather(*[a.resume.remote() for a in self._actors])
+        """No-op (symmetric to :meth:`pause`)."""
+        return None
 
     async def shutdown(self) -> None:
         if self._actors:

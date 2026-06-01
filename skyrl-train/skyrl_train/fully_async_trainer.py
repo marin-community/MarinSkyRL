@@ -644,21 +644,25 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             [g.uid for g in cur_generation_group_mini_batch]
                         )
 
-                    # 4. After training: pause generation, sync weights, resume.
-                    #    Weight-sync quiescing under fan-out: before broadcasting
-                    #    fresh weights we also barrier-pause every RolloutCoordinator
-                    #    (stop admitting new trials + drain in-flight) so no rollout
-                    #    straddles the weight swap. Symmetric resume afterward.
-                    #    Default OFF => _rollout_fanout_enabled is False and this is
-                    #    a no-op (identical to today).
+                    # 4. After training: sync weights to the inference engines.
+                    #    The inference engines are a SHARED HTTP backend that every
+                    #    RolloutCoordinator calls, so the STOCK engine-level
+                    #    pause/sync/resume below (fast NCCL broadcast with the
+                    #    engines briefly quiesced) already propagates fresh weights
+                    #    to every coordinator's subsequent requests. We deliberately
+                    #    do NOT barrier-pause/drain the RolloutCoordinators at the
+                    #    trial level: a coordinator-level drain is unnecessary for
+                    #    correctness and defeats async overlap (the hard-drain stalled
+                    #    the step boundary indefinitely when long-running trials never
+                    #    drained). Rollouts in flight across the weight swap simply
+                    #    return as STALE and are bounded by the dispatcher's existing
+                    #    max_staleness_steps accounting — exactly like stock
+                    #    fully_async, which never drains trial orchestration. This
+                    #    block is now byte-identical for fan-out ON and OFF.
                     with Timer("sync_weights", self.all_timings):
-                        if self._rollout_fanout_enabled:
-                            await self.generator.pause()
                         await self.inference_engine_client.pause_generation()
                         await self.async_sync_policy_weights_to_inference_engines()
                         await self.inference_engine_client.resume_generation()
-                        if self._rollout_fanout_enabled:
-                            await self.generator.resume()
 
                 # 5. Log status and update metrics
                 logger.info(status)
