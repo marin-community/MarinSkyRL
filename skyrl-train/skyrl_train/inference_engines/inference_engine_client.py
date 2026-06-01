@@ -941,11 +941,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             wait_for_server_ready,
         )
 
+        # Bind the uvicorn server to 0.0.0.0 so that off-node clients (e.g. the
+        # rollout-fanout RolloutCoordinator actors running on WORKER nodes) can
+        # reach the endpoint over the internal compute network. The configured
+        # `http_endpoint_host` (default 127.0.0.1) is the CLIENT-side host used
+        # for the local readiness probe below; binding the SERVER to 0.0.0.0 is
+        # a superset of binding to 127.0.0.1, so the loopback readiness probe and
+        # the fan-out-OFF path (client uses 127.0.0.1 on the same node) are both
+        # unaffected. This is safe: the endpoint only lives on the internal
+        # 10.128.x.x compute net, never the public internet.
         self._server_thread = threading.Thread(
             target=serve,
             args=(self,),
             kwargs={
-                "host": self.http_endpoint_host,
+                "host": "0.0.0.0",
                 "port": self.http_endpoint_port,
                 "log_level": "warning",
             },

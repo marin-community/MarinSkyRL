@@ -334,6 +334,38 @@ class RolloutDispatcher:
         self._terminal_bench_cfg = OmegaConf.create(
             OmegaConf.to_container(terminal_bench_cfg, resolve=True)
         )
+
+        # --- Fan-out connectivity fix (head-IP injection) ---
+        # The vLLM HTTP inference endpoint (InferenceEngineClient) is bound on the
+        # HEAD node — the same process that constructs this dispatcher. Its
+        # configured `http_endpoint_host` is 127.0.0.1, which only resolves to the
+        # endpoint ON the head. The RolloutCoordinator actors below run on WORKER
+        # nodes (SPREAD PlacementGroup), where 127.0.0.1:8000 has nothing
+        # listening -> every litellm request fails "All connection attempts
+        # failed". This dispatcher runs on the head where the endpoint is bound, so
+        # `ray.util.get_node_ip_address()` here yields the head's ROUTABLE compute
+        # IP. We substitute it for the loopback host in the per-coordinator
+        # generator config so each coordinator builds its litellm base_url against
+        # a reachable address. The server is bound to 0.0.0.0 (see
+        # InferenceEngineClient._spin_up_http_endpoint), so this routable host is
+        # reachable from every node.
+        #
+        # GATING: this only happens on the fan-out path — the RolloutDispatcher is
+        # constructed ONLY when rollout.fanout.enabled (see
+        # fully_async_trainer._maybe_enable_rollout_fanout). When fan-out is OFF,
+        # the dispatcher never exists and the generator runs in-process on the head
+        # using the unchanged 127.0.0.1 host. We only override the loopback host so
+        # an explicitly-configured non-loopback host (e.g. a manual remote setup)
+        # is respected.
+        configured_host = self._generator_cfg.get("http_endpoint_host", None)
+        if configured_host in ("127.0.0.1", "localhost", None):
+            head_ip = ray.util.get_node_ip_address()
+            self._generator_cfg["http_endpoint_host"] = head_ip
+            _log().info(
+                f"[RolloutDispatcher] fan-out path: overriding inference host "
+                f"{configured_host} -> {head_ip} (routable head IP) for "
+                f"coordinator litellm base_url connectivity"
+            )
         self._num_coordinators = num_coordinators
         self._cpus_per_coordinator = cpus_per_coordinator
 
