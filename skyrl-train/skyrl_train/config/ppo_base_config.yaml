@@ -393,8 +393,13 @@ environment:
 # and notes/ot-agent/RL/architecture/skyrl_harbor_rollout_fanout_design.md.
 rollout:
   fanout:
-    # Master flag. false => no behavior change.
-    enabled: false
+    # Master flag. DEFAULT ON: shards rollout orchestration across K coordinator
+    # processes to break the single-event-loop GIL ceiling (validated 2026-06-01,
+    # Jupiter + Perlmutter). Weight sync is always the no-drain / bounded-staleness
+    # path (the coordinator hard-drain that could hang was removed, not gated) — so
+    # there is no unsafe weight-sync mode to select. Set false to fall back to the
+    # legacy single-loop generator (e.g. for an A/B baseline).
+    enabled: true
     # K: number of RolloutCoordinator actor processes. Each gets its own event
     # loop, TerminalBenchGenerator, QueueOrchestrator/semaphore (n_concurrent//K),
     # litellm cache, and Daytona client (connection_pool_maxsize//K).
