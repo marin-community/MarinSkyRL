@@ -23,7 +23,17 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         self.inference_engine_actor = inference_engine_actor
 
     def tp_size(self):
-        return ray.get(self.inference_engine_actor.tp_size.remote())
+        # Diagnostic: unwrap un-pickleable Ray exceptions into a plain
+        # RuntimeError. When a raylet dies (e.g. GPFS SIGBUS/ESTALE during
+        # weight-sync-state init) Ray raises a dynamically-generated
+        # RayTaskError(ActorDiedError) whose re-serialization across the dying
+        # boundary surfaces as a PicklingError / pydantic_compat
+        # ModuleNotFoundError red herring. Re-raising as a picklable plain
+        # exception preserves the TRUE cause in logs. Happy path unchanged.
+        try:
+            return ray.get(self.inference_engine_actor.tp_size.remote())
+        except ray.exceptions.RayError as e:
+            raise RuntimeError(f"tp_size() failed at Ray boundary: {e!r}") from None
 
     def pp_size(self):
         return ray.get(self.inference_engine_actor.pp_size.remote())

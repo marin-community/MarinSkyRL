@@ -805,11 +805,23 @@ class RayPPOTrainer:
         """
         Setup the connection between policy model and inference engine for weight syncing.
         """
-        ray.get(
-            self.policy_model.async_run_ray_method(
-                "pass_through", "init_weight_sync_state", self.inference_engine_client
+        # Diagnostic: unwrap un-pickleable Ray exceptions into a plain
+        # RuntimeError so a recurrence reports the TRUE cause (e.g. a raylet
+        # killed by a GPFS SIGBUS/ESTALE mmap fault -> ActorUnavailableError)
+        # rather than the secondary PicklingError / pydantic_compat
+        # ModuleNotFoundError that arises from Ray failing to re-serialize the
+        # dynamically-generated RayTaskError across the dying boundary. Happy
+        # path unchanged.
+        try:
+            ray.get(
+                self.policy_model.async_run_ray_method(
+                    "pass_through", "init_weight_sync_state", self.inference_engine_client
+                )
             )
-        )
+        except ray.exceptions.RayError as e:
+            raise RuntimeError(
+                f"init_weight_sync_state failed at Ray boundary: {e!r}"
+            ) from None
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:

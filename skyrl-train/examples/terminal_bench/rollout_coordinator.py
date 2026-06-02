@@ -410,6 +410,16 @@ class RolloutDispatcher:
             f"x {self._cpus_per_coordinator} CPU (SPREAD)"
         )
 
+        # SEQUENTIAL bring-up: create one coordinator, await its startup to
+        # completion, THEN create + start the next. Each coordinator imports the
+        # full Harbor/transformers stack and loads a tokenizer off the shared FS
+        # (GPFS) at startup; doing all K concurrently produced a thundering-herd
+        # page-in burst that — coincident with the vLLM engines loading weights —
+        # tipped GPFS into a SIGBUS / errno=116 (ESTALE) mmap fault that killed
+        # raylets and cascaded to ActorUnavailableError at weight-sync-state
+        # init. Serializing construction+startup keeps only one coordinator
+        # paging the heavy stack in at a time. The SPREAD PlacementGroup is
+        # retained (it is not the cause).
         self._actors = []
         for shard_idx in range(self._num_coordinators):
             actor = RolloutCoordinator.options(
@@ -425,11 +435,19 @@ class RolloutDispatcher:
                 shard_idx=shard_idx,
                 num_coordinators=self._num_coordinators,
             )
+            # Await THIS coordinator's startup/readiness to completion before
+            # constructing the next one, so its heavy GPFS import + tokenizer
+            # load finishes (and pages settle) before the next begins.
+            await actor.startup.remote()
             self._actors.append(actor)
+            _log().info(
+                f"[RolloutDispatcher] coordinator {shard_idx + 1}/"
+                f"{self._num_coordinators} started"
+            )
+            # Spread the page-in further: brief pause between coordinators.
+            if shard_idx + 1 < self._num_coordinators:
+                await asyncio.sleep(2)
 
-        # Barrier on every coordinator's startup so the orchestrators exist
-        # before the first generate() RPC.
-        await asyncio.gather(*[a.startup.remote() for a in self._actors])
         _log().info(
             f"[RolloutDispatcher] {self._num_coordinators} coordinators started"
         )
