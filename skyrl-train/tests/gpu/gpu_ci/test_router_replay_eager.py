@@ -13,8 +13,14 @@ Or directly (no pytest):
 """
 
 import torch
-import pytest
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+try:
+    import pytest
+
+    pytestmark = [pytest.mark.gpu]
+except ImportError:  # pytest absent on cluster envs — direct invocation still works
+    pytest = None
 
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.models.router_replay import (
@@ -22,8 +28,6 @@ from skyrl_train.models.router_replay import (
     get_active_replay,
     SENTINEL_EXPERT_ID,
 )
-
-pytestmark = [pytest.mark.gpu]
 
 
 def _make_config():
