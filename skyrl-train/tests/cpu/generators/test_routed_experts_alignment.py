@@ -237,9 +237,12 @@ def test_training_input_batch_noop_vs_present(char_tokenizer):
     re1 = [_real_row(10 + i) for i in range(5)]
 
     def build(routed_experts):
-        # Mirror trainer.convert_to_training_input's tensor wiring (subset).
+        # Mirror trainer.convert_to_training_input's tensor wiring (subset). Use
+        # a real logprobs tensor so every present field is a Tensor (TensorBatch
+        # .__eq__ does torch.equal over present keys).
+        logprobs = [[0.0] * len(r) for r in responses]
         (seq, attn, resp_mask, rew, lm, lp, re_t) = convert_prompts_responses_to_batch_tensors(
-            char_tokenizer, prompts, responses, rewards, loss_masks, None, routed_experts
+            char_tokenizer, prompts, responses, rewards, loss_masks, logprobs, routed_experts
         )
         batch = TrainingInputBatch(
             {
