@@ -773,8 +773,17 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     # Each accumulated element is a [L, K] row; user/prefix/post-EOS rows are
     # sentinel-filled (see align_routed_experts_with_lcs / SENTINEL_EXPERT_ID).
     rollout_routed_experts = None if assistant_routed_experts is None else []
-    # Sentinel [L, K] shape inferred lazily from the first real routed_experts row.
+    # Sentinel [L, K] shape — learned UP-FRONT by scanning assistant_routed_experts
+    # for the first real per-token row, so that sentinel rows emitted BEFORE the
+    # first generated token (e.g. a leading user message) already have the correct
+    # [L, K] width. Otherwise a single sample could mix [1, 1] and [L, K] rows and
+    # break the dense torch.tensor() collation.
     _re_sentinel_row = None
+    if assistant_routed_experts is not None:
+        for _turn_re in assistant_routed_experts:
+            if _turn_re and len(_turn_re) > 0:
+                _re_sentinel_row = _sentinel_routed_experts_row(_turn_re[0])
+                break
     assistant_msg_idx = 0
 
     for i in range(len(messages)):
