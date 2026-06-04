@@ -380,7 +380,7 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
 
 
-def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size=1):
+def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size=1, fsdp_kwargs=None):
     """Shard MoE experts across the ``ep`` submesh via torchtitan ``ExpertParallel``.
 
     Stage 4a — torch ``all_to_all`` backend only (NO DeepEP; that is Stage 5) and
@@ -388,8 +388,15 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     ``GroupedMoEShim.moe.experts`` (the ``GroupedExperts`` w1/w2/w3 holder) this:
 
       * ``Shard(0)``-s every expert param over ``device_mesh["ep"]`` (each rank holds
-        ``num_experts // ep_size`` experts), composing with the FSDP2 ``Shard`` on the
-        ``fsdp`` submesh applied earlier (net: 2-D expert DTensors);
+        ``num_experts // ep_size`` experts) via ``parallelize_module`` — while the
+        params are still PLAIN tensors (torchtitan's ``_partition_fn`` calls
+        ``distribute_tensor`` onto the ep mesh, which rejects an already-DTensor input);
+      * when ``fsdp_kwargs`` is given, immediately ``fully_shard``-s the same experts
+        module on the ``fsdp`` submesh, composing a second ``Shard`` dim of the SAME
+        root mesh → net 2-D expert DTensors ``[Shard(0)_ep, Shard_fsdp]``. Doing the
+        experts' ``fully_shard`` here (not leaving it to the parent decoder layer's
+        ``fully_shard`` in ``apply_fsdp2``) makes the 2-D composition explicit and lets
+        the parent layer's wrap nest correctly (FSDP2 excludes already-wrapped children);
       * installs ``ExpertParallel._token_dispatch`` / ``_token_combine`` all_to_all
         hooks on the ``experts`` module boundary (the autograd ``_A2A`` carries grads
         symmetrically on the backward).
@@ -398,8 +405,9 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     router replay is preserved by construction (scope §3). Returns the number of
     expert modules sharded.
 
-    Must be called AFTER ``apply_fsdp2`` and BEFORE the full-state-dict load so the
-    load distributes weights into their final EP+FSDP placement.
+    Must be called BEFORE ``apply_fsdp2`` (so EP runs on plain params) and before the
+    full-state-dict load so the load distributes weights into their final EP+FSDP
+    placement.
     """
     assert ep_comm_backend == "torch", (
         f"Stage 4a supports only ep_comm_backend='torch' (DeepEP is Stage 5); got {ep_comm_backend!r}"
@@ -412,6 +420,7 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     from torchtitan.distributed.expert_parallel import ExpertParallel
 
     ep_mesh = device_mesh["ep"]
+    fsdp_mesh = device_mesh["fsdp"]
     sharded = 0
     for module in model.modules():
         # The lifted grouped block exposes `moe.experts` (a GroupedExperts holding
@@ -423,6 +432,10 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
         if experts is None or experts.__class__.__name__ != "GroupedExperts":
             continue
         parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ExpertParallel())
+        # Compose the FSDP Shard dim on the fsdp submesh → 2-D expert DTensors.
+        if fsdp_kwargs is not None:
+            ep_fsdp_kwargs = {k: v for k, v in fsdp_kwargs.items() if k != "mesh"}
+            fully_shard(experts, mesh=fsdp_mesh, **ep_fsdp_kwargs)
         # Flag the grouped block so its forward selects the EP-decorated compute path.
         moe._ep_enabled = True
         sharded += 1

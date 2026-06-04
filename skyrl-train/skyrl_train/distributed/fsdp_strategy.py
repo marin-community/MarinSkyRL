@@ -330,19 +330,27 @@ class FSDPStrategy(DistributedStrategy):
             }
             module = model.model if is_wrapped else model
             full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
-            # Stage 4a: shard experts over the "ep" submesh AFTER FSDP wrap and
-            # BEFORE the full-state-dict load (so the load distributes into the
-            # final EP+FSDP placement). ep_size==1 ⇒ apply_ep is never called.
+            # Stage 4a: shard experts over the "ep" submesh BEFORE the FSDP wrap.
+            # torchtitan ExpertParallel's _partition_fn distribute_tensor's the raw
+            # expert params onto the "ep" submesh; this must happen while they are
+            # still plain tensors. fully_shard (apply_fsdp2) then composes a second
+            # Shard dim on the "fsdp" submesh of the SAME root mesh (net 2-D expert
+            # DTensors). The reverse order fails: distribute_tensor cannot re-mesh an
+            # already-fsdp-sharded DTensor onto the ep mesh
+            # ("Cannot distribute a DTensor ... to a different device mesh"). ep_size==1
+            # ⇒ apply_ep is never called and ordering is irrelevant (byte-identical).
             if ep_on:
                 from skyrl_train.distributed.fsdp_utils import apply_ep
 
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
-                num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend)
+                num_sharded = apply_ep(
+                    module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs
+                )
                 assert num_sharded > 0, (
                     "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
                     "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
                 )
+            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
             fsdp2_load_full_state_dict(module, full_state, cpu_offload)
             fsdp_module = module
         else:
