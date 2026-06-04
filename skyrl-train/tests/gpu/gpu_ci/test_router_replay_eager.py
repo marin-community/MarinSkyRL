@@ -121,6 +121,21 @@ def _forward_logits(wrapper, input_ids, attention_mask, num_actions, rollout_rou
     return output["logits"]
 
 
+def _repad_packed(packed_logits, input_ids, attention_mask):
+    """Restore packed ``[1, nnz, V]`` logits to dense ``[B, seq, V]``.
+
+    Under sample packing ``HFModelWrapper.forward`` returns logits in packed
+    form — it re-pads only ``log_probs``/``entropy`` inside ``forward``, never
+    ``logits``. So any test that slices ``[:, -num_actions:, :]`` must first
+    re-pad the packed logits through the SAME unpad indices the forward used.
+    """
+    from flash_attn.bert_padding import pad_input, unpad_input
+
+    _, idx, _, _, _ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
+    batch, seqlen = input_ids.shape
+    return pad_input(packed_logits.squeeze(0), idx, batch, seqlen)
+
+
 def _all_one_expert_mask(batch, num_actions, L, K, expert_id, device):
     # Force every response token to (expert_id repeated)? No — duplicate rows
     # revert to native. Force [expert_id, expert_id+1] so each row is a valid
@@ -281,9 +296,11 @@ def test_g3a_1_packed_equals_unpacked():
 
     out_dense = _forward_logits(wrapper_dense, input_ids, attn, num_actions, rollout_routed_experts=re)
     out_packed = _forward_logits(wrapper_packed, input_ids, attn, num_actions, rollout_routed_experts=re)
+    # The packed wrapper returns logits in packed [1, nnz, V] form; re-pad to
+    # [B, seq, V] (the dense wrapper already is) before the response slice.
+    out_packed = _repad_packed(out_packed, input_ids, attn)
 
-    # Compare response positions only (the slice replay forces). pad_input
-    # restores [B, seq_len] for the packed path, so shapes align.
+    # Compare response positions only (the slice replay forces).
     resp_dense = out_dense[:, -num_actions:, :].float()
     resp_packed = out_packed[:, -num_actions:, :].float()
     assert torch.allclose(resp_dense, resp_packed, atol=2e-2), (
@@ -340,7 +357,10 @@ def test_g3a_3_ragged_alignment():
     L = count_moe_layers(cfg)
     K = cfg.num_experts_per_tok
 
-    out_natural = _forward_logits(wrapper, input_ids, attn, num_actions).float()
+    # Packed wrapper → re-pad [1, nnz, V] to [B, seq, V] before the response slice.
+    out_natural = _repad_packed(
+        _forward_logits(wrapper, input_ids, attn, num_actions), input_ids, attn
+    ).float()
 
     # All-sentinel everywhere except sequence index 1's response → forced.
     re = torch.full((batch, num_actions, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
@@ -350,7 +370,9 @@ def test_g3a_3_ragged_alignment():
         re[forced_seq, :, :, 1] = 6
     for k in range(2, K):
         re[forced_seq, :, :, k] = 5 + k
-    out_replay = _forward_logits(wrapper, input_ids, attn, num_actions, rollout_routed_experts=re).float()
+    out_replay = _repad_packed(
+        _forward_logits(wrapper, input_ids, attn, num_actions, rollout_routed_experts=re), input_ids, attn
+    ).float()
 
     resp_n = out_natural[:, -num_actions:, :]
     resp_r = out_replay[:, -num_actions:, :]
