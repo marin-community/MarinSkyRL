@@ -60,16 +60,20 @@ def _build_wrapper(moe_router_replay: bool, device="cuda", seed=0, use_sample_pa
         cfg._attn_implementation = "flash_attention_2"
     with torch.device(device):
         hf_model = Qwen3MoeForCausalLM._from_config(cfg)
-    hf_model = hf_model.to(torch.float32)
+    # FlashAttention varlen (used under sample packing) only supports fp16/bf16,
+    # so packed wrappers must run in bf16; the dense path stays fp32 for exact
+    # Stage-2 comparisons.
+    dtype = torch.bfloat16 if use_sample_packing else torch.float32
+    hf_model = hf_model.to(dtype)
     wrapper = HFModelWrapper(
         pretrain_or_model=hf_model,
         use_flash_attention_2=use_sample_packing,
-        bf16=False,
+        bf16=use_sample_packing,
         sequence_parallel_size=1,
         use_sample_packing=use_sample_packing,
         moe_router_replay=moe_router_replay,
     )
-    wrapper.model.to(device)
+    wrapper.model.to(device=device, dtype=dtype)
     return wrapper, cfg
 
 
@@ -263,12 +267,12 @@ def test_g3a_1_packed_equals_unpacked():
     on the same rows the dense path forces.
     """
     device = "cuda"
-    # Same seed → identical weights for both wrappers.
+    # Same seed → identical weights for both wrappers. Build the dense wrapper
+    # in bf16 too so the ONLY difference vs the packed wrapper is the packing /
+    # FA2-varlen path (dtype is held constant).
     wrapper_dense, cfg = _build_wrapper(True, device=device, seed=0, use_sample_packing=False)
     wrapper_packed, _ = _build_wrapper(True, device=device, seed=0, use_sample_packing=True)
-    # FA2 needs bf16/fp16; build both in the same dtype for a clean compare.
     wrapper_dense.model.to(torch.bfloat16)
-    wrapper_packed.model.to(torch.bfloat16)
 
     input_ids, attn, num_actions = _ragged_inputs(device=device)
     L = count_moe_layers(cfg)
@@ -330,7 +334,6 @@ def test_g3a_3_ragged_alignment():
     """
     device = "cuda"
     wrapper, cfg = _build_wrapper(True, device=device, use_sample_packing=True)
-    wrapper.model.to(torch.bfloat16)
 
     input_ids, attn, num_actions = _ragged_inputs(device=device)
     batch = input_ids.shape[0]
