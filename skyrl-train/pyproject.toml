@@ -92,6 +92,16 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'mcore' and extra != 'vllm'" },
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
 ]
+# Expert-parallel / router-replay port (see notes/skyrl/fsdp2_ep_router_replay_port_plan.md).
+# torchtitan is pure-python (provides @expert_parallel / ExpertParallel); it does NOT rebuild
+# torch. Pin matches prime-rl (EP + grouped-GEMM + R3 validated there); compatible with our
+# trainer torch 2.9.0 — Stage-0 dry-run confirmed it moves no protected package (torch/TE/
+# transformers/numpy/flash-attn/mcore).
+torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
+# deep-ep is the Stage-5 perf backend only. The prime-rl prebuilt wheel is x86_64; on aarch64
+# (Jupiter/GH200) an aarch64-native build already exists in envs/rl, supplied out-of-band, so
+# the URL below is inert there (gated by the marker on the `deepep` extra). x86_64-only.
+deep-ep = { url = "https://github.com/PrimeIntellect-ai/prime-rl/releases/download/v0.5.0/deep_ep-1.2.1+29d31c0-cp312-cp312-linux_x86_64.whl" }
 
 [project.optional-dependencies]
 deepspeed = [
@@ -154,6 +164,18 @@ miniswe = [
     # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
     "mini-swe-agent>=1.12.0",
     "litellm",
+]
+# Expert-parallel / router-replay port (Stage 0+). See notes/skyrl/fsdp2_ep_router_replay_port_plan.md.
+# `ep` = the Stage-4 torch-backend EP floor (torchtitan only; no NVSHMEM, no deep-ep coupling).
+# `deepep` = the Stage-5 perf backend (adds the platform-gated deep-ep wheel; inert on aarch64).
+# Neither pins torch/vllm, so they are NOT added to [tool.uv].conflicts; the base install is
+# unaffected and the no-EP default path needs neither extra.
+ep = [
+    "torchtitan",
+]
+deepep = [
+    "torchtitan",
+    "deep-ep ; platform_machine == 'x86_64'",
 ]
 
 

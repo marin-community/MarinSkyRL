@@ -48,6 +48,14 @@ trainer:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
       reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
+      # --- Expert-parallel / router-replay (Stage 0; defaults = current behavior) ---
+      # See notes/skyrl/fsdp2_ep_router_replay_port_plan.md. No code path consumes
+      # these yet; all defaults preserve the existing plain-FSDP2 path byte-for-byte.
+      expert_model_parallel_size: 1        # EP degree on the FSDP2 mesh; 1 = no EP (today's path)
+      expert_tensor_parallel_size: 1       # TP within each expert shard; 1 = none
+      moe_token_dispatcher_type: "alltoall"  # "alltoall" | "deepep"
+      moe_router_replay: false             # R3 rollout-routing replay; off = unchanged forward
+      ep_comm_backend: "torch"             # "torch" | "deepep"; torch = no NVSHMEM dependency
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
     use_torch_compile: false
@@ -62,6 +70,12 @@ trainer:
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
+      # --- Expert-parallel / router-replay (Stage 0; defaults = current behavior) ---
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      moe_token_dispatcher_type: "alltoall"
+      moe_router_replay: false
+      ep_comm_backend: "torch"
   critic:
     model:
       path: null
@@ -86,6 +100,12 @@ trainer:
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
+      # --- Expert-parallel / router-replay (Stage 0; defaults = current behavior) ---
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      moe_token_dispatcher_type: "alltoall"
+      moe_router_replay: false
+      ep_comm_backend: "torch"
     sequence_parallel_size: 1
   algorithm:
     advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
