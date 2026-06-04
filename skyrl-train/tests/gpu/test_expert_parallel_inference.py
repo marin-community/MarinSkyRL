@@ -143,9 +143,16 @@ def test_ep_generation():
         ray.shutdown()
 
 
-def test_ep_weight_sync():
-    """
-    Ensure generation works after syncing weights from training policy worker.
+def _run_ep_weight_sync(grouped_ep: bool):
+    """Sync weights from an FSDP2 trainer into EP=2 inference engines and assert
+    the responses are unchanged across the sync.
+
+    grouped_ep=False (the original test): plain-FSDP2 stock-HF trainer (replay/EP off).
+    grouped_ep=True (Stage 4b / G4-4): grouped-swapped (``moe_grouped_gemm=True``) +
+    EP-sharded (``expert_model_parallel_size=2``) trainer. The EP-sharded grouped
+    expert DTensors must reshard (``full_tensor`` across ep+fsdp) AND name/shape-remap
+    (``convert_tt_to_hf_moe`` after the shim-prefix strip) back into the EP inference
+    engine's per-expert HF layout.
     """
     _check_gpus(num_gpus=NUM_GPUS)
 
@@ -153,6 +160,10 @@ def test_ep_weight_sync():
     try:
         cfg = _get_test_cfg()
         cfg.trainer.placement.colocate_all = True
+        if grouped_ep:
+            # Grouped-GEMM swap + EP=2 on the trainer side (Stage 4b).
+            cfg.trainer.policy.fsdp_config.moe_grouped_gemm = True
+            cfg.trainer.policy.fsdp_config.expert_model_parallel_size = 2
         # Deterministic sampling for robust comparisons
         cfg.generator.sampling_params.temperature = 0.0
         cfg.generator.sampling_params.top_p = 1.0
@@ -206,11 +217,21 @@ def test_ep_weight_sync():
         assert len(out_after["stop_reasons"]) == len(prompts)
 
         # Check that weights are not corrupted: responses should be similar pre/post sync
+        num_similar = 0
         for i in range(len(prompts)):
-            if not are_responses_similar([out_before["responses"][i]], [out_after["responses"][i]], tolerance=0.02):
+            if are_responses_similar([out_before["responses"][i]], [out_after["responses"][i]], tolerance=0.02):
+                num_similar += 1
+            else:
                 print(
                     f"Response changed significantly after weight sync: before={out_before['responses'][i][:200]} ... after={out_after['responses'][i][:200]} ..."
                 )
+        if grouped_ep:
+            # G4-4: the EP-sharded grouped trainer weights must reshard + remap into the
+            # EP inference engine and reproduce the pre-sync responses.
+            assert num_similar == len(prompts), (
+                f"G4-4 weight-sync (grouped+EP) corrupted weights: only {num_similar}/{len(prompts)} "
+                "responses matched after sync."
+            )
     finally:
         if pg is not None:
             try:
@@ -218,3 +239,13 @@ def test_ep_weight_sync():
             except Exception:
                 pass
         ray.shutdown()
+
+
+def test_ep_weight_sync():
+    """Plain-FSDP2 stock-HF trainer → EP=2 inference (flag-off extractor path)."""
+    _run_ep_weight_sync(grouped_ep=False)
+
+
+def test_ep_weight_sync_grouped():
+    """G4-4: grouped-swapped + EP-sharded FSDP2 trainer → EP=2 inference (Stage 4b)."""
+    _run_ep_weight_sync(grouped_ep=True)

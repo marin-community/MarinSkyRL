@@ -36,12 +36,24 @@ class FSDPWeightExtractor(WeightExtractor):
         model: FSDP model to extract weights from
         group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
+        moe_grouped_gemm: If True, the model was grouped-swapped (Stage 3b) so its MoE
+            blocks are ``GroupedMoEShim`` instances holding grouped ``experts.w1/w2/w3``
+            tensors. The extracted state dict is then name/shape-remapped back to the
+            per-expert HF layout the inference engine expects (Stage 4b). Default False
+            keeps the path byte-identical to the non-grouped (a3-production) extractor.
     """
 
-    def __init__(self, model: torch.nn.Module, group_by_module: bool = False, batch_size_threshold_gb: float = 0.0):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        group_by_module: bool = False,
+        batch_size_threshold_gb: float = 0.0,
+        moe_grouped_gemm: bool = False,
+    ):
         self.model = model
         self.group_by_module = group_by_module
         self.batch_size_threshold_gb = batch_size_threshold_gb
+        self.moe_grouped_gemm = moe_grouped_gemm
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from FSDP model.
@@ -62,6 +74,14 @@ class FSDPWeightExtractor(WeightExtractor):
 
         # Get state dict (handles FSDP sharding)
         params = self.model.state_dict()
+
+        # Stage 4b: if the trainer was grouped-swapped (Stage 3b), its live MoE keys
+        # carry the GroupedMoEShim `.moe` segment and grouped `experts.w1/w2/w3`
+        # `[num_experts, ...]` tensors. Strip the shim/FSDP prefix and remap back to the
+        # per-expert HF layout the inference engine knows, BEFORE the broadcast loop.
+        # Gated: non-grouped models skip this entirely (byte-identical path).
+        if self.moe_grouped_gemm:
+            params = self._remap_grouped_state_dict(params)
 
         if not self.group_by_module:
             # Simple path: yield one chunk per parameter
@@ -87,6 +107,62 @@ class FSDPWeightExtractor(WeightExtractor):
         """Gather sharded tensor into full tensor."""
         device = torch.cuda.current_device()
         return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+
+    # MoE grouped-block (GroupedMoEShim.moe) segment that sits between the HF
+    # `...mlp.` prefix and the grouped `experts.w1/...`/`router.gate` keys the
+    # `convert_tt_to_hf_moe` converter matches on. FSDP2 `fully_shard` does not add a
+    # `_fsdp_wrapped_module` segment to state_dict keys, but FSDP1 (and nested wraps)
+    # can — strip it defensively so the remap is layout-agnostic.
+    _SHIM_SEG = ".mlp.moe."
+    _FSDP_SEG = "._fsdp_wrapped_module."
+
+    @staticmethod
+    def _strip_grouped_prefix(name: str) -> str:
+        """Normalize a live grouped-swapped key to the converter's expected form.
+
+        ``...layers.{i}.mlp.moe.experts.w1`` -> ``...layers.{i}.mlp.experts.w1``
+        ``...layers.{i}.mlp.moe.router.gate.weight`` -> ``...mlp.router.gate.weight``
+        Also drops any FSDP ``_fsdp_wrapped_module`` segments.
+        """
+        name = name.replace(FSDPWeightExtractor._FSDP_SEG, ".")
+        name = name.replace(FSDPWeightExtractor._SHIM_SEG, ".mlp.")
+        return name
+
+    def _remap_grouped_state_dict(self, params):
+        """Strip the GroupedMoEShim/FSDP prefix + run ``convert_tt_to_hf_moe`` in place.
+
+        Only the grouped MoE tensors (``experts.w1/w2/w3``, ``router.gate``, the shared
+        expert ``w1/w2/w3``) need to be materialized to full tensors before the converter
+        slices them per-expert (``w1[j]``) — a DTensor ``Shard(0)`` on the expert dim would
+        otherwise give a partial slice. Non-MoE params are left as-is (gathered lazily in the
+        existing broadcast loop). After the converter runs, expert keys become the per-expert
+        HF names the inference engine already loads.
+        """
+        from skyrl_train.models.layers.moe_weight_remap import convert_tt_to_hf_moe
+
+        # Grouped-block tensors the converter consumes (post-prefix-strip suffixes).
+        grouped_suffixes = (
+            ".mlp.experts.w1",
+            ".mlp.experts.w2",
+            ".mlp.experts.w3",
+            ".mlp.router.gate.weight",
+            ".mlp.shared_expert.w1.weight",
+            ".mlp.shared_expert.w2.weight",
+            ".mlp.shared_expert.w3.weight",
+        )
+
+        remapped = {}
+        for name, param in params.items():
+            new_name = self._strip_grouped_prefix(name)
+            if new_name.endswith(grouped_suffixes):
+                # Materialize before the converter slices per-expert.
+                remapped[new_name] = self._gather_tensor(param).detach().contiguous()
+            else:
+                remapped[new_name] = param
+
+        # In-place grouped -> per-expert HF remap (splits w1/w2/w3 into experts.{j}.*).
+        convert_tt_to_hf_moe(remapped)
+        return remapped
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
@@ -170,6 +246,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             batch_size_threshold_gb=(
                 self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
             ),
+            moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
         )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
