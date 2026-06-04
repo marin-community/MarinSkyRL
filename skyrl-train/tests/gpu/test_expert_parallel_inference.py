@@ -99,8 +99,11 @@ def init_ray_inference_engines(
         enable_prefix_caching=True,
         enforce_eager=True,
         shared_pg=shared_pg,
-        gpu_memory_utilization=0.8,
-        inference_engine_enable_sleep=False,
+        gpu_memory_utilization=config.generator.gpu_memory_utilization,
+        # Colocated runs sleep the engine to free GPU for the trainer (prod derives
+        # this from colocate_all in main_base.py); the weight-sync test calls
+        # client.sleep()/wake_up(tags=...) which requires sleep mode enabled.
+        inference_engine_enable_sleep=config.trainer.placement.colocate_all,
         async_engine=True,
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
@@ -164,6 +167,13 @@ def _run_ep_weight_sync(grouped_ep: bool):
             # Grouped-GEMM swap + EP=2 on the trainer side (Stage 4b).
             cfg.trainer.policy.fsdp_config.moe_grouped_gemm = True
             cfg.trainer.policy.fsdp_config.expert_model_parallel_size = 2
+            # 3-D mesh (ddp=1, ep=2, fsdp=2): fsdp_size must be set so
+            # ep_size * fsdp_size == world_size (4); the default -1 would make
+            # fsdp_size=world_size=4 and fail the divisibility assert.
+            cfg.trainer.policy.fsdp_config.fsdp_size = 2
+            # Leave headroom for the colocated EP-sharded trainer next to the
+            # gpu_memory_utilization=0.8 inference engines.
+            cfg.generator.gpu_memory_utilization = 0.45
         # Deterministic sampling for robust comparisons
         cfg.generator.sampling_params.temperature = 0.0
         cfg.generator.sampling_params.top_p = 1.0
