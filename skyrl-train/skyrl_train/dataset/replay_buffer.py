@@ -73,6 +73,8 @@ class Experience:
     # Teacher distillation fields
     teacher_top_k_logprobs: Optional[Float[torch.Tensor, "batch response_len K"]] = None
     teacher_top_k_indices: Optional[torch.Tensor] = None
+    # MoE router-replay (R3) field — present only when moe_router_replay is on.
+    rollout_routed_experts: Optional[Integer[torch.Tensor, "batch response_len L K"]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -98,6 +100,8 @@ class Experience:
             self.teacher_top_k_logprobs = to(self.teacher_top_k_logprobs, device)
         if self.teacher_top_k_indices is not None:
             self.teacher_top_k_indices = to(self.teacher_top_k_indices, device)
+        if self.rollout_routed_experts is not None:
+            self.rollout_routed_experts = to(self.rollout_routed_experts, device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
@@ -122,6 +126,8 @@ class Experience:
             self.teacher_top_k_logprobs = self.teacher_top_k_logprobs.pin_memory()
         if self.teacher_top_k_indices is not None:
             self.teacher_top_k_indices = self.teacher_top_k_indices.pin_memory()
+        if self.rollout_routed_experts is not None:
+            self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
         return self
 
 

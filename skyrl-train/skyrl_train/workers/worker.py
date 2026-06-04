@@ -790,6 +790,7 @@ class PolicyWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        rollout_routed_experts = experience.rollout_routed_experts
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -802,6 +803,7 @@ class PolicyWorkerBase(Worker):
                 return_output=True,
                 compute_entropy=True,
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
+                rollout_routed_experts=rollout_routed_experts,
             )
             # loss function
             # TODO: recompute advantages

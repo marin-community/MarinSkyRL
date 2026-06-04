@@ -65,6 +65,7 @@ class HFModelWrapper(nn.Module):
         use_torch_compile: bool = False,
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
+        moe_router_replay: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -194,6 +195,39 @@ class HFModelWrapper(nn.Module):
             else chunked_entropy_from_logits
         )
 
+        # MoE router replay (R3) — Stage 2. Detect MoE blocks, and only when the
+        # flag is on AND the model actually has MoE blocks do we instantiate a
+        # controller + monkeypatch the block class. Flag-off ⇒ self._router_replay
+        # is None, no class is patched, and the forward is byte-identical to
+        # stock HF (the patched forward, even if some other run installed it,
+        # short-circuits to the original when no controller is active).
+        self.moe_router_replay = moe_router_replay
+        self._router_replay = None
+        if moe_router_replay:
+            from skyrl_train.models.router_replay import (
+                RouterReplay,
+                install_router_replay_patch,
+                count_moe_layers,
+            )
+
+            num_moe_blocks = install_router_replay_patch(self.model)
+            if num_moe_blocks > 0:
+                # Sample packing is deferred to Stage 3 (R-F): the dense,
+                # unpacked path is what Stage 2 exercises. Guard loudly.
+                if self.use_sample_packing:
+                    raise NotImplementedError(
+                        "moe_router_replay does not support use_sample_packing yet "
+                        "(deferred to Stage 3). Disable use_sample_packing or "
+                        "moe_router_replay."
+                    )
+                self._router_replay = RouterReplay()
+                expected_layers = count_moe_layers(self.model.config)
+                if num_moe_blocks != expected_layers:
+                    raise AssertionError(
+                        f"router_replay: discovered {num_moe_blocks} MoE blocks but "
+                        f"config says {expected_layers} MoE layers."
+                    )
+
     @torch.no_grad()
     def generate(self, input_ids: torch.Tensor, **kwargs) -> Union[
         Tuple[torch.LongTensor, torch.LongTensor],
@@ -279,6 +313,7 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        rollout_routed_experts: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
         position_ids = attention_mask.long().cumsum(-1) - 1
@@ -314,13 +349,40 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
-        # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
-            # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
-            # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
-        else:
-            output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+        # MoE router replay (R3) — Stage 2. When enabled and targets are
+        # provided, install the per-layer forced top-k into the controller for
+        # the duration of the model forward. Single-GPU, dense (unpacked) path.
+        replay_installed = False
+        if (
+            self._router_replay is not None
+            and rollout_routed_experts is not None
+            and not self.use_sample_packing
+            and self.sequence_parallel_size == 1
+        ):
+            from skyrl_train.models.router_replay import set_active_replay
+
+            per_layer_targets, replay_mask = self._build_router_replay_targets(
+                rollout_routed_experts, sequences_fwd, num_actions
+            )
+            self._router_replay.begin_replay()
+            self._router_replay.set_microbatch_targets(per_layer_targets, replay_mask)
+            set_active_replay(self._router_replay)
+            replay_installed = True
+
+        try:
+            # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
+            if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+                # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
+                # Not using attention mask leads to higher perf since flash attention varlen func is enabled
+                output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            else:
+                output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+        finally:
+            if replay_installed:
+                from skyrl_train.models.router_replay import set_active_replay
+
+                set_active_replay(None)
+                self._router_replay.clear()
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
@@ -385,6 +447,57 @@ class HFModelWrapper(nn.Module):
             return (action_log_probs, output)
         else:
             return action_log_probs
+
+    def _build_router_replay_targets(self, rollout_routed_experts, sequences_fwd, num_actions):
+        """Build per-layer forced-topk targets + a per-token replay mask.
+
+        ``rollout_routed_experts`` is ``[B, response_len, L, K]`` (response axis).
+        The model forward runs the full ``[B, seq_len]`` sequence; HF MoE blocks
+        flatten ``[B, seq_len] -> (B*seq_len)`` in batch-major (row) order. We
+        build a full-sequence target ``[B*seq_len, K]`` per layer and a
+        ``[B*seq_len]`` bool mask True only on response positions (the last
+        ``num_actions`` columns) AND non-sentinel rows. Prompt / pad / sentinel
+        rows fall through to natural routing.
+        """
+        from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID
+
+        if isinstance(num_actions, (list, np.ndarray)):
+            raise NotImplementedError(
+                "router_replay requires a scalar num_actions (dense unpacked path); "
+                "got a per-sample list/array."
+            )
+        device = sequences_fwd.device
+        batch_size, seq_len = sequences_fwd.shape
+        re = rollout_routed_experts.to(device=device, dtype=torch.long)
+        B, response_len, L, K = re.shape
+        assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
+        assert response_len == num_actions, (
+            f"router_replay response_len {response_len} != num_actions {num_actions}"
+        )
+
+        # Full-seq target [B, seq_len, L, K], sentinel-filled, response copied in.
+        full = torch.full(
+            (batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device
+        )
+        full[:, seq_len - response_len : seq_len, :, :] = re
+
+        # Replay mask: True on response positions whose row is non-sentinel
+        # (a row is sentinel iff all K captured experts equal SENTINEL_EXPERT_ID).
+        response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+        response_pos[:, seq_len - response_len : seq_len] = True
+        # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
+        # for replay only where every layer carries real data. Use layer 0 as the
+        # representative (the capture rail writes the same sentinel pattern across
+        # layers for a given token), then AND with response_pos.
+        non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
+        replay_mask_BS = response_pos & non_sentinel  # [B, seq_len]
+
+        # Flatten batch-major to match HF's [B, seq_len] -> (B*seq_len).
+        replay_mask = replay_mask_BS.reshape(-1)  # [B*seq_len]
+        # Per-layer targets: [B*seq_len, K] each, ordered by layer position.
+        full_flat = full.permute(2, 0, 1, 3).reshape(L, batch_size * seq_len, K)  # [L, B*seq_len, K]
+        per_layer_targets = [full_flat[i] for i in range(L)]
+        return per_layer_targets, replay_mask
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
