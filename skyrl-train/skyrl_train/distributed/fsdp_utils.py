@@ -235,7 +235,7 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 # Fsdp2 load full state dict from `accelerate`
 # Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
 # NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
-def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None):
+def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None, ep_enabled=False):
     """
     Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
     parameters from rank 0 to all other ranks. This function modifies the model in-place.
@@ -244,9 +244,36 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         model (`torch.nn.Module`):
             The model to load the state dict into, expected to be on meta device or a VRAM spike can occur
         full_sd (`dict`): The full state dict to load, can be only on rank 0
+        ep_enabled (`bool`): Whether expert parallelism is active. When True, the model has a MIX of params
+            sharded over the global FSDP mesh AND expert params sharded over a (fsdp, ep) submesh. The naive
+            per-param `broadcast(global)` + `distribute_tensor(submesh)` path below interleaves a global
+            collective with a submesh collective per param, so ranks that do not own a slice of a given
+            submesh desync from the global broadcast → NCCL store->get wait timeout (deadlock). When
+            ep_enabled, we instead use the standard FSDP2 full-state-dict loader
+            (`torch.distributed.checkpoint.state_dict.set_model_state_dict` with broadcast_from_rank0), which
+            shards each param to its OWN DTensor mesh in a collective-symmetric way regardless of target mesh.
+            DEFAULT False keeps the a3 (non-EP) production path byte-identical.
     """
     import torch.distributed as dist
     from torch.distributed.tensor import distribute_tensor
+
+    if ep_enabled:
+        # Placement-aware, collective-symmetric full-state-dict load for mixed
+        # global/submesh (EP) params. Standard FSDP2 loader used by torchtitan/prime-rl.
+        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=False),
+        )
+        # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
+        offload_fsdp2_model_to_cpu(model)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        if not cpu_offload:
+            load_fsdp2_model_to_gpu(model)
+        return model
 
     # Model was previously copied to meta device
     meta_sharded_sd = model.state_dict()

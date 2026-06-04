@@ -351,7 +351,11 @@ class FSDPStrategy(DistributedStrategy):
                     "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
                 )
             apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
-            fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+            # Under EP, `module` has params on a mix of meshes (non-expert on the global/"fsdp"
+            # mesh, experts on the (fsdp,ep) submesh). The naive broadcast+distribute_tensor loader
+            # deadlocks on that mix (global broadcast interleaved with submesh collective). Gate the
+            # placement-aware loader on EP; ep_size==1 (a3) keeps the byte-identical naive path.
+            fsdp2_load_full_state_dict(module, full_state, cpu_offload, ep_enabled=ep_on)
             fsdp_module = module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
