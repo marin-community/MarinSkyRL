@@ -108,7 +108,18 @@ class FSDPStrategy(DistributedStrategy):
         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
         self.world_size = dist.get_world_size()
 
-        self.device_mesh = create_device_mesh(world_size=self.world_size, fsdp_size=self.fsdp_config.fsdp_size)
+        # Stage 4a: expert parallelism. ep_size>1 builds a 3-D ["ddp","ep","fsdp"]
+        # mesh; ep_size==1 (default / a3 production) is the unchanged 1-D/2-D mesh.
+        ep_size = int(self.fsdp_config.get("expert_model_parallel_size", 1))
+        etp_size = int(self.fsdp_config.get("expert_tensor_parallel_size", 1))
+        if ep_size > 1:
+            assert self.fsdp_strategy == "fsdp2", "Expert parallelism (ep_size>1) requires fsdp2 strategy"
+            assert etp_size == 1, "Stage 4a is ETP==1 only (expert_tensor_parallel_size must be 1)"
+            # SP+EP is deferred (scope §5); the SP gate itself lives in model_wrapper.
+        self.ep_size = ep_size
+        self.device_mesh = create_device_mesh(
+            world_size=self.world_size, fsdp_size=self.fsdp_config.fsdp_size, ep_size=ep_size
+        )
 
     def offload_to_cpu(
         self, model, optimizer, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True
@@ -276,6 +287,14 @@ class FSDPStrategy(DistributedStrategy):
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
+        # Stage 4a: when EP is on, FSDP shards non-expert params over the "fsdp"
+        # submesh only (the experts get a separate ExpertParallel Shard(0) over the
+        # "ep" submesh in apply_ep, after fully_shard). ep_size==1 keeps fsdp_mesh
+        # as today's full mesh (byte-identical).
+        ep_on = getattr(self, "ep_size", 1) > 1
+        if ep_on:
+            fsdp_mesh = self.device_mesh["fsdp"]
+
         # Wrap model with FSDP
         if self.fsdp_strategy == "fsdp":
             # cpu offloading will always be none for models that train with FSDP due to correctness issues with gradient accumulation -
@@ -312,6 +331,18 @@ class FSDPStrategy(DistributedStrategy):
             module = model.model if is_wrapped else model
             full_state = module.state_dict()
             apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+            # Stage 4a: shard experts over the "ep" submesh AFTER FSDP wrap and
+            # BEFORE the full-state-dict load (so the load distributes into the
+            # final EP+FSDP placement). ep_size==1 ⇒ apply_ep is never called.
+            if ep_on:
+                from skyrl_train.distributed.fsdp_utils import apply_ep
+
+                ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
+                num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend)
+                assert num_sharded > 0, (
+                    "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
+                    "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
+                )
             fsdp2_load_full_state_dict(module, full_state, cpu_offload)
             fsdp_module = module
         else:

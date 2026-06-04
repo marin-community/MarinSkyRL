@@ -380,6 +380,55 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
 
 
+def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size=1):
+    """Shard MoE experts across the ``ep`` submesh via torchtitan ``ExpertParallel``.
+
+    Stage 4a — torch ``all_to_all`` backend only (NO DeepEP; that is Stage 5) and
+    ETP==1 (plain ``ExpertParallel``, not ``ExpertTensorParallel``). For each lifted
+    ``GroupedMoEShim.moe.experts`` (the ``GroupedExperts`` w1/w2/w3 holder) this:
+
+      * ``Shard(0)``-s every expert param over ``device_mesh["ep"]`` (each rank holds
+        ``num_experts // ep_size`` experts), composing with the FSDP2 ``Shard`` on the
+        ``fsdp`` submesh applied earlier (net: 2-D expert DTensors);
+      * installs ``ExpertParallel._token_dispatch`` / ``_token_combine`` all_to_all
+        hooks on the ``experts`` module boundary (the autograd ``_A2A`` carries grads
+        symmetrically on the backward).
+
+    The router gate + the forced-index override fire BEFORE any token movement, so
+    router replay is preserved by construction (scope §3). Returns the number of
+    expert modules sharded.
+
+    Must be called AFTER ``apply_fsdp2`` and BEFORE the full-state-dict load so the
+    load distributes weights into their final EP+FSDP placement.
+    """
+    assert ep_comm_backend == "torch", (
+        f"Stage 4a supports only ep_comm_backend='torch' (DeepEP is Stage 5); got {ep_comm_backend!r}"
+    )
+    assert sequence_parallel_size == 1, (
+        "SP+EP is deferred (scope §5): apply_ep requires sequence_parallel_size==1"
+    )
+
+    from torch.distributed.tensor.parallel import parallelize_module
+    from torchtitan.distributed.expert_parallel import ExpertParallel
+
+    ep_mesh = device_mesh["ep"]
+    sharded = 0
+    for module in model.modules():
+        # The lifted grouped block exposes `moe.experts` (a GroupedExperts holding
+        # w1/w2/w3). Match the shim's `moe` attribute to find expert holders.
+        moe = getattr(module, "moe", None)
+        if moe is None:
+            continue
+        experts = getattr(moe, "experts", None)
+        if experts is None or experts.__class__.__name__ != "GroupedExperts":
+            continue
+        parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ExpertParallel())
+        # Flag the grouped block so its forward selects the EP-decorated compute path.
+        moe._ep_enabled = True
+        sharded += 1
+    return sharded
+
+
 def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
     """torch.nn.utils.clip_grad_norm_ can't run on cpu parameter DTensor"""
     from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
@@ -396,13 +445,39 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def create_device_mesh(world_size, fsdp_size):
-    if fsdp_size < 0 or fsdp_size >= world_size:
-        device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
-    else:
-        device_mesh = init_device_mesh(
-            "cuda", mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
-        )
+def create_device_mesh(world_size, fsdp_size, ep_size=1, device_type="cuda"):
+    """Build the FSDP2 device mesh.
+
+    ``ep_size <= 1`` (the default / a3-production path) is UNCHANGED — the today
+    1-D ``["fsdp"]`` or 2-D ``["ddp","fsdp"]`` mesh, byte-identical to before EP
+    (Stage 4 flag-off requirement G4-0).
+
+    ``ep_size > 1`` (Stage 4a expert parallelism) builds a 3-D
+    ``["ddp","ep","fsdp"]`` mesh of shape ``(ddp, ep_size, fsdp_size)`` where
+    ``ddp = world_size // (ep_size * fsdp_size)``. Experts shard over the ``ep``
+    submesh; non-expert params shard over the ``fsdp`` submesh. E.g.
+    ``create_device_mesh(4, 2, ep_size=2)`` → ``(1, 2, 2)``.
+    """
+    if ep_size <= 1:
+        if fsdp_size < 0 or fsdp_size >= world_size:
+            device_mesh = init_device_mesh(device_type, mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
+        else:
+            device_mesh = init_device_mesh(
+                device_type, mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
+            )
+        return device_mesh
+
+    # Expert parallelism (Stage 4a): 3-D ["ddp", "ep", "fsdp"] mesh.
+    fsdp = world_size if (fsdp_size < 0 or fsdp_size >= world_size) else fsdp_size
+    assert world_size % ep_size == 0, f"world_size={world_size} not divisible by ep_size={ep_size}"
+    assert world_size % fsdp == 0, f"world_size={world_size} not divisible by fsdp_size={fsdp}"
+    assert (world_size % (ep_size * fsdp)) == 0, (
+        f"world_size={world_size} not divisible by ep_size*fsdp_size={ep_size * fsdp}"
+    )
+    ddp = world_size // (ep_size * fsdp)
+    device_mesh = init_device_mesh(
+        device_type, mesh_shape=(ddp, ep_size, fsdp), mesh_dim_names=["ddp", "ep", "fsdp"]
+    )
     return device_mesh
 
 
@@ -411,10 +486,10 @@ def get_sharding_strategy(device_mesh):
 
     if device_mesh.ndim == 1:
         sharding_strategy = ShardingStrategy.FULL_SHARD
-    elif device_mesh.ndim == 2:
+    elif device_mesh.ndim in (2, 3):
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
     else:
-        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
+        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1, 2 or 3")
     return sharding_strategy
 
 

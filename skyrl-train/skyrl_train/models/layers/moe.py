@@ -41,6 +41,7 @@ from typing import Literal, Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 
 # --------------------------------------------------------------------------- #
@@ -92,6 +93,23 @@ def _run_experts_grouped_mm(
     return out
 
 
+# Stage 4a: the EP grouped-mm compute path. The torchtitan ``@expert_parallel``
+# decorator (1) converts the expert DTensor params to local tensors, and (2) runs
+# ``generate_permute_indices`` to re-shuffle the cross-rank interleaved
+# ``num_tokens_per_expert_group`` (returned by ``ExpertParallel._token_dispatch``)
+# into local-expert order + pad each group to ALIGN_SIZE_M for ``torch._grouped_mm``.
+# It is applied ONLY here (the EP>1 compute path); the bare for-loop above stays the
+# EP=1 fp32 parity oracle. Imported lazily so the base (no-EP) install never needs
+# torchtitan.
+def _maybe_build_ep_grouped_mm():
+    from torchtitan.distributed.expert_parallel import expert_parallel
+
+    return expert_parallel(_run_experts_grouped_mm)
+
+
+_run_experts_grouped_mm_ep = None
+
+
 class GroupedExperts(nn.Module):
     """Stacked per-expert gated-MLP weights, run grouped over tokens.
 
@@ -116,6 +134,17 @@ class GroupedExperts(nn.Module):
         self.use_grouped_mm = use_grouped_mm
 
     def forward(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        # EP active ⇒ params are DTensors (Shard(0) on the ep submesh). The
+        # ExpertParallel _token_dispatch hook has already all_to_all'd `x` and
+        # returned the cross-rank interleaved `num_tokens_per_expert` here; the
+        # @expert_parallel-decorated grouped-mm re-permutes + pads, runs
+        # torch._grouped_mm on the local experts, then unpermutes. The bare
+        # for-loop is EP=1-only (it cannot consume the interleaved counts).
+        if isinstance(self.w1, DTensor):
+            global _run_experts_grouped_mm_ep
+            if _run_experts_grouped_mm_ep is None:
+                _run_experts_grouped_mm_ep = _maybe_build_ep_grouped_mm()
+            return _run_experts_grouped_mm_ep(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
