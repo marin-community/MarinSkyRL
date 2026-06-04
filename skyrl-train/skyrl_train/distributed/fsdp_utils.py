@@ -466,10 +466,17 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, device_type="cuda"):
     (Stage 4 flag-off requirement G4-0).
 
     ``ep_size > 1`` (Stage 4a expert parallelism) builds a 3-D
-    ``["ddp","ep","fsdp"]`` mesh of shape ``(ddp, ep_size, fsdp_size)`` where
+    ``["ddp","fsdp","ep"]`` mesh of shape ``(ddp, fsdp_size, ep_size)`` where
     ``ddp = world_size // (ep_size * fsdp_size)``. Experts shard over the ``ep``
     submesh; non-expert params shard over the ``fsdp`` submesh. E.g.
     ``create_device_mesh(4, 2, ep_size=2)`` → ``(1, 2, 2)``.
+
+    The ``fsdp`` dim is placed BEFORE ``ep`` deliberately: an EP-sharded expert param
+    is later ``fully_shard``-ed on the ``fsdp`` submesh, producing a 2-D expert DTensor
+    that FSDP2 internally slices as ``("fsdp", "ep")``. ``DeviceMesh._get_slice_mesh_dims``
+    requires those root-dim indices to be ascending, so ``fsdp`` (idx 1) must precede
+    ``ep`` (idx 2). The reverse order raised
+    ``KeyError: ... Mesh dim indices should be in ascending order``.
     """
     if ep_size <= 1:
         if fsdp_size < 0 or fsdp_size >= world_size:
@@ -480,7 +487,8 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, device_type="cuda"):
             )
         return device_mesh
 
-    # Expert parallelism (Stage 4a): 3-D ["ddp", "ep", "fsdp"] mesh.
+    # Expert parallelism (Stage 4a): 3-D ["ddp", "fsdp", "ep"] mesh (fsdp before ep so
+    # the composed 2-D expert DTensor slices in ascending root-dim order).
     fsdp = world_size if (fsdp_size < 0 or fsdp_size >= world_size) else fsdp_size
     assert world_size % ep_size == 0, f"world_size={world_size} not divisible by ep_size={ep_size}"
     assert world_size % fsdp == 0, f"world_size={world_size} not divisible by fsdp_size={fsdp}"
@@ -489,7 +497,7 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, device_type="cuda"):
     )
     ddp = world_size // (ep_size * fsdp)
     device_mesh = init_device_mesh(
-        device_type, mesh_shape=(ddp, ep_size, fsdp), mesh_dim_names=["ddp", "ep", "fsdp"]
+        device_type, mesh_shape=(ddp, fsdp, ep_size), mesh_dim_names=["ddp", "fsdp", "ep"]
     )
     return device_mesh
 

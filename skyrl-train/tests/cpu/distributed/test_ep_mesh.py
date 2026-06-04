@@ -2,7 +2,7 @@
 
 Gates (scope §6):
   G4-1        create_device_mesh(4, 2, ep_size=2) → shape (1, 2, 2) with dim names
-              ["ddp", "ep", "fsdp"]; divisibility asserts fire on bad combos.
+              ["ddp", "fsdp", "ep"]; divisibility asserts fire on bad combos.
   G4-0-mesh   ep_size==1 (default) → UNCHANGED 1-D ["fsdp"] / 2-D ["ddp","fsdp"]
               mesh, byte-identical to the pre-EP path.
 
@@ -67,10 +67,11 @@ def _mesh_worker(rank, world_size):
     os.environ.setdefault("WORLD_SIZE", str(world_size))
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
     try:
-        # G4-1: ep_size=2, fsdp_size=2 on 4 ranks → (ddp=1, ep=2, fsdp=2).
+        # G4-1: ep_size=2, fsdp_size=2 on 4 ranks → (ddp=1, fsdp=2, ep=2).
+        # fsdp precedes ep so the composed 2-D expert DTensor slices ascending.
         mesh = create_device_mesh(world_size=4, fsdp_size=2, ep_size=2, device_type="cpu")
         assert tuple(mesh.mesh.shape) == (1, 2, 2), f"shape={tuple(mesh.mesh.shape)} != (1,2,2)"
-        assert mesh.mesh_dim_names == ("ddp", "ep", "fsdp"), f"names={mesh.mesh_dim_names}"
+        assert mesh.mesh_dim_names == ("ddp", "fsdp", "ep"), f"names={mesh.mesh_dim_names}"
         # submeshes addressable
         assert mesh["ep"].size() == 2
         assert mesh["fsdp"].size() == 2
@@ -88,7 +89,7 @@ def _mesh_worker(rank, world_size):
         mesh_1d = create_device_mesh(world_size=4, fsdp_size=-1, ep_size=1, device_type="cpu")
         assert mesh_1d.mesh_dim_names == ("fsdp",), f"1-D names={mesh_1d.mesh_dim_names}"
         if rank == 0:
-            print("[G4-1] 3-D mesh (1,2,2) names ['ddp','ep','fsdp'] + submeshes: PASS")
+            print("[G4-1] 3-D mesh (1,2,2) names ['ddp','fsdp','ep'] + submeshes: PASS")
             print("[G4-0-mesh] ep_size=1 byte-identical 2-D/1-D mesh: PASS")
     finally:
         dist.destroy_process_group()
