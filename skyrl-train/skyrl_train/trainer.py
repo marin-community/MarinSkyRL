@@ -833,6 +833,16 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
 
+        # MoE router-replay capture rail (Stage 1): only pull routed_experts when
+        # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical
+        # (the field is never even passed to the collator nor set on the batch).
+        moe_router_replay = bool(
+            self.cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)
+        )
+        routed_experts = (
+            generator_output.get("rollout_routed_experts", None) if moe_router_replay else None
+        )
+
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -840,6 +850,7 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
+            rollout_routed_experts_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -847,6 +858,7 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
+            routed_experts,
         )
         # sanity check for tis
         if self.cfg.trainer.algorithm.use_tis:
@@ -854,6 +866,11 @@ class RayPPOTrainer:
                 rollout_logprobs_tensor is not None
             ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
+        if rollout_routed_experts_tensor is not None:
+            assert (
+                rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape
+            ), "routed_experts response axis should look like responses"
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -869,6 +886,10 @@ class RayPPOTrainer:
                 ),
             },
         )
+        # Attach routed_experts only when present, so the flag-off batch dict has
+        # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
+        if rollout_routed_experts_tensor is not None:
+            training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
         training_input.metadata = {"uids": uids}
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if generator_output.get("exclude_from_baseline") is not None:

@@ -336,6 +336,12 @@ class TrainingInput(TypedDict, total=False):
     # Teacher distillation fields (populated by DistillationTrainer when teacher engine is configured)
     teacher_top_k_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len K"]]
     teacher_top_k_indices: Optional[Integer[torch.Tensor, "batch_size seq_len K"]]
+    # MoE router-replay capture rail (Stage 1): per-token expert-selection indices
+    # captured from vLLM, [batch, response_len, L, K] (L = MoE layers, K = top-k).
+    # Present only when trainer.policy.fsdp_config.moe_router_replay is True. >2-D
+    # per-token precedent: teacher_top_k_* above; TensorBatch._check_consistency
+    # only validates dim-0, so 4-D is accepted. Consumed in Stage 2 (replay), not here.
+    rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

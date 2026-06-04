@@ -11,6 +11,9 @@ from skyrl_train.generators.utils import (
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
     extract_logprobs_from_rollout_details,
+    extract_routed_experts_from_rollout_details,
+    _sentinel_routed_experts_row,
+    SENTINEL_EXPERT_ID,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
@@ -46,6 +49,9 @@ class TerminalBenchAgentOutput:
     trajectory_id: TrajectoryID
     summarization_count: Optional[int] = None
     rollout_logprobs: Optional[List[float]] = None
+    # MoE router-replay (Stage 1 capture rail): per-token [L, K] expert-selection
+    # rows aligned 1:1 with response_ids. None unless moe_router_replay is on.
+    rollout_routed_experts: Optional[List[List[List[int]]]] = None
     # For RLOO-N: True = exclude from baseline (infrastructure failure)
     # False = include in baseline (agent failure or success)
     exclude_from_baseline: bool = False
@@ -61,6 +67,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         terminal_bench_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        moe_router_replay: bool = False,
     ):
         """
         Args:
@@ -68,11 +75,16 @@ class TerminalBenchGenerator(GeneratorInterface):
             terminal_bench_cfg: DictConfig object containing the terminal bench configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            moe_router_replay: when True, capture per-token MoE routed_experts from
+                Harbor rollout_details and plumb them through to the training batch
+                (Stage 1 of the FSDP2 EP/router-replay port). Default False keeps the
+                GeneratorOutput byte-identical to today.
         """
         self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
+        self._moe_router_replay = moe_router_replay
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
@@ -694,6 +706,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     output.prompt_ids = [0]
                     output.reward = 0
                     output.rollout_logprobs = None  # Clear logprobs to match response_ids length
+                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
                 else:
                     successful_outputs.append(output)
         else:
@@ -706,6 +719,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     output.prompt_ids = [0]
                     output.reward = 0
                     output.rollout_logprobs = None  # Clear logprobs to match response_ids length
+                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
                     output.exclude_from_baseline = False  # Legacy: include in baseline
                 else:
                     successful_outputs.append(output)
@@ -794,6 +808,31 @@ class TerminalBenchGenerator(GeneratorInterface):
                     f"and if context length errors are preventing logprob collection."
                 )
 
+        # Collect routed_experts (Stage 1 MoE router-replay capture rail). Mirrors
+        # the rollout_logprobs gather and mixed-presence handling. Gated on
+        # moe_router_replay so the GeneratorOutput is byte-identical when off (the
+        # key is omitted entirely, not set to None). Skipped for eval like logprobs.
+        rollout_routed_experts_list = None
+        if self._moe_router_replay and not is_eval:
+            has_any_re = any(output.rollout_routed_experts is not None for output in all_outputs)
+            if has_any_re:
+                # Learn the [L, K] sentinel-row shape from the first real sample so
+                # missing/failed samples are sentinel-filled at the correct width.
+                sentinel_row = [[SENTINEL_EXPERT_ID]]
+                for output in all_outputs:
+                    if output.rollout_routed_experts:
+                        sentinel_row = _sentinel_routed_experts_row(output.rollout_routed_experts[0])
+                        break
+                rollout_routed_experts_list = []
+                for output in all_outputs:
+                    if output.rollout_routed_experts is not None:
+                        rollout_routed_experts_list.append(output.rollout_routed_experts)
+                    else:
+                        # Sentinel-fill missing samples to match response_ids length.
+                        rollout_routed_experts_list.append(
+                            [list(sentinel_row) for _ in range(len(output.response_ids))]
+                        )
+
         # Aggregate per-component reward metrics (composite shaper only)
         component_outputs = [o for o in all_outputs if o.reward_components is not None]
         if component_outputs:
@@ -844,6 +883,11 @@ class TerminalBenchGenerator(GeneratorInterface):
             "exclude_from_baseline": [output.exclude_from_baseline for output in all_outputs],
             "actual_global_step": actual_global_step,
         }
+
+        # Only attach routed_experts when router-replay is on, so the flag-off
+        # GeneratorOutput dict is byte-identical to today (key absent, not None).
+        if rollout_routed_experts_list is not None:
+            generator_output["rollout_routed_experts"] = rollout_routed_experts_list
 
         return generator_output
 
@@ -1122,9 +1166,28 @@ class TerminalBenchGenerator(GeneratorInterface):
         rollout_details = getattr(result.agent_result, "rollout_details", None)
         assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
 
-        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
-        )
+        # Extract per-turn MoE routed_experts (Stage 1 capture rail). Gated on
+        # moe_router_replay so the flag-off path is byte-identical: when off we
+        # never pass assistant_routed_experts, so the chokepoint returns its 3-tuple.
+        rollout_routed_experts = None
+        if self._moe_router_replay:
+            assistant_routed_experts = extract_routed_experts_from_rollout_details(rollout_details)
+            (
+                response_ids,
+                loss_mask,
+                rollout_logprobs,
+                rollout_routed_experts,
+            ) = get_response_ids_and_loss_mask_from_messages(
+                response_messages,
+                self.tokenizer,
+                assistant_logprobs,
+                custom_chat_template=self.custom_chat_template_content,
+                assistant_routed_experts=assistant_routed_experts,
+            )
+        else:
+            response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+                response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
+            )
 
         # Determine stop reason
         max_response_tokens = (
@@ -1141,6 +1204,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         loss_mask = loss_mask[:max_response_tokens]
         if rollout_logprobs is not None:
             rollout_logprobs = rollout_logprobs[:max_response_tokens]
+        if rollout_routed_experts is not None:
+            rollout_routed_experts = rollout_routed_experts[:max_response_tokens]
 
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
@@ -1150,6 +1215,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
             rollout_logprobs=rollout_logprobs,
+            rollout_routed_experts=rollout_routed_experts,
             summarization_count=summarization_count,
             reward_components=reward_components,
         )

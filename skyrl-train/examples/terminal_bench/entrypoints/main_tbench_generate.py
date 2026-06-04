@@ -34,6 +34,9 @@ class TerminalBenchGenerateExp(BasePPOExp):
             terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            moe_router_replay=bool(
+                cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)
+            ),
         )
 
     def _setup_generator(self):

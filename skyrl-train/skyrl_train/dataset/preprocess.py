@@ -32,6 +32,7 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
+    routed_experts: Optional[List[List[List[List[int]]]]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -39,6 +40,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional["torch.Tensor"],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
@@ -129,4 +131,31 @@ def convert_prompts_responses_to_batch_tensors(
         ]
         logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
 
-    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor
+    # MoE router-replay capture rail (Stage 1): right-pad routed_experts on the
+    # response axis exactly like rollout_logprobs, but each per-token element is a
+    # [L, K] expert-index vector. Result: [batch, response_len, L, K] int. Padding
+    # rows are sentinel [L, K] (all zeros). 4-D is accepted by TensorBatch since
+    # _check_consistency only validates dim-0.
+    routed_experts_tensor = None
+    if routed_experts:
+        max_output_len = action_mask.size(1)
+        # Infer [L, K] from the first non-empty sample (every real row shares it).
+        L, K = 1, 1
+        for sample_re in routed_experts:
+            if sample_re:
+                L = len(sample_re[0])
+                K = len(sample_re[0][0]) if L > 0 and isinstance(sample_re[0][0], (list, tuple)) else 1
+                break
+        sentinel_row = [[0] * K for _ in range(L)]
+        padded_re = []
+        for sample_re in routed_experts:
+            sample_re = list(sample_re)
+            pad_n = max_output_len - len(sample_re)
+            if pad_n > 0:
+                sample_re = sample_re + [sentinel_row for _ in range(pad_n)]
+            elif pad_n < 0:
+                sample_re = sample_re[:max_output_len]
+            padded_re.append(sample_re)
+        routed_experts_tensor = torch.tensor(padded_re, dtype=torch.long)
+
+    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor, routed_experts_tensor

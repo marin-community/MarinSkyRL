@@ -38,6 +38,11 @@ class GeneratorOutput(TypedDict):
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
+    # MoE router-replay (Stage 1 capture rail): per-sample per-token [L, K]
+    # expert-selection rows, i.e. List[ [response_len, L, K] ]. Present only when
+    # trainer.policy.fsdp_config.moe_router_replay is True; absent otherwise so the
+    # default (production) GeneratorOutput is byte-identical.
+    rollout_routed_experts: Optional[List[List[List[List[int]]]]]
     trajectory_ids: Optional[List[TrajectoryID]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]

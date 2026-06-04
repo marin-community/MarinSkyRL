@@ -503,10 +503,22 @@ except ImportError:
                             # than leaving a short list paired with full
                             # prompt/completion lists.
                             del rollout["logprobs"]
+                # Truncate provider-specific per-turn data (e.g. routed_experts
+                # for MoE router-replay) in lockstep with the token/logprob
+                # lists. RolloutDetail.extra is {field_name: [per-turn values]},
+                # each inner list aligned with completion_token_ids. Without this,
+                # a context-length/timeout rollback would leave extra[*] longer
+                # than the truncated turns, breaking downstream length invariants.
+                # Truncating an absent key is a no-op, so this is safe always.
+                extra = rollout.get("extra")
+                if isinstance(extra, dict):
+                    for field_name, per_turn in list(extra.items()):
+                        if isinstance(per_turn, list):
+                            extra[field_name] = per_turn[:target_count]
 
             def _clear_rollout_details(self, rollout) -> None:
                 """Remove every per-turn list from a RolloutDetail."""
-                for key in ("prompt_token_ids", "completion_token_ids", "logprobs"):
+                for key in ("prompt_token_ids", "completion_token_ids", "logprobs", "extra"):
                     if key in rollout:
                         del rollout[key]
 

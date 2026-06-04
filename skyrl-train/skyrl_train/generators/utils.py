@@ -255,6 +255,23 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
                 for response_ids in output["response_ids"]:
                     rollout_logprobs_concat.append([0.0] * len(response_ids))
 
+    # Handle mixed routed_experts (Stage 1 MoE router-replay capture rail) the same
+    # way as rollout_logprobs: if any batch carries routed_experts but others don't,
+    # sentinel-fill the missing batches with a per-token [1, 1] sentinel row so the
+    # concatenated list stays 1:1 with response_ids. When the flag is off, NO batch
+    # carries the key (the generator omits it), so this stays None and the result
+    # dict is byte-identical to today.
+    has_routed_experts = ["rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None for output in generator_outputs]
+    rollout_routed_experts_concat = None
+    if any(has_routed_experts):
+        rollout_routed_experts_concat = []
+        for output in generator_outputs:
+            if "rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None:
+                rollout_routed_experts_concat.extend(output["rollout_routed_experts"])
+            else:
+                for response_ids in output["response_ids"]:
+                    rollout_routed_experts_concat.append([[[SENTINEL_EXPERT_ID]] for _ in range(len(response_ids))])
+
     result: GeneratorOutput = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
@@ -267,6 +284,8 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         ),
         "rollout_logprobs": rollout_logprobs_concat,
     }
+    if rollout_routed_experts_concat is not None:
+        result["rollout_routed_experts"] = rollout_routed_experts_concat
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -554,7 +573,171 @@ def extract_logprobs_from_rollout_details(
     return logprobs
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None):
+def extract_routed_experts_from_rollout_details(
+    rollout_details: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Any]]:
+    """Extract per-turn MoE ``routed_experts`` from Harbor's rollout_details.
+
+    Sibling of :func:`extract_logprobs_from_rollout_details`. The vLLM fork emits
+    per-token expert-selection indices ``[gen_len, L, K]`` (L = MoE layers,
+    K = top-k experts) over ``/v1`` non-streaming via ``provider_specific_fields``.
+    Harbor's ``_extract_provider_extra`` lands this in
+    ``RolloutDetail.extra["routed_experts"]`` as a per-turn list (one ``[gen_len, L, K]``
+    entry per assistant turn, aligned with ``completion_token_ids``).
+
+    This is Stage 1 of the FSDP2 EP/router-replay port (R3 capture rail). No MoE
+    math here — pure data-plane extraction. Returns None when absent so the field
+    is treated as a sentinel-filled sample downstream (preempted requests, quant
+    paths, and disabled-capture modes silently drop routing — see
+    notes/skyrl/stage1_capture_rail_scope.md Q1).
+
+    Args:
+        rollout_details: List of RolloutDetail dicts from Harbor's AgentContext.
+
+    Returns:
+        Per-turn routed_experts ``[[gen_len, L, K]_turn1, ...]``, or None if
+        rollout_details is empty/missing or doesn't carry routed_experts.
+    """
+    if not rollout_details or len(rollout_details) == 0:
+        return None
+
+    # First rollout_detail contains the main agent's conversation.
+    main_rollout = rollout_details[0]
+
+    if isinstance(main_rollout, dict):
+        extra = main_rollout.get("extra")
+    else:
+        extra = getattr(main_rollout, "extra", None)
+
+    if not extra or not isinstance(extra, dict):
+        return None
+
+    routed_experts = extra.get("routed_experts")
+    if not routed_experts:
+        return None
+
+    if not isinstance(routed_experts, list):
+        logger.warning(f"Unexpected routed_experts type: {type(routed_experts)}, expected list")
+        return None
+
+    logger.debug(f"Extracted routed_experts from rollout_details: {len(routed_experts)} turns")
+    return routed_experts
+
+
+SENTINEL_EXPERT_ID = 0  # sentinel for unmatched / non-generated token rows in routed_experts
+
+
+def align_routed_experts_with_lcs(
+    retokenized_ids: List[int],
+    vllm_routed_experts: List[Any],
+    tokenizer,
+    vllm_token_strings: Optional[List[str]] = None,
+) -> List[List[List[int]]]:
+    """Align vLLM per-token ``routed_experts`` rows to re-tokenized IDs via LCS.
+
+    Mirror of :func:`align_logprobs_with_lcs`, but each per-token element is a
+    ``[L, K]`` VECTOR (MoE-layer x top-k expert indices) rather than a scalar
+    logprob. ``routed_experts`` is 1:1 with the vLLM response tokens — exactly the
+    same index space as the per-token logprobs — so when the vLLM token strings are
+    available (``vllm_token_strings``, from the parallel logprob dicts) we run the
+    IDENTICAL ``SequenceMatcher.get_matching_blocks()`` LCS used by
+    ``align_logprobs_with_lcs`` and copy the whole ``[L, K]`` row for each matched
+    position. Unmatched positions get a sentinel ``[L, K]`` row (all
+    ``SENTINEL_EXPERT_ID``).
+
+    When token strings are unavailable, the exact 1:1 count case (same tokenizer —
+    the production / smoke path) is a direct copy; differing counts fall back to a
+    positional-index LCS proxy.
+
+    Args:
+        retokenized_ids: Token IDs from re-tokenizing the response text.
+        vllm_routed_experts: Per-token routed-experts rows from vLLM, each a
+            ``[L, K]`` nested list (length == number of vLLM tokens).
+        tokenizer: HuggingFace tokenizer used for re-tokenization.
+        vllm_token_strings: Optional per-token vLLM token strings (same order as
+            ``vllm_routed_experts``) used to share the logprob LCS map.
+
+    Returns:
+        List of ``[L, K]`` rows aligned to ``retokenized_ids`` (one per token).
+        Unmatched tokens get a sentinel ``[L, K]`` row.
+    """
+    if not vllm_routed_experts:
+        # No routed_experts to align — caller sentinel-pads; return [] so the
+        # per-turn extend uses a sentinel block sized to the generated tokens.
+        return []
+
+    if not retokenized_ids:
+        return []
+
+    # Infer the [L, K] shape from the first vLLM row so the sentinel matches.
+    sentinel_row = _sentinel_routed_experts_row(vllm_routed_experts[0])
+    aligned = [list(sentinel_row) for _ in range(len(retokenized_ids))]
+
+    n_vllm = len(vllm_routed_experts)
+    n_retok = len(retokenized_ids)
+
+    if vllm_token_strings is not None and len(vllm_token_strings) == n_vllm:
+        # Faithful mirror of align_logprobs_with_lcs: LCS over token strings,
+        # copy the [L, K] row instead of a scalar.
+        retok_strings = tokenizer.convert_ids_to_tokens(retokenized_ids)
+        matcher = SequenceMatcher(None, retok_strings, vllm_token_strings)
+        for a_start, b_start, size in matcher.get_matching_blocks():
+            for i in range(size):
+                aligned[a_start + i] = vllm_routed_experts[b_start + i]
+        return aligned
+
+    if n_vllm == n_retok:
+        # Exact 1:1 — common case (same tokenizer). Direct copy.
+        for i in range(n_retok):
+            aligned[i] = vllm_routed_experts[i]
+        return aligned
+
+    # No token strings and counts differ: positional-index LCS proxy (routed_experts
+    # shares the vLLM response-token index space).
+    matcher = SequenceMatcher(None, list(range(n_retok)), list(range(n_vllm)))
+    matched_any = False
+    for a_start, b_start, size in matcher.get_matching_blocks():
+        for i in range(size):
+            aligned[a_start + i] = vllm_routed_experts[b_start + i]
+            matched_any = True
+    if not matched_any:
+        logger.debug(
+            f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); "
+            f"all rows sentinel."
+        )
+    return aligned
+
+
+def _sentinel_routed_experts_row(template_row: Any) -> List[List[int]]:
+    """Build a sentinel ``[L, K]`` row matching the shape of ``template_row``."""
+    # template_row is a [L, K] nested list. Mirror its L x K shape with sentinels.
+    if not isinstance(template_row, (list, tuple)) or len(template_row) == 0:
+        # Degenerate / unknown shape — fall back to a single [1, 1] sentinel.
+        return [[SENTINEL_EXPERT_ID]]
+    sentinel = []
+    for layer in template_row:
+        if isinstance(layer, (list, tuple)):
+            sentinel.append([SENTINEL_EXPERT_ID] * len(layer))
+        else:
+            sentinel.append([SENTINEL_EXPERT_ID])
+    return sentinel
+
+
+def _re_sentinel_rows(n: int, sentinel_row: Optional[List[List[int]]]) -> List[List[List[int]]]:
+    """Return ``n`` copies of a sentinel ``[L, K]`` routed_experts row.
+
+    If the ``[L, K]`` shape has not been learned yet (no real row seen), fall back
+    to a degenerate ``[[SENTINEL_EXPERT_ID]]`` row; the collator infers the true
+    ``[L, K]`` from whichever sample first carries real routing and pads the rest.
+    """
+    if n <= 0:
+        return []
+    if sentinel_row is None:
+        sentinel_row = [[SENTINEL_EXPERT_ID]]
+    return [list(sentinel_row) for _ in range(n)]
+
+
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None, assistant_routed_experts=None):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -586,6 +769,12 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     response_ids = []
     loss_mask = []
     rollout_logprobs = None if assistant_logprobs is None else []
+    # routed_experts rides the SAME per-token / per-turn index space as logprobs.
+    # Each accumulated element is a [L, K] row; user/prefix/post-EOS rows are
+    # sentinel-filled (see align_routed_experts_with_lcs / SENTINEL_EXPERT_ID).
+    rollout_routed_experts = None if assistant_routed_experts is None else []
+    # Sentinel [L, K] shape inferred lazily from the first real routed_experts row.
+    _re_sentinel_row = None
     assistant_msg_idx = 0
 
     for i in range(len(messages)):
@@ -602,6 +791,10 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             loss_mask.extend([0] * len(cur_token_ids))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(cur_token_ids))
+            if assistant_routed_experts is not None:
+                rollout_routed_experts.extend(
+                    _re_sentinel_rows(len(cur_token_ids), _re_sentinel_row)
+                )
         elif cur_message["role"] == "assistant":
             # 3.2. For assistant messages, we need to separate out:
             # 1) generation prompt IDs -- mask is 0
@@ -634,6 +827,10 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             loss_mask.extend([0] * prefix_len)
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * prefix_len)
+            if assistant_routed_experts is not None:
+                rollout_routed_experts.extend(
+                    _re_sentinel_rows(prefix_len, _re_sentinel_row)
+                )
 
             # 3.2.2. Add what the assistant actually generated
             loss_mask.extend([1] * len(generated_token_ids))
@@ -686,10 +883,55 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
 
                 rollout_logprobs.extend(msg_logprobs if msg_logprobs is not None else [0.0] * len(generated_token_ids))
 
+            # 3.2.2b. Add the per-token routed_experts [L, K] rows for what the
+            # assistant actually generated, aligned to the re-tokenized generated
+            # tokens via LCS (mirrors the logprobs alignment above).
+            if assistant_routed_experts is not None:
+                msg_routed_experts = None
+                if assistant_msg_idx < len(assistant_routed_experts):
+                    candidate_re = assistant_routed_experts[assistant_msg_idx]
+                    if candidate_re:
+                        # Lazily learn the [L, K] sentinel shape from the first real row.
+                        if _re_sentinel_row is None and len(candidate_re) > 0:
+                            _re_sentinel_row = _sentinel_routed_experts_row(candidate_re[0])
+                        # Share the logprob LCS map: routed_experts rides the SAME
+                        # vLLM response-token index space as the per-token logprobs,
+                        # so reuse those token strings when present for an identical
+                        # tokenizer-mismatch alignment.
+                        vllm_token_strings = None
+                        if assistant_logprobs and assistant_msg_idx < len(assistant_logprobs):
+                            lp_candidate = assistant_logprobs[assistant_msg_idx]
+                            if (
+                                lp_candidate
+                                and isinstance(lp_candidate[0], dict)
+                                and "token" in lp_candidate[0]
+                            ):
+                                vllm_token_strings = [tl["token"] for tl in lp_candidate]
+                        msg_routed_experts = align_routed_experts_with_lcs(
+                            generated_token_ids,
+                            candidate_re,
+                            tokenizer,
+                            vllm_token_strings=vllm_token_strings,
+                        )
+                else:
+                    logger.warning(
+                        "Missing routed_experts for assistant message #{} (provided {} lists). "
+                        "Proceeding with sentinel rows.",
+                        assistant_msg_idx + 1,
+                        len(assistant_routed_experts),
+                    )
+                if msg_routed_experts is None or len(msg_routed_experts) != len(generated_token_ids):
+                    msg_routed_experts = _re_sentinel_rows(len(generated_token_ids), _re_sentinel_row)
+                rollout_routed_experts.extend(msg_routed_experts)
+
             # 3.2.3. Add the tokens after the EOS token.
             loss_mask.extend([0] * len(tokens_after_eos))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(tokens_after_eos))
+            if assistant_routed_experts is not None:
+                rollout_routed_experts.extend(
+                    _re_sentinel_rows(len(tokens_after_eos), _re_sentinel_row)
+                )
 
             assistant_msg_idx += 1
         else:
@@ -697,5 +939,8 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
 
         assert len(loss_mask) == len(response_ids)
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
+        assert len(rollout_routed_experts) == len(response_ids) if rollout_routed_experts is not None else True
 
-    return response_ids, loss_mask, rollout_logprobs
+    if assistant_routed_experts is None:
+        return response_ids, loss_mask, rollout_logprobs
+    return response_ids, loss_mask, rollout_logprobs, rollout_routed_experts

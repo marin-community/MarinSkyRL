@@ -229,6 +229,9 @@ class RolloutCoordinator:
             terminal_bench_cfg=scaled_tb_cfg,
             inference_engine_client=None,
             tokenizer=tokenizer,
+            moe_router_replay=bool(
+                cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)
+            ),
         )
 
         # Pause gate. When set (paused), run_shard refuses to admit new shards.
