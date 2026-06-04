@@ -239,7 +239,7 @@ class TokenChoiceTopKRouter(nn.Module):
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
-        )
+        ).to(torch.int64)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -261,12 +261,15 @@ class TokenReorderer(nn.Module):
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         selected_experts_indices = selected_experts_indices.reshape(-1)
+        # int64 counts: the for-loop path needs ints (tolist→split), and the EP
+        # all_to_all dispatch (torchtitan _token_dispatch) requires INTEGER split
+        # sizes — a float histc here makes NCCL alltoall_base reject the splits.
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.float(),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
-        )
+        ).to(torch.int64)
         token_indices_experts_sorted = torch.argsort(selected_experts_indices, stable=True)
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
         token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
