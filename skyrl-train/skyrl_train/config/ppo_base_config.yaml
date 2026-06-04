@@ -55,6 +55,7 @@ trainer:
       expert_tensor_parallel_size: 1       # TP within each expert shard; 1 = none
       moe_token_dispatcher_type: "alltoall"  # "alltoall" | "deepep"
       moe_router_replay: false             # R3 rollout-routing replay; off = unchanged forward
+      moe_grouped_gemm: false              # Stage 3b: swap HF eager MoE for grouped-GEMM (EP=1); off = HF eager untouched
       ep_comm_backend: "torch"             # "torch" | "deepep"; torch = no NVSHMEM dependency
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
@@ -75,6 +76,7 @@ trainer:
       expert_tensor_parallel_size: 1
       moe_token_dispatcher_type: "alltoall"
       moe_router_replay: false
+      moe_grouped_gemm: false
       ep_comm_backend: "torch"
   critic:
     model:
@@ -105,6 +107,7 @@ trainer:
       expert_tensor_parallel_size: 1
       moe_token_dispatcher_type: "alltoall"
       moe_router_replay: false
+      moe_grouped_gemm: false
       ep_comm_backend: "torch"
     sequence_parallel_size: 1
   algorithm:

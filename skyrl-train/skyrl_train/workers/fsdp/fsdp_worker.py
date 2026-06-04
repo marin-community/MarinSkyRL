@@ -141,6 +141,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
                 moe_router_replay=bool(self.cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
+                moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)

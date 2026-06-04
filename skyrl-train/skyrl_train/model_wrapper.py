@@ -66,6 +66,7 @@ class HFModelWrapper(nn.Module):
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
         moe_router_replay: bool = False,
+        moe_grouped_gemm: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -202,7 +203,22 @@ class HFModelWrapper(nn.Module):
         # stock HF (the patched forward, even if some other run installed it,
         # short-circuits to the original when no controller is active).
         self.moe_router_replay = moe_router_replay
+        self.moe_grouped_gemm = moe_grouped_gemm
         self._router_replay = None
+
+        # Stage 3b: grouped-GEMM MoE swap (EP=1, torch backend). Behind the
+        # `moe_grouped_gemm` flag (default False → no swap, HF eager block class
+        # untouched, stock forward — byte-identical to today). When on, each HF
+        # `*SparseMoeBlock` instance is replaced (before FSDP2 wrap) by a thin
+        # shim around the lifted grouped `MoE`; the shim reuses the Stage-2
+        # RouterReplay singleton as the replay transport via the native router
+        # `routed_experts` arg, so the forward replay-install seam is unchanged.
+        num_moe_blocks = 0
+        if moe_grouped_gemm:
+            from skyrl_train.models.layers.moe_swap import swap_moe_blocks_to_grouped
+
+            num_moe_blocks = swap_moe_blocks_to_grouped(self.model)
+
         if moe_router_replay:
             from skyrl_train.models.router_replay import (
                 RouterReplay,
@@ -210,7 +226,11 @@ class HFModelWrapper(nn.Module):
                 count_moe_layers,
             )
 
-            num_moe_blocks = install_router_replay_patch(self.model)
+            if not moe_grouped_gemm:
+                # Eager-fallback (Stage 2/3a) path: monkeypatch the HF block class.
+                # On the grouped path the HF blocks no longer exist (swapped), and
+                # the shim drives replay through the native router instead.
+                num_moe_blocks = install_router_replay_patch(self.model)
             if num_moe_blocks > 0:
                 # Stage 3a: sample packing (use_sample_packing + FA2) is now
                 # supported on the eager path. The packed [1, nnz] target is a

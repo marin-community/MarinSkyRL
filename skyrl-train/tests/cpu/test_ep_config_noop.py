@@ -28,6 +28,7 @@ EP_FIELDS = {
     "expert_tensor_parallel_size": 1,
     "moe_token_dispatcher_type": "alltoall",
     "moe_router_replay": False,
+    "moe_grouped_gemm": False,
     "ep_comm_backend": "torch",
 }
 
