@@ -246,27 +246,65 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         full_sd (`dict`): The full state dict to load, can be only on rank 0
         ep_enabled (`bool`): Whether expert parallelism is active. When True, the model has a MIX of params
             sharded over the global FSDP mesh AND expert params sharded over a (fsdp, ep) submesh. The naive
-            per-param `broadcast(global)` + `distribute_tensor(submesh)` path below interleaves a global
-            collective with a submesh collective per param, so ranks that do not own a slice of a given
-            submesh desync from the global broadcast → NCCL store->get wait timeout (deadlock). When
-            ep_enabled, we instead use the standard FSDP2 full-state-dict loader
-            (`torch.distributed.checkpoint.state_dict.set_model_state_dict` with broadcast_from_rank0), which
-            shards each param to its OWN DTensor mesh in a collective-symmetric way regardless of target mesh.
-            DEFAULT False keeps the a3 (non-EP) production path byte-identical.
+            per-param `broadcast(global)` + `distribute_tensor(submesh)` path below deadlocks: per param it
+            interleaves a global broadcast with a submesh-scoped collective (distribute_tensor scatters from
+            mesh-coordinate 0), so ranks that are coordinate-0 on one mesh but not another desync → NCCL
+            store->get wait timeout. When ep_enabled we use a collective-symmetric loader: every rank
+            participates in the SAME global CUDA broadcast for every param (replicating it to all ranks), then
+            shards each param onto its OWN DTensor mesh PURELY LOCALLY (slice + DTensor.from_local, no further
+            collective), so mixed global/submesh placements never interleave collectives. DEFAULT False keeps
+            the a3 (non-EP) production path byte-identical.
     """
     import torch.distributed as dist
     from torch.distributed.tensor import distribute_tensor
 
     if ep_enabled:
-        # Placement-aware, collective-symmetric full-state-dict load for mixed
-        # global/submesh (EP) params. Standard FSDP2 loader used by torchtitan/prime-rl.
-        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+        # Collective-symmetric placement-aware load for mixed global/submesh (EP) params.
+        from torch.distributed.tensor import DTensor
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 
-        set_model_state_dict(
-            model,
-            full_sd,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=False),
-        )
+        # Same keys/order on every rank (the sharded model state dict is identical across ranks).
+        meta_sharded_sd = model.state_dict()
+        sharded_sd = {}
+        is_rank0 = dist.get_rank() == 0
+
+        for param_name, sharded_param in meta_sharded_sd.items():
+            # Phase 1 (symmetric): replicate the full param to ALL ranks via a single
+            # global CUDA broadcast. Every rank issues the identical collective in the
+            # identical order, so the global NCCL PG never desyncs.
+            if is_rank0:
+                full_param = full_sd[param_name].detach().to(device="cuda", dtype=sharded_param.dtype)
+            else:
+                full_param = torch.empty(
+                    sharded_param.shape, device="cuda", dtype=sharded_param.dtype
+                )
+            dist.broadcast(full_param, src=0)
+
+            # Phase 2 (purely local): shard the now-replicated full tensor onto THIS
+            # param's own DTensor mesh by slicing the local shard — no collective, so a
+            # global-mesh param and a (fsdp,ep)-submesh param are handled identically.
+            if isinstance(sharded_param, DTensor):
+                local_shape, global_offset = compute_local_shape_and_global_offset(
+                    full_param.shape, sharded_param.device_mesh, sharded_param.placements
+                )
+                slices = tuple(
+                    slice(off, off + size) for size, off in zip(local_shape, global_offset)
+                )
+                local_tensor = full_param[slices].detach().clone().contiguous()
+                sharded_tensor = DTensor.from_local(
+                    local_tensor,
+                    sharded_param.device_mesh,
+                    sharded_param.placements,
+                    shape=sharded_param.shape,
+                    stride=sharded_param.stride(),
+                )
+            else:
+                # Plain replicated tensor/buffer (e.g. rotary inv_freq): keep full copy.
+                sharded_tensor = full_param.detach().clone().contiguous()
+            sharded_sd[param_name] = sharded_tensor
+
+        model.load_state_dict(sharded_sd, assign=True)
+
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
         offload_fsdp2_model_to_cpu(model)
         torch.cuda.synchronize()
