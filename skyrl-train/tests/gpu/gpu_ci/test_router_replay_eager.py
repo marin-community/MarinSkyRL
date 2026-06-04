@@ -52,17 +52,21 @@ def _make_config():
     return cfg
 
 
-def _build_wrapper(moe_router_replay: bool, device="cuda", seed=0):
+def _build_wrapper(moe_router_replay: bool, device="cuda", seed=0, use_sample_packing=False):
     torch.manual_seed(seed)
     cfg = _make_config()
+    # Sample packing requires FA2 (the wrapper asserts this in __init__).
+    if use_sample_packing:
+        cfg._attn_implementation = "flash_attention_2"
     with torch.device(device):
         hf_model = Qwen3MoeForCausalLM._from_config(cfg)
     hf_model = hf_model.to(torch.float32)
     wrapper = HFModelWrapper(
         pretrain_or_model=hf_model,
+        use_flash_attention_2=use_sample_packing,
         bf16=False,
         sequence_parallel_size=1,
-        use_sample_packing=False,
+        use_sample_packing=use_sample_packing,
         moe_router_replay=moe_router_replay,
     )
     wrapper.model.to(device)
@@ -72,6 +76,29 @@ def _build_wrapper(moe_router_replay: bool, device="cuda", seed=0):
 def _inputs(batch=1, seq_len=32, num_actions=16, vocab=256, device="cuda"):
     input_ids = torch.randint(0, vocab, (batch, seq_len), device=device)
     attention_mask = torch.ones(batch, seq_len, dtype=torch.long, device=device)
+    return input_ids, attention_mask, num_actions
+
+
+def _ragged_inputs(seq_len=32, num_actions=16, vocab=256, device="cuda", seed=7):
+    """Left-padded batch with DIFFERENT real-token lengths per row.
+
+    Each row's response is the last ``num_actions`` positions (fixed scalar);
+    the prompt portion varies in length so the left-pad count differs per row.
+    With non-trivial left padding, ``unpad_input`` actually permutes tokens out
+    of the naive row-major contiguous order, which is what G3a-3 stresses.
+    """
+    torch.manual_seed(seed)
+    batch = 3
+    # Real-token lengths per row (all >= num_actions so the full response is
+    # real). Distinct prompt lengths → distinct left-pad counts.
+    real_lens = [num_actions + 2, num_actions + 7, seq_len]  # e.g. 18, 23, 32
+    input_ids = torch.randint(1, vocab, (batch, seq_len), device=device)
+    attention_mask = torch.zeros(batch, seq_len, dtype=torch.long, device=device)
+    for b, rl in enumerate(real_lens):
+        rl = min(rl, seq_len)
+        attention_mask[b, seq_len - rl:] = 1
+        # zero out the left-pad token ids (cosmetic; FA2 ignores them anyway)
+        input_ids[b, : seq_len - rl] = 0
     return input_ids, attention_mask, num_actions
 
 
@@ -221,10 +248,138 @@ def test_extra_layer_count_and_sentinel():
     print(f"[extra] layer count == {expected} and sentinel routes naturally: PASS")
 
 
+# --------------------------------------------------------------------------- #
+# Stage 3a — sample-packing replay path                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_g3a_1_packed_equals_unpacked():
+    """G3a-1: replay packed == replay unpacked.
+
+    Same model weights, same inputs, same rollout_routed_experts. Run the
+    wrapper once with use_sample_packing=False (dense) and once with
+    use_sample_packing=True (+ FA2). The response-position logits must match
+    (FA2 vs eager tol atol≈2e-2). Proves the packed index_select target lands
+    on the same rows the dense path forces.
+    """
+    device = "cuda"
+    # Same seed → identical weights for both wrappers.
+    wrapper_dense, cfg = _build_wrapper(True, device=device, seed=0, use_sample_packing=False)
+    wrapper_packed, _ = _build_wrapper(True, device=device, seed=0, use_sample_packing=True)
+    # FA2 needs bf16/fp16; build both in the same dtype for a clean compare.
+    wrapper_dense.model.to(torch.bfloat16)
+    wrapper_packed.model.to(torch.bfloat16)
+
+    input_ids, attn, num_actions = _ragged_inputs(device=device)
+    L = count_moe_layers(cfg)
+    K = cfg.num_experts_per_tok
+    re = _all_one_expert_mask(input_ids.shape[0], num_actions, L, K, expert_id=3, device=device)
+
+    out_dense = _forward_logits(wrapper_dense, input_ids, attn, num_actions, rollout_routed_experts=re)
+    out_packed = _forward_logits(wrapper_packed, input_ids, attn, num_actions, rollout_routed_experts=re)
+
+    # Compare response positions only (the slice replay forces). pad_input
+    # restores [B, seq_len] for the packed path, so shapes align.
+    resp_dense = out_dense[:, -num_actions:, :].float()
+    resp_packed = out_packed[:, -num_actions:, :].float()
+    assert torch.allclose(resp_dense, resp_packed, atol=2e-2), (
+        f"packed replay != dense replay on response logits "
+        f"(max abs diff {(resp_dense - resp_packed).abs().max().item():.4e})"
+    )
+    print("[G3a-1] packed replay == unpacked replay: PASS")
+
+
+def test_g3a_2_production_noop():
+    """G3a-2: production no-op. moe_router_replay=False + use_sample_packing=True
+    → no controller installed → torch.equal to today's packed forward."""
+    device = "cuda"
+    wrapper, cfg = _build_wrapper(False, device=device, use_sample_packing=True)
+    assert wrapper._router_replay is None, "_router_replay must be None when flag off"
+    assert get_active_replay() is None, "no controller may be active when flag off"
+
+    input_ids, attn, num_actions = _ragged_inputs(device=device)
+    out_wrapper = _forward_logits(wrapper, input_ids, attn, num_actions)
+
+    # Reproduce today's packed forward directly: unpad → model → pad. This is
+    # exactly what wrapper.forward does when no controller is installed; the
+    # patched SparseMoeBlock short-circuits to orig_forward (no controller).
+    from flash_attn.bert_padding import pad_input, unpad_input
+
+    position_ids = attn.long().cumsum(-1) - 1
+    position_ids.masked_fill_(attn == 0, 1)
+    seq_fwd, nnz_indices, _, _, _ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attn)
+    seq_fwd = seq_fwd.transpose(0, 1)
+    pos_fwd, _, _, _, _ = unpad_input(position_ids.unsqueeze(-1), attn)
+    pos_fwd = pos_fwd.transpose(0, 1)
+    stock_packed = wrapper.model(seq_fwd, attention_mask=None, position_ids=pos_fwd)["logits"]
+    # The wrapper returns logits in packed [1, nnz, V] form (no pad_input on
+    # logits inside forward — only log_probs/entropy get re-padded). Compare
+    # the packed logits directly.
+    assert torch.equal(out_wrapper, stock_packed), (
+        "flag-off packed forward not byte-identical to stock packed forward"
+    )
+    print("[G3a-2] production packed no-op byte-identical: PASS")
+
+
+def test_g3a_3_ragged_alignment():
+    """G3a-3: ragged-length alignment. Force a distinguishable expert set on
+    ONE sequence's response only (others sentinel → natural). Assert only that
+    sequence's response logits move vs natural; the other sequences are
+    byte-identical to natural. Proves the nnz_indices permute lands the forced
+    target on the correct (permuted) rows under packing.
+    """
+    device = "cuda"
+    wrapper, cfg = _build_wrapper(True, device=device, use_sample_packing=True)
+    wrapper.model.to(torch.bfloat16)
+
+    input_ids, attn, num_actions = _ragged_inputs(device=device)
+    batch = input_ids.shape[0]
+    L = count_moe_layers(cfg)
+    K = cfg.num_experts_per_tok
+
+    out_natural = _forward_logits(wrapper, input_ids, attn, num_actions).float()
+
+    # All-sentinel everywhere except sequence index 1's response → forced.
+    re = torch.full((batch, num_actions, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
+    forced_seq = 1
+    re[forced_seq, :, :, 0] = 5
+    if K > 1:
+        re[forced_seq, :, :, 1] = 6
+    for k in range(2, K):
+        re[forced_seq, :, :, k] = 5 + k
+    out_replay = _forward_logits(wrapper, input_ids, attn, num_actions, rollout_routed_experts=re).float()
+
+    resp_n = out_natural[:, -num_actions:, :]
+    resp_r = out_replay[:, -num_actions:, :]
+    moved = [(resp_n[b] - resp_r[b]).abs().max().item() for b in range(batch)]
+    # The forced sequence must move; the others must not (allclose to natural).
+    assert moved[forced_seq] > 1e-3, (
+        f"forced sequence {forced_seq} response logits did not move (max diff {moved[forced_seq]:.2e})"
+    )
+    for b in range(batch):
+        if b == forced_seq:
+            continue
+        assert torch.allclose(resp_n[b], resp_r[b], atol=2e-2), (
+            f"non-forced sequence {b} moved (max diff {moved[b]:.2e}) — nnz_indices permute landed on wrong rows"
+        )
+    print(f"[G3a-3] ragged alignment (only seq {forced_seq} moved; diffs={[f'{m:.2e}' for m in moved]}): PASS")
+
+
 if __name__ == "__main__":
+    import sys
+
+    # G3a-2 is the CPU/no-GPU-friendly no-op proof structurally, but FA2 needs a
+    # GPU. Run whatever the host supports.
+    if not torch.cuda.is_available():
+        print("CUDA not available — Stage 3a GPU gates DEFERRED.")
+        sys.exit(0)
+
     test_d_flag_off_byte_identical()
     test_a_override_bites()
     test_b_router_and_expert_grads()
     test_c_determinism()
     test_extra_layer_count_and_sentinel()
+    test_g3a_2_production_noop()
+    test_g3a_1_packed_equals_unpacked()
+    test_g3a_3_ragged_alignment()
     print("ALL PASS")

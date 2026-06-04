@@ -212,14 +212,11 @@ class HFModelWrapper(nn.Module):
 
             num_moe_blocks = install_router_replay_patch(self.model)
             if num_moe_blocks > 0:
-                # Sample packing is deferred to Stage 3 (R-F): the dense,
-                # unpacked path is what Stage 2 exercises. Guard loudly.
-                if self.use_sample_packing:
-                    raise NotImplementedError(
-                        "moe_router_replay does not support use_sample_packing yet "
-                        "(deferred to Stage 3). Disable use_sample_packing or "
-                        "moe_router_replay."
-                    )
+                # Stage 3a: sample packing (use_sample_packing + FA2) is now
+                # supported on the eager path. The packed [1, nnz] target is a
+                # plain index_select of the dense [B, seq_len] target by the same
+                # nnz_indices the forward's unpad_input used (both batch-major).
+                # SP (sequence_parallel_size > 1) remains deferred to Stage 4.
                 self._router_replay = RouterReplay()
                 expected_layers = count_moe_layers(self.model.config)
                 if num_moe_blocks != expected_layers:
@@ -349,20 +346,29 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
-        # MoE router replay (R3) — Stage 2. When enabled and targets are
+        # MoE router replay (R3) — Stage 2/3a. When enabled and targets are
         # provided, install the per-layer forced top-k into the controller for
-        # the duration of the model forward. Single-GPU, dense (unpacked) path.
+        # the duration of the model forward. Single-GPU; dense (unpacked) AND
+        # packed (use_sample_packing + FA2) paths. SP (sequence_parallel_size >
+        # 1) remains Stage 4.
         replay_installed = False
         if (
             self._router_replay is not None
             and rollout_routed_experts is not None
-            and not self.use_sample_packing
             and self.sequence_parallel_size == 1
         ):
             from skyrl_train.models.router_replay import set_active_replay
 
+            # Build the dense target off the ORIGINAL [B, seq_len] sequences (the
+            # response slice is only meaningful pre-pack), then index_select to
+            # the packed [1, nnz] layout by the same nnz_indices the forward's
+            # unpad_input used. Both flatten batch-major, so the index_select
+            # lands the packed target on the correct rows.
             per_layer_targets, replay_mask = self._build_router_replay_targets(
-                rollout_routed_experts, sequences_fwd, num_actions
+                rollout_routed_experts,
+                sequences,
+                num_actions,
+                nnz_indices=nnz_indices if self.use_sample_packing else None,
             )
             self._router_replay.begin_replay()
             self._router_replay.set_microbatch_targets(per_layer_targets, replay_mask)
@@ -448,16 +454,27 @@ class HFModelWrapper(nn.Module):
         else:
             return action_log_probs
 
-    def _build_router_replay_targets(self, rollout_routed_experts, sequences_fwd, num_actions):
+    def _build_router_replay_targets(self, rollout_routed_experts, sequences, num_actions, nnz_indices=None):
         """Build per-layer forced-topk targets + a per-token replay mask.
 
         ``rollout_routed_experts`` is ``[B, response_len, L, K]`` (response axis).
-        The model forward runs the full ``[B, seq_len]`` sequence; HF MoE blocks
-        flatten ``[B, seq_len] -> (B*seq_len)`` in batch-major (row) order. We
-        build a full-sequence target ``[B*seq_len, K]`` per layer and a
-        ``[B*seq_len]`` bool mask True only on response positions (the last
-        ``num_actions`` columns) AND non-sentinel rows. Prompt / pad / sentinel
-        rows fall through to natural routing.
+        The dense target is built off the ORIGINAL ``[B, seq_len]`` ``sequences``
+        (the response slice is only meaningful pre-pack); HF MoE blocks flatten
+        ``[B, seq_len] -> (B*seq_len)`` in batch-major (row) order. We build a
+        full-sequence target ``[B*seq_len, K]`` per layer and a ``[B*seq_len]``
+        bool mask True only on response positions (the last ``num_actions``
+        columns) AND non-sentinel rows. Prompt / pad / sentinel rows fall
+        through to natural routing.
+
+        Stage 3a — sample packing: when ``nnz_indices`` is not None the forward
+        ran ``unpad_input`` and the model sees a packed ``[1, nnz]`` sequence.
+        ``unpad_input``'s indices = ``nonzero(attention_mask.flatten())`` select
+        valid tokens in the SAME batch-major flatten order this builder uses
+        (``reshape(-1)`` / ``permute(2,0,1,3).reshape(L, B*seq_len, K)``), so the
+        packed ``(nnz)`` target/mask is a plain ``index_select(0, nnz_indices)``
+        of the dense ones. Left-pad rows have ``attention_mask == 0`` → dropped
+        by ``nonzero`` → never in ``nnz_indices`` (automatic). The controller is
+        layout-agnostic (only checks ``shape[0]``).
         """
         from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID
 
@@ -466,8 +483,8 @@ class HFModelWrapper(nn.Module):
                 "router_replay requires a scalar num_actions (dense unpacked path); "
                 "got a per-sample list/array."
             )
-        device = sequences_fwd.device
-        batch_size, seq_len = sequences_fwd.shape
+        device = sequences.device
+        batch_size, seq_len = sequences.shape
         re = rollout_routed_experts.to(device=device, dtype=torch.long)
         B, response_len, L, K = re.shape
         assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
@@ -497,6 +514,16 @@ class HFModelWrapper(nn.Module):
         # Per-layer targets: [B*seq_len, K] each, ordered by layer position.
         full_flat = full.permute(2, 0, 1, 3).reshape(L, batch_size * seq_len, K)  # [L, B*seq_len, K]
         per_layer_targets = [full_flat[i] for i in range(L)]
+
+        # Stage 3a: under sample packing the model forward operates on the packed
+        # [1, nnz] sequence. Project the dense [B*seq_len] target/mask down to the
+        # packed (nnz) layout via the same nnz_indices unpad_input used — both are
+        # batch-major flattens of [B, seq_len], so this is a plain index_select.
+        if nnz_indices is not None:
+            nnz_indices = nnz_indices.to(device)
+            replay_mask = replay_mask.index_select(0, nnz_indices)
+            per_layer_targets = [t.index_select(0, nnz_indices) for t in per_layer_targets]
+
         return per_layer_targets, replay_mask
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
