@@ -196,6 +196,19 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         cfg.trainer.policy.fsdp_config.moe_grouped_gemm = True
         cfg.trainer.policy.fsdp_config.expert_model_parallel_size = 2
         cfg.trainer.policy.fsdp_config.fsdp_size = 2
+        # Router replay is INCOMPATIBLE with activation/gradient checkpointing:
+        # checkpointing re-runs the MoE forward during backward, but the replay
+        # controller's per-microbatch targets are set/cleared around the FIRST
+        # forward only (model_wrapper.forward: begin_replay → set_microbatch_targets
+        # → ... → clear). On recompute the controller is no longer REPLAY-active, so
+        # the grouped shim takes the natural-routing branch → a different number of
+        # saved tensors than the original forward → torch CheckpointError
+        # ("75 vs 70 tensors"). The 14B-A2.7B model fits in 96 GB GH200 at
+        # micro_train_batch_size_per_gpu=1 without checkpointing, so disable it here.
+        # (Stage 7 / production note: to keep checkpointing ON with replay, the
+        # controller must be made recompute-safe — re-arm the same targets for the
+        # recomputation pass instead of clearing after the first forward.)
+        cfg.trainer.gradient_checkpointing = False
         # Leave GPU headroom for the colocated EP-sharded trainer next to the engines.
         cfg.generator.gpu_memory_utilization = 0.45
         # Deterministic sampling so the weight-sync oracle is stable.
