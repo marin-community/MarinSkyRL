@@ -1169,9 +1169,27 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Extract per-turn MoE routed_experts (Stage 1 capture rail). Gated on
         # moe_router_replay so the flag-off path is byte-identical: when off we
         # never pass assistant_routed_experts, so the chokepoint returns its 3-tuple.
+        #
+        # IMPORTANT: even with moe_router_replay ON, the capture rail can legitimately
+        # produce NO routed_experts for a given trial — extract_routed_experts_from_rollout_details
+        # returns None whenever rollout_details is empty/missing or simply doesn't carry
+        # routed_experts (e.g. a trial that errored mid-rollout, or a turn the P1 HTTP
+        # capture didn't tag). In that case we MUST take the 3-tuple path: passing
+        # assistant_routed_experts=None makes get_response_ids_and_loss_mask_from_messages
+        # return a 3-tuple, and unpacking 4 here raised
+        # `ValueError: not enough values to unpack (expected 4, got 3)` — which crashed the
+        # RolloutCoordinator shard on the first completed 80B trial. The downstream batch
+        # collation (generators/utils.py concatenate_generator_outputs) already tolerates
+        # mixed presence/absence of rollout_routed_experts across trials via its
+        # has_routed_experts any-check + sentinel fill, so leaving this trial's
+        # rollout_routed_experts=None is safe.
         rollout_routed_experts = None
-        if self._moe_router_replay:
-            assistant_routed_experts = extract_routed_experts_from_rollout_details(rollout_details)
+        assistant_routed_experts = (
+            extract_routed_experts_from_rollout_details(rollout_details)
+            if self._moe_router_replay
+            else None
+        )
+        if assistant_routed_experts is not None:
             (
                 response_ids,
                 loss_mask,
