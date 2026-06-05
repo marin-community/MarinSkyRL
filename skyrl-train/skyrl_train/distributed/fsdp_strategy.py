@@ -365,11 +365,30 @@ class FSDPStrategy(DistributedStrategy):
                 # left as the per-rank init-context materialized them — they are deterministic
                 # and identical across ranks, and meta-izing them would leave them unrestorable
                 # after the loader (-> "Cannot copy out of meta tensor" on the CPU offload).
-                for _p in module.parameters():
+                from torch.distributed.tensor import DTensor as _DTensor
+
+                for _name, _p in module.named_parameters():
                     # .to("meta") preserves the tensor subclass (DTensor stays DTensor,
                     # plain stays plain), so set_data does not hit an incompatible-type
                     # error; torch.empty_like(..., device="meta") would drop DTensor-ness.
-                    _p.data = _p.data.to("meta")
+                    try:
+                        _p.data = _p.data.to("meta")
+                    except Exception as _e:
+                        import sys as _sys
+
+                        print(
+                            "[EP-METAIZE-DBG] FAILED param "
+                            f"name={_name!r} rank={torch.distributed.get_rank()} "
+                            f"type(_p)={type(_p)} type(_p.data)={type(_p.data)} "
+                            f"is_DTensor={isinstance(_p.data, _DTensor)} "
+                            f"device={_p.data.device} dtype={_p.data.dtype} "
+                            f"shape={tuple(_p.data.shape)} "
+                            f"placements={getattr(_p.data, 'placements', None)} "
+                            f"err={type(_e).__name__}: {_e}",
+                            file=_sys.stderr,
+                            flush=True,
+                        )
+                        raise
 
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
                 num_sharded = apply_ep(
