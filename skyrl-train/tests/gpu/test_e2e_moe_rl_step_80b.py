@@ -274,12 +274,17 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
         initialize_ray(cfg)
         _check_cluster_gpus(num_gpus=NUM_GPUS)
 
-        # MULTI-NODE placement group: one GPU-bundle per node (STRICT_SPREAD so the 8
-        # bundles land on 8 distinct nodes -> EP=8 spans >=2 nodes -> internode
-        # torch-EP all-to-all is genuinely exercised). PACK would collapse onto fewer
-        # nodes and not fit the 80B shard.
-        bundles = [{"GPU": GPUS_PER_NODE, "CPU": GPUS_PER_NODE} for _ in range(NUM_NODES)]
-        pg = placement_group(bundles, strategy="STRICT_SPREAD")
+        # MULTI-NODE placement group: ONE bundle PER GPU (32 single-GPU bundles), NOT
+        # per-node 4-GPU bundles. vLLM's Ray executor (ray_executor.py ->
+        # initialize_ray_cluster) hard-raises "Placement group bundle cannot have
+        # more than 1 GPU" on multi-GPU bundles — it assigns one TP worker per
+        # single-GPU bundle. (The Stage-6 single-node test used NUM_GPUS x {"GPU":1}
+        # bundles for exactly this reason.) strategy="PACK" fills nodes densely: 32
+        # single-GPU bundles on 8 nodes x 4 GPU lands 4/node across all 8 nodes, so
+        # EP=8 still spans all 8 nodes (internode torch-EP all-to-all on the path)
+        # while satisfying vLLM's 1-GPU-bundle requirement.
+        bundles = [{"GPU": 1, "CPU": 1} for _ in range(NUM_GPUS)]
+        pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=600)
 
         # EP=8 inference engine, colocated.
