@@ -356,6 +356,29 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         # still reshard+remap the EP-sharded grouped trainer weights faithfully into
         # the EP inference engine (responses stay close to pre-sync). Tolerance is
         # looser than the static G4-4 sync (0.02) because a real optimizer step ran.
+        #
+        # DIAGNOSTIC (Stage 6, test-only): print the before/after response STRINGS and
+        # the per-prompt normalized-Levenshtein ratio so the failure mode is legible
+        # from the log alone. The hypothesis under investigation is that a genuine
+        # AdamW step (lr=1e-6, warmup=0 → per-param update ≈ ±lr coherently across all
+        # 14B params, INCLUDING the router gate) perturbs the GREEDY (temperature=0.0)
+        # decode enough to flip an early argmax token → full continuation divergence,
+        # i.e. responses that are still COHERENT but DIFFERENT (not garbage). The
+        # static G4-4 oracle passes at tol 0.02 only because it runs NO training step,
+        # so its round-trip is bit-identical. Printing both strings distinguishes
+        # "coherent-but-different" (expected, oracle-design artifact) from "garbage"
+        # (a real reshard/remap corruption).
+        from tests.gpu.utils import levenshtein
+
+        for i in range(len(prompts)):
+            b = out_before["responses"][i]
+            a = out_after["responses"][i]
+            ratio = float(levenshtein(b, a) / max(len(b), len(a), 1))
+            print(
+                f"[Stage6][weightsync][prompt{i}] lev_ratio={ratio:.4f} (tol=0.15)\n"
+                f"  BEFORE: {b[:200]!r}\n"
+                f"  AFTER : {a[:200]!r}"
+            )
         num_similar = sum(
             1
             for i in range(len(prompts))
