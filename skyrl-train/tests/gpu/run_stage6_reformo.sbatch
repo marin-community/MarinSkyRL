@@ -68,6 +68,12 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 echo "SKYRL_HOME=$SKYRL_HOME"
 git -C "$SKYRL_HOME" log --oneline -1 || true
 
+# Force HF offline (compute nodes have no internet; model pre-cached on login node).
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 cd "$SKYRL_HOME/skyrl-train"
-srun --export=ALL python tests/gpu/test_e2e_moe_rl_step.py
+# Single-node test: run the venv python directly (no nested srun — it only adds
+# the switch-topology lookup noise and isn't needed for a 1-node, Ray-local run).
+python tests/gpu/test_e2e_moe_rl_step.py
 echo "=== Stage 6 e2e EXIT $? ==="
