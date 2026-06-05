@@ -609,6 +609,31 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting RAY_ADDRESS to ray runtime env")
         env_vars["RAY_ADDRESS"] = os.environ["RAY_ADDRESS"]
 
+    # NCCL / Gloo network-fabric selection and debug knobs.
+    # Ray actors start with a clean environment and only see env vars that we
+    # explicitly forward here. On clusters where NCCL's interface auto-detection
+    # picks the wrong NIC (e.g. a down `eno*`/loopback instead of the routable
+    # InfiniBand `ib0`), the cross-process weight-sync communicator
+    # (policy rank 0 + inference-engine ranks) can never complete its first
+    # collective and the run hangs at weight sync. Forwarding these lets the
+    # operator pin the fabric from the launcher env (or hpc.launch) and have it
+    # actually reach the policy/vLLM workers. Pure passthrough: a no-op unless
+    # the var is set in the launcher environment, so the production/default path
+    # is unchanged.
+    for _net_env in (
+        "NCCL_SOCKET_IFNAME",
+        "GLOO_SOCKET_IFNAME",
+        "NCCL_IB_HCA",
+        "NCCL_IB_DISABLE",
+        "NCCL_NET",
+        "NCCL_SOCKET_FAMILY",
+        "NCCL_DEBUG",
+        "NCCL_DEBUG_SUBSYS",
+    ):
+        if os.environ.get(_net_env):
+            logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
+            env_vars[_net_env] = os.environ[_net_env]
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
