@@ -220,6 +220,21 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         cfg.generator.sampling_params.temperature = 0.0
         cfg.generator.sampling_params.top_p = 1.0
         cfg.generator.sampling_params.top_k = -1
+        # GATE NUMERICS (Stage 6, TEST-ONLY): the synthetic Experience feeds
+        # CONSTANT old/base log-probs + constant advantages through the REAL MoE.
+        # The recomputed (new) action_log_probs come from a genuine policy forward,
+        # so the GRPO `policy_loss` term (ratio clamped, advantage-weighted) is the
+        # well-defined signal that carries the gradient through router+experts. The
+        # auxiliary terms are degenerate on synthetic data: the KL term pairs the
+        # real `new` log-prob against a *constant* base (0.3) — meaningless and a
+        # NaN risk under k3 on a 14B forward — and the entropy term adds a second
+        # noisy contribution. Neither adds coverage of the surface this gate targets
+        # (replay→EP→backprop→weight-sync). Turning them off leaves `loss =
+        # policy_loss`, which is the term that must be finite and must backprop.
+        # This is gate-config only; the a3 production path (ep_size=1) is untouched
+        # and keeps its own algorithm config.
+        cfg.trainer.algorithm.use_kl_loss = False
+        cfg.trainer.algorithm.use_entropy_loss = False
 
         initialize_ray(cfg)
 
@@ -267,18 +282,27 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
             )
         )
 
-        for result in results:
+        for rank, result in enumerate(results):
             assert isinstance(result, dict), "training_step should return a status dict"
+            # Print the full status dict BEFORE asserting so a NaN in any component
+            # is attributable (the prior gate failure logged only the bare assert).
+            print(f"[Stage6][rank{rank}] training_step status: {result}")
+        for rank, result in enumerate(results):
             assert "policy_loss" in result and "final_loss" in result
+            # The policy (GRPO) loss is the load-bearing term that backprops through
+            # router + experts; it must be finite (kl/entropy are off in this gate).
+            pl_v = result["policy_loss"]
+            assert math.isfinite(pl_v), f"policy_loss is not finite (rank {rank}): {pl_v}"
             loss_v = result["final_loss"]
-            assert math.isfinite(loss_v), f"loss is not finite: {loss_v}"
+            assert math.isfinite(loss_v), f"loss is not finite (rank {rank}): {loss_v}"
             assert "raw_grad_norm" in result, "grad-norm missing — optimizer step did not run"
             gn = result["raw_grad_norm"]
-            assert math.isfinite(gn), f"grad-norm is not finite: {gn}"
+            assert math.isfinite(gn), f"grad-norm is not finite (rank {rank}): {gn}"
             assert gn > 0.0, f"grad-norm is zero — no grad flowed through router/experts: {gn}"
         print(
             f"[Stage6] replay+EP+grouped training step: loss={results[0]['final_loss']:.4f} "
-            f"grad_norm={results[0]['raw_grad_norm']:.4f} entropy={results[0]['policy_entropy']:.4f}"
+            f"policy_loss={results[0]['policy_loss']:.4f} grad_norm={results[0]['raw_grad_norm']:.4f} "
+            f"entropy={results[0]['policy_entropy']:.4f}"
         )
 
         # --- Weight-sync round-trip into the EP inference engine (G4-4 oracle). ---
