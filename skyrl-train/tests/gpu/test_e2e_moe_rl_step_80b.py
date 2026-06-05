@@ -89,7 +89,7 @@ INFER_TP = int(os.environ.get("SKYRL_80B_INFER_TP", "8"))
 INFER_EP = int(os.environ.get("SKYRL_80B_INFER_EP", "8"))
 # Conservative colocated KV headroom for the 80B trainer (offload_after_step gives
 # the trainer the GPU back during generate; the engine still needs weights+KV room).
-GPU_MEM_UTIL = float(os.environ.get("SKYRL_80B_GPU_MEM_UTIL", "0.40"))
+GPU_MEM_UTIL = float(os.environ.get("SKYRL_80B_GPU_MEM_UTIL", "0.30"))
 
 
 def _get_test_cfg() -> DictConfig:
@@ -346,6 +346,17 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
         )
 
         # --- Weight-sync round-trip into the EP=8 inference engine. ---
+        # COLOCATION HEADROOM (80B, Stage-7): the broadcast gathers FULL (unsharded)
+        # 80B tensors via DTensor.full_tensor() onto each rank's GPU. At 80B the
+        # trainer's FSDP2-sharded params + Adam fp32 optimizer state + the WAKING
+        # EP=8 vLLM engine already fill ~92/95 GiB, so the transient full-tensor
+        # gather OOMs (job 596157: OutOfMemoryError in broadcast_to_inference_engines
+        # -> _gather_tensor -> full_tensor, 378 MiB free). Offload the trainer
+        # optimizer/grads to CPU BEFORE waking the engine + gathering: FSDP2 still
+        # re-gathers params from their shards for the broadcast, but the freed Adam
+        # state (~4x params) gives the gather + engine room. (Small-MoE Stage 6 fit
+        # without this; 80B does not.)
+        policy.offload_to_cpu()
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
