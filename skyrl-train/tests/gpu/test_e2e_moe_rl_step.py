@@ -492,7 +492,13 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         # logprobs over the forced sequence, so the comparison is fully deterministic.
         score_sampling_params = {
             "max_tokens": 1,
-            "prompt_logprobs": 20,  # top-K; vLLM ALSO includes the actual prompt token
+            # prompt_logprobs=1 (the colocated EP engine's max_logprobs cap): vLLM
+            # ALWAYS includes the ACTUAL prompt token's logprob in prompt_logprobs[pos]
+            # even when it falls outside the requested top-K, and _engine_token_logprobs
+            # reads exactly that (plp[pos].get(tok), indexed by the forced token id —
+            # NOT a top-K rank). So K=1 yields every forced-token logprob the gate needs
+            # while staying within the engine's max_logprobs=1 (no engine/a3 change).
+            "prompt_logprobs": 1,  # vLLM ALSO includes the actual prompt token
             "temperature": 1.0,
             "top_p": 1.0,
             "top_k": -1,
