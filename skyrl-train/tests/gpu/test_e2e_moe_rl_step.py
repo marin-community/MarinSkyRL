@@ -33,6 +33,7 @@ Requires >= 4 GPUs (EP=2 x FSDP=2 trainer, colocated with an EP=2 inference engi
 import asyncio
 import math
 import os
+import random
 import sys
 
 # Allow `python tests/gpu/test_e2e_moe_rl_step.py` from the skyrl-train dir (no
@@ -42,6 +43,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+import numpy as np
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -55,7 +57,6 @@ from transformers import AutoTokenizer
 from omegaconf import DictConfig
 
 from tests.gpu.utils import (
-    are_responses_similar,
     get_available_gpus,
     get_test_actor_config,
     get_test_prompts,
@@ -198,6 +199,83 @@ def _make_replay_experience(model_config, batch_size=2, seq_len=48, num_actions=
     )
 
 
+def _seed_everything(seed: int = 1234):
+    """Seed all RNGs so the GRPO step + both logprob forwards are reproducible.
+
+    ``use_deterministic_algorithms`` is intentionally NOT forced globally: it makes
+    several bf16 MoE / FSDP collectives raise ``RuntimeError`` (no deterministic
+    kernel), and we do not need bit-exact determinism — we need the SAME weights to
+    be exercised by both the trainer forward and the vLLM forward. Fixed seeds +
+    ``cudnn.deterministic`` are sufficient for that; the logprob-agreement gate then
+    tolerates the residual fp/grouped-vs-HF/EP-reduction-order noise (see below).
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _build_forced_sequences(tokenizer, prompts, num_actions: int, seed: int = 7):
+    """Build a FIXED (prompt + forced continuation) token sequence per prompt.
+
+    Returns ``(seqs, num_actions)`` where ``seqs`` is a ``List[List[int]]`` and each
+    sequence is ``prompt_ids + forced_continuation`` with the SAME forced
+    continuation ids reused by BOTH scoring paths (trainer forward + vLLM
+    prompt_logprobs). The continuation is a deterministic pseudo-random run of valid
+    token ids (seeded), NOT sampled from the model — the gate scores a fixed target
+    sequence, so no sampling is involved and the comparison is fully deterministic.
+
+    The trainer and engine see the IDENTICAL ids; only the model numerics differ.
+    """
+    rng = random.Random(seed)
+    vocab_size = int(getattr(tokenizer, "vocab_size", 32000))
+    # Stay well inside the vocab and avoid id 0 / special-token collisions by using a
+    # safe interior band; the exact ids are immaterial — both paths score the same band.
+    lo, hi = 100, max(101, min(vocab_size - 100, 30000))
+    prompt_ids_batch = tokenizer.apply_chat_template(
+        prompts, add_generation_prompt=True, add_special_tokens=False, tokenize=True
+    )
+    seqs = []
+    for pids in prompt_ids_batch:
+        cont = [rng.randint(lo, hi) for _ in range(num_actions)]
+        seqs.append(list(pids) + cont)
+    return seqs, num_actions
+
+
+def _engine_token_logprobs(prompt_logprobs_batch, seqs, num_actions):
+    """Extract per-token chosen-token logprobs from vLLM ``prompt_logprobs``.
+
+    vLLM ``prompt_logprobs[pos]`` is a dict ``{token_id: logprob}`` giving
+    ``logP(seq[pos] | seq[:pos])`` (it always includes the actual prompt token even
+    when it's outside the requested top-K). The trainer's ``action_log_probs[:, j]``
+    (the last ``num_actions`` slots) is ``logP(seq[P+j] | seq[:P+j])`` with
+    ``P = len(seq) - num_actions`` (the model_wrapper roll(-1) + ``[-na-1:-1]``
+    slice). So trainer action ``j`` aligns with engine prompt position ``P+j``.
+
+    Returns a ``[B, num_actions]`` float tensor (NaN where vLLM omitted a position).
+    """
+    B = len(seqs)
+    out = torch.full((B, num_actions), float("nan"))
+    for i in range(B):
+        seq = seqs[i]
+        P = len(seq) - num_actions
+        plp = prompt_logprobs_batch[i] if prompt_logprobs_batch is not None else None
+        if plp is None:
+            continue
+        for j in range(num_actions):
+            pos = P + j
+            if pos >= len(plp) or plp[pos] is None:
+                continue
+            tok = seq[pos]
+            lp = plp[pos].get(tok)
+            if lp is not None:
+                out[i, j] = float(lp)
+    return out
+
+
 def test_e2e_moe_rl_step_replay_ep_grouped():
     """One full RL training step on a small MoE under EP=2 + grouped-GEMM +
     router-replay, then a weight-sync round-trip into the EP inference engine.
@@ -205,10 +283,24 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
     Asserts:
       * training step completes; loss + grad-norm finite (no NaN/inf), grad-norm > 0
         (grad flows through router + experts);
-      * the weight-sync round-trips into the EP=2 inference engine and reproduces
-        the pre-sync responses (the G4-4 ``are_responses_similar`` oracle).
+      * DETERMINISTIC logprob-agreement gate: the per-token logprobs of a FIXED
+        (prompt + forced continuation) sequence, computed by (a) the trainer's
+        POST-STEP forward and (b) the synced EP=2 vLLM engine's ``prompt_logprobs``,
+        agree within a tight tolerance. This passes iff the real GRPO update was
+        faithfully broadcast/resharded/remapped into the inference engine. It
+        replaces the prior greedy-decode ``are_responses_similar`` oracle, which was
+        a known artifact (the first AdamW step shifts ``router.gate`` ~1e-6
+        coherently -> flips greedy argmax -> full Levenshtein divergence -> 0/4),
+        and unlike the rejected ``lr=0.0`` no-op it validates a REAL update.
     """
     _check_gpus(num_gpus=NUM_GPUS)
+
+    # DETERMINISM (Stage 6, TEST-ONLY): seed every RNG so the GRPO step and both
+    # logprob forwards are reproducible across the run. The deterministic
+    # logprob-agreement gate (below) replaces the prior greedy-decode oracle, which
+    # was a known artifact (a genuine first AdamW step shifts router.gate ~1e-6
+    # coherently -> flips greedy argmax -> full Levenshtein divergence -> 0/4).
+    _seed_everything(1234)
 
     pg = None
     try:
@@ -245,14 +337,15 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         # `raw_grad_norm: nan`). The fix is to keep the training-forward temperature
         # at the normal training value (1.0 — no scaling, log-probs straight from
         # logits), and apply the deterministic (greedy) temperature ONLY to the
-        # inference sampling params used by the weight-sync oracle (built below).
+        # inference sampling params used by the pre-step engine SMOKE generate (built
+        # below). The GATE itself uses prompt_logprobs scoring (temperature=1.0, no
+        # sampling), so it does not depend on greedy decode at all.
         cfg.generator.sampling_params.temperature = 1.0
         cfg.generator.sampling_params.top_p = 1.0
         cfg.generator.sampling_params.top_k = -1
         # Deterministic (greedy) sampling params for the inference engine ONLY — used
-        # by the before/after weight-sync `are_responses_similar` oracle so the
-        # round-trip comparison is stable. Decoupled from the (temperature=1.0)
-        # value the training forward reads above.
+        # for the pre-step engine smoke generate (a liveness check, NOT the gate).
+        # Decoupled from the (temperature=1.0) value the training forward reads above.
         from copy import deepcopy
 
         infer_sampling_cfg = deepcopy(cfg.generator.sampling_params)
@@ -285,6 +378,18 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         asyncio.run(client.wake_up())
 
         prompts = get_test_prompts(MODEL, num_samples=4)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+        # FIXED (prompt + forced continuation) sequences for the deterministic
+        # logprob-agreement gate. Built ONCE; the SAME ids are scored by both the
+        # trainer's post-step forward and the synced EP vLLM engine. No sampling.
+        SCORE_NUM_ACTIONS = 24
+        forced_seqs, score_num_actions = _build_forced_sequences(
+            tokenizer, prompts, num_actions=SCORE_NUM_ACTIONS
+        )
+
+        # Smoke the engine once so a dead-engine failure surfaces before the (much
+        # longer) training step; this generate is NOT the gate (the gate is the
+        # post-step logprob agreement below).
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, infer_sampling_cfg)
         out_before = asyncio.run(
             client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
@@ -339,6 +444,38 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
             f"entropy={results[0]['policy_entropy']:.4f}"
         )
 
+        # --- (a) TRAINER post-step per-token logprobs on the FIXED sequences. ---
+        # Run a NO-grad forward of the just-updated policy on the forced sequences
+        # (natural routing — rollout_routed_experts is NOT passed here, matching the
+        # engine's native routing) BEFORE offload/weight-sync, so we score the SAME
+        # post-step weights the engine will receive. `forward` -> model_wrapper
+        # returns `action_log_probs[:, -num_actions:]` = per-token logP of the realized
+        # next token at temperature=1.0 (the gate's training-forward temperature).
+        max_len = max(len(s) for s in forced_seqs)
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        # Left-pad so the response slice `[-num_actions-1:-1]` lands on the forced
+        # continuation for every row (the model_wrapper slices from the right).
+        seq_tensor = torch.full((len(forced_seqs), max_len), pad_id, dtype=torch.long)
+        attn_tensor = torch.zeros((len(forced_seqs), max_len), dtype=torch.long)
+        for i, s in enumerate(forced_seqs):
+            seq_tensor[i, max_len - len(s):] = torch.tensor(s, dtype=torch.long)
+            attn_tensor[i, max_len - len(s):] = 1
+        # get_model_logits_from_actor sets response_length internally to seq_len-5,
+        # so call the worker forward directly with our exact score_num_actions.
+        from skyrl_train.training_batch import TrainingInputBatch
+        from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+
+        fwd_data = TrainingInputBatch({"sequences": seq_tensor, "attention_mask": attn_tensor})
+        fwd_data.metadata = {"response_length": score_num_actions}
+        fwd_refs = policy.async_run_ray_method("mesh", "forward", fwd_data)
+        fwd_out = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, ray.get(fwd_refs))
+        trainer_logprobs = fwd_out["output"].float()  # [B, score_num_actions]
+        assert trainer_logprobs.shape == (len(forced_seqs), score_num_actions), (
+            f"trainer logprob shape {tuple(trainer_logprobs.shape)} != "
+            f"{(len(forced_seqs), score_num_actions)}"
+        )
+        assert torch.isfinite(trainer_logprobs).all(), "trainer post-step logprobs contain non-finite values"
+
         # --- Weight-sync round-trip into the EP inference engine (G4-4 oracle). ---
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.wake_up(tags=["weights"]))
@@ -347,47 +484,95 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         asyncio.run(client.reset_prefix_cache())
 
-        out_after = asyncio.run(
-            client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
-        )
-        assert len(out_after["responses"]) == len(prompts)
-
-        # After ONE GRPO step the weights have moved slightly; the round-trip must
-        # still reshard+remap the EP-sharded grouped trainer weights faithfully into
-        # the EP inference engine (responses stay close to pre-sync). Tolerance is
-        # looser than the static G4-4 sync (0.02) because a real optimizer step ran.
-        #
-        # DIAGNOSTIC (Stage 6, test-only): print the before/after response STRINGS and
-        # the per-prompt normalized-Levenshtein ratio so the failure mode is legible
-        # from the log alone. The hypothesis under investigation is that a genuine
-        # AdamW step (lr=1e-6, warmup=0 → per-param update ≈ ±lr coherently across all
-        # 14B params, INCLUDING the router gate) perturbs the GREEDY (temperature=0.0)
-        # decode enough to flip an early argmax token → full continuation divergence,
-        # i.e. responses that are still COHERENT but DIFFERENT (not garbage). The
-        # static G4-4 oracle passes at tol 0.02 only because it runs NO training step,
-        # so its round-trip is bit-identical. Printing both strings distinguishes
-        # "coherent-but-different" (expected, oracle-design artifact) from "garbage"
-        # (a real reshard/remap corruption).
-        from tests.gpu.utils import levenshtein
-
-        for i in range(len(prompts)):
-            b = out_before["responses"][i]
-            a = out_after["responses"][i]
-            ratio = float(levenshtein(b, a) / max(len(b), len(a), 1))
-            print(
-                f"[Stage6][weightsync][prompt{i}] lev_ratio={ratio:.4f} (tol=0.15)\n"
-                f"  BEFORE: {b[:200]!r}\n"
-                f"  AFTER : {a[:200]!r}"
+        # --- (b) ENGINE post-sync per-token logprobs on the SAME FIXED sequences. ---
+        # NO sampling: feed the full forced sequence as `prompt_token_ids` and read
+        # vLLM `prompt_logprobs` (the exact teacher-scoring path in
+        # teacher_engine_client). `max_tokens=1` is required (vLLM must emit >=1
+        # token) but the generated token is irrelevant — we only read the prompt
+        # logprobs over the forced sequence, so the comparison is fully deterministic.
+        score_sampling_params = {
+            "max_tokens": 1,
+            "prompt_logprobs": 20,  # top-K; vLLM ALSO includes the actual prompt token
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+        }
+        score_out = asyncio.run(
+            client.generate(
+                InferenceEngineInput(prompt_token_ids=forced_seqs, sampling_params=score_sampling_params)
             )
-        num_similar = sum(
-            1
-            for i in range(len(prompts))
-            if are_responses_similar([out_before["responses"][i]], [out_after["responses"][i]], tolerance=0.15)
         )
-        assert num_similar == len(prompts), (
-            f"weight-sync round-trip corrupted weights: only {num_similar}/{len(prompts)} responses matched."
+        engine_plp = score_out.get("prompt_logprobs")
+        assert engine_plp is not None, (
+            "EP vLLM engine returned no prompt_logprobs — cannot run the logprob-agreement gate. "
+            "(SamplingParams(prompt_logprobs=K) is set; this should not happen on vLLM.)"
         )
-        print(f"[Stage6] weight-sync round-trip into EP engine: {num_similar}/{len(prompts)} similar PASS")
+        engine_logprobs = _engine_token_logprobs(engine_plp, forced_seqs, score_num_actions)
+
+        # --- THE GATE: numerical agreement of post-step trainer vs synced-engine
+        # per-token logprobs over the FIXED forced sequences. ---
+        # This passes IFF the post-step weights are faithfully in the EP engine. A
+        # mis-propagated update (wrong reshard/remap of router.gate or expert
+        # w1/w2/w3) shifts the logits by O(1)+ -> logprobs diverge by >> the tolerance.
+        # A faithful sync agrees up to fp/bf16 + grouped-GEMM-vs-HF + EP-reduction-order
+        # noise, which on these logprobs is a few e-2 to e-1 — orders of magnitude
+        # smaller than a real corruption. We assert on the per-token ABS diff,
+        # ignoring any positions vLLM omitted (NaN) and clamping the trainer logprobs
+        # to the same finite set.
+        valid = torch.isfinite(engine_logprobs) & torch.isfinite(trainer_logprobs)
+        n_valid = int(valid.sum().item())
+        assert n_valid >= score_num_actions, (
+            f"too few comparable logprob positions ({n_valid}); vLLM omitted most prompt positions"
+        )
+        abs_diff = (trainer_logprobs - engine_logprobs).abs()
+        abs_diff_valid = abs_diff[valid]
+        max_abs = float(abs_diff_valid.max().item())
+        mean_abs = float(abs_diff_valid.mean().item())
+
+        for i in range(len(forced_seqs)):
+            row_valid = valid[i]
+            t = trainer_logprobs[i][row_valid].tolist()
+            e = engine_logprobs[i][row_valid].tolist()
+            d = abs_diff[i][row_valid].tolist()
+            print(
+                f"[Stage6][logprob-gate][seq{i}] n={int(row_valid.sum())} "
+                f"max_abs={max(d) if d else float('nan'):.4f} mean_abs={(sum(d)/len(d)) if d else float('nan'):.4f}\n"
+                f"  TRAINER: {[round(x, 3) for x in t]}\n"
+                f"  ENGINE : {[round(x, 3) for x in e]}\n"
+                f"  ABSDIFF: {[round(x, 3) for x in d]}"
+            )
+        # Tolerance justification: identical fp32 logprobs are unattainable across the
+        # FSDP2 bf16 grouped-GEMM trainer forward and vLLM's native bf16 MoE forward
+        # (different kernels, expert-GEMM grouping, EP all-reduce order, RoPE/attn
+        # impl). Empirically that residual is a few e-2 per token on logprobs of this
+        # magnitude. A MIS-PROPAGATED update is not subtle: a wrong router.gate or
+        # expert tensor flips top-k expert selection and/or shifts logits by O(1+),
+        # giving per-token diffs of >= 1.0 (and frequently >> that). MAX_ABS_TOL=0.5
+        # sits comfortably between the two regimes: it tolerates the full fp/kernel
+        # noise band with margin while still catching any genuine transport corruption
+        # by an order of magnitude. MEAN_ABS_TOL=0.15 guards against a small-but-
+        # systematic offset (a partial/misaligned remap) that a max-only check could
+        # miss. Both thresholds are TEST-ONLY; the a3 path (ep_size=1) is untouched.
+        MAX_ABS_TOL = 0.5
+        MEAN_ABS_TOL = 0.15
+        print(
+            f"[Stage6][logprob-gate] OVERALL max_abs={max_abs:.4f} (tol={MAX_ABS_TOL}) "
+            f"mean_abs={mean_abs:.4f} (tol={MEAN_ABS_TOL}) over {n_valid} tokens"
+        )
+        assert max_abs <= MAX_ABS_TOL, (
+            f"weight-sync round-trip MIS-PROPAGATED the post-step update: max per-token logprob "
+            f"diff {max_abs:.4f} > {MAX_ABS_TOL} (mean {mean_abs:.4f}). Trainer post-step and synced "
+            f"EP-engine logprobs disagree by orders of magnitude -> the broadcast/reshard/remap did "
+            f"not faithfully land the real GRPO update in the inference engine."
+        )
+        assert mean_abs <= MEAN_ABS_TOL, (
+            f"weight-sync round-trip has a systematic logprob offset: mean per-token diff {mean_abs:.4f} "
+            f"> {MEAN_ABS_TOL} (max {max_abs:.4f}) -> a partial/misaligned remap of the post-step weights."
+        )
+        print(
+            f"[Stage6] weight-sync logprob-agreement gate PASS: post-step trainer weights are "
+            f"faithfully in the EP engine (max_abs={max_abs:.4f}, mean_abs={mean_abs:.4f})"
+        )
     finally:
         if pg is not None:
             try:
