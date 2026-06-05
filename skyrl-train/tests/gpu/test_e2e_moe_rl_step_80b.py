@@ -139,13 +139,24 @@ def init_ray_inference_engines(backend, tp_size, shared_pg, config) -> Inference
     return InferenceEngineClient(engine, tokenizer, config)
 
 
-def _check_gpus(num_gpus: int):
-    available = get_available_gpus()
-    if len(available) < num_gpus:
-        msg = f"Stage 7 80B e2e requires >= {num_gpus} GPUs, found {len(available)}: {available}"
+def _check_cluster_gpus(num_gpus: int):
+    """Multi-node GPU check: count the RAY CLUSTER's GPUs, not the driver's LOCAL
+    devices. The driver runs on the head node and ``torch.cuda.device_count()`` /
+    ``get_available_gpus()`` only sees that node's 4 GPUs; the other 28 live on the
+    7 worker nodes and are visible only through Ray. Must be called AFTER
+    ``initialize_ray``. (The Stage-6 single-node test used the local-device check
+    because all 4 GPUs were local.)"""
+    cluster = ray.cluster_resources()
+    n = int(cluster.get("GPU", 0))
+    if n < num_gpus:
+        msg = (
+            f"Stage 7 80B e2e requires >= {num_gpus} cluster GPUs, Ray reports {n} "
+            f"(cluster_resources={cluster}). Did all {num_gpus // 4} nodes join the cluster?"
+        )
         if pytest is not None:
             pytest.skip(msg)
         raise RuntimeError(msg)
+    print(f"[Stage7] Ray cluster GPUs: {n} (>= required {num_gpus})")
 
 
 def _assert_r3_alignment(model_config):
@@ -222,7 +233,8 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
     under EP=8 x FSDP=4 + grouped-GEMM + router-replay + gradient-checkpointing,
     multi-node (8 GH200 nodes), then the DIRECT weight-equality gate against the
     synced EP=8 vLLM engine."""
-    _check_gpus(num_gpus=NUM_GPUS)
+    # NOTE: GPU sufficiency is checked AFTER initialize_ray via ray.cluster_resources()
+    # (multi-node: the 32 GPUs are cluster-wide, not local to the head-node driver).
     _seed_everything(1234)
 
     pg = None
@@ -260,6 +272,7 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
         _assert_r3_alignment(model_config)
 
         initialize_ray(cfg)
+        _check_cluster_gpus(num_gpus=NUM_GPUS)
 
         # MULTI-NODE placement group: one GPU-bundle per node (STRICT_SPREAD so the 8
         # bundles land on 8 distinct nodes -> EP=8 spans >=2 nodes -> internode
