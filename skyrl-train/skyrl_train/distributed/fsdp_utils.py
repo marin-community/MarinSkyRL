@@ -246,27 +246,43 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         full_sd (`dict`): The full state dict to load, can be only on rank 0
         ep_enabled (`bool`): Whether expert parallelism is active. When True, the model has a MIX of params
             sharded over the global FSDP mesh AND expert params sharded over a (fsdp, ep) submesh. The naive
-            per-param `broadcast(global)` + `distribute_tensor(submesh)` path below deadlocks: per param it
-            interleaves a global broadcast with a submesh-scoped collective (distribute_tensor scatters from
-            mesh-coordinate 0), so ranks that are coordinate-0 on one mesh but not another desync → NCCL
-            store->get wait timeout. When ep_enabled we use a collective-symmetric loader: every rank
-            participates in the SAME global CUDA broadcast for every param (replicating it to all ranks), then
-            shards each param onto its OWN DTensor mesh PURELY LOCALLY (slice + DTensor.from_local, no further
-            collective), so mixed global/submesh placements never interleave collectives. DEFAULT False keeps
-            the a3 (non-EP) production path byte-identical.
+            per-param `broadcast(global)` + `distribute_tensor(submesh)` path used for the non-EP case
+            deadlocks on that mix: per param it interleaves a global broadcast with a submesh-scoped collective
+            (distribute_tensor scatters from mesh-coordinate 0), so ranks that are coordinate-0 on one mesh but
+            not another desync → NCCL store->get wait timeout. When ep_enabled we delegate to the documented
+            FSDP2 full-state-dict loader `torch.distributed.checkpoint.state_dict.set_model_state_dict`
+            (broadcast_from_rank0=True), the same robust loader torchtitan uses: it broadcasts the rank-0 full
+            state dict and re-shards EACH param to its OWN DTensor mesh / placement automatically, so mixed
+            global + (fsdp,ep)-submesh params are handled uniformly with no manual per-param
+            broadcast/distribute_tensor/set_data dance.
+
+            NOTE on the historical deadlock: an earlier attempt at this `set_model_state_dict` path hung
+            because, at that time, rank 0 held REAL CPU-initialized weights while the other ranks were
+            meta-initialized. `_load_model_state_dict` infers the broadcast device from the MODEL's local
+            params, so the rank0/non-rank0 real-vs-meta split made device inference asymmetric (rank0 → CPU,
+            others → CUDA) → mismatched gloo/nccl backend in broadcast_object_list → timeout. That is no longer
+            possible: the caller (`_fsdp_init_model`) now meta-izes ALL ranks' params uniformly before
+            apply_ep/apply_fsdp2, so every rank's local params are meta DTensors at load time and the inferred
+            broadcast device is identical (the default PG device) across ranks.
+
+            DEFAULT False keeps the a3 (non-EP) production path byte-identical.
     """
     import torch.distributed as dist
     from torch.distributed.tensor import distribute_tensor
 
     if ep_enabled:
-        # Collective-symmetric placement-aware load for mixed global/submesh (EP) params.
-        from torch.distributed.tensor import DTensor
-        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-
-        # Same keys/order on every rank (the sharded model state dict is identical across ranks).
-        meta_sharded_sd = model.state_dict()
-        sharded_sd = {}
-        is_rank0 = dist.get_rank() == 0
+        # Documented, robust FSDP2 full-state-dict loader (torchtitan-style). It broadcasts the
+        # rank-0 full state dict and re-shards each param to its OWN DTensor mesh / placement
+        # automatically — handling mixed global + (fsdp,ep)-submesh + meta-init params — which
+        # eliminates the manual per-param broadcast / distribute_tensor / set_data dance and the
+        # whole set_data/meta-copy error class that came with it.
+        #
+        # Precondition (guaranteed by the caller _fsdp_init_model): ALL ranks' model params are
+        # uniformly meta DTensors at this point, so set_model_state_dict's broadcast-device
+        # inference (which reads the MODEL's local params) is symmetric across ranks. full_sd holds
+        # the real weights on rank 0 and is empty ({}) on the other ranks, which is exactly what
+        # broadcast_from_rank0=True expects.
+        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
         import os as _os
 
@@ -274,81 +290,29 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         if _dbg:
             import sys as _sys
 
-            _r = dist.get_rank()
-            _keys = list(meta_sharded_sd.keys())
-            _missing = [k for k in _keys if (is_rank0 and k not in full_sd)]
+            _keys = list(model.state_dict().keys())
+            _missing = [k for k in _keys if (dist.get_rank() == 0 and k not in full_sd)]
             print(
-                f"[EP-LOADER-DBG] rank={_r} entered loader, nkeys={len(_keys)} "
+                f"[EP-LOADER-DBG] rank={dist.get_rank()} set_model_state_dict, nkeys={len(_keys)} "
                 f"first3={_keys[:3]} last1={_keys[-1:]} rank0_missing_in_full_sd={_missing[:5]}",
                 file=_sys.stderr,
                 flush=True,
             )
 
-        for _idx, (param_name, sharded_param) in enumerate(meta_sharded_sd.items()):
-            if _dbg and _idx % 50 == 0:
-                import sys as _sys
-
-                print(
-                    f"[EP-LOADER-DBG] rank={dist.get_rank()} pre-broadcast idx={_idx} name={param_name} "
-                    f"shape={tuple(sharded_param.shape)} is_dtensor={isinstance(sharded_param, DTensor)}",
-                    file=_sys.stderr,
-                    flush=True,
-                )
-            # Phase 1 (symmetric): replicate the full param to ALL ranks via a single
-            # global CUDA broadcast. Every rank issues the identical collective in the
-            # identical order, so the global NCCL PG never desyncs.
-            if is_rank0:
-                full_param = full_sd[param_name].detach().to(device="cuda", dtype=sharded_param.dtype)
-            else:
-                full_param = torch.empty(
-                    sharded_param.shape, device="cuda", dtype=sharded_param.dtype
-                )
-            dist.broadcast(full_param, src=0)
-
-            # Phase 2 (purely local): shard the now-replicated full tensor onto THIS
-            # param's own DTensor mesh by slicing the local shard — no collective, so a
-            # global-mesh param and a (fsdp,ep)-submesh param are handled identically.
-            if isinstance(sharded_param, DTensor):
-                local_shape, global_offset = compute_local_shape_and_global_offset(
-                    full_param.shape, sharded_param.device_mesh, sharded_param.placements
-                )
-                slices = tuple(
-                    slice(off, off + size) for size, off in zip(local_shape, global_offset)
-                )
-                local_tensor = full_param[slices].detach().clone().contiguous()
-                sharded_tensor = DTensor.from_local(
-                    local_tensor,
-                    sharded_param.device_mesh,
-                    sharded_param.placements,
-                    shape=sharded_param.shape,
-                    stride=sharded_param.stride(),
-                )
-            else:
-                # Plain replicated tensor/buffer (e.g. rotary inv_freq): keep full copy.
-                sharded_tensor = full_param.detach().clone().contiguous()
-            sharded_sd[param_name] = sharded_tensor
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=True),
+        )
 
         if _dbg:
             import sys as _sys
 
-            _cur = dict(model.named_parameters())
-            _cur.update(dict(model.named_buffers()))
-            for _k, _v in sharded_sd.items():
-                _tgt = _cur.get(_k, None)
-                if _tgt is None:
-                    continue
-                _tgt_dt = isinstance(_tgt, DTensor) or isinstance(getattr(_tgt, "data", None), DTensor)
-                _src_dt = isinstance(_v, DTensor)
-                if _tgt_dt != _src_dt:
-                    print(
-                        f"[EP-LOADER-DBG] rank={dist.get_rank()} TYPE-MISMATCH key={_k} "
-                        f"target_is_dtensor={_tgt_dt} source_is_dtensor={_src_dt} "
-                        f"target_type={type(_tgt).__name__} target_data_type={type(getattr(_tgt,'data',_tgt)).__name__}",
-                        file=_sys.stderr,
-                        flush=True,
-                    )
-            print(f"[EP-LOADER-DBG] rank={dist.get_rank()} FINISHED broadcast loop, loading state dict", file=_sys.stderr, flush=True)
-        model.load_state_dict(sharded_sd, assign=True)
+            print(
+                f"[EP-LOADER-DBG] rank={dist.get_rank()} set_model_state_dict returned cleanly",
+                file=_sys.stderr,
+                flush=True,
+            )
 
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
         offload_fsdp2_model_to_cpu(model)
