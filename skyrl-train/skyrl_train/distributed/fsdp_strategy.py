@@ -358,7 +358,15 @@ class FSDPStrategy(DistributedStrategy):
                     full_state = {k: v.detach().to("cpu", copy=True) for k, v in full_state.items()}
                 else:
                     full_state = {}
-                module.to_empty(device="meta")
+                # Meta-ize PARAMETERS ONLY (not buffers): only the expert *parameters* are
+                # passed through ExpertParallel._partition_fn / distribute_tensor, so making
+                # just the params uniformly meta removes the real-vs-meta scatter asymmetry.
+                # Buffers (e.g. non-persistent rotary inv_freq, absent from state_dict) are
+                # left as the per-rank init-context materialized them — they are deterministic
+                # and identical across ranks, and meta-izing them would leave them unrestorable
+                # after the loader (-> "Cannot copy out of meta tensor" on the CPU offload).
+                for _p in module.parameters():
+                    _p.data = torch.empty_like(_p.data, device="meta")
 
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
                 num_sharded = apply_ep(
