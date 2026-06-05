@@ -268,7 +268,32 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         sharded_sd = {}
         is_rank0 = dist.get_rank() == 0
 
-        for param_name, sharded_param in meta_sharded_sd.items():
+        import os as _os
+
+        _dbg = _os.environ.get("SKYRL_EP_LOADER_DEBUG", "") == "1"
+        if _dbg:
+            import sys as _sys
+
+            _r = dist.get_rank()
+            _keys = list(meta_sharded_sd.keys())
+            _missing = [k for k in _keys if (is_rank0 and k not in full_sd)]
+            print(
+                f"[EP-LOADER-DBG] rank={_r} entered loader, nkeys={len(_keys)} "
+                f"first3={_keys[:3]} last1={_keys[-1:]} rank0_missing_in_full_sd={_missing[:5]}",
+                file=_sys.stderr,
+                flush=True,
+            )
+
+        for _idx, (param_name, sharded_param) in enumerate(meta_sharded_sd.items()):
+            if _dbg and _idx % 50 == 0:
+                import sys as _sys
+
+                print(
+                    f"[EP-LOADER-DBG] rank={dist.get_rank()} pre-broadcast idx={_idx} name={param_name} "
+                    f"shape={tuple(sharded_param.shape)} is_dtensor={isinstance(sharded_param, DTensor)}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
             # Phase 1 (symmetric): replicate the full param to ALL ranks via a single
             # global CUDA broadcast. Every rank issues the identical collective in the
             # identical order, so the global NCCL PG never desyncs.
@@ -303,6 +328,10 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
                 sharded_tensor = full_param.detach().clone().contiguous()
             sharded_sd[param_name] = sharded_tensor
 
+        if _dbg:
+            import sys as _sys
+
+            print(f"[EP-LOADER-DBG] rank={dist.get_rank()} FINISHED broadcast loop, loading state dict", file=_sys.stderr, flush=True)
         model.load_state_dict(sharded_sd, assign=True)
 
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
