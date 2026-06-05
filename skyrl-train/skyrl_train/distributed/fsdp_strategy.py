@@ -365,30 +365,29 @@ class FSDPStrategy(DistributedStrategy):
                 # left as the per-rank init-context materialized them — they are deterministic
                 # and identical across ranks, and meta-izing them would leave them unrestorable
                 # after the loader (-> "Cannot copy out of meta tensor" on the CPU offload).
-                from torch.distributed.tensor import DTensor as _DTensor
-
-                for _name, _p in module.named_parameters():
-                    # .to("meta") preserves the tensor subclass (DTensor stays DTensor,
-                    # plain stays plain), so set_data does not hit an incompatible-type
-                    # error; torch.empty_like(..., device="meta") would drop DTensor-ness.
-                    try:
-                        _p.data = _p.data.to("meta")
-                    except Exception as _e:
-                        import sys as _sys
-
-                        print(
-                            "[EP-METAIZE-DBG] FAILED param "
-                            f"name={_name!r} rank={torch.distributed.get_rank()} "
-                            f"type(_p)={type(_p)} type(_p.data)={type(_p.data)} "
-                            f"is_DTensor={isinstance(_p.data, _DTensor)} "
-                            f"device={_p.data.device} dtype={_p.data.dtype} "
-                            f"shape={tuple(_p.data.shape)} "
-                            f"placements={getattr(_p.data, 'placements', None)} "
-                            f"err={type(_e).__name__}: {_e}",
-                            file=_sys.stderr,
-                            flush=True,
-                        )
-                        raise
+                # Re-REGISTER each param as a fresh meta nn.Parameter on its owning
+                # submodule (the standard torchtitan/prime-rl meta-init reset) instead of
+                # mutating `_p.data = _p.data.to("meta")` in place. The in-place `.data=`
+                # assignment routes through Variable.set_data, which raises
+                # "incompatible tensor type" for a TIED parameter (e.g.
+                # `model.embed_tokens.weight`, which shares storage with `lm_head.weight`
+                # when tie_word_embeddings=True — confirmed STEP-1 culprit). Replacing the
+                # Parameter object via setattr sidesteps set_data entirely AND cleanly
+                # un-ties embed/lm_head: each becomes an independent meta param. Both keys
+                # are present in rank-0's `full_state`, so the broadcast_from_rank0 loader
+                # below materializes each independently with the (identical) real weight,
+                # which is semantically equivalent to the tie. The fresh meta tensor keeps
+                # the exact dtype/shape/requires_grad so apply_ep / apply_fsdp2 see the
+                # same param spec they would for the original.
+                _param_specs = [
+                    (_name, _p.dtype, tuple(_p.shape), _p.requires_grad)
+                    for _name, _p in module.named_parameters()
+                ]
+                for _name, _dtype, _shape, _rg in _param_specs:
+                    _parent_name, _, _attr = _name.rpartition(".")
+                    _submod = module.get_submodule(_parent_name) if _parent_name else module
+                    _meta = torch.empty(_shape, device="meta", dtype=_dtype)
+                    setattr(_submod, _attr, torch.nn.Parameter(_meta, requires_grad=_rg))
 
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
                 num_sharded = apply_ep(
