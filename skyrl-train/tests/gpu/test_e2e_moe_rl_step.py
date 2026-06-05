@@ -158,8 +158,13 @@ def _make_replay_experience(model_config, batch_size=2, seq_len=24, num_actions=
         re[0] = SENTINEL_EXPERT_ID
 
     B, T = batch_size, seq_len
+    # Token range 0-100 (matches the proven make_dummy_experience used by the
+    # dense training_step GPU test). Sampling over the FULL 151936 vocab on a
+    # real 14B model produced degenerate/overflowing logits → NaN loss; the
+    # small range keeps the synthetic forward numerically sane while still
+    # exercising the full replay→EP→backprop path.
     return Experience(
-        sequences=torch.randint(0, model_config.vocab_size, (B, T), device=device),
+        sequences=torch.randint(0, 100, (B, T), device=device),
         action_log_probs=0.4 * torch.ones((B, num_actions), device=device),
         base_action_log_probs=0.3 * torch.ones((B, num_actions), device=device),
         rollout_logprobs=0.2 * torch.ones((B, num_actions), device=device),
