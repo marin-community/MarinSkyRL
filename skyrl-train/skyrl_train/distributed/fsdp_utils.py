@@ -589,7 +589,20 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     else:
         total_norm = stacked.pow(norm_type).sum().pow(1.0 / norm_type)
 
-    _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    # Apply the clip PER mesh-group. _clip_grads_with_norm_ (foreach) batches the
+    # scale-multiply into a single aten._foreach_mul_ over ALL grads, which again
+    # mixes the (fsdp) and (fsdp,ep) meshes ("Could not run pointwise computation
+    # across different mesh"). Clipping each group's params separately keeps every
+    # _foreach_mul_ within a single mesh. The scale factor is the SAME global
+    # total_norm for all groups (correct: it's one global clip coefficient).
+    params_by_mesh: dict = {}
+    for p in parameters:
+        if p.grad is None:
+            continue
+        mesh = getattr(p.grad, "device_mesh", None)
+        params_by_mesh.setdefault(mesh, []).append(p)
+    for group_params in params_by_mesh.values():
+        _clip_grads_with_norm_(group_params, max_norm, total_norm, foreach)
     return total_norm
 
 
