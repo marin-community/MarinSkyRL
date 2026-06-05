@@ -471,6 +471,109 @@ class WorkerWrap:
             return
         destroy_process_group(self._model_update_group)
 
+    def read_named_weights(self, hf_names, dump_inventory: bool = False):
+        """TEST-ONLY (Stage 6 weight-equality gate): read engine-side weights back
+        from the live vLLM model, reconstructed under the HF parameter names the
+        trainer broadcasts.
+
+        This is the symmetric inverse of ``load_weights`` (vLLM consumes HF-named
+        tensors in ``model.load_weights`` and maps them into its internal
+        fused/sharded params; here we read those internal params back and rebuild
+        the HF view so the trainer's post-step HF tensors can be compared
+        tensor-by-tensor). Returns, per requested HF name, this worker's
+        contribution as a CPU fp32 tensor plus the rank coordinates so the caller
+        can assemble across TP/EP shards.
+
+        Supported HF name forms (Qwen1.5-MoE / Qwen2MoE vLLM layout):
+          * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
+          * ``model.layers.{i}.mlp.gate.weight`` (router)       -> ReplicatedLinear (full copy every rank)
+          * ``model.layers.{i}.self_attn.o_proj.weight``        -> RowParallelLinear (TP input-sharded)
+          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> FusedMoE w13_weight[local_e, :I]  (EP expert-sharded)
+          * ``...experts.{j}.up_proj.weight``                   -> FusedMoE w13_weight[local_e, I:]
+          * ``...experts.{j}.down_proj.weight``                 -> FusedMoE w2_weight[local_e]
+
+        Args:
+            hf_names: list of HF parameter names to read back.
+            dump_inventory: if True, also returns the full ``named_parameters()``
+                name->shape inventory under key ``__inventory__`` (first run aid).
+        """
+        import re
+        import torch as _torch
+
+        model = self.model_runner.model
+        params = dict(model.named_parameters())
+        buffers = dict(model.named_buffers())
+        all_params = {**params, **buffers}
+
+        try:
+            from vllm.distributed import parallel_state as _ps
+            tp_rank = _ps.get_tensor_model_parallel_rank()
+            tp_size = _ps.get_tensor_model_parallel_world_size()
+        except Exception:
+            tp_rank, tp_size = 0, 1
+        try:
+            ep_rank = _ps.get_ep_group().rank_in_group
+            ep_size = _ps.get_ep_group().world_size
+        except Exception:
+            ep_rank, ep_size = 0, 1
+
+        def _cpu(t):
+            return t.detach().to("cpu", dtype=_torch.float32).contiguous()
+
+        out = {}
+        if dump_inventory:
+            out["__inventory__"] = {n: list(p.shape) for n, p in all_params.items()}
+        out["__ranks__"] = {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}
+
+        expert_re = re.compile(r"^(model\.layers\.\d+\.mlp)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+
+        for name in hf_names:
+            entry = {"found": False}
+            try:
+                # 1. Direct (replicated) match: router gate, norms, etc.
+                if name in all_params:
+                    entry = {"found": True, "mode": "direct", "tensor": _cpu(all_params[name])}
+                    out[name] = entry
+                    continue
+
+                # 2. Routed expert -> FusedMoE fused weights.
+                m = expert_re.match(name)
+                if m is not None:
+                    prefix, gj, proj = m.group(1), int(m.group(2)), m.group(3)
+                    # vLLM FusedMoE stores w13_weight [n_local_experts, 2*I, H] and
+                    # w2_weight [n_local_experts, H, I]. Local experts are a contiguous
+                    # EP slice: global expert gj lives on ep_rank == gj // n_local.
+                    w13 = all_params.get(f"{prefix}.experts.w13_weight")
+                    w2 = all_params.get(f"{prefix}.experts.w2_weight")
+                    if w13 is None or w2 is None:
+                        # Fallback: scan for any experts.*weight tensor under this prefix.
+                        cand = {k: v for k, v in all_params.items() if k.startswith(f"{prefix}.experts.") and k.endswith("weight")}
+                        entry = {"found": False, "note": f"no w13/w2; candidates={list(cand.keys())}"}
+                        out[name] = entry
+                        continue
+                    n_local = w13.shape[0]
+                    owner_ep = gj // n_local
+                    if owner_ep != ep_rank:
+                        entry = {"found": False, "mode": "expert", "owner_ep": owner_ep, "skip": True}
+                        out[name] = entry
+                        continue
+                    local_e = gj - owner_ep * n_local
+                    if proj == "down_proj":
+                        t = w2[local_e]
+                    else:
+                        inter = w13.shape[1] // 2
+                        t = w13[local_e, :inter] if proj == "gate_proj" else w13[local_e, inter:]
+                    entry = {"found": True, "mode": "expert", "owner_ep": owner_ep, "local_e": local_e, "tensor": _cpu(t)}
+                    out[name] = entry
+                    continue
+
+                # 3. Unknown / unsupported name.
+                entry = {"found": False, "note": "no mapping"}
+                out[name] = entry
+            except Exception as e:  # never crash the collective_rpc
+                out[name] = {"found": False, "error": repr(e)}
+        return out
+
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
@@ -1372,6 +1475,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Flush accumulated weights via model.load_weights()."""
         engine = self._get_engine()
         return await engine.collective_rpc("end_weight_update")
+
+    async def read_engine_weights(self, hf_names, dump_inventory: bool = False):
+        """TEST-ONLY (Stage 6 weight-equality gate): read engine-side weights back
+        under the trainer's HF parameter names, gathered across all TP/EP workers.
+
+        Returns ``List[Dict]`` (one dict per worker rank), each as produced by
+        ``WorkerWrap.read_named_weights``. The caller assembles the per-rank
+        contributions (TP/EP shards) into the full HF tensors to compare against
+        the trainer's post-step weights.
+        """
+        engine = self._get_engine()
+        return await engine.collective_rpc("read_named_weights", args=(list(hf_names), dump_inventory))
 
     async def teardown(self):
         await self._destroy_weights_update_group()

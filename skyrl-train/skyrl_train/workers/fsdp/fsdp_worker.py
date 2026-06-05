@@ -175,6 +175,29 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
+    def read_post_step_weights(self, names):
+        """TEST-ONLY (Stage 6 weight-equality gate): return the post-step HF-named
+        weight tensors the broadcast would send, for a representative ``names`` set.
+
+        Runs the SAME ``extract_weights`` path used by ``broadcast_to_inference_engines``
+        (grouped->HF remap + FSDP ``full_tensor()`` gather), so the returned tensors
+        are byte-identical to what the engine receives. ``extract_weights`` /
+        ``full_tensor()`` are collective over the full mesh, so EVERY rank must run
+        the generator; only rank 0 returns the (full) tensors as CPU fp32 — other
+        ranks return an empty dict to keep the payload small.
+        """
+        wanted = set(names)
+        collected = {}
+        generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
+        is_rank0 = torch.distributed.get_rank() == 0
+        # Must drive the full generator on every rank (the per-tensor full_tensor()
+        # gather is a collective); harvest only the requested names on rank 0.
+        for chunk in self.weight_extractor.extract_weights(generator_dtype):
+            for name, tensor in zip(chunk.names, chunk.tensors):
+                if is_rank0 and name in wanted:
+                    collected[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
+        return collected
+
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
