@@ -439,6 +439,13 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    # HF returns `_no_split_modules` as a SET for some archs (e.g. Qwen3-Next); the
+    # small-MoE models tested earlier returned a list. Normalize any non-str iterable
+    # to a list so the indexing below (and `in` membership later) is well-defined.
+    elif fsdp_transformer_layer_cls_to_wrap is not None and not isinstance(
+        fsdp_transformer_layer_cls_to_wrap, (list, tuple)
+    ):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
