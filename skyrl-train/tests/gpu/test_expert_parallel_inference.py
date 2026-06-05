@@ -47,7 +47,17 @@ def _get_test_cfg() -> DictConfig:
     # vLLM generator with EP enabled
     cfg.generator.backend = "vllm"
     cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = NUM_GPUS // 2
+    # NOTE: `init_ray_inference_engines` below hard-codes a single engine
+    # (num_inference_engines=1, TP=2). The policy worker derives the weight-sync
+    # process-group `world_size` from THIS config value
+    # (num_inference_engines * tp * pp * dp + 1). If this is left at NUM_GPUS//2=2
+    # while only one engine is actually created, the policy opens a world_size=5
+    # group and blocks forever in the rendezvous barrier waiting for the two
+    # ranks of a second engine that never exists (the symptom is a hang at
+    # `init_weight_update_communicator` with only `rank_offset: 1` ranks ever
+    # checking in). Keep this consistent with the single engine created below so
+    # the group is world_size = 1*2 + 1 = 3.
+    cfg.generator.num_inference_engines = 1
     cfg.generator.inference_engine_tensor_parallel_size = 2
     cfg.generator.inference_engine_expert_parallel_size = 2
     cfg.generator.inference_engine_data_parallel_size = 1
