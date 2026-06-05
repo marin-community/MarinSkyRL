@@ -408,6 +408,7 @@ class HFModelWrapper(nn.Module):
             set_active_replay(self._router_replay)
             replay_installed = True
 
+        defer_teardown = False
         try:
             # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
             if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
@@ -416,12 +417,28 @@ class HFModelWrapper(nn.Module):
                 output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
             else:
                 output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
-        finally:
-            if replay_installed:
-                from skyrl_train.models.router_replay import set_active_replay
 
-                set_active_replay(None)
-                self._router_replay.clear()
+            # Stage-7 P3 recompute-safety: when this forward builds an autograd
+            # graph (the training forward), the replay teardown MUST NOT fire here.
+            # Under activation/gradient checkpointing, backward RECOMPUTES this
+            # forward; if the controller is already cleared / uninstalled, the
+            # grouped/replay shim takes the natural-routing branch on recompute and
+            # saves a different number of tensors than the original (replay) forward
+            # -> torch CheckpointError ("N vs M tensors"). So the teardown is DEFERRED
+            # to after backward: the lifecycle now spans forward -> backward
+            # (option (a) of stage7_scope P3). The recompute fires during backward
+            # while the controller is still installed; the controller keys layer
+            # position on id(module) (router_replay.py), so the recompute forward
+            # re-installs the SAME substituted indices and stays byte-deterministic.
+            # The owner (Worker.training_step) calls teardown_router_replay() after
+            # strategy.backward(). For no-grad forwards (logprob/entropy scoring,
+            # eval) there is no backward to span -> tear down immediately in the
+            # finally as before. Flag-off (replay_installed=False) is unchanged.
+            if replay_installed and torch.is_grad_enabled() and output["logits"].requires_grad:
+                defer_teardown = True
+        finally:
+            if replay_installed and not defer_teardown:
+                self.teardown_router_replay()
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
@@ -486,6 +503,24 @@ class HFModelWrapper(nn.Module):
             return (action_log_probs, output)
         else:
             return action_log_probs
+
+    def teardown_router_replay(self):
+        """Uninstall the active replay controller and reset its per-microbatch
+        state. Idempotent and a no-op when replay is disabled / no controller.
+
+        Stage-7 P3: the training forward DEFERS teardown to after backward (so
+        gradient-checkpoint recompute, which re-runs the MoE forward during
+        backward, still sees the installed controller and the same forced
+        targets -> no CheckpointError). The owner (Worker.training_step) MUST
+        call this after strategy.backward() returns. No-grad scoring forwards
+        tear down inline in forward() and this becomes a harmless no-op.
+        """
+        if self._router_replay is None:
+            return
+        from skyrl_train.models.router_replay import set_active_replay
+
+        set_active_replay(None)
+        self._router_replay.clear()
 
     def _build_router_replay_targets(self, rollout_routed_experts, sequences, num_actions, nnz_indices=None):
         """Build per-layer forced-topk targets + a per-token replay mask.

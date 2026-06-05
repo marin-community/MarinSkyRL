@@ -845,6 +845,14 @@ class PolicyWorkerBase(Worker):
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
+        # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
+        # teardown to here (after backward) so gradient-checkpoint recompute still
+        # sees the installed controller -> no CheckpointError. Idempotent + a no-op
+        # when replay is disabled (flag-off / a3 path byte-identical).
+        teardown_replay = getattr(self.model, "teardown_router_replay", None)
+        if teardown_replay is not None:
+            teardown_replay()
+
         # Per-token log-ratio diagnostics — v5 accumulates across all micro-batches
         # of the global_step (sum + count + concat-of-topk) and finalizes once at
         # the end. v4 ran only on the LAST micro-batch, which with

@@ -268,7 +268,18 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         # (Stage 7 / production note: to keep checkpointing ON with replay, the
         # controller must be made recompute-safe — re-arm the same targets for the
         # recomputation pass instead of clearing after the first forward.)
-        cfg.trainer.gradient_checkpointing = False
+        #
+        # Stage-7 P3 PREFLIGHT: the recompute-safety fix (model_wrapper now DEFERS the
+        # replay teardown to after backward; Worker.training_step calls
+        # teardown_router_replay() post-backward) lets checkpointing coexist with
+        # replay. Set SKYRL_E2E_GRADIENT_CHECKPOINTING=1 to flip it ON and exercise
+        # the recompute path: assert no CheckpointError, finite loss/grad-norm, AND
+        # the SAME DIRECT weight-equality gate below (which would catch any recompute
+        # non-determinism, since a divergent recompute changes the post-step weights).
+        # Default (unset/0) keeps the Stage-6-closed behaviour byte-identical.
+        _grad_ckpt = os.environ.get("SKYRL_E2E_GRADIENT_CHECKPOINTING", "0") == "1"
+        cfg.trainer.gradient_checkpointing = _grad_ckpt
+        print(f"[Stage6/7-P3] gradient_checkpointing={_grad_ckpt} (replay+EP+grouped)")
         # Leave GPU headroom for the colocated EP-sharded trainer next to the engines.
         cfg.generator.gpu_memory_utilization = 0.45
         # TRAINING-FORWARD TEMPERATURE (Stage 6 ROOT CAUSE FIX, TEST-ONLY):
