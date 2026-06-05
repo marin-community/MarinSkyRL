@@ -75,11 +75,25 @@ class FSDPWeightExtractor(WeightExtractor):
         # Get state dict (handles FSDP sharding)
         params = self.model.state_dict()
 
-        # Stage 4b: if the trainer was grouped-swapped (Stage 3b), its live MoE keys
-        # carry the GroupedMoEShim `.moe` segment and grouped `experts.w1/w2/w3`
-        # `[num_experts, ...]` tensors. Strip the shim/FSDP prefix and remap back to the
-        # per-expert HF layout the inference engine knows, BEFORE the broadcast loop.
-        # Gated: non-grouped models skip this entirely (byte-identical path).
+        # Stage 7 (80B) — STREAMED grouped gather. For grouped-swapped models the old
+        # path eagerly `full_tensor()`-gathered EVERY layer's grouped `experts.w1/w2/w3`
+        # (the 512-expert stacks) into a single remapped dict before the broadcast loop,
+        # materializing the whole unsharded MoE on ONE GPU → OOM at 80B (job 602650,
+        # 93.78/95 GiB). When grouped + the (disaggregated/NCCL-broadcast) per-tensor
+        # transport, stream instead: gather → remap → yield → FREE one MoE layer (and one
+        # non-MoE param) at a time, so peak GPU memory is a single layer's expert stack,
+        # not all 48. Byte-identical to the eager remap (same converter, same tensors);
+        # only the materialization order/lifetime changes.
+        # Gated: non-grouped models (a3: moe_grouped_gemm=False) skip this entirely and
+        # take the unchanged simple/grouped-by-module paths below — code-path identical.
+        if self.moe_grouped_gemm and not self.group_by_module:
+            yield from self._extract_weights_streamed(params, dtype)
+            return
+
+        # Stage 4b: if the trainer was grouped-swapped (Stage 3b) AND on the CUDA-IPC /
+        # FlashRL module-grouping path (colocated NCCL IPC — not the 80B disaggregated
+        # broadcast), fall back to the eager whole-model remap. This combination is not
+        # on the 80B path; left unchanged.
         if self.moe_grouped_gemm:
             params = self._remap_grouped_state_dict(params)
 
@@ -107,6 +121,106 @@ class FSDPWeightExtractor(WeightExtractor):
         """Gather sharded tensor into full tensor."""
         device = torch.cuda.current_device()
         return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+
+    def _extract_weights_streamed(self, params, dtype: torch.dtype):
+        """Streamed grouped-MoE weight extraction (Stage 7 / 80B OOM fix).
+
+        Yields one ``WeightChunk`` per HF parameter, gathering + remapping LAZILY so
+        peak GPU memory is bounded by a single MoE layer's grouped expert stack (3 ×
+        ``[num_experts, moe_dim, dim]``) rather than the whole unsharded 80B model. The
+        emitted tensors are byte-identical to the eager ``_remap_grouped_state_dict``
+        path — same ``full_tensor()`` gather, same ``convert_tt_layer_to_hf`` per-expert
+        split, same dtype/contiguity — only their lifetime is per-layer.
+
+        IMPORTANT (collective correctness): ``full_tensor()`` is a collective over the
+        FSDP/EP mesh, so EVERY rank must drive this generator and reach each gather in
+        the SAME order. Iteration order is the deterministic ``state_dict()`` ordering on
+        all ranks, so the gather sequence is identical across ranks (matches the eager
+        path, which also gathered in dict order).
+        """
+        from skyrl_train.models.layers.moe_weight_remap import convert_tt_layer_to_hf
+
+        # Post-prefix-strip suffixes of the grouped-block tensors the converter consumes.
+        grouped_suffixes = (
+            ".mlp.experts.w1",
+            ".mlp.experts.w2",
+            ".mlp.experts.w3",
+            ".mlp.router.gate.weight",
+            ".mlp.shared_expert.w1.weight",
+            ".mlp.shared_expert.w2.weight",
+            ".mlp.shared_expert.w3.weight",
+        )
+
+        def _layer_of(name: str):
+            # ``model.layers.{i}.mlp.experts.w1`` -> i ; None for non-layer keys.
+            parts = name.split(".")
+            if len(parts) >= 3 and parts[0] == "model" and parts[1] == "layers":
+                try:
+                    return int(parts[2])
+                except ValueError:
+                    return None
+            return None
+
+        # First pass: strip prefixes (cheap, no gather) and partition into per-layer
+        # grouped-MoE tensors vs. everything else, preserving state_dict() order.
+        # ``layer_groups[i]`` = list of (stripped_name, dtensor_param) for that layer's
+        # grouped MoE keys; ``passthrough`` = ordered (stripped_name, param) for the rest.
+        from collections import OrderedDict
+
+        layer_groups: "OrderedDict[int, list]" = OrderedDict()
+        # Ordered plan of work items: ("moe", layer_idx) flushes that layer once, "param"
+        # yields a single non-MoE tensor. Emitted in first-encounter order so the gather
+        # sequence is deterministic and identical on every rank.
+        plan = []
+        seen_moe_layer = set()
+        passthrough = OrderedDict()
+
+        for name, param in params.items():
+            new_name = self._strip_grouped_prefix(name)
+            if new_name.endswith(grouped_suffixes):
+                li = _layer_of(new_name)
+                layer_groups.setdefault(li, []).append((new_name, param))
+                if li not in seen_moe_layer:
+                    seen_moe_layer.add(li)
+                    plan.append(("moe", li))
+            else:
+                passthrough[new_name] = param
+                plan.append(("param", new_name))
+
+        for kind, key in plan:
+            if kind == "param":
+                param = passthrough[key]
+                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
+                yield WeightChunk(
+                    names=[key],
+                    dtypes=[str(dtype)],
+                    shapes=[list(tensor.shape)],
+                    tensors=[tensor],
+                )
+                del tensor
+            else:
+                # Gather ONLY this layer's grouped MoE tensors, remap per-expert, yield
+                # each, then free the layer's grouped stack before moving on.
+                layer_sd = {}
+                for sname, sparam in layer_groups[key]:
+                    layer_sd[sname] = self._gather_tensor(sparam).detach().contiguous()
+                # In-place grouped -> per-expert HF split for THIS layer only. The
+                # per-expert entries are views into w1/w2/w3 (no extra alloc); we
+                # .contiguous() each on yield so the parent stack can free after the loop.
+                convert_tt_layer_to_hf(layer_sd, key)
+                for ename, etensor in layer_sd.items():
+                    out = etensor.to(dtype).detach().contiguous()
+                    yield WeightChunk(
+                        names=[ename],
+                        dtypes=[str(dtype)],
+                        shapes=[list(out.shape)],
+                        tensors=[out],
+                    )
+                    del out
+                # Drop all references to this layer's gathered tensors + per-expert views
+                # so the (large) grouped expert stack is freed before the next layer.
+                del layer_sd
+                torch.cuda.empty_cache()
 
     # MoE grouped-block (GroupedMoEShim.moe) segment that sits between the HF
     # `...mlp.` prefix and the grouped `experts.w1/...`/`router.gate` keys the
