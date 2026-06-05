@@ -80,12 +80,33 @@ class GroupedMoEShim(nn.Module):
         return out, None
 
 
+def _moe_attr(hf_block, hf_config, name):
+    """Resolve a MoE topology attribute (num_experts / top_k / norm_topk_prob)
+    across HF arch variants. Qwen3-MoE exposes these directly on the
+    ``*SparseMoeBlock``; Qwen3-Next moves them onto its router submodule
+    (``block.gate`` = ``Qwen3NextTopKRouter``, which carries ``top_k`` /
+    ``num_experts`` / ``norm_topk_prob``). Fall back to the HF config last
+    (config field names: num_experts, num_experts_per_tok, norm_topk_prob)."""
+    if hasattr(hf_block, name):
+        return getattr(hf_block, name)
+    gate = getattr(hf_block, "gate", None)
+    if gate is not None and hasattr(gate, name):
+        return getattr(gate, name)
+    cfg_alias = {"top_k": "num_experts_per_tok"}.get(name, name)
+    if hasattr(hf_config, cfg_alias):
+        return getattr(hf_config, cfg_alias)
+    raise AttributeError(
+        f"could not resolve MoE attribute '{name}' on {type(hf_block).__name__}, "
+        f"its .gate, or the HF config"
+    )
+
+
 def _build_moe_for_block(hf_block, hf_config) -> MoE:
     """Construct a grouped ``MoE`` mirroring the dims of an HF ``*SparseMoeBlock``."""
     dim = hf_block.gate.weight.shape[1]
-    num_experts = hf_block.num_experts
-    top_k = hf_block.top_k
-    route_norm = bool(hf_block.norm_topk_prob)
+    num_experts = _moe_attr(hf_block, hf_config, "num_experts")
+    top_k = _moe_attr(hf_block, hf_config, "top_k")
+    route_norm = bool(_moe_attr(hf_block, hf_config, "norm_topk_prob"))
 
     # Routed-expert intermediate size.
     if hasattr(hf_block.experts, "gate_up_proj"):
