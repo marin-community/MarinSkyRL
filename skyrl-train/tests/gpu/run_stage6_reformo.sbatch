@@ -73,7 +73,15 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
 cd "$SKYRL_HOME/skyrl-train"
+# Mirror all output to a per-run file under my own scratch (belt-and-suspenders
+# against the _ray_logs inode pressure that swallowed run 3's stdout), and run
+# python UNBUFFERED so prints land immediately even mid-training-step.
+export PYTHONUNBUFFERED=1
+RUNLOG="/e/scratch/jureap59/feuer1/stage6_e2e_${SLURM_JOB_ID}.log"
+echo "RUNLOG=$RUNLOG"
+# Disable Ray log dedup so the per-actor training_step prints show through.
+export RAY_DEDUP_LOGS=0
 # Single-node test: run the venv python directly (no nested srun — it only adds
 # the switch-topology lookup noise and isn't needed for a 1-node, Ray-local run).
-python tests/gpu/test_e2e_moe_rl_step.py
-echo "=== Stage 6 e2e EXIT $? ==="
+stdbuf -oL -eL python -u tests/gpu/test_e2e_moe_rl_step.py 2>&1 | tee "$RUNLOG"
+echo "=== Stage 6 e2e EXIT ${PIPESTATUS[0]} ==="
