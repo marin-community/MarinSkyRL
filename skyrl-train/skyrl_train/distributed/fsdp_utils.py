@@ -302,7 +302,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         set_model_state_dict(
             model,
             full_sd,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=True, assign=True),
+            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=True),
         )
 
         if _dbg:
