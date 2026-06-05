@@ -533,7 +533,21 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
 
 
 def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
-    """torch.nn.utils.clip_grad_norm_ can't run on cpu parameter DTensor"""
+    """torch.nn.utils.clip_grad_norm_ can't run on cpu parameter DTensor.
+
+    Stage 6: under expert parallelism the parameter set spans MULTIPLE device
+    meshes — EP-sharded grouped-expert grads are DTensors on the 2-D
+    ``(fsdp, ep)`` mesh, while non-expert grads are on the 1-D ``(fsdp)`` mesh.
+    ``_get_total_norm`` ultimately ``torch.stack``-s the per-grad partial norms,
+    and ``aten.stack`` rejects operands on different meshes
+    (``ValueError: All operands in aten.stack.default must have the same mesh``).
+    So we group grads by their grad's device mesh, reduce each group to a plain
+    *replicated* scalar via ``full_tensor()`` (which all-reduces the
+    ``_NormPartial`` across that group's mesh), then combine the per-group
+    ``p``-norms into one global scalar: ``total = (sum_g norm_g ** p) ** (1/p)``
+    (and ``max`` for ``p == inf``). The single combined scalar then clips every
+    grad. The non-EP path (all grads on one mesh, or plain tensors) is unchanged.
+    """
     from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
 
     if isinstance(parameters, torch.Tensor):
@@ -542,8 +556,39 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
         # prevent generators from being exhausted
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
-    total_norm = total_norm.to(torch.cuda.current_device(), non_blocking=True)
+
+    # Group grads by device mesh (DTensors only). Plain tensors / non-DTensors
+    # collect under a single ``None`` key. EP introduces >1 distinct mesh.
+    mesh_groups: dict = {}
+    for g in grads:
+        mesh = getattr(g, "device_mesh", None)
+        mesh_groups.setdefault(mesh, []).append(g)
+
+    if len(mesh_groups) <= 1:
+        # Single mesh (or all plain tensors): today's path, byte-identical.
+        total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
+        total_norm = total_norm.to(torch.cuda.current_device(), non_blocking=True)
+        _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+        return total_norm
+
+    # Multi-mesh (EP): reduce each mesh-group to a replicated plain scalar, then
+    # combine the per-group p-norms into a single global scalar.
+    norm_type = float(norm_type)
+    device = torch.cuda.current_device()
+    group_norms = []
+    for group_grads in mesh_groups.values():
+        gn = _get_total_norm(group_grads, norm_type, error_if_nonfinite, foreach)
+        # full_tensor() all-reduces the _NormPartial across THIS group's mesh,
+        # yielding a plain (non-DTensor) replicated scalar.
+        gn_full = gn.full_tensor() if hasattr(gn, "full_tensor") else gn
+        group_norms.append(gn_full.to(device, non_blocking=True))
+
+    stacked = torch.stack([gn.reshape(()) for gn in group_norms])
+    if norm_type == float("inf"):
+        total_norm = stacked.max()
+    else:
+        total_norm = stacked.pow(norm_type).sum().pow(1.0 / norm_type)
+
     _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
 
