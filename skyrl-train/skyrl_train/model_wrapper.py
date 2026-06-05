@@ -179,8 +179,21 @@ class HFModelWrapper(nn.Module):
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
             if "output_router_logits" in model_config:
-                logger.info("[MoE] set output_router_logits as True")
-                self.model.config.output_router_logits = True
+                # On the grouped-GEMM path (Stage 3b+) the HF ``*SparseMoeBlock``
+                # instances are swapped for ``GroupedMoEShim``s that deliberately
+                # DROP the HF aux-loss and return ``router_logits=None``. Leaving
+                # ``output_router_logits=True`` then makes the HF model forward
+                # feed an empty/None ``all_router_logits`` tuple into
+                # ``load_balancing_loss_func`` → ``gate_logits[0]`` IndexError
+                # (Qwen2/Qwen3-MoE). The grouped path doesn't use the HF aux-loss,
+                # so keep router-logit collection OFF there. Flag-off / eager
+                # paths are unchanged.
+                if moe_grouped_gemm:
+                    logger.info("[MoE] grouped-GEMM swap active — leaving output_router_logits False (aux-loss dropped)")
+                    self.model.config.output_router_logits = False
+                else:
+                    logger.info("[MoE] set output_router_logits as True")
+                    self.model.config.output_router_logits = True
 
             # https://github.com/huggingface/transformers/issues/26877
             # Use `model.generate(use_cache=True)` instead.`
