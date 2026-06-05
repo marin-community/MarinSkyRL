@@ -133,7 +133,7 @@ def _check_gpus(num_gpus: int):
         raise RuntimeError(msg)
 
 
-def _make_replay_experience(model_config, batch_size=2, seq_len=24, num_actions=8, device="cpu") -> Experience:
+def _make_replay_experience(model_config, batch_size=2, seq_len=48, num_actions=16, device="cpu") -> Experience:
     """Build a training ``Experience`` carrying a synthetic-but-realistic
     ``rollout_routed_experts`` mask shaped ``[B, num_actions, L, K]``.
 
@@ -158,19 +158,29 @@ def _make_replay_experience(model_config, batch_size=2, seq_len=24, num_actions=
         re[0] = SENTINEL_EXPERT_ID
 
     B, T = batch_size, seq_len
-    # Token range 0-100 (matches the proven make_dummy_experience used by the
-    # dense training_step GPU test). Sampling over the FULL 151936 vocab on a
-    # real 14B model produced degenerate/overflowing logits → NaN loss; the
-    # small range keeps the synthetic forward numerically sane while still
-    # exercising the full replay→EP→backprop path.
+    # Realistic response length (num_actions=16 >> the degenerate 8 the prior gate
+    # used; seq_len=48 > num_actions so the prompt slice and the
+    # `[:, -num_actions-1:-1]` gather are non-degenerate). Token range 0-100
+    # (matches the proven make_dummy_experience used by the dense training_step GPU
+    # test) keeps the synthetic forward numerically sane while still exercising the
+    # full replay→EP→backprop path.
     #
-    # NOTE: these old/base log-probs are intentionally CONSTANT — they are the
-    # `old_action_log_probs`/`base_action_log_probs` only; the trainer recomputes
-    # the (new) `action_log_probs` from a genuine policy forward. The GRPO ratio
-    # (new − const) is well-defined (clamped) and carries the gradient. The
-    # degenerate KL/entropy terms that would pair a real `new` log-prob against
-    # these constants are turned OFF in the gate config (use_kl_loss=False,
-    # use_entropy_loss=False) so a meaningless aux term can't NaN the gate.
+    # NOTE: these old/base log-probs are the `old_action_log_probs` /
+    # `base_action_log_probs` only; the trainer recomputes the (new)
+    # `action_log_probs` from a genuine policy forward on `sequences`. With the
+    # training-forward temperature fixed to 1.0 (see the gate config: the prior
+    # NaN was a `logits.div_(0.0)` from temperature=0.0, NOT a degenerate aux term)
+    # the new log-probs are finite, so the GRPO ratio `exp(new − old)` (clamped) is
+    # finite and ≈ a sane O(1) value.
+    #
+    # ADVANTAGES carry genuine intra- and inter-row VARIANCE (not the prior
+    # constant 0.6): a non-constant advantage means the surrogate loss
+    # `-min(r·A, clip(r)·A)` is a meaningful, finite, non-trivial signal and the
+    # masked-mean reduction can't collapse to a degenerate value. (GRPO group
+    # normalization is NOT re-run inside training_step — `advantages` is consumed
+    # as-is — so finite, non-constant values here are sufficient.)
+    torch.manual_seed(1234)
+    advantages = torch.randn((B, num_actions), device=device)  # finite, mean~0, var>0
     return Experience(
         sequences=torch.randint(0, 100, (B, T), device=device),
         action_log_probs=0.4 * torch.ones((B, num_actions), device=device),
@@ -178,7 +188,7 @@ def _make_replay_experience(model_config, batch_size=2, seq_len=24, num_actions=
         rollout_logprobs=0.2 * torch.ones((B, num_actions), device=device),
         values=0.5 * torch.ones((B, num_actions), device=device),
         returns=0.5 * torch.ones((B, num_actions), device=device),
-        advantages=0.6 * torch.ones((B, num_actions), device=device),
+        advantages=advantages,
         attention_mask=torch.ones((B, T), dtype=int, device=device),
         loss_mask=torch.ones((B, num_actions), dtype=int, device=device),
         action_mask=torch.ones((B, num_actions), dtype=int, device=device),
@@ -224,23 +234,39 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         cfg.trainer.gradient_checkpointing = False
         # Leave GPU headroom for the colocated EP-sharded trainer next to the engines.
         cfg.generator.gpu_memory_utilization = 0.45
-        # Deterministic sampling so the weight-sync oracle is stable.
-        cfg.generator.sampling_params.temperature = 0.0
+        # TRAINING-FORWARD TEMPERATURE (Stage 6 ROOT CAUSE FIX, TEST-ONLY):
+        # `Worker.training_step` passes `cfg.generator.sampling_params.temperature`
+        # straight into the *training* model forward, where `model_wrapper.forward`
+        # does `logits_BSV.div_(temperature)` (model_wrapper.py:427). The prior gate
+        # set this to 0.0 (for "deterministic sampling"), which made the training
+        # forward divide logits by ZERO -> inf/NaN logits -> NaN new-action_log_probs
+        # -> NaN log_ratio -> NaN policy_loss / raw_grad_norm. That is EXACTLY the
+        # 591214 status dict (`policy_loss: nan`, `log_ratio_abs_mean: nan`,
+        # `raw_grad_norm: nan`). The fix is to keep the training-forward temperature
+        # at the normal training value (1.0 — no scaling, log-probs straight from
+        # logits), and apply the deterministic (greedy) temperature ONLY to the
+        # inference sampling params used by the weight-sync oracle (built below).
+        cfg.generator.sampling_params.temperature = 1.0
         cfg.generator.sampling_params.top_p = 1.0
         cfg.generator.sampling_params.top_k = -1
-        # GATE NUMERICS (Stage 6, TEST-ONLY): the synthetic Experience feeds
-        # CONSTANT old/base log-probs + constant advantages through the REAL MoE.
-        # The recomputed (new) action_log_probs come from a genuine policy forward,
-        # so the GRPO `policy_loss` term (ratio clamped, advantage-weighted) is the
-        # well-defined signal that carries the gradient through router+experts. The
-        # auxiliary terms are degenerate on synthetic data: the KL term pairs the
-        # real `new` log-prob against a *constant* base (0.3) — meaningless and a
-        # NaN risk under k3 on a 14B forward — and the entropy term adds a second
-        # noisy contribution. Neither adds coverage of the surface this gate targets
-        # (replay→EP→backprop→weight-sync). Turning them off leaves `loss =
-        # policy_loss`, which is the term that must be finite and must backprop.
-        # This is gate-config only; the a3 production path (ep_size=1) is untouched
-        # and keeps its own algorithm config.
+        # Deterministic (greedy) sampling params for the inference engine ONLY — used
+        # by the before/after weight-sync `are_responses_similar` oracle so the
+        # round-trip comparison is stable. Decoupled from the (temperature=1.0)
+        # value the training forward reads above.
+        from copy import deepcopy
+
+        infer_sampling_cfg = deepcopy(cfg.generator.sampling_params)
+        infer_sampling_cfg.temperature = 0.0
+        # GATE NUMERICS (Stage 6, TEST-ONLY): with the training-forward temperature
+        # fixed to 1.0 the core GRPO `policy_loss` term (ratio clamped, advantage-
+        # weighted) is now well-defined and carries the gradient through router +
+        # experts. The auxiliary terms are still degenerate on synthetic data — the
+        # KL term pairs the real `new` log-prob against a *constant* base (0.3) and
+        # the entropy term adds a second noisy contribution — and neither adds
+        # coverage of the surface this gate targets (replay->EP->backprop->weight-
+        # sync). Keeping them off leaves `loss = policy_loss`, the term that must be
+        # finite and must backprop. This is gate-config only; the a3 production path
+        # (ep_size=1) is untouched and keeps its own algorithm config.
         cfg.trainer.algorithm.use_kl_loss = False
         cfg.trainer.algorithm.use_entropy_loss = False
 
@@ -259,7 +285,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         asyncio.run(client.wake_up())
 
         prompts = get_test_prompts(MODEL, num_samples=4)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, infer_sampling_cfg)
         out_before = asyncio.run(
             client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
         )
