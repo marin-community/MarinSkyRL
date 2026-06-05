@@ -331,6 +331,22 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         if _dbg:
             import sys as _sys
 
+            _cur = dict(model.named_parameters())
+            _cur.update(dict(model.named_buffers()))
+            for _k, _v in sharded_sd.items():
+                _tgt = _cur.get(_k, None)
+                if _tgt is None:
+                    continue
+                _tgt_dt = isinstance(_tgt, DTensor) or isinstance(getattr(_tgt, "data", None), DTensor)
+                _src_dt = isinstance(_v, DTensor)
+                if _tgt_dt != _src_dt:
+                    print(
+                        f"[EP-LOADER-DBG] rank={dist.get_rank()} TYPE-MISMATCH key={_k} "
+                        f"target_is_dtensor={_tgt_dt} source_is_dtensor={_src_dt} "
+                        f"target_type={type(_tgt).__name__} target_data_type={type(getattr(_tgt,'data',_tgt)).__name__}",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
             print(f"[EP-LOADER-DBG] rank={dist.get_rank()} FINISHED broadcast loop, loading state dict", file=_sys.stderr, flush=True)
         model.load_state_dict(sharded_sd, assign=True)
 
