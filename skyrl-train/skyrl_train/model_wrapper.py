@@ -3,6 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
+import os
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
@@ -81,6 +82,15 @@ class HFModelWrapper(nn.Module):
             ), "Flash attention 2 should be used for `use_sample_packing`"
 
         if isinstance(pretrain_or_model, str):
+            # Qwen3-Next GatedDeltaNet kernel routing (Stage 7/8): when the fla
+            # overlay is mounted, the broken fla-0.5.0 wheel would crash the
+            # qwen3_next modeling import — mask fla off BEFORE from_pretrained so
+            # transformers uses its pure-torch (or, opt-in, FlashQLA) GDN path.
+            # Gated on SKYRL_GDN_MASK_FLA so non-Qwen3-Next runs are untouched.
+            if os.environ.get("SKYRL_GDN_MASK_FLA", "0") in ("1", "true", "True"):
+                from skyrl_train.models.qwen3_next_gdn import mask_fla
+
+                mask_fla()
             # Note: dschf is defined in function scope to avoid global effects
             # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
             if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
@@ -198,6 +208,15 @@ class HFModelWrapper(nn.Module):
             # https://github.com/huggingface/transformers/issues/26877
             # Use `model.generate(use_cache=True)` instead.`
             self.model.config.use_cache = False
+
+            # Qwen3-Next: opt-in FlashQLA fused GDN kernel (Stage 8). No-op unless
+            # SKYRL_GDN_FLASHQLA=1 and the fla_tilelang overlay is mounted; rebinds
+            # each Qwen3NextGatedDeltaNet.chunk_gated_delta_rule to the fused
+            # tilelang kernel. Falls back to pure-torch (warning) if unavailable.
+            if os.environ.get("SKYRL_GDN_MASK_FLA", "0") in ("1", "true", "True"):
+                from skyrl_train.models.qwen3_next_gdn import engage_flashqla
+
+                engage_flashqla(self.model)
         else:
             self.model = pretrain_or_model
 
