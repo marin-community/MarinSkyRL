@@ -19,44 +19,118 @@ faithfully: the mask forces routing (override "bites", per Stage 2), grad flows
 through router + experts, and the EP-sharded grouped weights reshard+remap back
 into the EP inference engine (the G4-4 oracle).
 
-Run::
+Run (pytest)::
 
     uv run --isolated --extra dev --extra vllm pytest tests/gpu/test_e2e_moe_rl_step.py
+
+Or directly (no pytest, e.g. the cluster RL venv), from the ``skyrl-train`` dir::
+
+    python tests/gpu/test_e2e_moe_rl_step.py
 
 Requires >= 4 GPUs (EP=2 x FSDP=2 trainer, colocated with an EP=2 inference engine).
 """
 
 import asyncio
 import math
+import os
+import sys
 
-import pytest
+# Allow `python tests/gpu/test_e2e_moe_rl_step.py` from the skyrl-train dir (no
+# pytest / no installed `tests` package): put the repo root on sys.path so
+# `import tests.gpu.utils` resolves.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import ray
 import torch
 from ray.util.placement_group import placement_group
 
+try:
+    import pytest
+except ImportError:  # pytest absent on cluster RL venv — direct invocation still works
+    pytest = None
+
+from transformers import AutoTokenizer
+from omegaconf import DictConfig
+
 from tests.gpu.utils import (
     are_responses_similar,
     get_available_gpus,
+    get_test_actor_config,
     get_test_prompts,
     init_worker_with_type,
 )
-from tests.gpu.test_expert_parallel_inference import (
-    MODEL,
-    NUM_GPUS,
-    _get_test_cfg,
-    init_ray_inference_engines,
-)
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.router_replay import count_moe_layers, SENTINEL_EXPERT_ID
 from skyrl_train.utils import initialize_ray, get_ray_pg_ready_with_timeout
 
 
+# Inlined from tests/gpu/test_expert_parallel_inference.py (which imports pytest
+# unconditionally at module top-level → can't be imported under the cluster RL venv
+# that has no pytest). Kept byte-equivalent to the Stage-4 scaffolding it mirrors.
+MODEL = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
+NUM_GPUS = 4  # Should be divisible by 2
+
+
+def _get_test_cfg() -> DictConfig:
+    cfg = get_test_actor_config()
+    cfg.trainer.policy.model.path = MODEL
+    cfg.generator.backend = "vllm"
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 2
+    cfg.generator.inference_engine_expert_parallel_size = 2
+    cfg.generator.inference_engine_data_parallel_size = 1
+    cfg.generator.gpu_memory_utilization = 0.8
+    cfg.generator.max_input_length = 2048
+    cfg.generator.sampling_params.max_generate_length = 512
+    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.train_batch_size = 128
+    cfg.trainer.policy_mini_batch_size = 128
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.placement.policy_num_nodes = 1
+    cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
+    cfg.trainer.update_epochs_per_batch = 1
+    return cfg
+
+
+def init_ray_inference_engines(backend, tp_size, shared_pg, config) -> InferenceEngineClient:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    engine = create_ray_wrapped_inference_engines(
+        num_inference_engines=1,
+        tensor_parallel_size=tp_size,
+        expert_parallel_size=config.generator.inference_engine_expert_parallel_size,
+        model_dtype="bfloat16",
+        pretrain=MODEL,
+        seed=42,
+        vllm_v1_disable_multiproc=True,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+        shared_pg=shared_pg,
+        gpu_memory_utilization=config.generator.gpu_memory_utilization,
+        inference_engine_enable_sleep=config.trainer.placement.colocate_all,
+        async_engine=True,
+        max_num_batched_tokens=8192,
+        max_num_seqs=1024,
+        tokenizer=tokenizer,
+        backend=backend,
+    )
+    return InferenceEngineClient(engine, tokenizer, config)
+
+
 def _check_gpus(num_gpus: int):
     available = get_available_gpus()
     if len(available) < num_gpus:
-        pytest.skip(f"Stage 6 e2e requires >= {num_gpus} GPUs, found {len(available)}: {available}")
+        msg = f"Stage 6 e2e requires >= {num_gpus} GPUs, found {len(available)}: {available}"
+        if pytest is not None:
+            pytest.skip(msg)
+        raise RuntimeError(msg)
 
 
 def _make_replay_experience(model_config, batch_size=2, seq_len=24, num_actions=8, device="cpu") -> Experience:
