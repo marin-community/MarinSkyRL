@@ -30,6 +30,8 @@ EP_FIELDS = {
     "moe_router_replay": False,
     "moe_grouped_gemm": False,
     "ep_comm_backend": "torch",
+    "deepep_num_sms": 20,
+    "deepep_token_chunk_size": None,
 }
 
 

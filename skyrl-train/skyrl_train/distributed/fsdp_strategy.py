@@ -397,6 +397,19 @@ class FSDPStrategy(DistributedStrategy):
                     "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
                     "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
                 )
+                # DeepEP backend (Stage 5): set the SM count once (must precede the first
+                # dispatch; also sets the intranode kernel + RDMA channel count) and thread
+                # the optional per-MoE token chunk size. Buffer is lazily alloc'd on first
+                # dispatch via get_buffer. Lazy-imported so torch-EP never touches deep_ep.
+                if ep_backend == "deepep":
+                    from skyrl_train.distributed.deepep import configure_num_sms
+
+                    configure_num_sms(int(self.fsdp_config.get("deepep_num_sms", 20)))
+                    chunk_size = self.fsdp_config.get("deepep_token_chunk_size", None)
+                    for _m in module.modules():
+                        _moe = getattr(_m, "moe", None)
+                        if _moe is not None and hasattr(_moe, "set_deepep_token_chunk_size"):
+                            _moe.set_deepep_token_chunk_size(chunk_size)
             apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
             # Under EP, `module` has params on a mix of meshes (non-expert on the global/"fsdp"
             # mesh, experts on the (fsdp,ep) submesh). The naive broadcast+distribute_tensor loader

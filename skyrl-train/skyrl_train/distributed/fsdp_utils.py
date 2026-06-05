@@ -483,15 +483,27 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     full-state-dict load so the load distributes weights into their final EP+FSDP
     placement.
     """
-    assert ep_comm_backend == "torch", (
-        f"Stage 4a supports only ep_comm_backend='torch' (DeepEP is Stage 5); got {ep_comm_backend!r}"
+    assert ep_comm_backend in ("torch", "deepep"), (
+        f"ep_comm_backend must be 'torch' or 'deepep'; got {ep_comm_backend!r}"
     )
     assert sequence_parallel_size == 1, (
         "SP+EP is deferred (scope §5): apply_ep requires sequence_parallel_size==1"
     )
 
     from torch.distributed.tensor.parallel import parallelize_module
-    from torchtitan.distributed.expert_parallel import ExpertParallel
+
+    # torch (Stage 4) → torchtitan ExpertParallel (installs all_to_all hooks +
+    # @expert_parallel grouped-mm). deepep (Stage 5) → DeepEPExpertParallel (Shard(0)
+    # only; dispatch/combine is driven from MoE.forward). Imported lazily so the base
+    # / torch path never imports deep_ep and the deepep path never needs torchtitan.
+    if ep_comm_backend == "deepep":
+        from skyrl_train.distributed.expert_parallel import DeepEPExpertParallel
+
+        ep_plan = DeepEPExpertParallel()
+    else:
+        from torchtitan.distributed.expert_parallel import ExpertParallel
+
+        ep_plan = ExpertParallel()
 
     ep_mesh = device_mesh["ep"]
     fsdp_mesh = device_mesh["fsdp"]
@@ -505,11 +517,15 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
         experts = getattr(moe, "experts", None)
         if experts is None or experts.__class__.__name__ != "GroupedExperts":
             continue
-        parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ExpertParallel())
+        parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
         # Compose the FSDP Shard dim on the fsdp submesh → 2-D expert DTensors.
         if fsdp_kwargs is not None:
             ep_fsdp_kwargs = {k: v for k, v in fsdp_kwargs.items() if k != "mesh"}
             fully_shard(experts, mesh=fsdp_mesh, **ep_fsdp_kwargs)
+        # Tell the grouped block which comm backend to run. For deepep this also
+        # switches GroupedExperts.forward to the local-experts (.to_local) path and
+        # MoE.forward to the DeepEP dispatch/combine branch.
+        moe.set_ep_comm_backend(ep_comm_backend)
         # Flag the grouped block so its forward selects the EP-decorated compute path.
         moe._ep_enabled = True
         sharded += 1

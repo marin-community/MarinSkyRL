@@ -57,6 +57,8 @@ trainer:
       moe_router_replay: false             # R3 rollout-routing replay; off = unchanged forward
       moe_grouped_gemm: false              # Stage 3b: swap HF eager MoE for grouped-GEMM (EP=1); off = HF eager untouched
       ep_comm_backend: "torch"             # "torch" | "deepep"; torch = no NVSHMEM dependency
+      deepep_num_sms: 20                    # Stage 5: SMs for DeepEP dispatch/combine kernels (deepep backend only)
+      deepep_token_chunk_size: null         # Stage 5: tokens per DeepEP dispatch chunk; null = whole batch
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
     use_torch_compile: false
@@ -78,6 +80,8 @@ trainer:
       moe_router_replay: false
       moe_grouped_gemm: false
       ep_comm_backend: "torch"
+      deepep_num_sms: 20
+      deepep_token_chunk_size: null
   critic:
     model:
       path: null
@@ -109,6 +113,8 @@ trainer:
       moe_router_replay: false
       moe_grouped_gemm: false
       ep_comm_backend: "torch"
+      deepep_num_sms: 20
+      deepep_token_chunk_size: null
     sequence_parallel_size: 1
   algorithm:
     advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry

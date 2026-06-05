@@ -43,6 +43,10 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+# Expert-parallel communication backend. "torch" = torchtitan ExpertParallel
+# all_to_all (Stage 4); "deepep" = DeepEP fused dispatch/combine (Stage 5, lazy-imported).
+EPCommBackend = Literal["torch", "deepep"]
+
 
 # --------------------------------------------------------------------------- #
 # Expert compute kernels (bare impls, no @expert_parallel — Stage 4 re-adds)   #
@@ -132,8 +136,30 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
+        self.ep_comm_backend: EPCommBackend = "torch"
+
+    def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
+        self.ep_comm_backend = backend
+
+    def _forward_deepep(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        """DeepEP local-expert compute (Stage 5).
+
+        DeepEP's dispatch has already routed each token to its target expert's rank
+        and ``MoE._run_deepep_routed_experts`` has permuted the received rows into
+        local-expert order; here we just run the LOCAL experts (``.to_local()`` drops
+        the ep ``Shard(0)``) over the per-local-expert ``num_tokens_per_expert``.
+        """
+        w1 = self.w1.to_local()
+        w2 = self.w2.to_local()
+        w3 = self.w3.to_local()
+        if self.use_grouped_mm:
+            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
+        return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        # DeepEP backend: dispatch/permute happened upstream in MoE; run local experts.
+        if self.ep_comm_backend == "deepep":
+            return self._forward_deepep(x, num_tokens_per_expert)
         # EP active ⇒ params are DTensors (Shard(0) on the ep submesh). The
         # ExpertParallel _token_dispatch hook has already all_to_all'd `x` and
         # returned the cross-rank interleaved `num_tokens_per_expert` here; the
@@ -309,6 +335,7 @@ class MoE(nn.Module):
         use_grouped_mm: bool = False,
         shared_expert_dim: Optional[int] = None,
         shared_expert_gated: bool = False,
+        score_before_experts: bool = True,
     ):
         super().__init__()
         self.experts = GroupedExperts(
@@ -317,6 +344,13 @@ class MoE(nn.Module):
             num_experts=num_experts,
             use_grouped_mm=use_grouped_mm,
         )
+        self.ep_comm_backend: EPCommBackend = "torch"
+        self.experts.set_ep_comm_backend(self.ep_comm_backend)
+        # DeepEP scores tokens BEFORE the experts (the DeepEP path applies the
+        # routing weight to the dispatched activation pre-matmul). The torch /
+        # for-loop path keeps SkyRL's score-after-experts (matches HF eager).
+        self.score_before_experts = score_before_experts
+        self.deepep_token_chunk_size: Optional[int] = None
         self.router = TokenChoiceTopKRouter(
             dim=dim,
             num_experts=num_experts,
@@ -335,6 +369,89 @@ class MoE(nn.Module):
         else:
             self.shared_expert = None
             self.shared_expert_gate = None
+
+    def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
+        self.ep_comm_backend = backend
+        self.experts.set_ep_comm_backend(backend)
+
+    def set_deepep_token_chunk_size(self, chunk_size: Optional[int]) -> None:
+        self.deepep_token_chunk_size = chunk_size
+
+    def _run_local_routed_experts(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.experts(x, num_tokens_per_expert)
+
+    def _run_deepep_routed_experts(
+        self,
+        x: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+        top_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        """DeepEP routed-expert compute (Stage 5).
+
+        Dispatches each token to its target expert's rank via DeepEP's fused
+        all_to_all, runs the LOCAL experts, then combines back (which unpermutes →
+        token i returns to row i, preserving router replay; scope §3). Chunked to
+        overlap dispatch of chunk k+1 with the compute of chunk k. The combine
+        already unpermutes, so NO scatter_add here (unlike the torch path).
+        """
+        from skyrl_train.distributed.deepep import (
+            combine_tokens,
+            dispatch_tokens_async,
+            finalize_dispatch_tokens,
+            sync_combine,
+        )
+        from skyrl_train.distributed.expert_parallel import get_ep_group
+
+        if x.shape[0] == 0:
+            shared_output = self.shared_expert(x) if self.shared_expert is not None else None
+            return x.new_zeros(x.shape) if shared_output is None else shared_output
+
+        group = get_ep_group(self.experts)
+        chunk_size = min(self.deepep_token_chunk_size or x.shape[0], x.shape[0])
+
+        def dispatch_chunk(start: int, end: int):
+            return dispatch_tokens_async(
+                x[start:end],
+                selected_experts_indices[start:end],
+                top_scores[start:end],
+                num_experts=self.experts.num_experts,
+                group=group,
+                score_before_experts=self.score_before_experts,
+            )
+
+        def run_pending_chunk(pending_state):
+            hidden_states, num_tokens_per_expert, dispatch_state = finalize_dispatch_tokens(pending_state)
+            routed_output = self._run_local_routed_experts(hidden_states, num_tokens_per_expert)
+            # Keep combine outside the checkpointed routed-expert region so
+            # selective AC only recomputes local expert matmuls.
+            return combine_tokens(routed_output, dispatch_state)
+
+        pending_state = dispatch_chunk(0, chunk_size)
+        routed_outputs: list[torch.Tensor] = []
+
+        for chunk_start in range(chunk_size, x.shape[0], chunk_size):
+            chunk_end = min(chunk_start + chunk_size, x.shape[0])
+            next_pending_state = dispatch_chunk(chunk_start, chunk_end)
+            routed_outputs.append(run_pending_chunk(pending_state))
+            pending_state = next_pending_state
+
+        routed_outputs.append(run_pending_chunk(pending_state))
+
+        # Qwen3-(Next) sigmoid-gated shared expert applied on the combined per-token
+        # output (NOT prime-rl's BCFeedForward); added to the routed combine result.
+        if self.shared_expert is not None:
+            shared_output = self.shared_expert(x)
+            if self.shared_expert_gate is not None:
+                shared_output = F.sigmoid(self.shared_expert_gate(x)) * shared_output
+        else:
+            shared_output = None
+        sync_combine()
+        routed_output = routed_outputs[0] if len(routed_outputs) == 1 else torch.cat(routed_outputs, dim=0)
+        return routed_output if shared_output is None else shared_output + routed_output
 
     def _run_routed_experts(
         self,
@@ -372,6 +489,12 @@ class MoE(nn.Module):
             routed_experts = routed_experts.reshape(-1, top_k)
 
         top_scores, selected_experts_indices, _ = self.router(x, routed_experts=routed_experts)
+
+        if self.ep_comm_backend == "deepep":
+            # DeepEP drives dispatch→local-experts→combine; combine already
+            # unpermutes (token i → row i), so no reorderer/scatter_add here.
+            routed_output = self._run_deepep_routed_experts(x, selected_experts_indices, top_scores)
+            return routed_output.reshape(bs, slen, dim)
 
         (
             top_scores_experts_sorted,
