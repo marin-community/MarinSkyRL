@@ -342,6 +342,24 @@ class FSDPStrategy(DistributedStrategy):
             if ep_on:
                 from skyrl_train.distributed.fsdp_utils import apply_ep
 
+                # The init-weight context manager materializes REAL weights only on
+                # ep-coordinate-0 ranks and meta everywhere else. torchtitan's
+                # ExpertParallel._partition_fn distribute_tensor's the raw expert params,
+                # and distribute_tensor takes DIFFERENT code paths for real vs meta inputs
+                # (real → scatter collective from mesh-coord-0; meta → local construction,
+                # no collective). That real/meta asymmetry desyncs the ep-coord-0 ranks
+                # from the rest and deadlocks the first subsequent global collective
+                # ("setting up NCCL communicator ... store->get('0') wait timeout").
+                # Fix: snapshot rank-0's real weights into `full_state` (CPU), then put the
+                # WHOLE module on meta on EVERY rank so apply_ep / apply_fsdp2 run uniformly
+                # (all-meta → no scatter). The real weights flow back in collective-
+                # symmetrically via fsdp2_load_full_state_dict's broadcast_from_rank0.
+                if torch.distributed.get_rank() == 0:
+                    full_state = {k: v.detach().to("cpu", copy=True) for k, v in full_state.items()}
+                else:
+                    full_state = {}
+                module.to_empty(device="meta")
+
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
                 num_sharded = apply_ep(
                     module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs
