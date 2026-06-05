@@ -366,7 +366,10 @@ class FSDPStrategy(DistributedStrategy):
                 # and identical across ranks, and meta-izing them would leave them unrestorable
                 # after the loader (-> "Cannot copy out of meta tensor" on the CPU offload).
                 for _p in module.parameters():
-                    _p.data = torch.empty_like(_p.data, device="meta")
+                    # .to("meta") preserves the tensor subclass (DTensor stays DTensor,
+                    # plain stays plain), so set_data does not hit an incompatible-type
+                    # error; torch.empty_like(..., device="meta") would drop DTensor-ness.
+                    _p.data = _p.data.to("meta")
 
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
                 num_sharded = apply_ep(
