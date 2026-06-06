@@ -187,30 +187,34 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
         uuids = [p["physical_uuid"] for p in node_probes]
         devs = [p["current_device"] for p in node_probes]
         numas = [p["gpu_numa_node"] for p in node_probes]
+        # PHYSICAL UUID distinctness is the universal proof and holds in BOTH
+        # Ray cases: no two ranks may share a physical GPU.
         assert len(set(uuids)) == len(uuids), (
             f"node {node_ip}: ranks collided on the same physical GPU UUID: {node_probes}"
-        )
-        assert len(set(devs)) == len(devs), (
-            f"node {node_ip}: ranks collided on the same torch device index: {node_probes}"
         )
         assert len(node_probes) == GPUS_PER_NODE, (
             f"node {node_ip}: expected {GPUS_PER_NODE} ranks, got {len(node_probes)}"
         )
-        # NUMA distinctness only has meaning when CUDA_VISIBLE_DEVICES is UNSET
-        # (the Case-3 / pin_to_ray_gpu_id path the fix adds): there every actor
-        # sees all GPUs, so the sysfs NUMA node read for the pinned physical id
-        # is a real, per-rank-distinct value. When Ray MASKS CVD to one device
-        # per actor (Case 2), sysfs enumerates only that single visible GPU as
-        # index 0 -> gpu_numa is 0 for everyone by construction, and the proof of
-        # a distinct physical GPU (and therefore a distinct NUMA domain) is the
-        # distinct UUID asserted above, not the masked-view sysfs index.
+        # The torch-device-index and sysfs-NUMA-node distinctness checks ONLY
+        # have meaning when CUDA_VISIBLE_DEVICES is UNSET (the noset / Case-1/3
+        # physical-id pin path the fix targets, matching the 80B SIF env): there
+        # every actor sees all GPUs, so current_device() and the sysfs NUMA node
+        # are the real, per-rank-distinct physical id (0..3). When Ray MASKS CVD
+        # to one device per actor (Case 2), each actor's view collapses to a
+        # single GPU at index 0 -> current_device()==0 and gpu_numa==0 for
+        # everyone by construction; the distinct UUID asserted above is the proof
+        # of a distinct physical GPU + NUMA domain in that case.
         cvd_unset = all(
             (p["cuda_visible_devices"] in (None, "")) for p in node_probes
         )
-        if cvd_unset and all(n is not None for n in numas):
-            assert len(set(numas)) == len(numas), (
-                f"node {node_ip}: ranks share a GPU NUMA node (wrong-socket bind): {node_probes}"
+        if cvd_unset:
+            assert len(set(devs)) == len(devs), (
+                f"node {node_ip}: ranks collided on the same torch device index: {node_probes}"
             )
+            if all(n is not None for n in numas):
+                assert len(set(numas)) == len(numas), (
+                    f"node {node_ip}: ranks share a GPU NUMA node (wrong-socket bind): {node_probes}"
+                )
 
     # --- NVLink locality: a node's ranks are contiguous in rank order. ---
     ranks_sorted = sorted(probes, key=lambda p: p["rank"])
