@@ -16,6 +16,7 @@ from skyrl_train.utils.utils import (
     get_ray_pg_ready_with_timeout,
     policy_strict_spread_eligible,
     policy_spread_bundles,
+    policy_per_gpu_bundles_enabled,
 )
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
@@ -306,12 +307,22 @@ class BasePPOExp:
         from ray.util.placement_group import placement_group as _placement_group
 
         bundles = policy_spread_bundles(self.cfg)
-        pg = _placement_group(bundles, strategy="STRICT_SPREAD")
+        per_gpu = policy_per_gpu_bundles_enabled(self.cfg)
+        # Per-GPU bundles ({GPU:1} x world_size) must NOT use STRICT_SPREAD
+        # (that would force each single-GPU bundle onto a distinct node).
+        # PACK packs them ~num_gpus_per_node-per-node; reserving all world_size
+        # GPU slots up front still forces the (PACK) inference engines onto the
+        # disjoint remaining nodes — the disjointness guarantee comes from the
+        # reservation ordering, not from the spread strategy. Whole-node bundles
+        # keep STRICT_SPREAD (one whole-node bundle per node) as before.
+        strategy = "PACK" if per_gpu else "STRICT_SPREAD"
+        pg = _placement_group(bundles, strategy=strategy)
         get_ray_pg_ready_with_timeout(pg, timeout=timeout)
         logger.info(
-            f"Reserved dedicated STRICT_SPREAD policy placement group: "
+            f"Reserved dedicated policy placement group (strategy={strategy}, "
+            f"{'per-GPU {GPU:1}' if per_gpu else 'whole-node {GPU:N}'} bundles): "
             f"{self.cfg.trainer.placement.policy_num_nodes} node(s) x "
-            f"{self.cfg.trainer.placement.policy_num_gpus_per_node} GPU (whole-node bundles), "
+            f"{self.cfg.trainer.placement.policy_num_gpus_per_node} GPU, "
             f"reserved before inference-engine placement to guarantee disjoint nodes."
         )
         return pg

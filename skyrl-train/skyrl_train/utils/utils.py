@@ -40,15 +40,78 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
     return not use_ref_model
 
 
-def policy_spread_bundles(cfg: DictConfig):
-    """The whole-node bundle list for the dedicated STRICT_SPREAD policy PG.
+def resolve_pinned_local_rank(
+    *,
+    noset_visible_devices: bool,
+    cuda_visible_devices,
+    ray_gpu_ids,
+    launcher_local_rank: int,
+    device_count: int,
+    pin_to_ray_gpu_id: bool,
+) -> str:
+    """Pure decision for the LOCAL_RANK (== torch.cuda.set_device index) of a
+    distributed actor. Extracted from DistributedTorchRayActor.__init__ so the
+    GH200 device-pinning logic is unit-testable without importing Ray/torch
+    worker deps. All inputs are plain values; returns the LOCAL_RANK string.
 
-    One bundle per policy node, each claiming all of that node's GPUs, so the
-    policy occupies a set of whole dedicated nodes. Pure (Ray-free) so the
-    bundle count / shape is unit-testable.
+    Branches (see __init__ docstring for the full GH200 narrative):
+      1. NOSET set            -> ray_gpu_ids[0]      (Ray doesn't mask CVD; pin physical id)
+      2. CVD masked to 1 dev  -> "0"                 (a3 venv-Ray path; byte-identical)
+      3. pin_to_ray_gpu_id    -> ray_gpu_ids[0] if it's a valid device index,
+                                 else launcher_local_rank, else ray_gpu_ids[0]/"0"
+                                 (per-GPU {GPU:1} bundle: get_gpu_ids() is reliable)
+      4. otherwise            -> launcher_local_rank if in range, else ray_gpu_ids[0]
+                                 (whole-node bundle: positional rank%num_gpus_per_node)
+    """
+    if noset_visible_devices:
+        return str(ray_gpu_ids[0])
+
+    cvd = cuda_visible_devices
+    masked_to_single = cvd is not None and len([d for d in cvd.split(",") if d != ""]) == 1
+    if masked_to_single:
+        return "0"
+
+    if pin_to_ray_gpu_id:
+        if ray_gpu_ids and 0 <= int(ray_gpu_ids[0]) < max(device_count, 1):
+            return str(int(ray_gpu_ids[0]))
+        if device_count > 0 and 0 <= launcher_local_rank < device_count:
+            return str(launcher_local_rank)
+        return str(ray_gpu_ids[0]) if ray_gpu_ids else "0"
+
+    if device_count > 0 and 0 <= launcher_local_rank < device_count:
+        return str(launcher_local_rank)
+    return str(ray_gpu_ids[0])
+
+
+def policy_per_gpu_bundles_enabled(cfg: DictConfig) -> bool:
+    """Whether the dedicated policy PG should use per-GPU {GPU:1} bundles.
+
+    Pure (Ray-free) predicate. Only meaningful when the dedicated STRICT_SPREAD
+    policy PG is itself eligible (see `policy_strict_spread_eligible`); this just
+    reads the opt-in sub-flag. Default false → legacy whole-node {GPU:4} bundles.
+    """
+    return bool(getattr(cfg.trainer.placement, "policy_per_gpu_bundles", False))
+
+
+def policy_spread_bundles(cfg: DictConfig):
+    """The bundle list for the dedicated policy PG.
+
+    Two shapes, selected by `policy_per_gpu_bundles`:
+
+    - whole-node (default): one {GPU:n,CPU:n} bundle per policy node, each
+      claiming all of that node's GPUs. len(bundles) == policy_num_nodes.
+    - per-GPU (opt-in): one {GPU:1,CPU:1} bundle per policy GPU, i.e.
+      num_nodes * num_gpus_per_node bundles. len(bundles) == world_size, which
+      engages the reliable get_reordered_bundle_indices() path and gives each
+      actor a 1-GPU bundle so ray.get_gpu_ids()[0] resolves a distinct physical
+      GPU (the GH200 device-collision fix).
+
+    Pure (Ray-free) so the bundle count / shape is unit-testable.
     """
     num_nodes = cfg.trainer.placement.policy_num_nodes
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+    if policy_per_gpu_bundles_enabled(cfg):
+        return [{"GPU": 1, "CPU": 1} for _ in range(num_nodes * num_gpus_per_node)]
     return [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
 
 

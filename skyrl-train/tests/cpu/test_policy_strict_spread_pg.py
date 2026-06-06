@@ -14,7 +14,11 @@ uv run --isolated --extra dev pytest tests/cpu/test_policy_strict_spread_pg.py
 
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.utils import policy_strict_spread_eligible, policy_spread_bundles
+from skyrl_train.utils.utils import (
+    policy_strict_spread_eligible,
+    policy_spread_bundles,
+    policy_per_gpu_bundles_enabled,
+)
 
 
 def _make_cfg(
@@ -26,6 +30,7 @@ def _make_cfg(
     use_kl_loss=False,
     use_kl_in_reward=False,
     include_flag=True,
+    policy_per_gpu_bundles=None,
 ):
     """Build a minimal config exercising only the placement/algorithm fields the
     eligibility predicate and bundle computation read. Avoids the hydra-backed
@@ -37,6 +42,8 @@ def _make_cfg(
     }
     if include_flag:
         placement["policy_strict_spread_pg"] = policy_strict_spread_pg
+    if policy_per_gpu_bundles is not None:
+        placement["policy_per_gpu_bundles"] = policy_per_gpu_bundles
     return OmegaConf.create(
         {
             "trainer": {
@@ -121,3 +128,57 @@ def test_bundle_count_matches_policy_nodes_a3_8b():
     bundles = policy_spread_bundles(cfg)
     assert len(bundles) == 2
     assert sum(b["GPU"] for b in bundles) == 8
+
+
+# ---------------------------------------------------------------------------
+# Per-GPU-bundle (GH200 device-collision fix) cases
+# ---------------------------------------------------------------------------
+
+
+def test_per_gpu_bundles_default_off():
+    """Sub-flag absent -> per-GPU bundles disabled (whole-node behavior)."""
+    cfg = _disaggregated_no_ref_cfg(policy_num_nodes=8, policy_num_gpus_per_node=4)
+    assert policy_per_gpu_bundles_enabled(cfg) is False
+
+
+def test_per_gpu_bundles_predicate_on():
+    cfg = _make_cfg(policy_per_gpu_bundles=True)
+    assert policy_per_gpu_bundles_enabled(cfg) is True
+
+
+def test_per_gpu_bundles_shape_80b():
+    """80B with per-GPU bundles: 8 nodes x 4 GPU -> 32 {GPU:1} bundles.
+
+    len(bundles) == world_size (32) is the property that engages the reliable
+    get_reordered_bundle_indices() path in PPORayActorGroup._initiate_actors,
+    so each policy actor is scheduled against its own single-GPU bundle.
+    """
+    cfg = _make_cfg(policy_num_nodes=8, policy_num_gpus_per_node=4, policy_per_gpu_bundles=True)
+    bundles = policy_spread_bundles(cfg)
+    world_size = 8 * 4
+    assert len(bundles) == world_size == 32
+    assert all(b == {"GPU": 1, "CPU": 1} for b in bundles)
+    assert sum(b["GPU"] for b in bundles) == 32
+    # Same total GPU footprint as the whole-node shape -> same disjoint fit.
+    num_inference_gpus = 16 * 4
+    assert sum(b["GPU"] for b in bundles) + num_inference_gpus == 24 * 4
+
+
+def test_per_gpu_bundles_shape_a3_8b():
+    """a3 8B shape with per-GPU bundles: 2 nodes x 4 GPU -> 8 {GPU:1} bundles."""
+    cfg = _make_cfg(policy_num_nodes=2, policy_num_gpus_per_node=4, policy_per_gpu_bundles=True)
+    bundles = policy_spread_bundles(cfg)
+    assert len(bundles) == 8
+    assert all(b == {"GPU": 1, "CPU": 1} for b in bundles)
+
+
+def test_whole_node_vs_per_gpu_same_total_gpus():
+    """Whichever bundle shape, the reserved GPU count is identical -> the
+    disjointness-by-reservation guarantee is preserved across both modes."""
+    whole = policy_spread_bundles(
+        _make_cfg(policy_num_nodes=8, policy_num_gpus_per_node=4, policy_per_gpu_bundles=False)
+    )
+    per_gpu = policy_spread_bundles(
+        _make_cfg(policy_num_nodes=8, policy_num_gpus_per_node=4, policy_per_gpu_bundles=True)
+    )
+    assert sum(b["GPU"] for b in whole) == sum(b["GPU"] for b in per_gpu) == 32
