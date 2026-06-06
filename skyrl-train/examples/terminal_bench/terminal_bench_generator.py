@@ -12,6 +12,7 @@ from skyrl_train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
     extract_logprobs_from_rollout_details,
     extract_routed_experts_from_rollout_details,
+    normalize_token_ids,
     _sentinel_routed_experts_row,
     SENTINEL_EXPERT_ID,
 )
@@ -40,74 +41,14 @@ from examples.terminal_bench.harbor_config import HarborConfigBuilder
 MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
 
 
-def _normalize_prompt_token_ids(encoded) -> List[int]:
-    """Coerce a ``tokenizer.apply_chat_template(..., tokenize=True)`` result into a
-    flat ``List[int]`` of prompt token ids.
+# Backward-compatible alias. The coercion now lives in
+# ``skyrl_train.generators.utils.normalize_token_ids`` so it can be shared with
+# the response-side ``len()``-slicing sites (``get_generation_prompt_ids`` /
+# ``encode_messages_subset``) that hit the same Qwen3-Next-80B BatchEncoding leak.
+# Kept here (delegating) so the existing prompt-side call site and tests are
+# unchanged.
+_normalize_prompt_token_ids = normalize_token_ids
 
-    ``apply_chat_template`` is *supposed* to return a flat list of ints when
-    ``return_dict=False`` (our call site default). But several legitimate
-    upstream shapes leak through and break the training-batch collation in
-    ``preprocess._verify_inputs`` with the cryptic
-    ``contains a non-int element 'input_ids' (type str)`` error (sample 0,
-    first global_step) — because a ``BatchEncoding`` / ``dict`` iterates to its
-    *keys* (``['input_ids', 'attention_mask', ...]``) when treated as a
-    token-id list:
-
-    * ``BatchEncoding`` / ``dict`` / any mapping — when a tokenizer /
-      chat-template path returns the full encoding instead of just the ids (the
-      mapping's ``input_ids`` value is the real ids). This is the shape that
-      produced the 80B-specific ``_verify_inputs`` crash (job 631790); it
-      surfaces on the agentic terminal_bench prompt path under the model's
-      *bundled* chat template (``custom_chat_template_content=None``), which the
-      8B/a3 runs — which pass a custom flat-list template — never hit. NOTE that
-      ``transformers.BatchEncoding`` is a ``UserDict``, NOT a ``dict`` subclass
-      (``isinstance(BatchEncoding(...), dict)`` is False on transformers 4.57+),
-      so iterating it yields its KEYS — which is precisely how the literal
-      string ``'input_ids'`` leaked in as a "token id". We detect it by its
-      mapping interface, not ``isinstance(dict)``.
-    * ``[[int, ...]]`` — a singleton-batched nested list (e.g. when the single
-      conversation is mis-detected as a batch by ``apply_chat_template``'s
-      ``is_batched`` heuristic). We unwrap the single row.
-    * ``List[int]`` — the normal/correct path, returned unchanged.
-
-    The ids are still fully present here at the assembly site; extracting them
-    now (rather than coercing in ``_verify_inputs``, by which point a dict has
-    already collapsed to its keys) is the root-cause fix. The normal flat-list
-    path is byte-identical, so the already-correct 8B/a3 generator behavior is
-    unchanged.
-    """
-    # BatchEncoding / dict / any Mapping carrying the ids under a key.
-    #
-    # NOTE: `transformers.BatchEncoding` is a `UserDict`, NOT a `dict` subclass
-    # (`isinstance(BatchEncoding(...), dict)` is False on transformers 4.57+),
-    # and iterating it yields its KEYS — which is exactly how the literal
-    # string 'input_ids' leaked in as a "token id". So we must detect it by its
-    # mapping interface (`keys()` / `__getitem__`), not by `isinstance(dict)`.
-    if hasattr(encoded, "keys") and hasattr(encoded, "__getitem__") and not isinstance(encoded, (list, tuple)):
-        keys = list(encoded.keys())
-        for key in ("input_ids", "token_ids", "ids"):
-            if key in keys:
-                encoded = encoded[key]
-                break
-        else:
-            raise ValueError(
-                "apply_chat_template returned a mapping without an "
-                "'input_ids'/'token_ids'/'ids' key "
-                f"(keys={keys}); cannot recover prompt token ids."
-            )
-
-    # Tensor / ndarray (e.g. a BatchEncoding value or a return_tensors result).
-    if hasattr(encoded, "tolist") and not isinstance(encoded, (list, tuple)):
-        encoded = encoded.tolist()
-
-    encoded = list(encoded)
-
-    # Singleton-batched nesting: [[int, ...]] -> [int, ...]. Only unwrap a
-    # length-1 outer list whose sole element is itself a list of ints.
-    if len(encoded) == 1 and isinstance(encoded[0], (list, tuple)):
-        encoded = list(encoded[0])
-
-    return encoded
 
 @dataclass
 class TerminalBenchAgentOutput:

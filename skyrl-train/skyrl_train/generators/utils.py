@@ -173,13 +173,74 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
+def normalize_token_ids(encoded) -> List[int]:
+    """Coerce a ``tokenizer.apply_chat_template(..., tokenize=True)`` result into a
+    flat ``List[int]`` of token ids.
+
+    ``apply_chat_template`` is *supposed* to return a flat list of ints when
+    ``return_dict=False`` (our call-site default). But several legitimate upstream
+    shapes leak through and break ``len()``-based slicing and downstream batch
+    collation:
+
+    * ``BatchEncoding`` / ``dict`` / any mapping — when a tokenizer / chat-template
+      path returns the full encoding instead of just the ids (the mapping's
+      ``input_ids`` value is the real ids). NOTE that ``transformers.BatchEncoding``
+      is a ``UserDict``, NOT a ``dict`` subclass (``isinstance(BatchEncoding(...),
+      dict)`` is False on transformers 4.57+), so iterating it yields its KEYS and
+      ``len()`` returns the *key count* (e.g. 2) — which is exactly how the Qwen3-
+      Next-80B response-side ``len()``-slicing produced empty ``response_ids`` /
+      ``loss_mask`` ("All outputs are loss masked" -> NaN advantages -> no-op
+      step). We detect it by its mapping interface (``keys()`` / ``__getitem__``),
+      not ``isinstance(dict)``.
+    * tensor / ndarray — flattened via ``.tolist()``.
+    * ``[[int, ...]]`` — a singleton-batched nested list. We unwrap the single row.
+    * ``List[int]`` — the normal/correct path, returned unchanged (no ``.tolist()``,
+      no unwrap), so the 8B/a3 flat-list-template path is byte-identical.
+    """
+    # BatchEncoding / dict / any Mapping carrying the ids under a key.
+    #
+    # NOTE: `transformers.BatchEncoding` is a `UserDict`, NOT a `dict` subclass
+    # (`isinstance(BatchEncoding(...), dict)` is False on transformers 4.57+),
+    # and both iterating it and `len()` operate on its KEYS. So we must detect it
+    # by its mapping interface (`keys()` / `__getitem__`), not by `isinstance(dict)`.
+    if hasattr(encoded, "keys") and hasattr(encoded, "__getitem__") and not isinstance(encoded, (list, tuple)):
+        keys = list(encoded.keys())
+        for key in ("input_ids", "token_ids", "ids"):
+            if key in keys:
+                encoded = encoded[key]
+                break
+        else:
+            raise ValueError(
+                "apply_chat_template returned a mapping without an "
+                "'input_ids'/'token_ids'/'ids' key "
+                f"(keys={keys}); cannot recover token ids."
+            )
+
+    # Tensor / ndarray (e.g. a BatchEncoding value or a return_tensors result).
+    if hasattr(encoded, "tolist") and not isinstance(encoded, (list, tuple)):
+        encoded = encoded.tolist()
+
+    encoded = list(encoded)
+
+    # Singleton-batched nesting: [[int, ...]] -> [int, ...]. Only unwrap a
+    # length-1 outer list whose sole element is itself a list of ints.
+    if len(encoded) == 1 and isinstance(encoded[0], (list, tuple)):
+        encoded = list(encoded[0])
+
+    return encoded
+
+
 def get_generation_prompt_ids(tokenizer, custom_chat_template=None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
     """
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, chat_template=custom_chat_template)
-    empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=custom_chat_template
+    empty_user = normalize_token_ids(
+        tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, chat_template=custom_chat_template)
+    )
+    empty_user_with_generation_prompt = normalize_token_ids(
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=custom_chat_template
+        )
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -477,19 +538,23 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "I am a user."},
     ]
-    base_conversation_token_ids = tokenizer.apply_chat_template(
-        base_conversation,
-        add_generation_prompt=False,
-        tokenize=True,
-        chat_template=custom_chat_template,
+    base_conversation_token_ids = normalize_token_ids(
+        tokenizer.apply_chat_template(
+            base_conversation,
+            add_generation_prompt=False,
+            tokenize=True,
+            chat_template=custom_chat_template,
+        )
     )
 
     full_conversation = base_conversation + messages
-    full_conversation_token_ids = tokenizer.apply_chat_template(
-        full_conversation,
-        add_generation_prompt=False,
-        tokenize=True,
-        chat_template=custom_chat_template,
+    full_conversation_token_ids = normalize_token_ids(
+        tokenizer.apply_chat_template(
+            full_conversation,
+            add_generation_prompt=False,
+            tokenize=True,
+            chat_template=custom_chat_template,
+        )
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
