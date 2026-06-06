@@ -45,15 +45,32 @@ def test_batchencoding_dict_extracts_input_ids():
     assert all(isinstance(t, int) for t in out)
 
 
-def test_batchencoding_subclass_extracts_input_ids():
-    """A real BatchEncoding (dict subclass) is handled like a dict."""
-    try:
-        from transformers import BatchEncoding
-    except Exception:  # pragma: no cover - transformers always present in dev
-        pytest.skip("transformers not available")
+def test_batchencoding_extracts_input_ids():
+    """A real `transformers.BatchEncoding` is handled via its mapping interface.
+
+    This is the ACTUAL crash shape from job 631790. Note `BatchEncoding` is a
+    `UserDict`, NOT a `dict` subclass (`isinstance(BatchEncoding(...), dict)` is
+    False on transformers 4.57+), so iterating it yields its KEYS — which is how
+    the literal string 'input_ids' leaked in. The fix detects it by `keys()`,
+    not `isinstance(dict)`.
+    """
+    from transformers import BatchEncoding
+
     enc = BatchEncoding({"input_ids": [5, 6, 7], "attention_mask": [1, 1, 1]})
+    assert not isinstance(enc, dict)  # the trap: BatchEncoding is not a dict
     out = _normalize_prompt_token_ids(enc)
     assert out == [5, 6, 7]
+
+
+def test_batchencoding_tensor_value():
+    """A BatchEncoding whose input_ids is a tensor/ndarray is flattened to ints."""
+    import torch
+    from transformers import BatchEncoding
+
+    enc = BatchEncoding({"input_ids": torch.tensor([5, 6, 7])})
+    out = _normalize_prompt_token_ids(enc)
+    assert out == [5, 6, 7]
+    assert all(isinstance(t, int) for t in out)
 
 
 def test_singleton_batched_nesting_unwrapped():
