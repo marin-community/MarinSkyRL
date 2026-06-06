@@ -147,6 +147,14 @@ trainer:
     value_head_prefix: "value_head"
     policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov", or customizable with PolicyLossRegistry
     loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"
+    # Single global length-unbiased loss denominator Z = global_num_seqs * max_seq_len,
+    # computed + assigned at runtime in FSDPPolicyWorkerBase.ppo_train ONLY when
+    # loss_reduction == "seq_mean_token_sum_norm_global". Declared here (default null) so
+    # the runtime assignment is legal under OmegaConf struct mode; read via
+    # getattr(config, "global_loss_denom", None) in ppo_policy_loss so all other
+    # loss_reduction paths (token_mean / sequence_mean / seq_mean_token_sum_norm) are
+    # byte-identical (the key is never written or read on those paths).
+    global_loss_denom: null
     grpo_norm_by_std: true # set to false to disable normalization by std in GRPO
     # RLOO-N: minimum included samples per group for leave-one-out baseline.
     # Groups below this threshold get advantage=0 for all samples.

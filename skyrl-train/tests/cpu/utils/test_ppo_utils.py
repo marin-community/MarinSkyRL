@@ -324,6 +324,33 @@ def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
         )
 
 
+def test_default_config_declares_global_loss_denom_null():
+    """`global_loss_denom` must be DECLARED (default null) in ppo_base_config.yaml.
+
+    Regression guard for the arm1 (seq_mean_token_sum_norm_global) crash at
+    global_step 1: FSDPPolicyWorkerBase.ppo_train assigns
+    cfg.trainer.algorithm.global_loss_denom at runtime, but the key was not declared
+    in the base config, so OmegaConf struct mode raised
+    ConfigAttributeError("Key 'global_loss_denom' is not in struct"). This asserts the
+    key now exists (default None) AND that the runtime assignment is legal under struct
+    mode (reproducing the worker.py:752 assignment site), while leaving the default-path
+    read (getattr(config, "global_loss_denom", None)) at None.
+    """
+    pytest.importorskip("hydra")
+    from skyrl_train.config.utils import get_default_config
+
+    cfg = get_default_config()
+    algo = cfg.trainer.algorithm
+    # Declared and defaulted to null -> default (non-seqnorm) path read is None.
+    assert "global_loss_denom" in algo, "global_loss_denom must be declared in ppo_base_config.yaml"
+    assert algo.global_loss_denom is None
+    assert getattr(algo, "global_loss_denom", "SENTINEL") is None
+
+    # Reproduce the worker.py:752 runtime assignment under struct mode -> must NOT raise.
+    algo.global_loss_denom = max(7.0, 1.0) * 4096  # global_num_seqs * max_seq_len
+    assert algo.global_loss_denom == 7.0 * 4096
+
+
 def test_validate_cfg_rejects_unknown_loss_reduction():
     pytest.importorskip("hydra")
     from omegaconf import OmegaConf
