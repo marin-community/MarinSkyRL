@@ -676,17 +676,43 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
 
+    # cpu_offload (CPUOffloadPolicy, required to fit the 80B): params/grads are
+    # CPU-resident. The norm computation below all-reduces a DTensor _NormPartial
+    # (and full_tensor()) over the param's device mesh; with CPU tensors that
+    # collective hits the process group's CPU backend, which is not registered
+    # (the worker pg is nccl-only) → "No backend type associated with device
+    # type cpu". So when grads live on CPU, compute the NORM over CUDA copies of
+    # the grads (the all-reduce then runs on nccl). DTensor.to(cuda) moves the
+    # local shard while preserving the mesh/placement, so the reduction semantics
+    # are identical — only the backend differs. The CLIP is still applied to the
+    # ORIGINAL (cpu) grads in-place: _clip_grads_with_norm_ moves the scalar clip
+    # coefficient to each grad's device, so a cuda total_norm scales cpu grads
+    # correctly. cpu_offload=false (8B / a3 / ablation policy paths) keeps grads
+    # on cuda, ``grads_on_cpu`` is False, and this is byte-identical to before.
+    grads_on_cpu = any(g.device.type == "cpu" for g in grads)
+    if grads_on_cpu:
+        cuda_device = torch.cuda.current_device()
+        norm_grads = [g.to(cuda_device) for g in grads]
+    else:
+        norm_grads = grads
+
     # Group grads by device mesh (DTensors only). Plain tensors / non-DTensors
     # collect under a single ``None`` key. EP introduces >1 distinct mesh.
+    # Grouping uses ``norm_grads`` (cuda copies under cpu_offload) so the
+    # per-mesh norm reductions below run on the nccl backend.
     mesh_groups: dict = {}
-    for g in grads:
+    for g in norm_grads:
         mesh = getattr(g, "device_mesh", None)
         mesh_groups.setdefault(mesh, []).append(g)
 
     if len(mesh_groups) <= 1:
-        # Single mesh (or all plain tensors): today's path, byte-identical.
-        total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
+        # Single mesh (or all plain tensors): today's path, byte-identical when
+        # grads are on cuda (norm_grads is grads). Under cpu_offload norm_grads
+        # are the cuda copies so the _NormPartial all-reduce runs on nccl.
+        total_norm = _get_total_norm(norm_grads, norm_type, error_if_nonfinite, foreach)
         total_norm = total_norm.to(torch.cuda.current_device(), non_blocking=True)
+        # Clip the ORIGINAL parameters' grads (cpu under cpu_offload);
+        # _clip_grads_with_norm_ moves the cuda total_norm to each grad's device.
         _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
         return total_norm
 
