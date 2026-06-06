@@ -415,6 +415,23 @@ class FSDPStrategy(DistributedStrategy):
             # mesh, experts on the (fsdp,ep) submesh). The naive broadcast+distribute_tensor loader
             # deadlocks on that mix (global broadcast interleaved with submesh collective). Gate the
             # placement-aware loader on EP; ep_size==1 (a3) keeps the byte-identical naive path.
+            if ep_on:
+                # 80B init-OOM fix (complements the streamed loader SkyRL b44adade):
+                # `from_pretrained` materialized the FULL real model on GPU before the
+                # meta-ization above (lines ~382-390) replaced every Parameter with a
+                # meta tensor. Dereferencing the originals frees them on the Python side
+                # but the CUDA caching allocator KEEPS that ~80-90 GiB as reserved-but-
+                # unused — and nothing reclaims it before the loader's per-shard
+                # `.to(cuda)`. On a tight 95 GiB GPU that stale reservation is enough to
+                # OOM the loader's tiny allocations (observed 613556/614034: GPU-0 <1 GiB
+                # free yet the policy process itself holds only ~1.7 GiB; 612355 squeaked
+                # by on a luckier allocator state). gc + empty_cache RETURNS the freed
+                # pre-load reservation to the device before the streamed load. EP-only;
+                # a3 (non-EP) path is untouched and byte-identical.
+                import gc as _gc
+
+                _gc.collect()
+                torch.cuda.empty_cache()
             fsdp2_load_full_state_dict(module, full_state, cpu_offload, ep_enabled=ep_on)
             fsdp_module = module
         else:
