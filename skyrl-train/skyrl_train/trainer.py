@@ -632,9 +632,18 @@ class RayPPOTrainer:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
         return entries[: (len(entries) // dp_size) * dp_size]
 
-    def build_models(self, PolicyWorker, CriticWorker, RefWorker):
+    def build_models(self, PolicyWorker, CriticWorker, RefWorker, policy_pg: Optional[PlacementGroup] = None):
         """
         Initialize the actors for training, and handle colocation logic
+
+        Args:
+            policy_pg: Optional pre-reserved placement group dedicated to the
+                policy/training actors. Supplied (non-None) only for the
+                disaggregated, no-ref case when `placement.policy_strict_spread_pg`
+                is enabled — it is a STRICT_SPREAD whole-node placement group
+                reserved BEFORE the inference engines so that policy and
+                inference land on disjoint nodes. When None, the legacy
+                lazy-PACK behavior in `PPORayActorGroup._initiate_actors` is used.
         """
         cfg = self.cfg
         pg = None
@@ -718,13 +727,26 @@ class RayPPOTrainer:
                 pg = placement_group(bundles, strategy="PACK")
                 get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
+            # Dedicated, pre-reserved STRICT_SPREAD policy placement group
+            # (disaggregated no-ref case only). Supplied (non-None) by the
+            # entrypoint when `placement.policy_strict_spread_pg` is enabled.
+            # It is guaranteed not to coincide with the colocate_policy_ref
+            # branch above because eligibility requires use_ref_model=False.
+            # Each policy actor takes a full GPU within its node's whole-node
+            # bundle (so the inference engines, on disjoint nodes, never share
+            # a physical GPU with a policy worker).
+            if policy_pg is not None:
+                assert not use_ref_model, "dedicated policy_pg is only used when no ref model is present"
+                assert pg is None, "dedicated policy_pg must not coexist with a shared policy/ref pg"
+                pg = policy_pg
+
             policy_model = PPORayActorGroup(
                 cfg,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
                 pg=pg,
-                num_gpus_per_actor=0.75 if pg else 1,
+                num_gpus_per_actor=(1 if policy_pg is not None else (0.75 if pg else 1)),
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             )

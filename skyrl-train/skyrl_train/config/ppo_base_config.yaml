@@ -21,6 +21,16 @@ trainer:
     critic_num_gpus_per_node: 4
     ref_num_nodes: 1
     ref_num_gpus_per_node: 4
+    # When true AND the run is disaggregated (colocate_all=false) AND no ref
+    # model is used, reserve the policy/training placement group up front with
+    # a STRICT_SPREAD whole-node bundle per policy node, BEFORE the inference
+    # engines' placement group is created. This guarantees the FSDP policy
+    # claims its N dedicated nodes first, forcing the (PACK) inference engines
+    # onto the disjoint remaining nodes. Prevents the nondeterministic
+    # policy/vLLM GPU-collision OOM on exactly-full clusters (e.g. 80B on 24
+    # nodes: 8 policy + 16 inference = 24). Default false preserves the
+    # historical lazy-PACK behavior for all existing runs.
+    policy_strict_spread_pg: false
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:

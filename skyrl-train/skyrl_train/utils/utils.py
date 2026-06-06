@@ -20,6 +20,38 @@ from ray.util.placement_group import (
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
 
 
+def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
+    """Whether a dedicated STRICT_SPREAD policy placement group should be used.
+
+    Pure (Ray-free) predicate so it is unit-testable. Eligible only when ALL of:
+      - `trainer.placement.policy_strict_spread_pg` is enabled (opt-in; default
+        false, so every existing run is byte-for-byte unchanged),
+      - the run is disaggregated (`colocate_all=false`), and
+      - no reference model is used (`use_kl_loss` and `use_kl_in_reward` both
+        false) — i.e. the policy placement group is NOT shared with a ref model.
+    """
+    placement = cfg.trainer.placement
+    if not bool(getattr(placement, "policy_strict_spread_pg", False)):
+        return False
+    if placement.colocate_all:
+        return False
+    algo = cfg.trainer.algorithm
+    use_ref_model = algo.use_kl_loss or algo.use_kl_in_reward
+    return not use_ref_model
+
+
+def policy_spread_bundles(cfg: DictConfig):
+    """The whole-node bundle list for the dedicated STRICT_SPREAD policy PG.
+
+    One bundle per policy node, each claiming all of that node's GPUs, so the
+    policy occupies a set of whole dedicated nodes. Pure (Ray-free) so the
+    bundle count / shape is unit-testable.
+    """
+    num_nodes = cfg.trainer.placement.policy_num_nodes
+    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+    return [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
+
+
 class Timer:
     def __init__(self, message, update_dict=None):
         self.message = message

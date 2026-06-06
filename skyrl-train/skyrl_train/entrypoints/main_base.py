@@ -11,7 +11,12 @@ from skyrl_train.utils import validate_cfg
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.utils import (
+    initialize_ray,
+    get_ray_pg_ready_with_timeout,
+    policy_strict_spread_eligible,
+    policy_spread_bundles,
+)
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
@@ -180,6 +185,13 @@ class BasePPOExp:
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
+        # Reserve the policy/training placement group BEFORE the inference
+        # engines (which are created later, in `_setup_trainer`), so that in the
+        # disaggregated no-ref case the policy claims its dedicated whole nodes
+        # first and the inference engines are forced onto the disjoint
+        # remainder. None unless `policy_strict_spread_pg` is enabled for an
+        # eligible (disaggregated, no-ref) run.
+        self.policy_pg = self.get_policy_pg()
 
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
@@ -273,6 +285,36 @@ class BasePPOExp:
             return pg
         else:
             return None
+
+    def get_policy_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S):
+        """Reserve a dedicated whole-node placement group for the policy.
+
+        Uses STRICT_SPREAD so each policy node gets exactly one bundle holding
+        all of that node's GPUs — guaranteeing the policy occupies a set of
+        whole, dedicated nodes that the (PACK) inference-engine placement group
+        cannot share. Returns None when not eligible (see
+        `policy_strict_spread_eligible`), in which case the legacy lazy-PACK
+        path in `PPORayActorGroup._initiate_actors` is used unchanged.
+
+        When a ref model is present in the disaggregated path, policy and ref
+        share a single placement group built inside `build_models`; that path
+        is left entirely untouched (eligibility requires use_ref_model=False).
+        """
+        if not policy_strict_spread_eligible(self.cfg):
+            return None
+
+        from ray.util.placement_group import placement_group as _placement_group
+
+        bundles = policy_spread_bundles(self.cfg)
+        pg = _placement_group(bundles, strategy="STRICT_SPREAD")
+        get_ray_pg_ready_with_timeout(pg, timeout=timeout)
+        logger.info(
+            f"Reserved dedicated STRICT_SPREAD policy placement group: "
+            f"{self.cfg.trainer.placement.policy_num_nodes} node(s) x "
+            f"{self.cfg.trainer.placement.policy_num_gpus_per_node} GPU (whole-node bundles), "
+            f"reserved before inference-engine placement to guarantee disjoint nodes."
+        )
+        return pg
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """Initializes the generator.
@@ -391,8 +433,10 @@ class BasePPOExp:
             colocate_pg=self.colocate_pg,
         )
 
-        # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+        # Build the models. Pass the pre-reserved dedicated policy placement
+        # group (None unless `policy_strict_spread_pg` is enabled for an
+        # eligible disaggregated no-ref run).
+        trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
         return trainer
 
     def run(self):
