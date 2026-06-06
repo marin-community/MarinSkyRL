@@ -988,7 +988,14 @@ class RayPPOTrainer:
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
-                per_token_reward[-1] = float(reward)
+                # Guard the zero-token-response edge case: an agentic rollout
+                # trajectory can legitimately produce an empty response_ids list
+                # (e.g. a trial that emits no assistant tokens before erroring/
+                # terminating). `per_token_reward[-1] = ...` then IndexErrors on
+                # the empty list. With no tokens there is nowhere to place the
+                # response-level reward, so leave the (empty) per-token list as-is.
+                if per_token_reward:
+                    per_token_reward[-1] = float(reward)
                 per_token_rewards.append(per_token_reward)
 
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
