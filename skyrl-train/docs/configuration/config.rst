@@ -380,7 +380,7 @@ Algorithm Configuration
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
       policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
-      loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+      loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"
       grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
 
       # GAE parameters
@@ -457,6 +457,7 @@ Algorithm Configuration
   - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
   - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+  - ``seq_mean_token_sum_norm_global``: GLOBAL length-unbiased variant of Dr. GRPO. Sums the masked per-token loss over the whole DP batch and divides by a single global denominator ``Z = global_num_seqs * max_seq_len`` (computed once on the driver via a single all-reduce), instead of dividing each micro-batch by ``accumulation_steps``. This sidesteps the mean-of-per-microbatch-means size bias under gradient accumulation + async rollouts.
 
 - ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.

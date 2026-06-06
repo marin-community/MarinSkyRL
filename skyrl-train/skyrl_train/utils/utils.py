@@ -311,7 +311,8 @@ def validate_cfg(cfg: DictConfig):
         "token_mean",
         "sequence_mean",
         "seq_mean_token_sum_norm",
-    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+        "seq_mean_token_sum_norm_global",
+    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', 'seq_mean_token_sum_norm_global']`"
 
     # add field to algorithm config needed for loss functions
     # create a new config to make it modifiable

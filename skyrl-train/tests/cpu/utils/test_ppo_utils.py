@@ -268,6 +268,73 @@ def test_reduce_loss():
     assert torch.allclose(result_max, expected_max), f"Expected {expected_max}, got {result_max}"
 
 
+def _validatable_dummy_config():
+    """A dummy config that passes validate_batch_sizes so validate_cfg reaches the
+    loss_reduction allow-list (single-GPU placement, all batch sizes == 1)."""
+    from omegaconf import OmegaConf
+    from tests.cpu.util import example_dummy_config
+
+    cfg = example_dummy_config()
+    OmegaConf.update(
+        cfg,
+        "trainer",
+        {
+            "train_batch_size": 1,
+            "policy_mini_batch_size": 1,
+            "critic_mini_batch_size": 1,
+            "micro_train_batch_size_per_gpu": 1,
+            "micro_forward_batch_size_per_gpu": 1,
+            "placement": {
+                "policy_num_nodes": 1,
+                "policy_num_gpus_per_node": 1,
+                "critic_num_nodes": 1,
+                "critic_num_gpus_per_node": 1,
+                "ref_num_nodes": 1,
+                "ref_num_gpus_per_node": 1,
+            },
+        },
+    )
+    return cfg
+
+
+@pytest.mark.parametrize(
+    "loss_reduction",
+    ["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"],
+)
+def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
+    """Config-validation smoke: validate_cfg must NOT reject any supported loss_reduction.
+
+    Regression guard for the arm1 failure where `seq_mean_token_sum_norm_global`
+    was registered in reduce_loss + compute_policy_loss but rejected by the
+    hardcoded allow-list in validate_cfg (utils.py). The minimal dummy config may
+    still trip later (unrelated) placement/colocation asserts, so we only require
+    that the *loss_reduction allow-list* never fires for a supported value.
+    """
+    pytest.importorskip("hydra")
+    from omegaconf import OmegaConf
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = _validatable_dummy_config()
+    OmegaConf.update(cfg, "trainer.algorithm.loss_reduction", loss_reduction)
+    try:
+        validate_cfg(cfg)
+    except AssertionError as e:
+        assert "invalid loss_reduction" not in str(e), (
+            f"supported loss_reduction {loss_reduction!r} was rejected by the allow-list: {e}"
+        )
+
+
+def test_validate_cfg_rejects_unknown_loss_reduction():
+    pytest.importorskip("hydra")
+    from omegaconf import OmegaConf
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = _validatable_dummy_config()
+    OmegaConf.update(cfg, "trainer.algorithm.loss_reduction", "definitely_not_a_reduction")
+    with pytest.raises(AssertionError, match="invalid loss_reduction"):
+        validate_cfg(cfg)
+
+
 def test_adaptive_kl_controller_update():
     controller = AdaptiveKLController(init_kl_coef=0.2, target=0.1, horizon=100)
     controller.update(current=0.2, n_steps=10)
