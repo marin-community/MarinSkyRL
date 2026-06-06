@@ -62,10 +62,37 @@ class DistributedTorchRayActor:
         os.environ["MASTER_PORT"] = str(self._master_port)
         os.environ["WORLD_SIZE"] = str(self._world_size)
         os.environ["RANK"] = str(self._rank)
-        # NOTE: Ray will automatically set the CUDA_VISIBLE_DEVICES
-        # environment variable for each actor, so always set device to 0
-        # os.environ["LOCAL_RANK"] = str(self._local_rank)
-        os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
+        # Device pinning. `LOCAL_RANK` is consumed by every strategy's
+        # setup_distributed() as the argument to torch.cuda.set_device().
+        #
+        # Three cases:
+        #  1. ray_noset_visible_devices() True (a RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES
+        #     env var is set): Ray does NOT constrain CUDA_VISIBLE_DEVICES, every actor
+        #     sees all physical GPUs, so pin to this actor's Ray-assigned physical id.
+        #  2. NOSET unset AND Ray constrained CUDA_VISIBLE_DEVICES to a single device for
+        #     this actor (the normal/older-Ray path, e.g. the a3 8B venv runtime): device
+        #     0 within the masked view IS the assigned GPU, so LOCAL_RANK="0" is correct.
+        #  3. NOSET unset BUT CUDA_VISIBLE_DEVICES is unset / empty / lists >1 device
+        #     (newer Ray inside the megatron+vllm SIF no longer overrides the visible-device
+        #     env var, emitting "Ray will no longer override accelerator visible devices..."):
+        #     every per-node policy actor would then default LOCAL_RANK="0" and all
+        #     torch.cuda.set_device(0) onto the SAME physical GPU 0 -> ~90 GiB init collision
+        #     (the 80B reproducible init-OOM). Pin to the Ray-assigned physical id instead.
+        #
+        # Case 2 keeps the historical behavior byte-identical (single-device mask -> "0");
+        # cases 1 and 3 both pin the Ray-assigned physical GPU, which is a no-op wherever
+        # ranks were already correctly spread.
+        if ray_noset_visible_devices():
+            os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
+        else:
+            _cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+            _masked_to_single = _cvd is not None and len([d for d in _cvd.split(",") if d != ""]) == 1
+            if _masked_to_single:
+                os.environ["LOCAL_RANK"] = "0"
+            else:
+                # Ray did not constrain this actor to a single visible device; bind to the
+                # actor's Ray-assigned physical GPU so per-node ranks land on distinct GPUs.
+                os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
