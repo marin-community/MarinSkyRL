@@ -24,6 +24,32 @@ def _verify_inputs(
         len(loss_masks), len(prompts)
     )
 
+    # Element-type validation. torch.tensor(sequences) raises the cryptic
+    # `ValueError: too many dimensions 'str'` if any prompt/response token-id
+    # list contains a non-int (e.g. a stringified token leaking from a
+    # malformed rollout trajectory). Surface exactly which sample + field +
+    # offending element is corrupt instead, so the bad trajectory is
+    # actionable rather than a bare ValueError at the tensor build. Valid
+    # int-only inputs (the normal path, incl. a3) pass through unchanged.
+    def _first_bad_token(seq):
+        for tok in seq:
+            if not isinstance(tok, (int, bool)):
+                return tok
+        return None
+
+    for field_name, seqs in (("prompt", prompts), ("response", responses)):
+        for idx, seq in enumerate(seqs):
+            bad = _first_bad_token(seq)
+            if bad is not None:
+                raise ValueError(
+                    "{field} token-id list at sample index {idx} contains a non-int element "
+                    "{bad!r} (type {tname}); expected a flat list of token ids. This corrupts "
+                    "torch.tensor() collation (the bare 'too many dimensions \\'str\\'' error). "
+                    "The offending trajectory's {field}_ids must be tokenized ints.".format(
+                        field=field_name, idx=idx, bad=bad, tname=type(bad).__name__
+                    )
+                )
+
 
 def convert_prompts_responses_to_batch_tensors(
     tokenizer: AutoTokenizer,
