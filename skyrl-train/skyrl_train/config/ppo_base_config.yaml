@@ -31,6 +31,22 @@ trainer:
     # nodes: 8 policy + 16 inference = 24). Default false preserves the
     # historical lazy-PACK behavior for all existing runs.
     policy_strict_spread_pg: false
+    # When true (and policy_strict_spread_pg is also true), build the dedicated
+    # policy placement group out of one {GPU:1,CPU:1} bundle PER policy GPU
+    # (num_nodes * num_gpus_per_node bundles) instead of one whole-node {GPU:4}
+    # bundle per node. This makes len(bundles) == world_size, so the actor group
+    # engages the reliable get_reordered_bundle_indices() path (each InfoActor
+    # probes its bundle's single physical GPU via ray.get_gpu_ids()), and every
+    # policy actor is scheduled with num_gpus=1 against a 1-GPU bundle. The
+    # actor's own ray.get_gpu_ids()[0] then returns that bundle's distinct
+    # physical GPU id, so device pinning no longer depends on a positional
+    # rank%num_gpus_per_node modulo (which is wrong on GH200, where CUDA logical
+    # ordering is FASTEST_FIRST, not PCI/NUMA-identity, and which still races
+    # because the SIF Ray leaves CUDA_VISIBLE_DEVICES unmasked). Whole-node
+    # NVLink locality is preserved because the reorder sorts bundles by
+    # (node_id, gpu_id), so a node's 4 GPUs stay contiguous in rank order.
+    # Default false preserves the current whole-node-bundle behavior.
+    policy_per_gpu_bundles: false
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:

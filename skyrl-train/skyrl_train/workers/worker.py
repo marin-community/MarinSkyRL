@@ -45,7 +45,15 @@ from pathlib import Path
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
 class DistributedTorchRayActor:
     def __init__(
-        self, world_size, rank, local_rank, master_addr, master_port, sequence_parallel_size, record_memory=False
+        self,
+        world_size,
+        rank,
+        local_rank,
+        master_addr,
+        master_port,
+        sequence_parallel_size,
+        record_memory=False,
+        pin_to_ray_gpu_id=False,
     ):
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
@@ -84,22 +92,20 @@ class DistributedTorchRayActor:
         #     Qwen3-Next-80B init OOM (all 4 ranks materializing the 80B on GPU 0).
         #
         # Case 2 keeps the historical behavior byte-identical (single-device mask -> "0").
-        if ray_noset_visible_devices():
-            os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
-        else:
-            _cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
-            _masked_to_single = _cvd is not None and len([d for d in _cvd.split(",") if d != ""]) == 1
-            if _masked_to_single:
-                os.environ["LOCAL_RANK"] = "0"
-            else:
-                # Ray did not constrain this actor to a single visible device and its GPU
-                # bookkeeping is unreliable; use the launcher-assigned per-node rank so the
-                # per-node actors land on distinct physical GPUs (0..num_gpus_per_node-1).
-                _device_count = torch.cuda.device_count()
-                if _device_count > 0 and 0 <= local_rank < _device_count:
-                    os.environ["LOCAL_RANK"] = str(local_rank)
-                else:
-                    os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
+        # pin_to_ray_gpu_id (case 3) engages only on the per-GPU {GPU:1}-bundle policy PG,
+        # where ray.get_gpu_ids() is a reliable distinct physical id per actor. The full
+        # decision lives in resolve_pinned_local_rank() (pure / unit-tested).
+        from skyrl_train.utils.utils import resolve_pinned_local_rank
+
+        _noset = ray_noset_visible_devices()
+        os.environ["LOCAL_RANK"] = resolve_pinned_local_rank(
+            noset_visible_devices=_noset,
+            cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+            ray_gpu_ids=ray.get_gpu_ids(),
+            launcher_local_rank=local_rank,
+            device_count=torch.cuda.device_count(),
+            pin_to_ray_gpu_id=pin_to_ray_gpu_id,
+        )
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
@@ -190,11 +196,29 @@ class DistributedTorchRayActor:
 
         Uses shared NUMA utility that auto-detects GPU-to-CPU NUMA topology
         via nvidia-smi topo. Handles GH200 unified memory correctly.
+
+        The NUMA binding must key off the PHYSICAL GPU id (sysfs/PCI-ordered,
+        as nvidia-smi sees it), not a positional/logical index. Resolution
+        order for the physical id:
+          1. CUDA_VISIBLE_DEVICES[rank] — when Ray masked CVD, its entries are
+             the physical ids this process can see (the historical path).
+          2. LOCAL_RANK env — when CVD is unset (SIF Ray) but device pinning
+             ran in __init__, LOCAL_RANK already holds the physical id we
+             selected (ray.get_gpu_ids()[0] in the per-GPU-bundle path), so
+             NUMA binds to the SAME physical GPU torch.cuda.set_device() chose.
+             This corrects the prior `gpu_id = rank` fallback, which on GH200
+             could bind a different physical socket than the device in use,
+             because logical (rank) and physical ordering differ.
+          3. positional rank — last resort if neither is available.
         """
         try:
             from skyrl_train.utils.numa import set_numa_affinity_for_gpu
             cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-            gpu_id = int(cuda_devs[rank]) if cuda_devs[0] else rank
+            if cuda_devs[0]:
+                gpu_id = int(cuda_devs[rank])
+            else:
+                _lr = os.environ.get("LOCAL_RANK")
+                gpu_id = int(_lr) if _lr not in (None, "", "-1") else rank
             set_numa_affinity_for_gpu(gpu_id)
         except Exception as e:
             logger.debug(f"NUMA affinity setup skipped: {e}")
@@ -397,11 +421,16 @@ class PPORayActorGroup:
         colocate_all: bool = False,
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
+        pin_to_ray_gpu_id: bool = False,
     ) -> None:
         self.cfg = cfg
         self._num_nodes = num_nodes
         self._num_gpus_per_node = num_gpus_per_node
         self.ray_actor_type = ray_actor_type
+        # When True, each actor pins its CUDA device to ray.get_gpu_ids()[0]
+        # (reliable only when each actor owns a dedicated {GPU:1} bundle, i.e.
+        # the per-GPU-bundle policy PG). See DistributedTorchRayActor.__init__.
+        self._pin_to_ray_gpu_id = pin_to_ray_gpu_id
 
         # custom resources, see https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
         self._resources = resources
@@ -463,6 +492,7 @@ class PPORayActorGroup:
                 master_port=None,
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
+                pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
             )
         else:
             master_actor = self.ray_actor_type.options(
@@ -478,6 +508,7 @@ class PPORayActorGroup:
                 master_port=None,
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
+                pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
             )
         self._actor_handlers = [master_actor]
         # Create worker actors
@@ -508,6 +539,7 @@ class PPORayActorGroup:
                         master_port=master_port,
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
+                        pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
                     )
                 else:
                     worker_actor = self.ray_actor_type.options(
@@ -523,6 +555,7 @@ class PPORayActorGroup:
                         master_port=master_port,
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
+                        pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
                     )
                 self._actor_handlers.append(worker_actor)
 

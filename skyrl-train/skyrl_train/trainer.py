@@ -59,7 +59,7 @@ from skyrl_train.utils.trainer_utils import (
     DynamicSamplingState,
     build_dataloader,
 )
-from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.utils.utils import configure_ray_worker_logging, policy_per_gpu_bundles_enabled
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -740,6 +740,12 @@ class RayPPOTrainer:
                 assert pg is None, "dedicated policy_pg must not coexist with a shared policy/ref pg"
                 pg = policy_pg
 
+            # Pin each policy actor to its Ray-assigned physical GPU only when
+            # the dedicated policy PG uses per-GPU {GPU:1} bundles (each actor
+            # then owns one bundle == one GPU, so ray.get_gpu_ids()[0] is a
+            # distinct, reliable physical id even when the SIF Ray leaves
+            # CUDA_VISIBLE_DEVICES unmasked). Off otherwise → unchanged pinning.
+            _policy_pin_to_ray_gpu_id = policy_pg is not None and policy_per_gpu_bundles_enabled(cfg)
             policy_model = PPORayActorGroup(
                 cfg,
                 cfg.trainer.placement.policy_num_nodes,
@@ -749,6 +755,7 @@ class RayPPOTrainer:
                 num_gpus_per_actor=(1 if policy_pg is not None else (0.75 if pg else 1)),
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+                pin_to_ray_gpu_id=_policy_pin_to_ray_gpu_id,
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
