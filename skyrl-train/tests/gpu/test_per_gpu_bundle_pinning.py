@@ -63,17 +63,60 @@ def _make_cfg() -> DictConfig:
 
 
 def _probe_device_id(self):
-    """Run inside each actor: return the post-set_device physical placement."""
+    """Run inside each actor: apply the fix's pinning decision and return the
+    resulting physical placement + NUMA binding.
+
+    DistributedTorchRayActor.__init__ (the fix) only *writes* os.environ[
+    "LOCAL_RANK"] (= resolve_pinned_local_rank()); the actual
+    torch.cuda.set_device() + _set_numa_affinity() run later in the strategy's
+    setup_distributed(). This probe reproduces exactly that production sequence
+    (set_device(LOCAL_RANK) then _set_numa_affinity(rank)) so what we measure is
+    precisely where the fix's LOCAL_RANK lands the device + CPU/NUMA mask.
+    """
     import torch as _torch
     from skyrl_train.utils.utils import get_physical_gpu_id as _uuid
 
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ.get("RANK", "-1"))
+
+    # Pin exactly as setup_distributed() does (consumes the fix's LOCAL_RANK).
+    _torch.cuda.set_device(local_rank)
+    # Apply the same NUMA binding the worker does, keyed off the physical id.
+    try:
+        self._set_numa_affinity(rank)
+    except Exception:
+        pass
+
     dev = _torch.cuda.current_device()
+    # CPU affinity mask the NUMA bind produced (evidence the bind ran + is
+    # distinct per physical GPU socket).
+    try:
+        cpu_affinity = sorted(os.sched_getaffinity(0))
+        cpu_affinity_summary = (
+            f"{cpu_affinity[0]}-{cpu_affinity[-1]} (n={len(cpu_affinity)})"
+            if cpu_affinity else "none"
+        )
+    except Exception:
+        cpu_affinity_summary = "unavailable"
+    # GPU's hardware NUMA node (sysfs), to show device + NUMA agree.
+    gpu_numa_node = None
+    try:
+        from skyrl_train.utils.numa import _enumerate_gpus_from_sysfs
+
+        gpu_map = _enumerate_gpus_from_sysfs()
+        if gpu_map is not None:
+            gpu_numa_node = gpu_map.get(local_rank)
+    except Exception:
+        pass
+
     return {
-        "rank": int(os.environ.get("RANK", "-1")),
+        "rank": rank,
         "local_rank": os.environ.get("LOCAL_RANK"),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "current_device": dev,
         "physical_uuid": _uuid(),
+        "gpu_numa_node": gpu_numa_node,
+        "cpu_affinity": cpu_affinity_summary,
         "node_ip": ray.util.get_node_ip_address(),
     }
 
@@ -110,6 +153,16 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
         actor.__ray_call__.remote(_probe_device_id) for actor in policy._actor_handlers
     ])
 
+    # --- Per-rank evidence (UUID / device / NUMA), printed for the report. ---
+    print(f"\n=== trial {trial}: per-rank pinning evidence ===")
+    for p in sorted(probes, key=lambda x: x["rank"]):
+        print(
+            f"  rank={p['rank']:>2} local_rank={p['local_rank']} "
+            f"dev={p['current_device']} uuid={p['physical_uuid']} "
+            f"gpu_numa={p['gpu_numa_node']} cpu_aff={p['cpu_affinity']} "
+            f"node={p['node_ip']} CVD={p['cuda_visible_devices']}"
+        )
+
     # --- Distinctness: no two ranks share a physical GPU on the same node. ---
     by_node = {}
     for p in probes:
@@ -118,6 +171,7 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
     for node_ip, node_probes in by_node.items():
         uuids = [p["physical_uuid"] for p in node_probes]
         devs = [p["current_device"] for p in node_probes]
+        numas = [p["gpu_numa_node"] for p in node_probes]
         assert len(set(uuids)) == len(uuids), (
             f"node {node_ip}: ranks collided on the same physical GPU UUID: {node_probes}"
         )
@@ -127,6 +181,12 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
         assert len(node_probes) == GPUS_PER_NODE, (
             f"node {node_ip}: expected {GPUS_PER_NODE} ranks, got {len(node_probes)}"
         )
+        # NUMA: when sysfs NUMA nodes are resolvable, each rank's GPU must sit on
+        # its own NUMA node (the fix keys NUMA off the physical id it pinned).
+        if all(n is not None for n in numas):
+            assert len(set(numas)) == len(numas), (
+                f"node {node_ip}: ranks share a GPU NUMA node (wrong-socket bind): {node_probes}"
+            )
 
     # --- NVLink locality: a node's ranks are contiguous in rank order. ---
     ranks_sorted = sorted(probes, key=lambda p: p["rank"])
