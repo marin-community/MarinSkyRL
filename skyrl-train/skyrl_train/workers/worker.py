@@ -74,14 +74,16 @@ class DistributedTorchRayActor:
         #     0 within the masked view IS the assigned GPU, so LOCAL_RANK="0" is correct.
         #  3. NOSET unset BUT CUDA_VISIBLE_DEVICES is unset / empty / lists >1 device
         #     (newer Ray inside the megatron+vllm SIF no longer overrides the visible-device
-        #     env var, emitting "Ray will no longer override accelerator visible devices..."):
-        #     every per-node policy actor would then default LOCAL_RANK="0" and all
-        #     torch.cuda.set_device(0) onto the SAME physical GPU 0 -> ~90 GiB init collision
-        #     (the 80B reproducible init-OOM). Pin to the Ray-assigned physical id instead.
+        #     env var, emitting "Ray will no longer override accelerator visible devices...";
+        #     in this mode ray.get_gpu_ids() is ALSO unreliable — it returned [0] for every
+        #     one of the 4 per-node policy actors, so even pinning to get_gpu_ids()[0] still
+        #     collapses all of them onto physical GPU 0): every actor sees all GPUs, so bind
+        #     to the launcher-assigned per-node rank (rank % num_gpus_per_node = 0,1,2,3),
+        #     which is deterministically distinct per node and independent of Ray's
+        #     accelerator bookkeeping. This is the lever that fixes the reproducible
+        #     Qwen3-Next-80B init OOM (all 4 ranks materializing the 80B on GPU 0).
         #
-        # Case 2 keeps the historical behavior byte-identical (single-device mask -> "0");
-        # cases 1 and 3 both pin the Ray-assigned physical GPU, which is a no-op wherever
-        # ranks were already correctly spread.
+        # Case 2 keeps the historical behavior byte-identical (single-device mask -> "0").
         if ray_noset_visible_devices():
             os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
         else:
@@ -90,9 +92,14 @@ class DistributedTorchRayActor:
             if _masked_to_single:
                 os.environ["LOCAL_RANK"] = "0"
             else:
-                # Ray did not constrain this actor to a single visible device; bind to the
-                # actor's Ray-assigned physical GPU so per-node ranks land on distinct GPUs.
-                os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
+                # Ray did not constrain this actor to a single visible device and its GPU
+                # bookkeeping is unreliable; use the launcher-assigned per-node rank so the
+                # per-node actors land on distinct physical GPUs (0..num_gpus_per_node-1).
+                _device_count = torch.cuda.device_count()
+                if _device_count > 0 and 0 <= local_rank < _device_count:
+                    os.environ["LOCAL_RANK"] = str(local_rank)
+                else:
+                    os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
