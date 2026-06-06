@@ -50,6 +50,9 @@ def _make_cfg() -> DictConfig:
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.generator.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
+    # Placement-only smoke: use the console tracking backend so validate_cfg()
+    # does not require WANDB_API_KEY (the base config defaults logger="wandb").
+    cfg.trainer.logger = "console"
     # Disaggregated, no-ref, per-GPU-bundle dedicated policy PG (the fix path).
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.algorithm.use_kl_loss = False
