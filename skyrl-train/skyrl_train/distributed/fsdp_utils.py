@@ -282,37 +282,149 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # inference (which reads the MODEL's local params) is symmetric across ranks. full_sd holds
         # the real weights on rank 0 and is empty ({}) on the other ranks, which is exactly what
         # broadcast_from_rank0=True expects.
-        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-
         import os as _os
+        import sys as _sys
 
         _dbg = _os.environ.get("SKYRL_EP_LOADER_DEBUG", "") == "1"
-        if _dbg:
-            import sys as _sys
 
-            _keys = list(model.state_dict().keys())
-            _missing = [k for k in _keys if (dist.get_rank() == 0 and k not in full_sd)]
+        # ------------------------------------------------------------------
+        # STREAMED EP full-state-dict load (80B GPU-0 init OOM fix).
+        #
+        # WHY NOT torch's set_model_state_dict(broadcast_from_rank0=True):
+        # that loader is already per-param (it comments "Broadcast every tensor
+        # to avoid OOM for now"), but for EACH param it does
+        # `full_state[key].detach().to(cuda)` to stage the WHOLE param on GPU-0
+        # before the global broadcast. For an 80B grouped-MoE expert param (dim-0
+        # = num_experts, fused w1/w2/w3) that single tensor alone exceeds GPU-0's
+        # free VRAM (<1 GiB observed on jobs 605185/606619/607073) → init OOM at
+        # _broadcast_state_dict / _broadcast_tensors.
+        #
+        # THIS loader assembles each param's FULL tensor on CPU one dim-0 CHUNK at
+        # a time (rank-0 stages one chunk → GPU, GLOBAL-PG broadcast, every rank
+        # copies the chunk into a CPU full buffer, frees the GPU chunk), then
+        # extracts ONLY this rank's local shard from the CPU full tensor using
+        # each placement's OWN `_split_tensor` in mesh order — the exact local
+        # decomposition `distribute_tensor` performs, but WITHOUT its collective
+        # and WITHOUT ever putting the full tensor on GPU. `_split_tensor` is
+        # overridden by `_StridedShard` (the placement FSDP2 emits when a tensor
+        # dim is sharded by BOTH the ep and fsdp mesh dims, as the grouped experts
+        # are), so the shard layout is byte-identical to `distribute_tensor` for
+        # plain Shard, _StridedShard, AND Replicate. Peak GPU usage is therefore
+        # ONE dim-0 chunk + this rank's (already-sharded) local shard — the full
+        # ~2 GiB unsharded grouped-expert tensor is NEVER on GPU on any rank.
+        #
+        # Collective-safe: the ONLY collective is the per-chunk global-PG
+        # broadcast; every rank drives it in identical key+chunk order (the
+        # _split_tensor extraction is purely local). No submesh-scoped collective
+        # is interleaved, so the historical global-vs-submesh desync cannot recur.
+        # ------------------------------------------------------------------
+        from torch.distributed.tensor import DTensor
+
+        rank = dist.get_rank()
+        device = torch.device("cuda", torch.cuda.current_device())
+
+        # Per-broadcast row budget along dim 0. The grouped-expert params are the
+        # only ones large enough to matter; a small budget caps the GPU transient.
+        # Override via env for finer granularity if even one chunk is too large.
+        max_rows = int(_os.environ.get("SKYRL_EP_LOADER_CHUNK_ROWS", "8"))
+        if max_rows < 1:
+            max_rows = 1
+
+        def _extract_local_shard(full_cpu, dtensor_meta):
+            """Reproduce distribute_tensor's LOCAL scatter result for this rank.
+
+            Walks mesh dims in order; for each, splits the running tensor with the
+            placement's own `_split_tensor` (so _StridedShard is honored) and keeps
+            this rank's coordinate slice. Returns the local-shard CPU tensor.
+            """
+            mesh = dtensor_meta.device_mesh
+            placements = dtensor_meta.placements
+            coord = mesh.get_coordinate()  # this rank's coord per mesh dim
+            cur = full_cpu
+            for mesh_dim, placement in enumerate(placements):
+                if placement.is_shard():
+                    num_chunks = mesh.size(mesh_dim)
+                    shards, _ = placement._split_tensor(
+                        cur, num_chunks, with_padding=False, contiguous=True
+                    )
+                    cur = shards[coord[mesh_dim]]
+                # Replicate / Partial: no narrowing on this mesh dim.
+            return cur.contiguous()
+
+        meta_sharded_sd = model.state_dict()
+        new_sd = {}
+
+        # Deterministic, all-ranks-identical iteration order.
+        for key in meta_sharded_sd.keys():
+            local_state = meta_sharded_sd[key]
+
+            # Rank 0 holds the real (CPU) source; other ranks have nothing.
+            src = full_sd.get(key, None) if rank == 0 else None
+            if rank == 0 and src is None:
+                raise RuntimeError(f"[EP-LOADER] missing key on rank 0: {key}")
+
+            # Shape/dtype come from the local (meta) param — identical on all ranks.
+            full_shape = tuple(local_state.shape)
+            dtype = local_state.dtype
+            is_dt = isinstance(local_state, DTensor)
+
+            # Assemble the FULL tensor on CPU, chunk by chunk, broadcasting from
+            # rank 0. GPU only ever holds one chunk at a time.
+            full_cpu = torch.empty(full_shape, dtype=dtype, device="cpu")
+            if len(full_shape) == 0:  # 0-D scalar
+                gpu = torch.empty((), device=device, dtype=dtype)
+                if rank == 0:
+                    gpu.copy_(src.detach().to(device=device, dtype=dtype))
+                dist.broadcast(gpu, src=0)
+                full_cpu.copy_(gpu.cpu())
+                del gpu
+            else:
+                nrows = full_shape[0]
+                rows_per_chunk = max(1, min(max_rows, nrows))
+                start = 0
+                while start < nrows:
+                    end = min(start + rows_per_chunk, nrows)
+                    if rank == 0:
+                        gpu = src[start:end].detach().to(device=device, dtype=dtype, copy=True)
+                    else:
+                        gpu = torch.empty((end - start,) + full_shape[1:], device=device, dtype=dtype)
+                    dist.broadcast(gpu, src=0)
+                    full_cpu[start:end].copy_(gpu.cpu())
+                    del gpu
+                    start = end
+            torch.cuda.empty_cache()
+
+            # Extract this rank's local shard (LOCAL, no collective) and place on GPU.
+            if is_dt:
+                local_cpu = _extract_local_shard(full_cpu, local_state)
+                local_gpu = local_cpu.to(device=device, dtype=dtype)
+                new_sd[key] = DTensor.from_local(
+                    local_gpu,
+                    local_state.device_mesh,
+                    local_state.placements,
+                    shape=local_state.shape,
+                    stride=local_state.stride(),
+                )
+                del local_cpu
+            else:
+                new_sd[key] = full_cpu.to(device=device, dtype=dtype)
+
+            del full_cpu
+
+        if _dbg:
             print(
-                f"[EP-LOADER-DBG] rank={dist.get_rank()} set_model_state_dict, nkeys={len(_keys)} "
-                f"first3={_keys[:3]} last1={_keys[-1:]} rank0_missing_in_full_sd={_missing[:5]}",
+                f"[EP-LOADER-DBG] rank={rank} streamed-load assembled {len(new_sd)} params "
+                f"(chunk_rows={max_rows}); calling load_state_dict(assign=True)",
                 file=_sys.stderr,
                 flush=True,
             )
 
-        set_model_state_dict(
-            model,
-            full_sd,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True, strict=True),
-        )
+        # assign=True: params are meta DTensors, replace storage in-place.
+        model.load_state_dict(new_sd, assign=True)
+        del new_sd
 
         if _dbg:
-            import sys as _sys
-
-            print(
-                f"[EP-LOADER-DBG] rank={dist.get_rank()} set_model_state_dict returned cleanly",
-                file=_sys.stderr,
-                flush=True,
-            )
+            print(f"[EP-LOADER-DBG] rank={rank} streamed-load returned cleanly", file=_sys.stderr, flush=True)
 
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
         offload_fsdp2_model_to_cpu(model)
