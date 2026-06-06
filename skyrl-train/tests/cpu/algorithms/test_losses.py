@@ -8,7 +8,7 @@ import pytest
 import torch
 from omegaconf import DictConfig
 
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean, reduce_loss
 
 
 # Adapted a good test from NeMO-RL
@@ -621,3 +621,67 @@ def test_sapo_policy_loss_basic():
 
     # SAPO should always report clip_ratio = 0.0
     assert actual_clip_ratio == 0.0
+
+
+def test_reduce_loss_seq_mean_token_sum_norm_global():
+    """seq_mean_token_sum_norm_global: loss == sum(loss * mask) / global_denom.
+
+    Also a regression guard that the EXISTING reduction modes are byte-identical
+    when the new global_denom param is left at its default (None).
+    """
+    device = "cpu"
+
+    loss = torch.tensor(
+        [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
+        device=device,
+    )
+    loss_mask = torch.tensor(
+        [[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]],
+        device=device,
+    )
+    max_seq_len = 4
+    global_denom = 5.0  # e.g. global_num_seqs=... such that Z is this known value
+
+    # --- New mode: sum of masked loss / global_denom (NOT a mean) ---
+    out = reduce_loss(
+        loss,
+        loss_mask,
+        "seq_mean_token_sum_norm_global",
+        max_seq_len=max_seq_len,
+        global_denom=global_denom,
+    )
+    expected = torch.sum(loss * loss_mask) / global_denom
+    torch.testing.assert_close(out, expected, rtol=1e-6, atol=1e-8)
+
+    # New mode without a mask -> sum of all / global_denom
+    out_nomask = reduce_loss(
+        loss,
+        None,
+        "seq_mean_token_sum_norm_global",
+        max_seq_len=max_seq_len,
+        global_denom=global_denom,
+    )
+    torch.testing.assert_close(out_nomask, torch.sum(loss) / global_denom, rtol=1e-6, atol=1e-8)
+
+    # Missing global_denom must assert
+    with pytest.raises(AssertionError):
+        reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm_global", max_seq_len=max_seq_len)
+
+    # --- Regression guard: the existing modes are unchanged with default global_denom=None ---
+    # token_mean == masked_mean
+    tm = reduce_loss(loss, loss_mask, "token_mean", max_seq_len=max_seq_len)
+    torch.testing.assert_close(
+        tm, (loss * loss_mask).sum() / (loss_mask.sum() + 1e-8), rtol=1e-6, atol=1e-8
+    )
+    # sequence_mean == per-seq masked mean, then batch mean
+    sm = reduce_loss(loss, loss_mask, "sequence_mean", max_seq_len=max_seq_len)
+    seq_means = (loss * loss_mask).sum(dim=-1) / (loss_mask.sum(dim=-1) + 1e-8)
+    torch.testing.assert_close(sm, seq_means.mean(), rtol=1e-6, atol=1e-8)
+    # seq_mean_token_sum_norm (Dr.GRPO) == per-seq token-sum / max_seq_len, then mean
+    drgrpo = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", max_seq_len=max_seq_len)
+    torch.testing.assert_close(
+        drgrpo, (torch.sum(loss * loss_mask, dim=-1) / max_seq_len).mean(), rtol=1e-6, atol=1e-8
+    )
+
+    # The new mode is genuinely different from Dr.GRPO (sum-vs-mean of seq terms)
+    assert not torch.allclose(out, drgrpo, rtol=1e-3)

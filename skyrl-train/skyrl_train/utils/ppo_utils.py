@@ -863,7 +863,11 @@ def ppo_policy_loss(
         "token_mean",
         "sequence_mean",
         "seq_mean_token_sum_norm",
-    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
+        "seq_mean_token_sum_norm_global",
+    ], (
+        "loss_reduction must be 'token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', "
+        "or 'seq_mean_token_sum_norm_global'"
+    )
 
     ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
@@ -885,7 +889,13 @@ def ppo_policy_loss(
         tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
         loss = loss * tis_imp_ratio
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    loss = reduce_loss(
+        loss,
+        loss_mask,
+        loss_reduction,
+        config.max_seq_len,
+        global_denom=getattr(config, "global_loss_denom", None),
+    )
     return loss, clip_ratio
 
 
@@ -1176,8 +1186,11 @@ def compute_policy_loss_kl_cov(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
+    loss_reduction: Literal[
+        "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"
+    ],
     max_seq_len: Optional[int] = None,
+    global_denom: Optional[float] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
@@ -1196,6 +1209,22 @@ def reduce_loss(
             # If no mask, assume all tokens are valid
             seq_losses = torch.sum(loss, dim=-1) / max_seq_len
         loss = torch.mean(seq_losses)
+    elif loss_reduction == "seq_mean_token_sum_norm_global":
+        # GLOBAL length-unbiased normalizer (Dr.GRPO fixed-const promoted to global).
+        # Sum (NOT mean) the masked per-token loss for this micro-batch, divide by a
+        # single global denominator Z = global_num_seqs * max_seq_len that is computed
+        # once on the driver via a single all_reduce. Summing here (rather than meaning)
+        # is what lets each micro-batch contribute its raw numerator to the one global
+        # denominator -> the realized objective is (1/Z) * sum over the whole batch,
+        # sidestepping the mean-of-per-microbatch-means size bias under grad-accum + async.
+        # The caller MUST drop the /accumulation_steps on this (already-globally-normed)
+        # policy term (see worker.py training_step).
+        assert global_denom is not None, "global_denom must be provided for seq_mean_token_sum_norm_global"
+        if loss_mask is not None:
+            loss = torch.sum(loss * loss_mask) / global_denom
+        else:
+            # If no mask, assume all tokens are valid
+            loss = torch.sum(loss) / global_denom
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
     return loss

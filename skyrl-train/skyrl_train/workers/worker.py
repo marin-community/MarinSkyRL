@@ -727,6 +727,32 @@ class PolicyWorkerBase(Worker):
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
 
+        # ── Global length-unbiased normalizer (seq_mean_token_sum_norm_global only) ──
+        # Compute the SINGLE global denominator Z = global_num_seqs * max_seq_len once,
+        # before the epoch loop, via ONE single-scalar all_reduce(op="sum"). This is the
+        # crux fix for the async/grad-accum size bias: instead of dividing each
+        # micro-batch by accumulation_steps (a count -> mean-of-means), every
+        # micro-batch's masked loss-SUM is divided by this one global denom, so the
+        # realized objective is a single global normalization over the whole DP batch.
+        #
+        # NCCL-safety (avoids the log-ratio v2/v3 status-dict key-mismatch deadlock):
+        # a single scalar tensor, a fixed code path every rank executes, clamp(min=1)
+        # so a rank with zero non-zero-advantage sequences still contributes a valid
+        # reduce. This is a no-op for every other loss_reduction (gated).
+        if self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
+            advantages_all = train_data["advantages"]
+            # Count sequences with a non-zero advantage locally (zero-advantage seqs
+            # -- excluded / k<2 / zero-variance RLOO groups -- contribute no gradient,
+            # so they must not inflate Z).
+            local_num_seqs = float((advantages_all.abs().sum(dim=-1) > 0).sum().item())
+            global_num_seqs = self.strategy.all_reduce(
+                torch.tensor(local_num_seqs, device=torch.cuda.current_device()), op="sum"
+            )
+            global_num_seqs = float(global_num_seqs.item())
+            self.cfg.trainer.algorithm.global_loss_denom = (
+                max(global_num_seqs, 1.0) * self.cfg.trainer.algorithm.max_seq_len
+            )
+
         # Clear fragmented GPU memory before training to avoid OOM at step boundaries
         # (matches CriticWorkerBase.ppo_train behavior)
         torch.cuda.empty_cache()
@@ -875,8 +901,16 @@ class PolicyWorkerBase(Worker):
             kl_loss = torch.tensor(0.0)
         kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-        loss = policy_loss + kl_loss_term - entropy_loss_term
-        loss = loss / accumulation_steps
+        if self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
+            # The policy term is already normalized by the SINGLE global denominator
+            # Z = global_num_seqs * max_seq_len (set on the driver before the epoch loop),
+            # so dividing it again by accumulation_steps would double-normalize it. The
+            # KL / entropy auxiliary terms are per-micro-batch means and DO still need the
+            # /accumulation_steps to average correctly across the gradient-accumulation window.
+            loss = policy_loss + (kl_loss_term - entropy_loss_term) / accumulation_steps
+        else:
+            loss = policy_loss + kl_loss_term - entropy_loss_term
+            loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
