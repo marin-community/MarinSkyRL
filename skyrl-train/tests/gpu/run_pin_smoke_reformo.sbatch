@@ -68,9 +68,22 @@ export SMOKE_NUM_NODES=2
 export SMOKE_GPUS_PER_NODE=4
 export SMOKE_TRIALS="${SMOKE_TRIALS:-3}"
 
+# SMOKE_NOSET=1 forces RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES into the SIF
+# Ray (so Ray does NOT mask CVD -> ray_noset_visible_devices() True -> the
+# Case-1/Case-3 physical-id pinning path, matching the unmasked-CVD environment
+# the 80B SIF exhibits). Default unset -> Ray masks CVD per actor (Case 2).
+NOSET_ENV=()
+if [ "${SMOKE_NOSET:-0}" = "1" ]; then
+  export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+  export APPTAINERENV_RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+  NOSET_ENV=(--env "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1")
+  echo "SMOKE_NOSET=1 -> forcing unmasked CVD (Case-1/3 physical-id pin path)"
+fi
+
 # Apptainer prefix (no overlays needed for a placement smoke; SIF Python only).
 APPT=(apptainer exec --nv --bind /e/scratch --bind /e/data1
       --env "PYTHONPATH=$SMOKE_PYTHONPATH"
+      "${NOSET_ENV[@]}"
       --env "WANDB_MODE=offline" "$SIF")
 
 LOGDIR=/e/scratch/jureap59/feuer1/tmp_pinning_smoke/logs

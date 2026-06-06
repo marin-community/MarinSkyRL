@@ -112,10 +112,14 @@ def _probe_device_id(self):
     except Exception:
         pass
 
+    from skyrl_train.utils.utils import ray_noset_visible_devices as _noset
+
     return {
         "rank": rank,
         "local_rank": os.environ.get("LOCAL_RANK"),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "ray_gpu_ids": ray.get_gpu_ids(),
+        "noset_visible_devices": bool(_noset()),
         "current_device": dev,
         "physical_uuid": _uuid(),
         "gpu_numa_node": gpu_numa_node,
@@ -156,14 +160,22 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
         actor.__ray_call__.remote(_probe_device_id) for actor in policy._actor_handlers
     ])
 
-    # --- Per-rank evidence (UUID / device / NUMA), printed for the report. ---
-    print(f"\n=== trial {trial}: per-rank pinning evidence ===")
+    # --- Per-rank evidence (UUID / device / NUMA / Ray-case), printed for the
+    # report. The (noset, CVD) pair identifies which resolve_pinned_local_rank
+    # branch fired: noset=True -> Case 1 (LOCAL_RANK=ray_gpu_ids[0]); CVD masked
+    # to one device -> Case 2 (LOCAL_RANK="0"); CVD unset + pin -> Case 3. ---
+    p0 = probes[0]
+    print(
+        f"\n=== trial {trial}: per-rank pinning evidence "
+        f"(noset_visible_devices={p0['noset_visible_devices']}) ==="
+    )
     for p in sorted(probes, key=lambda x: x["rank"]):
         print(
             f"  rank={p['rank']:>2} local_rank={p['local_rank']} "
-            f"dev={p['current_device']} uuid={p['physical_uuid']} "
-            f"gpu_numa={p['gpu_numa_node']} cpu_aff={p['cpu_affinity']} "
-            f"node={p['node_ip']} CVD={p['cuda_visible_devices']}"
+            f"dev={p['current_device']} ray_gpu_ids={p['ray_gpu_ids']} "
+            f"uuid={p['physical_uuid']} gpu_numa={p['gpu_numa_node']} "
+            f"cpu_aff={p['cpu_affinity']} node={p['node_ip']} "
+            f"CVD={p['cuda_visible_devices']}"
         )
 
     # --- Distinctness: no two ranks share a physical GPU on the same node. ---
@@ -184,9 +196,18 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
         assert len(node_probes) == GPUS_PER_NODE, (
             f"node {node_ip}: expected {GPUS_PER_NODE} ranks, got {len(node_probes)}"
         )
-        # NUMA: when sysfs NUMA nodes are resolvable, each rank's GPU must sit on
-        # its own NUMA node (the fix keys NUMA off the physical id it pinned).
-        if all(n is not None for n in numas):
+        # NUMA distinctness only has meaning when CUDA_VISIBLE_DEVICES is UNSET
+        # (the Case-3 / pin_to_ray_gpu_id path the fix adds): there every actor
+        # sees all GPUs, so the sysfs NUMA node read for the pinned physical id
+        # is a real, per-rank-distinct value. When Ray MASKS CVD to one device
+        # per actor (Case 2), sysfs enumerates only that single visible GPU as
+        # index 0 -> gpu_numa is 0 for everyone by construction, and the proof of
+        # a distinct physical GPU (and therefore a distinct NUMA domain) is the
+        # distinct UUID asserted above, not the masked-view sysfs index.
+        cvd_unset = all(
+            (p["cuda_visible_devices"] in (None, "")) for p in node_probes
+        )
+        if cvd_unset and all(n is not None for n in numas):
             assert len(set(numas)) == len(numas), (
                 f"node {node_ip}: ranks share a GPU NUMA node (wrong-socket bind): {node_probes}"
             )
