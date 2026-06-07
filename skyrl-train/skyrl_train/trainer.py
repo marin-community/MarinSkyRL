@@ -1237,7 +1237,22 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
+        # MoE router-replay (R3): the pre-update old-logprob / ref forward MUST
+        # replay the SAME captured routing as the training forward, otherwise the
+        # old-logprob pass uses NATIVE top-k routing while the training pass
+        # (worker.training_step -> model.forward(rollout_routed_experts=...)) uses
+        # REPLAY routing. For an MoE policy the two routings pick different experts
+        # -> divergent logprobs over the SAME tokens/weights -> a huge step-1
+        # importance ratio (log_ratio_abs_max ~ 19, policy_loss ~ 1e4,
+        # raw_grad_norm ~ 1e5) that corrupts the policy. Threading routed_experts
+        # into the forward-pass batch makes old/ref/train forwards use the
+        # identical (replay) path so step 1 is genuinely on-policy (log_ratio ~ 0).
+        # Gated on presence: flag-off (8B / no router-replay) batches never carry
+        # this key, so the selected key set is byte-identical to before.
+        fwd_keys = ["sequences", "attention_mask"]
+        if "rollout_routed_experts" in training_input.keys():
+            fwd_keys.append("rollout_routed_experts")
+        data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         def collect_results(actor_infos, results, key):
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)

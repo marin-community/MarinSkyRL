@@ -1205,6 +1205,17 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        # MoE router-replay (R3): replay the SAME captured routing as the training
+        # forward so the old-logprob (pi_old) pass and the training pass share the
+        # identical forward path. Without this the old-logprob pass falls through to
+        # NATIVE top-k routing while training uses REPLAY routing -> different
+        # experts -> a pathological step-1 importance ratio. Absent key (8B /
+        # router-replay off) -> None -> stock native forward, unchanged.
+        rollout_routed_experts = (
+            micro_batch["rollout_routed_experts"]
+            if "rollout_routed_experts" in micro_batch.keys()
+            else None
+        )
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -1213,6 +1224,7 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.generator.sampling_params.temperature,
+                rollout_routed_experts=rollout_routed_experts,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1408,8 +1420,23 @@ class RefWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        # MoE router-replay (R3): ref model also replays captured routing (it is
+        # constructed with moe_router_replay=true), so its KL-reference logprobs
+        # are computed on the same forward path as the policy. Absent key -> None
+        # -> stock native forward (8B / flag-off unchanged).
+        rollout_routed_experts = (
+            micro_batch["rollout_routed_experts"]
+            if "rollout_routed_experts" in micro_batch.keys()
+            else None
+        )
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            log_probs = self.model(sequences, response_length, attention_mask, return_output=False)
+            log_probs = self.model(
+                sequences,
+                response_length,
+                attention_mask,
+                return_output=False,
+                rollout_routed_experts=rollout_routed_experts,
+            )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(
             {"output": log_probs},
