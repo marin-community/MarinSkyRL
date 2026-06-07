@@ -72,6 +72,35 @@ def _parse_vllm_version() -> version.Version:
         return version.parse("999.0.0")
 
 
+def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str, Any]:
+    """Build an OpenAI-style ErrorResponse dict, robust to vLLM's ErrorInfo move.
+
+    vLLM >= 0.10 wraps the error fields in a nested ``ErrorInfo``; older vLLM put
+    them flat on ``ErrorResponse``. vLLM 0.16 ALSO relocated ``ErrorInfo`` out of
+    the flat ``vllm.entrypoints.openai.protocol`` module (which no longer exists)
+    into ``vllm.entrypoints.openai.engine.protocol`` — importing the old path
+    raised ``ModuleNotFoundError`` inside the engine's request-error handler
+    (vllm_engine.py:1591), turning every recoverable per-request error into an
+    unhandled crash. Try the new sub-package path first, then the old flat path,
+    then fall back to the flat-field ErrorResponse for pre-0.10 vLLM.
+    """
+    ErrorInfo = None
+    try:  # vLLM >= 0.16 (sub-package layout, same module as ErrorResponse)
+        from vllm.entrypoints.openai.engine.protocol import ErrorInfo  # type: ignore
+    except ImportError:
+        try:  # vLLM 0.10–0.15 (flat layout)
+            from vllm.entrypoints.openai.protocol import ErrorInfo  # type: ignore
+        except ImportError:
+            ErrorInfo = None
+
+    if ErrorInfo is not None:
+        return ErrorResponse(
+            error=ErrorInfo(message=message, type=type_phrase, code=code),
+        ).model_dump()
+    # pre-0.10 vLLM: flat fields directly on ErrorResponse.
+    return ErrorResponse(message=message, type=type_phrase, code=code).model_dump()
+
+
 @dataclass
 class Logprob:
     logprob: float
@@ -1529,22 +1558,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            if _parse_vllm_version() >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=str(e),
-                        type=HTTPStatus.BAD_REQUEST.phrase,
-                        code=HTTPStatus.BAD_REQUEST.value,
-                    ),
-                ).model_dump()
-            else:
-                return ErrorResponse(
-                    message=str(e),
-                    type=HTTPStatus.BAD_REQUEST.phrase,
-                    code=HTTPStatus.BAD_REQUEST.value,
-                ).model_dump()
+            return _build_error_response(
+                str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value
+            )
 
         # 2. Call vllm engine
         try:
@@ -1587,22 +1603,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             if is_input_overflow:
                 logger.warning("Input-overflow rejected by vLLM serving (returning 400, non-retryable): %s", e)
 
-            if _parse_vllm_version() >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=str(e),
-                        type=status.phrase,
-                        code=status.value,
-                    ),
-                ).model_dump()
-            else:
-                return ErrorResponse(
-                    message=str(e),
-                    type=status.phrase,
-                    code=status.value,
-                ).model_dump()
+            return _build_error_response(str(e), status.phrase, status.value)
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.
