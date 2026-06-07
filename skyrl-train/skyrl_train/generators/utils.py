@@ -10,40 +10,137 @@ from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 
 
+# Sentinel used to mark logprob positions that the alignment layer could NOT
+# recover (no vLLM logprob available for that training token). Distinct from a
+# legitimate 0.0 logprob so the metrics layer can count "holes" exactly. The
+# training tensor still consumes a float, so callers replace UNALIGNED_LOGPROB
+# with 0.0 right before emitting; the metrics are computed BEFORE that step.
+UNALIGNED_LOGPROB = float("nan")
+
+
+class AlignmentStats:
+    """Per-assistant-message alignment bookkeeping for TIS logprob mapping.
+
+    Carries enough signal to emit ``tis/exact_match_fraction``,
+    ``tis/lcs_fallback_fraction`` and ``tis/alignment_fail_count`` at the batch
+    level so an LCS fallback or a token-count divergence can NEVER silently
+    degrade TIS — it is always observable on the dashboard.
+
+    Fields (all token-counted, summed across messages in a trajectory):
+        n_tokens:          total training (generated) tokens seen
+        n_exact:           tokens mapped via the exact (token_id-zip) path
+        n_lcs:             tokens mapped via the LCS string fallback
+        n_unaligned:       training tokens that received NO vLLM logprob (holes)
+        n_messages:        assistant messages processed
+        n_lcs_messages:    assistant messages that took the LCS fallback path
+        n_failed_messages: assistant messages where alignment fully failed
+                           (entire message zeroed)
+    """
+
+    __slots__ = (
+        "n_tokens",
+        "n_exact",
+        "n_lcs",
+        "n_unaligned",
+        "n_messages",
+        "n_lcs_messages",
+        "n_failed_messages",
+    )
+
+    def __init__(self):
+        self.n_tokens = 0
+        self.n_exact = 0
+        self.n_lcs = 0
+        self.n_unaligned = 0
+        self.n_messages = 0
+        self.n_lcs_messages = 0
+        self.n_failed_messages = 0
+
+    def merge(self, other: "AlignmentStats") -> None:
+        self.n_tokens += other.n_tokens
+        self.n_exact += other.n_exact
+        self.n_lcs += other.n_lcs
+        self.n_unaligned += other.n_unaligned
+        self.n_messages += other.n_messages
+        self.n_lcs_messages += other.n_lcs_messages
+        self.n_failed_messages += other.n_failed_messages
+
+    def as_metrics(self, prefix: str = "tis/") -> Dict[str, float]:
+        n = max(self.n_tokens, 1)
+        return {
+            f"{prefix}aligned_tokens": float(self.n_tokens),
+            f"{prefix}exact_match_fraction": self.n_exact / n,
+            f"{prefix}lcs_fallback_fraction": self.n_lcs / n,
+            f"{prefix}unaligned_fraction": self.n_unaligned / n,
+            f"{prefix}alignment_fail_count": float(self.n_failed_messages),
+            f"{prefix}lcs_fallback_messages": float(self.n_lcs_messages),
+        }
+
+
+def align_logprobs_by_token_ids(
+    generated_token_ids: List[int],
+    vllm_token_ids: List[int],
+    vllm_logprobs: List[float],
+    stats: Optional["AlignmentStats"] = None,
+) -> Optional[List[float]]:
+    """EXACT alignment: zip vLLM logprobs onto the training tokens by token id.
+
+    This is the ROBUST path. vLLM emits, per generated token, both the token id
+    (``completion_token_ids``) and its logprob (``logprobs``), index-aligned by
+    construction. When the training-side ``generated_token_ids`` (sliced out of
+    the re-tokenized assistant message) are IDENTICAL to ``vllm_token_ids``, the
+    logprobs map 1:1 with NO guessing — positions are exact.
+
+    Returns the per-token logprob list (len == len(generated_token_ids)) on an
+    exact id match, or ``None`` if the ids diverge (caller should fall back to
+    LCS and record the fallback in ``stats``). A divergence is expected to be
+    rare; when it happens it means the served chat template / tokenizer and the
+    training re-tokenization produced different ids for the same assistant turn.
+    """
+    if vllm_token_ids is None or vllm_logprobs is None:
+        return None
+    if len(vllm_token_ids) != len(vllm_logprobs):
+        # vLLM contract violation (ids and logprobs must be parallel). Don't
+        # trust either — force the caller down the LCS path.
+        return None
+    if list(generated_token_ids) != list(vllm_token_ids):
+        return None
+    if stats is not None:
+        stats.n_exact += len(generated_token_ids)
+    return list(vllm_logprobs)
+
+
 def align_logprobs_with_lcs(
     retokenized_ids: List[int],
     vllm_token_logprobs: List[Dict[str, Any]],
     tokenizer,
+    stats: Optional["AlignmentStats"] = None,
 ) -> List[float]:
     """Align vLLM logprobs to re-tokenized IDs using LCS on token strings.
 
-    When re-tokenizing vLLM output with a different tokenizer (e.g., for TIS training),
-    the token counts may differ slightly (off-by-one or more). This function uses
-    Longest Common Subsequence (LCS) matching on token strings to align the logprobs
-    from vLLM to the re-tokenized sequence.
+    LAST-RESORT fallback. Prefer :func:`align_logprobs_by_token_ids`, which is
+    exact. This LCS string-match is used only when the exact token-id path is
+    unavailable (no ``completion_token_ids``) or the ids diverged. It is
+    inherently a guess and CAN misalign, so every invocation is recorded in
+    ``stats`` (``n_lcs`` / ``n_lcs_messages`` / ``n_unaligned``) and surfaced as
+    the ``tis/lcs_fallback_fraction`` metric — it must never silently degrade TIS.
 
     Args:
         retokenized_ids: Token IDs from re-tokenizing the response text
         vllm_token_logprobs: List of dicts with "token" (str) and "logprob" (float)
             from Harbor's rollout_details
         tokenizer: HuggingFace tokenizer used for re-tokenization
+        stats: Optional AlignmentStats to record fallback counts into.
 
     Returns:
         List of aligned logprobs, one per retokenized_id. Unmatched tokens get 0.0.
-
-    Example:
-        >>> # vLLM tokenized as ["Hello", " world", "!"] with logprobs [-0.1, -0.2, -0.3]
-        >>> # Re-tokenizer splits as ["Hello", " ", "world", "!"]
-        >>> vllm_logprobs = [
-        ...     {"token": "Hello", "logprob": -0.1},
-        ...     {"token": " world", "logprob": -0.2},
-        ...     {"token": "!", "logprob": -0.3}
-        ... ]
-        >>> retok_ids = tokenizer.encode("Hello world!")  # [1, 2, 3, 4]
-        >>> aligned = align_logprobs_with_lcs(retok_ids, vllm_logprobs, tokenizer)
-        >>> # Returns logprobs aligned to retokenized sequence via LCS matching
     """
+    if stats is not None:
+        stats.n_lcs_messages += 1
     if not vllm_token_logprobs:
+        if stats is not None:
+            stats.n_unaligned += len(retokenized_ids)
+            stats.n_failed_messages += 1
         return [0.0] * len(retokenized_ids)
 
     if not retokenized_ids:
@@ -59,18 +156,27 @@ def align_logprobs_with_lcs(
     # Use SequenceMatcher to find LCS alignment
     matcher = SequenceMatcher(None, retok_strings, vllm_strings)
     aligned = [0.0] * len(retokenized_ids)
+    matched_mask = [False] * len(retokenized_ids)
 
     # Get all matching blocks and assign logprobs
     for a_start, b_start, size in matcher.get_matching_blocks():
         for i in range(size):
             aligned[a_start + i] = vllm_logprobs[b_start + i]
+            matched_mask[a_start + i] = True
+
+    matched_count = sum(1 for m in matched_mask if m)
+    if stats is not None:
+        stats.n_lcs += matched_count
+        stats.n_unaligned += len(retokenized_ids) - matched_count
+        if matched_count == 0:
+            stats.n_failed_messages += 1
 
     # Log alignment statistics for debugging
-    matched_count = sum(1 for lp in aligned if lp != 0.0)
     if matched_count < len(retokenized_ids) * 0.9:  # Less than 90% matched
-        logger.debug(
-            f"LCS alignment: matched {matched_count}/{len(retokenized_ids)} tokens "
-            f"(vLLM had {len(vllm_token_logprobs)} tokens). "
+        logger.warning(
+            f"TIS LCS fallback: matched only {matched_count}/{len(retokenized_ids)} tokens "
+            f"(vLLM had {len(vllm_token_logprobs)} tokens). This indicates a "
+            f"tokenizer/chat-template mismatch between serving and training. "
             f"First few retok: {retok_strings[:5]}, vLLM: {vllm_strings[:5]}"
         )
 
@@ -581,17 +687,23 @@ def extract_logprobs_from_rollout_details(
             Can be None or empty if rollout details weren't collected.
 
     Returns:
-        Per-turn logprobs in format [[{token, logprob}_turn1], [{token, logprob}_turn2], ...],
-        or None if rollout_details is empty/missing or doesn't contain logprobs.
-        Each inner dict has "token" (str) and "logprob" (float) keys.
+        Per-turn logprobs, or None if rollout_details is empty/missing or doesn't
+        contain logprobs. Two inner formats are accepted and both are now
+        supported (the float format is the canonical Harbor format and pairs
+        index-for-index with ``completion_token_ids``):
+            - float format: [[float, float, ...]_turn1, ...]
+            - dict  format: [[{"token": str, "logprob": float}, ...]_turn1, ...]
+        The float format is preferred: combined with the per-turn
+        ``completion_token_ids`` (see :func:`extract_token_ids_from_rollout_details`)
+        it enables the EXACT token-id alignment path, which needs no LCS guessing.
 
     Example:
         >>> rollout_details = result.agent_result.rollout_details
         >>> assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
-        >>> if assistant_logprobs:
-        ...     response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-        ...         messages, tokenizer, assistant_logprobs
-        ...     )
+        >>> assistant_token_ids = extract_token_ids_from_rollout_details(rollout_details)
+        >>> response_ids, loss_mask, rollout_logprobs, _stats = get_response_ids_and_loss_mask_from_messages(
+        ...     messages, tokenizer, assistant_logprobs, assistant_token_ids=assistant_token_ids
+        ... )
     """
     if not rollout_details or len(rollout_details) == 0:
         return None
@@ -620,22 +732,48 @@ def extract_logprobs_from_rollout_details(
         )
         return None
 
-    # Validate the inner structure contains dicts with token+logprob (new format)
-    # or just floats (legacy format - handle gracefully)
-    if len(logprobs) > 0 and len(logprobs[0]) > 0:
-        first_item = logprobs[0][0]
-        if isinstance(first_item, (int, float)):
-            # Legacy format: list[list[float]] - convert to new format without token strings
-            # This allows backward compatibility but LCS alignment won't work
-            logger.warning(
-                "Detected legacy logprobs format (list[list[float]]). "
-                "Token strings not available, LCS alignment will be disabled. "
-                "Update Harbor to get token strings for proper TIS support."
-            )
-            return None  # Return None to disable logprobs for legacy format
-
+    # Float format ([[float, ...], ...]) is now FULLY supported via the exact
+    # token-id alignment path (it rides index-for-index with completion_token_ids),
+    # so we no longer disable TIS for it. Dict format ([[{token, logprob}], ...])
+    # is still accepted for the LCS fallback path. We pass either format through
+    # untouched; the downstream alignment layer detects which it received.
     logger.debug(f"Extracted logprobs from rollout_details: {len(logprobs)} turns")
     return logprobs
+
+
+def extract_token_ids_from_rollout_details(
+    rollout_details: Optional[List[Dict[str, Any]]],
+) -> Optional[List[List[int]]]:
+    """Extract per-turn ``completion_token_ids`` from Harbor's rollout_details.
+
+    These are the EXACT token ids vLLM generated for each assistant turn,
+    index-aligned with the per-turn ``logprobs`` floats. Carrying them into
+    :func:`get_response_ids_and_loss_mask_from_messages` lets TIS map logprobs to
+    training tokens by token id (exact, no re-tokenization guess) instead of
+    string-LCS. Mirrors :func:`extract_logprobs_from_rollout_details`.
+
+    Returns per-turn ids ``[[id, ...]_turn1, ...]`` or None when absent.
+    """
+    if not rollout_details or len(rollout_details) == 0:
+        return None
+
+    main_rollout = rollout_details[0]
+    if isinstance(main_rollout, dict):
+        token_ids = main_rollout.get("completion_token_ids")
+    else:
+        token_ids = getattr(main_rollout, "completion_token_ids", None)
+
+    if not token_ids:
+        return None
+    if not isinstance(token_ids, list):
+        logger.warning(f"Unexpected completion_token_ids type: {type(token_ids)}, expected list")
+        return None
+    if len(token_ids) > 0 and not isinstance(token_ids[0], list):
+        logger.warning(
+            f"Unexpected completion_token_ids[0] type: {type(token_ids[0])}, expected list."
+        )
+        return None
+    return token_ids
 
 
 def extract_routed_experts_from_rollout_details(
@@ -802,30 +940,46 @@ def _re_sentinel_rows(n: int, sentinel_row: Optional[List[List[int]]]) -> List[L
     return [list(sentinel_row) for _ in range(n)]
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None, assistant_routed_experts=None):
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None, assistant_routed_experts=None, assistant_token_ids=None, alignment_stats: Optional["AlignmentStats"] = None):
     """
     Get the response ids and loss mask from a list of messages.
 
     We encode each message one by one, using a fixed base approach, building response token IDs, loss mask,
     and rollout logprobs if provided. For Qwen3, this function will keep all the thinking tokens from the messages.
 
-    When assistant_logprobs contains token strings (new format from Harbor), this function uses LCS
-    (Longest Common Subsequence) alignment to handle tokenization mismatches between vLLM and the
-    training tokenizer. This solves the off-by-one problem in TIS (Truncated Importance Sampling).
+    TIS logprob alignment (robust, two-tier):
+      1. EXACT path (preferred): when ``assistant_token_ids`` (Harbor's per-turn
+         ``completion_token_ids``) is provided AND matches the re-tokenized
+         generated tokens for that turn, the per-turn logprob floats are zipped
+         on 1:1 — positions are exact by construction, NO guessing.
+      2. LCS fallback (last resort): when the exact path is unavailable (no
+         token ids) or the ids diverge, fall back to LCS string matching. Every
+         fallback is RECORDED in ``alignment_stats`` (and logged at WARNING) so
+         it surfaces as ``tis/lcs_fallback_fraction`` and never silently degrades.
 
     Args:
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
-        assistant_logprobs: Optional list of logprobs for each assistant message. Supports two formats:
-            - New format (with token strings): [[{"token": str, "logprob": float}, ...], ...]
-            - Legacy format (floats only): [[float, ...], ...] - will trigger a warning
+        assistant_logprobs: Optional per-assistant-message logprobs. Two formats:
+            - float format (canonical Harbor): [[float, ...], ...]
+            - dict format (token strings): [[{"token": str, "logprob": float}, ...], ...]
         custom_chat_template: Optional custom chat template string to use instead of tokenizer's default.
+        assistant_token_ids: Optional per-assistant-message exact vLLM token ids
+            (Harbor ``completion_token_ids``), index-aligned with assistant_logprobs.
+            Enables the EXACT alignment path.
+        alignment_stats: Optional AlignmentStats accumulator the caller can read
+            afterward to emit tis/* metrics. A local one is created if None.
 
     Returns:
-        Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
+        Tuple of (response ids, loss mask, rollout logprobs[, rollout routed experts]).
+        When ``assistant_routed_experts`` is None a 3-tuple is returned (back-compat);
+        otherwise a 4-tuple. Per-turn alignment counts are written into
+        ``alignment_stats`` (pass one in to read them).
     """
     assert len(messages), "messages list cannot be empty"
+    if alignment_stats is None:
+        alignment_stats = AlignmentStats()
 
     # Needed to correctly mask it zero for assistant messages.
     generation_prompt_ids = get_generation_prompt_ids(tokenizer, custom_chat_template=custom_chat_template)
@@ -910,6 +1064,8 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             loss_mask.extend([1] * len(generated_token_ids))
             if assistant_logprobs:
                 msg_logprobs = None
+                alignment_stats.n_messages += 1
+                alignment_stats.n_tokens += len(generated_token_ids)
                 if assistant_msg_idx >= len(assistant_logprobs):
                     logger.warning(
                         "Missing logprobs for assistant message #{} (provided {} lists). "
@@ -917,43 +1073,70 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
                         assistant_msg_idx + 1,
                         len(assistant_logprobs),
                     )
+                    alignment_stats.n_unaligned += len(generated_token_ids)
+                    alignment_stats.n_failed_messages += 1
                 else:
                     candidate_logprobs = assistant_logprobs[assistant_msg_idx]
 
-                    # Check if we have the new format with token strings (for LCS alignment)
-                    has_token_strings = (
-                        len(candidate_logprobs) > 0
-                        and isinstance(candidate_logprobs[0], dict)
-                        and "token" in candidate_logprobs[0]
-                    )
-
-                    if has_token_strings:
-                        # New format: use LCS alignment to handle tokenization mismatches
-                        msg_logprobs = align_logprobs_with_lcs(
-                            generated_token_ids,
-                            candidate_logprobs,
-                            tokenizer
-                        )
-                        logger.debug(
-                            f"LCS aligned logprobs for assistant message #{assistant_msg_idx + 1}: "
-                            f"vLLM tokens={len(candidate_logprobs)}, retokenized={len(generated_token_ids)}"
-                        )
+                    # Normalize logprobs to (token_strings_or_None, float_logprobs).
+                    # vLLM/Harbor canonical format is plain floats; the dict format
+                    # (with token strings) only feeds the LCS fallback.
+                    candidate_token_strings = None
+                    if len(candidate_logprobs) > 0 and isinstance(candidate_logprobs[0], dict):
+                        if "token" in candidate_logprobs[0]:
+                            candidate_token_strings = [lp.get("token") for lp in candidate_logprobs]
+                        candidate_float_logprobs = [lp.get("logprob", 0.0) for lp in candidate_logprobs]
                     else:
-                        # Legacy format: simple count-based matching (may fail on off-by-one)
-                        if isinstance(candidate_logprobs[0], dict):
-                            # Dict format but missing token strings - extract just logprobs
-                            candidate_logprobs = [lp.get("logprob", 0.0) for lp in candidate_logprobs]
+                        candidate_float_logprobs = list(candidate_logprobs)
 
-                        if len(candidate_logprobs) != len(generated_token_ids):
-                            logger.warning(
-                                "Logprob count ({}) does not match token count ({}) for assistant message #{}. "
-                                "Token strings not available for LCS alignment. Proceeding with zeroed logprobs.",
-                                len(candidate_logprobs),
-                                len(generated_token_ids),
-                                assistant_msg_idx + 1,
+                    # --- Tier 1: EXACT alignment by token id (preferred) ---
+                    # Use Harbor's per-turn completion_token_ids when available.
+                    candidate_ids = None
+                    if (
+                        assistant_token_ids is not None
+                        and assistant_msg_idx < len(assistant_token_ids)
+                    ):
+                        candidate_ids = assistant_token_ids[assistant_msg_idx]
+                    if candidate_ids is not None:
+                        msg_logprobs = align_logprobs_by_token_ids(
+                            generated_token_ids,
+                            candidate_ids,
+                            candidate_float_logprobs,
+                            stats=alignment_stats,
+                        )
+
+                    # --- Tier 2: LCS fallback (last resort, always recorded) ---
+                    if msg_logprobs is None:
+                        if candidate_token_strings is not None:
+                            # Reconstruct dict format for the LCS matcher.
+                            dict_logprobs = [
+                                {"token": t, "logprob": lp}
+                                for t, lp in zip(candidate_token_strings, candidate_float_logprobs)
+                            ]
+                            msg_logprobs = align_logprobs_with_lcs(
+                                generated_token_ids,
+                                dict_logprobs,
+                                tokenizer,
+                                stats=alignment_stats,
                             )
+                        elif len(candidate_float_logprobs) == len(generated_token_ids):
+                            # No token strings, but counts match exactly: positional
+                            # 1:1 (treat as exact — this is the float+no-ids case).
+                            msg_logprobs = candidate_float_logprobs
+                            alignment_stats.n_exact += len(generated_token_ids)
                         else:
-                            msg_logprobs = candidate_logprobs
+                            # No token ids, no token strings, count mismatch: cannot
+                            # align. Record the failure loudly instead of guessing.
+                            logger.warning(
+                                "TIS alignment FAILED for assistant message #{}: "
+                                "logprob count ({}) != token count ({}), and no token ids/strings "
+                                "available for fallback. Zeroing this message's logprobs.",
+                                assistant_msg_idx + 1,
+                                len(candidate_float_logprobs),
+                                len(generated_token_ids),
+                            )
+                            alignment_stats.n_unaligned += len(generated_token_ids)
+                            alignment_stats.n_failed_messages += 1
 
                 rollout_logprobs.extend(msg_logprobs if msg_logprobs is not None else [0.0] * len(generated_token_ids))
 

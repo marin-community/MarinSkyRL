@@ -982,6 +982,37 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
+        # TIS importance-ratio diagnostics. Emitted on EVERY rank with an
+        # identical key set whenever use_tis is on, so the per-key
+        # all_reduce(status) stays keyset-compatible (see worker memory note).
+        # At step 0 / on-policy the ratio exp(old_lp - rollout_lp) should be ~1.0;
+        # a large deviation or heavy clamping at tis_imp_ratio_cap signals that the
+        # rollout logprobs are misaligned to the training tokens.
+        tis_diag = {}
+        if self.cfg.trainer.algorithm.use_tis:
+            with torch.no_grad():
+                if rollout_action_logprobs is not None:
+                    cap = float(self.cfg.trainer.algorithm.tis_imp_ratio_cap)
+                    delta = (old_action_log_probs - rollout_action_logprobs).float()
+                    imp = torch.exp(torch.clamp(delta, min=-20.0, max=20.0))
+                    m = loss_mask.float()
+                    denom = m.sum().clamp(min=1.0)
+                    imp_mean = (imp * m).sum() / denom
+                    delta_abs_mean = (delta.abs() * m).sum() / denom
+                    clamped_frac = (((imp > cap).float()) * m).sum() / denom
+                    tis_diag = {
+                        "tis/imp_ratio_mean": imp_mean.item(),
+                        "tis/imp_ratio_capped_fraction": clamped_frac.item(),
+                        "tis/log_ratio_abs_mean": delta_abs_mean.item(),
+                    }
+                else:
+                    # Keep keyset identical even on the (asserted-unreachable) None path.
+                    tis_diag = {
+                        "tis/imp_ratio_mean": 1.0,
+                        "tis/imp_ratio_capped_fraction": 0.0,
+                        "tis/log_ratio_abs_mean": 0.0,
+                    }
+
         # entropy loss
         with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
             # batch_size, seqlen
@@ -1131,6 +1162,9 @@ class PolicyWorkerBase(Worker):
         status.update(ratio_diag)
         # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
         status.update(spike_diag)
+        # TIS importance-ratio diagnostics. Empty dict when use_tis is off; when on
+        # it carries an identical key set on every rank (keyset-safe all_reduce).
+        status.update(tis_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 

@@ -11,8 +11,10 @@ from skyrl_train.generators.utils import (
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
     extract_logprobs_from_rollout_details,
+    extract_token_ids_from_rollout_details,
     extract_routed_experts_from_rollout_details,
     normalize_token_ids,
+    AlignmentStats,
     _sentinel_routed_experts_row,
     SENTINEL_EXPERT_ID,
 )
@@ -70,6 +72,10 @@ class TerminalBenchAgentOutput:
     exception_type: Optional[str] = None
     # Per-component reward breakdown (composite shaper only)
     reward_components: Optional[Dict[str, float]] = None
+    # TIS logprob-alignment bookkeeping (exact-vs-LCS-vs-failed token counts).
+    # Aggregated into rollout_metrics as tis/* so an LCS fallback or alignment
+    # failure can never silently degrade TIS. None when no logprobs were present.
+    alignment_stats: Optional[AlignmentStats] = None
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -749,6 +755,34 @@ class TerminalBenchGenerator(GeneratorInterface):
         rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
         rollout_metrics["generate/num_masked_trajectories"] = num_masked_trajectories
 
+        # TIS logprob-alignment metrics (aggregated across all trajectories with
+        # logprobs). These make an LCS fallback or alignment failure ALWAYS visible
+        # on the dashboard instead of silently degrading TIS:
+        #   tis/exact_match_fraction   — fraction of training tokens mapped exactly
+        #                                 by token id (target ~1.0 when on-policy)
+        #   tis/lcs_fallback_fraction  — fraction recovered only via LCS string match
+        #                                 (target ~0.0; > 0 signals tokenizer mismatch)
+        #   tis/unaligned_fraction     — fraction with NO recoverable logprob (holes)
+        #   tis/alignment_fail_count   — assistant messages where alignment fully failed
+        #   tis/lcs_fallback_messages  — assistant messages that took the LCS path
+        batch_align = AlignmentStats()
+        any_align = False
+        for output in all_outputs:
+            if getattr(output, "alignment_stats", None) is not None:
+                batch_align.merge(output.alignment_stats)
+                any_align = True
+        if any_align:
+            rollout_metrics.update(batch_align.as_metrics(prefix="generate/tis/"))
+            if batch_align.n_lcs_messages > 0 or batch_align.n_failed_messages > 0:
+                logger.warning(
+                    f"TIS alignment: {batch_align.n_exact}/{batch_align.n_tokens} tokens exact, "
+                    f"{batch_align.n_lcs} via LCS fallback, {batch_align.n_unaligned} unaligned; "
+                    f"{batch_align.n_lcs_messages} LCS-fallback messages, "
+                    f"{batch_align.n_failed_messages} failed messages "
+                    f"(of {batch_align.n_messages} assistant messages). "
+                    f"Non-zero LCS/failure means serving↔training tokenizer divergence."
+                )
+
         # Per-step error counters for tracked exception types.
         # Pre-populate with zeros so every configured exception appears as a
         # consistent time-series on dashboards, then overlay actual counts.
@@ -1178,6 +1212,11 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Extract per-turn logprobs from Harbor's rollout_details (required for TIS)
         rollout_details = getattr(result.agent_result, "rollout_details", None)
         assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
+        # Exact-alignment ids: Harbor's per-turn completion_token_ids, index-aligned
+        # with assistant_logprobs. Enables the exact (no re-tokenization guess) TIS path.
+        assistant_token_ids = extract_token_ids_from_rollout_details(rollout_details)
+        # Accumulate per-message exact/LCS/fail counts; surfaced as tis/* metrics.
+        alignment_stats = AlignmentStats() if assistant_logprobs is not None else None
 
         # Extract per-turn MoE routed_experts (Stage 1 capture rail). Gated on
         # moe_router_replay so the flag-off path is byte-identical: when off we
@@ -1214,10 +1253,17 @@ class TerminalBenchGenerator(GeneratorInterface):
                 assistant_logprobs,
                 custom_chat_template=self.custom_chat_template_content,
                 assistant_routed_experts=assistant_routed_experts,
+                assistant_token_ids=assistant_token_ids,
+                alignment_stats=alignment_stats,
             )
         else:
             response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-                response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
+                response_messages,
+                self.tokenizer,
+                assistant_logprobs,
+                custom_chat_template=self.custom_chat_template_content,
+                assistant_token_ids=assistant_token_ids,
+                alignment_stats=alignment_stats,
             )
 
         # Determine stop reason
@@ -1249,4 +1295,5 @@ class TerminalBenchGenerator(GeneratorInterface):
             rollout_routed_experts=rollout_routed_experts,
             summarization_count=summarization_count,
             reward_components=reward_components,
+            alignment_stats=alignment_stats,
         )

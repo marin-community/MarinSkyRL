@@ -566,13 +566,19 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         with pytest.raises(ValueError, match="Expected message role to be 'user' or 'assistant'"):
             get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer)
 
-    def test_missing_logprobs_raises(self, qwen_tokenizer):
-        """Test that missing logprobs for assistant message raises ValueError."""
+    def test_missing_logprobs_degrades_and_reports(self, qwen_tokenizer):
+        """Missing logprobs for an assistant message must NOT crash the RL job.
+
+        Hardened contract: degrade gracefully (zero that message's logprobs) and
+        RECORD the failure in AlignmentStats so it surfaces as
+        tis/alignment_fail_count instead of silently degrading or hard-crashing.
+        """
+        from skyrl_train.generators.utils import AlignmentStats
+
         messages = [
             {"role": "assistant", "content": "Hello"},
             {"role": "assistant", "content": "Hi"},
         ]
-        # Only provide logprobs for one assistant message
         generation_prompt_ids = get_generation_prompt_ids(qwen_tokenizer)
         msg_token_ids = encode_messages_subset([messages[0]], qwen_tokenizer)
         assert qwen_tokenizer.eos_token_id in msg_token_ids, "Assistant message should contain EOS token"
@@ -580,18 +586,28 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         num_tokens = last_eos_idx + 1 - len(generation_prompt_ids)
 
         assistant_logprobs = [[-0.5] * num_tokens]  # Only one logprobs list for two assistant messages
+        stats = AlignmentStats()
+        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+            messages, qwen_tokenizer, assistant_logprobs, alignment_stats=stats
+        )
+        assert len(rollout_logprobs) == len(response_ids) == len(loss_mask)
+        # The second assistant message had no logprobs -> recorded as a failure.
+        assert stats.n_failed_messages == 1
 
-        with pytest.raises(ValueError, match="Missing logprobs for assistant message"):
-            get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer, assistant_logprobs)
+    def test_logprobs_count_mismatch_degrades_and_reports(self, qwen_tokenizer):
+        """Count mismatch with no token ids/strings: degrade + record, do not crash."""
+        from skyrl_train.generators.utils import AlignmentStats
 
-    def test_logprobs_count_mismatch_raises(self, qwen_tokenizer):
-        """Test that mismatched logprobs count raises ValueError."""
         messages = [{"role": "assistant", "content": "Hello"}]
-        # Provide wrong number of logprobs
-        assistant_logprobs = [[-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]]  # Too many
-
-        with pytest.raises(ValueError, match="Logprobs count.*does not match token count"):
-            get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer, assistant_logprobs)
+        # Provide wrong number of logprobs, no token ids/strings for fallback.
+        assistant_logprobs = [[-0.5] * 10]
+        stats = AlignmentStats()
+        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+            messages, qwen_tokenizer, assistant_logprobs, alignment_stats=stats
+        )
+        assert len(rollout_logprobs) == len(response_ids) == len(loss_mask)
+        assert stats.n_failed_messages == 1
+        assert stats.n_exact == 0
 
     # ------------------------------------------------------------------
     # Test exact loss mask values for specific models
