@@ -1378,9 +1378,18 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
-        if self.cfg.generator.sampling_params.logprobs is not None:
+        if (
+            self.cfg.generator.sampling_params.logprobs is not None
+            and training_input["rollout_logprobs"] is not None
+        ):
             # calculates the difference in probs between inference and trainer components
-            # only consider response tokens
+            # only consider response tokens.
+            # NOTE (Fix A-extend, 2026-06-07): rollout_logprobs can be None for a
+            # whole batch when use_tis is on but every trajectory lacked logprobs
+            # (graceful-degrade path in convert_to_training_input). Subscripting None
+            # here is what crashed the 80B R3+TIS train loop at global_step 1
+            # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
+            # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
