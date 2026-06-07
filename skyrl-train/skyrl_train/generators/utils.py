@@ -465,6 +465,38 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
 
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+
+    # Preserve the TIS alignment metrics (generate/tis/*). get_rollout_metrics
+    # only derives reward/length stats, so without this the per-batch TIS
+    # alignment health (exact_match_fraction / lcs_fallback_fraction /
+    # alignment_fail_count) would be SILENTLY DROPPED on the fully-async path
+    # (concatenate happens per training step there) and never reach wandb. Merge
+    # them back by recombining the token-weighted fractions across batches.
+    total_aligned = 0.0
+    sum_exact = sum_lcs = sum_unaligned = 0.0
+    sum_fail = sum_lcs_msgs = 0.0
+    saw_tis = False
+    for output in generator_outputs:
+        rm = output.get("rollout_metrics") or {}
+        n = rm.get("generate/tis/aligned_tokens")
+        if n is None:
+            continue
+        saw_tis = True
+        total_aligned += n
+        sum_exact += rm.get("generate/tis/exact_match_fraction", 0.0) * n
+        sum_lcs += rm.get("generate/tis/lcs_fallback_fraction", 0.0) * n
+        sum_unaligned += rm.get("generate/tis/unaligned_fraction", 0.0) * n
+        sum_fail += rm.get("generate/tis/alignment_fail_count", 0.0)
+        sum_lcs_msgs += rm.get("generate/tis/lcs_fallback_messages", 0.0)
+    if saw_tis:
+        denom = max(total_aligned, 1.0)
+        rollout_metrics["generate/tis/aligned_tokens"] = total_aligned
+        rollout_metrics["generate/tis/exact_match_fraction"] = sum_exact / denom
+        rollout_metrics["generate/tis/lcs_fallback_fraction"] = sum_lcs / denom
+        rollout_metrics["generate/tis/unaligned_fraction"] = sum_unaligned / denom
+        rollout_metrics["generate/tis/alignment_fail_count"] = sum_fail
+        rollout_metrics["generate/tis/lcs_fallback_messages"] = sum_lcs_msgs
+
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
