@@ -880,7 +880,13 @@ def ppo_policy_loss(
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
 
-    if config.use_tis:
+    # TIS graceful degrade (Fix A): apply the truncated-importance-sampling
+    # ratio only when use_tis is on AND this batch actually carries rollout
+    # logprobs. When the whole training batch came back with no logprobs the
+    # trainer leaves rollout_logprobs as None (instead of hard-asserting); we
+    # then fall back to the standard policy loss for THIS batch only. The
+    # tis/batch_skipped_no_logprobs metric is emitted driver-side by the trainer.
+    if config.use_tis and rollout_logprobs is not None:
         from loguru import logger as logger_
 
         logger_.debug(f"Using TIS with dtype: {rollout_logprobs.dtype}")

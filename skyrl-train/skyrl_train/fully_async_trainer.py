@@ -637,6 +637,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             while len(cur_generation_group_mini_batch) < self.mini_batch_size:
                                 cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
 
+                    # TIS graceful-degrade observability (Fix A): record whether THIS
+                    # training batch was missing all rollout logprobs (-> TIS skipped,
+                    # standard policy loss used) and a running skipped-fraction. Driver-side
+                    # metric only (NOT part of the worker per-key all_reduce(status)), so it
+                    # cannot cause the keyset-mismatch NCCL deadlock. skipped_fraction ~1.0
+                    # over the run = rollout-logprob capture systematically broken (R3<->logprob
+                    # interaction); low = intermittent context-length errors.
+                    if self.cfg.trainer.algorithm.use_tis:
+                        batch_skipped = float(getattr(self, "_tis_batch_skipped_no_logprobs", 0.0))
+                        self._tis_skipped_count = getattr(self, "_tis_skipped_count", 0.0) + batch_skipped
+                        self._tis_total_count = getattr(self, "_tis_total_count", 0.0) + 1.0
+                        self.all_metrics.update({
+                            "tis/batch_skipped_no_logprobs": batch_skipped,
+                            "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
+                        })
+
                     # 3. Run training and record consumed UIDs in the tracker.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)

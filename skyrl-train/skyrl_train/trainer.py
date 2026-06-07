@@ -451,6 +451,17 @@ class RayPPOTrainer:
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
                         logger.info(f"Number of sequences: {len(training_input['sequences'])}")
 
+                    # TIS graceful-degrade observability (Fix A): see fully_async_trainer
+                    # for rationale. Driver-side metric only (keyset-safe vs all_reduce).
+                    if self.cfg.trainer.algorithm.use_tis:
+                        batch_skipped = float(getattr(self, "_tis_batch_skipped_no_logprobs", 0.0))
+                        self._tis_skipped_count = getattr(self, "_tis_skipped_count", 0.0) + batch_skipped
+                        self._tis_total_count = getattr(self, "_tis_total_count", 0.0) + 1.0
+                        self.all_metrics.update({
+                            "tis/batch_skipped_no_logprobs": batch_skipped,
+                            "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
+                        })
+
                     # 1.4 inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
                         training_input = self.fwd_logprobs_values_reward(training_input)
@@ -899,11 +910,38 @@ class RayPPOTrainer:
             routed_experts,
         )
         # sanity check for tis
+        #
+        # Graceful TIS degrade (Fix A, 2026-06-07): when use_tis is on but the
+        # ENTIRE training batch came back with no rollout logprobs
+        # (rollout_logprobs_tensor is None), do NOT hard-assert/crash. The
+        # generator already detects + logs the all-None case ("ALL N
+        # trajectories missing logprobs. This batch cannot be used for TIS
+        # training"); the trainer must complete the hardening by degrading to
+        # standard (non-TIS) policy loss for THIS batch only. The None tensor
+        # propagates cleanly: TensorBatch.chunk/slice leave None values
+        # un-chunked (-> each micro-batch sees rollout_logprobs=None), the
+        # worker's TIS diagnostics already guard `is not None`, and
+        # ppo_policy_loss skips the TIS importance ratio when rollout_logprobs
+        # is None (see ppo_utils.ppo_policy_loss). We surface the skip via a
+        # `tis/batch_skipped_no_logprobs` metric (set on the driver below) so the
+        # failure mode is observable; the relaunch skip-fraction is the live
+        # systematic-vs-intermittent diagnostic.
+        self._tis_batch_skipped_no_logprobs = 0.0
         if self.cfg.trainer.algorithm.use_tis:
-            assert (
-                rollout_logprobs_tensor is not None
-            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
-            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+            if rollout_logprobs_tensor is None:
+                self._tis_batch_skipped_no_logprobs = 1.0
+                logger.warning(
+                    "use_tis is True but this training batch has NO rollout logprobs "
+                    "(all-None). Degrading to standard (non-TIS) policy loss for THIS "
+                    "batch and continuing. tis/batch_skipped_no_logprobs=1. If this "
+                    "persists (skip-fraction ~1.0) the rollout-logprob capture is "
+                    "systematically broken (e.g. routed_experts capture displacing "
+                    "logprobs); a low/intermittent rate is context-length errors."
+                )
+            else:
+                assert (
+                    rollout_logprobs_tensor.shape == loss_masks_tensor.shape
+                ), "Logprobs should look like responses"
         # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
         if rollout_routed_experts_tensor is not None:
             assert (
