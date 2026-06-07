@@ -83,6 +83,73 @@ def resolve_pinned_local_rank(
     return str(ray_gpu_ids[0])
 
 
+def resolve_actor_cuda_env(
+    *,
+    noset_visible_devices: bool,
+    cuda_visible_devices,
+    ray_gpu_ids,
+) -> dict:
+    """Pure decision for the per-actor CUDA env that DETERMINISTICALLY pins each
+    actor to its single Ray-assigned physical GPU, independent of positional /
+    LOCAL_RANK ordering and of how (or whether) Ray masked CUDA_VISIBLE_DEVICES.
+
+    This is the deterministic device-pin used when
+    ``trainer.placement.policy_force_cvd_mask`` is enabled (opt-in, default
+    off). It is the strongest form of the per-GPU-bundle fix: rather than rely
+    on ``set_device(LOCAL_RANK)`` resolving the right physical GPU (which can
+    silently collapse onto GPU 0 when CVD is left unmasked on the SIF Ray and
+    ``ray.get_gpu_ids()`` collides), it MASKS each actor to exactly one visible
+    device and forces a stable PCI ordering BEFORE any CUDA / device-mesh init.
+    With one visible device, ``set_device(0)`` and ``init_device_mesh`` and
+    FSDP's ``device_id=current_device()`` can ONLY land on that one physical
+    GPU, so EP×FSDP cannot stack ranks on a shared GPU.
+
+    Returns a dict of env vars to apply (only the keys that should be set):
+      - ``CUDA_DEVICE_ORDER`` = "PCI_BUS_ID" (so the logical index agrees with
+        the sysfs/NUMA PCI ordering; GH200's default FASTEST_FIRST order ≠ PCI
+        order, which is what makes a positional index bind the wrong socket).
+      - ``CUDA_VISIBLE_DEVICES`` = the single physical id this actor owns, ONLY
+        when Ray left it unmasked / multi-device. If Ray already masked CVD to a
+        single device (the a3 venv path / the whole-GPU-request path), we leave
+        CVD untouched (re-masking to a *physical* id would be wrong, because the
+        physical id is not addressable inside an already-masked view).
+      - ``LOCAL_RANK`` = "0" — after masking there is exactly one visible
+        device, whose logical index is 0.
+
+    Branches (mirror resolve_pinned_local_rank's input space):
+      1. NOSET set            -> CVD unmasked by design; mask to ray_gpu_ids[0].
+      2. CVD masked to 1 dev  -> already isolated; leave CVD, LOCAL_RANK "0".
+      3. CVD unset / multi-dev-> mask to ray_gpu_ids[0] (the collision case).
+    """
+    env = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+    cvd = cuda_visible_devices
+    masked_to_single = cvd is not None and len([d for d in cvd.split(",") if d != ""]) == 1
+
+    if masked_to_single and not noset_visible_devices:
+        # Ray already isolated this actor to one device; index 0 within the mask.
+        env["LOCAL_RANK"] = "0"
+        return env
+
+    # Unmasked (NOSET) or multi-device view: mask to this actor's own physical
+    # GPU. ray_gpu_ids[0] is the physical id of the actor's {GPU:1} bundle.
+    if ray_gpu_ids:
+        env["CUDA_VISIBLE_DEVICES"] = str(int(ray_gpu_ids[0]))
+        env["LOCAL_RANK"] = "0"
+    return env
+
+
+def policy_force_cvd_mask_enabled(cfg: DictConfig) -> bool:
+    """Whether to apply the deterministic forced-CVD-mask device pin.
+
+    Pure (Ray-free) predicate. Opt-in sub-flag of the per-GPU-bundle policy PG;
+    default false → unchanged set_device(LOCAL_RANK) pinning. Only meaningful
+    alongside policy_per_gpu_bundles (per actor owns one {GPU:1} bundle, so
+    ray.get_gpu_ids()[0] is its distinct physical id).
+    """
+    return bool(getattr(cfg.trainer.placement, "policy_force_cvd_mask", False))
+
+
 def policy_per_gpu_bundles_enabled(cfg: DictConfig) -> bool:
     """Whether the dedicated policy PG should use per-GPU {GPU:1} bundles.
 

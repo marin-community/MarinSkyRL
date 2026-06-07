@@ -17,7 +17,7 @@ This is the load-bearing GH200 device-pinning logic. It must:
 uv run --isolated --extra dev pytest tests/cpu/test_resolve_pinned_local_rank.py
 """
 
-from skyrl_train.utils.utils import resolve_pinned_local_rank
+from skyrl_train.utils.utils import resolve_pinned_local_rank, resolve_actor_cuda_env
 
 
 def _resolve(**kw):
@@ -119,3 +119,52 @@ def test_whole_node_bundle_sif_collision_reproduction():
     modulo = [_resolve(cuda_visible_devices=None, ray_gpu_ids=[0], pin_to_ray_gpu_id=False,
                        launcher_local_rank=r, device_count=4) for r in range(4)]
     assert modulo == ["0", "1", "2", "3"]
+
+
+# --- resolve_actor_cuda_env: the DETERMINISTIC forced-CVD-mask pin ----------
+#
+# This is the EP×FSDP fix: rather than rely on set_device(LOCAL_RANK), mask each
+# actor to its single physical GPU + force PCI_BUS_ID order BEFORE any CUDA /
+# device-mesh init, so init_device_mesh / FSDP device_id can only resolve that
+# one physical GPU and EP ranks cannot stack on a shared GPU.
+
+
+def test_cvd_mask_unset_masks_to_physical_id():
+    # Case 3 (SIF unmasked): mask to this actor's own physical GPU id.
+    env = resolve_actor_cuda_env(noset_visible_devices=False, cuda_visible_devices=None, ray_gpu_ids=[3])
+    assert env == {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "3", "LOCAL_RANK": "0"}
+
+
+def test_cvd_mask_already_single_leaves_cvd_untouched():
+    # Case 2 (Ray already masked to one device): do NOT re-mask to a physical id
+    # (that id is not addressable inside the already-masked view); just LOCAL_RANK 0.
+    env = resolve_actor_cuda_env(noset_visible_devices=False, cuda_visible_devices="2", ray_gpu_ids=[2])
+    assert "CUDA_VISIBLE_DEVICES" not in env
+    assert env["LOCAL_RANK"] == "0"
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+
+def test_cvd_mask_noset_masks_even_if_cvd_looks_single():
+    # Case 1 (NOSET): Ray won't mask; the visible set is all devices. Mask to ours.
+    env = resolve_actor_cuda_env(noset_visible_devices=True, cuda_visible_devices="0,1,2,3", ray_gpu_ids=[2])
+    assert env["CUDA_VISIBLE_DEVICES"] == "2"
+    assert env["LOCAL_RANK"] == "0"
+
+
+def test_cvd_mask_multi_device_view_masks_to_physical_id():
+    env = resolve_actor_cuda_env(noset_visible_devices=False, cuda_visible_devices="0,1", ray_gpu_ids=[1])
+    assert env["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_cvd_mask_four_actors_get_distinct_single_device_masks():
+    # The crux: four per-node policy actors, CVD unmasked, each masks to its OWN
+    # physical GPU -> four distinct single-device masks -> set_device(0) lands on
+    # four distinct physical GPUs -> NO GPU-0 stacking under EP×FSDP.
+    masks = [
+        resolve_actor_cuda_env(noset_visible_devices=False, cuda_visible_devices=None, ray_gpu_ids=[g])[
+            "CUDA_VISIBLE_DEVICES"
+        ]
+        for g in (0, 1, 2, 3)
+    ]
+    assert masks == ["0", "1", "2", "3"]
+    assert len(set(masks)) == 4

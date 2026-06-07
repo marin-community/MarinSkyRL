@@ -47,6 +47,20 @@ trainer:
     # (node_id, gpu_id), so a node's 4 GPUs stay contiguous in rank order.
     # Default false preserves the current whole-node-bundle behavior.
     policy_per_gpu_bundles: false
+    # When true (and policy_per_gpu_bundles is also true), each policy actor
+    # additionally MASKS CUDA_VISIBLE_DEVICES to its single Ray-assigned
+    # physical GPU and forces CUDA_DEVICE_ORDER=PCI_BUS_ID BEFORE any CUDA /
+    # EP-device-mesh init. This is the DETERMINISTIC form of the device pin:
+    # with exactly one visible device, torch.cuda.set_device(0),
+    # init_device_mesh (which reads LOCAL_RANK/current_device), and FSDP's
+    # device_id=current_device() can only resolve that one physical GPU, so
+    # EP=8×FSDP=4 ranks cannot stack on a shared GPU even if the SIF Ray left
+    # CVD unmasked or ray.get_gpu_ids() / the InfoActor reorder is unreliable.
+    # Closes the nondeterministic Qwen3-Next-80B init-OOM (intra-policy GPU-0
+    # stacking) that set_device(LOCAL_RANK) alone could not deterministically
+    # prevent. Default false preserves the set_device(LOCAL_RANK)-only pin and
+    # is a no-op for the 8B / a3 (non-EP, single-device-masked) path.
+    policy_force_cvd_mask: false
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:

@@ -59,7 +59,11 @@ from skyrl_train.utils.trainer_utils import (
     DynamicSamplingState,
     build_dataloader,
 )
-from skyrl_train.utils.utils import configure_ray_worker_logging, policy_per_gpu_bundles_enabled
+from skyrl_train.utils.utils import (
+    configure_ray_worker_logging,
+    policy_per_gpu_bundles_enabled,
+    policy_force_cvd_mask_enabled,
+)
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -746,6 +750,10 @@ class RayPPOTrainer:
             # distinct, reliable physical id even when the SIF Ray leaves
             # CUDA_VISIBLE_DEVICES unmasked). Off otherwise → unchanged pinning.
             _policy_pin_to_ray_gpu_id = policy_pg is not None and policy_per_gpu_bundles_enabled(cfg)
+            # Deterministic forced-CVD-mask pin (opt-in; default false). Only
+            # meaningful alongside the per-GPU-bundle pin. Masks each policy
+            # actor to its single physical GPU before any CUDA/EP-mesh init.
+            _policy_force_cvd_mask = _policy_pin_to_ray_gpu_id and policy_force_cvd_mask_enabled(cfg)
             policy_model = PPORayActorGroup(
                 cfg,
                 cfg.trainer.placement.policy_num_nodes,
@@ -756,6 +764,7 @@ class RayPPOTrainer:
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
                 pin_to_ray_gpu_id=_policy_pin_to_ray_gpu_id,
+                force_cvd_mask=_policy_force_cvd_mask,
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(

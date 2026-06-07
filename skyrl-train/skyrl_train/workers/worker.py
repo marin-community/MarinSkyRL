@@ -54,6 +54,7 @@ class DistributedTorchRayActor:
         sequence_parallel_size,
         record_memory=False,
         pin_to_ray_gpu_id=False,
+        force_cvd_mask=False,
     ):
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
@@ -95,9 +96,35 @@ class DistributedTorchRayActor:
         # pin_to_ray_gpu_id (case 3) engages only on the per-GPU {GPU:1}-bundle policy PG,
         # where ray.get_gpu_ids() is a reliable distinct physical id per actor. The full
         # decision lives in resolve_pinned_local_rank() (pure / unit-tested).
-        from skyrl_train.utils.utils import resolve_pinned_local_rank
+        from skyrl_train.utils.utils import resolve_pinned_local_rank, resolve_actor_cuda_env
 
         _noset = ray_noset_visible_devices()
+
+        # Deterministic forced-CVD-mask pin (opt-in via policy_force_cvd_mask).
+        # When engaged, mask this actor to its single Ray-assigned PHYSICAL GPU
+        # and force PCI_BUS_ID ordering BEFORE any CUDA / EP-device-mesh init,
+        # so set_device(0)/init_device_mesh/FSDP device_id can only resolve that
+        # one physical GPU. This is independent of positional/LOCAL_RANK ordering
+        # and of whether the SIF Ray masked CVD — closing the GH200 EP×FSDP
+        # GPU-0-stacking init-OOM that set_device(LOCAL_RANK) alone could not
+        # deterministically prevent. IMPORTANT: this must run before
+        # torch.cuda.device_count() below touches CUDA (which would latch the
+        # unmasked device set). force_cvd_mask only engages with the per-GPU
+        # {GPU:1}-bundle PG, where ray.get_gpu_ids()[0] is a distinct physical id.
+        if force_cvd_mask and pin_to_ray_gpu_id:
+            _cuda_env = resolve_actor_cuda_env(
+                noset_visible_devices=_noset,
+                cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+                ray_gpu_ids=ray.get_gpu_ids(),
+            )
+            for _k, _v in _cuda_env.items():
+                os.environ[_k] = _v
+            logging.info(
+                "[device-pin] force_cvd_mask: applied %s (ray_gpu_ids=%s)",
+                _cuda_env,
+                ray.get_gpu_ids(),
+            )
+
         os.environ["LOCAL_RANK"] = resolve_pinned_local_rank(
             noset_visible_devices=_noset,
             cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -236,6 +263,43 @@ class Worker(DistributedTorchRayActor):
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
+
+    def get_device_placement_diag(self) -> dict:
+        """Diagnostic: report the PHYSICAL device this rank actually landed on,
+        plus its EP/FSDP device-mesh coordinate. Used by the EP-reproducing
+        placement smoke to assert every EP×FSDP rank is on a distinct physical
+        GPU. Read-only; safe to call after init_model.
+        """
+        import socket as _socket
+
+        idx = torch.cuda.current_device()
+        try:
+            uuid = str(torch.cuda.get_device_properties(idx).uuid)
+        except Exception:
+            uuid = None
+        diag = {
+            "rank": int(os.environ.get("RANK", "-1")),
+            "host": _socket.gethostname(),
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "CUDA_DEVICE_ORDER": os.environ.get("CUDA_DEVICE_ORDER"),
+            "LOCAL_RANK": os.environ.get("LOCAL_RANK"),
+            "ray_gpu_ids": [str(g) for g in ray.get_gpu_ids()],
+            "device_count": torch.cuda.device_count(),
+            "current_device": idx,
+            "phys_uuid": uuid,
+        }
+        # EP/FSDP mesh coordinate, when the strategy built a device mesh.
+        strat = getattr(self, "strategy", None)
+        mesh = getattr(strat, "device_mesh", None) if strat is not None else None
+        if mesh is not None:
+            try:
+                diag["mesh_shape"] = tuple(mesh.mesh.shape)
+                diag["mesh_dim_names"] = tuple(mesh.mesh_dim_names)
+                diag["mesh_coord"] = tuple(int(c) for c in mesh.get_coordinate())
+                diag["ep_size"] = int(getattr(strat, "ep_size", 1))
+            except Exception as e:
+                diag["mesh_error"] = repr(e)
+        return diag
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         """Offload all worker state to CPU.
@@ -422,6 +486,7 @@ class PPORayActorGroup:
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
         pin_to_ray_gpu_id: bool = False,
+        force_cvd_mask: bool = False,
     ) -> None:
         self.cfg = cfg
         self._num_nodes = num_nodes
@@ -431,6 +496,10 @@ class PPORayActorGroup:
         # (reliable only when each actor owns a dedicated {GPU:1} bundle, i.e.
         # the per-GPU-bundle policy PG). See DistributedTorchRayActor.__init__.
         self._pin_to_ray_gpu_id = pin_to_ray_gpu_id
+        # When True (and pin_to_ray_gpu_id), each actor additionally MASKS
+        # CUDA_VISIBLE_DEVICES to its single physical GPU + forces PCI_BUS_ID
+        # ordering before any CUDA init — the deterministic EP×FSDP pin.
+        self._force_cvd_mask = force_cvd_mask
 
         # custom resources, see https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
         self._resources = resources
@@ -493,6 +562,7 @@ class PPORayActorGroup:
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
                 pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                force_cvd_mask=self._force_cvd_mask,
             )
         else:
             master_actor = self.ray_actor_type.options(
@@ -509,6 +579,7 @@ class PPORayActorGroup:
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
                 pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                force_cvd_mask=self._force_cvd_mask,
             )
         self._actor_handlers = [master_actor]
         # Create worker actors
@@ -540,6 +611,7 @@ class PPORayActorGroup:
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
                         pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                        force_cvd_mask=self._force_cvd_mask,
                     )
                 else:
                     worker_actor = self.ray_actor_type.options(
@@ -556,6 +628,7 @@ class PPORayActorGroup:
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
                         pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                        force_cvd_mask=self._force_cvd_mask,
                     )
                 self._actor_handlers.append(worker_actor)
 
