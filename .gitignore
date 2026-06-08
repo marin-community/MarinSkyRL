@@ -39,13 +39,16 @@ docs/_spelling/
 /skyrl-gym/dist
 
 *.log
-<<<<<<< HEAD
 trials/
-=======
 
 # SQLite database files
 *.db
 
 # uv lock files
 uv.lock
->>>>>>> main
+
+# temp directory
+/temp/
+
+# build directories
+/_build*
