@@ -1,4 +1,5 @@
 import ray
+from loguru import logger
 from packaging import version
 from ray.actor import ActorHandle
 from typing import Any, List, Dict
@@ -169,6 +170,17 @@ def create_ray_wrapped_inference_engines(
     else:
         distributed_executor_backend = "ray"
     data_parallel_backend = "mp"
+    # The vLLM `mp` executor REQUIRES v1 multiprocessing to spawn its TP worker
+    # subprocesses. The default vllm_v1_disable_multiproc=true sets
+    # VLLM_ENABLE_V1_MULTIPROCESSING=0, which kills the mp executor's shm message
+    # queue at warm-up ("RuntimeError: cancelled" in shm_broadcast.dequeue ->
+    # EngineCore init fail). Force it off for the mp backend so the workers run.
+    if use_mp_backend and vllm_v1_disable_multiproc:
+        logger.info(
+            "mp_backend: overriding vllm_v1_disable_multiproc=True -> False "
+            "(the mp executor needs VLLM_ENABLE_V1_MULTIPROCESSING=1 to spawn TP workers)."
+        )
+        vllm_v1_disable_multiproc = False
     # With the mp executor the single actor must hold ALL tp_pp_size GPUs itself (vLLM forks
     # its workers locally). With ray/uni the actor holds the GPUs per the original logic.
     if use_mp_backend:

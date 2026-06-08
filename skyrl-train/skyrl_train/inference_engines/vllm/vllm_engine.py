@@ -155,7 +155,12 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}, "
         f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
     )
-    if executor_backend != "ray":
+    # NOTE: the `mp` executor backend (Qwen3-Next R3 capture path) MUST keep v1
+    # multiprocessing ENABLED — it spawns its TP worker subprocesses via the v1 mp
+    # path, and disabling it cancels the shm message queue at warm-up
+    # ("RuntimeError: cancelled"). NUMA single-GPU pinning does not apply to the
+    # multi-GPU mp engine anyway, so skip this branch for mp.
+    if executor_backend not in ("ray", "mp"):
         try:
             from skyrl_train.utils.numa import is_numa_affinity_enabled, set_numa_affinity_for_gpu
             numa_enabled = is_numa_affinity_enabled()
