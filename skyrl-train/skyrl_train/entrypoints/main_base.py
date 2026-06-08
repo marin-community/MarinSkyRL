@@ -71,6 +71,8 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
             "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
         },
         "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
+        # Opt-in mp executor backend (Qwen3-Next R3 capture hang workaround; default off).
+        "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
