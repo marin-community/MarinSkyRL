@@ -183,8 +183,22 @@ def create_ray_wrapped_inference_engines(
 
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
     if not use_hybrid_engine:
-        # Create a big placement group to ensure that all inference engines are packed
-        bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
+        # Create a big placement group to ensure that all inference engines are packed.
+        if use_mp_backend:
+            # mp executor: each (engine, DP-rank) is ONE Ray actor that itself
+            # reserves the whole TP*PP GPU slice and forks its workers locally.
+            # The actor's resource request is {GPU: tp_pp_size}, so it must land in
+            # a single bundle that big — one {GPU: tp_pp_size} bundle per DP rank
+            # (NOT tp_pp_size separate {GPU:1} bundles, which an actor requesting
+            # tp_pp_size GPUs cannot fit into; Ray's _validate_resource_shape
+            # requires a single actor to fit one bundle). One bundle per DP rank
+            # keeps the bundle count == num actors so each gets a distinct index.
+            bundles = [
+                {"GPU": tp_pp_size, "CPU": tp_pp_size}
+                for _ in range(num_inference_engines * data_parallel_size)
+            ]
+        else:
+            bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
         shared_pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
@@ -192,7 +206,11 @@ def create_ray_wrapped_inference_engines(
         base_pg_index = i * per_engine_gpu_count
 
         # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
+        # The mp PACK PG has one {GPU: tp_pp_size} bundle per (engine, DP-rank), so the
+        # rendezvous bundle for engine i's DP-rank-0 is at i*data_parallel_size (not the
+        # per-GPU base_pg_index, which would index past the smaller mp bundle list).
+        rendezvous_pg_index = (i * data_parallel_size) if use_mp_backend else base_pg_index
+        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, rendezvous_pg_index)
 
         if backend == "vllm":
             if async_engine:
@@ -231,16 +249,17 @@ def create_ray_wrapped_inference_engines(
                 )
                 if use_mp_backend:
                     # The mp executor's single actor reserves the whole TP*PP GPU slice itself
-                    # (vLLM forks its workers locally). Do NOT pin it to one 1-GPU bundle
-                    # (that bundle only has 1 GPU, but the actor needs tp_pp_size). Bundle
-                    # index -1 lets Ray place the multi-GPU actor against the PACK'd PG slice;
-                    # with the exactly-sized PACK PG the slice is co-located on one node.
-                    # bundle_indices stays None so vLLM does not try ray per-worker placement.
+                    # (vLLM forks its workers locally, no per-worker Ray actors). It must land
+                    # in ONE bundle holding tp_pp_size GPUs, so the mp PACK PG (built above) is
+                    # one {GPU: tp_pp_size} bundle per (engine, DP-rank) and this actor is pinned
+                    # to its own dedicated bundle (index = i*data_parallel_size + dp_rank). The
+                    # whole-slice bundle keeps all TP workers co-located on one node. bundle_indices
+                    # stays None so vLLM does not attempt ray per-worker placement.
                     dp_rank_bundles = None
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
                         placement_group=shared_pg,
                         placement_group_capture_child_tasks=True,
-                        placement_group_bundle_index=-1,
+                        placement_group_bundle_index=i * data_parallel_size + dp_rank,
                     )
                 else:
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
