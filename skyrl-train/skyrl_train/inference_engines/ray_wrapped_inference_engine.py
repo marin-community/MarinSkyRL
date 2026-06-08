@@ -292,6 +292,13 @@ def create_ray_wrapped_inference_engines(
                     else {}
                 )
 
+                # The mp executor's TP workers exchange custom-all-reduce IPC handles
+                # under the Ray-actor placement + remapped CUDA_VISIBLE_DEVICES; vLLM's
+                # custom all-reduce fails there with a CUDA "invalid argument" at
+                # custom_all_reduce.cuh (worker dies at warm-up). Disable it for mp so
+                # NCCL handles the TP all-reduce (correctness-equal, slightly slower).
+                mp_extra_kwargs = {"disable_custom_all_reduce": True} if use_mp_backend else {}
+
                 engine = actor_class.options(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
@@ -319,6 +326,7 @@ def create_ray_wrapped_inference_engines(
                     max_logprobs=max_logprobs,
                     enable_ray_prometheus_stats=enable_ray_prometheus_stats,
                     **dp_kwargs,
+                    **mp_extra_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
                     **rope_engine_kwargs,
