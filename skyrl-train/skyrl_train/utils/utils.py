@@ -726,7 +726,19 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
                 "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
             )
             env_vars["VLLM_USE_V1"] = "1"
-            env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            # The `mp` executor backend (Qwen3-Next R3 capture path, opt-in
+            # generator.inference_engine_mp_backend) REQUIRES v1 multiprocessing to
+            # spawn its TP worker subprocesses; forcing it to 0 here (the default,
+            # for scheduling determinism) cancels the mp executor's shm message
+            # queue at warm-up. Keep it ON (unset => vLLM default 1) for mp.
+            mp_backend = bool(getattr(cfg.generator, "inference_engine_mp_backend", False))
+            if not mp_backend:
+                env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            else:
+                logger.info(
+                    "inference_engine_mp_backend=true: NOT setting VLLM_ENABLE_V1_MULTIPROCESSING=0 "
+                    "(the mp executor needs v1 multiprocessing to spawn TP workers)."
+                )
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
