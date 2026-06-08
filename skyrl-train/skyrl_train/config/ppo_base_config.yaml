@@ -349,6 +349,12 @@ generator:
   inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1
   inference_engine_data_parallel_size: 1
+  # Opt-in: use vLLM's `mp` executor backend (instead of `ray`) for non-colocated
+  # multi-GPU engines. Required for the Qwen3-Next-80B-A3B R3 router-capture path
+  # (enable_return_routed_experts=true), where the vLLM Ray Compiled-DAG deadlocks on the
+  # hybrid arch. Only valid when trainer.placement.colocate_all=false. Default false =>
+  # byte-identical to the ray backend for every existing run.
+  inference_engine_mp_backend: false
   n_samples_per_prompt: 5
   async_engine: true
   batched: false

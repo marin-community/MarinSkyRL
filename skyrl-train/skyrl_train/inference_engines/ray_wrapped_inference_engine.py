@@ -114,9 +114,21 @@ def create_ray_wrapped_inference_engines(
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
     max_logprobs: int = 1,
+    mp_backend: bool = False,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
+
+    mp_backend: opt-in. When True (and TP>1 / PP>1 and NOT colocated), run each vLLM
+        inference engine with the `mp` (multiprocessing) executor backend instead of `ray`.
+        This is required for the Qwen3-Next-80B-A3B R3 router-capture path
+        (`enable_return_routed_experts=true`): the vLLM Ray Compiled-DAG deadlocks on the
+        hybrid (GatedDeltaNet + full-attn) arch when capture is on (rank-0 stuck in the DAG
+        channel read at 0% GPU; reproduced + root-caused 2026-06-08). The `mp` executor has
+        no Ray Compiled-DAG and runs the same config cleanly at full (cudagraph) speed.
+        Default False => byte-identical behaviour for every other run. Only valid for
+        non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
+        still require the ray backend for shared-GPU resource management.
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
     from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -136,12 +148,33 @@ def create_ray_wrapped_inference_engines(
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
-    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
-    # TODO: we should be able to support mp backend by allocating resources at engine level
-    distributed_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
-    data_parallel_backend = "mp"
     use_hybrid_engine = shared_pg is not None
-    num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
+    tp_pp_size = tensor_parallel_size * pipeline_parallel_size
+    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
+    # mp_backend (opt-in) lets a NON-colocated multi-GPU engine use vLLM's `mp` executor
+    # instead, which avoids the Ray Compiled-DAG deadlock on the Qwen3-Next R3 capture path.
+    # In that mode the single SkyRL actor owns the whole TP*PP GPU slice and vLLM spawns its
+    # workers as local subprocesses (no per-worker Ray actors).
+    use_mp_backend = bool(mp_backend) and tp_pp_size > 1 and not use_hybrid_engine
+    if bool(mp_backend) and tp_pp_size > 1 and use_hybrid_engine:
+        raise ValueError(
+            "generator.inference_engine_mp_backend=true is only supported for NON-colocated "
+            "inference engines (trainer.placement.colocate_all=false). Colocated engines need "
+            "the ray backend for shared-GPU resource management."
+        )
+    if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
+        distributed_executor_backend = "uni"
+    elif use_mp_backend:
+        distributed_executor_backend = "mp"
+    else:
+        distributed_executor_backend = "ray"
+    data_parallel_backend = "mp"
+    # With the mp executor the single actor must hold ALL tp_pp_size GPUs itself (vLLM forks
+    # its workers locally). With ray/uni the actor holds the GPUs per the original logic.
+    if use_mp_backend:
+        num_gpus_per_actor = tp_pp_size
+    else:
+        num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
 
     if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
         # Every worker will use 0.2 GPU, so that we can schedule
@@ -192,16 +225,29 @@ def create_ray_wrapped_inference_engines(
             for dp_rank in range(data_parallel_size):
 
                 # Contiguous TP*PP slice reserved for a single DP rank.
-                tp_pp_size = tensor_parallel_size * pipeline_parallel_size
                 base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
                 dp_rank_bundles = (
                     list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
                 )
-                dp_rank_sched = PlacementGroupSchedulingStrategy(
-                    placement_group=shared_pg,
-                    placement_group_capture_child_tasks=True,
-                    placement_group_bundle_index=base_dp_pg_index,
-                )
+                if use_mp_backend:
+                    # The mp executor's single actor reserves the whole TP*PP GPU slice itself
+                    # (vLLM forks its workers locally). Do NOT pin it to one 1-GPU bundle
+                    # (that bundle only has 1 GPU, but the actor needs tp_pp_size). Bundle
+                    # index -1 lets Ray place the multi-GPU actor against the PACK'd PG slice;
+                    # with the exactly-sized PACK PG the slice is co-located on one node.
+                    # bundle_indices stays None so vLLM does not try ray per-worker placement.
+                    dp_rank_bundles = None
+                    dp_rank_sched = PlacementGroupSchedulingStrategy(
+                        placement_group=shared_pg,
+                        placement_group_capture_child_tasks=True,
+                        placement_group_bundle_index=-1,
+                    )
+                else:
+                    dp_rank_sched = PlacementGroupSchedulingStrategy(
+                        placement_group=shared_pg,
+                        placement_group_capture_child_tasks=True,
+                        placement_group_bundle_index=base_dp_pg_index,
+                    )
 
                 dp_kwargs = (
                     {
