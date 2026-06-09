@@ -934,16 +934,41 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # staleness) over the pessimistic capture at task pickup time.
                 actual_step = cur_generator_output.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
-                try:
-                    generation_output_group_buffer.put_nowait(
-                        GeneratedOutputGroup(
-                            generator_output=cur_generator_output,
-                            uid=uids[0],
-                            global_step_when_scheduled=staleness_step,
-                        )
+                # Backpressure: BLOCK on a full buffer instead of crashing.
+                #
+                # The buffer is sized maxsize=num_parallel_generation_workers (== the
+                # number of these worker loops). Each worker, after a put, loops back and
+                # generates AGAIN — so while the consumer is blocked inside a long (e.g.
+                # 80B, multi-hour) training step, a single worker can produce MORE than one
+                # completed group before any are drained. With nothing draining, the prior
+                # put_nowait() would raise QueueFull on the (maxsize+1)-th enqueue and the
+                # except-handler below would sys.exit(1) and kill the driver. That overflow
+                # is INEVITABLE whenever a training step is slow relative to rollout
+                # throughput (root cause of the 80B step-2 failure, job 665754).
+                #
+                # `await buffer.put(...)` provides the natural, correct bound: a producer
+                # that finishes while the buffer is full simply WAITS for the consumer to
+                # free a slot, rather than crashing. This is a strict no-op in the
+                # not-full case (put returns immediately, identical to put_nowait), so the
+                # fast-consumer arms (8B TIS) are byte-for-byte unchanged. It structurally
+                # bounds buffered-but-unconsumed groups to exactly `maxsize` — without
+                # enlarging the buffer. Per-group staleness is still enforced downstream in
+                # convert_generation_group_mini_batch_to_training_input(), which discards
+                # any group staler than max_staleness_steps.
+                #
+                # Counter accounting is preserved: the submission slot (`running`) stays
+                # held across the (possibly blocking) put, and on_rollout_accepted() —
+                # which moves the rollout from `running` to `accepted` — fires only AFTER
+                # the group is actually buffered, which is exactly correct. If the worker
+                # is cancelled while blocked in put(), slot_acquired is still True so the
+                # CancelledError handler below reconciles submitted/running.
+                await generation_output_group_buffer.put(
+                    GeneratedOutputGroup(
+                        generator_output=cur_generator_output,
+                        uid=uids[0],
+                        global_step_when_scheduled=staleness_step,
                     )
-                except asyncio.QueueFull:
-                    raise AssertionError("Generation buffer should never be full given staleness control.")
+                )
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:
