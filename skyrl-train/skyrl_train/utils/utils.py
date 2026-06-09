@@ -693,6 +693,28 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
+    # Force CPython stock asyncio (epoll SelectorEventLoop), NOT uvloop, in EVERY
+    # Ray worker/actor process spawned under this runtime env.
+    #
+    # Ray installs uvloop globally in every worker by default
+    # (RAY_USE_UVLOOP defaults True -> ray default_worker.py try_install_uvloop).
+    # libuv's epoll-ctl machinery SIGABRTs under Daytona sandbox-teardown socket
+    # churn (uv__epoll_ctl_prep / uv__io_poll asserts; present across libuv
+    # 1.45-1.49+). The driver/orchestrator is already protected by
+    # asyncio.set_event_loop_policy(DefaultEventLoopPolicy()) in
+    # BasePPOExp.run() (entrypoints/main_base.py), but that ONLY covers the
+    # skyrl_entrypoint driver process -- it does NOT propagate into the Ray
+    # *actor* processes (RolloutCoordinator, inference engines, policy/ref
+    # workers), which still install uvloop and still abort. Observed on the 80B
+    # production run (job 669177): a RolloutCoordinator CoreWorker aborted at
+    # Fatal Python error: Aborted -> uv__epoll_ctl_prep inside
+    # CoreWorker.initialize_eventloops_for_actor_concurrency_group AFTER a full
+    # clean step 1, taking the run down. Setting RAY_USE_UVLOOP=0 here makes
+    # ray's try_install_uvloop a no-op in ALL actors, closing that gap.
+    # Actors are network-RTT-bound (vLLM/Daytona HTTP) so uvloop's throughput
+    # edge is moot. See feedback_uvloop_libuv_019_pin.
+    env_vars["RAY_USE_UVLOOP"] = "0"
+
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
