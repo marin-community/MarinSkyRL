@@ -738,11 +738,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # These are propagated to EVERY Ray worker (policy/ref/inference) via the
     # ray runtime env, the same path as RAY_USE_UVLOOP above. Pure diagnostic
     # overhead; the model/training config is unchanged so the trace localizes
-    # the SAME deadlock. (NCCL_DEBUG / NCCL_DEBUG_SUBSYS are also conditionally
-    # forwarded from the launcher env further below; setting them here makes
-    # them active regardless of the launcher environment.)
-    env_vars["NCCL_DEBUG"] = "INFO"
-    env_vars["NCCL_DEBUG_SUBSYS"] = "COLL,INIT,P2P"
+    # the SAME deadlock. (NCCL_DEBUG / NCCL_DEBUG_SUBSYS are forced to INFO AFTER
+    # the launcher-env forwarding loop below -- see the override there -- because
+    # the OT-Agent launcher exports NCCL_DEBUG=WARN, which the forwarding loop
+    # would otherwise copy in and clobber an INFO set here.)
+    #
+    # Flight-recorder buffer size: torch 2.9 renamed TORCH_NCCL_TRACE_BUFFER_SIZE
+    # -> TORCH_FR_BUFFER_SIZE (old name still honored as a deprecated alias). Set
+    # both so the recorder is enabled regardless of the torch version in the SIF.
+    env_vars["TORCH_FR_BUFFER_SIZE"] = "20000"
     env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
     env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
     env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
@@ -872,6 +876,16 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         if os.environ.get(_net_env):
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
+
+    # Diagnostic NCCL verbosity override (Option A flight-recorder relaunch).
+    # FORCE NCCL_DEBUG=INFO / NCCL_DEBUG_SUBSYS=COLL,INIT,P2P here, AFTER the
+    # passthrough loop above, so they win over the launcher env. The OT-Agent
+    # launcher (hpc.py) exports NCCL_DEBUG=WARN, which the loop would otherwise
+    # copy into env_vars and suppress the per-collective INIT/COLL/P2P trace we
+    # need to localize the 80B EP all-to-all backward deadlock (job 673119).
+    # Setting them last is the surgical override.
+    env_vars["NCCL_DEBUG"] = "INFO"
+    env_vars["NCCL_DEBUG_SUBSYS"] = "COLL,INIT,P2P"
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
