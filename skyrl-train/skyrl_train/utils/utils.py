@@ -715,6 +715,48 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # edge is moot. See feedback_uvloop_libuv_019_pin.
     env_vars["RAY_USE_UVLOOP"] = "0"
 
+    # ---------------------------------------------------------------------
+    # NCCL flight-recorder + finite-timeout instrumentation (Option A diag).
+    #
+    # The 80B R3 router-replay run (job 673119, EP=8xFSDP=6, 48-GPU policy)
+    # HARD-deadlocked at the first policy_train backward micro-iteration on an
+    # EP all-to-all / router-replay-recompute MoE-backward collective and spun
+    # ~115 min with NO watchdog teardown. Root cause of the *silent* spin:
+    # without TORCH_NCCL_ASYNC_ERROR_HANDLING the NCCL watchdog never tears the
+    # process down on a stuck collective, and with no flight recorder there is
+    # no per-rank stuck-collective trace.
+    #
+    # These vars (1) enable the torch NCCL flight recorder so the next hang
+    # dumps the exact stuck collective name + ranks per worker, and (2) make
+    # the watchdog actually abort + dump on timeout. The *finite* timeout
+    # itself is plumbed below via SKYRL_WORKER_NCCL_TIMEOUT_IN_S, which is read
+    # by init_process_group in worker.py (and the EP/FSDP sub-meshes created by
+    # init_device_mesh inherit the default PG's timeout). We raise it to 20 min
+    # so a genuinely-stuck EP collective aborts with a flight-recorder dump
+    # instead of spinning silently for hours.
+    #
+    # These are propagated to EVERY Ray worker (policy/ref/inference) via the
+    # ray runtime env, the same path as RAY_USE_UVLOOP above. Pure diagnostic
+    # overhead; the model/training config is unchanged so the trace localizes
+    # the SAME deadlock. (NCCL_DEBUG / NCCL_DEBUG_SUBSYS are also conditionally
+    # forwarded from the launcher env further below; setting them here makes
+    # them active regardless of the launcher environment.)
+    env_vars["NCCL_DEBUG"] = "INFO"
+    env_vars["NCCL_DEBUG_SUBSYS"] = "COLL,INIT,P2P"
+    env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
+    env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
+    env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = (
+        "/e/data1/datasets/playground/ot-baf/nccl_trace/673_relaunch_rank"
+    )
+    # Finite NCCL collective timeout (20 min). Read by
+    # skyrl_train.utils.constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
+    # torch.distributed.init_process_group(timeout=...) in worker.py; the EP /
+    # FSDP device-mesh sub-groups inherit this default-PG timeout. Default is
+    # 600s; we raise to 1200s so a stuck EP all-to-all aborts (with a flight
+    # recorder dump) rather than spinning indefinitely.
+    env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = "1200"
+
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
