@@ -639,6 +639,28 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
         parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
         # Compose the FSDP Shard dim on the fsdp submesh → 2-D expert DTensors.
         if fsdp_kwargs is not None:
+            # FAIL-FAST: when EP AND FSDP both shard the expert dim, each EP-rank
+            # holds (num_experts // ep_size) experts, which FSDP then shards over
+            # fsdp_size. If that is uneven, FSDP2 even-pads the param/optimizer
+            # local shard while the EP-backward grad stays unpadded → the Adam
+            # `lerp_` raises `size of tensor a (N) must match b (N-1) at dim 0` at
+            # the step-1 optimizer step (job 674574: fsdp_size=6, 64/6 uneven).
+            # Catch the invalid geometry at init with a clear message instead.
+            num_experts = getattr(experts, "num_experts", None)
+            ep_size = ep_mesh.size()
+            fsdp_size = fsdp_mesh.size()
+            if num_experts is not None and ep_size > 1 and fsdp_size > 1:
+                experts_per_ep_rank = num_experts // ep_size
+                assert num_experts % ep_size == 0, (
+                    f"num_experts={num_experts} must be divisible by ep_size={ep_size}"
+                )
+                assert experts_per_ep_rank % fsdp_size == 0, (
+                    f"fsdp_size={fsdp_size} must divide num_experts//ep_size="
+                    f"{experts_per_ep_rank} (num_experts={num_experts}, ep_size={ep_size}); "
+                    f"uneven expert shard → FSDP2 pads the local optimizer shard but the "
+                    f"EP-backward grad is unpadded → Adam dim-0 mismatch at the step-1 "
+                    f"optimizer step. Choose an fsdp_size that divides {experts_per_ep_rank}."
+                )
             ep_fsdp_kwargs = {k: v for k, v in fsdp_kwargs.items() if k != "mesh"}
             fully_shard(experts, mesh=fsdp_mesh, **ep_fsdp_kwargs)
         # Tell the grouped block which comm backend to run. For deepep this also
