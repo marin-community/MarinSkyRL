@@ -32,18 +32,33 @@ from skyrl_train.models.router_replay import RouterReplayAction, get_active_repl
 
 class GroupedMoEShim(nn.Module):
     """Wraps a grouped ``MoE`` to satisfy the HF decoder-layer ``self.mlp(h)``
-    2-tuple contract and to apply router replay via the native ``routed_experts``
-    arg.
+    contract and to apply router replay via the native ``routed_experts`` arg.
 
-    HF ``*SparseMoeBlock.forward`` returns ``(final_hidden_states, router_logits)``;
-    the decoder layer either ignores the second element or threads it to the
-    aux-loss. Stage 3b drops aux-loss, so we return ``router_logits=None`` (the
-    decoder code tolerates None for the dropped element).
+    The return contract is arch-dependent and set at construction by
+    ``swap_moe_blocks_to_grouped`` from the class of the HF block being replaced:
+
+    * ``Qwen3NextSparseMoeBlock`` (``returns_tuple=True``, DEFAULT): the
+      Qwen3-Next decoder unpacks a 2-tuple
+      (``hidden_states, _ = self.mlp(...)`` / ``isinstance(..., tuple)`` guard),
+      so the shim returns ``(out, router_logits_or_None)``. Aux-loss is dropped
+      in Stage 3b, so ``router_logits`` is None. This is the validated 80B path
+      and is the default to keep it byte-identical.
+    * ``Qwen3MoeSparseMoeBlock`` (``returns_tuple=False``): the stock
+      ``Qwen3MoeSparseMoeBlock.forward`` returns a BARE TENSOR, and the
+      Qwen3-MoE decoder consumes it directly (``hidden_states = self.mlp(h)``
+      then ``hidden_states = residual + hidden_states`` — no tuple unpack).
+      Returning a 2-tuple here raised
+      ``TypeError: unsupported operand type(s) for +: 'Tensor' and 'tuple'`` at
+      ``modeling_qwen3_moe.py`` (residual add). So the shim must return the bare
+      tensor for this arch.
     """
 
-    def __init__(self, moe: MoE):
+    def __init__(self, moe: MoE, returns_tuple: bool = True):
         super().__init__()
         self.moe = moe
+        # Arch-dependent return contract; default True = Qwen3-Next 2-tuple
+        # (preserves the validated 80B path byte-identically).
+        self.returns_tuple = returns_tuple
 
     def _replay_indices(self, hidden_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Resolve forced top-k indices for the current rows via the controller.
@@ -76,8 +91,11 @@ class GroupedMoEShim(nn.Module):
             out = self.moe(hidden_states, routed_experts=routed_experts)
         else:
             out = self.moe(hidden_states)
-        # 2-tuple contract; aux-loss dropped → router_logits is None.
-        return out, None
+        if self.returns_tuple:
+            # Qwen3-Next decoder unpacks a 2-tuple; aux-loss dropped → None.
+            return out, None
+        # Qwen3-MoE decoder consumes a bare tensor (residual + self.mlp(h)).
+        return out
 
 
 def _moe_attr(hf_block, hf_config, name):
@@ -156,6 +174,11 @@ def swap_moe_blocks_to_grouped(model) -> int:
         ref_param = block.gate.weight
         moe = moe.to(device=ref_param.device, dtype=ref_param.dtype)
         remap_hf_block_to_moe(block, moe)
-        parent.mlp = GroupedMoEShim(moe)
+        # The shim must mirror the replaced HF block's return contract: the
+        # Qwen3-MoE decoder consumes a BARE TENSOR (residual + self.mlp(h)),
+        # while the Qwen3-Next decoder unpacks a 2-tuple. Default (no match) is
+        # the 2-tuple, preserving the validated Qwen3-Next 80B path.
+        returns_tuple = type(block).__name__ != "Qwen3MoeSparseMoeBlock"
+        parent.mlp = GroupedMoEShim(moe, returns_tuple=returns_tuple)
         swapped += 1
     return swapped
