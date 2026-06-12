@@ -126,11 +126,20 @@ def _grad_norm(model):
     return g2**0.5
 
 
-def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4):
+def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4, cp_group=None):
     """One full seeded GRPO step on a REPLICATED model. Returns (loss, grad_norm).
     Inputs are FIXED + identical across cp1/cp2 so the only difference is the CP
     forward. Advantages/old_log_probs are deterministic synthetic, asymmetric so
-    the loss genuinely depends on the freshly-computed logprobs."""
+    the loss genuinely depends on the freshly-computed logprobs.
+
+    cp_group: when given (cp>1), SUM-all-reduce the param grads across the cp group
+    before grad-norm + optimizer step. This mirrors what real FSDP2-CP does — the
+    cp dim participates in the gradient reduction. In this REPLICATED test harness
+    there is no FSDP to do it, so we reduce explicitly: the grad-safe unshard's
+    all_gather backward reduce-scatters each token's grad to its OWNING cp rank, so
+    each rank holds only its shard's contribution; summing across the cp group
+    reconstructs the full-sequence gradient (== the cp=1 gradient)."""
+    import torch.distributed as _dist
     from omegaconf import OmegaConf
     from skyrl_train.utils.ppo_utils import ppo_policy_loss
 
@@ -167,6 +176,13 @@ def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4):
     loss, _ = ppo_policy_loss(action_log_probs, old_log_probs, advantages, cfg, loss_mask=loss_mask)
     opt.zero_grad()
     loss.backward()
+    if cp_group is not None:
+        # Reconstruct the full-sequence gradient (real FSDP2-CP does this in the
+        # fsdp/cp reduction). SUM across the cp group: each rank held only its
+        # shard's grad after the unshard's reduce-scatter backward.
+        for p in model.model.parameters():
+            if p.grad is not None:
+                _dist.all_reduce(p.grad, op=_dist.ReduceOp.SUM, group=cp_group)
     gnorm = _grad_norm(model)
     opt.step()
     return loss.float().item(), gnorm
@@ -202,8 +218,9 @@ def test1_e2e_grpo_parity(cp_size, cp_mesh, rank):
     lp2_pre = _score(m_cp2, input_ids, attention_mask, num_actions)
     pre_mean = (lp1_pre - lp2_pre).abs().mean().item()
 
+    cp_group = cp_mesh.get_group()
     loss1, gn1 = _grpo_step(m_cp1, input_ids, attention_mask, num_actions)
-    loss2, gn2 = _grpo_step(m_cp2, input_ids, attention_mask, num_actions)
+    loss2, gn2 = _grpo_step(m_cp2, input_ids, attention_mask, num_actions, cp_group=cp_group)
 
     # Post-step logprobs (the weights have now diverged by exactly the gradient diff).
     lp1_post = _score(m_cp1, input_ids, attention_mask, num_actions)
@@ -354,8 +371,12 @@ def test3_cp_ep_moe(world_size, rank):
     from torch.distributed.tensor import DTensor
 
     # ---- Verify the 4-D mesh slices compose (the Stage-3 concern) ----
+    # 4 GPUs with cp=2 x ep=2 leaves fsdp=1 (1*1*2*2=4). fsdp_size=2 would need
+    # world=8. The 4-D ["ddp","fsdp","cp","ep"] mesh of shape (1,1,2,2) still
+    # exercises the expert-DTensor slice over a 4-D mesh (the Stage-3 concern);
+    # experts shard over the ep submesh (fsdp is size-1 here).
     try:
-        mesh4d = create_device_mesh(world_size=world_size, fsdp_size=2, ep_size=2, cp_size=2)
+        mesh4d = create_device_mesh(world_size=world_size, fsdp_size=1, ep_size=2, cp_size=2)
     except Exception as e:
         if rank == 0:
             print(f"[TEST3] create_device_mesh(4-D) FAILED: {e!r}")
