@@ -147,17 +147,18 @@ def test_cp1_noop_bit_identical():
 # ----------------------------------------------------------------------------
 # (2) 2-GPU cp=2 (torchrun main). Sharding shape + both rotate methods + pad + determinism.
 # ----------------------------------------------------------------------------
-def _shard_probe_logits(cp_mesh, model, input_ids, position_ids, attention_mask):
+def _shard_probe_logits(cp_mesh, model, input_ids, position_ids):
     """Run JUST the base model forward inside the CP context (no immediate unshard)
-    so we can assert the logits come back sequence-sharded [B, S/cp, V]."""
+    so we can assert the logits come back sequence-sharded [B, S/cp, V]. Mirrors
+    the production path: only sequences + position_ids are CP-sharded; the mask is
+    NOT passed (pure causal ring SDPA), matching HFModelWrapper.forward."""
     from skyrl_train.distributed.cp_utils import cp_context
 
     seqs = input_ids.clone()
     pos = position_ids.clone()
-    attn = attention_mask.clone()
-    buffers = [seqs, pos, attn]
-    with cp_context(cp_mesh, "allgather", buffers=buffers, seq_dims=[1, 1, 1], no_restore={seqs}):
-        out = model.model(seqs, attention_mask=attn, position_ids=pos)
+    buffers = [seqs, pos]
+    with cp_context(cp_mesh, "allgather", buffers=buffers, seq_dims=[1, 1], no_restore={seqs}):
+        out = model.model(seqs, attention_mask=None, position_ids=pos)
         sharded_shape = tuple(out["logits"].shape)
     return sharded_shape
 
@@ -204,14 +205,10 @@ def main():
         last_pos = position_ids[:, -1:]
         pad_pos = torch.arange(1, pad + 1, device=position_ids.device).unsqueeze(0)
         position_ids_p = torch.cat((position_ids, last_pos + pad_pos), dim=-1)
-        attn_p = torch.cat(
-            (attention_mask, torch.zeros(attention_mask.size(0), pad, dtype=attention_mask.dtype, device="cuda")),
-            dim=-1,
-        )
     else:
-        input_ids_p, position_ids_p, attn_p = input_ids, position_ids, attention_mask
+        input_ids_p, position_ids_p = input_ids, position_ids
     S_pad = input_ids_p.size(1)
-    sharded_shape = _shard_probe_logits(cp_mesh, model, input_ids_p, position_ids_p, attn_p)
+    sharded_shape = _shard_probe_logits(cp_mesh, model, input_ids_p, position_ids_p)
     B = input_ids.size(0)
     expected_shard_S = S_pad // cp_size
     if rank == 0:

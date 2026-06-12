@@ -521,14 +521,19 @@ class HFModelWrapper(nn.Module):
                         device=attention_mask_fwd.device,
                     )
                     attention_mask_fwd = torch.cat((attention_mask_fwd, pad_attn), dim=-1)
-            # The CP context shards these buffers along dim=1 (the sequence dim).
-            # attention_mask may be None (rare on the dense path, but guard); only
-            # list non-None buffers so buffer_seq_dims stays parallel.
+            # The CP context shards ONLY sequences + position_ids along dim=1 (the
+            # sequence dim). The 2D attention_mask is deliberately NOT sharded /
+            # passed into the model under CP: HF would expand it to a 4D additive
+            # bias `[B, 1, S_q, S_kv]` whose key axis must stay FULL-length, but
+            # the sharded 2D mask makes that expand fail inside the CP region
+            # (`aten.expand` size mismatch S_kv/cp vs S_q). torch CP ring SDPA
+            # instead runs PURE CAUSAL attention (is_causal inferred when
+            # attention_mask=None), which it shards correctly. Left-padding masking
+            # is recovered via position_ids + the post-hoc entropy/logprob masks;
+            # exact per-token correctness under padding is the Stage-5 concern.
+            # `attention_mask_fwd` is kept (full, unsharded) for the entropy mask.
             _cp_buffers = [sequences_fwd, position_ids_fwd]
             _cp_seq_dims = [1, 1]
-            if attention_mask_fwd is not None:
-                _cp_buffers.append(attention_mask_fwd)
-                _cp_seq_dims.append(1)
             _cp_no_restore = {sequences_fwd}
 
         # MoE router replay (R3) — Stage 2/3a. When enabled and targets are
@@ -585,6 +590,10 @@ class HFModelWrapper(nn.Module):
                 if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
                     # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
                     # Not using attention mask leads to higher perf since flash attention varlen func is enabled
+                    output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+                elif cp_size > 1:
+                    # CP: pass attention_mask=None so SDPA runs pure causal (ring
+                    # attention on cp_mesh); a sharded 2D mask breaks the 4D expand.
                     output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
@@ -900,11 +909,11 @@ def _get_critic_model(
                             device=attention_mask_fwd.device,
                         )
                         attention_mask_fwd = torch.cat((attention_mask_fwd, pad_attn), dim=-1)
+                # Only sequences + position_ids are CP-sharded; the 2D mask is NOT
+                # passed under CP (the 4D-bias expand fails on a sharded mask) — CP
+                # runs pure causal SDPA. See HFModelWrapper.forward for the rationale.
                 _cp_buffers = [input_ids_fwd, position_ids_fwd]
                 _cp_seq_dims = [1, 1]
-                if attention_mask_fwd is not None:
-                    _cp_buffers.append(attention_mask_fwd)
-                    _cp_seq_dims.append(1)
                 cp_ctx = maybe_cp_context(
                     cp_size,
                     self.cp_mesh,
@@ -918,6 +927,9 @@ def _get_critic_model(
 
             with cp_ctx:
                 if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
+                    outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
+                elif cp_size > 1:
+                    # CP: attention_mask=None -> pure causal ring SDPA.
                     outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
                 else:
                     outputs = getattr(self, self.base_model_prefix)(
