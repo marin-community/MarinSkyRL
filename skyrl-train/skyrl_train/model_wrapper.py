@@ -529,12 +529,20 @@ class HFModelWrapper(nn.Module):
             # (`aten.expand` size mismatch S_kv/cp vs S_q). torch CP ring SDPA
             # instead runs PURE CAUSAL attention (is_causal inferred when
             # attention_mask=None), which it shards correctly. Left-padding masking
-            # is recovered via position_ids + the post-hoc entropy/logprob masks;
-            # exact per-token correctness under padding is the Stage-5 concern.
+            # is recovered via position_ids + the post-hoc entropy/logprob masks.
             # `attention_mask_fwd` is kept (full, unsharded) for the entropy mask.
-            _cp_buffers = [sequences_fwd, position_ids_fwd]
-            _cp_seq_dims = [1, 1]
-            _cp_no_restore = {sequences_fwd}
+            #
+            # Stage 5: we ALSO CP-shard `sequences_rolled` (the per-token labels)
+            # with the SAME zigzag load balancer so the per-token logprobs computed
+            # on the local sharded logits `[B, S/cp, V]` line up token-for-token
+            # with the local logits BEFORE the unshard. (Stage 4 computed logprobs
+            # against the FULL sequences_rolled after an immediate logit unshard;
+            # Stage 5 moves the unshard seam to AFTER the per-token compute, which
+            # is the memory-efficient gather — `[B,S]` logprobs not `[B,S,V]`
+            # logits — and is the seam the loss/loss_mask/KL must align on.)
+            _cp_buffers = [sequences_fwd, position_ids_fwd, sequences_rolled]
+            _cp_seq_dims = [1, 1, 1]
+            _cp_no_restore = {sequences_fwd, sequences_rolled}
 
         # MoE router replay (R3) — Stage 2/3a. When enabled and targets are
         # provided, install the per-layer forced top-k into the controller for
@@ -561,16 +569,17 @@ class HFModelWrapper(nn.Module):
             set_active_replay(self._router_replay)
             replay_installed = True
 
-        # Stage 4 (FSDP2 CP): enter torch-native `context_parallel` around the
+        # Stage 4/5 (FSDP2 CP): enter torch-native `context_parallel` around the
         # model forward so SDPA dispatches to ring attention on the cp mesh and
         # the listed sequence buffers are sharded by torch's built-in load
         # balancer. cp_size==1 ⇒ `maybe_cp_context` is `contextlib.nullcontext()`
         # (literal no-op, G1). Inside the context the HF forward returns logits
-        # sequence-sharded `[B, S/cp, V]`; for THIS stage we immediately
-        # `context_parallel_unshard` the logits back to `[B, S, V]` (a runnable
-        # forward) so the unchanged downstream logprob/entropy compute against the
-        # full-length `sequences_rolled` works. Stage 5 replaces the immediate
-        # unshard with the loss-aligned per-token unshard.
+        # sequence-sharded `[B, S/cp, V]`. Stage 5: we keep the logits sharded
+        # through the per-token logprob/entropy compute (using the co-sharded
+        # `sequences_rolled` labels) and `context_parallel_unshard` ONLY the
+        # per-token `[B, S/cp]` outputs back to natural-order `[B, S]` (the
+        # loss-aligned seam — mirrors how the Ulysses path gathers per-token
+        # logprobs before the response slice).
         if cp_size > 1:
             cp_ctx = maybe_cp_context(
                 cp_size,
@@ -609,14 +618,6 @@ class HFModelWrapper(nn.Module):
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
-                # Stage 4: unshard the sequence-sharded logits `[B, S/cp, V]` back
-                # to the full `[B, S, V]` along the sequence dim (dim=1) so the
-                # downstream per-token compute (against full-length
-                # sequences_rolled) runs as on the non-CP path. Stage 5 replaces
-                # this immediate unshard with the loss-aligned per-token unshard.
-                if cp_size > 1:
-                    output["logits"] = context_parallel_unshard(self.cp_mesh, [output["logits"]], [1])[0]
-
             # Stage-7 P3 recompute-safety: when this forward builds an autograd
             # graph (the training forward), the replay teardown MUST NOT fire here.
             # Under activation/gradient checkpointing, backward RECOMPUTES this
@@ -643,11 +644,26 @@ class HFModelWrapper(nn.Module):
         logits_BSV.div_(temperature)
 
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+        # Under CP `logits_BSV` is sequence-sharded `[B, S/cp, V]` and
+        # `sequences_rolled` was co-sharded by the SAME zigzag balancer, so this
+        # per-token compute is token-for-token aligned on the local shard.
         log_probs = logprobs_from_logits(
             logits_BSV,
             sequences_rolled,
             inplace_backward=True,
         )
+
+        # Stage 5 (FSDP2 CP) — THE correctness seam: unshard the per-token
+        # `[B, S/cp]` logprobs back to natural-order `[B, S]` via the inverse of
+        # torch's zigzag load balancer. This is the loss-aligned gather (mirrors
+        # the Ulysses `gather_outputs_and_unpad` seam below, different gather op):
+        # after this the logprobs are in the SAME token order as the cp=1 path, so
+        # the response slice / loss / loss_mask / advantages / ref-KL all line up
+        # exactly. cp_size==1 ⇒ skipped (G1). Entropy is unsharded separately
+        # below (it must be computed unmasked on the shard, then masked post-gather
+        # — the full attention_mask can't be applied to a zigzag shard).
+        if cp_size > 1:
+            log_probs = context_parallel_unshard(self.cp_mesh, [log_probs], [1])[0]
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
@@ -673,9 +689,22 @@ class HFModelWrapper(nn.Module):
                 # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
                 entropy_mask = attention_mask_fwd
 
-            entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
-            )
+            # Stage 5 (FSDP2 CP): logits are sequence-sharded `[B, S/cp, V]`, but the
+            # entropy attention_mask is FULL-length `[B, S]` and in NATURAL order —
+            # it cannot index a zigzag shard. So compute entropy UNMASKED on the
+            # shard, `context_parallel_unshard` it to natural-order `[B, S]`, THEN
+            # apply the full mask. This yields the SAME masked entropy as cp=1.
+            if cp_size > 1:
+                entropy_BS = self.chunked_entropy_from_logits_fn(
+                    logits_BSV, requires_grad=entropy_requires_grad, attention_mask=None
+                )
+                entropy_BS = context_parallel_unshard(self.cp_mesh, [entropy_BS], [1])[0]
+                if entropy_mask is not None:
+                    entropy_BS = entropy_BS * entropy_mask.to(entropy_BS.dtype)
+            else:
+                entropy_BS = self.chunked_entropy_from_logits_fn(
+                    logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
+                )
 
             if self.sequence_parallel_size > 1:
                 dim = entropy_BS.ndim - 1
@@ -895,9 +924,13 @@ def _get_critic_model(
                     input_ids_fwd, position_ids_fwd, attention_mask_fwd, self.sequence_parallel_size
                 )
 
-            # Stage 4 (FSDP2 CP): pad to 2*cp divisibility (G4), then wrap the base
-            # forward in torch-native context_parallel (ring SDPA) and immediately
-            # unshard the hidden states. cp_size==1 ⇒ no-op (G1). Mirrors the
+            # Stage 4/5 (FSDP2 CP): pad to 2*cp divisibility (G4), then wrap the base
+            # forward in torch-native context_parallel (ring SDPA) and unshard the
+            # per-token hidden states `[B, S/cp, H]` -> natural-order `[B, S, H]`.
+            # The value head is a per-token pointwise Linear, so unsharding the
+            # hidden states (then projecting) yields natural-order values that are
+            # token-for-token aligned with cp=1 — the SAME loss-aligned seam Stage 5
+            # uses for policy logprobs. cp_size==1 ⇒ no-op (G1). Mirrors the
             # policy/ref HFModelWrapper.forward exactly so value targets align.
             cp_size = self.context_parallel_size
             cp_pad_size = 0
@@ -953,7 +986,7 @@ def _get_critic_model(
                     )
                 last_hidden_states_BSH = outputs["last_hidden_state"]
                 if cp_size > 1:
-                    # unshard hidden states [B, S/cp, H] -> [B, S, H] (Stage 5 defers).
+                    # Stage 5: unshard hidden states [B, S/cp, H] -> natural [B, S, H].
                     last_hidden_states_BSH = context_parallel_unshard(self.cp_mesh, [last_hidden_states_BSH], [1])[0]
 
             if self.sequence_parallel_size > 1:
