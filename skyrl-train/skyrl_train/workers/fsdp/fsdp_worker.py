@@ -66,6 +66,7 @@ class FSDPWeightExtractor(WeightExtractor):
         """Apply the per-arch inference-engine name translation (identity for all
         arches except Mixtral). Scoped via ``self._model_type``."""
         from skyrl_train.models.layers.moe_weight_remap import translate_moe_name_to_vllm
+
         return translate_moe_name_to_vllm(name, self._model_type)
 
     def extract_weights(self, dtype: torch.dtype):
@@ -378,6 +379,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.policy.fsdp_config.get("context_parallel_size", 1)),
+                # Stage 4: surface the CP submesh + rotate method so the forward
+                # enters torch-native context_parallel (ring SDPA). None at cp=1.
+                cp_mesh=self.cp_mesh,
+                cp_rotate_method=str(self.cfg.trainer.policy.fsdp_config.get("cp_rotate_method", "allgather")),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -465,6 +470,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         # Extract weights using the initialized extractor
         import os
+
         _fuse_weights = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
 
         if not self.use_cuda_ipc:
@@ -623,6 +629,9 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.critic.fsdp_config.get("context_parallel_size", 1)),
+                # Stage 4: value forward must CP-shard identically (G3). None at cp=1.
+                cp_mesh=self.cp_mesh,
+                cp_rotate_method=str(self.cfg.trainer.critic.fsdp_config.get("cp_rotate_method", "allgather")),
             )
             self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
@@ -693,6 +702,10 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.ref.fsdp_config.get("context_parallel_size", 1)),
+                # Stage 4: ref-logprob forward must CP-shard identically to the
+                # policy so KL aligns post-unshard (G3). None at cp=1.
+                cp_mesh=self.cp_mesh,
+                cp_rotate_method=str(self.cfg.trainer.ref.fsdp_config.get("cp_rotate_method", "allgather")),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
