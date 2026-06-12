@@ -36,6 +36,13 @@ CP_FIELDS = {
     "cp_style": "ring_sdpa",
     "cp_rotate_method": "allgather",
 }
+# Stage-2 additive top-level trainer keys (not under fsdp_config). Like CP_FIELDS,
+# these are purely additive and must be stripped before the structural-identity
+# comparison against the pre-CP golden. Default "auto" preserves byte-identical
+# behavior (G1).
+STAGE2_TRAINER_FIELDS = {
+    "attn_backend": "auto",
+}
 ROLES = ("policy", "ref", "critic")
 
 
@@ -75,6 +82,8 @@ def test_all_defaults_is_structurally_identical_to_pre_cp():
         fsdp = container["trainer"][role]["fsdp_config"]
         for k in CP_FIELDS:  # strip the additive keys -> should reproduce pre-CP shape
             fsdp.pop(k, None)
+    for k in STAGE2_TRAINER_FIELDS:  # strip Stage-2 additive top-level trainer keys
+        container["trainer"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the pre-CP golden baseline"
 
@@ -93,6 +102,13 @@ def test_diff_is_exactly_the_three_new_keys_x_three_roles():
         # And the added keys carry the disabled defaults.
         for k, v in CP_FIELDS.items():
             assert cur_fsdp[k] == v
+    # The only new top-level trainer keys are the Stage-2 additive ones (attn_backend).
+    added_trainer = set(current["trainer"]) - set(golden["trainer"])
+    assert added_trainer == set(
+        STAGE2_TRAINER_FIELDS
+    ), f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(STAGE2_TRAINER_FIELDS)}"
+    for k, v in STAGE2_TRAINER_FIELDS.items():
+        assert current["trainer"][k] == v
 
 
 # ----------------------------------------------------------------------------- G2
