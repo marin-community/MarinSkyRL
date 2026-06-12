@@ -6,6 +6,14 @@ uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_lo
 
 For Megatron, run with:
 uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_model.py -m "megatron"
+
+Context-Parallel (CP) resume note: under CP the model weights are FSDP-sharded on
+the ``fsdp`` submesh, which is ORTHOGONAL to the ``cp`` submesh — CP shards only
+the activations/sequence inside the forward, never the parameters. So save/load of
+a CP-trained checkpoint is the SAME code path as fsdp2 here (CP has no effect on
+the state_dict). The dedicated CP resume assertion (save after a cp=2 GRPO step,
+reload into a fresh cp=2 model, scored logprobs byte-identical) is TEST 4 in
+``tests/gpu/test_cp_e2e_grpo.py`` (Stage 6).
 """
 
 import ray

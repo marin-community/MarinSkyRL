@@ -501,6 +501,43 @@ class HFModelWrapper(nn.Module):
         if cp_size > 1:
             assert self.sequence_parallel_size == 1, "CP and Ulysses SP are mutually exclusive (G2)"
             assert not self.use_sample_packing, "CP requires the dense (unpacked) path (G2)"
+            # Stage 6 (production guard): CP ring SDPA runs PURE-CAUSAL with
+            # attention_mask=None inside the context (the 2D mask is not
+            # CP-shardable — see the long comment below). Pure-causal attention
+            # only masks pad tokens that come AFTER the real tokens (trailing /
+            # right-pad — causality blocks real tokens from attending forward).
+            # LEFT-padding (pads BEFORE the real tokens) is NOT masked: every
+            # real token attends back across the leading pads, diverging grossly
+            # from the cp=1 (masked) path (~1.0 logprob error — Stage 5/5b). So
+            # CP REQUIRES right-aligned batches. Detect a left-padded row (a
+            # masked-out position that precedes a real position) and fail loudly
+            # rather than silently train on corrupted attention. Gated by
+            # SKYRL_CP_REQUIRE_RIGHT_ALIGN (default "1"); set "0" only if the
+            # caller has independently guaranteed right-alignment and wants to
+            # skip the per-step scan. cp_size==1 never reaches here (G1).
+            if attention_mask_fwd is not None and os.environ.get("SKYRL_CP_REQUIRE_RIGHT_ALIGN", "1") not in (
+                "0",
+                "false",
+                "False",
+            ):
+                am = attention_mask_fwd.to(torch.bool)
+                # A row is right-aligned iff, reading left→right, no real token (1)
+                # appears after a pad (0): i.e. cummax of the mask is monotone and
+                # the FIRST occurrence of a 1 is followed only by 1s up to the last
+                # real token. Equivalent check: a left pad exists iff any position
+                # is a pad (0) AND some LATER position in the same row is real (1).
+                later_real = torch.flip(torch.cummax(torch.flip(am.int(), dims=[1]), dim=1).values, dims=[1])
+                left_padded = ((~am) & later_real.bool()).any(dim=1)
+                if bool(left_padded.any()):
+                    bad = torch.nonzero(left_padded, as_tuple=False).flatten().tolist()
+                    raise AssertionError(
+                        f"[CP] context_parallel_size={cp_size} requires RIGHT-ALIGNED batches "
+                        f"(pads must be TRAILING so pure-causal ring SDPA masks them); rows {bad} "
+                        f"are LEFT-padded (a real token follows a pad). Left-padding corrupts CP "
+                        f"attention (real tokens attend across leading pads, ~1.0 logprob error vs "
+                        f"cp=1). Right-align the batch before the CP forward, or set "
+                        f"SKYRL_CP_REQUIRE_RIGHT_ALIGN=0 only if alignment is guaranteed upstream."
+                    )
             _, total_seq_len = sequences_fwd.shape
             multiple = 2 * cp_size
             cp_pad_size = (multiple - total_seq_len % multiple) % multiple
