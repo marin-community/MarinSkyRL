@@ -157,8 +157,11 @@ def _shard_probe_logits(cp_mesh, model, input_ids, position_ids):
     seqs = input_ids.clone()
     pos = position_ids.clone()
     buffers = [seqs, pos]
+    # Mirror the production CP path: pass the per-layer-type mask dict (None entries)
+    # so HF skips create_causal_mask and SDPA runs is_causal=True ring attention.
+    cp_mask = {"full_attention": None, "sliding_attention": None}
     with cp_context(cp_mesh, "allgather", buffers=buffers, seq_dims=[1, 1], no_restore={seqs}):
-        out = model.model(seqs, attention_mask=None, position_ids=pos)
+        out = model.model(seqs, attention_mask=cp_mask, position_ids=pos)
         sharded_shape = tuple(out["logits"].shape)
     return sharded_shape
 

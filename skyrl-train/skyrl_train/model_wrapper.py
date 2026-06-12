@@ -592,9 +592,20 @@ class HFModelWrapper(nn.Module):
                     # Not using attention mask leads to higher perf since flash attention varlen func is enabled
                     output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
                 elif cp_size > 1:
-                    # CP: pass attention_mask=None so SDPA runs pure causal (ring
-                    # attention on cp_mesh); a sharded 2D mask breaks the 4D expand.
-                    output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+                    # CP: force PURE-CAUSAL ring SDPA. We must NOT let HF build its 4D
+                    # additive causal bias mask: under CP `create_causal_mask` runs at
+                    # model entry and produces a `[B,1,S_q,S_kv]` bias whose key axis
+                    # ends up sharded (S/cp) while the query axis stays full → torch
+                    # CP's SDPA wrapper then fails `aten.expand` (kv=S/cp vs q=S). HF's
+                    # documented escape hatch (modeling_qwen3.py:403) is to pass
+                    # `attention_mask` ALREADY as the per-layer-type mask DICT, which
+                    # short-circuits `create_causal_mask`; with None entries every
+                    # layer gets attention_mask=None → SDPA sets is_causal=True, which
+                    # torch CP ring attention shards correctly. Padding masking is
+                    # recovered post-hoc (entropy/logprob masks); exact per-token
+                    # padding correctness is the Stage-5 concern.
+                    cp_mask = {"full_attention": None, "sliding_attention": None}
+                    output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -929,8 +940,13 @@ def _get_critic_model(
                 if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
                     outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
                 elif cp_size > 1:
-                    # CP: attention_mask=None -> pure causal ring SDPA.
-                    outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
+                    # CP: pass the per-layer-type mask DICT (None entries) so HF skips
+                    # create_causal_mask → SDPA is_causal=True → ring attention shards
+                    # cleanly (see HFModelWrapper.forward for the full rationale).
+                    cp_mask = {"full_attention": None, "sliding_attention": None}
+                    outputs = getattr(self, self.base_model_prefix)(
+                        input_ids_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd
+                    )
                 else:
                     outputs = getattr(self, self.base_model_prefix)(
                         input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
