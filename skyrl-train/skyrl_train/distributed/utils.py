@@ -82,8 +82,24 @@ def init_custom_process_group(
 
     # NOTE: The pg_options parameter was renamed into backend_options in PyTorch 2.6.0
     # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
-    # We need to determine the appropriate parameter name based on PyTorch version
-    pg_options_param_name = "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    # Determine the accepted kwarg by INSPECTING the installed _new_process_group_helper
+    # signature rather than a lexicographic version-string compare. The old
+    # `str(torch.__version__) >= "2.6"` test breaks at torch 2.10/2.11 because
+    # "2.11.0+cu130" < "2.6" lexicographically -> it wrongly picked "pg_options",
+    # which torch 2.11 _new_process_group_helper rejects (TypeError: unexpected
+    # keyword argument 'pg_options'). Signature inspection is correct on every
+    # torch (2.9 baked SIF picks backend_options exactly as before -> no regression).
+    import inspect as _inspect
+    _helper_params = _inspect.signature(_new_process_group_helper).parameters
+    if "backend_options" in _helper_params:
+        pg_options_param_name = "backend_options"
+    elif "pg_options" in _helper_params:
+        pg_options_param_name = "pg_options"
+    else:
+        raise RuntimeError(
+            "_new_process_group_helper accepts neither 'backend_options' nor "
+            f"'pg_options' (torch {torch.__version__}); signature: {_inspect.signature(_new_process_group_helper)}"
+        )
     pg, _ = _new_process_group_helper(
         world_size,
         rank,
