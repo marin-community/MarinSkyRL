@@ -42,7 +42,10 @@ def test_explicit_backends_override_flash_attn():
     # Explicit backend overrides the flash_attn bool entirely.
     assert resolve_attn_implementation(attn_backend="sdpa", use_flash_attention_2=True) == "sdpa"
     assert resolve_attn_implementation(attn_backend="sdpa", use_flash_attention_2=False) == "sdpa"
-    assert resolve_attn_implementation(attn_backend="flash_attention_2", use_flash_attention_2=False) == "flash_attention_2"
+    assert (
+        resolve_attn_implementation(attn_backend="flash_attention_2", use_flash_attention_2=False)
+        == "flash_attention_2"
+    )
     assert resolve_attn_implementation(attn_backend="flex", use_flash_attention_2=True) == "flex_attention"
 
 

@@ -278,7 +278,9 @@ class HFModelWrapper(nn.Module):
                 # so keep router-logit collection OFF there. Flag-off / eager
                 # paths are unchanged.
                 if moe_grouped_gemm:
-                    logger.info("[MoE] grouped-GEMM swap active — leaving output_router_logits False (aux-loss dropped)")
+                    logger.info(
+                        "[MoE] grouped-GEMM swap active — leaving output_router_logits False (aux-loss dropped)"
+                    )
                     self.model.config.output_router_logits = False
                 else:
                     logger.info("[MoE] set output_router_logits as True")
@@ -483,11 +485,7 @@ class HFModelWrapper(nn.Module):
         # packed (use_sample_packing + FA2) paths. SP (sequence_parallel_size >
         # 1) remains Stage 4.
         replay_installed = False
-        if (
-            self._router_replay is not None
-            and rollout_routed_experts is not None
-            and self.sequence_parallel_size == 1
-        ):
+        if self._router_replay is not None and rollout_routed_experts is not None and self.sequence_parallel_size == 1:
             from skyrl_train.models.router_replay import set_active_replay
 
             # Build the dense target off the ORIGINAL [B, seq_len] sequences (the
@@ -646,22 +644,17 @@ class HFModelWrapper(nn.Module):
 
         if isinstance(num_actions, (list, np.ndarray)):
             raise NotImplementedError(
-                "router_replay requires a scalar num_actions (dense unpacked path); "
-                "got a per-sample list/array."
+                "router_replay requires a scalar num_actions (dense unpacked path); " "got a per-sample list/array."
             )
         device = sequences.device
         batch_size, seq_len = sequences.shape
         re = rollout_routed_experts.to(device=device, dtype=torch.long)
         B, response_len, L, K = re.shape
         assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
-        assert response_len == num_actions, (
-            f"router_replay response_len {response_len} != num_actions {num_actions}"
-        )
+        assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
 
         # Full-seq target [B, seq_len, L, K], sentinel-filled, response copied in.
-        full = torch.full(
-            (batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device
-        )
+        full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
         full[:, seq_len - response_len : seq_len, :, :] = re
 
         # Replay mask: True on response positions whose row is non-sentinel

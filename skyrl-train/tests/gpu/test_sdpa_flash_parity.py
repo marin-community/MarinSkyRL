@@ -143,9 +143,9 @@ def test_sdpa_matches_flash_forward():
         f"sdpa(fp32) logprobs disagree with eager(fp32) reference: {d_correct_logp:.6e} > {FP32_ATOL} "
         "-> sdpa math is WRONG (not a precision issue)"
     )
-    assert torch.allclose(ent_sdpa_fp32, ent_eager_fp32, atol=FP32_ATOL, rtol=RTOL), (
-        f"sdpa(fp32) entropy disagrees with eager(fp32): {d_correct_ent:.6e} > {FP32_ATOL}"
-    )
+    assert torch.allclose(
+        ent_sdpa_fp32, ent_eager_fp32, atol=FP32_ATOL, rtol=RTOL
+    ), f"sdpa(fp32) entropy disagrees with eager(fp32): {d_correct_ent:.6e} > {FP32_ATOL}"
 
     # (B) Training-signal: bf16 cross-kernel diff stays at the bf16 floor (the
     # same-kernel bf16-vs-fp32 spread is itself >= this; a wiring bug would not be).
@@ -153,6 +153,6 @@ def test_sdpa_matches_flash_forward():
         f"flash vs sdpa bf16 logprobs diverged beyond the bf16 floor: {d_xkernel_logp:.6e} > "
         f"{BF16_LOGP_ATOL} (same-kernel bf16 floor was {d_prec_logp:.6e})"
     )
-    assert torch.allclose(ent_flash_bf16, ent_sdpa_bf16, atol=BF16_ENT_ATOL, rtol=RTOL), (
-        f"flash vs sdpa bf16 entropy diverged beyond the bf16 floor: {d_xkernel_ent:.6e} > {BF16_ENT_ATOL}"
-    )
+    assert torch.allclose(
+        ent_flash_bf16, ent_sdpa_bf16, atol=BF16_ENT_ATOL, rtol=RTOL
+    ), f"flash vs sdpa bf16 entropy diverged beyond the bf16 floor: {d_xkernel_ent:.6e} > {BF16_ENT_ATOL}"
