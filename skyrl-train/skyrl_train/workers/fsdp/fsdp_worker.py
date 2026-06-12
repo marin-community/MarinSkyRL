@@ -54,6 +54,19 @@ class FSDPWeightExtractor(WeightExtractor):
         self.group_by_module = group_by_module
         self.batch_size_threshold_gb = batch_size_threshold_gb
         self.moe_grouped_gemm = moe_grouped_gemm
+        # Per-arch inference-engine (vLLM) weight-NAME translation. Most grouped-MoE
+        # arches (qwen3_moe/qwen3_next/olmoe) emit broadcast names that already match
+        # vLLM's stock params_dict, so this stays the identity for them. Mixtral is the
+        # exception (transformers-5.x ``mlp.*`` vs vLLM's stock ``block_sparse_moe.*``);
+        # ``translate_moe_name_to_vllm`` renames ONLY Mixtral keys (see moe_weight_remap).
+        _cfg = getattr(model, "config", None)
+        self._model_type = getattr(_cfg, "model_type", "") or "" if _cfg is not None else ""
+
+    def _translate_name(self, name: str) -> str:
+        """Apply the per-arch inference-engine name translation (identity for all
+        arches except Mixtral). Scoped via ``self._model_type``."""
+        from skyrl_train.models.layers.moe_weight_remap import translate_moe_name_to_vllm
+        return translate_moe_name_to_vllm(name, self._model_type)
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from FSDP model.
@@ -101,6 +114,7 @@ class FSDPWeightExtractor(WeightExtractor):
             # Simple path: yield one chunk per parameter
             for name, param in params.items():
                 tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
+                name = self._translate_name(name)
                 yield WeightChunk(
                     names=[name],
                     dtypes=[str(dtype)],
@@ -191,6 +205,7 @@ class FSDPWeightExtractor(WeightExtractor):
             if kind == "param":
                 param = passthrough[key]
                 tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
+                key = self._translate_name(key)
                 yield WeightChunk(
                     names=[key],
                     dtypes=[str(dtype)],
@@ -210,6 +225,7 @@ class FSDPWeightExtractor(WeightExtractor):
                 convert_tt_layer_to_hf(layer_sd, key)
                 for ename, etensor in layer_sd.items():
                     out = etensor.to(dtype).detach().contiguous()
+                    ename = self._translate_name(ename)
                     yield WeightChunk(
                         names=[ename],
                         dtypes=[str(dtype)],

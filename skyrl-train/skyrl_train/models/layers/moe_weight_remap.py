@@ -174,3 +174,50 @@ def convert_tt_to_hf_moe(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
     for i in range(_get_max_layer_num(state_dict)):
         convert_tt_layer_to_hf(state_dict, i)
     return state_dict
+
+
+# --------------------------------------------------------------------------- #
+# Inference-engine (vLLM) name translation — per-arch.                        #
+# --------------------------------------------------------------------------- #
+#
+# The ``convert_tt_*`` converters above emit transformers-5.x HF names
+# (``...mlp.gate.weight``, ``...mlp.experts.{j}.gate_proj/up_proj/down_proj.weight``).
+# Most vLLM stock model definitions (qwen3_moe, qwen3_next, olmoe) register their
+# MoE params under exactly those transformers names, so the broadcast names already
+# match their ``load_weights`` ``params_dict`` — NO translation needed.
+#
+# Mixtral is the exception: transformers 5.x renamed the Mixtral MoE block
+# ``block_sparse_moe`` -> ``mlp`` and the per-expert projections to
+# ``gate_proj/up_proj/down_proj``, but vLLM kept the ORIGINAL canonical Mixtral
+# names (``block_sparse_moe.gate`` + per-expert ``w1/w2/w3``, consumed by FusedMoE's
+# ``expert_params_mapping`` with ckpt_gate=w1 / ckpt_down=w2 / ckpt_up=w3). So for
+# Mixtral ONLY we rename the broadcast keys to vLLM's stock layout. This is a pure
+# string rename — the per-expert tensor shapes ([moe_dim, dim] for w1/w3,
+# [dim, moe_dim] for w2) are already what vLLM's FusedMoE weight_loader expects;
+# NO shape/structural transform.
+
+
+def translate_moe_name_to_vllm(name: str, model_type: str) -> str:
+    """Rename a broadcast weight key to the vLLM stock layout for ``model_type``.
+
+    Currently scoped to Mixtral; every other arch (qwen3_moe / qwen3_next / olmoe /
+    ...) is returned UNCHANGED, so existing grouped-MoE arches keep byte-identical
+    broadcast names. Safe to call on every emitted name.
+    """
+    if model_type != "mixtral":
+        return name
+    # Router:  ...mlp.gate.weight                  -> ...block_sparse_moe.gate.weight
+    # Experts: ...mlp.experts.{j}.gate_proj.weight -> ...block_sparse_moe.experts.{j}.w1.weight
+    #          ...mlp.experts.{j}.up_proj.weight   -> ...block_sparse_moe.experts.{j}.w3.weight
+    #          ...mlp.experts.{j}.down_proj.weight -> ...block_sparse_moe.experts.{j}.w2.weight
+    if ".mlp." not in name:
+        return name
+    new = name
+    if ".mlp.experts." in new:
+        new = new.replace(".gate_proj.weight", ".w1.weight")
+        new = new.replace(".up_proj.weight", ".w3.weight")
+        new = new.replace(".down_proj.weight", ".w2.weight")
+    # Rename the block segment (router gate + experts both live under .mlp.).
+    new = new.replace(".mlp.experts.", ".block_sparse_moe.experts.")
+    new = new.replace(".mlp.gate.weight", ".block_sparse_moe.gate.weight")
+    return new
