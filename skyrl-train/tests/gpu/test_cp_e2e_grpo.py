@@ -137,8 +137,15 @@ def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4):
     model.model.train()
     opt = torch.optim.SGD(model.model.parameters(), lr=lr)  # SGD = deterministic, no state
 
+    # IMPORTANT: the CP forward lists `sequences` in `no_restore_buffers`, so torch's
+    # context_parallel mutates the passed `input_ids` IN-PLACE to this rank's shard
+    # and does NOT restore it on exit. Pass a CLONE so the caller's tensor (reused
+    # across forwards) is never corrupted between calls (else the next forward sees a
+    # pre-sharded input_ids -> RoPE seq-len mismatch).
     # forward (CP for cp2) -> per-token action logprobs, grad-enabled.
-    action_log_probs, _out = model(input_ids, num_actions, attention_mask, compute_entropy=False, return_output=True)
+    action_log_probs, _out = model(
+        input_ids.clone(), num_actions, attention_mask.clone(), compute_entropy=False, return_output=True
+    )
     B, A = action_log_probs.shape
     dev = action_log_probs.device
     old_log_probs = torch.full((B, A), -1.0, device=dev)
@@ -168,7 +175,8 @@ def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4):
 def _score(model, input_ids, attention_mask, num_actions):
     model.model.eval()
     with torch.no_grad():
-        lp, _ = model(input_ids, num_actions, attention_mask, compute_entropy=False, return_output=True)
+        # clone: CP's no_restore mutates `sequences` in-place (see _grpo_step note).
+        lp, _ = model(input_ids.clone(), num_actions, attention_mask.clone(), compute_entropy=False, return_output=True)
     return lp.float()
 
 
