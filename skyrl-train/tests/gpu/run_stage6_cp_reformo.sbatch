@@ -33,6 +33,7 @@ ulimit -c 0
 # Worktree (dedicated MarinSkyRL clone on feuer/fsdp2-cp; NOT the active RL src).
 WT="${WT:-/e/scratch/jureap59/feuer1/cp_stage2_wt}"
 SIF="${SIF:-/e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3.sif}"
+OVERLAY="${OVERLAY:-/e/scratch/jureap59/feuer1/containers/skyrl_titan_overlay.img}"   # torchtitan 0.2.2 (CP+EP TEST 3)
 NPROC="${NPROC:-4}"   # 4 = CP+EP; set NPROC=2 for dense-CP-only.
 
 export GLOO_USE_IPV6=0
@@ -46,12 +47,13 @@ export SKYRL_CP_REQUIRE_RIGHT_ALIGN=1
 
 RUNLOG="/e/scratch/jureap59/feuer1/stage6_cp_e2e_${SLURM_JOB_ID}.log"
 echo "=== Stage 6 CP e2e launch (nproc=${NPROC}) ==="
-echo "host: $(hostname)  WT=$WT  SIF=$SIF  RUNLOG=$RUNLOG"
+echo "host: $(hostname)  WT=$WT  SIF=$SIF  OVERLAY=$OVERLAY  RUNLOG=$RUNLOG"
 git -C "$WT" log --oneline -1 || true
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 
 cd "$WT/skyrl-train"
 srun apptainer exec --nv \
+  --overlay "$OVERLAY":ro \
   --env PYTHONPATH="$WT/skyrl-train" \
   --env LIBRARY_PATH=/.singularity.d/libs \
   --env SKYRL_CP_REQUIRE_RIGHT_ALIGN=1 \
