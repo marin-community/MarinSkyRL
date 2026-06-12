@@ -683,7 +683,47 @@ class TerminalBenchGenerator(GeneratorInterface):
         all_outputs: List[TerminalBenchAgentOutput] = []
         for i, result in enumerate(results):
             trajectory_id = trajectory_ids[i]
-            output = self._process_trial_result(result, trajectory_id)
+            # Defense-in-depth: a SUCCESSFUL trial can still raise inside
+            # _process_trial_result during the train-side tokenization/loss-mask
+            # reconstruction — most notably a jinja2 TemplateError from
+            # tokenizer.apply_chat_template (e.g. a chat template that rejects the
+            # agentic multi-turn / consecutive-same-role / tool message structure).
+            # That render error is a property of THIS ONE trajectory, not the job,
+            # so it must be a per-trial skip, not a fatal crash. If it propagates
+            # out of run_shard it ALSO triggers `_pickle.PicklingError: Can't
+            # pickle RayTaskError(TemplateError)` when Ray serializes the nested
+            # exception back to the driver — turning a skippable per-trial error
+            # into a deterministic job kill. Catch it here, on the generator-worker
+            # side, BEFORE it can cross the Ray boundary: classify it (mask by
+            # default — it's an infrastructure/serialization-class failure,
+            # excluded from the RLOO-N baseline) and emit an error output, exactly
+            # like the orchestrator/exception paths above.
+            try:
+                output = self._process_trial_result(result, trajectory_id)
+            except Exception as process_error:
+                exclude_from_baseline, exception_type = self._classify_exception(process_error)
+                # _classify_exception may return the _PASSTHROUGH sentinel; for a
+                # processing-time render error there is no usable verifier reward
+                # to pass through, so coerce it to a masked (excluded) failure.
+                if exclude_from_baseline is self._PASSTHROUGH:
+                    exclude_from_baseline = True
+                logger.warning(
+                    f"Trajectory {trajectory_id} failed during result processing "
+                    f"(NOT fatal — skipping this trial): "
+                    f"{type(process_error).__name__}: {process_error} "
+                    f"(exception_type={exception_type}, "
+                    f"exclude_from_baseline={exclude_from_baseline})"
+                )
+                output = TerminalBenchAgentOutput(
+                    response_ids=[0],
+                    reward=0,
+                    stop_reason="error",
+                    loss_mask=[0],
+                    prompt_ids=[0],
+                    trajectory_id=trajectory_id,
+                    exclude_from_baseline=bool(exclude_from_baseline),
+                    exception_type=exception_type,
+                )
             all_outputs.append(output)
 
         # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt):
