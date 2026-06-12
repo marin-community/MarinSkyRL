@@ -239,24 +239,6 @@ def main():
     all_ok &= _test_unshard_matches_oracle(cp_mesh, cp_size, rank)
     dist.barrier()
 
-    # --- DIAGNOSTIC: fp32 nopad parity, to separate bf16 ring-reduction noise from
-    # any genuine algorithmic misalignment. fp32 should be at the fp32 ring floor
-    # (~1e-4) IF the unshard/attention algorithm is correct on unpadded input. ---
-    m_cp1_fp32 = _build(context_parallel_size=1, cp_mesh=None, bf16=False)
-    m_cp2_fp32 = _build(context_parallel_size=cp_size, cp_mesh=cp_mesh, cp_rotate_method="allgather", bf16=False)
-    ii, am, na = _dense_batch("nopad")
-    ii, am = ii.to("cuda"), am.to("cuda")
-    lp1, e1 = _run(m_cp1_fp32, ii, am, na)
-    lp2, e2 = _run(m_cp2_fp32, ii, am, na)
-    if rank == 0:
-        print(
-            f"[Stage5 DIAG] fp32 nopad: d_action_log_probs={(lp1 - lp2).abs().max().item():.3e} "
-            f"d_entropy={(e1[:, -na:] - e2[:, -na:]).abs().max().item():.3e}"
-        )
-    del m_cp1_fp32, m_cp2_fp32
-    torch.cuda.empty_cache()
-    dist.barrier()
-
     # Build the cp=1 reference ONCE (deterministic, identical on every rank).
     m_cp1 = _build(context_parallel_size=1, cp_mesh=None)
     # Build the cp=2 model (same checkpoint weights).
@@ -273,8 +255,15 @@ def main():
         logp_cp1, ent_cp1 = _run(m_cp1, input_ids, attention_mask, num_actions)
         logp_cp2, ent_cp2 = _run(m_cp2, input_ids, attention_mask, num_actions)
 
+        # bf16 self-noise floor: cp1 vs a SECOND cp1 forward (same model, same
+        # input). Any nonzero here is pure nondeterministic bf16 kernel noise, the
+        # floor below which cp2-vs-cp1 cannot be expected to go.
+        logp_cp1b, _ = _run(m_cp1, input_ids, attention_mask, num_actions)
+        floor_logp = (logp_cp1 - logp_cp1b).abs().max().item()
+
         # --- #1 G3 round-trip parity: action_log_probs + entropy ---
         d_logp = (logp_cp1 - logp_cp2).abs().max().item()
+        mean_logp = (logp_cp1 - logp_cp2).abs().mean().item()
         # entropy returned is over the FULL [B, S]; slice to the response span to
         # compare apples-to-apples (action span = last num_actions).
         ent_cp1_a = ent_cp1[:, -num_actions:]
@@ -293,7 +282,10 @@ def main():
 
         if rank == 0:
             print(f"[Stage5 #1] G3 parity: d_action_log_probs={d_logp:.3e}  d_entropy={d_ent:.3e}  d_refKL={d_kl:.3e}")
-            print(f"[Stage5 #1] (atol={G3_ATOL})")
+            print(
+                f"[Stage5 #1] (atol={G3_ATOL})  mean|d_logp|={mean_logp:.3e}  "
+                f"bf16_self_noise_floor(cp1-vs-cp1)={floor_logp:.3e}"
+            )
         ok1 = (d_logp <= G3_ATOL) and (d_ent <= G3_ATOL) and (d_kl <= G3_ATOL)
         # identical token order: shapes must match exactly (no off-by-one)
         ok_order = logp_cp1.shape == logp_cp2.shape == (input_ids.size(0), num_actions)
