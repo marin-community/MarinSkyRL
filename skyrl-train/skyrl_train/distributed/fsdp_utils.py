@@ -352,6 +352,12 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             return cur.contiguous()
 
         meta_sharded_sd = model.state_dict()
+        # LIVE registered params, keyed by the SAME names load_state_dict(assign=True)
+        # validates against. Used by the loader shape assert (B1) below so a stale /
+        # aliased state_dict() snapshot that disagrees with the live param (the
+        # ep-only-vs-composed divergence behind `start+length exceeds`) is caught with
+        # a precise message instead of opaquely at `assign`.
+        live_params = dict(model.named_parameters())
         new_sd = {}
 
         # Deterministic, all-ranks-identical iteration order.
@@ -397,6 +403,31 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             # Extract this rank's local shard (LOCAL, no collective) and place on GPU.
             if is_dt:
                 local_cpu = _extract_local_shard(full_cpu, local_state)
+                # Loader shape assert (B1): the assembled local shard MUST match the
+                # LIVE registered param's local shape — i.e. exactly what
+                # `load_state_dict(assign=True)` narrows the new tensor into. We compare
+                # against `live_params[key]` (named_parameters), NOT the possibly stale /
+                # aliased `state_dict()` snapshot `local_state` we extracted with, so a
+                # snapshot-vs-live placement divergence (the ep-only 1-D snapshot vs the
+                # 2-D composed live param that produces `start(0)+length(N) exceeds N//fsdp`)
+                # is caught with a precise, keyed message here instead of opaquely at the
+                # `assign` narrow. No-op on the correct Qwen / 80B paths (snapshot==live,
+                # shapes already match) and on the non-DTensor branch below.
+                live_p = live_params.get(key, None)
+                expected_local_shape = (
+                    tuple(live_p.to_local().shape)
+                    if isinstance(live_p, DTensor)
+                    else tuple(local_state.to_local().shape)
+                )
+                assert tuple(local_cpu.shape) == expected_local_shape, (
+                    f"[EP-LOADER] {key}: assembled local shard {tuple(local_cpu.shape)} != "
+                    f"live registered param local shape {expected_local_shape}; "
+                    f"snapshot placements={local_state.placements}, live placements="
+                    f"{getattr(live_p, 'placements', None)}, mesh_dims="
+                    f"{getattr(local_state.device_mesh, 'mesh_dim_names', None)}. "
+                    f"Expert param is likely ep-sharded but not fsdp-composed (1-D meta) "
+                    f"— see apply_ep's composition assert (A)."
+                )
                 local_gpu = local_cpu.to(device=device, dtype=dtype)
                 new_sd[key] = DTensor.from_local(
                     local_gpu,
@@ -624,6 +655,24 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
 
         ep_plan = ExpertParallel()
 
+    # Matcher relaxation (EP=2xFSDP=2 OLMoE grouped-expert load bug): match the
+    # expert holder by `isinstance(experts, GroupedExperts)` AS WELL AS the legacy
+    # `__class__.__name__ == "GroupedExperts"` string check. ALL supported archs
+    # (Qwen3-MoE, Qwen3-Next, OLMoE, Mixtral) build their expert holder as the SAME
+    # `skyrl_train.models.layers.moe.GroupedExperts` (MoE.__init__ -> self.experts =
+    # GroupedExperts(...)); there is NO sibling/subclass holder today. We use the
+    # `isinstance OR name` UNION (not isinstance alone) deliberately so the match is
+    # a STRICT SUPERSET of the prior name-check and cannot regress on either axis:
+    #   * isinstance also catches any FUTURE GroupedExperts subclass (a name-only
+    #     check would silently miss a subclass -> ep-only 1-D leak -> the
+    #     `length(N) exceeds N/fsdp` load crash this fix targets);
+    #   * the name fallback survives module-import duplication (two import paths for
+    #     GroupedExperts would defeat a bare isinstance but keep the name equal).
+    # It never broadens to non-expert modules (only `.moe.experts` that are
+    # GroupedExperts / subclasses match), so it is byte-identical on EP=1 (apply_ep
+    # not called) and on the working Qwen EP x FSDP paths (match already fired).
+    from skyrl_train.models.layers.moe import GroupedExperts
+
     ep_mesh = device_mesh["ep"]
     fsdp_mesh = device_mesh["fsdp"]
     sharded = 0
@@ -634,7 +683,9 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
         if moe is None:
             continue
         experts = getattr(moe, "experts", None)
-        if experts is None or experts.__class__.__name__ != "GroupedExperts":
+        if experts is None or not (
+            isinstance(experts, GroupedExperts) or experts.__class__.__name__ == "GroupedExperts"
+        ):
             continue
         parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
         # Compose the FSDP Shard dim on the fsdp submesh → 2-D expert DTensors.
@@ -663,6 +714,35 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
                 )
             ep_fsdp_kwargs = {k: v for k, v in fsdp_kwargs.items() if k != "mesh"}
             fully_shard(experts, mesh=fsdp_mesh, **ep_fsdp_kwargs)
+            # Composition assert (A): when EP AND FSDP both shard the expert dim,
+            # `fully_shard(experts)` MUST have composed a 2-D (fsdp, ep) DTensor on
+            # top of the ep `parallelize_module` Shard(0). If a future arch's holder
+            # leaves the param EP-sharded-only (1-D `(Shard(0),)`, num_experts//ep
+            # rows), the streamed loader `fsdp2_load_full_state_dict` would faithfully
+            # assemble that 1-D shard and crash opaquely at `load_state_dict(assign=True)`
+            # with `start(0)+length(num_experts//ep) exceeds dimension size(num_experts//ep//fsdp)`.
+            # Fail LOUD here at wrap time instead. No-op on the working Qwen / 80B
+            # paths (always 2-D) and skipped entirely unless ep>1 AND fsdp>1.
+            if ep_size > 1 and fsdp_size > 1:
+                e_per = None
+                if num_experts is not None:
+                    e_per = num_experts // ep_size // fsdp_size
+                for _pn, _p in experts.named_parameters(recurse=False):
+                    _pls = getattr(_p, "placements", ())
+                    assert len(_pls) == 2 and all(getattr(pl, "is_shard", lambda: False)() for pl in _pls), (
+                        f"EP+FSDP expert param {_pn} did not compose to a 2-D (fsdp,ep) "
+                        f"sharded DTensor (got placements={_pls}); apply_ep's "
+                        f"fully_shard(experts) did not reach this holder for this arch. "
+                        f"This is the EP-only 1-D leak that triggers the loader "
+                        f"`length(...) exceeds ...` crash."
+                    )
+                    if e_per is not None:
+                        _local_rows = _p.to_local().shape[0]
+                        assert _local_rows == e_per, (
+                            f"EP+FSDP expert param {_pn} local rows {_local_rows} != "
+                            f"num_experts//ep//fsdp = {e_per} "
+                            f"(num_experts={num_experts}, ep_size={ep_size}, fsdp_size={fsdp_size})."
+                        )
         # Tell the grouped block which comm backend to run. For deepep this also
         # switches GroupedExperts.forward to the local-experts (.to_local) path and
         # MoE.forward to the DeepEP dispatch/combine branch.
