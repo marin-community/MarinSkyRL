@@ -1,0 +1,109 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/pytorch:26.02-py3
+
+# NATIVE torch-2.11 build of the OpenThoughts-Agent RL SIF for JSC Jupiter (GH200,
+# aarch64/sbsa, CUDA 13). REPLACES the torch-2.9 + compat-shim approach.
+#
+# Base: NGC PyTorch 26.02 = torch 2.11.0a0+eb65b36914 + CUDA 13.1.1 (first NGC
+# tag shipping torch 2.11; 25.09=2.9, 25.11/25.12/26.01=2.10). Multi-arch
+# manifest -> resolves to aarch64/sbsa on the GH200.
+#
+# The fork's vLLM v2-migration / 0.20.2rc0 pins torch==2.11 and #includes
+# torch 2.11-only headers (torch/headeronly/util/shim_utils.h via
+# csrc/libtorch_stable/torch_utils.h). On this base those headers EXIST natively
+# -> NO shim synthesis, NO --no-deps torch-pinning, NO 2.9 compat hacks.
+#
+# TransformerEngine is NOT installed: production RL uses FSDP2 (not Megatron),
+# so TE is not needed. Dropping TE removes the torch-2.9 constraint that forced
+# the prior build.
+#
+# Build invocation (run via r3_full_build_torch211.sh; build dir bound at /mnt):
+#   apptainer build --fakeroot --bind /e/scratch/jureap59/feuer1/build:/mnt \
+#       /e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm_r3_torch211.sif \
+#       /e/scratch/jureap59/feuer1/build/skyrl_megatron_vllm_r3_torch211.def
+
+%post
+    set -e
+    # --- clear any leaked host Lmod GCCcore build env (/e/software) so the
+    #     in-SIF gcc + crt objects are used (else: ld cannot find crt1.o) ---
+    unset CMAKE_PREFIX_PATH PKG_CONFIG_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH
+    unset EBROOTGCCCORE EBROOTBINUTILS EBROOTZLIB EBROOTMAKE GCC_HOME
+    export CC=/usr/bin/gcc
+    export CXX=/usr/bin/g++
+    export PATH=/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+
+    export DEBIAN_FRONTEND=noninteractive
+    export SETUPTOOLS_SCM_PRETEND_VERSION=0.20.2rc0
+    # Build dir is bound at /mnt (--bind /e/scratch/jureap59/feuer1/build:/mnt)
+    export VLLM_FORK=/mnt/vllm_fork
+    export TORCH_CUDA_ARCH_LIST="9.0+PTX"      # GH200 sm_90 only
+    export MAX_JOBS=32
+    export CMAKE_BUILD_TYPE=Release
+    export VLLM_TARGET_DEVICE=cuda
+    # FlashMLA pre-cloned on the login node (build env has no internet for the
+    # FetchContent git submodule fetch of NVIDIA/cutlass). STILL VALID.
+    export FLASH_MLA_SRC_DIR=/mnt/flashmla_prebuilt/FlashMLA
+
+    echo "=== Pre-install torch sanity (must be 2.11, cu13, aarch64) ==="
+    python -c "import torch; print('torch', torch.__version__, torch.version.cuda)"
+    # Native header check: the fork's required torch 2.11 header must EXIST.
+    # If this fails, the base is wrong (do NOT synthesize a shim).
+    SHIM_HDR=$(python -c "import torch,os;print(os.path.join(os.path.dirname(torch.__file__),'include','torch','headeronly','util','shim_utils.h'))")
+    if [ -f "$SHIM_HDR" ]; then
+      echo "NATIVE_SHIM_UTILS_PRESENT $SHIM_HDR"
+    else
+      echo "FATAL: torch 2.11 header shim_utils.h ABSENT at $SHIM_HDR -- wrong base, aborting (NO shim synthesis on this native build)"
+      exit 7
+    fi
+
+    cd "$VLLM_FORK"
+
+    # --- SELF-HEAL: drop any stale host-configured FetchContent CMake trees.
+    #     The *-subbuild/*-build CMakeCache.txt bake the configure-time absolute
+    #     path (host: /e/.../build/vllm_fork); inside the container the build dir
+    #     is /mnt/vllm_fork -> CMake aborts on cachefile-dir mismatch. Re-populate
+    #     fresh at /mnt. KEEP the slow *-src GPFS clones (cutlass/deepgemm/etc).
+    #     STILL VALID (independent of torch version).
+    echo "=== Step 0: purge stale CMake subbuild/build trees in .deps ==="
+    if [ -d "$VLLM_FORK/.deps" ]; then
+      for d in "$VLLM_FORK"/.deps/*-subbuild "$VLLM_FORK"/.deps/*-build; do
+        [ -d "$d" ] || continue
+        echo "purge $d"
+        rm -rf "$d"
+      done
+    fi
+    rm -rf "$VLLM_FORK"/.deps/flashmla-src "$VLLM_FORK"/.deps/flashmla-build "$VLLM_FORK"/.deps/flashmla-subbuild || true
+
+    echo "=== Step 1: pure-Python runtime deps (NO torch/nvidia/flashinfer/xformers/triton) ==="
+    grep -vE '^[[:space:]]*(#|$)' requirements/common.txt \
+      | grep -viE 'torch|nvidia|flashinfer|xformers|triton|^[[:space:]]*-' \
+      > /tmp/common_filtered.txt || true
+    pip install --no-cache-dir -r /tmp/common_filtered.txt
+
+    echo "=== Step 2: build-backend deps (NOT torch — --no-build-isolation needs these in-env) ==="
+    pip install --no-cache-dir "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8.0" wheel "packaging>=24.2" jinja2
+
+    echo "=== Step 3: build a wheel against NATIVE torch 2.11, install NON-editable (baked-in) ==="
+    # --no-build-isolation: use the in-SIF torch 2.11 (do NOT let pip pull a fresh
+    # torch). --no-deps on the install so the fork's torch==2.11.0 pin is satisfied
+    # by the already-present NGC torch (same major.minor) and pip does not try to
+    # replace it with a pytorch.org wheel.
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.20.2rc0 \
+      pip wheel --no-cache-dir --no-build-isolation --no-deps -w /tmp/vllm_wheel . -v
+    pip install --no-cache-dir --no-deps /tmp/vllm_wheel/vllm-*.whl
+    rm -rf /tmp/vllm_wheel
+
+    echo "=== Step 4: verify ==="
+    python -c "import vllm; print('VLLM_VERSION', vllm.__version__)"
+    python -c "import vllm._C; print('VLLM_C_OK')"
+    python -c "import vllm._flashmla_C; print('FLASHMLA_C_OK')" 2>&1 | tail -1
+    python -c "import torch; print('TORCH_AFTER', torch.__version__, torch.version.cuda)"
+
+%labels
+    org.opencontainers.title skyrl_megatron_vllm_r3_torch211
+    vllm.version 0.20.2rc0
+    vllm.feature native_routed_experts_PR39917
+    vllm.build native_torch211_no_shim
+    base nvcr.io/nvidia/pytorch:26.02-py3
+    torch 2.11.0a0+nv26.02-cu13.1
+    transformerengine NOT_INSTALLED_FSDP2
