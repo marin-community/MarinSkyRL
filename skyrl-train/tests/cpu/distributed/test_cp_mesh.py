@@ -146,9 +146,9 @@ def _shape_worker_cp_ep(rank, world_size):
         assert mesh.mesh.numel() == world_size, f"#3 numel={mesh.mesh.numel()} != {world_size}"
         # Ordering contract: fsdp < cp < ep (load-bearing for fsdp-before-ep expert composition).
         names = mesh.mesh_dim_names
-        assert names.index("fsdp") < names.index("cp") < names.index("ep"), (
-            f"#3 dim order must be fsdp < cp < ep; got {names}"
-        )
+        assert (
+            names.index("fsdp") < names.index("cp") < names.index("ep")
+        ), f"#3 dim order must be fsdp < cp < ep; got {names}"
         assert mesh["fsdp"].size() == 2 and mesh["cp"].size() == 2 and mesh["ep"].size() == 2
         if rank == 0:
             print("[#3] cp=2,ep=2 → ['ddp','fsdp','cp','ep'] fsdp<cp<ep numel==world: PASS")
@@ -168,9 +168,9 @@ def _cp_group_worker(rank, world_size):
         cp_size = 2
         mesh = create_device_mesh(world_size=4, fsdp_size=2, cp_size=cp_size, device_type="cpu")
         cp_group = mesh["cp"].get_group()
-        assert dist.get_world_size(cp_group) == cp_size, (
-            f"#5 cp_group world_size={dist.get_world_size(cp_group)} != cp_size={cp_size}"
-        )
+        assert (
+            dist.get_world_size(cp_group) == cp_size
+        ), f"#5 cp_group world_size={dist.get_world_size(cp_group)} != cp_size={cp_size}"
         # Gather every rank's cp-group global-rank membership and verify the partition.
         members = dist.get_process_group_ranks(cp_group)
         assert len(members) == cp_size, f"#5 cp_group members={members} != {cp_size}"
@@ -178,9 +178,9 @@ def _cp_group_worker(rank, world_size):
         # Contiguity: with mesh layout (ddp=1, fsdp=2, cp=2) the cp dim is the last
         # (fastest-varying) axis, so each cp group is a contiguous run of `cp_size`
         # consecutive global ranks. members are sorted by torch.
-        assert members == list(range(members[0], members[0] + cp_size)), (
-            f"#5 cp_group {members} is not a contiguous run of {cp_size} ranks"
-        )
+        assert members == list(
+            range(members[0], members[0] + cp_size)
+        ), f"#5 cp_group {members} is not a contiguous run of {cp_size} ranks"
         assert members[0] % cp_size == 0, f"#5 cp_group base {members[0]} not aligned to {cp_size}"
 
         # Disjointness across groups: collect all groups' member tuples and confirm a partition.
@@ -193,10 +193,7 @@ def _cp_group_worker(rank, world_size):
             union |= set(grp)
         assert union == set(range(world_size)), f"#5 cp groups do not partition all ranks: {union}"
         if rank == 0:
-            print(
-                f"[#5] cp_group size=={cp_size}, contiguous + disjoint partition "
-                f"{sorted(unique)}: PASS"
-            )
+            print(f"[#5] cp_group size=={cp_size}, contiguous + disjoint partition " f"{sorted(unique)}: PASS")
     finally:
         dist.destroy_process_group()
 
