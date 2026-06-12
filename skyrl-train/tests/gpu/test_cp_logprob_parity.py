@@ -252,14 +252,17 @@ def main():
         if rank == 0:
             print(f"\n[Stage5] === case={tag} seq_len={S} (S % 2cp = {S % (2 * cp_size)}) ===")
 
+        # bf16 self-noise floor: TWO cp1 forwards (same model, same input) BEFORE
+        # any CP forward. Any nonzero here is pure nondeterministic bf16 kernel
+        # noise, the floor below which cp2-vs-cp1 cannot be expected to go. We run
+        # both cp1 forwards first because torch's context_parallel leaves global
+        # DTensor/rotate state that makes a subsequent NON-CP forward in the same
+        # process crash ("aten.add got mixed Tensor and DTensor") — a test-harness
+        # ordering artifact, not a production issue (prod uses one cp mode/process).
         logp_cp1, ent_cp1 = _run(m_cp1, input_ids, attention_mask, num_actions)
-        logp_cp2, ent_cp2 = _run(m_cp2, input_ids, attention_mask, num_actions)
-
-        # bf16 self-noise floor: cp1 vs a SECOND cp1 forward (same model, same
-        # input). Any nonzero here is pure nondeterministic bf16 kernel noise, the
-        # floor below which cp2-vs-cp1 cannot be expected to go.
         logp_cp1b, _ = _run(m_cp1, input_ids, attention_mask, num_actions)
         floor_logp = (logp_cp1 - logp_cp1b).abs().max().item()
+        logp_cp2, ent_cp2 = _run(m_cp2, input_ids, attention_mask, num_actions)
 
         # --- #1 G3 round-trip parity: action_log_probs + entropy ---
         d_logp = (logp_cp1 - logp_cp2).abs().max().item()
