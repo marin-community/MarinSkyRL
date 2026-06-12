@@ -18,8 +18,77 @@ from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
+
+# --- Stage 2 (FSDP2 CP): guarded flash-attn import ---------------------------
+# The CP path runs through SDPA ring attention, not flash-attn varlen, so the
+# environment that loads the model need NOT have flash-attn installed. Previously
+# `from flash_attn.bert_padding import pad_input, unpad_input` was an
+# unconditional module-level import that broke `import model_wrapper` in any
+# env without flash-attn. We make it lazy: try the import; if it fails, bind
+# `pad_input`/`unpad_input` to shims that raise ONLY if actually called (every
+# call site is gated on `attn_implementation == "flash_attention_2"` or
+# `use_sample_packing`, both of which are off on the sdpa/CP path). `_HAS_FLASH`
+# records availability for tests / diagnostics.
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input  # noqa: F401
+
+    _HAS_FLASH = True
+except ImportError:  # flash-attn not installed (e.g. the CP/sdpa-only env)
+    _HAS_FLASH = False
+
+    def _flash_missing(*args, **kwargs):
+        raise ImportError(
+            "flash_attn is not installed but a flash-attn-only code path "
+            "(sample packing / pad_input / unpad_input) was invoked. Install "
+            "flash-attn, or use attn_backend='sdpa'/'flex' with "
+            "use_sample_packing=false (the CP path)."
+        )
+
+    def pad_input(*args, **kwargs):  # noqa: F811
+        return _flash_missing(*args, **kwargs)
+
+    def unpad_input(*args, **kwargs):  # noqa: F811
+        return _flash_missing(*args, **kwargs)
+
+
+def resolve_attn_implementation(
+    attn_backend: str = "auto",
+    use_flash_attention_2: bool = False,
+    context_parallel_size: int = 1,
+) -> str:
+    """Resolve the HF `attn_implementation` string from the Stage-2 backend selector.
+
+    `attn_backend` ∈ {"auto", "flash_attention_2", "sdpa", "flex"}:
+      - "auto" (default) reproduces the pre-Stage-2 behavior EXACTLY:
+        "flash_attention_2" if `use_flash_attention_2` else "eager" (G1 —
+        every existing run stays byte-identical).
+      - "flash_attention_2" / "sdpa" force that backend (overriding `flash_attn`).
+      - "flex" maps to HF's "flex_attention".
+
+    When CP is enabled (`context_parallel_size > 1`, the Stage-0 flag), the
+    backend MUST be a ring-compatible non-varlen attention (sdpa/flex); flash
+    attention varlen is rejected (G2). `auto`/`flash_attention_2` are rejected
+    under CP; the caller must explicitly select sdpa/flex.
+    """
+    valid = {"auto", "flash_attention_2", "sdpa", "flex"}
+    assert attn_backend in valid, f"attn_backend='{attn_backend}' is invalid; must be one of {sorted(valid)}"
+
+    if attn_backend == "auto":
+        impl = "flash_attention_2" if use_flash_attention_2 else "eager"
+    elif attn_backend == "flex":
+        impl = "flex_attention"
+    else:
+        impl = attn_backend  # "flash_attention_2" or "sdpa"
+
+    if context_parallel_size > 1:
+        assert impl in ("sdpa", "flex_attention"), (
+            f"context_parallel_size={context_parallel_size} requires a ring-compatible "
+            f"attention backend (attn_backend ∈ {{'sdpa','flex'}}); got attn_backend="
+            f"'{attn_backend}' -> attn_implementation='{impl}'. Flash-attn varlen is not "
+            "supported under context parallel (G2)."
+        )
+    return impl
 
 
 class HFModelWrapper(nn.Module):
@@ -68,12 +137,22 @@ class HFModelWrapper(nn.Module):
         rope_theta: float | None = None,
         moe_router_replay: bool = False,
         moe_grouped_gemm: bool = False,
+        attn_backend: str = "auto",
+        context_parallel_size: int = 1,
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+        self.context_parallel_size = context_parallel_size
+        # Stage 2: resolve attention backend. attn_backend="auto" reproduces the
+        # pre-Stage-2 logic byte-for-byte (G1); otherwise it overrides flash_attn.
+        # Under CP (context_parallel_size > 1) flash-attn varlen is rejected (G2).
+        self.attn_implementation = resolve_attn_implementation(
+            attn_backend=attn_backend,
+            use_flash_attention_2=use_flash_attention_2,
+            context_parallel_size=context_parallel_size,
+        )
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
@@ -761,6 +840,8 @@ def get_llm_for_sequence_regression(
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    attn_backend: str = "auto",
+    context_parallel_size: int = 1,
     **kwargs,
 ) -> nn.Module:
     """Get transformer with a sequence classification head on top (linear layer).
@@ -779,7 +860,12 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    # Stage 2: resolve attention backend (auto = pre-Stage-2 behavior; CP rejects flash).
+    config._attn_implementation = resolve_attn_implementation(
+        attn_backend=attn_backend,
+        use_flash_attention_2=use_flash_attention_2,
+        context_parallel_size=context_parallel_size,
+    )
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
