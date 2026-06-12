@@ -15,6 +15,45 @@ forced-index slice into the native ``MoE`` router's ``routed_experts`` arg. The
 ``model_wrapper.forward`` replay-install seam is therefore UNCHANGED between the
 eager (3a) and grouped (3b) paths — same singleton, same per-layer targets, same
 ``[N, K]`` contract.
+
+ARCH SUPPORT MATRIX (what swap_moe_blocks_to_grouped can handle today):
+  * ``Qwen3MoeSparseMoeBlock``  — supported (bare-tensor return).
+  * ``Qwen3NextSparseMoeBlock`` — supported (2-tuple return).
+
+NOT SUPPORTED — ``gemma4`` (google/gemma-4-26B-A4B-it, transformers 5.10.1).
+Gemma4's MoE is STRUCTURALLY different from both Qwen3 variants and this shim
+CANNOT swap it without new code. Verified against the SIF modeling file
+(transformers/models/gemma4/modeling_gemma4.py). The gaps:
+  1. No ``*SparseMoeBlock`` wrapper exists. The MoE is composed DIRECTLY into
+     ``Gemma4TextDecoderLayer`` as TWO separate attributes — ``self.router``
+     (``Gemma4TextRouter``) and ``self.experts`` (``Gemma4TextExperts``) — gated
+     by ``self.enable_moe_block``. swap_moe_blocks_to_grouped scans for
+     ``parent.mlp`` whose class endswith "SparseMoeBlock" → matches NOTHING for
+     gemma4 (returns 0 swaps; the model trains on the slow HF for-loop experts).
+  2. Each gemma4 decoder layer ALSO has a DENSE ``self.mlp`` (``Gemma4TextMLP``)
+     that runs IN PARALLEL with the MoE; the layer combines them as
+     ``post_ffn_ln_1(mlp_out) + post_ffn_ln_2(moe_out)``. Any future swapper
+     must target ``self.experts``+``self.router``, NOT ``self.mlp`` (dense).
+  3. Router differs: ``Gemma4TextRouter`` uses ``self.proj`` (not ``self.gate``),
+     applies an RMSNorm + ``self.scale``*scalar_root + a learned
+     ``self.per_expert_scale[idx]`` gather on the top-k weights, and returns a
+     3-tuple ``(router_probabilities, top_k_weights, top_k_index)``. The native
+     ``MoE`` router (gate-only softmax/sigmoid) does not model per-expert scale.
+  4. Expert weights are FUSED ``nn.Parameter`` tensors on ``Gemma4TextExperts``
+     (``gate_up_proj`` ``[E, 2*moe_inter, hidden]``, ``down_proj``
+     ``[E, hidden, moe_inter]``) — no ``hf_block.gate.weight`` and no
+     per-expert ``gate_proj/up_proj/down_proj`` submodules, so both
+     ``_build_moe_for_block`` (reads ``hf_block.gate.weight`` / ``hf_block.experts``)
+     and ``remap_hf_block_to_moe`` would AttributeError/KeyError.
+  5. The decoder applies SEPARATE pre/post RMSNorms around the MoE branch
+     (``pre_feedforward_layernorm_2`` / ``post_feedforward_layernorm_2``) that
+     live on the layer, not inside any swappable block — the grouped ``MoE``
+     would need these threaded in to stay numerically faithful.
+Supporting gemma4 requires a NEW block-detection + build + weight-remap +
+(optionally) router-replay path keyed on ``Gemma4TextExperts``, plus handling
+the parallel dense MLP and the per-expert router scale. This is structural work,
+NOT a ``returns_tuple`` flag flip — DO NOT attempt a blind swap. Topology:
+128 experts, top_k 8, moe_intermediate_size 704, hidden 2816, 30 layers.
 """
 
 from __future__ import annotations
@@ -162,8 +201,28 @@ def swap_moe_blocks_to_grouped(model) -> int:
     it back to ``parent.mlp``. Returns the number of blocks swapped.
 
     Must run AFTER model load and BEFORE FSDP2 wrap (see model_wrapper).
+
+    Fails fast on known-unsupported MoE arches (gemma4) instead of silently
+    swapping 0 blocks and training on the slow HF for-loop experts — see the
+    module docstring "ARCH SUPPORT MATRIX" for why gemma4 needs new code.
     """
     hf_config = model.config
+    # Guard: gemma4 composes its MoE as separate Gemma4TextRouter +
+    # Gemma4TextExperts on the decoder layer (no *SparseMoeBlock), so the scan
+    # below would no-op silently. Refuse rather than mislead. See module
+    # docstring for the structural-shim work this needs.
+    _model_type = getattr(hf_config, "model_type", "") or ""
+    _text_type = getattr(getattr(hf_config, "text_config", None), "model_type", "") or ""
+    if "gemma4" in _model_type or "gemma4" in _text_type:
+        raise NotImplementedError(
+            "moe_grouped_gemm is not supported for gemma4 (model_type="
+            f"{_model_type!r}). gemma4's MoE is composed directly into "
+            "Gemma4TextDecoderLayer as separate Gemma4TextRouter + "
+            "Gemma4TextExperts (no *SparseMoeBlock), with a parallel dense MLP, "
+            "fused expert nn.Parameters, and a per-expert router scale — see "
+            "moe_swap.py ARCH SUPPORT MATRIX. Set moe_grouped_gemm=false (HF "
+            "eager experts) until a gemma4 swap path is implemented."
+        )
     swapped = 0
     for parent in model.modules():
         block = getattr(parent, "mlp", None)
