@@ -68,13 +68,20 @@ def main():
             f"layers={cfg.num_hidden_layers} attn={cfg.num_attention_heads}/{cfg.num_key_value_heads}KV"
         )
 
-    # ---- Rank 0 builds REAL weights on CPU; all ranks build the module on meta,
-    # exactly mirroring the EP=1 production seam (weights flow in via the loader).
+    # ---- Mirror the EP=1 production seam EXACTLY (fsdp_strategy.py:332):
+    # build the model with REAL weights, run swap_moe_blocks_to_grouped on it, and
+    # snapshot full_state = module.state_dict() AFTER the swap (so full_state
+    # already carries the grouped `mlp.moe.{router,experts}.*` keys that match the
+    # swapped meta module's state_dict). The non-EP loader zips full_sd with the
+    # meta sharded sd by POSITION, so the two must be the SAME post-swap module
+    # structure. All ranks build+swap on meta; weights flow in via the loader.
     torch.manual_seed(0)
     if rank == 0:
-        model = MixtralForCausalLM(cfg).to(torch.bfloat16)
-        full_state = {k: v.detach().to("cpu", copy=True) for k, v in model.state_dict().items()}
-        del model
+        real = MixtralForCausalLM(cfg).to(torch.bfloat16)
+        n_swapped_real = swap_moe_blocks_to_grouped(real)
+        assert n_swapped_real == cfg.num_hidden_layers
+        full_state = {k: v.detach().to("cpu", copy=True) for k, v in real.state_dict().items()}
+        del real
         torch.cuda.empty_cache()
     else:
         full_state = {}
@@ -82,20 +89,11 @@ def main():
     with torch.device("meta"):
         model = MixtralForCausalLM(cfg).to(torch.bfloat16)
 
-    # ---- Stage 3b grouped-GEMM swap (Mixtral bare-tensor shim). On meta, the
-    # swap builds the grouped MoE + remaps (meta copy_ is a no-op shape check).
+    # ---- Stage 3b grouped-GEMM swap (Mixtral bare-tensor shim) on the meta module.
     n_swapped = swap_moe_blocks_to_grouped(model)
     if rank == 0:
         _log(f"swap_moe_blocks_to_grouped: swapped {n_swapped} blocks (expect {cfg.num_hidden_layers})")
     assert n_swapped == cfg.num_hidden_layers, f"expected {cfg.num_hidden_layers} swaps, got {n_swapped}"
-
-    # The grouped-swap renamed mlp.gate/experts -> mlp.moe.router/experts.w*; the
-    # rank-0 full_state still has the HF names. Convert it to the grouped layout so
-    # the loader's keys match the (swapped) meta module's state_dict keys.
-    from skyrl_train.models.layers.moe_weight_remap import convert_hf_to_tt_moe
-
-    if rank == 0:
-        full_state = convert_hf_to_tt_moe(full_state)
 
     # ---- EP=1 mesh + FSDP2 wrap (apply_ep is NOT called for ep_size==1).
     device_mesh = create_device_mesh(world_size=world, fsdp_size=fsdp_size, ep_size=1)
