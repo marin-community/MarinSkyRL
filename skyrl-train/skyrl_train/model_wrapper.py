@@ -17,7 +17,7 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndByt
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
-from skyrl_train.distributed.cp_utils import maybe_cp_context, context_parallel_unshard
+from skyrl_train.distributed.cp_utils import maybe_cp_context, context_parallel_unshard, cp_unshard_grad_safe
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from packaging.version import Version
 
@@ -700,7 +700,17 @@ class HFModelWrapper(nn.Module):
         # below (it must be computed unmasked on the shard, then masked post-gather
         # — the full attention_mask can't be applied to a zigzag shard).
         if cp_size > 1:
-            log_probs = context_parallel_unshard(self.cp_mesh, [log_probs], [1])[0]
+            # Stage 6: the stock context_parallel_unshard is @torch.no_grad (its
+            # in-place index-restore raises "cannot resize variables that require
+            # grad"). For a CP TRAINING step the per-token logprobs must stay
+            # differentiable (they feed the policy loss -> backward), so when grad
+            # is enabled and the tensor needs grad use the autograd-safe unshard
+            # (differentiable all_gather + out-of-place reorder, byte-identical
+            # natural order). No-grad scoring keeps the cheaper stock unshard.
+            if torch.is_grad_enabled() and log_probs.requires_grad:
+                log_probs = cp_unshard_grad_safe(self.cp_mesh, log_probs, 1)
+            else:
+                log_probs = context_parallel_unshard(self.cp_mesh, [log_probs], [1])[0]
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
@@ -735,7 +745,12 @@ class HFModelWrapper(nn.Module):
                 entropy_BS = self.chunked_entropy_from_logits_fn(
                     logits_BSV, requires_grad=entropy_requires_grad, attention_mask=None
                 )
-                entropy_BS = context_parallel_unshard(self.cp_mesh, [entropy_BS], [1])[0]
+                # Stage 6: grad-safe unshard when entropy carries grad (entropy can
+                # appear in the loss via an entropy bonus); else the stock no_grad unshard.
+                if torch.is_grad_enabled() and entropy_BS.requires_grad:
+                    entropy_BS = cp_unshard_grad_safe(self.cp_mesh, entropy_BS, 1)
+                else:
+                    entropy_BS = context_parallel_unshard(self.cp_mesh, [entropy_BS], [1])[0]
                 if entropy_mask is not None:
                     entropy_BS = entropy_BS * entropy_mask.to(entropy_BS.dtype)
             else:
@@ -1024,7 +1039,16 @@ def _get_critic_model(
                 last_hidden_states_BSH = outputs["last_hidden_state"]
                 if cp_size > 1:
                     # Stage 5: unshard hidden states [B, S/cp, H] -> natural [B, S, H].
-                    last_hidden_states_BSH = context_parallel_unshard(self.cp_mesh, [last_hidden_states_BSH], [1])[0]
+                    # Stage 6: grad-safe unshard when training the value head (the
+                    # hidden states feed the value loss -> backward); stock no_grad
+                    # unshard for inference. The stock unshard is @torch.no_grad and
+                    # raises on grad-requiring tensors.
+                    if torch.is_grad_enabled() and last_hidden_states_BSH.requires_grad:
+                        last_hidden_states_BSH = cp_unshard_grad_safe(self.cp_mesh, last_hidden_states_BSH, 1)
+                    else:
+                        last_hidden_states_BSH = context_parallel_unshard(
+                            self.cp_mesh, [last_hidden_states_BSH], [1]
+                        )[0]
 
             if self.sequence_parallel_size > 1:
                 last_hidden_states_SH = last_hidden_states_BSH.squeeze(0)
