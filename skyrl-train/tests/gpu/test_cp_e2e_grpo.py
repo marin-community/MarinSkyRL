@@ -632,7 +632,11 @@ def main():
         if core_ok and (cpep is True):
             print("STAGE 6: ALL PASS (CP + CP+EP both ship)")
         elif core_ok and (cpep is None):
-            print("STAGE 6: CORE PASS (CP ships); CP+EP NOT EXERCISED (need 4 GPU) -> follow-up")
+            print(
+                "STAGE 6: CORE PASS (CP-without-EP SHIPS); CP+EP NOT FULLY EXERCISED "
+                "(<4 GPU, or apply_ep needs a torchtitan-equipped SIF — 4-D mesh slice "
+                "itself verified) -> documented follow-up"
+            )
         elif core_ok and (cpep is False):
             print("STAGE 6: PARTIAL — CP-without-EP SHIPS; CP+EP FAILED -> documented follow-up")
         else:
