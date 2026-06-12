@@ -89,11 +89,11 @@ def _dense_batch(case: str):
     return input_ids, attention_mask, num_actions
 
 
-def _build(context_parallel_size=1, cp_mesh=None, cp_rotate_method="allgather"):
+def _build(context_parallel_size=1, cp_mesh=None, cp_rotate_method="allgather", bf16=True):
     model = HFModelWrapper(
         pretrain_or_model=MODEL_NAME,
         use_flash_attention_2=False,
-        bf16=True,
+        bf16=bf16,
         sequence_parallel_size=1,
         use_sample_packing=False,
         attn_backend="sdpa",
@@ -237,6 +237,24 @@ def main():
     # --- #2 zigzag oracle (CPU self-check + live unshard vs oracle) ---
     all_ok &= _test_zigzag_oracle_selfcheck(rank)
     all_ok &= _test_unshard_matches_oracle(cp_mesh, cp_size, rank)
+    dist.barrier()
+
+    # --- DIAGNOSTIC: fp32 nopad parity, to separate bf16 ring-reduction noise from
+    # any genuine algorithmic misalignment. fp32 should be at the fp32 ring floor
+    # (~1e-4) IF the unshard/attention algorithm is correct on unpadded input. ---
+    m_cp1_fp32 = _build(context_parallel_size=1, cp_mesh=None, bf16=False)
+    m_cp2_fp32 = _build(context_parallel_size=cp_size, cp_mesh=cp_mesh, cp_rotate_method="allgather", bf16=False)
+    ii, am, na = _dense_batch("nopad")
+    ii, am = ii.to("cuda"), am.to("cuda")
+    lp1, e1 = _run(m_cp1_fp32, ii, am, na)
+    lp2, e2 = _run(m_cp2_fp32, ii, am, na)
+    if rank == 0:
+        print(
+            f"[Stage5 DIAG] fp32 nopad: d_action_log_probs={(lp1 - lp2).abs().max().item():.3e} "
+            f"d_entropy={(e1[:, -na:] - e2[:, -na:]).abs().max().item():.3e}"
+        )
+    del m_cp1_fp32, m_cp2_fp32
+    torch.cuda.empty_cache()
     dist.barrier()
 
     # Build the cp=1 reference ONCE (deterministic, identical on every rank).
