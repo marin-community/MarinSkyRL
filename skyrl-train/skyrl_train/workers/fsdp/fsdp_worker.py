@@ -342,6 +342,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
+        # Stage 3: surface the CP submesh/group on the worker so the Stage-4 forward wrap
+        # can read it. cp_size==1 leaves both None (flag-off path untouched).
+        self.cp_mesh = getattr(strategy, "cp_mesh", None)
+        self.cp_group = getattr(strategy, "cp_group", None)
+
         self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
 
         # Update per-gpu mini batch size based on device mesh
@@ -588,6 +593,10 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
+        # Stage 3: surface the CP submesh/group on the worker (None when cp_size==1).
+        self.cp_mesh = getattr(strategy, "cp_mesh", None)
+        self.cp_group = getattr(strategy, "cp_group", None)
+
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
 
@@ -663,6 +672,10 @@ class FSDPRefWorkerBase(RefWorkerBase):
         )
         strategy.setup_distributed()
         self.strategy = strategy
+
+        # Stage 3: surface the CP submesh/group on the worker (None when cp_size==1).
+        self.cp_mesh = getattr(strategy, "cp_mesh", None)
+        self.cp_group = getattr(strategy, "cp_group", None)
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         init_context = get_init_weight_context_manager(

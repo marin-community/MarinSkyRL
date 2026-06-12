@@ -853,27 +853,42 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def create_device_mesh(world_size, fsdp_size, ep_size=1, device_type="cuda"):
+def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type="cuda"):
     """Build the FSDP2 device mesh.
 
-    ``ep_size <= 1`` (the default / a3-production path) is UNCHANGED — the today
-    1-D ``["fsdp"]`` or 2-D ``["ddp","fsdp"]`` mesh, byte-identical to before EP
-    (Stage 4 flag-off requirement G4-0).
+    Dim-order contract (root-dim indices, low → high): ``ddp`` < ``fsdp`` < ``cp`` < ``ep``.
+    Any subset of {``cp``, ``ep``} may be active; the *relative* order is always
+    ``fsdp`` before ``cp`` before ``ep``. This is load-bearing:
 
-    ``ep_size > 1`` (Stage 4a expert parallelism) builds a 3-D
-    ``["ddp","fsdp","ep"]`` mesh of shape ``(ddp, fsdp_size, ep_size)`` where
-    ``ddp = world_size // (ep_size * fsdp_size)``. Experts shard over the ``ep``
-    submesh; non-expert params shard over the ``fsdp`` submesh. E.g.
-    ``create_device_mesh(4, 2, ep_size=2)`` → ``(1, 2, 2)``.
+    - ``fsdp`` before ``ep`` (Stage 4a): an EP-sharded expert param is later
+      ``fully_shard``-ed on the ``fsdp`` submesh, producing a 2-D expert DTensor that
+      FSDP2 internally slices as ``("fsdp", "ep")``. ``DeviceMesh._get_slice_mesh_dims``
+      requires those root-dim indices to be ascending, so ``fsdp`` must precede ``ep``
+      (the reverse raised ``KeyError: ... Mesh dim indices should be in ascending order``).
+    - ``cp`` between ``fsdp`` and ``ep`` (Stage 3): keeps the fsdp-before-ep expert
+      composition intact while giving Context Parallel its own submesh. Stage 4 consumes
+      ``device_mesh["cp"]`` for the ring-SDPA ``context_parallel(...)`` wrap; Stage 6 is
+      where EP+CP runtime composition is exercised.
 
-    The ``fsdp`` dim is placed BEFORE ``ep`` deliberately: an EP-sharded expert param
-    is later ``fully_shard``-ed on the ``fsdp`` submesh, producing a 2-D expert DTensor
-    that FSDP2 internally slices as ``("fsdp", "ep")``. ``DeviceMesh._get_slice_mesh_dims``
-    requires those root-dim indices to be ascending, so ``fsdp`` (idx 1) must precede
-    ``ep`` (idx 2). The reverse order raised
-    ``KeyError: ... Mesh dim indices should be in ascending order``.
+    Mesh layouts (``ddp = world_size // (fsdp * cp * ep)``):
+
+    - ``ep_size <= 1`` and ``cp_size <= 1`` (the default / a3-production path) is
+      UNCHANGED — the today 1-D ``["fsdp"]`` or 2-D ``["ddp","fsdp"]`` mesh,
+      byte-identical to before EP/CP (flag-off invariant G1).
+    - ``cp_size > 1``, ``ep_size <= 1``: 3-D ``["ddp","fsdp","cp"]`` of shape
+      ``(ddp, fsdp, cp_size)``. E.g. ``create_device_mesh(4, 2, cp_size=2)`` → ``(1, 2, 2)``.
+    - ``ep_size > 1``, ``cp_size <= 1``: 3-D ``["ddp","fsdp","ep"]`` of shape
+      ``(ddp, fsdp, ep_size)``. E.g. ``create_device_mesh(4, 2, ep_size=2)`` → ``(1, 2, 2)``.
+    - ``cp_size > 1`` and ``ep_size > 1``: 4-D ``["ddp","fsdp","cp","ep"]`` of shape
+      ``(ddp, fsdp, cp_size, ep_size)``.
+
+    Note (G4, enforced in Stage 4's forward, not here): when ``cp_size > 1`` the padded
+    ``seq_len`` must satisfy ``seq_len % (2 * cp_size) == 0`` for torch's built-in CP
+    load balancer (zigzag token offset).
+
+    The total mesh numel always equals ``world_size`` (asserted below).
     """
-    if ep_size <= 1:
+    if ep_size <= 1 and cp_size <= 1:
         if fsdp_size < 0 or fsdp_size >= world_size:
             device_mesh = init_device_mesh(device_type, mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
         else:
@@ -882,18 +897,35 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, device_type="cuda"):
             )
         return device_mesh
 
-    # Expert parallelism (Stage 4a): 3-D ["ddp", "fsdp", "ep"] mesh (fsdp before ep so
-    # the composed 2-D expert DTensor slices in ascending root-dim order).
+    # CP and/or EP active: build a 3-D or 4-D mesh keeping fsdp < cp < ep.
     fsdp = world_size if (fsdp_size < 0 or fsdp_size >= world_size) else fsdp_size
+    assert ep_size >= 1 and cp_size >= 1, f"ep_size={ep_size}, cp_size={cp_size} must be >= 1"
     assert world_size % ep_size == 0, f"world_size={world_size} not divisible by ep_size={ep_size}"
+    assert world_size % cp_size == 0, f"world_size={world_size} not divisible by cp_size={cp_size}"
     assert world_size % fsdp == 0, f"world_size={world_size} not divisible by fsdp_size={fsdp}"
-    assert (world_size % (ep_size * fsdp)) == 0, (
-        f"world_size={world_size} not divisible by ep_size*fsdp_size={ep_size * fsdp}"
+    inner = fsdp * cp_size * ep_size
+    assert (world_size % inner) == 0, (
+        f"world_size={world_size} not divisible by fsdp_size*cp_size*ep_size={inner} "
+        f"(fsdp={fsdp}, cp_size={cp_size}, ep_size={ep_size})"
     )
-    ddp = world_size // (ep_size * fsdp)
-    device_mesh = init_device_mesh(
-        device_type, mesh_shape=(ddp, fsdp, ep_size), mesh_dim_names=["ddp", "fsdp", "ep"]
+    ddp = world_size // inner
+
+    mesh_dim_names = ["ddp", "fsdp"]
+    mesh_shape = [ddp, fsdp]
+    if cp_size > 1:
+        mesh_dim_names.append("cp")
+        mesh_shape.append(cp_size)
+    if ep_size > 1:
+        mesh_dim_names.append("ep")
+        mesh_shape.append(ep_size)
+
+    # Total numel must equal world_size (ddp absorbs the residual; assert anyway).
+    import math
+
+    assert math.prod(mesh_shape) == world_size, (
+        f"mesh_shape={tuple(mesh_shape)} numel={math.prod(mesh_shape)} != world_size={world_size}"
     )
+    device_mesh = init_device_mesh(device_type, mesh_shape=tuple(mesh_shape), mesh_dim_names=mesh_dim_names)
     return device_mesh
 
 

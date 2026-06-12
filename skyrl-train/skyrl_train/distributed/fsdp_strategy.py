@@ -117,9 +117,30 @@ class FSDPStrategy(DistributedStrategy):
             assert etp_size == 1, "Stage 4a is ETP==1 only (expert_tensor_parallel_size must be 1)"
             # SP+EP is deferred (scope §5); the SP gate itself lives in model_wrapper.
         self.ep_size = ep_size
+
+        # Stage 3: context parallelism. cp_size>1 inserts a "cp" dim (fsdp < cp < ep)
+        # into the mesh; cp_size==1 (default) leaves the mesh untouched. Topology-only
+        # here — the CP forward wrap (ring SDPA) lands in Stage 4 and reads self.cp_group.
+        cp_size = int(self.fsdp_config.get("context_parallel_size", 1))
+        if cp_size > 1:
+            assert self.fsdp_strategy == "fsdp2", "Context parallelism (cp_size>1) requires fsdp2 strategy"
+        self.cp_size = cp_size
+
         self.device_mesh = create_device_mesh(
-            world_size=self.world_size, fsdp_size=self.fsdp_config.fsdp_size, ep_size=ep_size
+            world_size=self.world_size,
+            fsdp_size=self.fsdp_config.fsdp_size,
+            ep_size=ep_size,
+            cp_size=cp_size,
         )
+
+        # Expose the CP submesh + process group for Stage 4 (model_wrapper reads these).
+        # cp_size==1 leaves both None so the flag-off path is byte-identical.
+        if cp_size > 1:
+            self.cp_mesh = self.device_mesh["cp"]
+            self.cp_group = self.cp_mesh.get_group()
+        else:
+            self.cp_mesh = None
+            self.cp_group = None
 
     def offload_to_cpu(
         self, model, optimizer, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True
