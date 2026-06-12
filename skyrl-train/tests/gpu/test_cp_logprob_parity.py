@@ -55,22 +55,31 @@ def _assert_under_test():
     assert hasattr(_cp, "context_parallel_unshard"), "cp_utils.context_parallel_unshard missing — wrong/old module"
 
 
-def _dense_batch(divisible: bool):
-    """A small dense [B, S] batch with left-padding and a clear response span.
+def _dense_batch(case: str):
+    """A small dense [B, S] batch with a clear response span.
 
-    `divisible=True`  -> seq_len chosen divisible by 2*cp (=4), no G4 pad.
-    `divisible=False` -> seq_len NOT divisible (pad-edge test #5).
+    `case="nopad"`     -> all tokens valid (NO left padding). Isolates whether CP
+                          pure-causal ring SDPA matches cp=1 when there is nothing
+                          to mask (diagnostic for the left-padding hypothesis).
+    `case="divisible"` -> left-padded, seq_len divisible by 2*cp (=4), no G4 pad.
+    `case="pad-edge"`  -> left-padded, seq_len NOT divisible by 2*cp (G4 pad).
     """
     pad = 151643  # Qwen3 <|endoftext|> (pad)
     eos = 151645  # <|im_end|>
-    if divisible:
-        # width 12 -> 12 % 4 == 0 (no pad)
+    if case == "nopad":
+        # both rows length 12, fully valid -> no left padding, no masking needed.
+        seq_a = [785, 374, 264, 1273, 315, 279, 1849, 11, 1602, 1661, 4621, eos]
+        seq_b = [12091, 1879, 11, 419, 374, 264, 2588, 1273, 13, 4710, 2266, eos]
+    elif case == "divisible":
+        # width 12 -> 12 % 4 == 0 (no G4 pad), with left padding
         seq_a = [pad] * 3 + [785, 374, 264, 1273, 315, 279, 1849, 11, eos]
         seq_b = [pad] * 2 + [12091, 1879, 11, 419, 374, 264, 2588, 1273, 13, eos]
-    else:
-        # width 10 -> 10 % 4 == 2 (pad to 12)
+    elif case == "pad-edge":
+        # width 10 -> 10 % 4 == 2 (G4 pad to 12), with left padding
         seq_a = [pad] * 2 + [785, 374, 264, 1273, 315, 279, 1849, eos]
         seq_b = [pad] * 1 + [12091, 1879, 11, 419, 374, 264, 2588, 1273, eos]
+    else:
+        raise ValueError(case)
     width = max(len(seq_a), len(seq_b))
     seq_a = [pad] * (width - len(seq_a)) + seq_a
     seq_b = [pad] * (width - len(seq_b)) + seq_b
@@ -235,8 +244,8 @@ def main():
     # Build the cp=2 model (same checkpoint weights).
     m_cp2 = _build(context_parallel_size=cp_size, cp_mesh=cp_mesh, cp_rotate_method="allgather")
 
-    for tag, divisible in (("divisible", True), ("pad-edge", False)):
-        input_ids, attention_mask, num_actions = _dense_batch(divisible)
+    for tag in ("nopad", "divisible", "pad-edge"):
+        input_ids, attention_mask, num_actions = _dense_batch(tag)
         input_ids = input_ids.to("cuda")
         attention_mask = attention_mask.to("cuda")
         S = input_ids.size(1)
