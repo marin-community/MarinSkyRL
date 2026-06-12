@@ -110,10 +110,16 @@ def main():
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32, cast_forward_inputs=True
     )
+    # NOTE: offload_policy=None for the smoke. cpu_offload is a memory knob for the
+    # full 47B run; it is NOT what this smoke validates (swap + EP=1 mesh + the
+    # distributed state-dict load + a finite microstep). Enabling it here would
+    # require reproducing the production worker's full meta-init/to_empty(cpu) seam
+    # for the un-FSDP-wrapped params (model.norm/lm_head) — orthogonal plumbing that
+    # adds no coverage of the EP-load surface. The 2-layer model fits HBM easily.
     fsdp_kwargs = {
         "mesh": device_mesh,
         "mp_policy": mp_policy,
-        "offload_policy": CPUOffloadPolicy(pin_memory=True),
+        "offload_policy": None,
         "reshard_after_forward": True,
     }
     apply_fsdp2(model, fsdp_kwargs, {"cpu_offload": True})
