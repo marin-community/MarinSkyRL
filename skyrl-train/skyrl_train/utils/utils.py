@@ -226,12 +226,12 @@ def get_system_memory_metrics() -> dict:
         process_mem = process.memory_info()
 
         return {
-            "system/ram_used_gb": mem.used / (1024 ** 3),
-            "system/ram_available_gb": mem.available / (1024 ** 3),
-            "system/ram_total_gb": mem.total / (1024 ** 3),
+            "system/ram_used_gb": mem.used / (1024**3),
+            "system/ram_available_gb": mem.available / (1024**3),
+            "system/ram_total_gb": mem.total / (1024**3),
             "system/ram_percent": mem.percent,
-            "system/process_rss_gb": process_mem.rss / (1024 ** 3),
-            "system/process_vms_gb": process_mem.vms / (1024 ** 3),
+            "system/process_rss_gb": process_mem.rss / (1024**3),
+            "system/process_vms_gb": process_mem.vms / (1024**3),
         }
     except ImportError:
         logger.warning("psutil not installed, skipping system memory metrics")
@@ -383,10 +383,78 @@ def validate_megatron_cfg(cfg: DictConfig):
         ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
 
 
+def _validate_cp_cfg(cfg: DictConfig):
+    """Validate the torch-native Context-Parallel (CP) config (Stage 0; FSDP2-only).
+
+    CP shards the sequence dim with a torch-native ring-SDPA pass on the FSDP2 mesh.
+    It is mutually exclusive with Ulysses sequence parallelism (which also shards the
+    seq dim) and is gated entirely off by default (`context_parallel_size == 1`), in
+    which case this function is a strict no-op and the run is byte-identical to today.
+
+    For every role (policy/ref/critic) with `fsdp_config.context_parallel_size > 1`:
+      - trainer.strategy must be "fsdp2" (CP path is FSDP2-only here),
+      - <role>.sequence_parallel_size must be 1 (G2 — CP ⊥ Ulysses),
+      - cp_style must be in {"ring_sdpa"} ("ring_flash_attn" reserved for a later stage),
+      - cp_rotate_method must be in {"allgather", "all_to_all"},
+      - sample packing must be off (packed-varlen CP is deferred),
+      - context_parallel_size must divide the role's world size (cheap arithmetic guard;
+        full mesh divisibility is re-checked in Stage 3).
+
+    See notes/RL/skyrl/fsdp2_context_parallel_stages/.
+    """
+    placement = cfg.trainer.placement
+    role_world_sizes = {
+        "policy": placement.policy_num_gpus_per_node * placement.policy_num_nodes,
+        "ref": placement.ref_num_gpus_per_node * placement.ref_num_nodes,
+        "critic": placement.critic_num_gpus_per_node * placement.critic_num_nodes,
+    }
+    valid_cp_styles = {"ring_sdpa"}
+    valid_rotate_methods = {"allgather", "all_to_all"}
+
+    for role in ("policy", "ref", "critic"):
+        role_cfg = cfg.trainer[role]
+        cp_size = role_cfg.fsdp_config.context_parallel_size
+        assert cp_size >= 1, f"trainer.{role}.fsdp_config.context_parallel_size must be >= 1, got {cp_size}"
+        if cp_size == 1:
+            # CP disabled for this role -> strict no-op, no further constraints.
+            continue
+
+        assert cfg.trainer.strategy == "fsdp2", (
+            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) "
+            f"is only supported with trainer.strategy='fsdp2', got '{cfg.trainer.strategy}'"
+        )
+        assert role_cfg.sequence_parallel_size == 1, (
+            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) is mutually "
+            f"exclusive with ulysses sequence parallel; found trainer.{role}.sequence_parallel_size="
+            f"{role_cfg.sequence_parallel_size} (both shard the sequence dim)"
+        )
+        cp_style = role_cfg.fsdp_config.cp_style
+        assert cp_style in valid_cp_styles, (
+            f"trainer.{role}.fsdp_config.cp_style='{cp_style}' is not supported; "
+            f"must be one of {sorted(valid_cp_styles)} (ring_flash_attn is reserved for a later stage)"
+        )
+        cp_rotate = role_cfg.fsdp_config.cp_rotate_method
+        assert cp_rotate in valid_rotate_methods, (
+            f"trainer.{role}.fsdp_config.cp_rotate_method='{cp_rotate}' is invalid; "
+            f"must be one of {sorted(valid_rotate_methods)}"
+        )
+        assert not cfg.trainer.use_sample_packing, (
+            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) does not yet "
+            "support sample packing; set trainer.use_sample_packing=false (packed-varlen CP is deferred)"
+        )
+        world_size = role_world_sizes[role]
+        assert world_size % cp_size == 0, (
+            f"trainer.{role}.fsdp_config.context_parallel_size={cp_size} must divide the {role} world size "
+            f"({world_size}); full mesh divisibility is re-checked in Stage 3"
+        )
+
+
 def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
+    _validate_cp_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
 
     assert (
@@ -750,9 +818,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
     env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
     env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = (
-        "/e/data1/datasets/playground/ot-baf/nccl_trace/673_relaunch_rank"
-    )
+    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = "/e/data1/datasets/playground/ot-baf/nccl_trace/673_relaunch_rank"
     # Finite NCCL collective timeout (20 min). Read by
     # skyrl_train.utils.constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
     # torch.distributed.init_process_group(timeout=...) in worker.py; the EP /

@@ -99,6 +99,13 @@ trainer:
       ep_comm_backend: "torch"             # "torch" | "deepep"; torch = no NVSHMEM dependency
       deepep_num_sms: 20                    # Stage 5: SMs for DeepEP dispatch/combine kernels (deepep backend only)
       deepep_token_chunk_size: null         # Stage 5: tokens per DeepEP dispatch chunk; null = whole batch
+      # --- Context-parallel (torch-native ring SDPA; Stage 0; defaults = current behavior) ---
+      # See notes/RL/skyrl/fsdp2_context_parallel_stages/. No code path consumes
+      # these yet; all defaults preserve the existing plain-FSDP2 path byte-for-byte.
+      # CP and Ulysses (sequence_parallel_size) are mutually exclusive (both shard the seq dim).
+      context_parallel_size: 1          # 1 = disabled. CP ring degree (FSDP2 only).
+      cp_style: "ring_sdpa"             # "ring_sdpa" (torch-native). reserved: "ring_flash_attn"
+      cp_rotate_method: "allgather"     # torch CP rotate: "allgather" | "all_to_all"
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
     use_torch_compile: false
@@ -122,6 +129,10 @@ trainer:
       ep_comm_backend: "torch"
       deepep_num_sms: 20
       deepep_token_chunk_size: null
+      # --- Context-parallel (torch-native ring SDPA; Stage 0; defaults = current behavior) ---
+      context_parallel_size: 1
+      cp_style: "ring_sdpa"
+      cp_rotate_method: "allgather"
   critic:
     model:
       path: null
@@ -155,6 +166,10 @@ trainer:
       ep_comm_backend: "torch"
       deepep_num_sms: 20
       deepep_token_chunk_size: null
+      # --- Context-parallel (torch-native ring SDPA; Stage 0; defaults = current behavior) ---
+      context_parallel_size: 1
+      cp_style: "ring_sdpa"
+      cp_rotate_method: "allgather"
     sequence_parallel_size: 1
   algorithm:
     advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
