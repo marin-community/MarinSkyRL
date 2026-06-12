@@ -181,10 +181,15 @@ def _ppo_loss_all_modes(action_log_probs, loss_mask):
     from skyrl_train.utils.ppo_utils import ppo_policy_loss
 
     B, A = action_log_probs.shape
-    torch.manual_seed(0)
-    # deterministic synthetic inputs (same on every rank / both cp settings)
-    old_log_probs = action_log_probs.detach() + 0.01
-    advantages = torch.linspace(-1.0, 1.0, B * A, device=action_log_probs.device).reshape(B, A)
+    # Deterministic synthetic inputs, IDENTICAL for cp=1 and cp=2 (do NOT derive
+    # from action_log_probs — that would feed each model its own logp into BOTH
+    # log_probs and old_log_probs and cancel the very difference we're testing).
+    # A fixed old_log_probs + asymmetric (non-cancelling) advantages makes the
+    # loss genuinely depend on action_log_probs, so cp1-vs-cp2 logprob drift
+    # propagates into the loss value (the thing test #4 is meant to detect).
+    dev = action_log_probs.device
+    old_log_probs = torch.full((B, A), -1.0, device=dev)
+    advantages = torch.linspace(0.2, 1.8, B * A, device=dev).reshape(B, A)
     max_seq_len = 64
     results = {}
     for mode in ("token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"):
