@@ -177,12 +177,28 @@ def _moe_attr(hf_block, hf_config, name):
     )
 
 
+# Blocks whose native router UNCONDITIONALLY renormalizes the top-k weights
+# (top_scores /= top_scores.sum) but expose NO ``norm_topk_prob`` on the block,
+# its router, or the HF config. For these, route_norm must be forced True (the
+# native softmax MoE router with route_norm=True is then bit-faithful). Keyed by
+# the HF block class name.
+#   * MixtralSparseMoeBlock — MixtralTopKRouter always does
+#       ``router_top_value /= router_top_value.sum(dim=-1, keepdim=True)``; the
+#       Mixtral config has no ``norm_topk_prob`` field, so _moe_attr would raise.
+_ROUTE_NORM_ALWAYS_BLOCKS = {"MixtralSparseMoeBlock"}
+
+
 def _build_moe_for_block(hf_block, hf_config) -> MoE:
     """Construct a grouped ``MoE`` mirroring the dims of an HF ``*SparseMoeBlock``."""
     dim = hf_block.gate.weight.shape[1]
     num_experts = _moe_attr(hf_block, hf_config, "num_experts")
     top_k = _moe_attr(hf_block, hf_config, "top_k")
-    route_norm = bool(_moe_attr(hf_block, hf_config, "norm_topk_prob"))
+    if type(hf_block).__name__ in _ROUTE_NORM_ALWAYS_BLOCKS:
+        # Native router always renormalizes top-k weights but exposes no
+        # ``norm_topk_prob`` to introspect → force True (see set docstring).
+        route_norm = True
+    else:
+        route_norm = bool(_moe_attr(hf_block, hf_config, "norm_topk_prob"))
 
     # Routed-expert intermediate size.
     if hasattr(hf_block.experts, "gate_up_proj"):
@@ -267,8 +283,24 @@ def swap_moe_blocks_to_grouped(model) -> int:
         #       `block.gate.weight` [num_experts, hidden]; experts are FUSED nn.Parameter
         #       (`experts.gate_up_proj`/`experts.down_proj`) → handled by the fused branch
         #       in _build_moe_for_block / remap_hf_block_to_moe. No shared expert.
+        #   * MixtralSparseMoeBlock  — transformers 5.10.1: MixtralSparseMoeBlock.forward
+        #       returns a BARE TENSOR (`return hidden_states`, despite the `-> tuple`
+        #       annotation — the 5.x refactor moved routing into MixtralTopKRouter +
+        #       MixtralExperts); MixtralDecoderLayer does `hidden_states = self.mlp(h)`
+        #       then `residual + hidden_states`. Router is `block.gate`
+        #       (MixtralTopKRouter: F.linear(hidden, weight) → softmax(float32) → topk →
+        #       `router_top_value /= sum` renorm), weight at `block.gate.weight`
+        #       [num_experts, hidden] → faithful to the native MoE softmax router with
+        #       route_norm=True. Experts are FUSED nn.Parameter
+        #       (`experts.gate_up_proj` [E, 2*inter, hidden] / `experts.down_proj`
+        #       [E, hidden, inter]) → handled by the fused branch in
+        #       _build_moe_for_block / remap_hf_block_to_moe. No shared expert.
+        #       Topology: 8 experts, top_k 2, intermediate_size 14336, hidden 4096.
+        #       NOTE: Mixtral always renormalizes the top-k weights but exposes NO
+        #       `norm_topk_prob` (config or router attr) → _build_moe_for_block must
+        #       default route_norm True for it (see _MoE_ROUTE_NORM_ALWAYS below).
         # 2-TUPLE blocks: Qwen3NextSparseMoeBlock (default), etc.
-        _BARE_TENSOR_BLOCKS = {"Qwen3MoeSparseMoeBlock", "OlmoeSparseMoeBlock"}
+        _BARE_TENSOR_BLOCKS = {"Qwen3MoeSparseMoeBlock", "OlmoeSparseMoeBlock", "MixtralSparseMoeBlock"}
         returns_tuple = type(block).__name__ not in _BARE_TENSOR_BLOCKS
         parent.mlp = GroupedMoEShim(moe, returns_tuple=returns_tuple)
         swapped += 1
