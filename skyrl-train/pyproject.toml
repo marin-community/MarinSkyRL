@@ -27,6 +27,12 @@ dependencies = [
     "transformers>=4.51.0",
     "hydra-core==1.3.2",
     "accelerate",
+    # Stage-1 (FSDP2 CP port): pin base torch>=2.10 so the torch-native context-parallel
+    # API (torch.distributed.tensor.experimental.context_parallel + ring-SDPA load balancer)
+    # is guaranteed present for the trainer. Production SIF runs torch 2.11.0+cu130 today.
+    # The vllm extra pins an exact compatible torch (==2.11.0); sglang/mcore/flashrl still
+    # pin torch 2.7.x and are isolated by [tool.uv].conflicts — reconciled in Stage 7.
+    "torch>=2.10.0",
     "torchdata",
     "omegaconf",
     "ray==2.51.1",
@@ -127,26 +133,37 @@ docs = [
 sandboxes = [
     "litellm[proxy]>=1.67.5",
 ]
+# Stage-1 (FSDP2 CP port): the vllm extra is the actively-used inference path; its torch
+# pin must carry torch-native context_parallel (>=2.10). Versions MIRROR the production SIF
+# `skyrl_megatron_vllm0202rc0_r3.sif`, which runs the following resolved stack multi-node on
+# Jupiter today: torch 2.11.0, vLLM 0.20.2rc0, flash-attn 2.6.3, torchvision 0.26.0.
+# (The SIF is a cu130 build via its own build script; the version *pins* here are index-agnostic
+#  and resolve against the pytorch-cu128 index, which also publishes torch-2.11 wheels.)
+# flash-attn is only needed for the NON-CP paths after Stage 2 (CP uses SDPA), so a slightly
+# older 2.6.3 paired with torch 2.11 is fine.
 vllm = [
-    "vllm==0.11.0",
-    "flash-attn==2.8.3",
-    "torch==2.8.0",
+    "vllm==0.20.2rc0",
+    "flash-attn==2.6.3",
+    "torch==2.11.0",
     "flashinfer-python",
     "flashinfer-jit-cache",
-    "torchvision"
+    "torchvision==0.26.0"
 ]
+# TODO(stage7): reconcile sglang/mcore/flashrl torch pins toward 2.10+. They still pin torch
+# 2.7.x and are isolated from the base torch>=2.10 by the [tool.uv].conflicts table, so they
+# only surface a resolver conflict when those extras are explicitly selected — acceptable now.
 sglang = [
     "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
     "flashinfer-python",
     "flash-attn==2.8.3",
-    "torch==2.7.1",
+    "torch==2.7.1",  # TODO(stage7): bump toward >=2.10 as sglang allows
     "torchvision",
 ]
 mcore = [
   "transformer-engine[pytorch]==2.7.0",
   "flash-attn==2.7.4.post1",
   "vllm==0.10.1.1",
-  "torch==2.7.1",
+  "torch==2.7.1",  # TODO(stage7): bump toward >=2.10 as megatron-core/TE allow
   "flashinfer-python",
   "torchvision",
   "megatron-bridge==0.1.0rc4",
@@ -156,7 +173,7 @@ flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
     # See examples/flash_rl/README.md for installation instructions.
     "flash-attn==2.8.3",
-    "torch==2.7.0",
+    "torch==2.7.0",  # TODO(stage7): bump toward >=2.10 as the custom flash_rl vLLM wheel allows
     "flashinfer-python",
     "torchvision",
 ]
