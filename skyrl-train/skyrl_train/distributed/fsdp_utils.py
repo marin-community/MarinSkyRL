@@ -922,9 +922,9 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
     # Total numel must equal world_size (ddp absorbs the residual; assert anyway).
     import math
 
-    assert math.prod(mesh_shape) == world_size, (
-        f"mesh_shape={tuple(mesh_shape)} numel={math.prod(mesh_shape)} != world_size={world_size}"
-    )
+    assert (
+        math.prod(mesh_shape) == world_size
+    ), f"mesh_shape={tuple(mesh_shape)} numel={math.prod(mesh_shape)} != world_size={world_size}"
     device_mesh = init_device_mesh(device_type, mesh_shape=tuple(mesh_shape), mesh_dim_names=mesh_dim_names)
     return device_mesh
 
