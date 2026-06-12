@@ -86,10 +86,17 @@ def main():
     else:
         full_state = {}
 
-    with torch.device("meta"):
-        model = MixtralForCausalLM(cfg).to(torch.bfloat16)
+    # Build all-ranks on a REAL device (small 2-layer model fits easily) rather
+    # than pure-meta: the non-EP loader's dtype/contiguity inference reads live
+    # params+buffers, and non-persistent buffers (rotary inv_freq, absent from the
+    # state_dict) must carry real, deterministic, rank-identical values. Params get
+    # OVERWRITTEN by the loader (assign=True from rank-0's full_state); buffers stay
+    # as the deterministic real-init values. This mirrors the production seam where
+    # only PARAMS are re-meta-ized while buffers stay materialized (fsdp_strategy.py).
+    torch.manual_seed(1234)
+    model = MixtralForCausalLM(cfg).to(device="cuda", dtype=torch.bfloat16)
 
-    # ---- Stage 3b grouped-GEMM swap (Mixtral bare-tensor shim) on the meta module.
+    # ---- Stage 3b grouped-GEMM swap (Mixtral bare-tensor shim).
     n_swapped = swap_moe_blocks_to_grouped(model)
     if rank == 0:
         _log(f"swap_moe_blocks_to_grouped: swapped {n_swapped} blocks (expect {cfg.num_hidden_layers})")
