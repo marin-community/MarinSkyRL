@@ -19,6 +19,25 @@ eager (3a) and grouped (3b) paths — same singleton, same per-layer targets, sa
 ARCH SUPPORT MATRIX (what swap_moe_blocks_to_grouped can handle today):
   * ``Qwen3MoeSparseMoeBlock``  — supported (bare-tensor return).
   * ``Qwen3NextSparseMoeBlock`` — supported (2-tuple return).
+  * ``OlmoeSparseMoeBlock`` (allenai/OLMoE-1B-7B-*, transformers 5.10.1) —
+    supported (bare-tensor return; see _BARE_TENSOR_BLOCKS). Router is
+    ``block.gate`` (``OlmoeTopKRouter``: plain softmax top-k + optional
+    norm_topk_prob, weight at ``block.gate.weight`` [num_experts, hidden] →
+    softmax-faithful to the native MoE router). Experts are FUSED nn.Parameter
+    (``experts.gate_up_proj``/``experts.down_proj``) → fused remap branch. No
+    shared expert. Topology: 64 experts, top_k 8, norm_topk_prob False.
+
+NOT SUPPORTED — ``phimoe`` (microsoft/Phi-3.5-MoE-instruct, transformers 5.10.1).
+PhimoeSparseMoeBlock's class name endswith "SparseMoeBlock" (so the scan would
+match) BUT it is structurally incompatible: (1) its router is ``block.router``
+(``PhimoeTopKRouter``), not ``block.gate`` → _build_moe_for_block's
+``hf_block.gate.weight`` read AttributeErrors; (2) routing uses ``sparsemixer``
+(custom mask-based top-2 with jitter), NOT plain softmax/sigmoid top-k, so the
+native softmax MoE router would be numerically WRONG (same class of gap as
+gemma4's per-expert scale); (3) experts are fused nn.Parameter (that part the
+fused branch could handle, but 1+2 are blockers). Supporting phimoe needs a
+sparsemixer-aware router + ``block.router`` detection — structural work, not a
+flag flip. Use OLMoE as the small-MoE non-Qwen counterpart instead.
 
 NOT SUPPORTED — ``gemma4`` (google/gemma-4-26B-A4B-it, transformers 5.10.1).
 Gemma4's MoE is STRUCTURALLY different from both Qwen3 variants and this shim
@@ -233,11 +252,24 @@ def swap_moe_blocks_to_grouped(model) -> int:
         ref_param = block.gate.weight
         moe = moe.to(device=ref_param.device, dtype=ref_param.dtype)
         remap_hf_block_to_moe(block, moe)
-        # The shim must mirror the replaced HF block's return contract: the
-        # Qwen3-MoE decoder consumes a BARE TENSOR (residual + self.mlp(h)),
-        # while the Qwen3-Next decoder unpacks a 2-tuple. Default (no match) is
-        # the 2-tuple, preserving the validated Qwen3-Next 80B path.
-        returns_tuple = type(block).__name__ != "Qwen3MoeSparseMoeBlock"
+        # The shim must mirror the replaced HF block's return contract. Some HF
+        # MoE decoders consume a BARE TENSOR (residual + self.mlp(h)); others
+        # unpack a 2-tuple (hidden_states, router_logits). The default (no match)
+        # is the 2-tuple, preserving the validated Qwen3-Next 80B path.
+        #
+        # BARE-TENSOR blocks (return final_hidden_states; decoder does
+        #   `hidden_states = self.mlp(h)` then `residual + hidden_states`):
+        #   * Qwen3MoeSparseMoeBlock — verified (TypeError otherwise, see shim docstring).
+        #   * OlmoeSparseMoeBlock    — transformers 5.10.1: OlmoeSparseMoeBlock.forward
+        #       returns a bare tensor; OlmoeDecoderLayer does `residual + self.mlp(h)`.
+        #       Router is `block.gate` (OlmoeTopKRouter, plain softmax-topk + optional
+        #       norm_topk_prob → faithful to the native MoE softmax router), weight at
+        #       `block.gate.weight` [num_experts, hidden]; experts are FUSED nn.Parameter
+        #       (`experts.gate_up_proj`/`experts.down_proj`) → handled by the fused branch
+        #       in _build_moe_for_block / remap_hf_block_to_moe. No shared expert.
+        # 2-TUPLE blocks: Qwen3NextSparseMoeBlock (default), etc.
+        _BARE_TENSOR_BLOCKS = {"Qwen3MoeSparseMoeBlock", "OlmoeSparseMoeBlock"}
+        returns_tuple = type(block).__name__ not in _BARE_TENSOR_BLOCKS
         parent.mlp = GroupedMoEShim(moe, returns_tuple=returns_tuple)
         swapped += 1
     return swapped
