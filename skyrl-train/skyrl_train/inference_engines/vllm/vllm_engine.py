@@ -1302,47 +1302,90 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             custom_chat_template_content = None
 
+        # vLLM >= 0.20.2rc0 moved chat-template / tool-parsing into a separate
+        # ``OpenAIServingRender`` object that both OpenAIServingChat and
+        # OpenAIServingCompletion now take as a REQUIRED keyword-only
+        # ``openai_serving_render`` arg (and dropped ``model_config``). Build it
+        # lazily here; ``None`` on older vLLM where the class doesn't exist, in
+        # which case the legacy try/except branches below are taken (byte-
+        # identical to the prior behavior on vLLM 0.16 / <0.20.2).
+        openai_serving_render = None
+        try:
+            from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+            openai_serving_render = OpenAIServingRender(
+                model_config=model_config,
+                renderer=engine.renderer,
+                model_registry=models.registry,
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
+            )
+        except ImportError:
+            openai_serving_render = None
+
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
-        # Try newer API first, fall back to older API if TypeError
-        try:
+        # Try the vLLM >= 0.20.2rc0 render API first, then newer (>=0.13, no
+        # model_config), then legacy (<0.13, with model_config).
+        if openai_serving_render is not None:
             self.openai_serving_chat = OpenAIServingChat(
                 engine_client=engine,
                 models=models,
                 response_role="assistant",
+                openai_serving_render=openai_serving_render,
                 request_logger=None,
                 chat_template=custom_chat_template_content,
                 chat_template_content_format="auto",
                 **openai_kwargs,
             )
-        except TypeError:
-            self.openai_serving_chat = OpenAIServingChat(
-                engine_client=engine,
-                model_config=model_config,
-                models=models,
-                response_role="assistant",
-                request_logger=None,
-                chat_template=custom_chat_template_content,
-                chat_template_content_format="auto",
-                **openai_kwargs,
-            )
+        else:
+            try:
+                self.openai_serving_chat = OpenAIServingChat(
+                    engine_client=engine,
+                    models=models,
+                    response_role="assistant",
+                    request_logger=None,
+                    chat_template=custom_chat_template_content,
+                    chat_template_content_format="auto",
+                    **openai_kwargs,
+                )
+            except TypeError:
+                self.openai_serving_chat = OpenAIServingChat(
+                    engine_client=engine,
+                    model_config=model_config,
+                    models=models,
+                    response_role="assistant",
+                    request_logger=None,
+                    chat_template=custom_chat_template_content,
+                    chat_template_content_format="auto",
+                    **openai_kwargs,
+                )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
-        # Try newer API first, fall back to older API if TypeError
-        try:
+        # Same three-way API selection as OpenAIServingChat above.
+        if openai_serving_render is not None:
             self.openai_serving_completion = OpenAIServingCompletion(
                 engine_client=engine,
                 models=models,
+                openai_serving_render=openai_serving_render,
                 request_logger=None,
             )
-        except TypeError:
-            self.openai_serving_completion = OpenAIServingCompletion(
-                engine_client=engine,
-                model_config=model_config,
-                models=models,
-                request_logger=None,
-            )
+        else:
+            try:
+                self.openai_serving_completion = OpenAIServingCompletion(
+                    engine_client=engine,
+                    models=models,
+                    request_logger=None,
+                )
+            except TypeError:
+                self.openai_serving_completion = OpenAIServingCompletion(
+                    engine_client=engine,
+                    model_config=model_config,
+                    models=models,
+                    request_logger=None,
+                )
         return engine
 
     def _create_ray_prometheus_stat_loggers(self):
