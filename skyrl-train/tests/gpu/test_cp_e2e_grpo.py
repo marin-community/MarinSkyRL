@@ -527,21 +527,23 @@ def main():
     # The dense CP parity / OOM / resume tests use a pure cp mesh of size 2 (the
     # first 2 ranks form cp; with 4 ranks we still build cp=2 over a 2-rank slice
     # of a dedicated mesh). To keep it simple and robust: cp_size = min(2, ws).
-    cp_size = 2 if world_size >= 2 else 1
     assert world_size >= 2, f"Stage 6 needs >= 2 ranks; got {world_size}"
 
-    # Dense-CP tests run on a (cp,) mesh over the FIRST cp_size ranks. With 4 ranks
-    # we run them on a 2-rank cp subgroup and idle ranks 2,3 at a barrier — but
-    # torch CP needs every participating rank in the mesh, so build a (cp_size,)
-    # mesh from the FULL world only when world_size == cp_size; otherwise fold
-    # extra ranks into cp (cp_size = world_size) so all ranks participate.
-    cp_size = world_size if world_size in (2, 4) else 2
-    mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("cp",))
+    # Dense-CP tests run at cp=2 — the LOCKED, Stage-5-validated config (cp>2 dense
+    # is unvalidated and not required by the spec; "cp=2 = 2 GPUs"). To let ALL
+    # ranks participate in the collective at any world_size, build a 2-D
+    # ("ddp","cp") mesh of shape (world_size//2, 2) and use the cp submesh: every
+    # rank lands in a 2-rank cp group (rings of 2), all ranks active. The batch is
+    # seed-fixed (rank-independent), so each cp group shards the SAME input
+    # identically and the parity result is the same on every group.
+    cp_size = 2
+    assert world_size % 2 == 0, f"need an even world_size for cp=2 groups; got {world_size}"
+    mesh = init_device_mesh("cuda", (world_size // 2, 2), mesh_dim_names=("ddp", "cp"))
     cp_mesh = mesh["cp"]
 
     results = {}
 
-    # TEST 1 — e2e GRPO parity (cp = world_size).
+    # TEST 1 — e2e GRPO parity (cp=2).
     results["test1_e2e_grpo"] = test1_e2e_grpo_parity(cp_size, cp_mesh, rank)
     dist.barrier()
 
