@@ -89,6 +89,16 @@ def _extract(outputs):
     return response_ids, response_logprobs
 
 
+def _log_attn_backend(tag):
+    """Log which attention backend env-var is in force (the engine resolves the
+    concrete backend from VLLM_ATTENTION_BACKEND if set; we pin it identically for
+    both dcp=1 and dcp=2 so a backend MISMATCH cannot confound the parity result).
+    The concrete per-layer backend chosen is also printed by vLLM's own startup
+    log line 'Using <X> backend' — grep the run log for it."""
+    be = os.environ.get("VLLM_ATTENTION_BACKEND", "<unset:auto-select>")
+    print(f"[Stage3-DCP] {tag}: VLLM_ATTENTION_BACKEND={be}", flush=True)
+
+
 def _build_engine(dcp):
     import vllm
 
@@ -106,6 +116,7 @@ def _build_engine(dcp):
     # G1 contract: dcp kwarg ABSENT when ==1 (byte-identical to today); present when >1.
     if dcp > 1:
         kwargs["decode_context_parallel_size"] = dcp
+    _log_attn_backend(f"Engine(dcp={dcp}) pre-build")
     return vllm.LLM(**kwargs)
 
 
