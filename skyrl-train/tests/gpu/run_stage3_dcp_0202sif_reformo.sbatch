@@ -81,7 +81,21 @@ export DCP_PARITY_MODEL="$MODEL"
 export DCP_PARITY_TP=4
 export DCP_PARITY_DCP=2
 # Pin the attention backend IDENTICAL on both dcp=1 and dcp=2 paths.
+# NOTE: on vLLM 0.20.2rc0 VLLM_ATTENTION_BACKEND is no longer a recognized env var
+# (it logs "Unknown vLLM environment variable detected" and is IGNORED); the engine
+# auto-selects the attention backend. It's the SAME (ignored) var on both dcp=1 and
+# dcp=2, so there is no backend MISMATCH confound — both paths auto-select identically.
+# Kept set for parity with the prior 0.16-era runs; the test logs the value seen.
 export VLLM_ATTENTION_BACKEND="$ATTN"
+# CRITICAL (0.20.2rc0 SIF gap): this SIF does NOT ship `flashinfer`, but vLLM
+# 0.20.2rc0 defaults VLLM_USE_FLASHINFER_SAMPLER=True and TopKTopPSampler.__init__
+# UNCONDITIONALLY does `from vllm.v1.attention.backends.flashinfer import
+# FlashInferBackend` when that flag is on — crashing engine startup with
+# `ModuleNotFoundError: No module named 'flashinfer'` BEFORE the graceful-fallback
+# branch (observed: run #1 / job 857117, dcp=1 baseline never built). Setting this to
+# 0 skips the import and uses the PyTorch-native/Triton sampler — which is also more
+# deterministic and irrelevant to greedy (temp=0) parity. Set on BOTH paths.
+export VLLM_USE_FLASHINFER_SAMPLER=0
 # tp>1 standalone (NOT in a Ray actor) -> force vLLM TP workers to SPAWN, else they
 # fork after the parent CUDA-inits and die "Cannot re-initialize CUDA in forked
 # subprocess". (The test also sets these defensively.)
@@ -147,6 +161,7 @@ srun apptainer exec --nv \
   --env DCP_PARITY_MODEL="$MODEL" \
   --env DCP_PARITY_TP=4 --env DCP_PARITY_DCP=2 \
   --env VLLM_ATTENTION_BACKEND="$ATTN" \
+  --env VLLM_USE_FLASHINFER_SAMPLER=0 \
   --env VLLM_WORKER_MULTIPROC_METHOD=spawn \
   --env VLLM_ENABLE_V1_MULTIPROCESSING=1 \
   $P2P_ENV \
