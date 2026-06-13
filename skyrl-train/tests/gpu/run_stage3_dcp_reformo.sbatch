@@ -65,6 +65,11 @@ export TRANSFORMERS_OFFLINE=1
 export DCP_PARITY_MODEL="$MODEL"
 export DCP_PARITY_TP=4
 export DCP_PARITY_DCP=2
+# tp>1 standalone (NOT in a Ray actor) -> force vLLM TP workers to SPAWN, else
+# they fork after the parent CUDA-inits and die "Cannot re-initialize CUDA in
+# forked subprocess". (The test also sets these defensively.)
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export VLLM_ENABLE_V1_MULTIPROCESSING=1
 
 RUNLOG="/e/scratch/jureap59/feuer1/stage3_dcp_parity_${SLURM_JOB_ID}.log"
 echo "=== Stage 3 DCP rollout-parity launch ==="
@@ -80,6 +85,8 @@ srun apptainer exec --nv \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 \
   --env DCP_PARITY_MODEL="$MODEL" \
   --env DCP_PARITY_TP=4 --env DCP_PARITY_DCP=2 \
+  --env VLLM_WORKER_MULTIPROC_METHOD=spawn \
+  --env VLLM_ENABLE_V1_MULTIPROCESSING=1 \
   "$SIF" \
   python -u tests/gpu/test_dcp_rollout_parity.py 2>&1 | tee "$RUNLOG"
 echo "=== Stage 3 DCP parity EXIT ${PIPESTATUS[0]} ==="

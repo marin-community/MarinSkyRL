@@ -34,6 +34,16 @@ Run (4-GPU single node, NOT torchrun — vLLM owns its own TP workers):
 import os
 import sys
 
+# Force vLLM's V1 TP workers to SPAWN (not fork). This test builds a tp>1 engine
+# OUTSIDE a Ray actor — vLLM only auto-forces spawn when it detects a Ray actor
+# (vllm.utils._maybe_force_spawn), so standalone it would fork the workers. If the
+# parent has touched CUDA (any torch.cuda.* call) before the engine forks, the
+# workers die with "Cannot re-initialize CUDA in forked subprocess". Set BEFORE any
+# torch/vllm import, and the GPU-count guard below uses CUDA_VISIBLE_DEVICES / a
+# non-CUDA-initializing path so the parent never creates a CUDA context.
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+
 # DCP's AllGather+ReduceScatter reorders the fp reduction vs dcp=1; logprobs match
 # within tol, NOT bit-exactly. Greedy argmax (#1) must still be EXACT (argmax robust
 # to sub-ulp logit jitter). atol 1e-2 absorbs the bf16 reduction-order residual on
@@ -119,13 +129,28 @@ def _run_engine(llm, prompt_token_ids, temperature):
     return _extract(outputs)
 
 
-def main():
-    import torch
+def _visible_gpu_count():
+    """Count GPUs WITHOUT initializing a CUDA context in this (parent) process —
+    touching torch.cuda.* here would make vLLM's spawned/forked TP workers fail
+    with 'Cannot re-initialize CUDA in forked subprocess'. Read the device list
+    from CUDA_VISIBLE_DEVICES, else fall back to nvidia-smi -L."""
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None and cvd.strip() != "":
+        return len([x for x in cvd.split(",") if x.strip() != ""])
+    try:
+        import subprocess
 
-    if not torch.cuda.is_available():
-        print("CUDA not available — Stage 3 DCP rollout parity gate DEFERRED.")
+        out = subprocess.check_output(["nvidia-smi", "-L"], text=True)
+        return len([ln for ln in out.splitlines() if ln.strip().startswith("GPU ")])
+    except Exception:
         return 0
-    ngpu = torch.cuda.device_count()
+
+
+def main():
+    ngpu = _visible_gpu_count()
+    if ngpu == 0:
+        print("No GPUs visible — Stage 3 DCP rollout parity gate DEFERRED.")
+        return 0
     assert ngpu >= TP, f"Stage 3 DCP parity needs >= {TP} GPUs (tp={TP}); got {ngpu}"
 
     import vllm
@@ -146,14 +171,16 @@ def main():
     ids_a_greedy, lp_a_greedy = _run_engine(llm_a, prompt_token_ids, temperature=0.0)
     ids_a_samp, _ = _run_engine(llm_a, prompt_token_ids, temperature=0.8)
     # free engine A before building B (each at 0.45 util; sequential is safest).
+    # Engine A's TP workers are SEPARATE spawned processes — del triggers their
+    # teardown; do NOT call torch.cuda.empty_cache() here (it would CUDA-init this
+    # parent process and make Engine B's spawned workers fail).
     del llm_a
     import gc
+
     gc.collect()
-    torch.cuda.empty_cache()
-    try:
-        import ray  # vLLM may have spun a ray-internal executor; ignore if absent
-    except Exception:
-        ray = None
+    import time
+
+    time.sleep(5)  # let Engine A's worker procs release their GPU memory
 
     # ---- Engine B: dcp=2 ----
     print(f"\n[Stage3-DCP] building Engine B (dcp={DCP}) ...")
