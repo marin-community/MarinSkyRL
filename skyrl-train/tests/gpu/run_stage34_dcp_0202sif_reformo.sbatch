@@ -117,17 +117,30 @@ srun apptainer exec --nv \
 S3_RC=${PIPESTATUS[0]}
 echo "=== [DCP] STAGE 3 EXIT ${S3_RC} ==="
 
-# ---- STAGE 4: long-ctx KV OOM->OK ship gate (auto-falls back to headroom) ----
-echo "=== [DCP] STAGE 4 — long-ctx KV OOM->OK ship gate ==="
+# ---- STAGE 4: long-ctx KV OOM->OK ship gate ----
+# Qwen2.5-1.5B caps max_position_embeddings at 32768, and at tp=4 the tiny KV fits
+# trivially below that cap -> a crisp single-GPU OOM-at-32k is NOT achievable. The
+# scope's endorsed path for that case is the MEASURED KV-HEADROOM gate: with
+# VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 (lifts the position-embedding cap so KV becomes the
+# BINDING constraint; Stage 4 only tests whether the KV cache INITIALIZES, not output
+# quality, so the RoPE-NaN-beyond-32k caveat is irrelevant here), at a low gpu_util we
+# ladder the max_model_len and record the largest that initializes at dcp=1 vs dcp=2.
+# DCP shards the decode KV along the token dim, removing the tp>kv_heads (4>2)
+# duplication, so dcp=2's per-GPU KV/token is ~half dcp=1's -> dcp=2 reaches a strictly
+# LARGER max context. That ratio (~2x) is the DCP long-context win, independent of the
+# absolute available-KV. (oom-mode is still wired + auto-falls-back here.)
+echo "=== [DCP] STAGE 4 — long-ctx KV headroom (OOM->OK) ship gate ==="
 srun apptainer exec --nv \
   --bind /e/scratch --bind /e/data1 \
   "${COMMON_ENV[@]}" \
-  --env DCP_OOM_MODE="${DCP_OOM_MODE:-oom}" \
-  --env DCP_OOM_MAXLEN="${DCP_OOM_MAXLEN:-65536}" \
-  --env DCP_OOM_GPUUTIL="${DCP_OOM_GPUUTIL:-0.30}" \
-  --env DCP_OOM_PROMPT_LEN="${DCP_OOM_PROMPT_LEN:-32768}" \
+  --env VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+  --env DCP_OOM_MODE="${DCP_OOM_MODE:-headroom}" \
+  --env DCP_HEADROOM_GPUUTIL="${DCP_HEADROOM_GPUUTIL:-0.20}" \
+  --env DCP_HEADROOM_LADDER="${DCP_HEADROOM_LADDER:-65536,131072,196608,262144,393216,524288}" \
+  --env DCP_OOM_MAXLEN="${DCP_OOM_MAXLEN:-262144}" \
+  --env DCP_OOM_GPUUTIL="${DCP_OOM_GPUUTIL:-0.20}" \
+  --env DCP_OOM_PROMPT_LEN="${DCP_OOM_PROMPT_LEN:-131072}" \
   --env DCP_OOM_GEN_LEN="${DCP_OOM_GEN_LEN:-256}" \
-  --env DCP_HEADROOM_GPUUTIL="${DCP_HEADROOM_GPUUTIL:-0.55}" \
   "$SIF" \
   python -u tests/gpu/test_dcp_longctx_oom.py 2>&1 | tee -a "$RUNLOG"
 S4_RC=${PIPESTATUS[0]}

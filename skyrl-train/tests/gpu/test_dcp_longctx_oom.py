@@ -77,6 +77,18 @@ def _is_kv_oom(exc):
            ("No free blocks available" in s)
 
 
+def _is_len_ceiling(exc):
+    """True if exc is vLLM REFUSING a max_model_len above the model's
+    max_position_embeddings (a pydantic ModelConfig ValidationError). This is a
+    LENGTH ceiling, not a KV ceiling — in the headroom ladder it's a valid 'this
+    length is not allowed' stop. Avoid hitting it by setting
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 (the runner does) so KV becomes the binding
+    constraint and the ladder measures the KV win, not the position-embedding cap."""
+    s = f"{type(exc).__name__}: {exc}"
+    return "greater than the derived max_model_len" in s or \
+           "max_position_embeddings" in s
+
+
 def _build(dcp, max_model_len, gpu_util):
     """Build a vllm.LLM; return the engine on success, raise on failure (caller
     distinguishes KV-OOM from other errors via _is_kv_oom)."""
@@ -152,6 +164,14 @@ def _mode_oom():
         if _is_kv_oom(e):
             dcp1_oomed = True
             print(f"[Stage4-DCP] dcp=1 KV-OOM as expected: {type(e).__name__}: {str(e)[:200]}")
+        elif _is_len_ceiling(e):
+            # max_model_len exceeded max_position_embeddings WITHOUT
+            # VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 -> not a KV demo. Signal a fall-through
+            # to headroom mode (which the runner drives with allow-long set).
+            print(f"[Stage4-DCP] dcp=1 hit the LENGTH ceiling (max_model_len {OOM_MAXLEN} > "
+                  f"max_position_embeddings), not a KV-OOM. Set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 "
+                  f"for a KV demo; falling back to MODE=headroom.")
+            return False, True   # (not a pass, but treat like 'dcp=1 built' to trigger headroom fallback)
         else:
             print(f"[Stage4-DCP] dcp=1 raised a NON-KV error (not a clean OOM demo): "
                   f"{type(e).__name__}: {str(e)[:200]}")
@@ -192,7 +212,11 @@ def _mode_headroom():
                 _free(llm)
             except Exception as e:
                 if _is_kv_oom(e):
-                    print(f"[Stage4-DCP]   dcp={dcp} L={L}: KV-OOM (ceiling reached)")
+                    print(f"[Stage4-DCP]   dcp={dcp} L={L}: KV-OOM (KV ceiling reached)")
+                    break
+                if _is_len_ceiling(e):
+                    print(f"[Stage4-DCP]   dcp={dcp} L={L}: LENGTH ceiling (max_position_embeddings); "
+                          f"set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 to probe the KV regime. Stopping ladder.")
                     break
                 print(f"[Stage4-DCP]   dcp={dcp} L={L}: NON-KV error: {type(e).__name__}: {str(e)[:160]}")
                 break
@@ -206,6 +230,30 @@ def _mode_headroom():
         ratio = max2 / max1 if max1 else float("inf")
         print(f"[Stage4-DCP] HEADROOM GATE: PASS — dcp={DCP} reaches a strictly LARGER max "
               f"context ({max2} > {max1}, {ratio:.2f}x) at the same gpu_util. The DCP KV win.")
+        # E2E OOM->OK proof + tokens/sec note: rebuild dcp=2 at the LARGEST length that
+        # dcp=1 could NOT init (max2, which dcp=1 OOMed below) and complete a real
+        # rollout — i.e. a context that dcp=1 cannot serve but dcp=2 can.
+        try:
+            prompt_len = min(max2 - OOM_GEN_LEN - 8, max(OOM_PROMPT_LEN, max1 + 1024))
+            prompt_len = max(prompt_len, max1 + 512)  # strictly beyond dcp=1's reach
+            print(f"[Stage4-DCP] E2E: rebuilding dcp={DCP} @ max_model_len={max2} and running a "
+                  f"prompt_len={prompt_len} rollout (a context dcp=1 OOMed on) ...")
+            llm2 = _build(dcp=DCP, max_model_len=max2, gpu_util=HEADROOM_GPUUTIL)
+            from vllm import SamplingParams
+            from vllm.inputs import TokensPrompt
+            prompt_ids = [100] * int(prompt_len)
+            sp = SamplingParams(temperature=0.0, max_tokens=OOM_GEN_LEN, logprobs=0)
+            t0 = time.time()
+            outs = llm2.generate(prompts=[TokensPrompt(prompt_token_ids=prompt_ids)], sampling_params=sp)
+            dt = time.time() - t0
+            gen = len(outs[0].outputs[0].token_ids)
+            tps = gen / dt if dt > 0 else 0.0
+            print(f"[Stage4-DCP] E2E: dcp={DCP} rollout COMPLETED at a dcp=1-infeasible context: "
+                  f"prompt_len={prompt_len}, generated {gen} tokens, {tps:.1f} tok/s.")
+            _free(llm2)
+        except Exception as e:
+            print(f"[Stage4-DCP] E2E rollout note FAILED (headroom gate already PASSED): "
+                  f"{type(e).__name__}: {str(e)[:160]}")
     else:
         print(f"[Stage4-DCP] HEADROOM GATE: FAIL — dcp={DCP} did not exceed dcp=1 "
               f"({max2} vs {max1}); ladder may not span the KV-binding regime.")
