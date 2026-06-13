@@ -59,9 +59,11 @@ from harbor.models.agent.name import AgentName
 #
 # =============================================================================
 
+
 @dataclass
 class FieldMapping:
     """Defines how a YAML field maps to Harbor config."""
+
     harbor_field: str  # Field name in Harbor's Pydantic model
     field_type: str = "direct"  # "direct" or "kwargs"
     default: Any = None  # Default value if not specified
@@ -70,6 +72,7 @@ class FieldMapping:
 @dataclass
 class SectionSchema:
     """Schema for a Harbor config section (agent, environment, etc.)."""
+
     fields: Dict[str, FieldMapping] = field(default_factory=dict)
 
     def get_all_field_names(self) -> Set[str]:
@@ -229,6 +232,15 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # Composite shaper params
         "composite_components": FieldMapping("composite_components", default=None),
         "composite_verifier_shaper": FieldMapping("composite_verifier_shaper", default="pass_ratio"),
+        # composite_loop (loop-behavior reward shaping) params.
+        # `loop_shaping` is the nested config block (all components default-off);
+        # see skyrl_train.utils.reward_shaping.DEFAULT_LOOP_SHAPING_CONFIG.
+        # `loop_outcome_shaper` selects which verifier-based shaper computes the
+        # outcome term (default pass_ratio -> byte-identical to today when the
+        # components are off). Both default to None so the composite_loop shaper
+        # falls back to its own defaults when unset.
+        "loop_shaping": FieldMapping("loop_shaping", default=None),
+        "loop_outcome_shaper": FieldMapping("loop_outcome_shaper", default=None),
     }
 )
 
@@ -251,20 +263,26 @@ ERROR_HANDLING_SCHEMA = SectionSchema(
         "passthrough_exceptions": FieldMapping("passthrough_exceptions", default=[]),
         # Exceptions to mask (exclude from baseline, no gradient contribution)
         # These are treated as "neutral" - infrastructure issues, not agent failures
-        "mask_exceptions": FieldMapping("mask_exceptions", default=[
-            "DaytonaError",
-            "EnvironmentStartTimeoutError",
-            "NetworkError",
-            "ConnectionError",
-            "RewardFileNotFoundError",
-            "RewardFileEmptyError",
-        ]),
+        "mask_exceptions": FieldMapping(
+            "mask_exceptions",
+            default=[
+                "DaytonaError",
+                "EnvironmentStartTimeoutError",
+                "NetworkError",
+                "ConnectionError",
+                "RewardFileNotFoundError",
+                "RewardFileEmptyError",
+            ],
+        ),
         # Exceptions to zero (include in baseline with reward=0)
         # These are treated as agent failures - the model should learn to avoid them
-        "zero_exceptions": FieldMapping("zero_exceptions", default=[
-            "AgentTimeoutError",
-            "ContextLengthExceededError",
-        ]),
+        "zero_exceptions": FieldMapping(
+            "zero_exceptions",
+            default=[
+                "AgentTimeoutError",
+                "ContextLengthExceededError",
+            ],
+        ),
         # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
         "default_error_treatment": FieldMapping("default_error_treatment", default="zero"),
     }
@@ -311,6 +329,7 @@ def _get_all_exposed_fields() -> Set[str]:
 # HarborConfigBuilder: Main interface for building TrialConfig from YAML
 # =============================================================================
 
+
 class HarborConfigBuilder:
     """
     Builds Harbor TrialConfig from SkyRL YAML configuration.
@@ -331,9 +350,7 @@ class HarborConfigBuilder:
         # Extract harbor-specific config if present, otherwise use flat structure
         # This supports both new nested style and legacy flat style
         if "harbor" in terminal_bench_cfg:
-            self._harbor_cfg = OmegaConf.to_container(
-                terminal_bench_cfg.harbor, resolve=True
-            ) or {}
+            self._harbor_cfg = OmegaConf.to_container(terminal_bench_cfg.harbor, resolve=True) or {}
         else:
             # Legacy: extract harbor fields from flat config
             self._harbor_cfg = self._extract_harbor_fields_legacy(terminal_bench_cfg)
@@ -388,10 +405,7 @@ class HarborConfigBuilder:
 
         prm_kwargs = {k: v for k, v in prm_cfg.items() if k != "name"}
         prm_instance = get_prm(prm_name, **prm_kwargs)
-        logger.info(
-            f"PRM '{prm_name}' enabled as turn_callback "
-            f"(params: {prm_kwargs})"
-        )
+        logger.info(f"PRM '{prm_name}' enabled as turn_callback " f"(params: {prm_kwargs})")
         return prm_instance.as_turn_callback()
 
     def _extract_harbor_fields_legacy(self, cfg: DictConfig) -> Dict[str, Any]:
@@ -636,22 +650,36 @@ class HarborConfigBuilder:
         if "composite_verifier_shaper" in config:
             shaper_kwargs["verifier_shaper"] = config.pop("composite_verifier_shaper")
 
+        # composite_loop shaper params. `loop_shaping` is the nested block
+        # (deep-merged onto defaults inside CompositeLoopShaper); `outcome_shaper`
+        # selects the outcome term's verifier shaper.
+        if "loop_shaping" in config:
+            val = config.pop("loop_shaping")
+            if val is not None:
+                # OmegaConf DictConfig -> plain dict so the shaper can mutate it.
+                if OmegaConf.is_config(val):
+                    val = OmegaConf.to_container(val, resolve=True)
+                shaper_kwargs["loop_shaping"] = val
+        if "loop_outcome_shaper" in config:
+            val = config.pop("loop_outcome_shaper")
+            if val is not None:
+                shaper_kwargs["outcome_shaper"] = val
+
         # Pass trajectory shaper kwargs through for composite mode
         trajectory_shaper_kwargs = {}
         if "target_tokens" in shaper_kwargs or "sigma_tokens" in shaper_kwargs:
             trajectory_shaper_kwargs["thinking_length"] = {
-                k: shaper_kwargs[k] for k in ["target_tokens", "sigma_tokens", "min_thinking_turns_ratio"]
+                k: shaper_kwargs[k]
+                for k in ["target_tokens", "sigma_tokens", "min_thinking_turns_ratio"]
                 if k in shaper_kwargs
             }
         if "required_fields" in shaper_kwargs or "penalize_truncated_json" in shaper_kwargs:
             trajectory_shaper_kwargs["format_quality"] = {
-                k: shaper_kwargs[k] for k in ["required_fields", "penalize_truncated_json"]
-                if k in shaper_kwargs
+                k: shaper_kwargs[k] for k in ["required_fields", "penalize_truncated_json"] if k in shaper_kwargs
             }
         if "error_penalty_weight" in shaper_kwargs or "min_turns" in shaper_kwargs:
             trajectory_shaper_kwargs["command_quality"] = {
-                k: shaper_kwargs[k] for k in ["error_penalty_weight", "min_turns"]
-                if k in shaper_kwargs
+                k: shaper_kwargs[k] for k in ["error_penalty_weight", "min_turns"] if k in shaper_kwargs
             }
         if trajectory_shaper_kwargs:
             shaper_kwargs["trajectory_shaper_kwargs"] = trajectory_shaper_kwargs
@@ -803,12 +831,14 @@ class HarborConfigBuilder:
         trial_fields = self._get_trial_fields()
 
         # Add required agent kwargs
-        agent_kwargs.update({
-            "api_base": api_base,
-            "key": "fake_key",
-            "session_id": session_id,
-            "model_info": self._model_info,
-        })
+        agent_kwargs.update(
+            {
+                "api_base": api_base,
+                "key": "fake_key",
+                "session_id": session_id,
+                "model_info": self._model_info,
+            }
+        )
 
         # Inject PRM turn_callback if configured
         if self._turn_callback is not None:
@@ -850,6 +880,7 @@ class HarborConfigBuilder:
 # Utility functions
 # =============================================================================
 
+
 def get_exposed_harbor_fields() -> Dict[str, list[str]]:
     """
     Get a summary of all exposed Harbor fields for documentation.
@@ -857,10 +888,7 @@ def get_exposed_harbor_fields() -> Dict[str, list[str]]:
     Returns:
         Dict mapping section names to lists of field names.
     """
-    return {
-        section_name: list(schema.get_all_field_names())
-        for section_name, schema in HARBOR_SCHEMA.items()
-    }
+    return {section_name: list(schema.get_all_field_names()) for section_name, schema in HARBOR_SCHEMA.items()}
 
 
 def print_harbor_schema() -> None:

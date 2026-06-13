@@ -79,14 +79,7 @@ class ParsedTestResult:
     def __post_init__(self):
         # Compute total if not explicitly set
         if self.total == 0:
-            self.total = (
-                self.passed
-                + self.failed
-                + self.errors
-                + self.xfailed
-                + self.xpassed
-                + self.skipped
-            )
+            self.total = self.passed + self.failed + self.errors + self.xfailed + self.xpassed + self.skipped
 
     @property
     def effective_passed(self) -> int:
@@ -182,11 +175,7 @@ class PytestOutputParser(OutputParser):
     # Regex for the summary line at the end of pytest output
     # Matches: "=== 1 failed, 62 passed, 2 xfailed in 2.39s ==="
     SUMMARY_PATTERN = re.compile(
-        r"=+\s*"
-        r"(?P<results>(?:\d+\s+\w+(?:,\s*)?)+)"
-        r"\s+in\s+"
-        r"(?P<duration>[\d.]+)s?"
-        r"\s*=+",
+        r"=+\s*" r"(?P<results>(?:\d+\s+\w+(?:,\s*)?)+)" r"\s+in\s+" r"(?P<duration>[\d.]+)s?" r"\s*=+",
         re.IGNORECASE,
     )
 
@@ -253,9 +242,7 @@ class PytestOutputParser(OutputParser):
         # Fall back to counting individual result lines
         return self._parse_from_lines(output)
 
-    def _parse_from_summary(
-        self, output: str, summary_match: re.Match
-    ) -> Optional[ParsedTestResult]:
+    def _parse_from_summary(self, output: str, summary_match: re.Match) -> Optional[ParsedTestResult]:
         """Parse from the pytest summary line."""
         results_str = summary_match.group("results")
         duration_str = summary_match.group("duration")
@@ -938,6 +925,7 @@ class FormatQualityShaper(TrajectoryRewardShaper):
         # Try to parse
         try:
             import json
+
             parsed = json.loads(json_str)
         except json.JSONDecodeError:
             # Check if it looks like truncated JSON (common failure mode)
@@ -1209,9 +1197,7 @@ class CompositeShaper:
 
         # Trajectory components
         for comp_name, shaper in self._trajectory_shapers.items():
-            component_rewards[comp_name] = shaper.shape(
-                chat_history or [], original_reward
-            )
+            component_rewards[comp_name] = shaper.shape(chat_history or [], original_reward)
 
         # Weighted sum
         final_reward = 0.0
@@ -1220,6 +1206,219 @@ class CompositeShaper:
             final_reward += weight * reward
 
         return min(1.0, max(0.0, final_reward)), component_rewards
+
+
+# =============================================================================
+# Composite Loop Shaper (loop-behavior reward shaping — Stage 0 scaffold)
+# =============================================================================
+#
+# `composite_loop` is a *container* shaper for the loop-behavior reward-shaping
+# program (notes/RL/skyrl/loop_behavior_reward_plan.md). It sums an outcome term
+# (the existing binary / pass_ratio reward) plus zero-or-more bounded behavioral
+# components (termination, anti-thrash, ... — added in Stages 1-2).
+#
+# STAGE 0 INVARIANT (G1): with all components disabled and outcome_weight=1.0,
+# `composite_loop` reproduces today's reward *bit-for-bit* — it is exactly the
+# value of the configured outcome shaper (default `pass_ratio`). No component is
+# wired yet; this lands the container, the config surface, the G2 clamp, and the
+# fully-populated `reward_components` dict (every key present, value 0.0).
+#
+# G2 GROUND-TRUTH ANCHOR: the summed *shaped* delta (everything except the
+# outcome term) is clamped to +/- total_shaping_cap, and a failing trajectory
+# (verifier reward == 0) can never be moved net-positive by shaping alone.
+
+
+# Default loop-shaping config (the no-op). Mirrors the yaml block in the Stage-0
+# spec. Every component is disabled with zero weights; with these defaults the
+# composite reduces to the outcome term.
+DEFAULT_LOOP_SHAPING_CONFIG: Dict[str, Any] = {
+    "outcome_weight": 1.0,
+    # Stage 1 — termination as a high-stakes learned action.
+    "terminate": {
+        "enabled": False,
+        "green_bonus": 0.0,
+        "red_penalty": 0.0,
+        "noterm_penalty": 0.0,
+    },
+    # Stage 2 — anti-thrash penalty (repeated byte-identical actions).
+    "antithrash": {
+        "enabled": False,
+        "per_repeat_penalty": 0.0,
+        "cap": 0.0,
+    },
+    # G2: |sum of shaped components| is clamped to this.
+    "total_shaping_cap": 0.3,
+}
+
+# The set of behavioral component keys the composite always reports (even at 0.0
+# in Stage 0). The outcome term is reported separately under "outcome".
+_LOOP_COMPONENT_KEYS: Tuple[str, ...] = ("terminate", "antithrash")
+
+
+def _deep_merge_loop_config(overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge user loop_shaping overrides onto DEFAULT_LOOP_SHAPING_CONFIG.
+
+    A fresh copy of the defaults is taken; nested component dicts are merged
+    key-by-key so a partial override (e.g. only ``terminate.enabled``) keeps the
+    other defaulted fields. Unknown top-level keys are passed through.
+    """
+    merged: Dict[str, Any] = {
+        "outcome_weight": DEFAULT_LOOP_SHAPING_CONFIG["outcome_weight"],
+        "total_shaping_cap": DEFAULT_LOOP_SHAPING_CONFIG["total_shaping_cap"],
+    }
+    for comp_key in _LOOP_COMPONENT_KEYS:
+        merged[comp_key] = dict(DEFAULT_LOOP_SHAPING_CONFIG[comp_key])
+
+    if not overrides:
+        return merged
+
+    for key, value in overrides.items():
+        if key in _LOOP_COMPONENT_KEYS and isinstance(value, dict):
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    return merged
+
+
+class CompositeLoopShaper:
+    """Container shaper that sums an outcome term + bounded behavioral components.
+
+    Stage 0: the container is wired to *nothing* — all components are disabled by
+    default, so the reward equals ``outcome_weight * <outcome shaper>`` which, with
+    ``outcome_weight == 1.0`` and the default ``pass_ratio`` outcome shaper, is
+    bit-identical to today's reward.
+
+    The shaped delta (sum of behavioral components) is clamped to
+    ``+/- total_shaping_cap`` (G2) and may never flip a failing trajectory
+    (``original_reward == 0``) to a net-positive total.
+
+    Config (passed via ``loop_shaping`` kwarg, merged onto the defaults):
+        loop_shaping:
+          outcome_weight: 1.0
+          terminate:  {enabled: false, green_bonus: 0.0, red_penalty: 0.0, noterm_penalty: 0.0}
+          antithrash: {enabled: false, per_repeat_penalty: 0.0, cap: 0.0}
+          total_shaping_cap: 0.3
+        outcome_shaper: pass_ratio   # which verifier-based shaper computes the outcome term
+    """
+
+    def __init__(
+        self,
+        loop_shaping: Optional[Dict[str, Any]] = None,
+        outcome_shaper: str = "pass_ratio",
+        outcome_parser: Optional[str] = None,
+        outcome_fallback_to_original: bool = True,
+        outcome_shaper_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,  # tolerate (and ignore) extra kwargs for a uniform interface
+    ):
+        self.config = _deep_merge_loop_config(loop_shaping)
+        self.outcome_shaper_name = outcome_shaper
+        self.outcome_parser = outcome_parser
+        self.outcome_fallback_to_original = outcome_fallback_to_original
+        self.outcome_shaper_kwargs = outcome_shaper_kwargs or {}
+
+    @classmethod
+    def name(cls) -> str:
+        return "composite_loop"
+
+    def _compute_outcome_reward(
+        self,
+        stdout: Optional[str],
+        original_reward: float,
+        chat_history: Optional[List[Dict[str, Any]]],
+    ) -> float:
+        """Outcome term = exactly the existing single-shaper reward path.
+
+        Delegates to ``shape_reward_from_output`` with the configured outcome
+        shaper so the value is, by construction, identical to running that shaper
+        standalone (the byte-identity guarantee for Stage 0).
+        """
+        return shape_reward_from_output(
+            stdout=stdout,
+            original_reward=original_reward,
+            parser_name=self.outcome_parser,
+            shaper_name=self.outcome_shaper_name,
+            shaper_kwargs=self.outcome_shaper_kwargs,
+            fallback_to_original=self.outcome_fallback_to_original,
+            chat_history=chat_history,
+        )
+
+    def _compute_components(
+        self,
+        stdout: Optional[str],
+        original_reward: float,
+        chat_history: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, float]:
+        """Compute each behavioral component's *raw signed delta* (pre-clamp).
+
+        Stage 0: every component is disabled, so every value is 0.0. Stages 1-2
+        replace the per-component bodies; the dict shape (one key per component,
+        always present) is fixed here so runs are inspectable from day one.
+        """
+        components: Dict[str, float] = {}
+
+        # Stage 1 — terminate. Disabled in Stage 0 -> 0.0.
+        terminate_cfg = self.config.get("terminate", {})
+        if not terminate_cfg.get("enabled", False):
+            components["terminate"] = 0.0
+        else:
+            # Stage 1 will implement this body. Until then a disabled-but-enabled
+            # flag still contributes nothing.
+            components["terminate"] = 0.0
+
+        # Stage 2 — antithrash. Disabled in Stage 0 -> 0.0.
+        antithrash_cfg = self.config.get("antithrash", {})
+        if not antithrash_cfg.get("enabled", False):
+            components["antithrash"] = 0.0
+        else:
+            components["antithrash"] = 0.0
+
+        return components
+
+    def shape_with_components(
+        self,
+        stdout: Optional[str],
+        original_reward: float,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[float, Dict[str, float]]:
+        """Compute the composite reward and a per-component breakdown.
+
+        Returns ``(final_reward, reward_components)`` where ``reward_components``
+        carries ``outcome``, the clamped ``shaping_total``, and every behavioral
+        component key (raw signed value).
+        """
+        outcome_weight = float(self.config.get("outcome_weight", 1.0))
+        total_shaping_cap = abs(float(self.config.get("total_shaping_cap", 0.3)))
+
+        outcome_reward = self._compute_outcome_reward(stdout, original_reward, chat_history)
+        components = self._compute_components(stdout, original_reward, chat_history)
+
+        # G2 clamp: sum the behavioral component deltas, clamp to +/- cap.
+        raw_shaping = sum(components.values())
+        shaping_total = max(-total_shaping_cap, min(total_shaping_cap, raw_shaping))
+
+        final_reward = outcome_weight * outcome_reward + shaping_total
+
+        # G2 ground-truth anchor: a failing trajectory (no outcome credit) can
+        # never be moved net-positive by shaping alone. When the outcome
+        # contribution is <= 0, shaping may not push the total above 0.
+        outcome_contribution = outcome_weight * outcome_reward
+        if outcome_contribution <= 0.0 and final_reward > 0.0:
+            final_reward = min(final_reward, outcome_contribution)
+
+        reward_components: Dict[str, float] = {"outcome": outcome_reward}
+        reward_components.update(components)
+        reward_components["shaping_total"] = shaping_total
+
+        return final_reward, reward_components
+
+    def shape(
+        self,
+        stdout: Optional[str],
+        original_reward: float,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> float:
+        final_reward, _ = self.shape_with_components(stdout, original_reward, chat_history)
+        return final_reward
 
 
 # =============================================================================
@@ -1429,8 +1628,7 @@ def shape_reward_from_output(
         composite = CompositeShaper(**kwargs)
         shaped, component_rewards = composite.shape_with_components(parsed, original_reward, chat_history)
         logger.debug(
-            f"Composite shaped reward: {original_reward:.3f} -> {shaped:.3f} "
-            f"(components={component_rewards})"
+            f"Composite shaped reward: {original_reward:.3f} -> {shaped:.3f} " f"(components={component_rewards})"
         )
         return shaped
 
@@ -1438,10 +1636,7 @@ def shape_reward_from_output(
     if shaper_name in _TRAJECTORY_SHAPER_REGISTRY:
         shaper = get_trajectory_shaper(shaper_name, **kwargs)
         shaped = shaper.shape(chat_history or [], original_reward)
-        logger.debug(
-            f"Trajectory shaped reward: {original_reward:.3f} -> {shaped:.3f} "
-            f"(shaper={shaper_name})"
-        )
+        logger.debug(f"Trajectory shaped reward: {original_reward:.3f} -> {shaped:.3f} " f"(shaper={shaper_name})")
         return shaped
 
     # Verifier-based shapers — need test output
@@ -1473,10 +1668,7 @@ def shape_reward_from_output(
     shaper = get_reward_shaper(shaper_name, **kwargs)
     shaped = shaper.shape(parsed, original_reward)
 
-    logger.debug(
-        f"Shaped reward: {original_reward:.3f} -> {shaped:.3f} "
-        f"(shaper={shaper_name})"
-    )
+    logger.debug(f"Shaped reward: {original_reward:.3f} -> {shaped:.3f} " f"(shaper={shaper_name})")
 
     return shaped
 
@@ -1487,15 +1679,28 @@ def shape_reward_with_components(
     parser_name: Optional[str] = None,
     shaper_kwargs: Optional[Dict] = None,
     chat_history: Optional[List[Dict[str, Any]]] = None,
+    shaper_name: str = "composite",
 ) -> Tuple[float, Dict[str, float]]:
     """
-    Composite-only variant that returns per-component reward breakdown.
+    Component-returning variant for container shapers.
+
+    Dispatches on ``shaper_name``:
+      - ``"composite"``       -> the weighted-average trajectory composite shaper.
+      - ``"composite_loop"``  -> the loop-behavior container shaper (Stage 0+):
+        outcome term + bounded behavioral components, with the G2 clamp.
 
     Returns:
-        Tuple of (final_reward, component_rewards) where component_rewards
-        maps each component name to its raw (unweighted) reward in [0, 1].
+        Tuple of (final_reward, component_rewards) where component_rewards maps
+        each component name to its (raw) reward value. The breakdown shape
+        depends on the container shaper.
     """
     kwargs = shaper_kwargs or {}
+
+    if shaper_name == "composite_loop":
+        shaper = CompositeLoopShaper(**kwargs)
+        return shaper.shape_with_components(stdout, original_reward, chat_history)
+
+    # Default: weighted-average composite shaper.
     parsed = parse_test_output(stdout, parser_name) if stdout else None
     composite = CompositeShaper(**kwargs)
     return composite.shape_with_components(parsed, original_reward, chat_history)

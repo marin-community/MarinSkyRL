@@ -77,6 +77,7 @@ class TerminalBenchAgentOutput:
     # failure can never silently degrade TIS. None when no logprobs were present.
     alignment_stats: Optional[AlignmentStats] = None
 
+
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
         self,
@@ -151,11 +152,15 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("custom_chat_template_chat_completion_path", None)
+        custom_chat_template_path = generator_cfg.engine_init_kwargs.get(
+            "custom_chat_template_chat_completion_path", None
+        )
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
-            logger.info(f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}")
+            logger.info(
+                f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}"
+            )
         else:
             self.custom_chat_template_content = None
 
@@ -319,8 +324,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             self._orchestrator_restart_count += 1
             if self._orchestrator_restart_count > MAX_ORCHESTRATOR_RESTART_ATTEMPTS:
                 logger.error(
-                    f"Max orchestrator restart attempts ({MAX_ORCHESTRATOR_RESTART_ATTEMPTS}) "
-                    f"exceeded. Giving up."
+                    f"Max orchestrator restart attempts ({MAX_ORCHESTRATOR_RESTART_ATTEMPTS}) " f"exceeded. Giving up."
                 )
                 return False
 
@@ -592,9 +596,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Get the active orchestrator (eval or training)
         # Note: We check without lock first for performance, then re-check with lock if needed
         active_orchestrator = self._get_active_orchestrator()
-        orchestrator_started = (
-            self._eval_session_active if is_eval else self._orchestrator_started
-        )
+        orchestrator_started = self._eval_session_active if is_eval else self._orchestrator_started
 
         # Check if orchestrator is available
         # If it appears unavailable, acquire lock and re-check to avoid race condition
@@ -603,17 +605,14 @@ class TerminalBenchGenerator(GeneratorInterface):
             async with self._orchestrator_lock:
                 # Re-check after acquiring lock - another worker may have restarted
                 active_orchestrator = self._get_active_orchestrator()
-                orchestrator_started = (
-                    self._eval_session_active if is_eval else self._orchestrator_started
-                )
+                orchestrator_started = self._eval_session_active if is_eval else self._orchestrator_started
                 if orchestrator_started and active_orchestrator is not None:
                     # Another worker already restarted, continue with the fresh orchestrator
                     logger.debug("Orchestrator was restarted by another worker, continuing")
                 else:
                     # Still unavailable, we need to restart
                     logger.warning(
-                        "QueueOrchestrator not available. Was startup() called? "
-                        "Attempting emergency restart..."
+                        "QueueOrchestrator not available. Was startup() called? " "Attempting emergency restart..."
                     )
             # Release lock before calling _restart_orchestrator (it acquires its own lock)
             if not orchestrator_started or active_orchestrator is None:
@@ -647,20 +646,17 @@ class TerminalBenchGenerator(GeneratorInterface):
             if is_eval:
                 logger.error("Eval session orchestrator failed. Returning all-failed output.")
                 return self._create_all_failed_output(
-                    trajectory_ids,
-                    f"EvalOrchestratorFailure_{type(orchestrator_error).__name__}"
+                    trajectory_ids, f"EvalOrchestratorFailure_{type(orchestrator_error).__name__}"
                 )
 
             # Attempt to restart the training orchestrator
             restart_success = await self._restart_orchestrator()
             if not restart_success:
                 logger.error(
-                    "Orchestrator restart failed. Returning all-failed output "
-                    "to avoid killing training job."
+                    "Orchestrator restart failed. Returning all-failed output " "to avoid killing training job."
                 )
                 return self._create_all_failed_output(
-                    trajectory_ids,
-                    f"OrchestratorFailure_{type(orchestrator_error).__name__}"
+                    trajectory_ids, f"OrchestratorFailure_{type(orchestrator_error).__name__}"
                 )
 
             # Retry once with the fresh orchestrator
@@ -671,12 +667,10 @@ class TerminalBenchGenerator(GeneratorInterface):
                 results = await asyncio.gather(*futures, return_exceptions=True)
             except Exception as retry_error:
                 logger.error(
-                    f"Retry after orchestrator restart also failed: "
-                    f"{type(retry_error).__name__}: {retry_error}"
+                    f"Retry after orchestrator restart also failed: " f"{type(retry_error).__name__}: {retry_error}"
                 )
                 return self._create_all_failed_output(
-                    trajectory_ids,
-                    f"OrchestratorRetryFailure_{type(retry_error).__name__}"
+                    trajectory_ids, f"OrchestratorRetryFailure_{type(retry_error).__name__}"
                 )
 
         # Process results into TerminalBenchAgentOutput
@@ -787,8 +781,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 [output.response_ids for output in successful_outputs],
                 [output.reward for output in successful_outputs],
             )
-            rollout_metrics["generate/trajectories_summarized"] = sum(1 for output in successful_outputs if output.summarization_count > 0)
-            rollout_metrics["generate/trajectories_truncated"] = sum(1 for output in successful_outputs if output.stop_reason == "length")
+            rollout_metrics["generate/trajectories_summarized"] = sum(
+                1 for output in successful_outputs if output.summarization_count > 0
+            )
+            rollout_metrics["generate/trajectories_truncated"] = sum(
+                1 for output in successful_outputs if output.stop_reason == "length"
+            )
         else:
             rollout_metrics = {}
         rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
@@ -1025,10 +1023,9 @@ class TerminalBenchGenerator(GeneratorInterface):
         if default_treatment == "passthrough":
             logger.debug(f"Exception {exception_type} not in config, using default: PASSTHROUGH")
             return self._PASSTHROUGH, exception_type
-        exclude = (default_treatment == "mask")
+        exclude = default_treatment == "mask"
         logger.debug(
-            f"Exception {exception_type} not in config, using default treatment: "
-            f"{'MASK' if exclude else 'ZERO'}"
+            f"Exception {exception_type} not in config, using default treatment: " f"{'MASK' if exclude else 'ZERO'}"
         )
         return exclude, exception_type
 
@@ -1080,6 +1077,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Create a mock exception to classify
             class MockException(Exception):
                 pass
+
             MockException.__name__ = exception_type
             treatment, _ = self._classify_exception(MockException())
 
@@ -1148,8 +1146,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Extract data from successful trial
         try:
             original_reward = result.verifier_result.rewards["reward"]
-            chat_history = result.agent_result.metadata['all_messages']
-            summarization_count = result.agent_result.metadata['summarization_count']
+            chat_history = result.agent_result.metadata["all_messages"]
+            summarization_count = result.agent_result.metadata["summarization_count"]
         except (KeyError, AttributeError, TypeError) as e:
             # Data extraction failure is typically an infrastructure issue
             exception_type = type(e).__name__
@@ -1177,14 +1175,16 @@ class TerminalBenchGenerator(GeneratorInterface):
             shaper_name = self._reward_shaping_config.get("reward_shaper", "pass_ratio")
             shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
 
-            # For composite shaper, capture per-component breakdown
-            if shaper_name == "composite":
+            # For container shapers (composite / composite_loop), capture the
+            # per-component breakdown.
+            if shaper_name in ("composite", "composite_loop"):
                 reward, reward_components = shape_reward_with_components(
                     stdout=verifier_stdout,
                     original_reward=original_reward,
                     parser_name=self._reward_shaping_config.get("reward_parser"),
                     shaper_kwargs=shaper_kwargs,
                     chat_history=chat_history,
+                    shaper_name=shaper_name,
                 )
             else:
                 reward = shape_reward_from_output(
@@ -1209,7 +1209,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # others (e.g. terminus-2) do not.
         system_msgs = []
         conversation = []
-        for msg in (chat_history or []):
+        for msg in chat_history or []:
             if msg["role"] == "system":
                 system_msgs.append(msg)
             else:
@@ -1219,8 +1219,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         if len(conversation) < 2 or conversation[0]["role"] != "user":
             # Invalid chat history is typically an infrastructure/serialization issue
             logger.warning(
-                f"Trajectory {trajectory_id} failed: Invalid chat history structure. "
-                f"chat_history: {chat_history}"
+                f"Trajectory {trajectory_id} failed: Invalid chat history structure. " f"chat_history: {chat_history}"
             )
             return TerminalBenchAgentOutput(
                 response_ids=[0],
@@ -1277,9 +1276,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # rollout_routed_experts=None is safe.
         rollout_routed_experts = None
         assistant_routed_experts = (
-            extract_routed_experts_from_rollout_details(rollout_details)
-            if self._moe_router_replay
-            else None
+            extract_routed_experts_from_rollout_details(rollout_details) if self._moe_router_replay else None
         )
         if assistant_routed_experts is not None:
             (
