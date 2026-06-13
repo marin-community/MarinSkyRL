@@ -753,6 +753,149 @@ def _get_assistant_messages(chat_history: List[Dict[str, Any]]) -> List[Dict[str
     return [m for m in chat_history if m.get("role") == "assistant"]
 
 
+# Strip <think>...</think> reasoning so two turns that *act* identically but
+# reason differently still collapse to the same action payload (and, conversely,
+# so a turn's reasoning never spuriously makes two identical actions look
+# distinct). Anti-thrash keys on the ACTION, not the prose around it.
+_THINK_STRIP_PATTERN = _THINK_BLOCK_PATTERN  # alias for intent at the call site
+
+
+def _normalize_action_payload(text: str) -> str:
+    """Normalize an action payload for byte-identity comparison.
+
+    Anti-thrash keys on the exact *payload* (the command string + any heredoc
+    body), normalized for **trivial whitespace only** so that two emissions that
+    differ solely by incidental indentation / trailing spaces / blank-line
+    padding still compare equal, while any real content difference (a different
+    file body, a changed flag, a different command) does NOT.
+
+    Normalization (whitespace-only, content-preserving):
+      - strip a leading/trailing whitespace,
+      - collapse runs of spaces/tabs *within a line* to a single space,
+      - drop trailing whitespace on each line,
+      - drop blank lines.
+    The per-line structure (and thus the heredoc body content) is preserved, so
+    e.g. a `cat > f.py <<EOF ... EOF` with one set of bytes is distinct from the
+    same heredoc with different bytes.
+    """
+    if not text:
+        return ""
+    lines = []
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        # Collapse internal runs of spaces/tabs and trim the line.
+        collapsed = re.sub(r"[ \t]+", " ", raw_line).strip()
+        if collapsed:
+            lines.append(collapsed)
+    return "\n".join(lines)
+
+
+def _extract_action_payload(msg: Dict[str, Any]) -> str:
+    """Extract a single assistant turn's *action payload* as a normalized string.
+
+    The payload is what the agent actually *did* this turn: the command /
+    heredoc text it emitted (assistant ``content``, with any ``<think>`` block
+    removed) plus a canonical serialization of any structured ``tool_calls``
+    (function name AND its arguments — keyed on the full payload, not just the
+    tool type, so re-running the same tool with *different* arguments is NOT a
+    repeat). Returns ``""`` for a turn that carries no actionable payload (those
+    are ignored by the detector — an empty action is never a "thrash").
+    """
+    parts: List[str] = []
+
+    content = msg.get("content") or ""
+    if not isinstance(content, str):
+        content = str(content)
+    # The action is the command/heredoc the model emits; its reasoning is not
+    # part of the action payload.
+    content_no_think = _THINK_STRIP_PATTERN.sub("", content)
+    content_norm = _normalize_action_payload(content_no_think)
+    if content_norm:
+        parts.append(content_norm)
+
+    tool_calls = msg.get("tool_calls") or []
+    if isinstance(tool_calls, list):
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            name = tc.get("function_name") or (tc.get("function") or {}).get("name") or ""
+            # Arguments may live under tc["arguments"] or tc["function"]["arguments"]
+            # and be a dict or a (possibly already JSON) string. Serialize
+            # canonically so identical argument *content* compares equal
+            # regardless of dict key order / incidental whitespace.
+            args = tc.get("arguments")
+            if args is None:
+                args = (tc.get("function") or {}).get("arguments")
+            args_repr = _canonical_args(args)
+            parts.append(f"{name}\n{args_repr}")
+
+    return "\n".join(p for p in parts if p)
+
+
+def _canonical_args(args: Any) -> str:
+    """Canonicalize tool-call arguments to a stable string for comparison."""
+    if args is None:
+        return ""
+    if isinstance(args, str):
+        # Might be a JSON string; if so, re-serialize sorted for stability.
+        try:
+            import json
+
+            parsed = json.loads(args)
+            return json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        except (ValueError, TypeError):
+            return _normalize_action_payload(args)
+    try:
+        import json
+
+        return json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return _normalize_action_payload(str(args))
+
+
+def detect_repeated_actions(trajectory_or_chat: Optional[List[Dict[str, Any]]]) -> int:
+    """Count byte-identical *consecutive* action repeats in a trajectory.
+
+    The anti-thrash signal (Stage 2 / M3). For each assistant turn we extract a
+    normalized **action payload** (the command/heredoc text + a canonical
+    serialization of any structured tool-call name+arguments — see
+    ``_extract_action_payload``), considering only turns that carry an actionable
+    payload (empty / non-action turns are skipped and do NOT break a run). We
+    then count repeats as the number of action turns whose payload is identical
+    to the *immediately preceding action turn's* payload — i.e. the length of
+    each maximal run of byte-identical actions minus one, summed over runs.
+
+    KEY (the load-bearing correctness property): dedup is keyed on the action's
+    exact PAYLOAD (content), NOT the action type, and a repeat only counts when
+    it is **consecutive** (an uninterrupted re-emission of the same payload — the
+    stuck-in-a-loop thrash). This is what makes the GOOD loop safe:
+
+      - ``cat > f.py <<EOF …same bytes…`` ×4 in a row -> a run of 4 -> 3 repeats.
+      - ``editA, pytest, editB, pytest`` -> the two ``pytest`` turns are NOT
+        consecutive (a *different* edit sits between them), and ``editA`` /
+        ``editB`` differ -> 0 repeats. Re-running the test after real new work is
+        the loop we WANT, never a thrash.
+
+    Returns the integer repeat count (0 if no repeats / empty trajectory).
+    """
+    messages = _extract_chat_history(trajectory_or_chat)
+    if not messages:
+        return 0
+
+    repeats = 0
+    prev_payload: Optional[str] = None
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        payload = _extract_action_payload(msg)
+        if not payload:
+            # A turn with no actionable payload neither counts nor breaks the run.
+            continue
+        if prev_payload is not None and payload == prev_payload:
+            repeats += 1
+        prev_payload = payload
+    return repeats
+
+
 class TrajectoryRewardShaper(ABC):
     """
     Abstract base class for trajectory-based reward shapers.
@@ -1270,6 +1413,16 @@ _TERMINATE_DEFAULTS: Dict[str, float] = {
     "noterm_penalty": 0.2,
 }
 
+# Stage 2 opt-in magnitude fallbacks for the antithrash component. Same pattern
+# as ``_TERMINATE_DEFAULTS``: applied only when ``antithrash.enabled`` is True
+# AND the config left the magnitude at its 0.0 disabled default, so "just enable
+# antithrash" yields the spec behaviour (0.02 per repeat, clamped at 0.1) without
+# re-stating the magnitudes. An explicit positive value is honoured verbatim.
+_ANTITHRASH_DEFAULTS: Dict[str, float] = {
+    "per_repeat_penalty": 0.02,
+    "cap": 0.1,
+}
+
 
 def _deep_merge_loop_config(overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge user loop_shaping overrides onto DEFAULT_LOOP_SHAPING_CONFIG.
@@ -1428,6 +1581,57 @@ class CompositeLoopShaper:
         # as a wall stop -> no terminate signal.
         return 0.0
 
+    @staticmethod
+    def _resolve_antithrash_magnitude(cfg: Dict[str, Any], key: str) -> float:
+        """Resolve an antithrash magnitude: explicit positive config value, else
+        the Stage-2 spec fallback (``_ANTITHRASH_DEFAULTS``).
+
+        Mirrors ``_resolve_terminate_magnitude``: the merged default is 0.0 (the
+        disabled value); when a config opts in (``enabled: true``) but leaves a
+        magnitude at the 0.0 default, the spec fallback is substituted.
+        """
+        try:
+            val = abs(float(cfg.get(key, 0.0)))
+        except (TypeError, ValueError):
+            val = 0.0
+        if val > 0.0:
+            return val
+        return _ANTITHRASH_DEFAULTS.get(key, 0.0)
+
+    def _compute_antithrash(
+        self,
+        chat_history: Optional[List[Dict[str, Any]]],
+    ) -> float:
+        """Stage 2 (M3) anti-thrash component.
+
+        Returns a raw *signed* (negative) delta: ``-per_repeat_penalty`` per
+        byte-identical *consecutive* action repeat beyond the first
+        (``detect_repeated_actions``), summed and clamped to ``-cap``. The signal
+        is computed from ``chat_history`` ALONE (the assistant turns carry the
+        action payloads) — no ``trajectory_context`` needed.
+
+        Content-keyed dedup (not type-keyed) + consecutive-only counting means a
+        legitimate re-run of a command after a *different* edit (the GOOD loop) is
+        never penalized — only genuine identical-payload churn is. When disabled,
+        or with no repeats, the component contributes 0.0 (preserving Stage-0/1
+        byte-identity).
+        """
+        antithrash_cfg = self.config.get("antithrash", {})
+        if not antithrash_cfg.get("enabled", False):
+            return 0.0
+
+        repeats = detect_repeated_actions(chat_history)
+        if repeats <= 0:
+            return 0.0
+
+        per_repeat = self._resolve_antithrash_magnitude(antithrash_cfg, "per_repeat_penalty")
+        cap = self._resolve_antithrash_magnitude(antithrash_cfg, "cap")
+
+        raw = per_repeat * repeats
+        # Component-level clamp at -cap (the G2 total clamp applies again downstream).
+        penalty = min(raw, cap)
+        return -penalty
+
     def _compute_components(
         self,
         stdout: Optional[str],
@@ -1447,12 +1651,9 @@ class CompositeLoopShaper:
         # Stage 1 — terminate (M2 "only-then-complete").
         components["terminate"] = self._compute_terminate(trajectory_context)
 
-        # Stage 2 — antithrash. Disabled -> 0.0.
-        antithrash_cfg = self.config.get("antithrash", {})
-        if not antithrash_cfg.get("enabled", False):
-            components["antithrash"] = 0.0
-        else:
-            components["antithrash"] = 0.0
+        # Stage 2 — antithrash (M3, repeated byte-identical actions). Gated on
+        # ``antithrash.enabled``; computed from chat_history alone. Disabled -> 0.0.
+        components["antithrash"] = self._compute_antithrash(chat_history)
 
         return components
 
