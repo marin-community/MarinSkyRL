@@ -372,6 +372,7 @@ generator:
   inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1
   inference_engine_data_parallel_size: 1
+  inference_engine_decode_context_parallel_size: 1   # 1 = disabled. vLLM DCP shards the KV cache across dcp ranks during decode; reuses TP GPUs (no extra GPUs); requires tp % dcp == 0 and dcp <= tp/num_kv_heads; vLLM backend only; not compatible with R3 (enable_return_routed_experts).
   # Opt-in: use vLLM's `mp` executor backend (instead of `ray`) for non-colocated
   # multi-GPU engines. Required for the Qwen3-Next-80B-A3B R3 router-capture path
   # (enable_return_routed_experts=true), where the vLLM Ray Compiled-DAG deadlocks on the

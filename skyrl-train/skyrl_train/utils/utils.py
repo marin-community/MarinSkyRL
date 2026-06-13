@@ -709,6 +709,81 @@ def validate_generator_cfg(cfg: DictConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
+    # Validate inference engine Decode Context Parallel (DCP).
+    _validate_dcp_cfg(cfg)
+
+
+def _validate_dcp_cfg(cfg: DictConfig):
+    """Validate the vLLM Decode Context Parallel (DCP) generator config (Stage 0).
+
+    vLLM DCP shards the KV cache along the token dim across `dcp` ranks *inside* the
+    TP group during decode (it reuses the TP GPUs, adding no GPUs — G4). It is gated
+    entirely off by default (`inference_engine_decode_context_parallel_size == 1`), in
+    which case this function is a strict no-op and the run is byte-identical to today
+    (G1). When enabled (`dcp > 1`) we fail-closed at SkyRL config-validate (G3) rather
+    than deep in vLLM init, with clear messages:
+
+      (a) tp % dcp == 0 (vLLM splits the TP group into dcp subgroups; parallel.py:474-478),
+      (cheap bound) 1 <= dcp <= tp,
+      (c) backend == "vllm" (SGLang has no DCP knob),
+      (e) NOT R3 router capture (vLLM rejects DCP + enable_return_routed_experts;
+          vllm/config/vllm.py:1939-1944).
+
+    # TODO(stage2): kv-head bound dcp<=tp/num_kv_heads + GQA/MLA arch gate (needs model config)
+    # TODO(stage1): attn-backend capability gate
+
+    See notes/RL/skyrl/vllm_dcp_rollout_stages/.
+    """
+    gen = cfg.generator
+    dcp = gen.inference_engine_decode_context_parallel_size
+    tp = gen.inference_engine_tensor_parallel_size
+    assert dcp >= 1, f"generator.inference_engine_decode_context_parallel_size must be >= 1, got {dcp}"
+    if dcp == 1:
+        # DCP disabled -> strict no-op, no further constraints (G1).
+        return
+
+    # (a) vLLM splits the TP group into `dcp` subgroups -> tp must be divisible by dcp.
+    assert tp % dcp == 0, (
+        f"vLLM decode context parallel requires tensor_parallel_size % dcp == 0 "
+        f"(DCP splits the TP group); got inference_engine_tensor_parallel_size={tp}, "
+        f"inference_engine_decode_context_parallel_size={dcp}"
+    )
+    # (cheap bound) 1 <= dcp <= tp. The tighter kv-head bound (dcp <= tp/num_kv_heads)
+    # needs the model config and is deferred to Stage 2.
+    assert 1 <= dcp <= tp, (
+        f"inference_engine_decode_context_parallel_size must satisfy 1 <= dcp <= "
+        f"inference_engine_tensor_parallel_size; got dcp={dcp}, tp={tp}"
+    )
+    # (c) SGLang has no DCP knob.
+    assert gen.backend == "vllm", (
+        f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) "
+        f"is only supported with generator.backend='vllm', got '{gen.backend}'"
+    )
+    # (e) vLLM rejects DCP together with R3 router capture (enable_return_routed_experts).
+    # R3 capture is configured at the generator level (direct flag or engine_init_kwargs),
+    # and the training-side replay is gated by trainer.policy.fsdp_config.moe_router_replay.
+    r3_capture = (
+        bool(gen.get("enable_return_routed_experts", False))
+        or bool(gen.get("engine_init_kwargs", {}).get("enable_return_routed_experts", False))
+        or bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
+    )
+    assert not r3_capture, (
+        f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) is not "
+        f"compatible with R3 router capture (enable_return_routed_experts / moe_router_replay); "
+        f"vLLM rejects DCP + return_routed_experts. Disable one of them."
+    )
+
+    # (G4) DCP rides the TP GPUs and must NOT enter rollout-GPU accounting. Assert the
+    # rollout-GPU count is a function of tp*pp*dp only, independent of dcp.
+    pp = gen.inference_engine_pipeline_parallel_size
+    dp = gen.inference_engine_data_parallel_size
+    per_engine_gpu_count = tp * pp * dp
+    num_rollout_gpus = gen.num_inference_engines * per_engine_gpu_count
+    assert num_rollout_gpus == gen.num_inference_engines * tp * pp * dp, (
+        "DCP must not change rollout-GPU accounting (it reuses the TP GPUs); "
+        f"num_rollout_gpus must equal num_inference_engines*tp*pp*dp regardless of dcp={dcp}"
+    )
+
 
 @ray.remote
 def get_all_env_variables():

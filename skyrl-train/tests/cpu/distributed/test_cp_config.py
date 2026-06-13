@@ -43,6 +43,13 @@ CP_FIELDS = {
 STAGE2_TRAINER_FIELDS = {
     "attn_backend": "auto",
 }
+# Additive generator key from the vLLM DCP port Stage 0 (flag-off no-op, default == 1).
+# Like the CP fields, it is purely additive and must be stripped before the structural
+# -identity comparison against the pre-CP golden (it is unrelated to CP — DCP is the
+# rollout-side decode KV-cache shard).
+STAGE0_DCP_GENERATOR_FIELDS = {
+    "inference_engine_decode_context_parallel_size": 1,
+}
 ROLES = ("policy", "ref", "critic")
 
 
@@ -84,6 +91,8 @@ def test_all_defaults_is_structurally_identical_to_pre_cp():
             fsdp.pop(k, None)
     for k in STAGE2_TRAINER_FIELDS:  # strip Stage-2 additive top-level trainer keys
         container["trainer"].pop(k, None)
+    for k in STAGE0_DCP_GENERATOR_FIELDS:  # strip DCP Stage-0 additive generator key
+        container["generator"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the pre-CP golden baseline"
 
