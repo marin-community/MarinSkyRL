@@ -97,6 +97,7 @@ def create_ray_wrapped_inference_engines(
     expert_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
+    decode_context_parallel_size: int = 1,
     shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
@@ -299,6 +300,18 @@ def create_ray_wrapped_inference_engines(
                 # NCCL handles the TP all-reduce (correctness-equal, slightly slower).
                 mp_extra_kwargs = {"disable_custom_all_reduce": True} if use_mp_backend else {}
 
+                # vLLM Decode Context Parallel (DCP): only forward the kwarg when enabled
+                # (> 1). decode_context_parallel_size is a native vLLM EngineArgs field, so
+                # it flows straight through **kwargs into vllm.LLM / AsyncEngineArgs with no
+                # new vLLM call site. When == 1 the kwarg is ABSENT, making the engine init
+                # byte-identical to today (G1). DCP rides the TP GPUs and does NOT touch
+                # per_engine_gpu_count or the PACK PG bundle math above (G4).
+                dcp_kwargs = (
+                    {"decode_context_parallel_size": decode_context_parallel_size}
+                    if decode_context_parallel_size > 1
+                    else {}
+                )
+
                 engine = actor_class.options(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
@@ -327,6 +340,7 @@ def create_ray_wrapped_inference_engines(
                     enable_ray_prometheus_stats=enable_ray_prometheus_stats,
                     **dp_kwargs,
                     **mp_extra_kwargs,
+                    **dcp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
                     **rope_engine_kwargs,
