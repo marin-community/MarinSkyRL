@@ -178,6 +178,10 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
         data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
+        # DCP metadata only: for remote engines the operator must pass `-dcp <n>` on the
+        # external `vllm serve` launch — SkyRL does not spawn remote servers. Carried here
+        # for geometry/GPU-accounting consistency (DCP reuses the TP GPUs; no extra GPUs).
+        decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
     )
 
 
