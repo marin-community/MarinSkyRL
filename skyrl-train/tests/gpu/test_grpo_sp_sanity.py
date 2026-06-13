@@ -1,5 +1,13 @@
 """
 uv run --isolated --extra vllm --extra dev -- pytest -s -vvv tests/gpu/test_grpo_sp_sanity.py
+
+This is the Ulysses sequence-parallel (SP) sanity check: a full GRPO step at sp=2
+matches sp=1 within tol. The Context-Parallel (CP) counterpart — a full seeded
+GRPO step at cp=2 vs cp=1 (loss / grad-norm / post-step logprob parity), plus the
+long-context OOM->OK demonstration and the CP+EP 4-D-mesh composition — lives in
+``tests/gpu/test_cp_e2e_grpo.py`` (Stage 6). CP and SP are mutually exclusive (both
+shard the sequence dim), so the CP gate is a separate self-contained torchrun test
+on the CP axis rather than an additional sp variant here.
 """
 
 import os

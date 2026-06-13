@@ -27,6 +27,14 @@ dependencies = [
     "transformers>=4.51.0",
     "hydra-core==1.3.2",
     "accelerate",
+    # Stage-1 (FSDP2 CP port): pin base torch>=2.10 so the torch-native context-parallel
+    # API (torch.distributed.tensor.experimental.context_parallel + ring-SDPA load balancer)
+    # is guaranteed present for the trainer. Production SIF runs torch 2.11.0+cu130 today.
+    # The vllm extra pins an exact compatible torch (==2.11.0). Stage-7 reconciled the other
+    # extras as far as upstream allows: sglang->torch 2.11.0 (full), mcore->torch 2.9.1 (partial,
+    # vLLM-capped), flashrl stays at torch 2.7.0 (custom-vLLM-wheel blocker). All remain isolated
+    # by [tool.uv].conflicts.
+    "torch>=2.10.0",
     "torchdata",
     "omegaconf",
     "ray==2.51.1",
@@ -88,10 +96,12 @@ torchvision = { index = "pytorch-cu128" }
 # We use `flashinfer-jit-cache` to avoid slow JIT compilation on first run.
 # Different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm'" }
-flashinfer-python = [
-    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'mcore' and extra != 'vllm'" },
-    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
-]
+# Stage-7: the old cu128torch2.7 flashinfer wheel-URL pins were torch-2.7-only and are
+# incompatible with the reconciled sglang (torch 2.11) / mcore (torch 2.9.1) stacks. sglang 0.5.13
+# and vLLM 0.14.1 each pull a compatible flashinfer transitively, so we no longer force-pin a
+# wheel URL for those extras — let the resolver pick the version each upstream declares.
+# (flashrl stays on torch 2.7.0; if its separately-installed wheel needs the old flashinfer it is
+#  installed out-of-band per examples/flash_rl/README.md, same as the custom vLLM wheel.)
 # Expert-parallel / router-replay port (see notes/skyrl/fsdp2_ep_router_replay_port_plan.md).
 # torchtitan is pure-python (provides @expert_parallel / ExpertParallel); it does NOT rebuild
 # torch. Pin matches prime-rl (EP + grouped-GEMM + R3 validated there); compatible with our
@@ -127,34 +137,68 @@ docs = [
 sandboxes = [
     "litellm[proxy]>=1.67.5",
 ]
+# Stage-1 (FSDP2 CP port): the vllm extra is the actively-used inference path; its torch
+# pin must carry torch-native context_parallel (>=2.10). Versions MIRROR the production SIF
+# `skyrl_megatron_vllm0202rc0_r3.sif`, which runs the following resolved stack multi-node on
+# Jupiter today: torch 2.11.0, vLLM 0.20.2rc0, flash-attn 2.6.3, torchvision 0.26.0.
+# (The SIF is a cu130 build via its own build script; the version *pins* here are index-agnostic
+#  and resolve against the pytorch-cu128 index, which also publishes torch-2.11 wheels.)
+# flash-attn is only needed for the NON-CP paths after Stage 2 (CP uses SDPA), so a slightly
+# older 2.6.3 paired with torch 2.11 is fine.
 vllm = [
-    "vllm==0.11.0",
-    "flash-attn==2.8.3",
-    "torch==2.8.0",
+    "vllm==0.20.2rc0",
+    "flash-attn==2.6.3",
+    "torch==2.11.0",
     "flashinfer-python",
     "flashinfer-jit-cache",
-    "torchvision"
+    "torchvision==0.26.0"
 ]
+# Stage-7 (FSDP2 CP port) reconciliation status — torch-version matrix per extra:
+#   sglang : RECONCILED → torch 2.11.0 (sglang 0.5.13 ships torch==2.11.0 wheels). uv-resolve
+#            verified (uv 0.10.2, `uv pip compile`, EXIT 0).
+#   mcore  : PARTIAL → torch 2.9.1 (was 2.7.1). The Megatron side (megatron-bridge 0.3.0 /
+#            megatron-core 0.16.x / TE 2.12) supports torch>=2.6 incl. 2.10/2.11, BUT the vLLM in
+#            this extra is the ceiling: every published vLLM through 0.16.1 HARD-PINS torch==2.9.1,
+#            so torch 2.10 is upstream-blocked here until a vLLM release moves to torch 2.10.
+#   flashrl: BLOCKED, left at torch 2.7.0 — see the inline note on the extra below.
+# All three remain isolated from the base torch>=2.10 by the [tool.uv].conflicts table because
+# each ships its OWN exact torch pin (and mcore/flashrl ship their own vLLM), which differs from
+# the base/vllm CP set (torch 2.11.0 + vLLM 0.20.2rc0). Conflicts entries are still required.
 sglang = [
-    "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
+    # Stage-7: bumped 0.4.8.post1 -> 0.5.13. sglang 0.5.13 pins torch==2.11.0 and
+    # flashinfer_python[cu13]==0.6.12 upstream; this is the first sglang line on torch 2.11.
+    # NOTE: 0.5.x folded the old `srt`/`openai`/`torch_memory_saver` extras into the base package,
+    # so the bare `sglang==` requirement now pulls the full runtime (uv warns if those extras are
+    # named). (The old "0.4.9.post1 weight-broadcast hang" caveat was a 0.4.x-era issue, superseded.)
+    "sglang==0.5.13",
     "flashinfer-python",
-    "flash-attn==2.8.3",
-    "torch==2.7.1",
-    "torchvision",
+    "flash-attn==2.6.3",  # paired with torch 2.11 (matches the vllm extra's torch-2.11 flash-attn)
+    "torch==2.11.0",
+    "torchvision==0.26.0",
 ]
 mcore = [
-  "transformer-engine[pytorch]==2.7.0",
+  # Stage-7: bumped the Megatron stack from the NeMo 25.09 line (TE 2.7.0 / mcore 0.14.0 /
+  # mbridge 0.1.0rc4 / vLLM 0.10.1.1 / torch 2.7.1) toward the NeMo 26.02 line. PARTIAL: the
+  # Megatron components support torch 2.10 (mbridge 0.3.0 requires torch>=2.6, TE>=2.10a0,<2.13,
+  # mcore>=0.15a0,<0.17), but vLLM hard-pins torch==2.9.1 (verified for vLLM 0.14.1..0.16.1), so
+  # torch lands at 2.9.1 — a +2-minor bump, the max vLLM allows. torch 2.10 is upstream-blocked on
+  # vLLM, not Megatron. Kept isolated via [tool.uv].conflicts. megatron-core is left unpinned so it
+  # floats within megatron-bridge 0.3.0's accepted range (the old ==0.14.0 pin is incompatible).
+  "transformer-engine[pytorch]==2.12.0",
   "flash-attn==2.7.4.post1",
-  "vllm==0.10.1.1",
-  "torch==2.7.1",
+  "vllm==0.14.1",
+  "torch==2.9.1",
   "flashinfer-python",
   "torchvision",
-  "megatron-bridge==0.1.0rc4",
-  "megatron-core==0.14.0",
+  "megatron-bridge==0.3.0",
 ]
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
     # See examples/flash_rl/README.md for installation instructions.
+    # Stage-7 BLOCKED: FlashRL's separately-installed custom vLLM wheel is only built/tested up to
+    # vLLM 0.10.0 / torch 2.7.1 (upstream yaof20/Flash-RL tested-env matrix tops out at the
+    # hiyouga/verl ngc-th2.7.1-cu12.6-vllm0.10.0 image; no torch 2.10/2.11 custom wheel exists).
+    # Bumping torch here would orphan the quantized-rollout wheel. Left pinned + isolated.
     "flash-attn==2.8.3",
     "torch==2.7.0",
     "flashinfer-python",

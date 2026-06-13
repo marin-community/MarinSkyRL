@@ -17,9 +17,79 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndByt
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
+from skyrl_train.distributed.cp_utils import maybe_cp_context, context_parallel_unshard, cp_unshard_grad_safe
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
+
+# --- Stage 2 (FSDP2 CP): guarded flash-attn import ---------------------------
+# The CP path runs through SDPA ring attention, not flash-attn varlen, so the
+# environment that loads the model need NOT have flash-attn installed. Previously
+# `from flash_attn.bert_padding import pad_input, unpad_input` was an
+# unconditional module-level import that broke `import model_wrapper` in any
+# env without flash-attn. We make it lazy: try the import; if it fails, bind
+# `pad_input`/`unpad_input` to shims that raise ONLY if actually called (every
+# call site is gated on `attn_implementation == "flash_attention_2"` or
+# `use_sample_packing`, both of which are off on the sdpa/CP path). `_HAS_FLASH`
+# records availability for tests / diagnostics.
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input  # noqa: F401
+
+    _HAS_FLASH = True
+except ImportError:  # flash-attn not installed (e.g. the CP/sdpa-only env)
+    _HAS_FLASH = False
+
+    def _flash_missing(*args, **kwargs):
+        raise ImportError(
+            "flash_attn is not installed but a flash-attn-only code path "
+            "(sample packing / pad_input / unpad_input) was invoked. Install "
+            "flash-attn, or use attn_backend='sdpa'/'flex' with "
+            "use_sample_packing=false (the CP path)."
+        )
+
+    def pad_input(*args, **kwargs):  # noqa: F811
+        return _flash_missing(*args, **kwargs)
+
+    def unpad_input(*args, **kwargs):  # noqa: F811
+        return _flash_missing(*args, **kwargs)
+
+
+def resolve_attn_implementation(
+    attn_backend: str = "auto",
+    use_flash_attention_2: bool = False,
+    context_parallel_size: int = 1,
+) -> str:
+    """Resolve the HF `attn_implementation` string from the Stage-2 backend selector.
+
+    `attn_backend` ∈ {"auto", "flash_attention_2", "sdpa", "flex"}:
+      - "auto" (default) reproduces the pre-Stage-2 behavior EXACTLY:
+        "flash_attention_2" if `use_flash_attention_2` else "eager" (G1 —
+        every existing run stays byte-identical).
+      - "flash_attention_2" / "sdpa" force that backend (overriding `flash_attn`).
+      - "flex" maps to HF's "flex_attention".
+
+    When CP is enabled (`context_parallel_size > 1`, the Stage-0 flag), the
+    backend MUST be a ring-compatible non-varlen attention (sdpa/flex); flash
+    attention varlen is rejected (G2). `auto`/`flash_attention_2` are rejected
+    under CP; the caller must explicitly select sdpa/flex.
+    """
+    valid = {"auto", "flash_attention_2", "sdpa", "flex"}
+    assert attn_backend in valid, f"attn_backend='{attn_backend}' is invalid; must be one of {sorted(valid)}"
+
+    if attn_backend == "auto":
+        impl = "flash_attention_2" if use_flash_attention_2 else "eager"
+    elif attn_backend == "flex":
+        impl = "flex_attention"
+    else:
+        impl = attn_backend  # "flash_attention_2" or "sdpa"
+
+    if context_parallel_size > 1:
+        assert impl in ("sdpa", "flex_attention"), (
+            f"context_parallel_size={context_parallel_size} requires a ring-compatible "
+            f"attention backend (attn_backend ∈ {{'sdpa','flex'}}); got attn_backend="
+            f"'{attn_backend}' -> attn_implementation='{impl}'. Flash-attn varlen is not "
+            "supported under context parallel (G2)."
+        )
+    return impl
 
 
 class HFModelWrapper(nn.Module):
@@ -68,12 +138,29 @@ class HFModelWrapper(nn.Module):
         rope_theta: float | None = None,
         moe_router_replay: bool = False,
         moe_grouped_gemm: bool = False,
+        attn_backend: str = "auto",
+        context_parallel_size: int = 1,
+        cp_mesh=None,
+        cp_rotate_method: str = "allgather",
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+        self.context_parallel_size = context_parallel_size
+        # Stage 4 (FSDP2 CP): the cp submesh + rotate method for the ring-SDPA
+        # forward wrap. cp_mesh is None when context_parallel_size == 1 (flag-off
+        # → forward takes the literal no-op nullcontext, byte-identical to today).
+        self.cp_mesh = cp_mesh
+        self.cp_rotate_method = cp_rotate_method
+        # Stage 2: resolve attention backend. attn_backend="auto" reproduces the
+        # pre-Stage-2 logic byte-for-byte (G1); otherwise it overrides flash_attn.
+        # Under CP (context_parallel_size > 1) flash-attn varlen is rejected (G2).
+        self.attn_implementation = resolve_attn_implementation(
+            attn_backend=attn_backend,
+            use_flash_attention_2=use_flash_attention_2,
+            context_parallel_size=context_parallel_size,
+        )
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
@@ -199,7 +286,9 @@ class HFModelWrapper(nn.Module):
                 # so keep router-logit collection OFF there. Flag-off / eager
                 # paths are unchanged.
                 if moe_grouped_gemm:
-                    logger.info("[MoE] grouped-GEMM swap active — leaving output_router_logits False (aux-loss dropped)")
+                    logger.info(
+                        "[MoE] grouped-GEMM swap active — leaving output_router_logits False (aux-loss dropped)"
+                    )
                     self.model.config.output_router_logits = False
                 else:
                     logger.info("[MoE] set output_router_logits as True")
@@ -398,17 +487,107 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
+        # Stage 4 (FSDP2 CP): pad the sequence buffers so seq_len % (2*cp) == 0
+        # (G4 — torch's CP load balancer requirement) BEFORE entering the CP
+        # context. CP and Ulysses are mutually exclusive (both shard the seq dim);
+        # CP runs on the dense [B, S] path only (Stage 0 forbids packing under CP).
+        # We pad on the RIGHT with pad tokens / position_ids continuing the cumsum
+        # / attention_mask=0, and record `cp_pad_size` so Stage 5 can unpad after
+        # the per-token unshard. NO slice here — torch's `context_parallel` does
+        # the per-rank sharding (and zigzag offset) inside the context. cp_size==1
+        # leaves every buffer untouched (the block is skipped, G1).
+        cp_size = self.context_parallel_size
+        cp_pad_size = 0
+        if cp_size > 1:
+            assert self.sequence_parallel_size == 1, "CP and Ulysses SP are mutually exclusive (G2)"
+            assert not self.use_sample_packing, "CP requires the dense (unpacked) path (G2)"
+            # Stage 6 (production guard): CP ring SDPA runs PURE-CAUSAL with
+            # attention_mask=None inside the context (the 2D mask is not
+            # CP-shardable — see the long comment below). Pure-causal attention
+            # only masks pad tokens that come AFTER the real tokens (trailing /
+            # right-pad — causality blocks real tokens from attending forward).
+            # LEFT-padding (pads BEFORE the real tokens) is NOT masked: every
+            # real token attends back across the leading pads, diverging grossly
+            # from the cp=1 (masked) path (~1.0 logprob error — Stage 5/5b). So
+            # CP REQUIRES right-aligned batches. Detect a left-padded row (a
+            # masked-out position that precedes a real position) and fail loudly
+            # rather than silently train on corrupted attention. Gated by
+            # SKYRL_CP_REQUIRE_RIGHT_ALIGN (default "1"); set "0" only if the
+            # caller has independently guaranteed right-alignment and wants to
+            # skip the per-step scan. cp_size==1 never reaches here (G1).
+            if attention_mask_fwd is not None and os.environ.get("SKYRL_CP_REQUIRE_RIGHT_ALIGN", "1") not in (
+                "0",
+                "false",
+                "False",
+            ):
+                am = attention_mask_fwd.to(torch.bool)
+                # A row is right-aligned iff, reading left→right, no real token (1)
+                # appears after a pad (0): i.e. cummax of the mask is monotone and
+                # the FIRST occurrence of a 1 is followed only by 1s up to the last
+                # real token. Equivalent check: a left pad exists iff any position
+                # is a pad (0) AND some LATER position in the same row is real (1).
+                later_real = torch.flip(torch.cummax(torch.flip(am.int(), dims=[1]), dim=1).values, dims=[1])
+                left_padded = ((~am) & later_real.bool()).any(dim=1)
+                if bool(left_padded.any()):
+                    bad = torch.nonzero(left_padded, as_tuple=False).flatten().tolist()
+                    raise AssertionError(
+                        f"[CP] context_parallel_size={cp_size} requires RIGHT-ALIGNED batches "
+                        f"(pads must be TRAILING so pure-causal ring SDPA masks them); rows {bad} "
+                        f"are LEFT-padded (a real token follows a pad). Left-padding corrupts CP "
+                        f"attention (real tokens attend across leading pads, ~1.0 logprob error vs "
+                        f"cp=1). Right-align the batch before the CP forward, or set "
+                        f"SKYRL_CP_REQUIRE_RIGHT_ALIGN=0 only if alignment is guaranteed upstream."
+                    )
+            _, total_seq_len = sequences_fwd.shape
+            multiple = 2 * cp_size
+            cp_pad_size = (multiple - total_seq_len % multiple) % multiple
+            if cp_pad_size > 0:
+                pad_id = 0
+                sequences_fwd = torch.nn.functional.pad(sequences_fwd, (0, cp_pad_size), value=pad_id)
+                sequences_rolled = torch.nn.functional.pad(sequences_rolled, (0, cp_pad_size), value=pad_id)
+                # position_ids: continue the per-row count past the last real token
+                # so RoPE on the pad region is well-defined (it is masked out anyway).
+                last_pos = position_ids_fwd[:, -1:]
+                pad_pos = torch.arange(1, cp_pad_size + 1, device=position_ids_fwd.device).unsqueeze(0)
+                position_ids_fwd = torch.cat((position_ids_fwd, last_pos + pad_pos), dim=-1)
+                if attention_mask_fwd is not None:
+                    pad_attn = torch.zeros(
+                        attention_mask_fwd.size(0),
+                        cp_pad_size,
+                        dtype=attention_mask_fwd.dtype,
+                        device=attention_mask_fwd.device,
+                    )
+                    attention_mask_fwd = torch.cat((attention_mask_fwd, pad_attn), dim=-1)
+            # The CP context shards ONLY sequences + position_ids along dim=1 (the
+            # sequence dim). The 2D attention_mask is deliberately NOT sharded /
+            # passed into the model under CP: HF would expand it to a 4D additive
+            # bias `[B, 1, S_q, S_kv]` whose key axis must stay FULL-length, but
+            # the sharded 2D mask makes that expand fail inside the CP region
+            # (`aten.expand` size mismatch S_kv/cp vs S_q). torch CP ring SDPA
+            # instead runs PURE CAUSAL attention (is_causal inferred when
+            # attention_mask=None), which it shards correctly. Left-padding masking
+            # is recovered via position_ids + the post-hoc entropy/logprob masks.
+            # `attention_mask_fwd` is kept (full, unsharded) for the entropy mask.
+            #
+            # Stage 5: we ALSO CP-shard `sequences_rolled` (the per-token labels)
+            # with the SAME zigzag load balancer so the per-token logprobs computed
+            # on the local sharded logits `[B, S/cp, V]` line up token-for-token
+            # with the local logits BEFORE the unshard. (Stage 4 computed logprobs
+            # against the FULL sequences_rolled after an immediate logit unshard;
+            # Stage 5 moves the unshard seam to AFTER the per-token compute, which
+            # is the memory-efficient gather — `[B,S]` logprobs not `[B,S,V]`
+            # logits — and is the seam the loss/loss_mask/KL must align on.)
+            _cp_buffers = [sequences_fwd, position_ids_fwd, sequences_rolled]
+            _cp_seq_dims = [1, 1, 1]
+            _cp_no_restore = {sequences_fwd, sequences_rolled}
+
         # MoE router replay (R3) — Stage 2/3a. When enabled and targets are
         # provided, install the per-layer forced top-k into the controller for
         # the duration of the model forward. Single-GPU; dense (unpacked) AND
         # packed (use_sample_packing + FA2) paths. SP (sequence_parallel_size >
         # 1) remains Stage 4.
         replay_installed = False
-        if (
-            self._router_replay is not None
-            and rollout_routed_experts is not None
-            and self.sequence_parallel_size == 1
-        ):
+        if self._router_replay is not None and rollout_routed_experts is not None and self.sequence_parallel_size == 1:
             from skyrl_train.models.router_replay import set_active_replay
 
             # Build the dense target off the ORIGINAL [B, seq_len] sequences (the
@@ -427,15 +606,54 @@ class HFModelWrapper(nn.Module):
             set_active_replay(self._router_replay)
             replay_installed = True
 
+        # Stage 4/5 (FSDP2 CP): enter torch-native `context_parallel` around the
+        # model forward so SDPA dispatches to ring attention on the cp mesh and
+        # the listed sequence buffers are sharded by torch's built-in load
+        # balancer. cp_size==1 ⇒ `maybe_cp_context` is `contextlib.nullcontext()`
+        # (literal no-op, G1). Inside the context the HF forward returns logits
+        # sequence-sharded `[B, S/cp, V]`. Stage 5: we keep the logits sharded
+        # through the per-token logprob/entropy compute (using the co-sharded
+        # `sequences_rolled` labels) and `context_parallel_unshard` ONLY the
+        # per-token `[B, S/cp]` outputs back to natural-order `[B, S]` (the
+        # loss-aligned seam — mirrors how the Ulysses path gathers per-token
+        # logprobs before the response slice).
+        if cp_size > 1:
+            cp_ctx = maybe_cp_context(
+                cp_size,
+                self.cp_mesh,
+                self.cp_rotate_method,
+                buffers=_cp_buffers,
+                seq_dims=_cp_seq_dims,
+                no_restore=_cp_no_restore,
+            )
+        else:
+            cp_ctx = maybe_cp_context(1, None, None, buffers=[], seq_dims=[])
+
         defer_teardown = False
         try:
-            # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-            if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
-                # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
-                # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-                output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
-            else:
-                output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+            with cp_ctx:
+                # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
+                if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+                    # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
+                    # Not using attention mask leads to higher perf since flash attention varlen func is enabled
+                    output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+                elif cp_size > 1:
+                    # CP: force PURE-CAUSAL ring SDPA. We must NOT let HF build its 4D
+                    # additive causal bias mask: under CP `create_causal_mask` runs at
+                    # model entry and produces a `[B,1,S_q,S_kv]` bias whose key axis
+                    # ends up sharded (S/cp) while the query axis stays full → torch
+                    # CP's SDPA wrapper then fails `aten.expand` (kv=S/cp vs q=S). HF's
+                    # documented escape hatch (modeling_qwen3.py:403) is to pass
+                    # `attention_mask` ALREADY as the per-layer-type mask DICT, which
+                    # short-circuits `create_causal_mask`; with None entries every
+                    # layer gets attention_mask=None → SDPA sets is_causal=True, which
+                    # torch CP ring attention shards correctly. Padding masking is
+                    # recovered post-hoc (entropy/logprob masks); exact per-token
+                    # padding correctness is the Stage-5 concern.
+                    cp_mask = {"full_attention": None, "sliding_attention": None}
+                    output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd)
+                else:
+                    output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
             # Stage-7 P3 recompute-safety: when this forward builds an autograd
             # graph (the training forward), the replay teardown MUST NOT fire here.
@@ -463,11 +681,36 @@ class HFModelWrapper(nn.Module):
         logits_BSV.div_(temperature)
 
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+        # Under CP `logits_BSV` is sequence-sharded `[B, S/cp, V]` and
+        # `sequences_rolled` was co-sharded by the SAME zigzag balancer, so this
+        # per-token compute is token-for-token aligned on the local shard.
         log_probs = logprobs_from_logits(
             logits_BSV,
             sequences_rolled,
             inplace_backward=True,
         )
+
+        # Stage 5 (FSDP2 CP) — THE correctness seam: unshard the per-token
+        # `[B, S/cp]` logprobs back to natural-order `[B, S]` via the inverse of
+        # torch's zigzag load balancer. This is the loss-aligned gather (mirrors
+        # the Ulysses `gather_outputs_and_unpad` seam below, different gather op):
+        # after this the logprobs are in the SAME token order as the cp=1 path, so
+        # the response slice / loss / loss_mask / advantages / ref-KL all line up
+        # exactly. cp_size==1 ⇒ skipped (G1). Entropy is unsharded separately
+        # below (it must be computed unmasked on the shard, then masked post-gather
+        # — the full attention_mask can't be applied to a zigzag shard).
+        if cp_size > 1:
+            # Stage 6: the stock context_parallel_unshard is @torch.no_grad (its
+            # in-place index-restore raises "cannot resize variables that require
+            # grad"). For a CP TRAINING step the per-token logprobs must stay
+            # differentiable (they feed the policy loss -> backward), so when grad
+            # is enabled and the tensor needs grad use the autograd-safe unshard
+            # (differentiable all_gather + out-of-place reorder, byte-identical
+            # natural order). No-grad scoring keeps the cheaper stock unshard.
+            if torch.is_grad_enabled() and log_probs.requires_grad:
+                log_probs = cp_unshard_grad_safe(self.cp_mesh, log_probs, 1)
+            else:
+                log_probs = context_parallel_unshard(self.cp_mesh, [log_probs], [1])[0]
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
@@ -493,9 +736,27 @@ class HFModelWrapper(nn.Module):
                 # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
                 entropy_mask = attention_mask_fwd
 
-            entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
-            )
+            # Stage 5 (FSDP2 CP): logits are sequence-sharded `[B, S/cp, V]`, but the
+            # entropy attention_mask is FULL-length `[B, S]` and in NATURAL order —
+            # it cannot index a zigzag shard. So compute entropy UNMASKED on the
+            # shard, `context_parallel_unshard` it to natural-order `[B, S]`, THEN
+            # apply the full mask. This yields the SAME masked entropy as cp=1.
+            if cp_size > 1:
+                entropy_BS = self.chunked_entropy_from_logits_fn(
+                    logits_BSV, requires_grad=entropy_requires_grad, attention_mask=None
+                )
+                # Stage 6: grad-safe unshard when entropy carries grad (entropy can
+                # appear in the loss via an entropy bonus); else the stock no_grad unshard.
+                if torch.is_grad_enabled() and entropy_BS.requires_grad:
+                    entropy_BS = cp_unshard_grad_safe(self.cp_mesh, entropy_BS, 1)
+                else:
+                    entropy_BS = context_parallel_unshard(self.cp_mesh, [entropy_BS], [1])[0]
+                if entropy_mask is not None:
+                    entropy_BS = entropy_BS * entropy_mask.to(entropy_BS.dtype)
+            else:
+                entropy_BS = self.chunked_entropy_from_logits_fn(
+                    logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
+                )
 
             if self.sequence_parallel_size > 1:
                 dim = entropy_BS.ndim - 1
@@ -510,6 +771,17 @@ class HFModelWrapper(nn.Module):
                 )  # (1, nnz) -> (B, S)
 
             output["entropy"] = entropy_BS
+
+        # Stage 4 (FSDP2 CP): strip the right-pad added for the 2*cp divisibility
+        # (G4) so the per-token tensors return to the original [B, S] length and
+        # the action slice below lands on the real response tokens. The pad region
+        # carried attention_mask==0, so the dropped logprobs/entropy are over pad
+        # tokens only (real-token values unaffected; no NaN/inf leaks). cp_size==1
+        # ⇒ cp_pad_size==0, this block is a no-op (G1).
+        if cp_size > 1 and cp_pad_size > 0:
+            log_probs = log_probs[:, : log_probs.size(1) - cp_pad_size]
+            if compute_entropy:
+                output["entropy"] = output["entropy"][:, : output["entropy"].size(1) - cp_pad_size]
 
         if isinstance(num_actions, list):
             if len(num_actions) == 1:
@@ -567,22 +839,17 @@ class HFModelWrapper(nn.Module):
 
         if isinstance(num_actions, (list, np.ndarray)):
             raise NotImplementedError(
-                "router_replay requires a scalar num_actions (dense unpacked path); "
-                "got a per-sample list/array."
+                "router_replay requires a scalar num_actions (dense unpacked path); " "got a per-sample list/array."
             )
         device = sequences.device
         batch_size, seq_len = sequences.shape
         re = rollout_routed_experts.to(device=device, dtype=torch.long)
         B, response_len, L, K = re.shape
         assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
-        assert response_len == num_actions, (
-            f"router_replay response_len {response_len} != num_actions {num_actions}"
-        )
+        assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
 
         # Full-seq target [B, seq_len, L, K], sentinel-filled, response copied in.
-        full = torch.full(
-            (batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device
-        )
+        full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
         full[:, seq_len - response_len : seq_len, :, :] = re
 
         # Replay mask: True on response positions whose row is non-sentinel
@@ -641,6 +908,9 @@ def _get_critic_model(
     value_head_prefix="value_head",
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    context_parallel_size: int = 1,
+    cp_mesh=None,
+    cp_rotate_method: str = "allgather",
 ):
     class CriticModel(base_pretrained_model):
         supports_gradient_checkpointing = True
@@ -654,6 +924,11 @@ def _get_critic_model(
 
             self.sequence_parallel_size = sequence_parallel_size
             self.use_sample_packing = use_sample_packing
+            # Stage 4 (FSDP2 CP): value forward must CP-shard identically to the
+            # policy so value targets align post-unshard (G3). None at cp=1.
+            self.context_parallel_size = context_parallel_size
+            self.cp_mesh = cp_mesh
+            self.cp_rotate_method = cp_rotate_method
             if use_sample_packing:
                 assert (
                     config._attn_implementation == "flash_attention_2"
@@ -701,13 +976,79 @@ def _get_critic_model(
                     input_ids_fwd, position_ids_fwd, attention_mask_fwd, self.sequence_parallel_size
                 )
 
-            if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
-                outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
-            else:
-                outputs = getattr(self, self.base_model_prefix)(
-                    input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
+            # Stage 4/5 (FSDP2 CP): pad to 2*cp divisibility (G4), then wrap the base
+            # forward in torch-native context_parallel (ring SDPA) and unshard the
+            # per-token hidden states `[B, S/cp, H]` -> natural-order `[B, S, H]`.
+            # The value head is a per-token pointwise Linear, so unsharding the
+            # hidden states (then projecting) yields natural-order values that are
+            # token-for-token aligned with cp=1 — the SAME loss-aligned seam Stage 5
+            # uses for policy logprobs. cp_size==1 ⇒ no-op (G1). Mirrors the
+            # policy/ref HFModelWrapper.forward exactly so value targets align.
+            cp_size = self.context_parallel_size
+            cp_pad_size = 0
+            if cp_size > 1:
+                assert self.sequence_parallel_size == 1, "CP and Ulysses SP are mutually exclusive (G2)"
+                assert not self.use_sample_packing, "CP requires the dense (unpacked) path (G2)"
+                _, total_seq_len = input_ids_fwd.shape
+                multiple = 2 * cp_size
+                cp_pad_size = (multiple - total_seq_len % multiple) % multiple
+                if cp_pad_size > 0:
+                    input_ids_fwd = torch.nn.functional.pad(input_ids_fwd, (0, cp_pad_size), value=0)
+                    last_pos = position_ids_fwd[:, -1:]
+                    pad_pos = torch.arange(1, cp_pad_size + 1, device=position_ids_fwd.device).unsqueeze(0)
+                    position_ids_fwd = torch.cat((position_ids_fwd, last_pos + pad_pos), dim=-1)
+                    if attention_mask_fwd is not None:
+                        pad_attn = torch.zeros(
+                            attention_mask_fwd.size(0),
+                            cp_pad_size,
+                            dtype=attention_mask_fwd.dtype,
+                            device=attention_mask_fwd.device,
+                        )
+                        attention_mask_fwd = torch.cat((attention_mask_fwd, pad_attn), dim=-1)
+                # Only sequences + position_ids are CP-sharded; the 2D mask is NOT
+                # passed under CP (the 4D-bias expand fails on a sharded mask) — CP
+                # runs pure causal SDPA. See HFModelWrapper.forward for the rationale.
+                _cp_buffers = [input_ids_fwd, position_ids_fwd]
+                _cp_seq_dims = [1, 1]
+                cp_ctx = maybe_cp_context(
+                    cp_size,
+                    self.cp_mesh,
+                    self.cp_rotate_method,
+                    buffers=_cp_buffers,
+                    seq_dims=_cp_seq_dims,
+                    no_restore={input_ids_fwd},
                 )
-            last_hidden_states_BSH = outputs["last_hidden_state"]
+            else:
+                cp_ctx = maybe_cp_context(1, None, None, buffers=[], seq_dims=[])
+
+            with cp_ctx:
+                if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
+                    outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
+                elif cp_size > 1:
+                    # CP: pass the per-layer-type mask DICT (None entries) so HF skips
+                    # create_causal_mask → SDPA is_causal=True → ring attention shards
+                    # cleanly (see HFModelWrapper.forward for the full rationale).
+                    cp_mask = {"full_attention": None, "sliding_attention": None}
+                    outputs = getattr(self, self.base_model_prefix)(
+                        input_ids_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd
+                    )
+                else:
+                    outputs = getattr(self, self.base_model_prefix)(
+                        input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
+                    )
+                last_hidden_states_BSH = outputs["last_hidden_state"]
+                if cp_size > 1:
+                    # Stage 5: unshard hidden states [B, S/cp, H] -> natural [B, S, H].
+                    # Stage 6: grad-safe unshard when training the value head (the
+                    # hidden states feed the value loss -> backward); stock no_grad
+                    # unshard for inference. The stock unshard is @torch.no_grad and
+                    # raises on grad-requiring tensors.
+                    if torch.is_grad_enabled() and last_hidden_states_BSH.requires_grad:
+                        last_hidden_states_BSH = cp_unshard_grad_safe(self.cp_mesh, last_hidden_states_BSH, 1)
+                    else:
+                        last_hidden_states_BSH = context_parallel_unshard(
+                            self.cp_mesh, [last_hidden_states_BSH], [1]
+                        )[0]
 
             if self.sequence_parallel_size > 1:
                 last_hidden_states_SH = last_hidden_states_BSH.squeeze(0)
@@ -724,6 +1065,11 @@ def _get_critic_model(
                 batch_size, seqlen = attention_mask.shape
                 # (1, nnz, 1) -> (nnz, 1) -> (batch_size, seqlen, 1)
                 values_BSH = pad_input(values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen)
+
+            # Stage 4: strip the CP right-pad so values return to [B, S] before the
+            # :-1 trim and action slice land on the real response tokens (no-op cp=1).
+            if cp_size > 1 and cp_pad_size > 0:
+                values_BSH = values_BSH[:, : values_BSH.size(1) - cp_pad_size]
 
             values = values_BSH.squeeze(-1)[:, :-1]
 
@@ -761,6 +1107,10 @@ def get_llm_for_sequence_regression(
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    attn_backend: str = "auto",
+    context_parallel_size: int = 1,
+    cp_mesh=None,
+    cp_rotate_method: str = "allgather",
     **kwargs,
 ) -> nn.Module:
     """Get transformer with a sequence classification head on top (linear layer).
@@ -779,7 +1129,12 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    # Stage 2: resolve attention backend (auto = pre-Stage-2 behavior; CP rejects flash).
+    config._attn_implementation = resolve_attn_implementation(
+        attn_backend=attn_backend,
+        use_flash_attention_2=use_flash_attention_2,
+        context_parallel_size=context_parallel_size,
+    )
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
@@ -789,6 +1144,9 @@ def get_llm_for_sequence_regression(
         value_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
         use_sample_packing=use_sample_packing,
+        context_parallel_size=context_parallel_size,
+        cp_mesh=cp_mesh,
+        cp_rotate_method=cp_rotate_method,
     )
 
     # Note: dschf is defined in function scope to avoid global effects
