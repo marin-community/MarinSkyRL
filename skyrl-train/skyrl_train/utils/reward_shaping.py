@@ -1234,6 +1234,11 @@ class CompositeShaper:
 DEFAULT_LOOP_SHAPING_CONFIG: Dict[str, Any] = {
     "outcome_weight": 1.0,
     # Stage 1 — termination as a high-stakes learned action.
+    # Disabled by default with zero magnitudes (G1 byte-identity). The spec
+    # opt-in magnitudes (green_bonus 0.3, red_penalty 0.3, noterm_penalty 0.2)
+    # are applied as fallbacks inside the component logic when a config sets
+    # ``enabled: true`` but omits an explicit magnitude (see
+    # ``_TERMINATE_DEFAULTS`` / ``_compute_terminate``).
     "terminate": {
         "enabled": False,
         "green_bonus": 0.0,
@@ -1253,6 +1258,17 @@ DEFAULT_LOOP_SHAPING_CONFIG: Dict[str, Any] = {
 # The set of behavioral component keys the composite always reports (even at 0.0
 # in Stage 0). The outcome term is reported separately under "outcome".
 _LOOP_COMPONENT_KEYS: Tuple[str, ...] = ("terminate", "antithrash")
+
+# Stage 1 opt-in magnitude fallbacks for the terminate component. Applied only
+# when ``terminate.enabled`` is True AND the config left the magnitude at 0.0
+# (the disabled default). A config that explicitly sets a magnitude (including
+# 0.0 while enabled, via a sentinel != the default) keeps its value — see
+# ``_resolve_terminate_magnitude``.
+_TERMINATE_DEFAULTS: Dict[str, float] = {
+    "green_bonus": 0.3,
+    "red_penalty": 0.3,
+    "noterm_penalty": 0.2,
+}
 
 
 def _deep_merge_loop_config(overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1342,30 +1358,96 @@ class CompositeLoopShaper:
             chat_history=chat_history,
         )
 
+    @staticmethod
+    def _resolve_terminate_magnitude(cfg: Dict[str, Any], key: str) -> float:
+        """Resolve a terminate magnitude: explicit positive config value, else
+        the Stage-1 spec fallback (``_TERMINATE_DEFAULTS``).
+
+        The merged default for each magnitude is 0.0 (the disabled value). When a
+        config opts in (``enabled: true``) but leaves a magnitude at the 0.0
+        default, we substitute the spec fallback so "just enable terminate"
+        yields the intended +0.3 / -0.3 / -0.2 behaviour. A config wanting a
+        custom magnitude simply sets it; any value > 0 is honoured verbatim.
+        """
+        try:
+            val = abs(float(cfg.get(key, 0.0)))
+        except (TypeError, ValueError):
+            val = 0.0
+        if val > 0.0:
+            return val
+        return _TERMINATE_DEFAULTS.get(key, 0.0)
+
+    def _compute_terminate(
+        self,
+        trajectory_context: Optional[Dict[str, Any]],
+    ) -> float:
+        """Stage 1 (M2) "only-then-complete" termination component.
+
+        Returns a raw *signed* delta (clamped downstream by the G2 cap):
+          - mark_complete AND verifier green (>0): ``+green_bonus``
+          - mark_complete AND verifier failing (==0): ``-red_penalty``
+          - never terminated (premature_stop / wall): ``-noterm_penalty``
+
+        The green bonus only fires on an already-green verifier, so it can never
+        rescue a failing trajectory (G2). When no trajectory context is supplied
+        (Stage-0 call sites), the component contributes 0.0 — preserving
+        byte-identity for callers that don't thread the signals.
+        """
+        terminate_cfg = self.config.get("terminate", {})
+        if not terminate_cfg.get("enabled", False):
+            return 0.0
+        if not trajectory_context:
+            # Enabled but no signals available -> no contribution (and no crash).
+            return 0.0
+
+        mark_complete = bool(trajectory_context.get("mark_complete", False))
+        premature_stop = bool(trajectory_context.get("premature_stop", False))
+        try:
+            verifier_reward = float(trajectory_context.get("verifier_reward", 0.0))
+        except (TypeError, ValueError):
+            verifier_reward = 0.0
+
+        green_bonus = self._resolve_terminate_magnitude(terminate_cfg, "green_bonus")
+        red_penalty = self._resolve_terminate_magnitude(terminate_cfg, "red_penalty")
+        noterm_penalty = self._resolve_terminate_magnitude(terminate_cfg, "noterm_penalty")
+
+        if mark_complete:
+            if verifier_reward > 0.0:
+                # Finished, and the hidden tests agree it's green -> reward it.
+                return +green_bonus
+            # Claimed done but the verifier is red -> discourage premature "done".
+            return -red_penalty
+
+        # Did not mark complete. If it ran to the wall (never terminated), penalize
+        # the over-iterate-never-stop mode. (premature_stop is set by the caller
+        # whenever the trajectory ended without a confirmed completion.)
+        if premature_stop:
+            return -noterm_penalty
+
+        # Terminated for some other reason without mark_complete and not flagged
+        # as a wall stop -> no terminate signal.
+        return 0.0
+
     def _compute_components(
         self,
         stdout: Optional[str],
         original_reward: float,
         chat_history: Optional[List[Dict[str, Any]]],
+        trajectory_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """Compute each behavioral component's *raw signed delta* (pre-clamp).
 
-        Stage 0: every component is disabled, so every value is 0.0. Stages 1-2
-        replace the per-component bodies; the dict shape (one key per component,
-        always present) is fixed here so runs are inspectable from day one.
+        Stage 1: the ``terminate`` component is live (gated on
+        ``terminate.enabled`` and on a supplied ``trajectory_context``); all
+        other components remain disabled -> 0.0. The dict shape (one key per
+        component, always present) is fixed here so runs are inspectable.
         """
         components: Dict[str, float] = {}
 
-        # Stage 1 — terminate. Disabled in Stage 0 -> 0.0.
-        terminate_cfg = self.config.get("terminate", {})
-        if not terminate_cfg.get("enabled", False):
-            components["terminate"] = 0.0
-        else:
-            # Stage 1 will implement this body. Until then a disabled-but-enabled
-            # flag still contributes nothing.
-            components["terminate"] = 0.0
+        # Stage 1 — terminate (M2 "only-then-complete").
+        components["terminate"] = self._compute_terminate(trajectory_context)
 
-        # Stage 2 — antithrash. Disabled in Stage 0 -> 0.0.
+        # Stage 2 — antithrash. Disabled -> 0.0.
         antithrash_cfg = self.config.get("antithrash", {})
         if not antithrash_cfg.get("enabled", False):
             components["antithrash"] = 0.0
@@ -1379,8 +1461,20 @@ class CompositeLoopShaper:
         stdout: Optional[str],
         original_reward: float,
         chat_history: Optional[List[Dict[str, Any]]] = None,
+        trajectory_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[float, Dict[str, float]]:
         """Compute the composite reward and a per-component breakdown.
+
+        ``trajectory_context`` (Stage 1+) carries the finished-trajectory signals
+        the behavioral components need but that are NOT derivable from
+        ``stdout``/``chat_history`` alone:
+          - ``mark_complete`` (bool): did the trajectory end in a confirmed
+            ``mark_task_complete``?
+          - ``verifier_reward`` (float): the ground-truth verifier verdict.
+          - ``premature_stop`` (bool): did it run to the agent/step wall without
+            confirming completion (never-terminated)?
+        When ``trajectory_context`` is None (Stage-0 call sites), every behavioral
+        component contributes 0.0 -> byte-identical to Stage 0 (G1).
 
         Returns ``(final_reward, reward_components)`` where ``reward_components``
         carries ``outcome``, the clamped ``shaping_total``, and every behavioral
@@ -1390,7 +1484,7 @@ class CompositeLoopShaper:
         total_shaping_cap = abs(float(self.config.get("total_shaping_cap", 0.3)))
 
         outcome_reward = self._compute_outcome_reward(stdout, original_reward, chat_history)
-        components = self._compute_components(stdout, original_reward, chat_history)
+        components = self._compute_components(stdout, original_reward, chat_history, trajectory_context)
 
         # G2 clamp: sum the behavioral component deltas, clamp to +/- cap.
         raw_shaping = sum(components.values())
@@ -1416,8 +1510,11 @@ class CompositeLoopShaper:
         stdout: Optional[str],
         original_reward: float,
         chat_history: Optional[List[Dict[str, Any]]] = None,
+        trajectory_context: Optional[Dict[str, Any]] = None,
     ) -> float:
-        final_reward, _ = self.shape_with_components(stdout, original_reward, chat_history)
+        final_reward, _ = self.shape_with_components(
+            stdout, original_reward, chat_history, trajectory_context
+        )
         return final_reward
 
 
@@ -1680,6 +1777,7 @@ def shape_reward_with_components(
     shaper_kwargs: Optional[Dict] = None,
     chat_history: Optional[List[Dict[str, Any]]] = None,
     shaper_name: str = "composite",
+    trajectory_context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """
     Component-returning variant for container shapers.
@@ -1688,6 +1786,12 @@ def shape_reward_with_components(
       - ``"composite"``       -> the weighted-average trajectory composite shaper.
       - ``"composite_loop"``  -> the loop-behavior container shaper (Stage 0+):
         outcome term + bounded behavioral components, with the G2 clamp.
+
+    ``trajectory_context`` (Stage 1+) carries finished-trajectory signals
+    (``mark_complete`` / ``verifier_reward`` / ``premature_stop``) consumed by the
+    ``composite_loop`` terminate component. It is ignored by the legacy
+    ``composite`` shaper. When None, ``composite_loop`` is byte-identical to
+    Stage 0 (G1).
 
     Returns:
         Tuple of (final_reward, component_rewards) where component_rewards maps
@@ -1698,7 +1802,9 @@ def shape_reward_with_components(
 
     if shaper_name == "composite_loop":
         shaper = CompositeLoopShaper(**kwargs)
-        return shaper.shape_with_components(stdout, original_reward, chat_history)
+        return shaper.shape_with_components(
+            stdout, original_reward, chat_history, trajectory_context
+        )
 
     # Default: weighted-average composite shaper.
     parsed = parse_test_output(stdout, parser_name) if stdout else None

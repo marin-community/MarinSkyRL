@@ -194,8 +194,10 @@ class _ProbeLoopShaper(CompositeLoopShaper):
         super().__init__(*args, **kwargs)
         self._probe_delta = probe_delta
 
-    def _compute_components(self, stdout, original_reward, chat_history):
-        comps = super()._compute_components(stdout, original_reward, chat_history)
+    def _compute_components(self, stdout, original_reward, chat_history, *args, **kwargs):
+        # Forward any extra args (Stage 1+ added an optional ``trajectory_context``
+        # param) so the probe stays compatible across stages.
+        comps = super()._compute_components(stdout, original_reward, chat_history, *args, **kwargs)
         comps["terminate"] = self._probe_delta
         return comps
 

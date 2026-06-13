@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -50,6 +51,74 @@ MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
 # Kept here (delegating) so the existing prompt-side call site and tests are
 # unchanged.
 _normalize_prompt_token_ids = normalize_token_ids
+
+
+# Markers indicating the agent confirmed task completion (terminus-2 family).
+# The agent's raw assistant response carries the completion marker in-band:
+#   - XML parser: ``<task_complete>true</task_complete>``
+#   - JSON parser: ``"task_complete": true``
+# and Harbor's ATIF serialization emits a ``mark_task_complete`` tool call.
+# We scan assistant message content for any of these so the detector is robust
+# across the terminus-2 response formats (matches the agent's own
+# ``_check_task_complete`` logic).
+_TASK_COMPLETE_PATTERNS = (
+    re.compile(r"<task_complete>\s*true\s*</task_complete>", re.IGNORECASE),
+    re.compile(r'["\']task_complete["\']\s*:\s*true', re.IGNORECASE),
+    re.compile(r"mark_task_complete", re.IGNORECASE),
+)
+
+
+def detect_termination_signals(
+    chat_history: Optional[List[Dict[str, Any]]],
+    verifier_reward: float,
+) -> Dict[str, Any]:
+    """Derive the Stage-1 (M2) termination signals from a finished trajectory.
+
+    Returns a ``trajectory_context`` dict consumed by the ``composite_loop``
+    terminate component:
+      - ``mark_complete`` (bool): an assistant turn confirmed task completion
+        (matched any ``_TASK_COMPLETE_PATTERNS`` marker).
+      - ``verifier_reward`` (float): the ground-truth verifier verdict (passed
+        through unchanged).
+      - ``premature_stop`` (bool): the trajectory ended WITHOUT a confirmed
+        completion (ran to the agent/step wall / timeout) — the never-terminated
+        mode. This is the complement of ``mark_complete``.
+
+    Detection is read-only and never mutates ``chat_history``.
+    """
+    mark_complete = False
+    if chat_history and isinstance(chat_history, list):
+        for msg in chat_history:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            content = msg.get("content") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            # Also surface any structured tool_calls (ATIF) carrying the marker.
+            tool_calls = msg.get("tool_calls") or []
+            tool_blob = ""
+            if isinstance(tool_calls, list):
+                tool_blob = " ".join(
+                    str(tc.get("function_name") or (tc.get("function") or {}).get("name") or "")
+                    for tc in tool_calls
+                    if isinstance(tc, dict)
+                )
+            haystack = content + " " + tool_blob
+            if any(p.search(haystack) for p in _TASK_COMPLETE_PATTERNS):
+                mark_complete = True
+                break
+
+    try:
+        vr = float(verifier_reward)
+    except (TypeError, ValueError):
+        vr = 0.0
+
+    return {
+        "mark_complete": mark_complete,
+        "verifier_reward": vr,
+        # Never-terminated == ran to the wall without confirming completion.
+        "premature_stop": not mark_complete,
+    }
 
 
 @dataclass
@@ -1178,6 +1247,15 @@ class TerminalBenchGenerator(GeneratorInterface):
             # For container shapers (composite / composite_loop), capture the
             # per-component breakdown.
             if shaper_name in ("composite", "composite_loop"):
+                # Stage 1: thread finished-trajectory termination signals into the
+                # composite_loop terminate component. None for the legacy composite
+                # (it ignores trajectory_context) and a no-op when terminate is
+                # disabled, so flag-off remains byte-identical (G1).
+                trajectory_context = (
+                    detect_termination_signals(chat_history, original_reward)
+                    if shaper_name == "composite_loop"
+                    else None
+                )
                 reward, reward_components = shape_reward_with_components(
                     stdout=verifier_stdout,
                     original_reward=original_reward,
@@ -1185,6 +1263,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     shaper_kwargs=shaper_kwargs,
                     chat_history=chat_history,
                     shaper_name=shaper_name,
+                    trajectory_context=trajectory_context,
                 )
             else:
                 reward = shape_reward_from_output(
