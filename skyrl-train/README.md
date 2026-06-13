@@ -63,6 +63,19 @@ uv sync --extra vllm
 source .venv/bin/activate
 ```
 
+#### Extra ↔ torch version matrix (FSDP2 Context-Parallel branch)
+
+The inference/training extras are mutually exclusive (see `[tool.uv].conflicts` in
+`pyproject.toml`) because each pins its own exact `torch`. Pick exactly one with `uv sync --extra <X>`:
+
+| Extra      | torch    | Notes                                                                    |
+|------------|----------|--------------------------------------------------------------------------|
+| (base)     | `>=2.10` | trainer floor — carries torch-native `context_parallel` for FSDP2 CP     |
+| `vllm`     | `2.11.0` | active inference path / CP set (vLLM 0.20.2rc0, flash-attn 2.6.3)         |
+| `sglang`   | `2.11.0` | sglang 0.5.13 (first sglang line on torch 2.11); uv-resolve verified     |
+| `mcore`    | `2.9.1`  | Megatron path: TE 2.12 + megatron-bridge 0.3.0 (+ megatron-core in bridge's range). **Partial** — the Megatron components support torch 2.10, but the bundled vLLM (0.14.1) hard-pins `torch==2.9.1` (every published vLLM through 0.16.1 does), capping this extra at 2.9.1 until vLLM moves to torch 2.10 |
+| `flashrl`  | `2.7.0`  | **blocked at torch 2.7** — FlashRL's separately-installed custom vLLM wheel is only built/tested up to vLLM 0.10.0 / torch 2.7.1 ([upstream](https://github.com/yaof20/Flash-RL)); no torch-2.10/2.11 custom wheel exists yet |
+
 Then, prepare the dataset:
 
 ```bash
