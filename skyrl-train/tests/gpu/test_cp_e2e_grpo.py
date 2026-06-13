@@ -376,7 +376,7 @@ def test3_cp_ep_moe(world_size, rank):
 
     from skyrl_train.distributed.fsdp_utils import create_device_mesh, apply_ep
     from skyrl_train.models.layers.moe import MoE
-    from skyrl_train.distributed.cp_utils import cp_context, context_parallel_unshard
+    from skyrl_train.distributed.cp_utils import cp_context, context_parallel_unshard, cp_unshard_grad_safe
     from torch.distributed.tensor import DTensor
 
     # ---- Verify the 4-D mesh slices compose (the Stage-3 concern) ----
@@ -492,15 +492,34 @@ def test3_cp_ep_moe(world_size, rank):
     # EP+CP: shard x over the cp submesh, run, unshard back to [B, S, D].
     atol = 5e-2  # bf16 grouped-mm + ring reassociation.
     try:
+        # NOTE: torch's context_parallel shards `xb` IN-PLACE on entry and RESTORES
+        # it IN-PLACE on exit; either bumps xb's version-counter. If the grad-carrying
+        # forward differentiates `xb` DIRECTLY (the router gate matmul saves it for
+        # MmBackward), that exit-restore invalidates the saved input ->
+        # "variable ... modified by an inplace operation: [10,256] is at version 4".
+        # Production never hits this: model layers operate on the EMBEDDING output (a
+        # fresh tensor derived from integer input ids), not the raw rotated buffer. We
+        # mirror that here: keep `xb` in `no_restore` (don't mutate it back on exit)
+        # AND feed the MoE a clone of the sharded buffer (xs) so MmBackward saves a
+        # tensor decoupled from torch's CP in-place machinery.
         xb = x.clone()
-        with cp_context(cp_mesh, "allgather", buffers=[xb], seq_dims=[1], no_restore=set()):
-            out_local = epcp(xb)  # [B, S/cp, D]
-        out_epcp = context_parallel_unshard(cp_mesh, [out_local], [1])[0]  # [B, S, D]
+        with cp_context(cp_mesh, "allgather", buffers=[xb], seq_dims=[1], no_restore={xb}):
+            xs = xb.clone()  # fresh leaf-of-graph input, immune to exit-restore
+            out_local = epcp(xs)  # [B, S/cp, D]
+        # Differentiable unshard (CP training path): stock context_parallel_unshard
+        # is @torch.no_grad and would detach out_epcp from the params (-> backward
+        # 'element 0 does not require grad'); cp_unshard_grad_safe is the autograd-aware
+        # unshard the production model_wrapper uses for the grad-carrying logprobs.
+        out_epcp = cp_unshard_grad_safe(cp_mesh, out_local, 1)  # [B, S, D], differentiable
         diff = (out_ep1 - out_epcp).abs().max().item()
         ok_parity = torch.allclose(out_ep1, out_epcp, atol=atol)
         # one backward to confirm the 4-D-mesh grad path is live.
         epcp.zero_grad()
-        out_epcp.float().pow(2).sum().backward()
+        if os.environ.get("SKYRL_CP_ANOMALY"):
+            with torch.autograd.set_detect_anomaly(True, check_nan=False):
+                out_epcp.float().pow(2).sum().backward()
+        else:
+            out_epcp.float().pow(2).sum().backward()
         gate_g = epcp.router.gate.weight.grad
         w2g = epcp.experts.w2.grad
         w2g = w2g.to_local() if isinstance(w2g, DTensor) else w2g

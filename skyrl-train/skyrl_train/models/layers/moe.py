@@ -97,21 +97,20 @@ def _run_experts_grouped_mm(
     return out
 
 
-# Stage 4a: the EP grouped-mm compute path. The torchtitan ``@expert_parallel``
-# decorator (1) converts the expert DTensor params to local tensors, and (2) runs
-# ``generate_permute_indices`` to re-shuffle the cross-rank interleaved
-# ``num_tokens_per_expert_group`` (returned by ``ExpertParallel._token_dispatch``)
-# into local-expert order + pad each group to ALIGN_SIZE_M for ``torch._grouped_mm``.
-# It is applied ONLY here (the EP>1 compute path); the bare for-loop above stays the
-# EP=1 fp32 parity oracle. Imported lazily so the base (no-EP) install never needs
-# torchtitan.
-def _maybe_build_ep_grouped_mm():
-    from torchtitan.distributed.expert_parallel import expert_parallel
-
-    return expert_parallel(_run_experts_grouped_mm)
-
-
-_run_experts_grouped_mm_ep = None
+# Stage 4a: the EP grouped-mm compute path.
+#
+# torchtitan API note (0.2.2): the permute/pad that the OLD ``@expert_parallel``
+# decorator performed has moved INTO ``ExpertParallel._token_dispatch`` (the
+# distribute_module input_fn): when EP is active that hook all_to_all's the tokens
+# AND runs ``generate_permute_indices`` to re-shuffle the cross-rank interleaved
+# ``num_tokens_per_expert_group`` into local-expert order + pad each group to
+# ALIGN_SIZE_M, and ``_token_combine`` (output_fn) unpermutes. So the EP COMPUTE
+# below must run the BARE grouped-mm over the already-dispatched/padded local
+# tokens — wrapping it (double-permute/pad) is wrong on the EP path. The standalone
+# padding helper was also renamed ``expert_parallel`` -> ``indices_padding_wrapper``
+# and moved to ``torchtitan.models.moe.utils``; it is the NON-EP grouped-mm padder
+# only (a single rank with no dispatch), which the EP=1 oracle path does not need.
+# Mirrors torchtitan's own ``GroupedExperts.forward`` (models/moe/moe.py).
 
 
 class GroupedExperts(nn.Module):
@@ -160,17 +159,18 @@ class GroupedExperts(nn.Module):
         # DeepEP backend: dispatch/permute happened upstream in MoE; run local experts.
         if self.ep_comm_backend == "deepep":
             return self._forward_deepep(x, num_tokens_per_expert)
-        # EP active ⇒ params are DTensors (Shard(0) on the ep submesh). The
-        # ExpertParallel _token_dispatch hook has already all_to_all'd `x` and
-        # returned the cross-rank interleaved `num_tokens_per_expert` here; the
-        # @expert_parallel-decorated grouped-mm re-permutes + pads, runs
-        # torch._grouped_mm on the local experts, then unpermutes. The bare
-        # for-loop is EP=1-only (it cannot consume the interleaved counts).
+        # EP active ⇒ params are DTensors (Shard(0) on the ep submesh). torchtitan's
+        # ExpertParallel._token_dispatch hook has ALREADY all_to_all'd `x` and run
+        # generate_permute_indices to re-permute into local-expert order + pad each
+        # group to ALIGN_SIZE_M; _token_combine unpermutes after. So here we just drop
+        # the ep Shard(0) (`.to_local()`) and run the BARE grouped-mm over the local
+        # experts — NO padding wrapper (that would double-pad). Mirrors torchtitan's
+        # own GroupedExperts.forward. The for-loop is EP=1-only.
         if isinstance(self.w1, DTensor):
-            global _run_experts_grouped_mm_ep
-            if _run_experts_grouped_mm_ep is None:
-                _run_experts_grouped_mm_ep = _maybe_build_ep_grouped_mm()
-            return _run_experts_grouped_mm_ep(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+            w1 = self.w1.to_local()
+            w2 = self.w2.to_local()
+            w3 = self.w3.to_local()
+            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
