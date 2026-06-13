@@ -58,6 +58,13 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "enforce_eager": cfg.generator.enforce_eager,
         "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
         "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
+        # vLLM Decode Context Parallel (DCP). Default 1 (disabled) -> forwarded as the
+        # signature default and (per ray_wrapped_inference_engine) NOT passed to the vLLM
+        # engine, so flag-off engine init is byte-identical to today (G1). When > 1 it is
+        # threaded into vllm.LLM / AsyncEngineArgs as a native EngineArgs kwarg. DCP rides
+        # the TP GPUs and is NOT part of any GPU/placement math (G4). Reaches both the
+        # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
+        "decode_context_parallel_size": cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         "shared_pg": colocate_pg,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
@@ -171,6 +178,10 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
         data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
+        # DCP metadata only: for remote engines the operator must pass `-dcp <n>` on the
+        # external `vllm serve` launch — SkyRL does not spawn remote servers. Carried here
+        # for geometry/GPU-accounting consistency (DCP reuses the TP GPUs; no extra GPUs).
+        decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
     )
 
 

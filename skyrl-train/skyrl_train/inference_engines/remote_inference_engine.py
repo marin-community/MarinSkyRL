@@ -128,8 +128,16 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         pp_size: Optional[int] = None,
         dp_size: Optional[int] = None,
         ep_size: Optional[int] = None,
+        dcp_size: Optional[int] = None,
     ):
-        """Initialize the InferenceEngine."""
+        """Initialize the InferenceEngine.
+
+        Note on `dcp_size` (decode context parallel): for remote engines SkyRL does NOT
+        launch the inference server, so DCP must be enabled on the EXTERNAL `vllm serve`
+        command via `-dcp <n>`. We carry `dcp_size` here as client metadata only (mirroring
+        `tp_size`) for geometry validation / GPU-accounting consistency; it is never sent to
+        or used to spawn the server. DCP reuses the TP group's GPUs (adds no GPUs — G4).
+        """
         self.url = f"http://{url}"
         self.model_name = model_name
         self.engine_backend = engine_backend
@@ -137,6 +145,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         self._pp_size = pp_size
         self._dp_size = dp_size
         self._ep_size = ep_size
+        self._dcp_size = dcp_size
         self.tokenizer = tokenizer
 
         # Create weight loader for coordinating weight updates
@@ -153,6 +162,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
     def ep_size(self) -> int:
         return self._ep_size
+
+    def dcp_size(self) -> int:
+        return self._dcp_size
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 1. Prepare inputs
@@ -326,7 +338,12 @@ def create_remote_inference_engines(
     pipeline_parallel_size: Optional[int] = None,
     data_parallel_size: Optional[int] = None,
     expert_parallel_size: Optional[int] = None,
+    decode_context_parallel_size: Optional[int] = None,
 ):
+    # `decode_context_parallel_size` is metadata only for remote engines: SkyRL does not
+    # launch the server, so the operator must pass `-dcp <n>` on the external `vllm serve`
+    # command. DCP reuses the TP GPUs (adds no GPUs — G4); it never changes the client's
+    # GPU accounting or the request payload.
     return [
         RemoteInferenceEngine(
             url=url,
@@ -337,6 +354,7 @@ def create_remote_inference_engines(
             pp_size=pipeline_parallel_size,
             dp_size=data_parallel_size,
             ep_size=expert_parallel_size,
+            dcp_size=decode_context_parallel_size,
         )
         for url in urls
     ]
