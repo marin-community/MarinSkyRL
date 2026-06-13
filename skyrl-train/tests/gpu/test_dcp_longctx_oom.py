@@ -234,10 +234,14 @@ def _mode_headroom():
         # dcp=1 could NOT init (max2, which dcp=1 OOMed below) and complete a real
         # rollout — i.e. a context that dcp=1 cannot serve but dcp=2 can.
         try:
-            prompt_len = min(max2 - OOM_GEN_LEN - 8, max(OOM_PROMPT_LEN, max1 + 1024))
+            # prompt strictly BEYOND dcp=1's max (so it's a dcp=1-infeasible context),
+            # but only modestly so — a huge prefill (~max2) would be needlessly slow and
+            # the point is "dcp=1 cannot serve this; dcp=2 can". delta is bounded.
+            E2E_DELTA = int(os.environ.get("DCP_E2E_DELTA", "16384"))
+            prompt_len = min(max2 - OOM_GEN_LEN - 8, max1 + E2E_DELTA)
             prompt_len = max(prompt_len, max1 + 512)  # strictly beyond dcp=1's reach
             print(f"[Stage4-DCP] E2E: rebuilding dcp={DCP} @ max_model_len={max2} and running a "
-                  f"prompt_len={prompt_len} rollout (a context dcp=1 OOMed on) ...")
+                  f"prompt_len={prompt_len} rollout (a context dcp=1 OOMed on; dcp=1 max was {max1}) ...")
             llm2 = _build(dcp=DCP, max_model_len=max2, gpu_util=HEADROOM_GPUUTIL)
             from vllm import SamplingParams
             from vllm.inputs import TokensPrompt
