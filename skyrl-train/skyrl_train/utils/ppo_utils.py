@@ -1482,6 +1482,68 @@ def compute_rloo_n_outcome_advantage(
     return scores, scores
 
 
+@register_advantage_estimator("rloo_n_pbs")
+def compute_rloo_n_pbs_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    exclude_from_baseline: Optional[np.ndarray] = None,
+    config=None,
+    token_level_shaping: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """RLOO-N outcome advantage + potential-based shaping (Stage C / F6).
+
+    Combines RLOO-N's per-trajectory outcome advantage (computed exactly as
+    ``compute_rloo_n_outcome_advantage`` — the outcome term reads ``rewards``
+    ONLY and is left bit-for-bit intact) with the per-token potential-based
+    shaping channel ``token_level_shaping`` (the PBS test-delta credit scattered
+    onto the EDIT-token span by ``pbs_shaping.compute_pbs_token_shaping``).
+
+    The combination is the additive + separate seam proven in Stage B:
+
+        advantage = rloo_n_outcome_advantage + token_level_shaping * response_mask
+
+    Properties:
+      * ``token_level_shaping is None`` or all-zeros ⇒ this returns EXACTLY the
+        RLOO-N advantage (pure RLOO-N; the flag-off / no-signal path).
+      * PBS is policy-invariant (Ng 1999): ``token_level_shaping`` is a true
+        potential difference ``γ·Φ(s') − Φ(s)`` built upstream, so adding it
+        cannot change the optimal policy.
+      * The shaping is masked by ``response_mask`` and only applied to response
+        tokens (the same support as the outcome advantage), so the
+        advantage/loss denominator (``response_mask.sum()``) is unchanged — no
+        seqnorm-style denominator break.
+
+    Returns ``(advantages, returns)`` with the same shape/semantics as RLOO-N
+    (advantages == returns; critic-free).
+    """
+    # Outcome term: unchanged RLOO-N (reads `rewards` only).
+    outcome_adv, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        exclude_from_baseline=exclude_from_baseline,
+        config=config,
+        **kwargs,
+    )
+
+    if token_level_shaping is None:
+        return outcome_adv, outcome_adv
+
+    with torch.no_grad():
+        shaping = token_level_shaping.to(device=outcome_adv.device, dtype=outcome_adv.dtype)
+        # Defensive shape-align (right-padded to response_mask width).
+        if shaping.shape != response_mask.shape:
+            sl = min(shaping.shape[-1], response_mask.shape[-1])
+            aligned = torch.zeros_like(response_mask, dtype=outcome_adv.dtype)
+            aligned[..., :sl] = shaping[..., :sl]
+            shaping = aligned
+        combined = outcome_adv + shaping * response_mask
+
+    return combined, combined
+
+
 @register_advantage_estimator(AdvantageEstimator.GAE)
 def compute_gae_advantage_return(
     token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],

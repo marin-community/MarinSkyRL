@@ -23,6 +23,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
 from skyrl_train.utils.span_tagger import tag_response_spans
+from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -210,6 +211,22 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
         self._enable_span_tagging = bool(
             self._reward_shaping_config.get("enable_span_tagging", True)
+        )
+
+        # Loop-behavior reward shaping (Stage C / F2 + F6): potential-based
+        # shaping (PBS) of the EDIT-token span from the in-trajectory test-delta.
+        # Default False -> the channel ships Stage-B ZEROS (no-op). Requires the
+        # token reward channel AND span tagging to be on (PBS scatters onto the
+        # F4 EDIT tags). PBS is policy-invariant (Ng 1999) and bounded.
+        self._enable_pbs_shaping = bool(
+            self._reward_shaping_config.get("enable_pbs_shaping", False)
+        )
+        self._pbs_gamma = float(self._reward_shaping_config.get("pbs_gamma", 1.0))
+        self._pbs_max_total_shaping = float(
+            self._reward_shaping_config.get("pbs_max_total_shaping", 0.3)
+        )
+        self._pbs_potential_shape = str(
+            self._reward_shaping_config.get("pbs_potential_shape", "linear")
         )
 
         # Error handling config (for RLOO-N advantage estimator)
@@ -1469,6 +1486,32 @@ class TerminalBenchGenerator(GeneratorInterface):
                 if len(tags) < len(response_ids):
                     tags = tags + [0] * (len(response_ids) - len(tags))
                 response_span_tags = tags
+
+            # Stage C (F2 + F6): replace the Stage-B zeros with potential-based
+            # shaping of the EDIT-token span from the in-trajectory test-delta.
+            # Requires span tags (PBS scatters onto SPAN_EDIT tokens). When the
+            # trajectory has no recognized test output / no edit turn, PBS returns
+            # an all-zero vector -> that trajectory stays pure-RLOO-N. PBS is
+            # policy-invariant (Ng 1999) and bounded to ±pbs_max_total_shaping.
+            if self._enable_pbs_shaping and response_span_tags is not None:
+                try:
+                    pbs_vector = compute_pbs_token_shaping(
+                        chat_history,
+                        response_span_tags,
+                        gamma=self._pbs_gamma,
+                        max_total_shaping=self._pbs_max_total_shaping,
+                        potential_shape=self._pbs_potential_shape,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Trajectory {trajectory_id}: PBS shaping failed ({e}); "
+                        f"falling back to zeros (outcome-only)."
+                    )
+                    pbs_vector = [0.0] * len(response_span_tags)
+                # Length-parity: pbs_vector is built on response_span_tags length.
+                if len(pbs_vector) < len(token_level_shaping):
+                    pbs_vector = pbs_vector + [0.0] * (len(token_level_shaping) - len(pbs_vector))
+                token_level_shaping = pbs_vector[: len(token_level_shaping)]
 
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]

@@ -251,6 +251,16 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # so the tagger cost can be disabled independently. No-op when the channel
         # is off.
         "enable_span_tagging": FieldMapping("enable_span_tagging", default=True),
+        # Loop-behavior reward shaping (Stage C / F2 + F6): potential-based shaping
+        # of the EDIT-token span from the in-trajectory test-delta. Default False ->
+        # the channel ships Stage-B ZEROS (no-op, byte-identical). Requires
+        # enable_token_reward_channel + enable_span_tagging. PBS is policy-invariant
+        # (Ng 1999); the total shaping is bounded to ±pbs_max_total_shaping so the
+        # hidden-test outcome reward stays dominant.
+        "enable_pbs_shaping": FieldMapping("enable_pbs_shaping", default=False),
+        "pbs_gamma": FieldMapping("pbs_gamma", default=1.0),
+        "pbs_max_total_shaping": FieldMapping("pbs_max_total_shaping", default=0.3),
+        "pbs_potential_shape": FieldMapping("pbs_potential_shape", default="linear"),
     }
 )
 

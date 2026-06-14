@@ -1170,6 +1170,12 @@ class RayPPOTrainer:
         else:
             # For RLOO-N: pass exclude_from_baseline if present in metadata
             exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)
+            # Stage C (F6): thread the per-token PBS shaping channel into the
+            # advantage estimator when it is present. The dispatcher forwards it
+            # via **kwargs; only the rloo_n_pbs combiner consumes it (every other
+            # estimator ignores the extra kwarg), and when the key is absent
+            # (channel off) token_level_shaping is None -> byte-identical path.
+            token_level_shaping = data["token_level_shaping"] if "token_level_shaping" in data else None
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
@@ -1181,6 +1187,7 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
                 exclude_from_baseline=exclude_from_baseline,
+                token_level_shaping=token_level_shaping,
             )
         data["returns"] = returns
         data["advantages"] = advantages
