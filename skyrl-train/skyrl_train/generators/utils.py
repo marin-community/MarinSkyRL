@@ -439,6 +439,39 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
                 for response_ids in output["response_ids"]:
                     rollout_routed_experts_concat.append([[[SENTINEL_EXPERT_ID]] for _ in range(len(response_ids))])
 
+    # Loop-behavior reward shaping (Stage B / F5 + F4): mix the per-token shaping
+    # channel + span tags the same way as routed_experts — sentinel-fill (zeros)
+    # any batch that lacks them so the concatenated list stays 1:1 with
+    # response_ids. When the channel is off NO batch carries the keys (the
+    # generator omits them), so these stay None and the result is byte-identical.
+    has_token_shaping = [
+        "token_level_shaping" in output and output.get("token_level_shaping") is not None
+        for output in generator_outputs
+    ]
+    token_level_shaping_concat = None
+    if any(has_token_shaping):
+        token_level_shaping_concat = []
+        for output in generator_outputs:
+            if "token_level_shaping" in output and output.get("token_level_shaping") is not None:
+                token_level_shaping_concat.extend(output["token_level_shaping"])
+            else:
+                for response_ids in output["response_ids"]:
+                    token_level_shaping_concat.append([0.0] * len(response_ids))
+
+    has_span_tags = [
+        "response_span_tags" in output and output.get("response_span_tags") is not None
+        for output in generator_outputs
+    ]
+    response_span_tags_concat = None
+    if any(has_span_tags):
+        response_span_tags_concat = []
+        for output in generator_outputs:
+            if "response_span_tags" in output and output.get("response_span_tags") is not None:
+                response_span_tags_concat.extend(output["response_span_tags"])
+            else:
+                for response_ids in output["response_ids"]:
+                    response_span_tags_concat.append([0] * len(response_ids))
+
     result: GeneratorOutput = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
@@ -453,6 +486,10 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     }
     if rollout_routed_experts_concat is not None:
         result["rollout_routed_experts"] = rollout_routed_experts_concat
+    if token_level_shaping_concat is not None:
+        result["token_level_shaping"] = token_level_shaping_concat
+    if response_span_tags_concat is not None:
+        result["response_span_tags"] = response_span_tags_concat
 
     # propagate additional keys with list values as-is
     additional_keys = [

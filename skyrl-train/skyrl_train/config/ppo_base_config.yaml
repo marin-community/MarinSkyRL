@@ -201,9 +201,18 @@ trainer:
     eps_clip_high: 0.2
     # dual clip parameters
     clip_ratio_c: 3.0
-    # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+    # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
+    # per-token shaping channel (token_level_shaping) + span tags
+    # (response_span_tags). Default false -> the trainer never pulls these from the
+    # GeneratorOutput nor sets them on the TrainingInputBatch, so the flag-off
+    # batch + advantage + loss are byte-identical to today. When true, Stage B
+    # threads the channel as ZEROS (no-op); Stages C/D register the combiner that
+    # fills it. NOTE: the generator-side gate lives in the harbor reward_shaping
+    # block (reward_shaping.enable_token_reward_channel); set BOTH to enable.
+    enable_token_reward_channel: false
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:
       tau_pos: 1.0

@@ -174,6 +174,8 @@ def test_packer_shape_and_right_pad(char_tokenizer):
         ret_loss_masks,
         logprobs_tensor,
         routed_experts_tensor,
+        _token_level_shaping_tensor,
+        _response_span_tags_tensor,
     ) = convert_prompts_responses_to_batch_tensors(
         char_tokenizer, prompts, responses, rewards, loss_masks, None, routed_experts
     )
@@ -207,8 +209,10 @@ def test_packer_noop_flag_off(char_tokenizer):
     res_off = convert_prompts_responses_to_batch_tensors(
         char_tokenizer, prompts, responses, rewards, loss_masks
     )
-    assert len(res_off) == 7
+    assert len(res_off) == 9
     assert res_off[6] is None  # routed_experts_tensor
+    assert res_off[7] is None  # token_level_shaping_tensor (Stage B, off)
+    assert res_off[8] is None  # response_span_tags_tensor (Stage B, off)
 
     res_off2 = convert_prompts_responses_to_batch_tensors(
         char_tokenizer, prompts, responses, rewards, loss_masks, None, None
@@ -241,7 +245,7 @@ def test_training_input_batch_noop_vs_present(char_tokenizer):
         # a real logprobs tensor so every present field is a Tensor (TensorBatch
         # .__eq__ does torch.equal over present keys).
         logprobs = [[0.0] * len(r) for r in responses]
-        (seq, attn, resp_mask, rew, lm, lp, re_t) = convert_prompts_responses_to_batch_tensors(
+        (seq, attn, resp_mask, rew, lm, lp, re_t, _tls, _rst) = convert_prompts_responses_to_batch_tensors(
             char_tokenizer, prompts, responses, rewards, loss_masks, logprobs, routed_experts
         )
         batch = TrainingInputBatch(

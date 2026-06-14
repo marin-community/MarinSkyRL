@@ -22,6 +22,7 @@ from skyrl_train.generators.utils import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
+from skyrl_train.utils.span_tagger import tag_response_spans
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -145,6 +146,11 @@ class TerminalBenchAgentOutput:
     # Aggregated into rollout_metrics as tis/* so an LCS fallback or alignment
     # failure can never silently degrade TIS. None when no logprobs were present.
     alignment_stats: Optional[AlignmentStats] = None
+    # Loop-behavior reward shaping (Stage B / F5 + F4): per-token additive shaping
+    # channel (zeros in Stage B) + span tags, aligned 1:1 with response_ids. None
+    # unless enable_token_reward_channel is on.
+    token_level_shaping: Optional[List[float]] = None
+    response_span_tags: Optional[List[int]] = None
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -195,6 +201,16 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Reward shaping config (parses test output for partial credit)
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
+
+        # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
+        # per-token shaping channel + span tagger. Default False -> the generator
+        # emits neither field, so the GeneratorOutput is byte-identical to today.
+        self._enable_token_reward_channel = bool(
+            self._reward_shaping_config.get("enable_token_reward_channel", False)
+        )
+        self._enable_span_tagging = bool(
+            self._reward_shaping_config.get("enable_span_tagging", True)
+        )
 
         # Error handling config (for RLOO-N advantage estimator)
         self._error_handling_config = self._harbor_config_builder.get_error_handling_config()
@@ -985,6 +1001,30 @@ class TerminalBenchGenerator(GeneratorInterface):
                             [list(sentinel_row) for _ in range(len(output.response_ids))]
                         )
 
+        # Collect the Stage B per-token shaping channel + span tags. Gated on
+        # enable_token_reward_channel so the GeneratorOutput is byte-identical when
+        # off (keys omitted entirely). Sentinel-fill (zeros) any sample missing them
+        # so the lists stay 1:1 with response_ids. Emitted for train AND eval is
+        # harmless (channel is zeros), but mirror the routed_experts train-only gate
+        # to keep eval batches identical.
+        token_level_shaping_list = None
+        response_span_tags_list = None
+        if self._enable_token_reward_channel and not is_eval:
+            if any(output.token_level_shaping is not None for output in all_outputs):
+                token_level_shaping_list = [
+                    output.token_level_shaping
+                    if output.token_level_shaping is not None
+                    else [0.0] * len(output.response_ids)
+                    for output in all_outputs
+                ]
+            if any(output.response_span_tags is not None for output in all_outputs):
+                response_span_tags_list = [
+                    output.response_span_tags
+                    if output.response_span_tags is not None
+                    else [0] * len(output.response_ids)
+                    for output in all_outputs
+                ]
+
         # Aggregate per-component reward metrics (composite shaper only)
         component_outputs = [o for o in all_outputs if o.reward_components is not None]
         if component_outputs:
@@ -1040,6 +1080,13 @@ class TerminalBenchGenerator(GeneratorInterface):
         # GeneratorOutput dict is byte-identical to today (key absent, not None).
         if rollout_routed_experts_list is not None:
             generator_output["rollout_routed_experts"] = rollout_routed_experts_list
+
+        # Attach the Stage B channel + tags only when present, so the flag-off
+        # GeneratorOutput dict is byte-identical to today (keys absent, not None).
+        if token_level_shaping_list is not None:
+            generator_output["token_level_shaping"] = token_level_shaping_list
+        if response_span_tags_list is not None:
+            generator_output["response_span_tags"] = response_span_tags_list
 
         return generator_output
 
@@ -1392,6 +1439,37 @@ class TerminalBenchGenerator(GeneratorInterface):
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
 
+        # Loop-behavior reward shaping (Stage B / F5 + F4): when the channel is
+        # enabled, emit a per-token shaping vector (ZEROS in Stage B — no-op) and,
+        # optionally, the F4 span tags. Both are computed on the SAME response_ids
+        # layout (the tagger re-walks the exact per-turn segmentation), so they
+        # align 1:1 with the training tokens. None when the channel is off ->
+        # byte-identical GeneratorOutput.
+        token_level_shaping: Optional[List[float]] = None
+        response_span_tags: Optional[List[int]] = None
+        if self._enable_token_reward_channel:
+            token_level_shaping = [0.0] * len(response_ids)
+            if self._enable_span_tagging:
+                try:
+                    tags = tag_response_spans(
+                        response_messages,
+                        self.tokenizer,
+                        custom_chat_template=self.custom_chat_template_content,
+                        assistant_token_ids=assistant_token_ids,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Trajectory {trajectory_id}: span tagging failed ({e}); "
+                        f"emitting all-OTHER tags."
+                    )
+                    tags = [0] * len(response_ids)
+                # Length-parity guard: the tagger re-walks the same segmentation,
+                # but truncate/pad to response_ids length to stay 1:1 even if a
+                # chat-template edge case drifts (mirrors the truncation below).
+                if len(tags) < len(response_ids):
+                    tags = tags + [0] * (len(response_ids) - len(tags))
+                response_span_tags = tags
+
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
@@ -1399,6 +1477,10 @@ class TerminalBenchGenerator(GeneratorInterface):
             rollout_logprobs = rollout_logprobs[:max_response_tokens]
         if rollout_routed_experts is not None:
             rollout_routed_experts = rollout_routed_experts[:max_response_tokens]
+        if token_level_shaping is not None:
+            token_level_shaping = token_level_shaping[:max_response_tokens]
+        if response_span_tags is not None:
+            response_span_tags = response_span_tags[:max_response_tokens]
 
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
@@ -1412,4 +1494,6 @@ class TerminalBenchGenerator(GeneratorInterface):
             summarization_count=summarization_count,
             reward_components=reward_components,
             alignment_stats=alignment_stats,
+            token_level_shaping=token_level_shaping,
+            response_span_tags=response_span_tags,
         )

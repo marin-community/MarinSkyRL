@@ -342,6 +342,17 @@ class TrainingInput(TypedDict, total=False):
     # per-token precedent: teacher_top_k_* above; TensorBatch._check_consistency
     # only validates dim-0, so 4-D is accepted. Consumed in Stage 2 (replay), not here.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]
+    # Loop-behavior reward shaping (Stage B / F5): per-token additive shaping
+    # channel, SEPARATE from `rewards` (the RLOO-N outcome term). Default all-zeros
+    # and present ONLY when trainer.algorithm.enable_token_reward_channel is True,
+    # so the flag-off TrainingInputBatch keyset is byte-identical to today. The
+    # combiner that ADDS this into the advantage is registered in Stage C; Stage B
+    # only makes it flow as zeros (no-op).
+    token_level_shaping: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    # Loop-behavior reward shaping (Stage B / F4): per-token span tags
+    # {OTHER=0, THINK=1, ACTION=2, EDIT=3}, aligned 1:1 with the response tokens
+    # (same exact-token-id layout TIS uses). Present only when the channel is on.
+    response_span_tags: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

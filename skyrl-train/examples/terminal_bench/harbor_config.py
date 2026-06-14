@@ -241,6 +241,16 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # falls back to its own defaults when unset.
         "loop_shaping": FieldMapping("loop_shaping", default=None),
         "loop_outcome_shaper": FieldMapping("loop_outcome_shaper", default=None),
+        # Loop-behavior reward shaping (Stage B / F5 + F4): the master gate for the
+        # per-token shaping channel + span tagger. Default False -> the generator
+        # emits NEITHER token_level_shaping NOR response_span_tags, so the
+        # GeneratorOutput is byte-identical to today. When True, Stage B emits the
+        # channel as ZEROS (no-op) plus the span tags; Stages C/D fill the channel.
+        "enable_token_reward_channel": FieldMapping("enable_token_reward_channel", default=False),
+        # When True (and the channel is enabled) also emit F4 span tags. Separable
+        # so the tagger cost can be disabled independently. No-op when the channel
+        # is off.
+        "enable_span_tagging": FieldMapping("enable_span_tagging", default=True),
     }
 )
 

@@ -105,7 +105,7 @@ def test_normalized_prompt_collates_into_training_batch():
     rewards = [[0.0, 1.0]]
     loss_masks = [[1, 1]]
 
-    seq, attn, action_mask, ret_rewards, ret_loss, lp, re_t = (
+    seq, attn, action_mask, ret_rewards, ret_loss, lp, re_t, _tls, _rst = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer, prompts, responses, rewards, loss_masks
         )
