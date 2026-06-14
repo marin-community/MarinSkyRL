@@ -337,12 +337,25 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             placement's own `_split_tensor` (so _StridedShard is honored) and keeps
             this rank's coordinate slice. Returns the local-shard CPU tensor.
             """
+            # `_StridedShard` (the placement FSDP2 emits for the expert dim sharded
+            # by BOTH the fsdp and ep mesh dims) returns `is_shard() == False` on
+            # torch 2.11 — the SAME quirk that broke apply_ep's composition assert
+            # (fixed in 4e52223). Gating the split on `is_shard()` here SKIPS the
+            # _StridedShard (fsdp) mesh dim, so the assembled local shard keeps the
+            # full ep-only row count (num_experts//ep) instead of being further split
+            # by sf=fsdp_size → it is `fsdp_size`× too large and the loader shape
+            # assert (B1) fires (job 860696: assembled (32,..) != live (8,..), fsdp=4).
+            # Match on the placement TYPE so _StridedShard._split_tensor (which honors
+            # the strided layout, as the docstring already intends) actually runs.
+            from torch.distributed.tensor.placement_types import Shard
+            from torch.distributed.tensor._dtensor_spec import _StridedShard
+
             mesh = dtensor_meta.device_mesh
             placements = dtensor_meta.placements
             coord = mesh.get_coordinate()  # this rank's coord per mesh dim
             cur = full_cpu
             for mesh_dim, placement in enumerate(placements):
-                if placement.is_shard():
+                if isinstance(placement, (Shard, _StridedShard)):
                     num_chunks = mesh.size(mesh_dim)
                     shards, _ = placement._split_tensor(
                         cur, num_chunks, with_padding=False, contiguous=True
