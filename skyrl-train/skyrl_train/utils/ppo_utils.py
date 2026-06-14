@@ -1189,6 +1189,68 @@ def compute_policy_loss_kl_cov(
     return pg_loss, 0.0
 
 
+# ---------------------------------------------------------------------------
+# Stage D (F7) — think-token down-weighting of the loss mask.
+# ---------------------------------------------------------------------------
+# The loss path (ppo_policy_loss -> reduce_loss -> masked_mean) consumes a 0/1
+# `loss_mask`. F7 generalizes it to a per-token WEIGHT vector so `<think>` tokens
+# can be DOWN-WEIGHTED (weight < 1, NOT zeroed — some planning is load-bearing).
+# Because `masked_mean` computes (loss * mask).sum() / mask.sum().clamp(min=1),
+# a weight vector produces the correct WEIGHTED mean (weighted numerator over
+# weighted denominator) with no separate denominator surgery — the same seam
+# `reduce_loss`'s token_mean / sequence_mean / seq_mean_token_sum_norm[_global]
+# branches already use. The weight only re-scales the per-token contribution;
+# the support (which tokens count) is unchanged because THINK weight > 0.
+#
+# BYTE-IDENTICAL CONTRACT: when `think_token_weight == 1.0` (the default) OR the
+# span tags are absent, this returns the ORIGINAL `loss_mask` object untouched —
+# so the load-bearing loss path is bit-for-bit today's behavior. Only when a
+# strictly-different weight is requested AND THINK spans exist is a new weighted
+# tensor materialized (THINK positions scaled, everything else == loss_mask).
+SPAN_THINK_TAG: int = 1  # mirrors span_tagger.SPAN_THINK (kept local to avoid a torch-free import cycle)
+
+
+def build_think_weighted_loss_mask(
+    loss_mask: Optional[torch.Tensor],
+    response_span_tags: Optional[torch.Tensor],
+    think_token_weight: float,
+) -> Optional[torch.Tensor]:
+    """Return a per-token loss-weight mask that down-weights THINK tokens (F7).
+
+    Args:
+        loss_mask: the 0/1 (or already-weighted) loss mask, shape (B, A).
+        response_span_tags: per-token span tags (SPAN_THINK==1), shape (B, A) or
+            None. Tagged 1:1 with the response tokens (== loss_mask layout).
+        think_token_weight: weight applied to THINK tokens (1.0 == no-op).
+
+    Returns:
+        - `loss_mask` UNCHANGED (same object) when ``think_token_weight == 1.0``
+          or ``response_span_tags is None`` or ``loss_mask is None`` — the
+          byte-identical default/flag-off path.
+        - Otherwise a NEW float tensor equal to ``loss_mask`` everywhere except
+          THINK positions, which are multiplied by ``think_token_weight``
+          (down-weighted but, for weight > 0, still counted in the support).
+    """
+    if loss_mask is None or response_span_tags is None or think_token_weight == 1.0:
+        return loss_mask
+
+    # Per-token multiplier: think_token_weight on THINK tokens, 1.0 elsewhere.
+    # Align tags to the loss_mask response width defensively (right-padded).
+    tags = response_span_tags
+    if tags.shape != loss_mask.shape:
+        sl = min(tags.shape[-1], loss_mask.shape[-1])
+        aligned = torch.zeros_like(loss_mask, dtype=tags.dtype)
+        aligned[..., :sl] = tags[..., :sl]
+        tags = aligned
+    is_think = tags == SPAN_THINK_TAG
+    weight = torch.where(
+        is_think,
+        torch.as_tensor(think_token_weight, dtype=torch.float32, device=loss_mask.device),
+        torch.ones((), dtype=torch.float32, device=loss_mask.device),
+    )
+    return loss_mask.to(torch.float32) * weight
+
+
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
@@ -1480,6 +1542,68 @@ def compute_rloo_n_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_advantage_estimator("rloo_n_pbs")
+def compute_rloo_n_pbs_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    exclude_from_baseline: Optional[np.ndarray] = None,
+    config=None,
+    token_level_shaping: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """RLOO-N outcome advantage + potential-based shaping (Stage C / F6).
+
+    Combines RLOO-N's per-trajectory outcome advantage (computed exactly as
+    ``compute_rloo_n_outcome_advantage`` — the outcome term reads ``rewards``
+    ONLY and is left bit-for-bit intact) with the per-token potential-based
+    shaping channel ``token_level_shaping`` (the PBS test-delta credit scattered
+    onto the EDIT-token span by ``pbs_shaping.compute_pbs_token_shaping``).
+
+    The combination is the additive + separate seam proven in Stage B:
+
+        advantage = rloo_n_outcome_advantage + token_level_shaping * response_mask
+
+    Properties:
+      * ``token_level_shaping is None`` or all-zeros ⇒ this returns EXACTLY the
+        RLOO-N advantage (pure RLOO-N; the flag-off / no-signal path).
+      * PBS is policy-invariant (Ng 1999): ``token_level_shaping`` is a true
+        potential difference ``γ·Φ(s') − Φ(s)`` built upstream, so adding it
+        cannot change the optimal policy.
+      * The shaping is masked by ``response_mask`` and only applied to response
+        tokens (the same support as the outcome advantage), so the
+        advantage/loss denominator (``response_mask.sum()``) is unchanged — no
+        seqnorm-style denominator break.
+
+    Returns ``(advantages, returns)`` with the same shape/semantics as RLOO-N
+    (advantages == returns; critic-free).
+    """
+    # Outcome term: unchanged RLOO-N (reads `rewards` only).
+    outcome_adv, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        exclude_from_baseline=exclude_from_baseline,
+        config=config,
+        **kwargs,
+    )
+
+    if token_level_shaping is None:
+        return outcome_adv, outcome_adv
+
+    with torch.no_grad():
+        shaping = token_level_shaping.to(device=outcome_adv.device, dtype=outcome_adv.dtype)
+        # Defensive shape-align (right-padded to response_mask width).
+        if shaping.shape != response_mask.shape:
+            sl = min(shaping.shape[-1], response_mask.shape[-1])
+            aligned = torch.zeros_like(response_mask, dtype=outcome_adv.dtype)
+            aligned[..., :sl] = shaping[..., :sl]
+            shaping = aligned
+        combined = outcome_adv + shaping * response_mask
+
+    return combined, combined
 
 
 @register_advantage_estimator(AdvantageEstimator.GAE)

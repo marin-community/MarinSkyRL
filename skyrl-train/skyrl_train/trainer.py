@@ -892,6 +892,20 @@ class RayPPOTrainer:
             generator_output.get("rollout_routed_experts", None) if moe_router_replay else None
         )
 
+        # Loop-behavior reward shaping (Stage B / F5 + F4): only pull the per-token
+        # shaping channel + span tags when the channel is enabled. Gated so the
+        # flag-off TrainingInputBatch is byte-identical (the fields are never passed
+        # to the collator nor set on the batch). Mirrors moe_router_replay above.
+        enable_token_reward_channel = bool(
+            self.cfg.trainer.algorithm.get("enable_token_reward_channel", False)
+        )
+        token_level_shaping = (
+            generator_output.get("token_level_shaping", None) if enable_token_reward_channel else None
+        )
+        response_span_tags = (
+            generator_output.get("response_span_tags", None) if enable_token_reward_channel else None
+        )
+
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -900,6 +914,8 @@ class RayPPOTrainer:
             loss_masks_tensor,
             rollout_logprobs_tensor,
             rollout_routed_experts_tensor,
+            token_level_shaping_tensor,
+            response_span_tags_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -908,6 +924,8 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
             routed_experts,
+            token_level_shaping,
+            response_span_tags,
         )
         # sanity check for tis
         #
@@ -966,6 +984,13 @@ class RayPPOTrainer:
         # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
         if rollout_routed_experts_tensor is not None:
             training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
+        # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
+        # when present, so the flag-off batch dict has exactly the same keys as
+        # today (TensorBatch.__eq__ compares key sets).
+        if token_level_shaping_tensor is not None:
+            training_input["token_level_shaping"] = token_level_shaping_tensor
+        if response_span_tags_tensor is not None:
+            training_input["response_span_tags"] = response_span_tags_tensor
         training_input.metadata = {"uids": uids}
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if generator_output.get("exclude_from_baseline") is not None:
@@ -1145,6 +1170,12 @@ class RayPPOTrainer:
         else:
             # For RLOO-N: pass exclude_from_baseline if present in metadata
             exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)
+            # Stage C (F6): thread the per-token PBS shaping channel into the
+            # advantage estimator when it is present. The dispatcher forwards it
+            # via **kwargs; only the rloo_n_pbs combiner consumes it (every other
+            # estimator ignores the extra kwarg), and when the key is absent
+            # (channel off) token_level_shaping is None -> byte-identical path.
+            token_level_shaping = data["token_level_shaping"] if "token_level_shaping" in data else None
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
@@ -1156,6 +1187,7 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
                 exclude_from_baseline=exclude_from_baseline,
+                token_level_shaping=token_level_shaping,
             )
         data["returns"] = returns
         data["advantages"] = advantages

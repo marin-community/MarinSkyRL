@@ -43,6 +43,15 @@ class GeneratorOutput(TypedDict):
     # trainer.policy.fsdp_config.moe_router_replay is True; absent otherwise so the
     # default (production) GeneratorOutput is byte-identical.
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
+    # Loop-behavior reward shaping (Stage B / F5): per-sample per-token additive
+    # shaping channel, List[ [response_len] float ]. Present only when
+    # enable_token_reward_channel is True; absent otherwise so the default
+    # GeneratorOutput is byte-identical. Carries ZEROS in Stage B (no-op).
+    token_level_shaping: Optional[List[List[float]]]
+    # Loop-behavior reward shaping (Stage B / F4): per-sample per-token span tags,
+    # List[ [response_len] int ] ({OTHER=0,THINK=1,ACTION=2,EDIT=3}). Present only
+    # when enable_token_reward_channel is True.
+    response_span_tags: Optional[List[List[int]]]
     trajectory_ids: Optional[List[TrajectoryID]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]

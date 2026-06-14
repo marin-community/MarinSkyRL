@@ -31,7 +31,12 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
+from skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    ppo_critic_loss,
+    compute_approx_kl,
+    build_think_weighted_loss_mask,
+)
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -958,6 +963,20 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
         rollout_routed_experts = experience.rollout_routed_experts
+        response_span_tags = experience.response_span_tags
+
+        # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
+        # per-token weighted loss mask (THINK positions scaled by think_token_weight,
+        # everything else == loss_mask). At think_token_weight==1.0 (default) or when
+        # span tags are absent, build_think_weighted_loss_mask returns the ORIGINAL
+        # loss_mask object -> the policy-loss path is byte-identical to today. The
+        # weighting is intentionally NOT applied to entropy / KL / TIS diagnostics,
+        # which keep the unweighted 0/1 loss_mask (they measure the policy, not the
+        # credit weighting).
+        think_token_weight = float(getattr(self.cfg.trainer.algorithm, "think_token_weight", 1.0))
+        policy_loss_mask = build_think_weighted_loss_mask(
+            loss_mask, response_span_tags, think_token_weight
+        )
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -979,7 +998,7 @@ class PolicyWorkerBase(Worker):
                 old_action_log_probs,
                 advantages,
                 config=self.cfg.trainer.algorithm,
-                loss_mask=loss_mask,
+                loss_mask=policy_loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
 

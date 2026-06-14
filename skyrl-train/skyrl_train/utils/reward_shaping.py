@@ -427,6 +427,63 @@ class UnittestOutputParser(OutputParser):
         return self.RAN_PATTERN.search(output) is not None
 
 
+class JestOutputParser(OutputParser):
+    """
+    Parser for Jest (JavaScript/TypeScript test runner) output.
+
+    Recognizes the Jest "Tests:" summary line, e.g.:
+        Tests:       1 failed, 12 passed, 13 total
+        Tests:       3 passed, 3 total
+        Tests:       2 failed, 1 skipped, 5 passed, 8 total
+
+    Jest reports a per-test "Tests:" tally (we read that, not the per-suite
+    "Test Suites:" tally). Returns None when no Jest "Tests:" line is present
+    (so the caller falls back to the next framework / no-signal).
+    """
+
+    # The "Tests:" summary line (status counts up to a "<N> total").
+    TESTS_LINE_PATTERN = re.compile(r"^\s*Tests:\s+(?P<results>.+?)$", re.MULTILINE | re.IGNORECASE)
+    # Individual "<count> <status>" tokens within that line.
+    COUNT_PATTERN = re.compile(r"(\d+)\s+(passed|failed|skipped|todo|total)", re.IGNORECASE)
+
+    @classmethod
+    def name(cls) -> str:
+        return "jest"
+
+    def parse(self, output: str) -> Optional[ParsedTestResult]:
+        if not output:
+            return None
+        m = self.TESTS_LINE_PATTERN.search(output)
+        if not m:
+            return None
+        counts = {"passed": 0, "failed": 0, "skipped": 0, "todo": 0, "total": 0}
+        found = False
+        for cm in self.COUNT_PATTERN.finditer(m.group("results")):
+            status = cm.group(2).lower()
+            if status in counts:
+                counts[status] = int(cm.group(1))
+                found = True
+        if not found:
+            return None
+        passed = counts["passed"]
+        failed = counts["failed"]
+        skipped = counts["skipped"] + counts["todo"]
+        total = counts["total"] if counts["total"] else (passed + failed + skipped)
+        return ParsedTestResult(
+            passed=passed,
+            failed=failed,
+            skipped=skipped,
+            total=total,
+            raw_output=output,
+            metadata={"parse_method": "jest"},
+        )
+
+    def can_parse(self, output: str) -> bool:
+        if not output:
+            return False
+        return self.TESTS_LINE_PATTERN.search(output) is not None
+
+
 class GenericOutputParser(OutputParser):
     """
     Generic fallback parser that counts PASS/FAIL/ERROR keywords.
@@ -1776,6 +1833,7 @@ def register_shaper(shaper_cls: Type[RewardShaper]) -> Type[RewardShaper]:
 # Register built-in parsers
 register_parser(PytestOutputParser)
 register_parser(UnittestOutputParser)
+register_parser(JestOutputParser)
 register_parser(GenericOutputParser)
 
 # Register built-in shapers

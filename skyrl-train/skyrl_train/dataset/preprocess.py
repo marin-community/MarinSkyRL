@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional
 import torch
 from transformers import AutoTokenizer
-from jaxtyping import Float
+from jaxtyping import Float, Integer
 
 
 def _verify_inputs(
@@ -59,6 +59,8 @@ def convert_prompts_responses_to_batch_tensors(
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
     routed_experts: Optional[List[List[List[List[int]]]]] = None,
+    token_level_shaping: Optional[List[List[float]]] = None,
+    response_span_tags: Optional[List[List[int]]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -67,6 +69,8 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
     Optional["torch.Tensor"],
+    Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[Integer[torch.Tensor, "batch response_len"]],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
@@ -184,4 +188,38 @@ def convert_prompts_responses_to_batch_tensors(
             padded_re.append(sample_re)
         routed_experts_tensor = torch.tensor(padded_re, dtype=torch.long)
 
-    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor, routed_experts_tensor
+    # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
+    # shaping channel and span tags on the response axis exactly like rewards /
+    # loss_mask. Both are gated upstream (only passed when
+    # enable_token_reward_channel is on), so when off they stay None and the
+    # returned tuple's last two slots are None — the caller attaches the batch keys
+    # only when non-None, keeping the flag-off batch byte-identical.
+    token_level_shaping_tensor = None
+    if token_level_shaping is not None:
+        token_level_shaping_tensor = torch.zeros_like(action_mask, dtype=torch.float)
+        for i, sample_shaping in enumerate(token_level_shaping):
+            if isinstance(sample_shaping, list):
+                sample_shaping = torch.tensor(sample_shaping, dtype=torch.float)
+            n = min(len(sample_shaping), token_level_shaping_tensor.size(1))
+            token_level_shaping_tensor[i, :n] = sample_shaping[:n]
+
+    response_span_tags_tensor = None
+    if response_span_tags is not None:
+        response_span_tags_tensor = torch.zeros_like(action_mask, dtype=torch.long)
+        for i, sample_tags in enumerate(response_span_tags):
+            if isinstance(sample_tags, list):
+                sample_tags = torch.tensor(sample_tags, dtype=torch.long)
+            n = min(len(sample_tags), response_span_tags_tensor.size(1))
+            response_span_tags_tensor[i, :n] = sample_tags[:n]
+
+    return (
+        sequences,
+        attention_mask,
+        action_mask,
+        ret_rewards,
+        ret_loss_masks,
+        logprobs_tensor,
+        routed_experts_tensor,
+        token_level_shaping_tensor,
+        response_span_tags_tensor,
+    )
