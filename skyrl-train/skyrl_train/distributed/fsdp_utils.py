@@ -727,9 +727,16 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
                 e_per = None
                 if num_experts is not None:
                     e_per = num_experts // ep_size // fsdp_size
+                # `_StridedShard` (the placement FSDP2 emits for the dim sharded by
+                # BOTH the ep and fsdp mesh dims) returns `is_shard() == False` on
+                # torch 2.11 — a quirk, NOT an EP-only 1-D leak. Accept it explicitly
+                # so the (_StridedShard(fsdp), Shard(ep)) 2-D composition validates.
+                from torch.distributed.tensor.placement_types import Shard
+                from torch.distributed.tensor._dtensor_spec import _StridedShard
+
                 for _pn, _p in experts.named_parameters(recurse=False):
                     _pls = getattr(_p, "placements", ())
-                    assert len(_pls) == 2 and all(getattr(pl, "is_shard", lambda: False)() for pl in _pls), (
+                    assert len(_pls) == 2 and all(isinstance(pl, (Shard, _StridedShard)) for pl in _pls), (
                         f"EP+FSDP expert param {_pn} did not compose to a 2-D (fsdp,ep) "
                         f"sharded DTensor (got placements={_pls}); apply_ep's "
                         f"fully_shard(experts) did not reach this holder for this arch. "
