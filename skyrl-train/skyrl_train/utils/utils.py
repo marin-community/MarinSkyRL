@@ -226,12 +226,12 @@ def get_system_memory_metrics() -> dict:
         process_mem = process.memory_info()
 
         return {
-            "system/ram_used_gb": mem.used / (1024 ** 3),
-            "system/ram_available_gb": mem.available / (1024 ** 3),
-            "system/ram_total_gb": mem.total / (1024 ** 3),
+            "system/ram_used_gb": mem.used / (1024**3),
+            "system/ram_available_gb": mem.available / (1024**3),
+            "system/ram_total_gb": mem.total / (1024**3),
             "system/ram_percent": mem.percent,
-            "system/process_rss_gb": process_mem.rss / (1024 ** 3),
-            "system/process_vms_gb": process_mem.vms / (1024 ** 3),
+            "system/process_rss_gb": process_mem.rss / (1024**3),
+            "system/process_vms_gb": process_mem.vms / (1024**3),
         }
     except ImportError:
         logger.warning("psutil not installed, skipping system memory metrics")
@@ -383,10 +383,78 @@ def validate_megatron_cfg(cfg: DictConfig):
         ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
 
 
+def _validate_cp_cfg(cfg: DictConfig):
+    """Validate the torch-native Context-Parallel (CP) config (Stage 0; FSDP2-only).
+
+    CP shards the sequence dim with a torch-native ring-SDPA pass on the FSDP2 mesh.
+    It is mutually exclusive with Ulysses sequence parallelism (which also shards the
+    seq dim) and is gated entirely off by default (`context_parallel_size == 1`), in
+    which case this function is a strict no-op and the run is byte-identical to today.
+
+    For every role (policy/ref/critic) with `fsdp_config.context_parallel_size > 1`:
+      - trainer.strategy must be "fsdp2" (CP path is FSDP2-only here),
+      - <role>.sequence_parallel_size must be 1 (G2 — CP ⊥ Ulysses),
+      - cp_style must be in {"ring_sdpa"} ("ring_flash_attn" reserved for a later stage),
+      - cp_rotate_method must be in {"allgather", "all_to_all"},
+      - sample packing must be off (packed-varlen CP is deferred),
+      - context_parallel_size must divide the role's world size (cheap arithmetic guard;
+        full mesh divisibility is re-checked in Stage 3).
+
+    See notes/RL/skyrl/fsdp2_context_parallel_stages/.
+    """
+    placement = cfg.trainer.placement
+    role_world_sizes = {
+        "policy": placement.policy_num_gpus_per_node * placement.policy_num_nodes,
+        "ref": placement.ref_num_gpus_per_node * placement.ref_num_nodes,
+        "critic": placement.critic_num_gpus_per_node * placement.critic_num_nodes,
+    }
+    valid_cp_styles = {"ring_sdpa"}
+    valid_rotate_methods = {"allgather", "all_to_all"}
+
+    for role in ("policy", "ref", "critic"):
+        role_cfg = cfg.trainer[role]
+        cp_size = role_cfg.fsdp_config.context_parallel_size
+        assert cp_size >= 1, f"trainer.{role}.fsdp_config.context_parallel_size must be >= 1, got {cp_size}"
+        if cp_size == 1:
+            # CP disabled for this role -> strict no-op, no further constraints.
+            continue
+
+        assert cfg.trainer.strategy == "fsdp2", (
+            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) "
+            f"is only supported with trainer.strategy='fsdp2', got '{cfg.trainer.strategy}'"
+        )
+        assert role_cfg.sequence_parallel_size == 1, (
+            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) is mutually "
+            f"exclusive with ulysses sequence parallel; found trainer.{role}.sequence_parallel_size="
+            f"{role_cfg.sequence_parallel_size} (both shard the sequence dim)"
+        )
+        cp_style = role_cfg.fsdp_config.cp_style
+        assert cp_style in valid_cp_styles, (
+            f"trainer.{role}.fsdp_config.cp_style='{cp_style}' is not supported; "
+            f"must be one of {sorted(valid_cp_styles)} (ring_flash_attn is reserved for a later stage)"
+        )
+        cp_rotate = role_cfg.fsdp_config.cp_rotate_method
+        assert cp_rotate in valid_rotate_methods, (
+            f"trainer.{role}.fsdp_config.cp_rotate_method='{cp_rotate}' is invalid; "
+            f"must be one of {sorted(valid_rotate_methods)}"
+        )
+        assert not cfg.trainer.use_sample_packing, (
+            f"context parallel (trainer.{role}.fsdp_config.context_parallel_size={cp_size}) does not yet "
+            "support sample packing; set trainer.use_sample_packing=false (packed-varlen CP is deferred)"
+        )
+        world_size = role_world_sizes[role]
+        assert world_size % cp_size == 0, (
+            f"trainer.{role}.fsdp_config.context_parallel_size={cp_size} must divide the {role} world size "
+            f"({world_size}); full mesh divisibility is re-checked in Stage 3"
+        )
+
+
 def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
+    _validate_cp_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
 
     assert (
@@ -641,6 +709,213 @@ def validate_generator_cfg(cfg: DictConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
+    # Validate inference engine Decode Context Parallel (DCP).
+    _validate_dcp_cfg(cfg)
+
+
+def _is_mla_arch(model_cfg) -> bool:
+    """Whether an HF model config describes a Multi-head Latent Attention (MLA) arch.
+
+    MLA models (DeepSeek-V2/V3, Kimi, etc.) compress the KV into a single shared latent
+    rather than exposing `num_key_value_heads` GQA groups, so the per-head DCP bound does
+    not apply the same way (DCP shards the latent; the effective kv-head count for the
+    bound is 1 -> the bound relaxes to dcp <= tp). We detect MLA conservatively via the
+    presence of the MLA-specific latent-rank fields that DeepSeek/Kimi configs carry.
+    """
+    if model_cfg is None:
+        return False
+    # DeepSeek/Kimi MLA configs carry the compressed-KV latent rank. Either field present
+    # is a reliable MLA marker across the DeepSeek-V2/V3/Kimi family.
+    for field in ("kv_lora_rank", "q_lora_rank"):
+        val = getattr(model_cfg, field, None)
+        if val is not None:
+            return True
+    # Fall back to architecture-name sniffing for forks that drop the latent-rank fields.
+    archs = getattr(model_cfg, "architectures", None) or []
+    if any(("deepseek" in a.lower() or "kimi" in a.lower()) for a in archs):
+        return True
+    return False
+
+
+def _resolve_num_kv_heads(model_path: str):
+    """Resolve (num_kv_heads, is_mla, model_cfg) from an HF model config, offline-safe.
+
+    Returns (None, False, None) if the config cannot be resolved without a network
+    download (so the caller degrades gracefully to the cheap dcp<=tp bound + warning).
+    For GQA/MHA models `num_kv_heads = num_key_value_heads` (falling back to
+    `num_attention_heads` for pure MHA, which has no separate kv-head count). For MLA
+    models the effective kv-head count is 1 (single shared latent).
+    """
+    try:
+        from transformers import AutoConfig
+    except Exception:  # transformers unavailable -> cannot resolve
+        return None, False, None
+    try:
+        # Respect offline / cached configs: do not force a network download at
+        # validate-time. If the config isn't locally resolvable, transformers raises
+        # (offline) or we let any error fall through to the graceful-degrade path.
+        model_cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except Exception:
+        return None, False, None
+
+    is_mla = _is_mla_arch(model_cfg)
+    if is_mla:
+        return 1, True, model_cfg
+    # text_config nesting (multimodal / wrapped configs) — prefer the inner text config.
+    inner = getattr(model_cfg, "text_config", None) or model_cfg
+    num_kv_heads = getattr(inner, "num_key_value_heads", None)
+    if num_kv_heads is None:
+        # Pure MHA: no separate kv-head count -> kv-heads == attention heads.
+        num_kv_heads = getattr(inner, "num_attention_heads", None)
+    if num_kv_heads is None:
+        return None, False, model_cfg
+    return int(num_kv_heads), False, model_cfg
+
+
+def _assert_dcp_capable_arch(model_cfg, dcp: int):
+    """(G3 f) Assert the model arch has a DCP-capable attention backend.
+
+    DCP is supported for GQA models (default FlashAttention backend) and MLA models
+    (FlashMLA / FlashAttnMLA). We keep the gate permissive: any standard decoder runs on
+    FlashAttention's GQA path (DCP-capable), and MLA is explicitly capable. We reject only
+    when the config positively declares a non-DCP-capable attention implementation
+    (e.g. an arch forced onto an attn backend with no DCP path).
+    """
+    if model_cfg is None:
+        # Could not resolve the config offline -> can't positively reject; rely on the
+        # cheap bound + the vLLM init-time assert. (Handled by the caller's warning.)
+        return
+    if _is_mla_arch(model_cfg):
+        return  # MLA is DCP-capable (FlashMLA / FlashAttnMLA).
+    # GQA / dense decoders run on FlashAttention (DCP-capable). Reject only an explicit,
+    # known-incapable attention implementation pinned in the config.
+    attn_impl = getattr(model_cfg, "_attn_implementation", None) or getattr(
+        model_cfg, "attn_implementation", None
+    )
+    incapable = {"eager", "sdpa"}
+    if attn_impl is not None and str(attn_impl).lower() in incapable:
+        raise AssertionError(
+            f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) "
+            f"requires a DCP-capable attention backend (FlashAttention for GQA, FlashMLA for MLA), "
+            f"but the model config pins attn_implementation='{attn_impl}', which has no DCP path. "
+            f"Use a GQA/MLA model on FlashAttention, or disable DCP."
+        )
+
+
+def _validate_dcp_cfg(cfg: DictConfig):
+    """Validate the vLLM Decode Context Parallel (DCP) generator config (Stages 0–2).
+
+    vLLM DCP shards the KV cache along the token dim across `dcp` ranks *inside* the
+    TP group during decode (it reuses the TP GPUs, adding no GPUs — G4). It is gated
+    entirely off by default (`inference_engine_decode_context_parallel_size == 1`), in
+    which case this function is a strict no-op and the run is byte-identical to today
+    (G1). When enabled (`dcp > 1`) we fail-closed at SkyRL config-validate (G3) rather
+    than deep in vLLM init, with clear messages:
+
+      (a) tp % dcp == 0 (vLLM splits the TP group into dcp subgroups; parallel.py:474-478),
+      (b) dcp <= tp // num_kv_heads(model) — the real upper bound; beyond tp/H the KV is
+          merely duplicated and there is no non-attention work to shard (doc :27,29).
+          Resolved model-aware from the HF config; degrades to the cheap dcp<=tp bound +
+          a warning when the config is not offline-resolvable.
+      (c) backend == "vllm" (SGLang has no DCP knob),
+      (e) NOT R3 router capture (vLLM rejects DCP + enable_return_routed_experts;
+          vllm/config/vllm.py:1939-1944),
+      (f) the arch is DCP-capable (GQA via FlashAttention, or MLA via FlashMLA).
+
+    Remote engines (`run_engines_locally == False`): SkyRL does not launch the inference
+    server, so the `-dcp N` flag must be set on the EXTERNAL `vllm serve` command. We run
+    the geometry checks (a)/(b)/(f) where the config is resolvable and emit a warning
+    reminding the operator to pass `-dcp` externally; we do not inject dcp into a server
+    SkyRL doesn't spawn.
+
+    See notes/RL/skyrl/vllm_dcp_rollout_stages/.
+    """
+    gen = cfg.generator
+    dcp = gen.inference_engine_decode_context_parallel_size
+    tp = gen.inference_engine_tensor_parallel_size
+    assert dcp >= 1, f"generator.inference_engine_decode_context_parallel_size must be >= 1, got {dcp}"
+    if dcp == 1:
+        # DCP disabled -> strict no-op, no further constraints (G1).
+        return
+
+    # (a) vLLM splits the TP group into `dcp` subgroups -> tp must be divisible by dcp.
+    assert tp % dcp == 0, (
+        f"vLLM decode context parallel requires tensor_parallel_size % dcp == 0 "
+        f"(DCP splits the TP group); got inference_engine_tensor_parallel_size={tp}, "
+        f"inference_engine_decode_context_parallel_size={dcp}"
+    )
+    # (cheap bound) 1 <= dcp <= tp. Always enforced; the tighter kv-head bound below
+    # supersedes it when the model config resolves offline.
+    assert 1 <= dcp <= tp, (
+        f"inference_engine_decode_context_parallel_size must satisfy 1 <= dcp <= "
+        f"inference_engine_tensor_parallel_size; got dcp={dcp}, tp={tp}"
+    )
+    # (c) SGLang has no DCP knob.
+    assert gen.backend == "vllm", (
+        f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) "
+        f"is only supported with generator.backend='vllm', got '{gen.backend}'"
+    )
+
+    # (b)/(f) model-aware bounds: resolve the HF config offline-safely.
+    model_path = cfg.trainer.policy.model.path
+    num_kv_heads, is_mla, model_cfg = _resolve_num_kv_heads(model_path)
+    if num_kv_heads is None:
+        # Could not resolve the config without a network download -> degrade gracefully:
+        # keep the cheap dcp<=tp bound (already asserted) and warn, leaning on vLLM's own
+        # init-time assert for the exact kv-head bound.
+        logger.warning(
+            f"DCP enabled (dcp={dcp}) but could not resolve the HF model config for "
+            f"'{model_path}' offline -> skipping the model-aware kv-head bound "
+            f"(dcp <= tp/num_kv_heads) and arch gate. The cheap bound (1 <= dcp <= tp) is "
+            f"enforced; vLLM's engine init will enforce the exact dcp <= tp/num_kv_heads bound."
+        )
+    else:
+        # (b) real upper bound: dcp <= tp // num_kv_heads. For MLA num_kv_heads==1 so this
+        # relaxes to dcp <= tp (vLLM's own init enforces the exact MLA bound).
+        max_dcp = tp // num_kv_heads
+        kv_kind = "MLA latent (1 effective kv-head)" if is_mla else f"num_key_value_heads={num_kv_heads}"
+        assert dcp <= max_dcp, (
+            f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) "
+            f"exceeds the kv-head bound dcp <= tp // num_kv_heads = {tp} // {num_kv_heads} = {max_dcp} "
+            f"for model '{model_path}' ({kv_kind}). Beyond tp/num_kv_heads the KV cache is merely "
+            f"duplicated and there is no non-attention work to shard; reduce dcp to <= {max_dcp}."
+        )
+        # (f) arch must be DCP-capable (GQA via FlashAttention, or MLA).
+        _assert_dcp_capable_arch(model_cfg, dcp)
+
+    # Remote path: SkyRL doesn't launch the server, so `-dcp` must be set externally.
+    if not bool(gen.get("run_engines_locally", True)):
+        logger.warning(
+            f"DCP enabled (dcp={dcp}) with run_engines_locally=False: SkyRL does NOT launch "
+            f"remote inference servers, so the external `vllm serve` command MUST be started "
+            f"with `-dcp {dcp}` (and matching `--tensor-parallel-size {tp}`). SkyRL only carries "
+            f"dcp as client metadata for geometry/GPU-accounting consistency."
+        )
+    # (e) vLLM rejects DCP together with R3 router capture (enable_return_routed_experts).
+    # R3 capture is configured at the generator level (direct flag or engine_init_kwargs),
+    # and the training-side replay is gated by trainer.policy.fsdp_config.moe_router_replay.
+    r3_capture = (
+        bool(gen.get("enable_return_routed_experts", False))
+        or bool(gen.get("engine_init_kwargs", {}).get("enable_return_routed_experts", False))
+        or bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
+    )
+    assert not r3_capture, (
+        f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) is not "
+        f"compatible with R3 router capture (enable_return_routed_experts / moe_router_replay); "
+        f"vLLM rejects DCP + return_routed_experts. Disable one of them."
+    )
+
+    # (G4) DCP rides the TP GPUs and must NOT enter rollout-GPU accounting. Assert the
+    # rollout-GPU count is a function of tp*pp*dp only, independent of dcp.
+    pp = gen.inference_engine_pipeline_parallel_size
+    dp = gen.inference_engine_data_parallel_size
+    per_engine_gpu_count = tp * pp * dp
+    num_rollout_gpus = gen.num_inference_engines * per_engine_gpu_count
+    assert num_rollout_gpus == gen.num_inference_engines * tp * pp * dp, (
+        "DCP must not change rollout-GPU accounting (it reuses the TP GPUs); "
+        f"num_rollout_gpus must equal num_inference_engines*tp*pp*dp regardless of dcp={dcp}"
+    )
+
 
 @ray.remote
 def get_all_env_variables():
@@ -750,9 +1025,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
     env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
     env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = (
-        "/e/data1/datasets/playground/ot-baf/nccl_trace/673_relaunch_rank"
-    )
+    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = "/e/data1/datasets/playground/ot-baf/nccl_trace/673_relaunch_rank"
     # Finite NCCL collective timeout (20 min). Read by
     # skyrl_train.utils.constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
     # torch.distributed.init_process_group(timeout=...) in worker.py; the EP /
