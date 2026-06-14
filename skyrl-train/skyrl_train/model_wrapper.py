@@ -463,12 +463,16 @@ class HFModelWrapper(nn.Module):
         if self.use_sample_packing:
             with torch.no_grad():
                 # Removes padding to get a packed tensor. `unpad_input` expects 3 dimensional tensor so we unsqueeze first
-                sequences_fwd, nnz_indices, _, _, _ = unpad_input(
+                # flash_attn < 2.7 returns a 4-tuple (hidden, indices, cu_seqlens,
+                # max_seqlen); >= 2.7 adds a 5th `seqused`. We only consume the
+                # first two, so star the tail to stay version-agnostic (the SIF
+                # ships flash_attn 2.6.3 -> 4-tuple).
+                sequences_fwd, nnz_indices, *_ = unpad_input(
                     sequences.unsqueeze(-1), attention_mask=attention_mask
                 )
                 # (nnz, 1) -> (1, nnz)
                 sequences_fwd = sequences_fwd.transpose(0, 1)
-                position_ids_fwd, _, _, _, _ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
+                position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
                 # (nnz, 1) -> (1, nnz)
                 position_ids_fwd = position_ids_fwd.transpose(0, 1)
                 attention_mask_fwd = None  # no attention mask with FA 2
@@ -953,12 +957,13 @@ def _get_critic_model(
             if self.use_sample_packing:
                 with torch.no_grad():
                     # remove padding. `unpad_input` expects 3 dimensional tensor
-                    input_ids_fwd, nnz_indices, _, _, _ = unpad_input(
+                    # version-agnostic unpack (flash_attn 2.6 -> 4-tuple, 2.7+ -> 5-tuple)
+                    input_ids_fwd, nnz_indices, *_ = unpad_input(
                         input_ids.unsqueeze(-1), attention_mask=attention_mask
                     )
                     # (nnz, 1) -> (1, nnz)
                     input_ids_fwd = input_ids_fwd.transpose(0, 1)
-                    position_ids_fwd, _, _, _, _ = unpad_input(
+                    position_ids_fwd, *_ = unpad_input(
                         position_ids.unsqueeze(-1), attention_mask=attention_mask
                     )
                     # (nnz, 1) -> (1, nnz)
