@@ -24,6 +24,17 @@ def test_config_key_defaults_false():
     assert cfg.trainer.algorithm.enable_token_reward_channel is False
 
 
+def test_stage_d_config_keys_default_noop():
+    """Stage D (F7 + M4) config keys default to the byte-identical no-op:
+    think_token_weight=1.0 (no loss down-weight), think_token_cost=0.0 (no cost)."""
+    cfg = get_default_config()
+    assert "think_token_weight" in cfg.trainer.algorithm
+    assert cfg.trainer.algorithm.think_token_weight == 1.0
+    assert "think_token_cost" in cfg.trainer.algorithm
+    assert cfg.trainer.algorithm.think_token_cost == 0.0
+    assert "think_max_cost_per_turn" in cfg.trainer.algorithm
+
+
 @pytest.fixture
 def tokenizer():
     return AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")

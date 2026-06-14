@@ -228,6 +228,21 @@ trainer:
     # fills it. NOTE: the generator-side gate lives in the harbor reward_shaping
     # block (reward_shaping.enable_token_reward_channel); set BOTH to enable.
     enable_token_reward_channel: false
+    # Stage D (F7 + M4) — think-token budget. DEFAULT-OFF (byte-identical).
+    #  - think_token_weight: per-token weight applied to <think> (SPAN_THINK) tokens
+    #    in the POLICY loss (F7). 1.0 == no-op (byte-identical loss path); set < 1
+    #    (e.g. 0.3) to DOWN-WEIGHT think tokens (NOT zero — some planning is
+    #    load-bearing). Read directly by the worker's training_step; requires
+    #    enable_token_reward_channel=true so response_span_tags are threaded.
+    #  - think_token_cost: magnitude of the mild per-think-token NEGATIVE reward
+    #    (M4), written onto SPAN_THINK tokens in the token_level_shaping channel by
+    #    the generator (harbor reward_shaping mapping) and combined via the
+    #    rloo_n_pbs additive seam. 0.0 == no-op. (e.g. 1e-4/think-token.)
+    #  - think_max_cost_per_turn: |cap| on the total think-cost per assistant turn
+    #    (keeps a single long ramble from dominating).
+    think_token_weight: 1.0
+    think_token_cost: 0.0
+    think_max_cost_per_turn: 0.05
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:
       tau_pos: 1.0

@@ -1189,6 +1189,68 @@ def compute_policy_loss_kl_cov(
     return pg_loss, 0.0
 
 
+# ---------------------------------------------------------------------------
+# Stage D (F7) — think-token down-weighting of the loss mask.
+# ---------------------------------------------------------------------------
+# The loss path (ppo_policy_loss -> reduce_loss -> masked_mean) consumes a 0/1
+# `loss_mask`. F7 generalizes it to a per-token WEIGHT vector so `<think>` tokens
+# can be DOWN-WEIGHTED (weight < 1, NOT zeroed — some planning is load-bearing).
+# Because `masked_mean` computes (loss * mask).sum() / mask.sum().clamp(min=1),
+# a weight vector produces the correct WEIGHTED mean (weighted numerator over
+# weighted denominator) with no separate denominator surgery — the same seam
+# `reduce_loss`'s token_mean / sequence_mean / seq_mean_token_sum_norm[_global]
+# branches already use. The weight only re-scales the per-token contribution;
+# the support (which tokens count) is unchanged because THINK weight > 0.
+#
+# BYTE-IDENTICAL CONTRACT: when `think_token_weight == 1.0` (the default) OR the
+# span tags are absent, this returns the ORIGINAL `loss_mask` object untouched —
+# so the load-bearing loss path is bit-for-bit today's behavior. Only when a
+# strictly-different weight is requested AND THINK spans exist is a new weighted
+# tensor materialized (THINK positions scaled, everything else == loss_mask).
+SPAN_THINK_TAG: int = 1  # mirrors span_tagger.SPAN_THINK (kept local to avoid a torch-free import cycle)
+
+
+def build_think_weighted_loss_mask(
+    loss_mask: Optional[torch.Tensor],
+    response_span_tags: Optional[torch.Tensor],
+    think_token_weight: float,
+) -> Optional[torch.Tensor]:
+    """Return a per-token loss-weight mask that down-weights THINK tokens (F7).
+
+    Args:
+        loss_mask: the 0/1 (or already-weighted) loss mask, shape (B, A).
+        response_span_tags: per-token span tags (SPAN_THINK==1), shape (B, A) or
+            None. Tagged 1:1 with the response tokens (== loss_mask layout).
+        think_token_weight: weight applied to THINK tokens (1.0 == no-op).
+
+    Returns:
+        - `loss_mask` UNCHANGED (same object) when ``think_token_weight == 1.0``
+          or ``response_span_tags is None`` or ``loss_mask is None`` — the
+          byte-identical default/flag-off path.
+        - Otherwise a NEW float tensor equal to ``loss_mask`` everywhere except
+          THINK positions, which are multiplied by ``think_token_weight``
+          (down-weighted but, for weight > 0, still counted in the support).
+    """
+    if loss_mask is None or response_span_tags is None or think_token_weight == 1.0:
+        return loss_mask
+
+    # Per-token multiplier: think_token_weight on THINK tokens, 1.0 elsewhere.
+    # Align tags to the loss_mask response width defensively (right-padded).
+    tags = response_span_tags
+    if tags.shape != loss_mask.shape:
+        sl = min(tags.shape[-1], loss_mask.shape[-1])
+        aligned = torch.zeros_like(loss_mask, dtype=tags.dtype)
+        aligned[..., :sl] = tags[..., :sl]
+        tags = aligned
+    is_think = tags == SPAN_THINK_TAG
+    weight = torch.where(
+        is_think,
+        torch.as_tensor(think_token_weight, dtype=torch.float32, device=loss_mask.device),
+        torch.ones((), dtype=torch.float32, device=loss_mask.device),
+    )
+    return loss_mask.to(torch.float32) * weight
+
+
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],

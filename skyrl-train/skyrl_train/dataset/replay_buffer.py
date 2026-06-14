@@ -75,6 +75,9 @@ class Experience:
     teacher_top_k_indices: Optional[torch.Tensor] = None
     # MoE router-replay (R3) field — present only when moe_router_replay is on.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch response_len L K"]] = None
+    # Stage D (F7) per-token span tags (SPAN_THINK==1) — present only when the
+    # token-reward channel is on; used to down-weight <think> tokens in the loss.
+    response_span_tags: Optional[Integer[torch.Tensor, "batch response_len"]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -102,6 +105,8 @@ class Experience:
             self.teacher_top_k_indices = to(self.teacher_top_k_indices, device)
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = to(self.rollout_routed_experts, device)
+        if self.response_span_tags is not None:
+            self.response_span_tags = to(self.response_span_tags, device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
@@ -128,6 +133,8 @@ class Experience:
             self.teacher_top_k_indices = self.teacher_top_k_indices.pin_memory()
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
+        if self.response_span_tags is not None:
+            self.response_span_tags = self.response_span_tags.pin_memory()
         return self
 
 
