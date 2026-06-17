@@ -21,11 +21,11 @@
 
 # Overview of this fork
 
-This is a fork of SkyRL for the [OpenThoughts-Agent project](https://github.com/open-thoughts/OpenThoughts-Agent).
+This is a fork of SkyRL maintained for the [Marin project](https://github.com/marin-community/marin) (`marin-community`), where it powers agentic RL training (SkyRL + Harbor). It was originally developed for the [OpenThoughts-Agent project](https://github.com/open-thoughts/OpenThoughts-Agent); that line of work now continues here under Marin.
 
-We will soon merge the changes to the main SkyRL branch.
+We aim to upstream these changes to the main SkyRL branch.
 
-For the time being, we list the steps to run SkyRL+Harbor for reproducing the RL training of our first release, i.e.:
+The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while
 - Evaluating with [open-thoughts/OpenThoughts-TB-dev](https://huggingface.co/datasets/open-thoughts/OpenThoughts-TB-dev), and 
