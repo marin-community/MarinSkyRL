@@ -467,23 +467,46 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            # Resolve optimizer class dynamically from torch.optim
             optimizer_name = optim_config.get("optimizer", "AdamW")
-            optimizer_cls = getattr(optim, optimizer_name, None)
-            if optimizer_cls is None or not (isinstance(optimizer_cls, type) and issubclass(optimizer_cls, optim.Optimizer)):
-                raise ValueError(
-                    f"Unknown optimizer '{optimizer_name}'. "
-                    f"Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop)."
+            if optimizer_name == "Muon":
+                # Hybrid Muon recipe: Muon on the 2-D hidden matmul weights,
+                # AdamW on embeddings / final head / norms / biases / 1-D params.
+                # Muon is only correct for 2-D weight matrices; classification +
+                # construction live in muon_hybrid.build_hybrid_muon. Under FSDP2
+                # the 2-D weights are sharded DTensors and Newton-Schulz runs
+                # correctly on them via DTensor collective-insertion (verified to
+                # match full-tensor NS within bf16 tolerance).
+                from skyrl_train.distributed.muon_hybrid import build_hybrid_muon
+
+                new_optimizer = build_hybrid_muon(fsdp_module.named_parameters(), optim_config)
+                logger.info(
+                    f"[Muon] hybrid optimizer: {len(new_optimizer._muon_param_names)} 2-D "
+                    f"weights -> Muon (lr={new_optimizer.muon.param_groups[0]['lr']}, "
+                    f"momentum={new_optimizer.muon.param_groups[0]['momentum']}, "
+                    f"ns_steps={new_optimizer.muon.param_groups[0]['ns_steps']}); "
+                    f"{len(new_optimizer._adamw_param_names)} params -> AdamW "
+                    f"(lr={optim_config.lr}). Muon params (first 6): "
+                    f"{new_optimizer._muon_param_names[:6]}"
                 )
+            else:
+                # Resolve optimizer class dynamically from torch.optim
+                optimizer_cls = getattr(optim, optimizer_name, None)
+                if optimizer_cls is None or not (
+                    isinstance(optimizer_cls, type) and issubclass(optimizer_cls, optim.Optimizer)
+                ):
+                    raise ValueError(
+                        f"Unknown optimizer '{optimizer_name}'. "
+                        f"Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop) or 'Muon'."
+                    )
 
-            optimizer_kwargs = {"lr": optim_config.lr, "weight_decay": optim_config.weight_decay}
-            if optimizer_name in ("AdamW", "Adam", "NAdam", "RAdam", "Adamax"):
-                optimizer_kwargs["betas"] = optim_config.adam_betas
-            extra = optim_config.get("optimizer_kwargs", {})
-            if extra:
-                optimizer_kwargs.update(extra)
+                optimizer_kwargs = {"lr": optim_config.lr, "weight_decay": optim_config.weight_decay}
+                if optimizer_name in ("AdamW", "Adam", "NAdam", "RAdam", "Adamax"):
+                    optimizer_kwargs["betas"] = optim_config.adam_betas
+                extra = optim_config.get("optimizer_kwargs", {})
+                if extra:
+                    optimizer_kwargs.update(extra)
 
-            new_optimizer = optimizer_cls(fsdp_module.parameters(), **optimizer_kwargs)
+                new_optimizer = optimizer_cls(fsdp_module.parameters(), **optimizer_kwargs)
 
             lr_scheduler = get_scheduler(
                 optim_config.scheduler,
