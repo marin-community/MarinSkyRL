@@ -894,16 +894,38 @@ def _validate_dcp_cfg(cfg: DictConfig):
     # (e) vLLM rejects DCP together with R3 router capture (enable_return_routed_experts).
     # R3 capture is configured at the generator level (direct flag or engine_init_kwargs),
     # and the training-side replay is gated by trainer.policy.fsdp_config.moe_router_replay.
+    #
+    # Opt-in bypass: VLLM_ALLOW_ROUTED_EXPERTS_DCP=1 lifts this guard, mirroring the
+    # identical env-var-gated bypass in the patched vLLM fork
+    # (vllm/config/vllm.py:_validate_return_routed_experts). DCP+R3 is NOT a fundamental
+    # incompatibility — MoE routing is a per-token function of each token's hidden state at
+    # the MoE layers, independent of how DCP shards the attention decode-KV; each DCP rank
+    # captures routing for its own tokens and the buffer is gathered like the output tokens.
+    # Validated by the dcp=1-vs-dcp=2 routed-experts parity smoke (token mismatch 6.94% =
+    # bf16-tie floor; job 905835 / DCP GQA-LSE fp32 fix). Fail-closed by default — without
+    # the env var the original hard assertion stands. (Mirrors the vLLM guard so the two
+    # never disagree; the SIF's vLLM honors the same flag.)
     r3_capture = (
         bool(gen.get("enable_return_routed_experts", False))
         or bool(gen.get("engine_init_kwargs", {}).get("enable_return_routed_experts", False))
         or bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
     )
-    assert not r3_capture, (
-        f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) is not "
-        f"compatible with R3 router capture (enable_return_routed_experts / moe_router_replay); "
-        f"vLLM rejects DCP + return_routed_experts. Disable one of them."
-    )
+    allow_routed_experts_dcp = os.environ.get("VLLM_ALLOW_ROUTED_EXPERTS_DCP", "0") == "1"
+    if r3_capture and allow_routed_experts_dcp:
+        logger.warning(
+            f"VLLM_ALLOW_ROUTED_EXPERTS_DCP=1: allowing decode context parallel "
+            f"(inference_engine_decode_context_parallel_size={dcp}) together with R3 router "
+            f"capture (enable_return_routed_experts / moe_router_replay). Out of vLLM "
+            f"PR#39917's validated scope; relies on the dcp=1-vs-dcp=2 routed-experts parity "
+            f"smoke (bf16-tie floor). Verify routed-experts capture parity before trusting results."
+        )
+    else:
+        assert not r3_capture, (
+            f"decode context parallel (inference_engine_decode_context_parallel_size={dcp}) is not "
+            f"compatible with R3 router capture (enable_return_routed_experts / moe_router_replay); "
+            f"vLLM rejects DCP + return_routed_experts. Disable one of them, or set "
+            f"VLLM_ALLOW_ROUTED_EXPERTS_DCP=1 to opt into the parity-validated bypass."
+        )
 
     # (G4) DCP rides the TP GPUs and must NOT enter rollout-GPU accounting. Assert the
     # rollout-GPU count is a function of tp*pp*dp only, independent of dcp.
