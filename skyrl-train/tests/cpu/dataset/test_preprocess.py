@@ -159,3 +159,76 @@ def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(cfg, toke
             rewards,
             loss_masks,
         )
+
+
+def _re_inputs(tokenizer):
+    """Two samples, response lens 3 and 5 (matches the _exact fixture shapes)."""
+    prompts = tokenizer(["abc", "12345"])["input_ids"]
+    outputs = tokenizer(["def", "67890"])["input_ids"]
+    rewards = [torch.tensor([0.0, 1.0, 0.0]), torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0])]
+    loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
+    return prompts, outputs, rewards, loss_masks
+
+
+def test_routed_experts_uniform_LK(tokenizer, cfg):
+    # All per-token rows are a canonical [L=48, K=8] vector. Result must be
+    # [batch, max_response_len, 48, 8] with sentinel-zero rows in the padding.
+    prompts, outputs, rewards, loss_masks = _re_inputs(tokenizer)
+    L, K = 48, 8
+    row = [[1] * K for _ in range(L)]
+    # sample 0 has 3 generated rows, sample 1 has 5.
+    routed_experts = [[row for _ in range(3)], [row for _ in range(5)]]
+
+    out = convert_prompts_responses_to_batch_tensors(
+        tokenizer, prompts, outputs, rewards, loss_masks, None, routed_experts
+    )
+    re_tensor = out[6]
+    assert re_tensor is not None
+    assert re_tensor.shape == (2, 5, L, K)
+    # sample 0 padding rows (positions 3,4) are sentinel zeros
+    assert torch.equal(re_tensor[0, 3], torch.zeros(L, K, dtype=torch.long))
+    assert torch.equal(re_tensor[0, 0], torch.ones(L, K, dtype=torch.long))
+
+
+def test_routed_experts_mixed_sentinel_and_real_no_ragged_crash(tokenizer, cfg):
+    # Regression for #232: one sample carries real [48, K] rows, the other was
+    # cross-sample sentinel-filled with degenerate [1, 1] rows. The collator must
+    # normalize the [1, 1] sentinels up to [48, K] instead of raising
+    # "expected sequence of length 1 at dim 2 (got 48)".
+    prompts, outputs, rewards, loss_masks = _re_inputs(tokenizer)
+    L, K = 48, 8
+    real_row = [[2] * K for _ in range(L)]
+    degenerate_sentinel = [[0]]  # the old broken [1, 1] sentinel
+    routed_experts = [
+        [real_row for _ in range(3)],
+        [degenerate_sentinel for _ in range(5)],
+    ]
+
+    out = convert_prompts_responses_to_batch_tensors(
+        tokenizer, prompts, outputs, rewards, loss_masks, None, routed_experts
+    )
+    re_tensor = out[6]
+    assert re_tensor is not None
+    assert re_tensor.shape == (2, 5, L, K)
+    # the degenerate-sentinel sample is normalized to all-zero [48, K] rows
+    assert torch.equal(re_tensor[1], torch.zeros(5, L, K, dtype=torch.long))
+    assert torch.equal(re_tensor[0, 0], torch.full((L, K), 2, dtype=torch.long))
+
+
+def test_routed_experts_ragged_rows_normalized(tokenizer, cfg):
+    # A single sample with internally ragged rows (a leading [1, 1] sentinel then
+    # full [48, K] rows) must normalize to a uniform [48, K] without crashing.
+    prompts, outputs, rewards, loss_masks = _re_inputs(tokenizer)
+    L, K = 48, 8
+    real_row = [[3] * K for _ in range(L)]
+    routed_experts = [
+        [[[0]], real_row, real_row],  # sample 0: ragged ([1,1] then [48,K])
+        [real_row for _ in range(5)],
+    ]
+    out = convert_prompts_responses_to_batch_tensors(
+        tokenizer, prompts, outputs, rewards, loss_masks, None, routed_experts
+    )
+    re_tensor = out[6]
+    assert re_tensor.shape == (2, 5, L, K)
+    assert torch.equal(re_tensor[0, 0], torch.zeros(L, K, dtype=torch.long))
+    assert torch.equal(re_tensor[0, 1], torch.full((L, K), 3, dtype=torch.long))

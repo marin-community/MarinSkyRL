@@ -18,6 +18,7 @@ from skyrl_train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
     encode_messages_subset,
+    concatenate_generator_outputs,
     SENTINEL_EXPERT_ID,
 )
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
@@ -277,3 +278,40 @@ def test_training_input_batch_noop_vs_present(char_tokenizer):
         assert torch.equal(off_a[k], on[k])
     # The added field satisfies the Stage-1 invariant shape[:2] == loss_mask.shape.
     assert tuple(on["rollout_routed_experts"].shape[:2]) == tuple(on["loss_mask"].shape)
+
+
+def test_concat_cross_sample_sentinel_matches_LK():
+    """Regression for #232: concatenate_generator_outputs must sentinel-fill a
+    routing-less generator output with [L, K]-shaped rows learned from a sibling
+    output that DOES carry routing, not a degenerate [1, 1] row. A [1, 1] sentinel
+    mixed with real [L, K] rows makes the L axis ragged and crashes the downstream
+    dense torch.tensor() collation ("expected sequence of length 1 at dim 2").
+    """
+    real_row = [[1] * K for _ in range(L)]  # [L, K]
+    # Output A carries routing; output B does not (preempted/quant path).
+    out_a = {
+        "prompt_token_ids": [[10, 11]],
+        "response_ids": [[20, 21, 22]],
+        "rewards": [[0.0, 0.0, 1.0]],
+        "loss_masks": [[1, 1, 1]],
+        "rollout_routed_experts": [[real_row, real_row, real_row]],
+    }
+    out_b = {
+        "prompt_token_ids": [[30, 31]],
+        "response_ids": [[40, 41]],
+        "rewards": [[0.0, 1.0]],
+        "loss_masks": [[1, 1]],
+        # no rollout_routed_experts key
+    }
+
+    merged = concatenate_generator_outputs([out_a, out_b])
+    assert "rollout_routed_experts" in merged
+    re = merged["rollout_routed_experts"]
+    assert len(re) == 2  # one entry per sample
+    # The sentinel-filled sample (B) must have [L, K]-shaped rows, NOT [1, 1].
+    sentinel_sample = re[1]
+    assert len(sentinel_sample) == 2  # 1:1 with response_ids
+    for row in sentinel_sample:
+        assert len(row) == L
+        assert all(len(layer) == K for layer in row)
+        assert all(all(e == SENTINEL_EXPERT_ID for e in layer) for layer in row)

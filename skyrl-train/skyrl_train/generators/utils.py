@@ -431,13 +431,32 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     has_routed_experts = ["rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None for output in generator_outputs]
     rollout_routed_experts_concat = None
     if any(has_routed_experts):
+        # Learn the real [L, K] per-token row shape from the FIRST sample that
+        # actually carries routing. Samples lacking routing (preempted requests,
+        # quant paths) must be sentinel-filled with the SAME [L, K] width — a
+        # degenerate [1, 1] sentinel here makes the L axis ragged across the batch
+        # ([48, K] real rows vs [1, 1] sentinels) and crashes the dense
+        # torch.tensor() collation in convert_prompts_responses_to_batch_tensors
+        # ("expected sequence of length 1 at dim 2"). See _sentinel_routed_experts_row.
+        _concat_sentinel_row = None
+        for output in generator_outputs:
+            re_out = output.get("rollout_routed_experts")
+            if re_out:
+                for sample_re in re_out:
+                    if sample_re and len(sample_re) > 0:
+                        _concat_sentinel_row = _sentinel_routed_experts_row(sample_re[0])
+                        break
+            if _concat_sentinel_row is not None:
+                break
         rollout_routed_experts_concat = []
         for output in generator_outputs:
             if "rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None:
                 rollout_routed_experts_concat.extend(output["rollout_routed_experts"])
             else:
                 for response_ids in output["response_ids"]:
-                    rollout_routed_experts_concat.append([[[SENTINEL_EXPERT_ID]] for _ in range(len(response_ids))])
+                    rollout_routed_experts_concat.append(
+                        _re_sentinel_rows(len(response_ids), _concat_sentinel_row)
+                    )
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): mix the per-token shaping
     # channel + span tags the same way as routed_experts — sentinel-fill (zeros)

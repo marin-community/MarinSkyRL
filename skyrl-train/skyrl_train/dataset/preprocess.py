@@ -169,23 +169,57 @@ def convert_prompts_responses_to_batch_tensors(
     routed_experts_tensor = None
     if routed_experts:
         max_output_len = action_mask.size(1)
-        # Infer [L, K] from the first non-empty sample (every real row shares it).
+        # Infer the true [L, K] per-token row shape by scanning ALL samples for the
+        # WIDEST real row, not just routed_experts[0][0]. Samples/rows that lack the
+        # full routing (cross-sample sentinels emitted as a degenerate [1, 1], or
+        # preempted/quant paths) would otherwise leave the L axis ragged ([48, K] vs
+        # [1, 1]) and crash the dense torch.tensor() collation with
+        # "expected sequence of length 1 at dim 2 (got 48)". We then NORMALIZE every
+        # row to [L, K] so the tensorize is shape-uniform regardless of upstream raggedness.
         L, K = 1, 1
         for sample_re in routed_experts:
-            if sample_re:
-                L = len(sample_re[0])
-                K = len(sample_re[0][0]) if L > 0 and isinstance(sample_re[0][0], (list, tuple)) else 1
-                break
+            for row in sample_re:
+                if isinstance(row, (list, tuple)) and len(row) > L:
+                    L = len(row)
+                    inner = row[0] if L > 0 else None
+                    K = len(inner) if isinstance(inner, (list, tuple)) and len(inner) > K else K
         sentinel_row = [[0] * K for _ in range(L)]
+
+        def _normalize_row(row):
+            # Coerce a per-token routed-experts row to exactly [L, K].
+            if not isinstance(row, (list, tuple)) or len(row) == 0:
+                return [list(layer) for layer in sentinel_row]
+            out = []
+            for layer in row[:L]:
+                if isinstance(layer, (list, tuple)):
+                    layer = list(layer[:K]) + [0] * (K - len(layer))
+                else:
+                    layer = [int(layer)] + [0] * (K - 1)
+                out.append(layer)
+            # pad missing layers
+            for _ in range(L - len(out)):
+                out.append([0] * K)
+            return out
+
+        # Fast path: rows already uniform [L, K] (the production MoE path) skip
+        # per-row normalization entirely so the byte-identical batch is preserved.
+        def _row_is_canonical(row):
+            return (
+                isinstance(row, (list, tuple))
+                and len(row) == L
+                and all(isinstance(l, (list, tuple)) and len(l) == K for l in row)
+            )
+
         padded_re = []
         for sample_re in routed_experts:
             sample_re = list(sample_re)
-            pad_n = max_output_len - len(sample_re)
+            normalized = [r if _row_is_canonical(r) else _normalize_row(r) for r in sample_re]
+            pad_n = max_output_len - len(normalized)
             if pad_n > 0:
-                sample_re = sample_re + [sentinel_row for _ in range(pad_n)]
+                normalized = normalized + [sentinel_row for _ in range(pad_n)]
             elif pad_n < 0:
-                sample_re = sample_re[:max_output_len]
-            padded_re.append(sample_re)
+                normalized = normalized[:max_output_len]
+            padded_re.append(normalized)
         routed_experts_tensor = torch.tensor(padded_re, dtype=torch.long)
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
