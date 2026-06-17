@@ -952,12 +952,24 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
 def get_sharding_strategy(device_mesh):
     from torch.distributed.fsdp import ShardingStrategy
 
+    # This legacy ShardingStrategy enum is only consumed by the FSDP1
+    # (``fsdp_strategy == "fsdp"``) wrap path. The FSDP2 (``fully_shard``) path —
+    # the only one that can build a >2-D mesh, since EP and CP both assert
+    # fsdp2 — slices the mesh into explicit submeshes (``["fsdp"]`` for the FSDP
+    # shard, ``["cp"]`` for ring SDPA, ``["ep"]`` for ExpertParallel) and never
+    # reads this enum. So for any multi-dim mesh the value is informational only.
+    #
+    # ndim layout contract (create_device_mesh): 1-D ["fsdp"]; 2-D ["ddp","fsdp"];
+    # 3-D adds one of cp/ep (["ddp","fsdp","cp"] or ["ddp","fsdp","ep"]); 4-D is the
+    # combined CP>1 AND EP>1 mesh ["ddp","fsdp","cp","ep"]. Every multi-dim mesh has
+    # an outer (replicate-like ddp) dim plus the fsdp shard dim, so HYBRID_SHARD is
+    # the correct FSDP1-semantics mapping for ndim 2, 3, and 4 alike.
     if device_mesh.ndim == 1:
         sharding_strategy = ShardingStrategy.FULL_SHARD
-    elif device_mesh.ndim in (2, 3):
+    elif device_mesh.ndim in (2, 3, 4):
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
     else:
-        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1, 2 or 3")
+        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1, 2, 3 or 4")
     return sharding_strategy
 
 
