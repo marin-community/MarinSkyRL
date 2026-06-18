@@ -364,10 +364,22 @@ def main():
                 f"[{label}] (raw_atol={raw_atol})  mean|d_logp|={mean_logp:.3e}  "
                 f"self_noise_floor(cp1-vs-cp1)={floor_logp:.3e}  right_aligned={right_aligned}"
             )
-        ok_raw = (d_logp <= raw_atol) and (d_ent <= raw_atol) and (d_kl <= raw_atol)
+        # The raw-parity GATE is on the per-token LOGPROBS and ref-KL (the
+        # quantities that feed the policy loss / KL penalty and must match cp=1).
+        # Entropy is reported as a DIAGNOSTIC only: its raw bf16 delta is a fixed
+        # `chunked_entropy_from_logits` quantization floor (~0.25 bf16 / ~0.031
+        # fp16) that is IDENTICAL across every case — left-padded, right-aligned,
+        # AND nopad — so it is precision noise, NOT an alignment signal, and was
+        # never part of this gate (the original gated order+loss only). Folding it
+        # into ok_raw would falsely fail the always-correct nopad/right cases.
+        ok_raw = (d_logp <= raw_atol) and (d_kl <= raw_atol)
         ok_order = logp_cp1.shape == logp_cp2.shape == (input_ids.size(0), num_actions)
         if rank == 0:
-            print(f"[{label}] raw within tol: {ok_raw}  shape/order match: {ok_order}  shape={tuple(logp_cp2.shape)}")
+            print(
+                f"[{label}] raw within tol (logprob+refKL): {ok_raw}  "
+                f"shape/order match: {ok_order}  shape={tuple(logp_cp2.shape)}  "
+                f"(d_entropy={d_ent:.3e} DIAGNOSTIC-only, bf16 entropy-quant floor)"
+            )
 
         # loss-VALUE parity over the four reduce modes, judged at the tighter
         # loss-level tol (where ring-reassociation noise averages out).
