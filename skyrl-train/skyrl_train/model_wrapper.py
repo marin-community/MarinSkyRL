@@ -502,46 +502,56 @@ class HFModelWrapper(nn.Module):
         # leaves every buffer untouched (the block is skipped, G1).
         cp_size = self.context_parallel_size
         cp_pad_size = 0
+        cp_left_shifts = None
         if cp_size > 1:
             assert self.sequence_parallel_size == 1, "CP and Ulysses SP are mutually exclusive (G2)"
             assert not self.use_sample_packing, "CP requires the dense (unpacked) path (G2)"
-            # Stage 6 (production guard): CP ring SDPA runs PURE-CAUSAL with
+            # Stage 6 (production fix): CP ring SDPA runs PURE-CAUSAL with
             # attention_mask=None inside the context (the 2D mask is not
             # CP-shardable — see the long comment below). Pure-causal attention
             # only masks pad tokens that come AFTER the real tokens (trailing /
             # right-pad — causality blocks real tokens from attending forward).
             # LEFT-padding (pads BEFORE the real tokens) is NOT masked: every
-            # real token attends back across the leading pads, diverging grossly
-            # from the cp=1 (masked) path (~1.0 logprob error — Stage 5/5b). So
-            # CP REQUIRES right-aligned batches. Detect a left-padded row (a
-            # masked-out position that precedes a real position) and fail loudly
-            # rather than silently train on corrupted attention. Gated by
+            # real token would attend back across the leading pads, diverging
+            # grossly from the cp=1 (masked) path (~1.0 logprob error). So CP
+            # REQUIRES right-aligned (left-flush) batches. Rather than crash on a
+            # left-padded batch (SkyRL's collator left-pads prompts), we DETECT
+            # the per-row leading-pad count and ROLL-LEFT every per-row [B,S]
+            # buffer entering the CP forward so each row becomes left-flush (real
+            # tokens first, pads trailing). The roll is recorded in
+            # `cp_left_shifts` and INVERTED on the per-token outputs (Stage 5b)
+            # so the returned logprobs/entropy are in the ORIGINAL column order —
+            # byte-identical alignment to the cp=1 path. Gated by
             # SKYRL_CP_REQUIRE_RIGHT_ALIGN (default "1"); set "0" only if the
             # caller has independently guaranteed right-alignment and wants to
-            # skip the per-step scan. cp_size==1 never reaches here (G1).
+            # skip the per-step realignment. cp_size==1 never reaches here (G1).
             if attention_mask_fwd is not None and os.environ.get("SKYRL_CP_REQUIRE_RIGHT_ALIGN", "1") not in (
                 "0",
                 "false",
                 "False",
             ):
                 am = attention_mask_fwd.to(torch.bool)
-                # A row is right-aligned iff, reading left→right, no real token (1)
-                # appears after a pad (0): i.e. cummax of the mask is monotone and
-                # the FIRST occurrence of a 1 is followed only by 1s up to the last
-                # real token. Equivalent check: a left pad exists iff any position
-                # is a pad (0) AND some LATER position in the same row is real (1).
-                later_real = torch.flip(torch.cummax(torch.flip(am.int(), dims=[1]), dim=1).values, dims=[1])
-                left_padded = ((~am) & later_real.bool()).any(dim=1)
-                if bool(left_padded.any()):
-                    bad = torch.nonzero(left_padded, as_tuple=False).flatten().tolist()
-                    raise AssertionError(
-                        f"[CP] context_parallel_size={cp_size} requires RIGHT-ALIGNED batches "
-                        f"(pads must be TRAILING so pure-causal ring SDPA masks them); rows {bad} "
-                        f"are LEFT-padded (a real token follows a pad). Left-padding corrupts CP "
-                        f"attention (real tokens attend across leading pads, ~1.0 logprob error vs "
-                        f"cp=1). Right-align the batch before the CP forward, or set "
-                        f"SKYRL_CP_REQUIRE_RIGHT_ALIGN=0 only if alignment is guaranteed upstream."
-                    )
+                _, S = am.shape
+                # `first_real`: index of the FIRST real (mask==1) token per row.
+                # argmax over a bool->int row returns the first 1; an all-pad row
+                # has no 1 → argmax gives 0 (we keep it 0 via `has_real` so the
+                # all-pad row is a no-op roll). Right-aligned (left-flush) rows
+                # already have first_real==0.
+                has_real = am.any(dim=1)
+                first_real = torch.argmax(am.int(), dim=1)
+                first_real = torch.where(has_real, first_real, torch.zeros_like(first_real))
+                if bool((first_real > 0).any()):
+                    # Roll each row LEFT by first_real[i] columns (the leading pads
+                    # wrap to the trailing end → right-pad). gather_idx[i, j] =
+                    # (j + first_real[i]) % S selects, for output column j, the
+                    # source column that lands there after the left-roll.
+                    arange_S = torch.arange(S, device=am.device).unsqueeze(0)
+                    gather_idx = (arange_S + first_real.unsqueeze(1)) % S
+                    sequences_fwd = torch.gather(sequences_fwd, 1, gather_idx)
+                    sequences_rolled = torch.gather(sequences_rolled, 1, gather_idx)
+                    position_ids_fwd = torch.gather(position_ids_fwd, 1, gather_idx)
+                    attention_mask_fwd = torch.gather(attention_mask_fwd, 1, gather_idx)
+                    cp_left_shifts = first_real
             _, total_seq_len = sequences_fwd.shape
             multiple = 2 * cp_size
             cp_pad_size = (multiple - total_seq_len % multiple) % multiple
@@ -786,6 +796,24 @@ class HFModelWrapper(nn.Module):
             log_probs = log_probs[:, : log_probs.size(1) - cp_pad_size]
             if compute_entropy:
                 output["entropy"] = output["entropy"][:, : output["entropy"].size(1) - cp_pad_size]
+
+        # Stage 5b (FSDP2 CP): if we LEFT-rolled the inputs to right-align a
+        # left-padded batch (cp_left_shifts set above), INVERT the roll now so
+        # the per-token logprobs/entropy return to the ORIGINAL column order. The
+        # forward left-rolled row i by f=cp_left_shifts[i] (gather j -> (j+f)%S);
+        # the inverse roll-RIGHT is gather j -> (j-f)%S. After the G4 strip above
+        # the tensors are back to length S (the same S the shifts were computed
+        # on), so the inverse gather restores the exact cp=1 token order — the
+        # trainer's seqnorm loss_mask + TIS rollout_logprobs alignment and the
+        # `num_actions` slice below all see natural order. cp_size==1 ⇒
+        # cp_left_shifts is None, this block is a no-op (G1).
+        if cp_size > 1 and cp_left_shifts is not None:
+            S = log_probs.size(1)
+            arange_S = torch.arange(S, device=log_probs.device).unsqueeze(0)
+            inv_idx = (arange_S - cp_left_shifts.unsqueeze(1)) % S
+            log_probs = torch.gather(log_probs, 1, inv_idx)
+            if compute_entropy:
+                output["entropy"] = torch.gather(output["entropy"], 1, inv_idx)
 
         if isinstance(num_actions, list):
             if len(num_actions) == 1:

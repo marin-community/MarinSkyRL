@@ -404,10 +404,13 @@ def main():
             m_cp1, m_cp2, tag, "Probe-b/bf16", raw_atol=G3_ATOL, loss_atol=LOSS_LEVEL_ATOL
         )
         probe_b[tag] = dict(ok_raw=ok_raw, ok_order=ok_order, ok_loss=ok_loss, d_logp=d_logp, d_ent=d_ent, d_kl=d_kl)
-        # Gate: ALL cases must have matching shape/order + loss-value parity.
-        # Raw parity is the diagnostic (right-aligned should now pass the floor;
-        # left-aligned is EXPECTED to blow up — that's the known left-pad defect).
-        all_ok &= ok_order and ok_loss
+        # Gate (post right-align fix): ALL cases must have matching shape/order +
+        # loss-value parity AND raw per-token parity within the bf16 floor. With
+        # the model_wrapper left-roll fix (cp_left_shifts), the LEFT-padded cases
+        # (`divisible`, `pad-edge`) — which used to blow up ~1.0 — must now match
+        # cp=1 within G3_ATOL just like the right-aligned cases. ok_raw becomes a
+        # HARD gate for every case; a failure means the realignment is broken.
+        all_ok &= ok_order and ok_loss and ok_raw
         dist.barrier()
     del m_cp1, m_cp2
 

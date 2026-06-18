@@ -33,14 +33,16 @@ set -x
 #    the batch up to this multiple automatically (and strips the pad after the
 #    per-token unshard), so you do NOT have to hand-align (max_prompt_length +
 #    max_generate_length); but keeping them already-divisible avoids the pad.
-#  * RIGHT-ALIGNED BATCHES (Stage 5/5b, hard requirement): CP ring SDPA runs
-#    pure-causal with attention_mask=None inside the context. Causality only
-#    masks TRAILING (right) pads; LEFT-padding corrupts attention (real tokens
-#    attend back across the leading pads → ~1.0 logprob error vs cp=1). SkyRL's
-#    GRPO batches are right-aligned (prompt+response then trailing pad), so this
-#    holds by construction. The CP forward additionally ASSERTS right-alignment
-#    per step (SKYRL_CP_REQUIRE_RIGHT_ALIGN=1, default) and fails loudly on any
-#    left-padded row rather than silently training on corrupted attention.
+#  * LEFT-PAD AUTO-REALIGN (Stage 5/5b): CP ring SDPA runs pure-causal with
+#    attention_mask=None inside the context. Causality only masks TRAILING
+#    (right) pads; LEFT-padding would corrupt attention (real tokens attend back
+#    across the leading pads → ~1.0 logprob error vs cp=1). SkyRL's collator
+#    LEFT-pads prompts, so the CP forward DETECTS the per-row leading-pad count
+#    and ROLLS each row left (left-flush) before the CP context, then INVERTS the
+#    roll on the per-token logprobs/entropy afterward — the returned tensors are
+#    byte-identical column order to cp=1. Gated by SKYRL_CP_REQUIRE_RIGHT_ALIGN=1
+#    (default); set 0 only if alignment is already guaranteed upstream (skips the
+#    per-step realign). cp_size==1 is an unconditional no-op.
 #  * Production precision is bf16 (fp16 was diagnostic only). Only the
 #    "allgather" rotate method works on torch 2.11 (all_to_all → NotImplemented).
 # ===========================================================================
