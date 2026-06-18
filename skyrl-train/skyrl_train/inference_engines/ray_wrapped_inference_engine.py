@@ -14,6 +14,58 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 
 
+# ---------------------------------------------------------------------------
+# #232 FIX B — NCCL flight-recorder observability env -> vLLM engine workers.
+#
+# The vLLM inference-engine actors (and, under the ray executor backend, the
+# per-rank TP worker actors they spawn) do NOT reliably inherit the NCCL
+# flight-recorder / watchdog env vars that are set on the host launch shell.
+# On Jupiter those vars are exported as APPTAINERENV_TORCH_NCCL_* (so apptainer
+# imports them into the `ray start` raylet process), but the Ray-actor-spawned
+# vLLM EngineCore / TP workers run with a runtime_env that does NOT carry the
+# raylet's TORCH_NCCL_* through to the actual collective-running process
+# (job 919724: the execute_model wedge fired but NO nccl_fr_rank* dump was
+# written -> NCCL's 600s watchdog never armed inside the worker, so vLLM's 900s
+# RPC watchdog always preempted it). Without these vars IN the worker process
+# env, a residual TP-rank desync can never write a flight-recorder trace.
+#
+# Fix: explicitly forward an allowlist of NCCL FR / debug vars from the
+# engine-creation process env (which DOES have them, set by the launch shell)
+# into the actor's Ray runtime_env env_vars. With
+# placement_group_capture_child_tasks=True (already set on the scheduling
+# strategy), the ray-backend TP worker actors inherit this runtime_env too, so
+# the vars land IN the process that actually runs the NCCL collective. When NONE
+# of these vars are set in the launching env (every non-#232 run), the dict is
+# empty and runtime_env is None -> byte-identical actor creation as before.
+_NCCL_FR_ENV_PASSTHROUGH = (
+    "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
+    "TORCH_NCCL_ENABLE_MONITORING",
+    "TORCH_NCCL_DUMP_ON_TIMEOUT",
+    "TORCH_NCCL_TRACE_CPP_STACK",
+    "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
+    "TORCH_NCCL_DEBUG_INFO_PIPE_FILE",
+    "TORCH_FR_BUFFER_SIZE",
+    "TORCH_NCCL_TRACE_BUFFER_SIZE",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+    "TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS",
+    "NCCL_BLOCKING_WAIT",
+)
+
+
+def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
+    """Forward NCCL flight-recorder/watchdog vars (#232 FIX B) from the launch
+    process env into the vLLM engine actor's Ray runtime_env, so they reach the
+    actual collective-running worker process. Returns None when none are set
+    (byte-identical actor creation for every run that does not set them)."""
+    import os
+
+    env_vars = {k: os.environ[k] for k in _NCCL_FR_ENV_PASSTHROUGH if k in os.environ}
+    if not env_vars:
+        return None
+    logger.info(f"#232 FIX B: forwarding NCCL FR env to vLLM engine actors via runtime_env: {sorted(env_vars)}")
+    return {"env_vars": env_vars}
+
+
 class RayWrappedInferenceEngine(InferenceEngineInterface):
     """
     A thin wrapper around a Ray ActorHandle to another InferenceEngineInterface.
@@ -149,6 +201,10 @@ def create_ray_wrapped_inference_engines(
         raise ValueError(f"Unsupported backend: {backend}")
 
     inference_engine_actors = []
+    # #232 FIX B: NCCL flight-recorder env to forward into the engine actor (and,
+    # via placement_group_capture_child_tasks, its ray-backend TP worker actors).
+    # None for every run that does not set the TORCH_NCCL_* FR vars -> no change.
+    inference_engine_runtime_env = _build_inference_engine_runtime_env()
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
     tp_pp_size = tensor_parallel_size * pipeline_parallel_size
@@ -312,11 +368,16 @@ def create_ray_wrapped_inference_engines(
                     else {}
                 )
 
-                engine = actor_class.options(
+                # #232 FIX B: attach runtime_env only when FR vars are present, so
+                # actor creation is byte-identical for every non-#232 run.
+                engine_options = dict(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
                     scheduling_strategy=dp_rank_sched,
-                ).remote(
+                )
+                if inference_engine_runtime_env is not None:
+                    engine_options["runtime_env"] = inference_engine_runtime_env
+                engine = actor_class.options(**engine_options).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
                     worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
