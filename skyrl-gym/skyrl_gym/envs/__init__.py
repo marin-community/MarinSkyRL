@@ -8,6 +8,11 @@ register(
 )
 
 register(
+    id="ifeval",
+    entry_point="skyrl_gym.envs.ifeval.env:IFEvalEnv",
+)
+
+register(
     id="gsm8k",
     entry_point="skyrl_gym.envs.gsm8k.env:GSM8kEnv",
 )
