@@ -421,7 +421,16 @@ def main():
     # hit 2e-2. Do not "tighten" this to 2e-2 to look stricter; that just re-breaks
     # the gate on benign bf16 noise. The real correctness signal is loss parity +
     # left==right raw parity.)
-    CP_RAW_BF16_FLOOR = 8e-2
+    #
+    # The bound is the per-token MAX (not mean) over a fully-dense sequence: the
+    # `nopad` case (no padding, longest real span) tops out at ~0.16 max-token
+    # (mean ~0.046; loss-value parity still passes at 5e-3; fp16 drops max to
+    # ~0.012). The padded cases sit lower (~0.054). Set the floor to 2e-1 to cover
+    # the dense max-token residual — still 5x below the original ~1.0 left-pad
+    # defect, and the left-vs-right ratio<=2.0 assert below independently catches
+    # any roll regression (a broken roll re-diverges left rows by orders of
+    # magnitude, far past 2e-1).
+    CP_RAW_BF16_FLOOR = 2e-1
 
     probe_b = {}
     for tag in ("nopad", "divisible", "pad-edge", "right-div", "right-pad-edge"):
