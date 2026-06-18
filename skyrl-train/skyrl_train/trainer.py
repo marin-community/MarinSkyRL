@@ -340,6 +340,38 @@ class RayPPOTrainer:
         finally:
             await self._teardown()
 
+    async def _handle_resume_at_max_steps(self) -> None:
+        """Handle a run that resumed AT or PAST max_steps (already complete).
+
+        Fires on_train_end callbacks (so a missing final checkpoint / HF export /
+        HF upload still runs) and returns without executing another training step,
+        so the process exits 0 (clean COMPLETED) instead of overshooting to gs N+1.
+        """
+        logger.info(
+            f"Resumed at global_step {self.global_step} >= max training steps "
+            f"({self.total_training_steps}); run is already COMPLETE. Skipping further "
+            f"training and finalizing (export/upload if missing)."
+        )
+        if self.colocate_all:
+            self.policy_model.backload_to_gpu()
+
+        final_epoch = max(self.cfg.trainer.epochs - 1, 0)
+        final_state = self._create_trainer_state(epoch=final_epoch)
+        self._control.reset()
+        self._control = await self.callback_handler.call_event_async(
+            "on_train_end", final_state, self._control, trainer=self
+        )
+
+        if self._control.should_save:
+            with Timer("save_checkpoints", self.all_timings):
+                self.save_checkpoints()
+                logger.info("Saved final checkpoint (resume-at-max finalize).")
+        if self._control.should_save_hf_model:
+            with Timer("save_hf_model", self.all_timings):
+                self.save_models()
+                logger.info("Saved final HF model (resume-at-max finalize).")
+        logger.info("Training already complete on resume — exiting cleanly.")
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper generator lifecycle management.
@@ -360,6 +392,18 @@ class RayPPOTrainer:
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
                 self.global_step, _ = self.load_checkpoints()
+
+            # Resume-overshoot guard: if we resumed AT or PAST max_steps the run is
+            # already complete. The loaded `global_step` is the *completed* step count
+            # (save_checkpoints writes it after a step finishes), so the unconditional
+            # `self.global_step += 1` below would push us to gs N+1 and run one spurious
+            # ("overshoot") step before the post-increment max_steps check fires. Recognize
+            # completion here and exit 0 cleanly (firing on_train_end so a missing final
+            # export/upload still runs). `>=` treats "resumed exactly at max_steps" as done;
+            # a mid-training resume (global_step < total_training_steps) falls through.
+            if self.global_step >= self.total_training_steps:
+                await self._handle_resume_at_max_steps()
+                return
 
         if self.colocate_all:
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)

@@ -499,6 +499,40 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             await self._teardown()
 
+    async def _handle_resume_at_max_steps(self) -> None:
+        """Handle a run that resumed AT or PAST max_steps (already complete).
+
+        Fires the on_train_end callbacks (so any configured final checkpoint /
+        HF export / HF upload runs if it is missing) and returns without executing
+        another training step. This makes a resumed-at-max run exit 0 (clean
+        COMPLETED), which terminates the afternotok restart chain instead of
+        overshooting to gs N+1 and FAILING.
+        """
+        logger.info(
+            f"Resumed at global_step {self.global_step} >= max training steps "
+            f"({self.total_training_steps}); run is already COMPLETE. Skipping further "
+            f"training and finalizing (export/upload if missing)."
+        )
+
+        final_epoch = max(self.cfg.trainer.epochs - 1, 0)
+        final_state = self._create_trainer_state(epoch=final_epoch)
+        self._control.reset()
+        self._control = await self.callback_handler.call_event_async(
+            "on_train_end", final_state, self._control, trainer=self
+        )
+
+        # Honor final-save requests from callbacks (idempotent: re-saving the gsN
+        # checkpoint / re-exporting HF is safe and ensures the export exists).
+        if self._control.should_save:
+            with Timer("save_checkpoints", self.all_timings):
+                await asyncio.to_thread(self.save_checkpoints)
+                logger.info("Saved final checkpoint (resume-at-max finalize).")
+        if self._control.should_save_hf_model:
+            with Timer("save_hf_model", self.all_timings):
+                await asyncio.to_thread(self.save_models)
+                logger.info("Saved final HF model (resume-at-max finalize).")
+        logger.info("Training already complete on resume — exiting cleanly.")
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper generator lifecycle management.
@@ -539,6 +573,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 f"expected {expected_consumed_in_epoch}, got {actual_consumed_in_epoch}. "
                                 f"This can happen after epoch boundary transitions or error recovery."
                             )
+
+            # Resume-overshoot guard: if we resumed AT or PAST max_steps, the run is
+            # already complete. Without this guard, the unconditional `self.global_step += 1`
+            # below (followed by the inner `for _ in range(self.global_step, ...)` loop) would
+            # execute a spurious step gs N+1 ("overshoot") before the post-increment max_steps
+            # check at the bottom of the loop ever fires — wasting a node slot and typically
+            # ending FAILED, which (because it is a *failure*) keeps the afternotok restart
+            # chain alive and spawns yet more overshoot links. Recognize completion here and
+            # exit 0 cleanly so the chain terminates and the final export/upload runs.
+            # NOTE: `self.global_step` here is the *completed* step count loaded from the
+            # checkpoint (save_checkpoints writes it after a step finishes), so `>=` (not `>`)
+            # correctly treats "resumed exactly at max_steps" as done. A mid-training resume
+            # (global_step < total_training_steps) falls through and continues normally.
+            if self.global_step >= self.total_training_steps:
+                await self._handle_resume_at_max_steps()
+                return
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
