@@ -92,6 +92,30 @@ def resolve_attn_implementation(
     return impl
 
 
+def _cp_mask_dict_supported(model) -> bool:
+    """Whether `model`'s forward accepts the per-layer-type mask DICT escape hatch.
+
+    Under CP we must skip HF's 4D additive `create_causal_mask` (its kv axis gets
+    sharded while q stays full → torch CP SDPA `aten.expand` failure). HF's dense
+    Qwen3 path supports passing `attention_mask` ALREADY as a per-layer-type dict
+    (modeling_qwen3.py:403 `if not isinstance(attention_mask, dict)`), which
+    short-circuits `create_causal_mask`. But the MoE path (modeling_qwen3_moe.py:497)
+    has NO dict handling: it feeds the arg straight into `create_causal_mask` →
+    `attention_mask.ndim` → AttributeError on a dict. So MoE models must instead
+    get `attention_mask=None` + monotonic position_ids (causality via SDPA
+    `is_causal=True`; padding recovered post-hoc by the loss/entropy masks).
+
+    Detection: route MoE architectures to the None path, everything else (dense
+    Qwen3 etc.) to the proven dict path. Checked once at init and cached. We look
+    at the underlying HF module class name and the config `model_type` (the model
+    may be PEFT/FSDP-wrapped, so we probe both) — "moe" in either ⇒ not supported.
+    """
+    name = type(model).__name__.lower()
+    cfg = getattr(model, "config", None)
+    model_type = (getattr(cfg, "model_type", "") or "").lower()
+    return "moe" not in name and "moe" not in model_type
+
+
 class HFModelWrapper(nn.Module):
     """
     Base class for wrapped HF models in reinforcement learning.
@@ -308,6 +332,13 @@ class HFModelWrapper(nn.Module):
                 engage_flashqla(self.model)
         else:
             self.model = pretrain_or_model
+
+        # CP mask contract probe (computed once): does this HF model's forward
+        # accept the per-layer-type mask DICT escape hatch? Dense Qwen3 does;
+        # Qwen3-MoE does NOT (its create_causal_mask path crashes on a dict).
+        # Gates the CP forward below between the dict path and the
+        # None+monotonic-position_ids path. See _cp_mask_dict_supported.
+        self._cp_mask_dict_supported = _cp_mask_dict_supported(self.model)
 
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
         # Credits: https://www.tylerromero.com/posts/2025-02-selective-log-softmax/#efficient-solution
@@ -664,8 +695,23 @@ class HFModelWrapper(nn.Module):
                     # torch CP ring attention shards correctly. Padding masking is
                     # recovered post-hoc (entropy/logprob masks); exact per-token
                     # padding correctness is the Stage-5 concern.
-                    cp_mask = {"full_attention": None, "sliding_attention": None}
-                    output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd)
+                    if self._cp_mask_dict_supported:
+                        cp_mask = {"full_attention": None, "sliding_attention": None}
+                        output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd)
+                    else:
+                        # Qwen3-MoE has no dict escape hatch (modeling_qwen3_moe.py:497
+                        # → create_causal_mask → dict.ndim AttributeError). Pass
+                        # attention_mask=None with MONOTONIC per-row position_ids so HF's
+                        # find_packed_sequence_indices returns None (the pad-filled-to-1
+                        # positions would otherwise spawn a spurious packed mask) →
+                        # SDPA is_causal=True → ring attention shards cleanly. Pad RoPE is
+                        # masked out post-hoc (entropy/logprob masks), so monotonic is safe.
+                        mono_pos = (
+                            torch.arange(sequences_fwd.size(1), device=sequences_fwd.device)
+                            .unsqueeze(0)
+                            .expand(sequences_fwd.size(0), -1)
+                        )
+                        output = self.model(sequences_fwd, attention_mask=None, position_ids=mono_pos)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -961,6 +1007,12 @@ def _get_critic_model(
             self.context_parallel_size = context_parallel_size
             self.cp_mesh = cp_mesh
             self.cp_rotate_method = cp_rotate_method
+            # CP mask contract probe (computed once): dense Qwen3 accepts the
+            # per-layer-type mask DICT, Qwen3-MoE does not. Gates the CP forward
+            # below. See _cp_mask_dict_supported (mirrors HFModelWrapper).
+            self._cp_mask_dict_supported = _cp_mask_dict_supported(
+                getattr(self, self.base_model_prefix)
+            )
             if use_sample_packing:
                 assert (
                     config._attn_implementation == "flash_attention_2"
@@ -1061,10 +1113,23 @@ def _get_critic_model(
                     # CP: pass the per-layer-type mask DICT (None entries) so HF skips
                     # create_causal_mask → SDPA is_causal=True → ring attention shards
                     # cleanly (see HFModelWrapper.forward for the full rationale).
-                    cp_mask = {"full_attention": None, "sliding_attention": None}
-                    outputs = getattr(self, self.base_model_prefix)(
-                        input_ids_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd
-                    )
+                    if self._cp_mask_dict_supported:
+                        cp_mask = {"full_attention": None, "sliding_attention": None}
+                        outputs = getattr(self, self.base_model_prefix)(
+                            input_ids_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd
+                        )
+                    else:
+                        # Qwen3-MoE: no dict escape hatch. attention_mask=None +
+                        # MONOTONIC position_ids → find_packed_sequence_indices None →
+                        # SDPA is_causal=True (mirrors HFModelWrapper.forward).
+                        mono_pos = (
+                            torch.arange(input_ids_fwd.size(1), device=input_ids_fwd.device)
+                            .unsqueeze(0)
+                            .expand(input_ids_fwd.size(0), -1)
+                        )
+                        outputs = getattr(self, self.base_model_prefix)(
+                            input_ids_fwd, attention_mask=None, position_ids=mono_pos
+                        )
                 else:
                     outputs = getattr(self, self.base_model_prefix)(
                         input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
