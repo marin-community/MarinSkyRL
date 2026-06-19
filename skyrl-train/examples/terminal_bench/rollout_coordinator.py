@@ -171,14 +171,21 @@ class RolloutCoordinator:
         # __init__ reset (backtrace: uv__epoll_ctl_prep -> uvloop Loop._run ->
         # CoreWorker.initialize_eventloops_for_actor_concurrency_group), proving
         # the concurrency-group loop is NOT reliably created after __init__ -- so
-        # an __init__-time policy reset alone is insufficient. We keep this reset
-        # as a harmless, idempotent backstop. (It must NOT move to module top:
-        # this class is exported to workers BY VALUE via cloudpickle (see _log()
+        # an __init__-time policy reset alone is insufficient. We keep this as a
+        # harmless, idempotent backstop. (It must NOT move to module top: this
+        # class is exported to workers BY VALUE via cloudpickle (see _log()
         # note), so the module's top-level code never runs in the actor process.)
-        import asyncio as _asyncio_for_loop_policy
-        _asyncio_for_loop_policy.set_event_loop_policy(
-            _asyncio_for_loop_policy.DefaultEventLoopPolicy()
-        )
+        #
+        # job 930208 then re-aborted at uvloop/sslproto.pyx
+        # SSLProtocol._on_handshake_complete -- a uvloop.Loop() was still running
+        # the litellm->Daytona HTTPS handshake, because a bare policy reset does
+        # NOT stop uvloop.new_event_loop()/aiohttp from constructing uvloop.Loop()
+        # directly. So this backstop now calls the SAME hardened hook used at
+        # worker boot, which additionally exports UV_USE_IO_URING=0 (kills the
+        # libuv 1.48.0 io_uring path) AND neutralizes uvloop in-process so no
+        # uvloop loop can be created at all. Idempotent + best-effort.
+        from skyrl_train.utils.utils import _force_stock_asyncio_in_worker
+        _force_stock_asyncio_in_worker()
         # Import here so the heavy Harbor/terminal-bench import only happens in
         # the actor process, not on the dispatcher when fan-out is off.
         from examples.terminal_bench.terminal_bench_generator import (

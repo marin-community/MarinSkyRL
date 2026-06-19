@@ -1046,6 +1046,32 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # edge is moot. See feedback_uvloop_libuv_019_pin.
     env_vars["RAY_USE_UVLOOP"] = "0"
 
+    # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
+    #
+    # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
+    # were STILL insufficient -- 930208 SIGABRT'd in a RolloutCoordinator at
+    # uvloop/sslproto.pyx:517 SSLProtocol._on_handshake_complete (the
+    # litellm->Daytona HTTPS handshake), proving a live uvloop.Loop() was
+    # running an SSL transport in the actor despite the stock-asyncio POLICY.
+    # uvloop.new_event_loop() constructs uvloop.Loop() DIRECTLY (it does NOT
+    # consult asyncio's event-loop policy), so a policy reset cannot stop a
+    # uvloop loop that Ray's C++ CoreWorker or aiohttp brings up by calling
+    # uvloop.new_event_loop() outright.
+    #
+    # The crash is libuv 1.48.0's io_uring epoll-ctl race (uv__epoll_ctl_prep;
+    # fixed in 1.49.0). libuv reads UV_USE_IO_URING via getenv() inside
+    # uv__use_io_uring() AT FIRST USE and caches it atomically; "0" -> io_uring
+    # is never armed and the buggy path is dead, while uvloop otherwise keeps
+    # working on plain epoll. The var was INERT before because it lived only in
+    # the driver/launcher (host) env and was NEVER propagated into the Ray
+    # ACTOR process env -- Ray actors derive their environment from this
+    # runtime_env env_vars dict, not from arbitrary driver env. Setting it here
+    # puts it in the actor's process env before the actor ever imports
+    # uvloop/libuv, so libuv's first uv__use_io_uring() reads 0. Belt: the
+    # worker_process_setup_hook also re-exports it into os.environ at worker
+    # boot in case import ordering races the runtime-env injection.
+    env_vars["UV_USE_IO_URING"] = "0"
+
     # ---------------------------------------------------------------------
     # NCCL flight-recorder + finite-timeout instrumentation (Option A diag).
     #
@@ -1261,10 +1287,70 @@ def _force_stock_asyncio_in_worker() -> None:
     This is the same idiom as the driver fix (``set_event_loop_policy`` ->
     ``DefaultEventLoopPolicy``); it is process-global and idempotent. Actors are
     network-RTT-bound (vLLM/Daytona HTTP), so uvloop's throughput edge is moot.
+
+    NOT ENOUGH ON ITS OWN (job 930208, the SSL re-abort): setting only the
+    POLICY left a different uvloop path live. 930208 SIGABRT'd in a
+    RolloutCoordinator at ``uvloop/sslproto.pyx:517
+    SSLProtocol._on_handshake_complete`` -- the litellm->Daytona HTTPS handshake
+    running on a uvloop.Loop(). ``uvloop.new_event_loop()`` builds ``uvloop.Loop()``
+    DIRECTLY and ignores the asyncio policy, so Ray's C++ CoreWorker (or
+    aiohttp) can still stand up a uvloop loop after this policy reset. We
+    therefore ALSO (1) export ``UV_USE_IO_URING=0`` into the worker env before
+    any libuv init (libuv 1.48.0 reads it via getenv at first use of
+    uv__use_io_uring() and caches it -> the buggy io_uring epoll-ctl path is
+    never armed; fixed-for-real in libuv 1.49.0), and (2) NEUTRALIZE uvloop
+    in-process so ``uvloop.install`` / ``uvloop.new_event_loop`` /
+    ``uvloop.EventLoopPolicy`` can no longer produce a uvloop loop -- they fall
+    back to stock asyncio. (1) keeps uvloop working on plain epoll if some loop
+    survives; (2) makes sure none does. Belt-and-suspenders covering the SSL
+    path that the bare policy reset missed.
     """
+    import os
+
+    # (1) Kill the buggy libuv 1.48.0 io_uring epoll-ctl path FIRST, before any
+    # import of uvloop/libuv in this worker triggers uv__use_io_uring(). This is
+    # the same value set in the Ray runtime_env env_vars (prepare_runtime_environment);
+    # re-setting it here guards against any import-ordering race where libuv is
+    # touched before the runtime-env injection lands.
+    os.environ["UV_USE_IO_URING"] = "0"
+
     import asyncio
 
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+    # (2) Neutralize uvloop in-process so nothing (Ray C++ CoreWorker, litellm,
+    # aiohttp) can construct a uvloop.Loop() that runs the SSL handshake on
+    # libuv. Guarded: if uvloop is not importable, there is nothing to do.
+    # Idempotent: re-aliasing to the stock equivalents is a no-op on re-entry.
+    try:
+        import uvloop  # noqa: F401
+    except Exception:
+        return
+
+    def _stock_new_event_loop():
+        # Stock asyncio loop (SelectorEventLoop on POSIX) -- never uvloop.Loop().
+        return asyncio.SelectorEventLoop()
+
+    def _stock_install():
+        # uvloop.install() normally sets uvloop's policy; force stock instead.
+        asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+    try:
+        uvloop.new_event_loop = _stock_new_event_loop  # type: ignore[assignment]
+        uvloop.install = _stock_install  # type: ignore[assignment]
+        # Anything that does asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        # (e.g. ray aiohttp worker, or older code paths) now installs the stock
+        # policy instead of uvloop's.
+        uvloop.EventLoopPolicy = asyncio.DefaultEventLoopPolicy  # type: ignore[assignment]
+        if hasattr(uvloop, "Loop"):
+            # Constructing uvloop.Loop() directly (the lowest-level escape hatch)
+            # now yields a stock SelectorEventLoop.
+            uvloop.Loop = asyncio.SelectorEventLoop  # type: ignore[assignment]
+    except Exception:
+        # Best-effort: the policy reset + UV_USE_IO_URING=0 already cover the
+        # common paths; do not let an attribute-shape change in uvloop crash the
+        # worker boot hook.
+        pass
 
 
 def configure_ray_worker_logging() -> None:
