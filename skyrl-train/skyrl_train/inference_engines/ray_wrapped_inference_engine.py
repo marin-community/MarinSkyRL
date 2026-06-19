@@ -251,8 +251,26 @@ def create_ray_wrapped_inference_engines(
         num_gpus_per_actor = 0.2
 
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
+    # #232 ROOT-CAUSE FIX (cross-node TP all-reduce decode deadlock): one PG PER
+    # ENGINE with STRICT_PACK, NOT a single flat PACK PG over all engines.
+    #
+    # The old `placement_group(<all bundles>, strategy="PACK")` is SOFT — Ray packs
+    # bundles greedily to minimize node count but gives NO per-engine node-affinity:
+    # a single engine's `tp_pp_size` contiguous {GPU:1} bundles can land split across
+    # TWO nodes (observed: job 923995, a TP=4 engine straddling jpbo-091-30 + -38).
+    # When that happens, vLLM detects the TP process group spans nodes, DISABLES
+    # custom_all_reduce ("Custom allreduce is disabled because this process group
+    # spans across nodes"), and every per-decode-step TP all-reduce goes over the IB
+    # RDMA fabric instead of on-node NVLink. Under sustained 131k-context decode that
+    # cross-node NCCL all-reduce deadlocks (rank spins count-32768 AllReduce while its
+    # cross-node peers block on the RDMA transport) — exactly the Option-B wedge.
+    #
+    # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
+    # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
+    # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1), so the
+    # per-engine `shared_pg`/`base_pg_index` math below is unchanged in spirit.
+    per_engine_pgs: list = []
     if not use_hybrid_engine:
-        # Create a big placement group to ensure that all inference engines are packed.
         if use_mp_backend:
             # mp executor: each (engine, DP-rank) is ONE Ray actor that itself
             # reserves the whole TP*PP GPU slice and forks its workers locally.
@@ -262,24 +280,49 @@ def create_ray_wrapped_inference_engines(
             # tp_pp_size GPUs cannot fit into; Ray's _validate_resource_shape
             # requires a single actor to fit one bundle). One bundle per DP rank
             # keeps the bundle count == num actors so each gets a distinct index.
+            # The {GPU: tp_pp_size} bundle is already atomic-per-node, so the mp path
+            # was never affected by the cross-node split; keep its single PACK PG.
             bundles = [
                 {"GPU": tp_pp_size, "CPU": tp_pp_size}
                 for _ in range(num_inference_engines * data_parallel_size)
             ]
+            shared_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         else:
-            bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
-        shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            # ray/uni backend: one STRICT_PACK PG per engine so each engine's
+            # per_engine_gpu_count {GPU:1} bundles are guaranteed co-located on a
+            # single node (no cross-node TP all-reduce in decode).
+            for _ in range(num_inference_engines):
+                pg = placement_group(
+                    [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
+                    strategy="STRICT_PACK",
+                )
+                per_engine_pgs.append(pg)
+            for pg in per_engine_pgs:
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            # Keep `shared_pg` defined for the TP==PP==1 / sglang paths that index a
+            # single flat PG; for the per-engine path it is re-selected in the loop.
+            shared_pg = per_engine_pgs[0]
 
     for i in range(num_inference_engines):
-        base_pg_index = i * per_engine_gpu_count
+        # Per-engine STRICT_PACK PGs (ray/uni, non-hybrid) are engine-LOCAL: each has its
+        # own bundle index space 0..per_engine_gpu_count-1, so base_pg_index resets to 0.
+        # The mp PACK PG and hybrid/sglang flat PG remain GLOBAL, so they keep the
+        # i*per_engine_gpu_count offset.
+        use_per_engine_pg = bool(per_engine_pgs)
+        if use_per_engine_pg:
+            engine_pg = per_engine_pgs[i]
+            base_pg_index = 0
+        else:
+            engine_pg = shared_pg
+            base_pg_index = i * per_engine_gpu_count
 
         # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
         # The mp PACK PG has one {GPU: tp_pp_size} bundle per (engine, DP-rank), so the
         # rendezvous bundle for engine i's DP-rank-0 is at i*data_parallel_size (not the
         # per-GPU base_pg_index, which would index past the smaller mp bundle list).
         rendezvous_pg_index = (i * data_parallel_size) if use_mp_backend else base_pg_index
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, rendezvous_pg_index)
+        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(engine_pg, rendezvous_pg_index)
 
         if backend == "vllm":
             if async_engine:
@@ -326,13 +369,13 @@ def create_ray_wrapped_inference_engines(
                     # stays None so vLLM does not attempt ray per-worker placement.
                     dp_rank_bundles = None
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
-                        placement_group=shared_pg,
+                        placement_group=engine_pg,
                         placement_group_capture_child_tasks=True,
                         placement_group_bundle_index=i * data_parallel_size + dp_rank,
                     )
                 else:
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
-                        placement_group=shared_pg,
+                        placement_group=engine_pg,
                         placement_group_capture_child_tasks=True,
                         placement_group_bundle_index=base_dp_pg_index,
                     )
@@ -410,14 +453,17 @@ def create_ray_wrapped_inference_engines(
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
 
+            # Per-engine STRICT_PACK PG uses engine-local bundle indices (0-based);
+            # the legacy flat PG keeps the global i*per_engine_gpu_count offset.
+            sglang_base_index = 0 if use_per_engine_pg else i * per_engine_gpu_count
             bundle_indices = None
             if per_engine_gpu_count > 1:
-                bundle_indices = list(range(i * per_engine_gpu_count, (i + 1) * per_engine_gpu_count))
+                bundle_indices = list(range(sglang_base_index, sglang_base_index + per_engine_gpu_count))
 
             scheduling_strategy = PlacementGroupSchedulingStrategy(
-                placement_group=shared_pg,
+                placement_group=engine_pg,
                 placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=i * per_engine_gpu_count,
+                placement_group_bundle_index=sglang_base_index,
             )
 
             # NOTE(Charlie): We need `torch.cuda.is_available()` to be True to import SGLang. Otherwise, it requires
