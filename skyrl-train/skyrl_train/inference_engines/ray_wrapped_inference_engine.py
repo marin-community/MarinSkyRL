@@ -185,6 +185,7 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
+    from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
     from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 
     if backend == "vllm":
@@ -251,10 +252,11 @@ def create_ray_wrapped_inference_engines(
         num_gpus_per_actor = 0.2
 
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
-    # #232 ROOT-CAUSE FIX (cross-node TP all-reduce decode deadlock): one PG PER
-    # ENGINE with STRICT_PACK, NOT a single flat PACK PG over all engines.
+    # #232 ROOT-CAUSE FIX (cross-node TP all-reduce decode deadlock): when an engine
+    # spans MORE THAN ONE GPU (TP*PP > 1), create one PG PER ENGINE with STRICT_PACK,
+    # NOT a single flat PACK PG over all engines.
     #
-    # The old `placement_group(<all bundles>, strategy="PACK")` is SOFT — Ray packs
+    # The flat `placement_group(<all bundles>, strategy="PACK")` is SOFT — Ray packs
     # bundles greedily to minimize node count but gives NO per-engine node-affinity:
     # a single engine's `tp_pp_size` contiguous {GPU:1} bundles can land split across
     # TWO nodes (observed: job 923995, a TP=4 engine straddling jpbo-091-30 + -38).
@@ -267,9 +269,38 @@ def create_ray_wrapped_inference_engines(
     #
     # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
     # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
-    # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1), so the
-    # per-engine `shared_pg`/`base_pg_index` math below is unchanged in spirit.
+    # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
+    #
+    # *** PLACEMENT-PG-STARVATION FIX (gate STRICT_PACK on tp_pp_size > 1) ***
+    # The per-engine STRICT_PACK above is only NEEDED when an engine owns >1 GPU
+    # (TP>1 or PP>1) — that's the only case with an on-node TP/PP all-reduce to
+    # protect. For TP==PP==1 (single-GPU engines, e.g. lever1's 16 TP=1 engines and
+    # swesmith's 48), each engine is ONE {GPU:1} bundle, so there is no intra-engine
+    # all-reduce to keep on-node, and STRICT_PACK is actively HARMFUL: N independent
+    # 1-bundle STRICT_PACK PGs scatter round-robin across nodes, leaving every node
+    # PARTIALLY used. The downstream policy/ref worker PG (worker.py:_initiate_actors,
+    # `placement_group([{GPU:4,CPU:4}]*policy_num_nodes, strategy="PACK")`) then can't
+    # find its required whole 4-GPU nodes and dies with
+    # `RuntimeError: Failed to create placement group (2 bundles, 8 GPUs) in 180s`
+    # (confirmed: lever1 924882 / swesmith 924888, both multi-node TP=1, post-e5f0ff5).
+    # A flat PACK over all single-GPU bundles packs them DENSELY (fills whole nodes,
+    # leaves whole nodes free), so the policy PACK PG gets its nodes. So: TP==PP==1 ->
+    # restore the original flat PACK; TP*PP>1 -> per-engine STRICT_PACK.
+    # NOTE: the gate is `tp_pp_size > 1`, NOT `per_engine_gpu_count > gpus_per_node` —
+    # #232 is TP=4 on 4-GPU nodes (4 is NOT > 4), which the latter would wrongly send
+    # down the flat-PACK path and re-break the cross-node-TP-split bug.
+    # For the multi-GPU-engine ray/uni case that could still scatter densely-packed
+    # engines onto partially-used nodes (e.g. TP=2 on 4-GPU nodes), the policy PG is
+    # protected independently by the `placement.policy_strict_spread_pg` reserve-first
+    # mechanism (main_base.get_policy_pg), which claims the policy's whole nodes BEFORE
+    # these engine PGs are created.
     per_engine_pgs: list = []
+    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
+        use_hybrid_engine=use_hybrid_engine,
+        use_mp_backend=use_mp_backend,
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+    )
     if not use_hybrid_engine:
         if use_mp_backend:
             # mp executor: each (engine, DP-rank) is ONE Ray actor that itself
@@ -288,10 +319,11 @@ def create_ray_wrapped_inference_engines(
             ]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        else:
-            # ray/uni backend: one STRICT_PACK PG per engine so each engine's
-            # per_engine_gpu_count {GPU:1} bundles are guaranteed co-located on a
-            # single node (no cross-node TP all-reduce in decode).
+        elif use_per_engine_strict_pack:
+            # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
+            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
+            # guaranteed co-located on a single node (no cross-node TP all-reduce in
+            # decode). #232 fix.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
@@ -300,15 +332,24 @@ def create_ray_wrapped_inference_engines(
                 per_engine_pgs.append(pg)
             for pg in per_engine_pgs:
                 get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-            # Keep `shared_pg` defined for the TP==PP==1 / sglang paths that index a
-            # single flat PG; for the per-engine path it is re-selected in the loop.
+            # Keep `shared_pg` defined for downstream indexing; per-engine path
+            # re-selects the engine's own PG in the loop.
             shared_pg = per_engine_pgs[0]
+        else:
+            # ray/uni backend, single-GPU engines (TP==PP==1): ONE flat PACK PG over
+            # all engine {GPU:1} bundles (the original pre-#232 behavior). PACK packs
+            # densely -> fills whole nodes -> leaves whole nodes free for the
+            # downstream policy/ref PACK PG. Restores the multi-node disaggregated
+            # behavior that the per-engine STRICT_PACK broke (lever1/swesmith).
+            bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
+            shared_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
     for i in range(num_inference_engines):
-        # Per-engine STRICT_PACK PGs (ray/uni, non-hybrid) are engine-LOCAL: each has its
-        # own bundle index space 0..per_engine_gpu_count-1, so base_pg_index resets to 0.
-        # The mp PACK PG and hybrid/sglang flat PG remain GLOBAL, so they keep the
-        # i*per_engine_gpu_count offset.
+        # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
+        # has its own bundle index space 0..per_engine_gpu_count-1, so base_pg_index
+        # resets to 0. The mp PACK PG, the TP==PP==1 flat PACK PG, and the hybrid/sglang
+        # flat PG remain GLOBAL, so they keep the i*per_engine_gpu_count offset.
         use_per_engine_pg = bool(per_engine_pgs)
         if use_per_engine_pg:
             engine_pg = per_engine_pgs[i]
@@ -397,7 +438,17 @@ def create_ray_wrapped_inference_engines(
                 # custom all-reduce fails there with a CUDA "invalid argument" at
                 # custom_all_reduce.cuh (worker dies at warm-up). Disable it for mp so
                 # NCCL handles the TP all-reduce (correctness-equal, slightly slower).
-                mp_extra_kwargs = {"disable_custom_all_reduce": True} if use_mp_backend else {}
+                # Do NOT clobber an explicit engine_init_kwargs override: the de-risk /
+                # long-ctx configs already pass `disable_custom_all_reduce=true` through
+                # `++generator.engine_init_kwargs.disable_custom_all_reduce`, and emitting
+                # it here too makes both expand into .remote() -> "got multiple values for
+                # keyword argument 'disable_custom_all_reduce'" (TypeError, crashes engine
+                # creation before any PG/training; confirmed de-risk 925650-925654).
+                mp_extra_kwargs = (
+                    {"disable_custom_all_reduce": True}
+                    if (use_mp_backend and "disable_custom_all_reduce" not in engine_init_kwargs)
+                    else {}
+                )
 
                 # vLLM Decode Context Parallel (DCP): only forward the kwarg when enabled
                 # (> 1). decode_context_parallel_size is a native vLLM EngineArgs field, so
