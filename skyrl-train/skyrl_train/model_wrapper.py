@@ -622,7 +622,29 @@ class HFModelWrapper(nn.Module):
             # Stage 5 moves the unshard seam to AFTER the per-token compute, which
             # is the memory-efficient gather — `[B,S]` logprobs not `[B,S,V]`
             # logits — and is the seam the loss/loss_mask/KL must align on.)
-            _cp_buffers = [sequences_fwd, position_ids_fwd, sequences_rolled]
+            # Position ids the model forward will actually consume under CP.
+            # Dict-mask models (dense Qwen3) use the real pad-aware position_ids_fwd
+            # (the dict short-circuits HF mask-building, so packed-detection never
+            # runs). MoE models take attention_mask=None, which makes HF run
+            # find_packed_sequence_indices(position_ids) — the pad-filled-to-1
+            # positions there would spawn a spurious packed mask. So for MoE we feed
+            # MONOTONIC positions (0..S-1 per row). CRUCIAL: build this buffer HERE
+            # (pre-context) and register it with the CP context, NOT fresh inside the
+            # forward — otherwise gradient-checkpointing recompute (which re-runs the
+            # forward after the CP context has sharded sequences_fwd in-place via
+            # no_restore) would rebuild it at the SHARDED length and the recomputed
+            # activations would mismatch the saved full-length ones (CheckpointError).
+            if self._cp_mask_dict_supported:
+                cp_position_ids = position_ids_fwd
+            else:
+                _S = sequences_fwd.size(1)
+                cp_position_ids = (
+                    torch.arange(_S, device=sequences_fwd.device)
+                    .unsqueeze(0)
+                    .expand(sequences_fwd.size(0), -1)
+                    .contiguous()
+                )
+            _cp_buffers = [sequences_fwd, cp_position_ids, sequences_rolled]
             _cp_seq_dims = [1, 1, 1]
             _cp_no_restore = {sequences_fwd, sequences_rolled}
 
@@ -697,21 +719,16 @@ class HFModelWrapper(nn.Module):
                     # padding correctness is the Stage-5 concern.
                     if self._cp_mask_dict_supported:
                         cp_mask = {"full_attention": None, "sliding_attention": None}
-                        output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd)
+                        output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=cp_position_ids)
                     else:
                         # Qwen3-MoE has no dict escape hatch (modeling_qwen3_moe.py:497
                         # → create_causal_mask → dict.ndim AttributeError). Pass
-                        # attention_mask=None with MONOTONIC per-row position_ids so HF's
-                        # find_packed_sequence_indices returns None (the pad-filled-to-1
-                        # positions would otherwise spawn a spurious packed mask) →
-                        # SDPA is_causal=True → ring attention shards cleanly. Pad RoPE is
-                        # masked out post-hoc (entropy/logprob masks), so monotonic is safe.
-                        mono_pos = (
-                            torch.arange(sequences_fwd.size(1), device=sequences_fwd.device)
-                            .unsqueeze(0)
-                            .expand(sequences_fwd.size(0), -1)
-                        )
-                        output = self.model(sequences_fwd, attention_mask=None, position_ids=mono_pos)
+                        # attention_mask=None with the MONOTONIC cp_position_ids built +
+                        # CP-registered above so HF's find_packed_sequence_indices returns
+                        # None (the pad-filled-to-1 positions would otherwise spawn a
+                        # spurious packed mask) → SDPA is_causal=True → ring shards cleanly.
+                        # Pad RoPE is masked out post-hoc, so monotonic is correctness-safe.
+                        output = self.model(sequences_fwd, attention_mask=None, position_ids=cp_position_ids)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -1093,7 +1110,21 @@ def _get_critic_model(
                 # Only sequences + position_ids are CP-sharded; the 2D mask is NOT
                 # passed under CP (the 4D-bias expand fails on a sharded mask) — CP
                 # runs pure causal SDPA. See HFModelWrapper.forward for the rationale.
-                _cp_buffers = [input_ids_fwd, position_ids_fwd]
+                # MoE (no dict mask) needs MONOTONIC positions; build + register the
+                # buffer HERE (pre-context) so recompute under gradient checkpointing
+                # shards it identically and avoids the CheckpointError half-length
+                # mismatch (mirrors HFModelWrapper.forward).
+                if self._cp_mask_dict_supported:
+                    cp_position_ids = position_ids_fwd
+                else:
+                    _S = input_ids_fwd.size(1)
+                    cp_position_ids = (
+                        torch.arange(_S, device=input_ids_fwd.device)
+                        .unsqueeze(0)
+                        .expand(input_ids_fwd.size(0), -1)
+                        .contiguous()
+                    )
+                _cp_buffers = [input_ids_fwd, cp_position_ids]
                 _cp_seq_dims = [1, 1]
                 cp_ctx = maybe_cp_context(
                     cp_size,
@@ -1116,19 +1147,15 @@ def _get_critic_model(
                     if self._cp_mask_dict_supported:
                         cp_mask = {"full_attention": None, "sliding_attention": None}
                         outputs = getattr(self, self.base_model_prefix)(
-                            input_ids_fwd, attention_mask=cp_mask, position_ids=position_ids_fwd
+                            input_ids_fwd, attention_mask=cp_mask, position_ids=cp_position_ids
                         )
                     else:
-                        # Qwen3-MoE: no dict escape hatch. attention_mask=None +
-                        # MONOTONIC position_ids → find_packed_sequence_indices None →
-                        # SDPA is_causal=True (mirrors HFModelWrapper.forward).
-                        mono_pos = (
-                            torch.arange(input_ids_fwd.size(1), device=input_ids_fwd.device)
-                            .unsqueeze(0)
-                            .expand(input_ids_fwd.size(0), -1)
-                        )
+                        # Qwen3-MoE: no dict escape hatch. attention_mask=None + the
+                        # MONOTONIC cp_position_ids built + CP-registered above →
+                        # find_packed_sequence_indices None → SDPA is_causal=True
+                        # (recompute-safe; mirrors HFModelWrapper.forward).
                         outputs = getattr(self, self.base_model_prefix)(
-                            input_ids_fwd, attention_mask=None, position_ids=mono_pos
+                            input_ids_fwd, attention_mask=None, position_ids=cp_position_ids
                         )
                 else:
                     outputs = getattr(self, self.base_model_prefix)(
