@@ -1231,6 +1231,42 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     return env_vars
 
 
+def _force_stock_asyncio_in_worker() -> None:
+    """Ray ``worker_process_setup_hook``: force CPython stock asyncio in EVERY worker.
+
+    Runs ONCE at the very start of every Ray worker process (before any task/actor
+    is dispatched and before the C++ CoreWorker builds an actor's
+    concurrency-group event loop), so it is the earliest possible point to pin the
+    event-loop policy in the worker process.
+
+    WHY THIS EXISTS (the gap the two prior fixes missed):
+      * ``BasePPOExp.run()`` (main_base.py) resets the policy, but ONLY in the
+        driver/orchestrator process -- not in Ray actor processes.
+      * ``RAY_USE_UVLOOP=0`` in ``prepare_runtime_environment`` is supposed to make
+        Ray's ``try_install_uvloop`` a no-op, and the per-actor reset in
+        ``RolloutCoordinator.__init__`` is supposed to flip the policy before the
+        loop is built -- but BOTH were empirically INSUFFICIENT: job 927538 still
+        SIGABRT'd in a ``RolloutCoordinator`` under uvloop after ~85 min, with the
+        loop created by the C++
+        ``CoreWorker.initialize_eventloops_for_actor_concurrency_group`` (the
+        backtrace is ``uv__epoll_ctl_prep -> uvloop Loop._run -> run_forever ->
+        CoreWorker...concurrency_group -> Fatal Python error: Aborted``). The async
+        actor's concurrency-group loop is created by the CoreWorker independently of
+        ``__init__`` ordering and was NOT governed by the env var in this Ray build
+        (2.51.1). A ``worker_process_setup_hook`` runs strictly before any of that,
+        so resetting the policy here makes EVERY worker's loop a stock
+        ``SelectorEventLoop`` (epoll, no libuv) -- the one place that reliably
+        covers the actor concurrency-group loop.
+
+    This is the same idiom as the driver fix (``set_event_loop_policy`` ->
+    ``DefaultEventLoopPolicy``); it is process-global and idempotent. Actors are
+    network-RTT-bound (vLLM/Daytona HTTP), so uvloop's throughput edge is moot.
+    """
+    import asyncio
+
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+
 def configure_ray_worker_logging() -> None:
     """
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
@@ -1281,7 +1317,19 @@ def initialize_ray(cfg: DictConfig):
     )
 
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+    # worker_process_setup_hook runs ONCE at the start of every Ray worker process,
+    # BEFORE the C++ CoreWorker builds an async actor's concurrency-group event loop.
+    # It forces CPython stock asyncio (no uvloop/libuv) in EVERY worker -- the only
+    # reliable place to cover the RolloutCoordinator concurrency-group loop that
+    # SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor __init__ reset.
+    # Referenced by fully-qualified name string (importable in every worker via the
+    # editable skyrl_train install) so Ray does not have to cloudpickle it.
+    ray.init(
+        runtime_env={
+            "env_vars": env_vars,
+            "worker_process_setup_hook": "skyrl_train.utils.utils._force_stock_asyncio_in_worker",
+        }
+    )
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()

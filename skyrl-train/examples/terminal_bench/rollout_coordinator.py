@@ -162,24 +162,19 @@ class RolloutCoordinator:
         num_coordinators: int,
     ):
         # --- libuv 1.48 io_uring SIGABRT fix for the fan-out actor loop ---
-        # This actor is a @ray.remote ASYNC actor: Ray lazily creates its
-        # concurrency-group event loop (initialize_eventloops_for_actor_
-        # concurrency_group) on first async-method dispatch, AFTER this
-        # __init__ returns. Under the default uvloop policy that loop uses
-        # libuv 1.48.0, whose io_uring epoll_ctl path (uv__epoll_ctl_prep)
-        # aborts the process (Fatal Python error: Aborted), killing the job
-        # via the coordinator -- the same SIGABRT the trainer-driver fix in
-        # main_base.BasePPOExp.run() (set_event_loop_policy) guards against,
-        # but that fix only covers the trainer process, NOT these fan-out
-        # actor processes. We CANNOT place this at module top: this class is
-        # exported to workers BY VALUE via cloudpickle (see _log() note), so
-        # the rollout_coordinator module is never imported in the actor
-        # process and module-level code never runs there. __init__ DOES run
-        # in the actor process, before the concurrency-group loop is built,
-        # so forcing the stock asyncio policy here makes that loop a
-        # SelectorEventLoop (no libuv). Setting the policy is process-global
-        # and idempotent; it is a no-op when fan-out is off because the
-        # actor (and this module) only exist on the fan-out path.
+        # DEFENSE IN DEPTH (secondary). The PRIMARY fix is the Ray
+        # worker_process_setup_hook `_force_stock_asyncio_in_worker`
+        # (skyrl_train.utils.utils, wired in initialize_ray), which runs at
+        # WORKER-PROCESS BOOT -- strictly before the C++ CoreWorker builds this
+        # actor's concurrency-group event loop. That ordering is what matters:
+        # job 927538 SIGABRT'd in a RolloutCoordinator under uvloop DESPITE this
+        # __init__ reset (backtrace: uv__epoll_ctl_prep -> uvloop Loop._run ->
+        # CoreWorker.initialize_eventloops_for_actor_concurrency_group), proving
+        # the concurrency-group loop is NOT reliably created after __init__ -- so
+        # an __init__-time policy reset alone is insufficient. We keep this reset
+        # as a harmless, idempotent backstop. (It must NOT move to module top:
+        # this class is exported to workers BY VALUE via cloudpickle (see _log()
+        # note), so the module's top-level code never runs in the actor process.)
         import asyncio as _asyncio_for_loop_policy
         _asyncio_for_loop_policy.set_event_loop_policy(
             _asyncio_for_loop_policy.DefaultEventLoopPolicy()
