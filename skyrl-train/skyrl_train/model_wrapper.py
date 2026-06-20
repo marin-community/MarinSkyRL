@@ -23,6 +23,7 @@ from skyrl_train.distributed.cp_utils import (
     context_parallel_unshard,
     cp_unshard_grad_safe,
     cp_sdpa_dispatcher_span,
+    cp_load_balance_indices,
 )
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from packaging.version import Version
@@ -829,6 +830,28 @@ class HFModelWrapper(nn.Module):
                 num_actions,
                 nnz_indices=nnz_indices if self.use_sample_packing else None,
             )
+            # FIX-7 (#232): under CP the model forward sees only this rank's
+            # sequence shard. The targets built above are FULL-sequence
+            # (`B*seq_len` rows), so the controller's per-layer row-count check
+            # (`target.rows == top_indices.rows`) fails (FULL `B*seq_len` vs LOCAL
+            # `B*(S_padded/cp)`; smoke 934803: 33966 vs 16984). Shard the targets +
+            # mask through the EXACT SAME transform chain the CP forward applies to
+            # `sequences_fwd` — per-row left-roll (right-align), right-pad to
+            # `2*cp` divisibility, torch's round-robin load-balance reorder, then
+            # slice to this CP rank's contiguous local block — so the sharded
+            # target rows line up token-for-token with the local forward's
+            # `top_indices`. Gated on `cp_size > 1`: CP1 / non-CP is byte-identical
+            # (this branch is skipped, targets stay full-sequence as before).
+            if self.context_parallel_size > 1:
+                _bsz, _seq_len = sequences.shape
+                per_layer_targets, replay_mask = self._cp_shard_router_targets(
+                    per_layer_targets,
+                    replay_mask,
+                    batch_size=_bsz,
+                    seq_len=_seq_len,
+                    cp_pad_size=cp_pad_size,
+                    cp_left_shifts=cp_left_shifts,
+                )
             self._router_replay.begin_replay()
             self._router_replay.set_microbatch_targets(per_layer_targets, replay_mask)
             set_active_replay(self._router_replay)
@@ -1110,6 +1133,95 @@ class HFModelWrapper(nn.Module):
         if not need or self.cp_mesh is None:
             return contextlib.nullcontext()
         return cp_sdpa_dispatcher_span(self.cp_mesh)
+
+    def _cp_shard_router_targets(
+        self,
+        per_layer_targets,
+        replay_mask,
+        batch_size: int,
+        seq_len: int,
+        cp_pad_size: int,
+        cp_left_shifts,
+    ):
+        """FIX-7 (#232): CP-shard the FULL-sequence router-replay targets/mask to
+        this CP rank's local token partition, matching the CP forward EXACTLY.
+
+        The forward (HFModelWrapper.forward, ``cp_size > 1`` branch) transforms the
+        ``[B, seq_len]`` token buffers in this order before the model sees them:
+
+          1. **Left-roll** each row by ``cp_left_shifts[i]`` columns (right-align /
+             left-flush; ``gather_idx[i,j] = (j + cp_left_shifts[i]) % seq_len``).
+             ``cp_left_shifts is None`` ⇒ batch already right-aligned, no roll.
+          2. **Right-pad** by ``cp_pad_size`` columns to make ``S_padded`` a
+             multiple of ``2*cp`` (torch's load-balancer requirement, G4).
+          3. **Load-balance reorder** the padded ``S_padded`` positions via torch's
+             CP balancer (``cp_load_balance_indices``: round-robin on torch≤2.10 /
+             the byte-identical head-tail balancer on torch≥2.11), then
+          4. **Even contiguous split** into ``cp`` shards; rank ``r`` keeps shard
+             ``r`` (positions ``[r*L_local, (r+1)*L_local)`` of the reordered seq,
+             ``L_local = S_padded / cp``).
+
+        The MoE block flattens ``hidden_states.view(-1, dim)`` batch-major over
+        ``[B, L_local]`` → ``B*L_local`` rows, so we apply the SAME chain to the
+        ``[B, seq_len, K]`` target / ``[B, seq_len]`` mask and re-flatten batch-major
+        to ``[B*L_local, K]`` / ``[B*L_local]``. Pad rows get the replay-OFF value
+        (sentinel target / mask False) so they fall through to native routing —
+        consistent with how the forward masks the pad region post-hoc.
+
+        Returns the (sharded) ``per_layer_targets`` list + ``replay_mask`` with
+        ``B*L_local`` rows each. cp_size==1 callers never reach here.
+        """
+        from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID
+
+        cp_size = self.context_parallel_size
+        device = replay_mask.device
+        K = per_layer_targets[0].shape[-1]
+
+        # [B*seq_len, *] -> [B, seq_len, *] (batch-major flatten is row-major).
+        targets_BSK = [t.view(batch_size, seq_len, K) for t in per_layer_targets]
+        mask_BS = replay_mask.view(batch_size, seq_len)
+
+        # (1) Per-row left-roll — IDENTICAL gather_idx the forward built so each
+        # token's routing target tracks its token after right-alignment.
+        if cp_left_shifts is not None:
+            arange_S = torch.arange(seq_len, device=device).unsqueeze(0)
+            gather_idx = (arange_S + cp_left_shifts.to(device).unsqueeze(1)) % seq_len  # [B, seq_len]
+            gather_idx_k = gather_idx.unsqueeze(-1).expand(batch_size, seq_len, K)
+            targets_BSK = [torch.gather(t, 1, gather_idx_k) for t in targets_BSK]
+            mask_BS = torch.gather(mask_BS, 1, gather_idx)
+
+        # (2) Right-pad to S_padded (sentinel target, mask False ⇒ native routing
+        # on the pad region, matching the forward's post-hoc pad masking).
+        if cp_pad_size > 0:
+            targets_BSK = [
+                torch.nn.functional.pad(t, (0, 0, 0, cp_pad_size), value=SENTINEL_EXPERT_ID) for t in targets_BSK
+            ]
+            mask_BS = torch.nn.functional.pad(mask_BS, (0, cp_pad_size), value=False)
+        S_padded = seq_len + cp_pad_size
+        assert S_padded % (2 * cp_size) == 0, (
+            f"router_replay CP: padded seq_len {S_padded} not divisible by 2*cp={2 * cp_size} "
+            f"(seq_len={seq_len}, cp_pad_size={cp_pad_size}); pad logic diverged from the forward."
+        )
+
+        # (3) Load-balance reorder — the SAME permutation torch's context_parallel
+        # applies to the forward's sequence buffers (round-robin on torch≤2.10 /
+        # head-tail on torch≥2.11; byte-identical for this contiguous case).
+        lb_idx = cp_load_balance_indices(S_padded, cp_size, device)  # [S_padded]
+        targets_BSK = [torch.index_select(t, 1, lb_idx) for t in targets_BSK]
+        mask_BS = torch.index_select(mask_BS, 1, lb_idx)
+
+        # (4) Slice to THIS CP rank's contiguous local block (even split of the
+        # reordered seq; rank r -> [r*L_local, (r+1)*L_local)).
+        L_local = S_padded // cp_size
+        rank = self.cp_mesh.get_local_rank()
+        lo, hi = rank * L_local, (rank + 1) * L_local
+        targets_BSK = [t[:, lo:hi, :].contiguous() for t in targets_BSK]
+        mask_BS = mask_BS[:, lo:hi].contiguous()
+
+        # Re-flatten batch-major to [B*L_local, K] / [B*L_local] for the controller.
+        per_layer_targets = [t.reshape(batch_size * L_local, K) for t in targets_BSK]
+        replay_mask = mask_BS.reshape(batch_size * L_local)
+        return per_layer_targets, replay_mask
 
     def _build_router_replay_targets(self, rollout_routed_experts, sequences, num_actions, nnz_indices=None):
         """Build per-layer forced-topk targets + a per-token replay mask.

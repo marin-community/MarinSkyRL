@@ -30,6 +30,45 @@ from torch.distributed.tensor.experimental._attention import (
 import torch.distributed._functional_collectives as funcol
 
 
+def cp_load_balance_indices(seq_length: int, cp_world_size: int, device, restore: bool = False) -> torch.Tensor:
+    """Return torch's CP sequence load-balance permutation as a FLAT ``[seq_length]``
+    LongTensor (the SAME reorder ``context_parallel`` applies to the forward's
+    sequence buffers before the per-rank contiguous split).
+
+    Used by the router-replay CP-shard (FIX-7, #232) so the FULL-sequence replay
+    target is reordered + sliced to each CP rank's local token block IDENTICALLY
+    to how the forward shards ``sequences_fwd`` — otherwise the controller's
+    per-layer row-count check (target rows == local ``top_indices`` rows) fails.
+
+    Torch-version robust (the CP private API moved between the OLD `r3baked` SIF
+    (torch 2.9) and the NEW `vllm0202rc0` CP SIF (torch 2.11)):
+      * torch ≤ 2.10: ``_attention._generate_round_robin_indices(seq_length,
+        cp_world_size, device, restore)`` → flat ``[seq_length]``.
+      * torch ≥ 2.11: the default balancer is ``_HeadTailLoadBalancer`` in
+        ``_context_parallel._load_balancer``; its ``_generate_indices(restore)``
+        returns ``[1, seq_length]`` (we squeeze to flat). VERIFIED byte-identical
+        to the 2.9 round-robin permutation for the contiguous (non-document) case
+        used here (e.g. S=12,cp=2 → ``[0,1,2,9,10,11,3,4,5,6,7,8]`` on both).
+    Both assert ``seq_length % (2*cp_world_size) == 0`` (enforced by the forward's
+    ``cp_pad_size`` padding).
+    """
+    assert seq_length % (2 * cp_world_size) == 0, (
+        f"cp_load_balance_indices: seq_length {seq_length} not divisible by 2*cp={2 * cp_world_size}"
+    )
+    # torch ≤ 2.10 path.
+    try:
+        from torch.distributed.tensor.experimental._attention import _generate_round_robin_indices
+
+        return _generate_round_robin_indices(seq_length, cp_world_size, device=device, restore=restore).long()
+    except Exception:
+        pass
+    # torch ≥ 2.11 path: head-tail load balancer (the default CP balancer).
+    from torch.distributed.tensor.experimental._context_parallel._load_balancer import _HeadTailLoadBalancer
+
+    idx = _HeadTailLoadBalancer(seq_length, cp_world_size, device)._generate_indices(restore=restore)
+    return idx.reshape(-1).long()
+
+
 def cp_unshard_grad_safe(cp_mesh, tensor: torch.Tensor, seq_dim: int) -> torch.Tensor:
     """Autograd-DIFFERENTIABLE context-parallel unshard of a per-token tensor.
 
