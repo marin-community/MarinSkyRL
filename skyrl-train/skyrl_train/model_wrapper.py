@@ -183,6 +183,91 @@ def _cp_force_flash_sdpa():
         yield
 
 
+# --- FIX-5 (#232): force the Qwen3-MoE CP forward to emit NO 4D attention mask -
+# Thread-local switch + import-time monkeypatch of the MoE modeling module's
+# `create_causal_mask` / `create_sliding_window_causal_mask` so that, ONLY while
+# the switch is on (set exclusively inside the MoE `cp_size > 1` forward branch),
+# they return `None` — i.e. the HF forward calls SDPA with `attn_mask=None` +
+# `is_causal=True`, which the torch CP ring SDPA shards cleanly.
+#
+# WHY a monkeypatch (vs. FIX-1's `attention_mask=None` alone). In isolation,
+# `create_causal_mask(attention_mask=None, monotonic position_ids)` DOES return
+# None (the `_ignore_causal_mask_sdpa` is_causal skip fires: no padding, q==kv).
+# But inside the REAL multi-rank FSDP2 + gradient-checkpointed CP forward, HF's
+# skip is suppressed — `is_tracing()` trips (fake-tensor / stream-capture under
+# the CP MONKEY_PATCH SDPA wrapper + GC recompute), so `_ignore_causal_mask_sdpa`
+# returns False and HF materializes a 4D additive bias `[B,1,S_q,S_kv]`. Under CP
+# the kv axis is then sharded to `S/cp` while q stays full, and the SDPA
+# head-broadcast `aten.expand([B,1,S_q,S_kv] -> [B,H,S_q,S_kv])` mismatches
+# (`S_kv/cp` vs `S_q`) → the job-930793 sharding-prop crash. Qwen3-MoE has NO
+# per-layer-type dict escape hatch (unlike dense Qwen3), so the only robust way to
+# guarantee `attn_mask=None` reaches SDPA is to short-circuit the mask builder
+# itself. The patch lives in the MoE modeling namespace (it imported the function
+# by value: `from ...masking_utils import create_causal_mask`), so we must rebind
+# the NAME there, not in `masking_utils`.
+#
+# Scope/safety: the switch is a thread-local default-OFF flag flipped ON only for
+# the duration of the MoE CP forward (`cp_size > 1` AND not dict-supported). When
+# OFF the patched wrapper delegates verbatim to the original HF function, so every
+# non-CP / CP1 / dense-Qwen3 / generation forward is byte-identical. The patch is
+# installed once, idempotently, and is a no-op (logged) if the MoE module is not
+# importable in this environment.
+import threading as _threading
+
+_cp_moe_force_no_mask = _threading.local()
+
+
+def _cp_moe_no_mask_active() -> bool:
+    return getattr(_cp_moe_force_no_mask, "active", False)
+
+
+_CP_MOE_MASK_PATCHED = False
+
+
+def _install_cp_moe_mask_patch() -> None:
+    """Idempotently wrap Qwen3-MoE's create_causal_mask(/sliding) to return None
+    while `_cp_moe_force_no_mask.active` is set. No-op if the module is absent."""
+    global _CP_MOE_MASK_PATCHED
+    if _CP_MOE_MASK_PATCHED:
+        return
+    try:
+        import transformers.models.qwen3_moe.modeling_qwen3_moe as _moe
+    except Exception as e:  # MoE modeling not importable in this env
+        logger.info(f"[CP FIX-5] Qwen3-MoE modeling not importable ({e}); mask patch skipped.")
+        _CP_MOE_MASK_PATCHED = True
+        return
+
+    def _wrap(orig):
+        def _wrapped(*args, **kwargs):
+            if _cp_moe_no_mask_active():
+                return None
+            return orig(*args, **kwargs)
+
+        _wrapped.__wrapped__ = orig
+        return _wrapped
+
+    patched = []
+    for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
+        orig = getattr(_moe, name, None)
+        if orig is not None and not getattr(orig, "__wrapped__", None):
+            setattr(_moe, name, _wrap(orig))
+            patched.append(name)
+    _CP_MOE_MASK_PATCHED = True
+    logger.info(f"[CP FIX-5] Installed Qwen3-MoE no-4D-mask CP patch on: {patched}")
+
+
+@contextlib.contextmanager
+def _cp_moe_no_mask():
+    """Activate the MoE no-4D-mask switch for the wrapped (MoE CP) forward only."""
+    _install_cp_moe_mask_patch()
+    prev = getattr(_cp_moe_force_no_mask, "active", False)
+    _cp_moe_force_no_mask.active = True
+    try:
+        yield
+    finally:
+        _cp_moe_force_no_mask.active = prev
+
+
 class HFModelWrapper(nn.Module):
     """
     Base class for wrapped HF models in reinforcement learning.
@@ -792,10 +877,19 @@ class HFModelWrapper(nn.Module):
                         else:
                             # Qwen3-MoE: no dict escape hatch (modeling_qwen3_moe → MoE
                             # forward always calls create_causal_mask). attention_mask=None
-                            # + the MONOTONIC cp_position_ids built + CP-registered above →
-                            # create_causal_mask returns None → SDPA is_causal=True. Pad
-                            # RoPE is masked out post-hoc, so monotonic is correctness-safe.
-                            output = self.model(sequences_fwd, attention_mask=None, position_ids=cp_position_ids)
+                            # + the MONOTONIC cp_position_ids built + CP-registered above
+                            # is NOT sufficient on transformers 5.10.1: under the real
+                            # FSDP2+GC CP forward HF's is_causal skip is suppressed
+                            # (is_tracing trips) so it still materializes a 4D bias that
+                            # CP cannot shard (aten.expand crash, job-930793). FIX-5 (#232):
+                            # `_cp_moe_no_mask()` monkeypatches the MoE create_causal_mask
+                            # to return None for the duration of this forward → SDPA gets
+                            # attn_mask=None + is_causal=True and CP ring-shards cleanly.
+                            # Pad RoPE is masked out post-hoc, so monotonic is correctness-safe.
+                            with _cp_moe_no_mask():
+                                output = self.model(
+                                    sequences_fwd, attention_mask=None, position_ids=cp_position_ids
+                                )
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -1224,10 +1318,15 @@ def _get_critic_model(
                         else:
                             # Qwen3-MoE: no dict escape hatch. attention_mask=None + the
                             # MONOTONIC cp_position_ids built + CP-registered above
-                            # (recompute-safe; mirrors HFModelWrapper.forward).
-                            outputs = getattr(self, self.base_model_prefix)(
-                                input_ids_fwd, attention_mask=None, position_ids=cp_position_ids
-                            )
+                            # (recompute-safe; mirrors HFModelWrapper.forward). FIX-5 (#232):
+                            # also force create_causal_mask -> None for the duration of the
+                            # forward so HF emits no 4D bias that CP cannot shard (the
+                            # is_causal skip is suppressed under FSDP2+GC+CP — see
+                            # HFModelWrapper.forward for the full rationale).
+                            with _cp_moe_no_mask():
+                                outputs = getattr(self, self.base_model_prefix)(
+                                    input_ids_fwd, attention_mask=None, position_ids=cp_position_ids
+                                )
                 else:
                     outputs = getattr(self, self.base_model_prefix)(
                         input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
