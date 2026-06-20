@@ -166,3 +166,58 @@ def maybe_cp_context(
         seq_dims=seq_dims,
         no_restore=no_restore,
     )
+
+
+@contextlib.contextmanager
+def cp_sdpa_dispatcher_span(cp_mesh, seq_dim: int = 2):
+    """Re-arm ONLY the torch CP ring-SDPA monkey-patch (no buffer (re)sharding)
+    for the duration of a `with` block — used to span the BACKWARD pass of a CP
+    training step (FIX-6, #232).
+
+    WHY (the gradient-checkpointing recompute mismatch). torch's
+    `context_parallel(...)` CM does two things on entry: (1) shards the listed
+    buffers in-place along the sequence dim, and (2) monkey-patches
+    `F.scaled_dot_product_attention` with the CP ring-attention wrapper (which
+    all-gathers k/v across the cp group, so each rank's SDPA sees the FULL kv
+    length). On exit it UNPATCHES SDPA. Under FSDP2 gradient/activation
+    checkpointing the per-layer forward is RECOMPUTED during `backward()` — which
+    runs AFTER `model_wrapper.forward` has exited the `context_parallel` CM, so
+    SDPA is no longer the ring wrapper. The recomputed attention therefore keeps
+    q/k/v at the LOCAL CP-sharded length (`S/cp`) while the original forward saved
+    them at the ring-gathered FULL length (`S`), and
+    `torch.utils.checkpoint.check_recomputed_tensors_match` raises a
+    "Recomputed values ... have different metadata" CheckpointError
+    (saved `[B,H,S,D]` vs recomputed `[B,H,S/cp,D]`; smoke 933207 gs1 backward:
+    saved 10404 vs recomputed 5202).
+
+    THE FIX: keep the ring-SDPA patch INSTALLED across backward so the recompute
+    dispatches to the SAME ring attention and reproduces the full-length q/k/v
+    metadata. The input buffers are already kept sharded across backward (the
+    forward registers them in `no_restore_buffers`), so we re-install ONLY the
+    SDPA patch here — NOT the buffer sharding (calling `context_parallel` again
+    would re-shard the already-sharded buffers, halving them a second time). We
+    call torch's `_enable_context_parallel_dispatcher_impl(seq_dim, mesh)` /
+    `_disable_context_parallel_dispatcher_impl()` directly (the same primitives
+    `context_parallel` uses internally), under the MONKEY_PATCH dispatch mode that
+    `context_parallel` set. `seq_dim=2` is the attention seq dim ([B,H,S,D]),
+    matching torch's own call inside `context_parallel`.
+
+    Guarded: if the private torch symbols are unavailable (API drift / non-CP
+    env), this is a logged no-op so import/CP1 never hard-fails. Caller gates this
+    on `cp_size > 1` AND the MoE-no-mask training path, so CP1 / non-CP / dense /
+    no-grad forwards never enter it (byte-identical).
+    """
+    try:
+        from torch.distributed.tensor.experimental._context_parallel._attention import (
+            _enable_context_parallel_dispatcher_impl,
+            _disable_context_parallel_dispatcher_impl,
+        )
+    except Exception as e:
+        logger.warning(f"[CP FIX-6] CP SDPA dispatcher primitives unavailable ({e}); backward span is a no-op.")
+        yield
+        return
+    _enable_context_parallel_dispatcher_impl(seq_dim=seq_dim, mesh=cp_mesh)
+    try:
+        yield
+    finally:
+        _disable_context_parallel_dispatcher_impl()

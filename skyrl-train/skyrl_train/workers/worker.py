@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import socket
@@ -1068,7 +1069,17 @@ class PolicyWorkerBase(Worker):
         else:
             loss = policy_loss + kl_loss_term - entropy_loss_term
             loss = loss / accumulation_steps
-        self.strategy.backward(loss, self.model, self.optimizer)
+        # FIX-6 (#232): wrap backward in the CP ring-SDPA dispatcher span so a CP
+        # training step's gradient-checkpoint recompute dispatches to ring attention
+        # (matching the saved full-length q/k/v) instead of plain SDPA on the
+        # CP-sharded q/k/v -> avoids the "Recomputed values have different metadata"
+        # CheckpointError. Returns a literal nullcontext for CP1 / non-CP / no-grad
+        # backward (byte-identical). Falls back to nullcontext if the model has no
+        # such method (non-HF wrappers).
+        _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
+        _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
+        with _cp_span_cm:
+            self.strategy.backward(loss, self.model, self.optimizer)
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
         # teardown to here (after backward) so gradient-checkpoint recompute still

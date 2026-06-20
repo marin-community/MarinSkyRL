@@ -18,7 +18,12 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndByt
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
-from skyrl_train.distributed.cp_utils import maybe_cp_context, context_parallel_unshard, cp_unshard_grad_safe
+from skyrl_train.distributed.cp_utils import (
+    maybe_cp_context,
+    context_parallel_unshard,
+    cp_unshard_grad_safe,
+    cp_sdpa_dispatcher_span,
+)
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from packaging.version import Version
 
@@ -329,6 +334,10 @@ class HFModelWrapper(nn.Module):
         # → forward takes the literal no-op nullcontext, byte-identical to today).
         self.cp_mesh = cp_mesh
         self.cp_rotate_method = cp_rotate_method
+        # FIX-6 (#232): armed by a CP training forward; consumed by
+        # cp_backward_dispatcher_span() to re-install the ring-SDPA patch across
+        # backward (gradient-checkpoint recompute). Default-off so non-CP is unchanged.
+        self._cp_needs_backward_sdpa_span = False
         # Stage 2: resolve attention backend. attn_backend="auto" reproduces the
         # pre-Stage-2 logic byte-for-byte (G1); otherwise it overrides flash_attn.
         # Under CP (context_parallel_size > 1) flash-attn varlen is rejected (G2).
@@ -915,6 +924,22 @@ class HFModelWrapper(nn.Module):
             if replay_installed and not defer_teardown:
                 self.teardown_router_replay()
 
+        # FIX-6 (#232): a CP TRAINING forward (cp_size>1, grad on) under FSDP2
+        # gradient checkpointing RECOMPUTES each layer during backward. The torch
+        # `context_parallel` CM (entered/exited above, around `self.model(...)`)
+        # has already UNPATCHED the ring SDPA by the time backward runs, so the
+        # recomputed attention keeps q/k/v at the LOCAL CP-sharded length while the
+        # original forward saved them ring-gathered to full length -> torch
+        # CheckpointError (saved [B,H,S,D] vs recomputed [B,H,S/cp,D]; smoke 933207
+        # gs1 backward, 10404 vs 5202). Arm a flag so the owner (Worker.training_step)
+        # re-installs the ring-SDPA patch across `strategy.backward()` via
+        # `self.cp_backward_dispatcher_span()`. cp_size==1 / no-grad / non-CP never
+        # arm it (byte-identical). The input buffers stay sharded (no_restore), so
+        # the span re-installs ONLY the SDPA patch — not the buffer sharding.
+        self._cp_needs_backward_sdpa_span = bool(
+            cp_size > 1 and torch.is_grad_enabled() and output["logits"].requires_grad
+        )
+
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
 
@@ -1068,6 +1093,23 @@ class HFModelWrapper(nn.Module):
 
         set_active_replay(None)
         self._router_replay.clear()
+
+    def cp_backward_dispatcher_span(self):
+        """Context manager the owner (Worker.training_step) wraps around
+        `strategy.backward()` so a CP training step's gradient-checkpoint recompute
+        runs under the ring-SDPA patch (FIX-6, #232).
+
+        Returns a real CP-SDPA span ONLY when the immediately-preceding forward was
+        a CP (cp_size>1) grad-building forward (it set `_cp_needs_backward_sdpa_span`
+        and `cp_mesh` is present). Otherwise — CP1 / non-CP / no-grad — returns a
+        literal nullcontext so backward is byte-identical. The flag is consumed
+        (reset to False) on read so it never leaks to a later non-CP backward.
+        """
+        need = getattr(self, "_cp_needs_backward_sdpa_span", False)
+        self._cp_needs_backward_sdpa_span = False
+        if not need or self.cp_mesh is None:
+            return contextlib.nullcontext()
+        return cp_sdpa_dispatcher_span(self.cp_mesh)
 
     def _build_router_replay_targets(self, rollout_routed_experts, sequences, num_actions, nnz_indices=None):
         """Build per-layer forced-topk targets + a per-token replay mask.
