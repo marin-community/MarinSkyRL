@@ -3,6 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
+import contextlib
 import os
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
@@ -114,6 +115,72 @@ def _cp_mask_dict_supported(model) -> bool:
     cfg = getattr(model, "config", None)
     model_type = (getattr(cfg, "model_type", "") or "").lower()
     return "moe" not in name and "moe" not in model_type
+
+
+@contextlib.contextmanager
+def _suppress_hf_packed_seq_mask():
+    """Under CP+MoE, force HF's no-4D-mask `is_causal` SDPA path by neutralizing
+    `find_packed_sequence_indices` for the duration of one model forward.
+
+    THE ROOT BUG (FIX-3, #232). FIX-1/FIX-2 set `attention_mask=None` + monotonic
+    `position_ids` on the Qwen3-MoE CP forward, ASSUMING that would make HF take
+    its no-mask `is_causal=True` SDPA shortcut. It does NOT. The MoE model forward
+    (modeling_qwen3_moe.py) ALWAYS calls `create_causal_mask(...)`, and
+    `masking_utils._preprocess_mask_arguments` runs packed-sequence detection
+    whenever `attention_mask is None and position_ids is not None and
+    past_key_values is None` (exactly our training-forward case). It calls
+    `find_packed_sequence_indices(position_ids)` — which, per its own source
+    comment (masking_utils.py:659 "it would be nice to return None ... but it
+    causes issues with export"), NEVER returns None. For MONOTONIC positions it
+    returns an all-zeros tensor (one packed "sequence"), which is `not None`, so
+    `create_causal_mask` sets `allow_is_causal_skip=False` and ANDs in the packed
+    mask function → the SDPA mask interface MATERIALIZES a 4D `[B,1,S_q,S_kv]`
+    boolean bias instead of returning None. Under CP=2 the kv axis of that bias is
+    sharded to S/cp while q stays full → torch CP SDPA's `aten.expand` fails
+    (`bf16[B,1,S_q,S_kv/cp] -> [B,H,S_q,S_kv]`). This is the job-930793 crash at
+    the training forward. The genbuf/logprob forwards take the SAME path but the
+    crash is structural to CP-sharded SDPA, so it only manifests once a CP forward
+    actually runs the 4D-mask SDPA (the training step).
+
+    THE FIX (matches FIX-1's intent — make HF NOT materialize the 4D bias): wrap
+    the MoE CP forward so `find_packed_sequence_indices` returns None when the
+    positions are genuinely monotonic per-row (NOT packed). With None, the packed
+    branch is skipped, `allow_is_causal_skip` stays True, `_ignore_causal_mask_sdpa`
+    returns True (kv_len==q_len, no padding mask), and `create_causal_mask` returns
+    None → SDPA `is_causal=True` → torch CP ring attention shards cleanly. This is
+    precisely the None-when-unpacked behavior HF's own comment wants but withholds
+    for export-compat; we are not exporting. Monotonic-position causality + post-hoc
+    padding masks (entropy/logprob) are the same correctness contract FIX-2 already
+    established. If positions are actually packed (a future packed-CP path), we fall
+    back to the real implementation so behavior is unchanged.
+
+    Scope: patches `transformers.masking_utils.find_packed_sequence_indices` (the
+    module-global `_preprocess_mask_arguments` resolves by bare name) ONLY for the
+    wrapped forward, then restores it. Dense Qwen3 (dict path) and all CP1 / non-CP
+    forwards never enter this context, so they are byte-unchanged.
+    """
+    import transformers.masking_utils as _mu
+
+    _orig = _mu.find_packed_sequence_indices
+
+    def _patched(position_ids):
+        result = _orig(position_ids)
+        # `result[:, -1] == 0` for every row ⇒ no position discontinuity ⇒ a single
+        # (unpacked) monotonic sequence per row. Return None so HF takes the no-4D
+        # -mask is_causal SDPA path (CP-shardable). Any nonzero ⇒ genuine packing ⇒
+        # keep the real mask. (Mirrors the masking_utils.py:659 "would be nice".)
+        try:
+            if bool((result[:, -1] == 0).all()):
+                return None
+        except Exception:
+            return result
+        return result
+
+    _mu.find_packed_sequence_indices = _patched
+    try:
+        yield
+    finally:
+        _mu.find_packed_sequence_indices = _orig
 
 
 class HFModelWrapper(nn.Module):
@@ -724,11 +791,16 @@ class HFModelWrapper(nn.Module):
                         # Qwen3-MoE has no dict escape hatch (modeling_qwen3_moe.py:497
                         # → create_causal_mask → dict.ndim AttributeError). Pass
                         # attention_mask=None with the MONOTONIC cp_position_ids built +
-                        # CP-registered above so HF's find_packed_sequence_indices returns
-                        # None (the pad-filled-to-1 positions would otherwise spawn a
-                        # spurious packed mask) → SDPA is_causal=True → ring shards cleanly.
-                        # Pad RoPE is masked out post-hoc, so monotonic is correctness-safe.
-                        output = self.model(sequences_fwd, attention_mask=None, position_ids=cp_position_ids)
+                        # CP-registered above. FIX-3 (#232): `find_packed_sequence_indices`
+                        # NEVER returns None even for monotonic positions (it returns an
+                        # all-zeros tensor), so HF would otherwise still materialize a 4D
+                        # [B,1,S_q,S_kv] causal bias whose kv axis mis-shards under CP
+                        # (aten.expand failure). `_suppress_hf_packed_seq_mask` makes that
+                        # detector return None for genuinely-monotonic positions → HF takes
+                        # the no-4D-mask SDPA is_causal=True path → ring shards cleanly. Pad
+                        # RoPE is masked out post-hoc, so monotonic is correctness-safe.
+                        with _suppress_hf_packed_seq_mask():
+                            output = self.model(sequences_fwd, attention_mask=None, position_ids=cp_position_ids)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -1151,12 +1223,16 @@ def _get_critic_model(
                         )
                     else:
                         # Qwen3-MoE: no dict escape hatch. attention_mask=None + the
-                        # MONOTONIC cp_position_ids built + CP-registered above →
-                        # find_packed_sequence_indices None → SDPA is_causal=True
-                        # (recompute-safe; mirrors HFModelWrapper.forward).
-                        outputs = getattr(self, self.base_model_prefix)(
-                            input_ids_fwd, attention_mask=None, position_ids=cp_position_ids
-                        )
+                        # MONOTONIC cp_position_ids built + CP-registered above. FIX-3
+                        # (#232): find_packed_sequence_indices never returns None on its
+                        # own (all-zeros, not None), so HF still builds a 4D mask that
+                        # mis-shards under CP; _suppress_hf_packed_seq_mask forces the
+                        # no-4D-mask SDPA is_causal=True path (recompute-safe; mirrors
+                        # HFModelWrapper.forward).
+                        with _suppress_hf_packed_seq_mask():
+                            outputs = getattr(self, self.base_model_prefix)(
+                                input_ids_fwd, attention_mask=None, position_ids=cp_position_ids
+                            )
                 else:
                     outputs = getattr(self, self.base_model_prefix)(
                         input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
