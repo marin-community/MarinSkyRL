@@ -119,38 +119,51 @@ def _cp_mask_dict_supported(model) -> bool:
 
 @contextlib.contextmanager
 def _cp_force_flash_sdpa():
-    """Force the FLASH SDPA backend for the duration of a CP model forward.
+    """Prioritize FLASH but KEEP the masked-tolerant SDPA backends enabled for a
+    CP model forward (FIX-4, #232; supersedes FIX-3's flash-ONLY pin).
 
-    THE ROOT BUG (FIX-3, #232; supersedes the FIX-1/FIX-2 mask-construction
-    theory). On the SIF's transformers 5.10.1 + torch 2.11, the Qwen3-MoE CP
-    forward with `attention_mask=None` + monotonic positions DOES reach HF's
-    no-4D-mask path: `create_causal_mask(...)` returns None and
-    `sdpa_attention_forward` calls `F.scaled_dot_product_attention(q,k,v,
-    attn_mask=None, is_causal=True)`. The 4D `bf16[B,1,S_q,S_kv]` bias in the
-    job-930793 crash is therefore NOT built by HF — it is materialized by the
-    torch context-parallel SDPA backend. With q/k/v CP-sharded on the seq dim
-    (kv → S/cp) and `is_causal=True`, torch CP routed the op to the
-    memory-efficient / cuDNN ring-attention backend
-    (`_scaled_dot_product_ring_efficient_attention`), which builds an explicit
-    `[B,1,S_q,S_kv/cp]` causal bias and then `aten.expand`s it to all heads +
-    full kv `[B,H,S_q,S_kv]` — and DTensor sharding-prop rejects the
-    `S_kv/cp (12220) -> S_kv (24440)` expand. (Confirmed from the Python
-    traceback: model_wrapper.py:731 attention_mask=None -> qwen3_moe attn ->
-    sdpa_attention.py:92 SDPA -> torch CP _attention.py inner_fn -> aten.expand
-    `bf16[4,1,24440,12220] -> [4,32,24440,24440]`.)
+    THE FIX-3 REGRESSION. FIX-3 pinned the FLASH SDPA backend via
+    `sdpa_kernel([SDPBackend.FLASH_ATTENTION], set_priority=True)` on the theory
+    that the Qwen3-MoE CP forward with `attention_mask=None` reaches HF's
+    no-4D-mask path (`create_causal_mask -> None`, SDPA called with
+    `attn_mask=None, is_causal=True`), so flash — which consumes `is_causal`
+    natively and never builds a 4D bias — would avoid the job-930793 efficient/
+    cuDNN `aten.expand` pathology.
 
-    THE FIX: force torch CP to use the FLASH ring-attention backend
-    (`_scaled_dot_product_ring_flash_attention`), which consumes `is_causal`
-    natively and never materializes a 4D additive bias — so there is no
-    `[B,1,S_q,S_kv]` tensor to mis-expand under CP-sharded kv. This is the
-    intended ring-SDPA path (`cp_style: ring_sdpa`); the math/efficient/cuDNN
-    backends are the ones with the CP-bias-expand pathology. `set_priority=True`
-    makes flash the top choice while leaving the others as fallbacks.
+    That theory was WRONG for this SIF (transformers 5.10.1 + torch 2.11). The
+    gs1 forward (job 932229) failed with `select_sdp_backend ... No available
+    kernel`, and the kernel-rejection reasons in the .out are decisive:
+      * "Flash Attention does not support non-null attn_mask" (sdp_utils_cpp.h:262)
+      * "Memory Efficient attention has been runtime disabled" (sdp_utils_cpp.h:552)
+      * "cuDNN attention has been runtime disabled"            (sdp_utils.cpp:706)
+    i.e. (1) HF DOES build a non-null 4D SDPA mask even with `attention_mask=None`
+    (create_causal_mask did NOT return None here), so flash is ineligible; and
+    (2) FIX-3's flash-ONLY pin had runtime-DISABLED the only backends that accept
+    a non-null mask (memory-efficient + cuDNN). `_sdpa_kernel([FLASH], ...)`
+    disables every backend not in the list — `set_priority` only reorders the
+    survivors, it does NOT keep the others as fallbacks. With flash rejected and
+    efficient/cuDNN disabled, nothing was available -> "No available kernel".
+
+    Mechanism note (why the old efficient/cuDNN-expand crash does NOT recur):
+    torch 2.11's CP dispatch is `_DispatchMode.MONKEY_PATCH` — it replaces
+    `F.scaled_dot_product_attention` itself with a wrapper that shards q/k/v (and
+    the mask) to LOCAL ring chunks and then calls the ORIGINAL `F.sdpa` on those
+    local tensors. The 4D-bias `aten.expand` therefore happens on already-local
+    chunks, not on a CP-sharded DTensor, so the job-930793 sharding-prop expand
+    mismatch (`S_kv/cp -> S_kv`) is structurally absent on this path.
+
+    THE FIX: enable ALL three CP-legal ring backends — FLASH, EFFICIENT,
+    CUDNN — with FLASH first via `set_priority=True`. (MATH is not CP-legal:
+    torch's CP ring `call_maps` only handles flash/efficient/cuDNN.) Flash still
+    wins the null-mask `is_causal=True` chunks (the i==0 ring step); the masked
+    chunks fall back to memory-efficient/cuDNN, which accept the non-null mask.
+    Validated in-SIF: `F.sdpa(..., attn_mask=4D, is_causal=False)` raises "No
+    available kernel" under FLASH-only but succeeds under [FLASH,EFFICIENT,CUDNN].
 
     Scope: applied ONLY inside the `cp_size > 1` forward branches (both the dense
-    dict path and the MoE None path benefit; both route through torch CP SDPA).
-    CP1 / non-CP forwards never enter this context → byte-unchanged. Guarded so an
-    environment without the flash SDPA kernel does not hard-fail at import.
+    dict path and the MoE None path route through torch CP SDPA). CP1 / non-CP
+    forwards never enter this context -> byte-unchanged. Guarded so an
+    environment without the `sdpa_kernel` API does not hard-fail at import.
     """
     try:
         from torch.nn.attention import sdpa_kernel, SDPBackend
@@ -158,7 +171,15 @@ def _cp_force_flash_sdpa():
         # No sdpa_kernel API: nothing to force; behave as a no-op.
         yield
         return
-    with sdpa_kernel([SDPBackend.FLASH_ATTENTION], set_priority=True):
+    # FLASH first (priority) but EFFICIENT + CUDNN stay ENABLED as masked-input
+    # fallbacks. A single-element list would runtime-disable the others (the
+    # FIX-3 regression); the explicit 3-backend list keeps them available.
+    backends = [SDPBackend.FLASH_ATTENTION]
+    for name in ("EFFICIENT_ATTENTION", "CUDNN_ATTENTION"):
+        b = getattr(SDPBackend, name, None)
+        if b is not None:
+            backends.append(b)
+    with sdpa_kernel(backends, set_priority=True):
         yield
 
 
