@@ -118,69 +118,48 @@ def _cp_mask_dict_supported(model) -> bool:
 
 
 @contextlib.contextmanager
-def _suppress_hf_packed_seq_mask():
-    """Under CP+MoE, force HF's no-4D-mask `is_causal` SDPA path by neutralizing
-    `find_packed_sequence_indices` for the duration of one model forward.
+def _cp_force_flash_sdpa():
+    """Force the FLASH SDPA backend for the duration of a CP model forward.
 
-    THE ROOT BUG (FIX-3, #232). FIX-1/FIX-2 set `attention_mask=None` + monotonic
-    `position_ids` on the Qwen3-MoE CP forward, ASSUMING that would make HF take
-    its no-mask `is_causal=True` SDPA shortcut. It does NOT. The MoE model forward
-    (modeling_qwen3_moe.py) ALWAYS calls `create_causal_mask(...)`, and
-    `masking_utils._preprocess_mask_arguments` runs packed-sequence detection
-    whenever `attention_mask is None and position_ids is not None and
-    past_key_values is None` (exactly our training-forward case). It calls
-    `find_packed_sequence_indices(position_ids)` — which, per its own source
-    comment (masking_utils.py:659 "it would be nice to return None ... but it
-    causes issues with export"), NEVER returns None. For MONOTONIC positions it
-    returns an all-zeros tensor (one packed "sequence"), which is `not None`, so
-    `create_causal_mask` sets `allow_is_causal_skip=False` and ANDs in the packed
-    mask function → the SDPA mask interface MATERIALIZES a 4D `[B,1,S_q,S_kv]`
-    boolean bias instead of returning None. Under CP=2 the kv axis of that bias is
-    sharded to S/cp while q stays full → torch CP SDPA's `aten.expand` fails
-    (`bf16[B,1,S_q,S_kv/cp] -> [B,H,S_q,S_kv]`). This is the job-930793 crash at
-    the training forward. The genbuf/logprob forwards take the SAME path but the
-    crash is structural to CP-sharded SDPA, so it only manifests once a CP forward
-    actually runs the 4D-mask SDPA (the training step).
+    THE ROOT BUG (FIX-3, #232; supersedes the FIX-1/FIX-2 mask-construction
+    theory). On the SIF's transformers 5.10.1 + torch 2.11, the Qwen3-MoE CP
+    forward with `attention_mask=None` + monotonic positions DOES reach HF's
+    no-4D-mask path: `create_causal_mask(...)` returns None and
+    `sdpa_attention_forward` calls `F.scaled_dot_product_attention(q,k,v,
+    attn_mask=None, is_causal=True)`. The 4D `bf16[B,1,S_q,S_kv]` bias in the
+    job-930793 crash is therefore NOT built by HF — it is materialized by the
+    torch context-parallel SDPA backend. With q/k/v CP-sharded on the seq dim
+    (kv → S/cp) and `is_causal=True`, torch CP routed the op to the
+    memory-efficient / cuDNN ring-attention backend
+    (`_scaled_dot_product_ring_efficient_attention`), which builds an explicit
+    `[B,1,S_q,S_kv/cp]` causal bias and then `aten.expand`s it to all heads +
+    full kv `[B,H,S_q,S_kv]` — and DTensor sharding-prop rejects the
+    `S_kv/cp (12220) -> S_kv (24440)` expand. (Confirmed from the Python
+    traceback: model_wrapper.py:731 attention_mask=None -> qwen3_moe attn ->
+    sdpa_attention.py:92 SDPA -> torch CP _attention.py inner_fn -> aten.expand
+    `bf16[4,1,24440,12220] -> [4,32,24440,24440]`.)
 
-    THE FIX (matches FIX-1's intent — make HF NOT materialize the 4D bias): wrap
-    the MoE CP forward so `find_packed_sequence_indices` returns None when the
-    positions are genuinely monotonic per-row (NOT packed). With None, the packed
-    branch is skipped, `allow_is_causal_skip` stays True, `_ignore_causal_mask_sdpa`
-    returns True (kv_len==q_len, no padding mask), and `create_causal_mask` returns
-    None → SDPA `is_causal=True` → torch CP ring attention shards cleanly. This is
-    precisely the None-when-unpacked behavior HF's own comment wants but withholds
-    for export-compat; we are not exporting. Monotonic-position causality + post-hoc
-    padding masks (entropy/logprob) are the same correctness contract FIX-2 already
-    established. If positions are actually packed (a future packed-CP path), we fall
-    back to the real implementation so behavior is unchanged.
+    THE FIX: force torch CP to use the FLASH ring-attention backend
+    (`_scaled_dot_product_ring_flash_attention`), which consumes `is_causal`
+    natively and never materializes a 4D additive bias — so there is no
+    `[B,1,S_q,S_kv]` tensor to mis-expand under CP-sharded kv. This is the
+    intended ring-SDPA path (`cp_style: ring_sdpa`); the math/efficient/cuDNN
+    backends are the ones with the CP-bias-expand pathology. `set_priority=True`
+    makes flash the top choice while leaving the others as fallbacks.
 
-    Scope: patches `transformers.masking_utils.find_packed_sequence_indices` (the
-    module-global `_preprocess_mask_arguments` resolves by bare name) ONLY for the
-    wrapped forward, then restores it. Dense Qwen3 (dict path) and all CP1 / non-CP
-    forwards never enter this context, so they are byte-unchanged.
+    Scope: applied ONLY inside the `cp_size > 1` forward branches (both the dense
+    dict path and the MoE None path benefit; both route through torch CP SDPA).
+    CP1 / non-CP forwards never enter this context → byte-unchanged. Guarded so an
+    environment without the flash SDPA kernel does not hard-fail at import.
     """
-    import transformers.masking_utils as _mu
-
-    _orig = _mu.find_packed_sequence_indices
-
-    def _patched(position_ids):
-        result = _orig(position_ids)
-        # `result[:, -1] == 0` for every row ⇒ no position discontinuity ⇒ a single
-        # (unpacked) monotonic sequence per row. Return None so HF takes the no-4D
-        # -mask is_causal SDPA path (CP-shardable). Any nonzero ⇒ genuine packing ⇒
-        # keep the real mask. (Mirrors the masking_utils.py:659 "would be nice".)
-        try:
-            if bool((result[:, -1] == 0).all()):
-                return None
-        except Exception:
-            return result
-        return result
-
-    _mu.find_packed_sequence_indices = _patched
     try:
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+    except Exception:
+        # No sdpa_kernel API: nothing to force; behave as a no-op.
         yield
-    finally:
-        _mu.find_packed_sequence_indices = _orig
+        return
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION], set_priority=True):
+        yield
 
 
 class HFModelWrapper(nn.Module):
@@ -772,34 +751,29 @@ class HFModelWrapper(nn.Module):
                     # Not using attention mask leads to higher perf since flash attention varlen func is enabled
                     output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
                 elif cp_size > 1:
-                    # CP: force PURE-CAUSAL ring SDPA. We must NOT let HF build its 4D
-                    # additive causal bias mask: under CP `create_causal_mask` runs at
-                    # model entry and produces a `[B,1,S_q,S_kv]` bias whose key axis
-                    # ends up sharded (S/cp) while the query axis stays full → torch
-                    # CP's SDPA wrapper then fails `aten.expand` (kv=S/cp vs q=S). HF's
-                    # documented escape hatch (modeling_qwen3.py:403) is to pass
-                    # `attention_mask` ALREADY as the per-layer-type mask DICT, which
-                    # short-circuits `create_causal_mask`; with None entries every
-                    # layer gets attention_mask=None → SDPA sets is_causal=True, which
-                    # torch CP ring attention shards correctly. Padding masking is
-                    # recovered post-hoc (entropy/logprob masks); exact per-token
-                    # padding correctness is the Stage-5 concern.
-                    if self._cp_mask_dict_supported:
-                        cp_mask = {"full_attention": None, "sliding_attention": None}
-                        output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=cp_position_ids)
-                    else:
-                        # Qwen3-MoE has no dict escape hatch (modeling_qwen3_moe.py:497
-                        # → create_causal_mask → dict.ndim AttributeError). Pass
-                        # attention_mask=None with the MONOTONIC cp_position_ids built +
-                        # CP-registered above. FIX-3 (#232): `find_packed_sequence_indices`
-                        # NEVER returns None even for monotonic positions (it returns an
-                        # all-zeros tensor), so HF would otherwise still materialize a 4D
-                        # [B,1,S_q,S_kv] causal bias whose kv axis mis-shards under CP
-                        # (aten.expand failure). `_suppress_hf_packed_seq_mask` makes that
-                        # detector return None for genuinely-monotonic positions → HF takes
-                        # the no-4D-mask SDPA is_causal=True path → ring shards cleanly. Pad
-                        # RoPE is masked out post-hoc, so monotonic is correctness-safe.
-                        with _suppress_hf_packed_seq_mask():
+                    # CP: force PURE-CAUSAL ring SDPA. HF must NOT build its 4D additive
+                    # causal bias; we pass attention_mask=None (MoE) / the per-layer-type
+                    # dict (dense Qwen3) so `create_causal_mask` returns None and HF calls
+                    # SDPA with attn_mask=None + is_causal=True. FIX-3 (#232): that alone
+                    # is NOT enough — under CP the torch context-parallel SDPA dispatcher,
+                    # if it routes the is_causal call to the memory-efficient/cuDNN ring
+                    # backend, materializes its own `[B,1,S_q,S_kv]` causal bias and
+                    # `aten.expand`s it to all heads + full kv, which DTensor sharding-prop
+                    # rejects (kv is CP-sharded to S/cp while q stays full → the
+                    # `bf16[4,1,24440,12220] -> [4,32,24440,24440]` expand crash, job
+                    # 930793). `_cp_force_flash_sdpa()` pins the FLASH ring backend, which
+                    # consumes is_causal natively and never builds a 4D bias → CP shards
+                    # cleanly. Padding is recovered post-hoc (entropy/logprob masks).
+                    with _cp_force_flash_sdpa():
+                        if self._cp_mask_dict_supported:
+                            cp_mask = {"full_attention": None, "sliding_attention": None}
+                            output = self.model(sequences_fwd, attention_mask=cp_mask, position_ids=cp_position_ids)
+                        else:
+                            # Qwen3-MoE: no dict escape hatch (modeling_qwen3_moe → MoE
+                            # forward always calls create_causal_mask). attention_mask=None
+                            # + the MONOTONIC cp_position_ids built + CP-registered above →
+                            # create_causal_mask returns None → SDPA is_causal=True. Pad
+                            # RoPE is masked out post-hoc, so monotonic is correctness-safe.
                             output = self.model(sequences_fwd, attention_mask=None, position_ids=cp_position_ids)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
@@ -1213,23 +1187,23 @@ def _get_critic_model(
                 if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
                     outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
                 elif cp_size > 1:
-                    # CP: pass the per-layer-type mask DICT (None entries) so HF skips
-                    # create_causal_mask → SDPA is_causal=True → ring attention shards
-                    # cleanly (see HFModelWrapper.forward for the full rationale).
-                    if self._cp_mask_dict_supported:
-                        cp_mask = {"full_attention": None, "sliding_attention": None}
-                        outputs = getattr(self, self.base_model_prefix)(
-                            input_ids_fwd, attention_mask=cp_mask, position_ids=cp_position_ids
-                        )
-                    else:
-                        # Qwen3-MoE: no dict escape hatch. attention_mask=None + the
-                        # MONOTONIC cp_position_ids built + CP-registered above. FIX-3
-                        # (#232): find_packed_sequence_indices never returns None on its
-                        # own (all-zeros, not None), so HF still builds a 4D mask that
-                        # mis-shards under CP; _suppress_hf_packed_seq_mask forces the
-                        # no-4D-mask SDPA is_causal=True path (recompute-safe; mirrors
-                        # HFModelWrapper.forward).
-                        with _suppress_hf_packed_seq_mask():
+                    # CP: pass the per-layer-type mask DICT (None entries, dense) /
+                    # attention_mask=None (MoE) so HF skips create_causal_mask → SDPA
+                    # is_causal=True. FIX-3 (#232): also pin the FLASH ring SDPA backend
+                    # so the torch CP dispatcher does not route is_causal to the
+                    # memory-efficient/cuDNN backend, which materializes a `[B,1,S_q,S_kv]`
+                    # bias and mis-expands it under CP-sharded kv (see HFModelWrapper.forward
+                    # for the full rationale + the job-930793 traceback).
+                    with _cp_force_flash_sdpa():
+                        if self._cp_mask_dict_supported:
+                            cp_mask = {"full_attention": None, "sliding_attention": None}
+                            outputs = getattr(self, self.base_model_prefix)(
+                                input_ids_fwd, attention_mask=cp_mask, position_ids=cp_position_ids
+                            )
+                        else:
+                            # Qwen3-MoE: no dict escape hatch. attention_mask=None + the
+                            # MONOTONIC cp_position_ids built + CP-registered above
+                            # (recompute-safe; mirrors HFModelWrapper.forward).
                             outputs = getattr(self, self.base_model_prefix)(
                                 input_ids_fwd, attention_mask=None, position_ids=cp_position_ids
                             )
