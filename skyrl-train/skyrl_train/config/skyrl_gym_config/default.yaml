@@ -14,3 +14,26 @@ search:
   search_url: "http://127.0.0.1:8000/retrieve"
   topk: 3
   timeout: 30
+
+aime:
+  # Tunable LENGTH-PENALTY reward (cosine length-scaled, correctness-gated).
+  # length_penalty_weight is the single grid axis. 0.0 == legacy +1/-1 reward
+  # (backward compatible default; weight=0 is a clean A/B superset).
+  # Set e.g. environment.skyrl_gym.aime.length_penalty_weight=0.5
+  length_penalty_weight: 0.0
+  # Target concise length in TOKENS: correct answers at/under this get full +1.0;
+  # longer correct answers decay (cosine) toward (1 - weight) at the cap.
+  # ~695 tok fits a correct AIME answer with thinking (smoke 47528845); a small
+  # headroom target is reasonable.
+  target_length: 768
+  # Reward for a truncated/no-box rollout at weight=1 (distinct from -1 wrong-but-
+  # complete). At weight=0 collapses to -1.0.
+  truncated_penalty: -2.0
+  # Reward-hacking guard: "correct" answers shorter than this (tokens) do NOT get
+  # the concision bonus (prevents collapsing the CoT to an instant boxed guess).
+  min_response_length: 16
+  # Truncation proxy marker (absence in a length-stopped response => truncated).
+  end_think_token: "<|end_think|>"
+  # max_gen_length: 0 -> taken from generator.sampling_params.max_generate_length
+  # at step time. Override only to decouple the reward budget from the gen cap.
+  max_gen_length: 0

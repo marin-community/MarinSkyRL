@@ -243,35 +243,178 @@ def verify(
     return correct, pred
 
 
+import math
+
+
+def compute_length_penalty(
+    correct: bool,
+    response_length: Optional[int],
+    truncated: bool,
+    *,
+    length_penalty_weight: float = 0.0,
+    target_length: int = 0,
+    max_gen_length: int = 0,
+    truncated_penalty: float = -2.0,
+    min_response_length: int = 16,
+) -> tuple[float, Dict[str, Any]]:
+    """Compute a tunable, backward-compatible length-shaped reward.
+
+    Design (cosine length-scaled reward, gated on correctness; Yeo et al.,
+    "Demystifying Long CoT", DeepSeek / Kimi Long2Short family):
+
+    Let w = length_penalty_weight (the single tunable grid axis). When w == 0,
+    this returns the *exact* legacy reward (+1.0 correct / -1.0 incorrect) with
+    NO length term and NO truncation distinction, so weight=0 is a clean A/B
+    superset of the current reward.
+
+    For w > 0, define a normalized "over-budget" position
+        f = clamp( (L - target) / (max_gen - target), 0, 1 )
+    where L is the response token length, `target` is the desired concise length,
+    and `max_gen` is the generation cap. f = 0 at/under target, f = 1 at the cap.
+
+    Three regimes:
+      1. CORRECT & complete (not truncated):
+            base = +1.0
+            shaped = +1.0 - w * (1 - cos(pi * f)) / 2
+         i.e. a cosine ramp: full +1.0 reward when L <= target, smoothly
+         decaying by up to w as L -> max_gen. Concise-correct >= verbose-correct
+         (requirement (a)), and it never drops below (1 - w), so a correct answer
+         is never punished below an incorrect one as long as w <= 2.
+      2. INCORRECT & complete (not truncated):
+            base = -1.0  (unchanged; we do not length-shape wrong-but-complete
+            answers, preserving the "tried and wrong" signal)
+      3. TRUNCATED (hit length cap / no terminal box): a DISTINCT, more negative
+         penalty `truncated_penalty` (default -2.0), scaled by w:
+            shaped = -1.0 + w * (truncated_penalty - (-1.0))
+         At w=1 this is exactly `truncated_penalty`; at w=0 it collapses to -1.0
+         (legacy). This separates "rambled into truncation" from "wrong-but-
+         complete" (requirement (b)).
+
+    Reward-hacking guard (requirement (d)): a correct answer shorter than
+    `min_response_length` tokens (degenerate / no-CoT collapse) does NOT receive
+    the concision bonus — it is clamped to the verbose-correct floor (1 - w).
+    This removes the degenerate optimum of emitting an instant boxed guess.
+
+    Returns (reward, info) where info carries the shaping diagnostics.
+    """
+    info: Dict[str, Any] = {
+        "length_shaped": False,
+        "truncated": bool(truncated),
+        "response_length": response_length,
+        "length_frac": None,
+    }
+
+    # weight=0  ->  exact legacy reward.
+    if length_penalty_weight == 0.0:
+        return (1.0 if correct else -1.0), info
+
+    info["length_shaped"] = True
+
+    # Truncated / over-budget with no terminal answer: distinct penalty regime.
+    if truncated:
+        reward = -1.0 + length_penalty_weight * (truncated_penalty - (-1.0))
+        info["regime"] = "truncated"
+        return reward, info
+
+    if not correct:
+        # Wrong-but-complete: keep the legacy -1.0 (no length shaping).
+        info["regime"] = "incorrect_complete"
+        return -1.0, info
+
+    # Correct & complete: cosine concision ramp.
+    if response_length is None or max_gen_length <= target_length:
+        # Missing length signal -> fall back to legacy +1.0 (no shaping possible).
+        info["length_shaped"] = False
+        info["regime"] = "correct_no_length_signal"
+        return 1.0, info
+
+    f = (response_length - target_length) / float(max_gen_length - target_length)
+    f = min(1.0, max(0.0, f))
+    info["length_frac"] = f
+
+    # Reward-hacking guard: too-short "correct" answers get the verbose floor,
+    # NOT the full concision bonus.
+    if response_length < min_response_length:
+        info["regime"] = "correct_degenerate_short"
+        return 1.0 - length_penalty_weight, info
+
+    cosine_decay = (1.0 - math.cos(math.pi * f)) / 2.0  # 0 at f=0, 1 at f=1
+    reward = 1.0 - length_penalty_weight * cosine_decay
+    info["regime"] = "correct_complete"
+    return reward, info
+
+
 def compute_score(
     solution_str: str,
     ground_truth: str,
     strict_box_verify: bool = False,
     pause_tokens_index: Optional[list[int]] = None,
+    response_length: Optional[int] = None,
+    stop_reason: Optional[str] = None,
+    length_penalty_weight: float = 0.0,
+    target_length: int = 0,
+    max_gen_length: int = 0,
+    truncated_penalty: float = -2.0,
+    min_response_length: int = 16,
+    end_think_token: str = "<|end_think|>",
 ) -> Dict[str, Any]:
     """Compute the reward score for a solution.
 
     Args:
-        solution_str: The solution string
+        solution_str: The solution string (full response text)
         ground_truth: The ground truth answer
         strict_box_verify: Whether to use strict box verification
         pause_tokens_index: Indices of pause tokens
+        response_length: Response length in TOKENS (plumbed from the generator).
+            None when unavailable -> length shaping is skipped.
+        stop_reason: The generation stop reason ("stop"/"length"/...). "length"
+            (or a missing terminal box/end-think marker) marks truncation.
+        length_penalty_weight: Tunable weight w (the grid axis). 0.0 == legacy
+            +1/-1 reward (backward compatible default).
+        target_length: Target concise length in tokens (full reward at/under).
+        max_gen_length: Generation cap in tokens (the reference for f).
+        truncated_penalty: Reward assigned to truncated/no-box rollouts at w=1.
+        min_response_length: Reward-hacking guard floor (tokens).
+        end_think_token: String marker whose ABSENCE in a length-stopped
+            response is a truncation proxy.
 
     Returns:
-        Reward score (1.0 for correct, -1.0 for incorrect)
-        and other information
+        Reward score and other information. With length_penalty_weight=0.0 this
+        is identical to the legacy reward (1.0 correct / -1.0 incorrect).
     """
-    # Limit solution length for efficiency
-    solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
-
-    # Verify the solution
-    correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
-
-    reward = 1.0 if correct else -1.0
+    # Verify on the tail of the FULL response (legacy behavior).
+    verify_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
+    correct, pred = verify(verify_str, ground_truth, strict_box_verify, pause_tokens_index)
     acc = correct
+
+    # Truncation detection: the generation hit the length cap (stop_reason ==
+    # "length"). We additionally treat a length-stop without an end-think marker
+    # as the "rambled into truncation, never reached Answer:" case. If stop_reason
+    # is unavailable, the end-think marker absence is used as a proxy only when a
+    # length signal is present (otherwise we cannot tell truncation from a short
+    # non-thinking answer, so we do NOT flag it).
+    truncated = False
+    if length_penalty_weight != 0.0:
+        if stop_reason is not None:
+            truncated = stop_reason == "length"
+        elif response_length is not None and max_gen_length > 0:
+            # Proxy: at/over the cap and missing the end-think marker.
+            truncated = response_length >= max_gen_length and (end_think_token not in solution_str)
+
+    reward, length_info = compute_length_penalty(
+        correct=correct,
+        response_length=response_length,
+        truncated=truncated,
+        length_penalty_weight=length_penalty_weight,
+        target_length=target_length,
+        max_gen_length=max_gen_length,
+        truncated_penalty=truncated_penalty,
+        min_response_length=min_response_length,
+    )
 
     return {
         "score": reward,
         "acc": acc,
         "pred": pred,
+        **length_info,
     }

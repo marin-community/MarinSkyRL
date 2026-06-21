@@ -236,6 +236,15 @@ class SkyRLGymGenerator(GeneratorInterface):
                     added_eos = True
 
             # 2. Environment step
+            # Expose generation-time signals to envs that opt in (no-op otherwise).
+            # In the agent loop, response token length for this turn is len(output_ids)
+            # and the generation cap is max_tokens.
+            if hasattr(env, "set_generation_metadata"):
+                env.set_generation_metadata(
+                    response_length=len(output_ids),
+                    stop_reason=stop_reason,
+                    max_gen_length=max_tokens,
+                )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
@@ -390,6 +399,16 @@ class SkyRLGymGenerator(GeneratorInterface):
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
+            # Expose generation-time signals (token length + stop_reason + the
+            # generation cap) to envs that opt in via set_generation_metadata().
+            # No-op for envs that don't define it (e.g. all non-aime envs), so
+            # this is backward compatible and zero-blast-radius.
+            if hasattr(env, "set_generation_metadata"):
+                env.set_generation_metadata(
+                    response_length=len(response),
+                    stop_reason=stop_reasons[i],
+                    max_gen_length=max_tokens,
+                )
             # step on environment and compute reward
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]
