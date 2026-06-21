@@ -36,6 +36,7 @@ eager (3a) and grouped (3b) paths.
 
 from __future__ import annotations
 
+import os
 from typing import Literal, Optional
 
 import torch
@@ -489,6 +490,23 @@ class MoE(nn.Module):
             routed_experts = routed_experts.reshape(-1, top_k)
 
         top_scores, selected_experts_indices, _ = self.router(x, routed_experts=routed_experts)
+
+        # --- R3_EPTRACE (TEMP DIAG, #232): env-gated per-rank EP-dispatch trace to
+        # localize the SeqNum=145 ALLTOALL_BASE hang. Logs a monotonic per-module
+        # call counter + total routed tokens + replay flag on every MoE.forward.
+        # If the per-rank call counts DIVERGE at the hang -> collective-count desync;
+        # if they match but one rank lags in wall-clock -> straggler. Revert after.
+        if os.environ.get("R3_EPTRACE"):
+            import torch.distributed as _epdist
+
+            _gr = _epdist.get_rank() if _epdist.is_initialized() else -1
+            self._eptrace_n = getattr(self, "_eptrace_n", 0) + 1
+            _epttok = int(selected_experts_indices.numel())
+            print(
+                f"[R3EPTRACE] grank={_gr} fwd_call={self._eptrace_n} "
+                f"ntok={x.shape[0]} routed_slots={_epttok} replay={routed_experts is not None}",
+                flush=True,
+            )
 
         if self.ep_comm_backend == "deepep":
             # DeepEP drives dispatch→local-experts→combine; combine already
