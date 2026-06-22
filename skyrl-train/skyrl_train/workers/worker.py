@@ -165,15 +165,94 @@ class DistributedTorchRayActor:
             "cuda", mesh_shape=(dp_size, self.sequence_parallel_size), mesh_dim_names=("dp", "sp")
         )
         self.device_mesh = device_mesh
+
+        # --- EP/CP-aware DATA-parallel width for MeshDispatch -------------------------
+        # The MoE EP all-to-all deadlock at SeqNum=145 (CP=2+EP8 131k prod run, 2026-06-22)
+        # and the underlying silent MoE-math corruption both trace to MeshDispatch keying
+        # data shards on (mesh_rank.dp, mesh_rank.dp_size) where dp_size was computed as
+        # world_size // sequence_parallel_size ALONE -- EP/CP-UNAWARE. The FSDP2 device
+        # mesh (fsdp_utils.create_device_mesh) is ["ddp","fsdp","cp","ep"]: only ddp x fsdp
+        # are TRUE data-parallel (distinct-shard) dims. Data MUST be REPLICATED across cp
+        # (CP splits the sequence inside the forward), ep (all EP ranks process the SAME
+        # tokens), and sp (Ulysses likewise). With SP=1 the old formula gave dp_size=32 on
+        # the ep8xfsdp2xcp2 (1,2,2,8) mesh, so all 32 ranks got DISTINCT shards -> EP-group
+        # ranks combined mismatched tokens -> per-expert counts diverged -> the ragged
+        # token all-to-all desynced and hung. CONFIRMED by the EPPROBE run (job 946890):
+        # at gs=1 all 32 ranks reported DISTINCT fp_sum fingerprints (dp=0..31, dp_size=32).
+        #
+        # Fix: dp_size = world_size // (sp * cp * ep) = ddp_size * fsdp_size (= 2 here), and
+        # dp = the rank's position WITHIN its (ddp,fsdp) data-parallel subgroup, derived from
+        # the FSDP2 row-major rank decomposition so that ranks differing ONLY in (sp,cp,ep)
+        # get the SAME dp -> the same shard. The `sp` field is repurposed as the rank's
+        # REPLICATION index within its dp group (0 for exactly one rank per group); it is
+        # consumed only by MeshRank.is_collection_dp_rank (dispatch.py:37, `sp==0`), so this
+        # keeps collection picking exactly one shard per dp group while leaving the dispatch
+        # split logic untouched.
+        #
+        # INVARIANT (verified): when cp==ep==1 this reduces to the ORIGINAL formula
+        # dp_size = world_size // sp, dp = rank // sp, sp = rank % sp -- byte-identical to the
+        # pre-EP/CP path (the non-EP/non-CP a3 production runs are unaffected). We keep the
+        # original mesh-derived computation for that case and only branch when cp/ep are on.
+        cp_size, ep_size = self._resolve_cp_ep_sizes()
+        if cp_size <= 1 and ep_size <= 1:
+            mesh_dp = self.device_mesh.get_local_rank(mesh_dim="dp")
+            mesh_sp = self.device_mesh.get_local_rank(mesh_dim="sp")
+            mesh_dp_size = self.device_mesh.size(0)
+        else:
+            sp_size = self.sequence_parallel_size
+            # FSDP2 mesh is ["ddp","fsdp","cp","ep"] (row-major; ep varies fastest).
+            # SP is NOT a dim of that mesh; in the cp/ep config SP=1. Treat the global rank
+            # as a flat index over (ddp, fsdp, sp, cp, ep) replication block of width
+            # sp*cp*ep, with the data-parallel index = position in the (ddp,fsdp) outer dims.
+            inner = sp_size * cp_size * ep_size
+            assert self._world_size % inner == 0, (
+                f"world_size={self._world_size} not divisible by sp*cp*ep="
+                f"{inner} (sp={sp_size}, cp={cp_size}, ep={ep_size})"
+            )
+            mesh_dp_size = self._world_size // inner
+            # dp = which (ddp,fsdp) data-parallel group this rank belongs to; rep = its
+            # index within that group's replicated (sp,cp,ep) ranks (rep==0 -> collector).
+            mesh_dp = self._rank // inner
+            mesh_sp = self._rank % inner
         self.mesh_rank = MeshRank(
-            dp=self.device_mesh.get_local_rank(mesh_dim="dp"),
-            sp=self.device_mesh.get_local_rank(mesh_dim="sp"),
+            dp=mesh_dp,
+            sp=mesh_sp,
             tp=0,
             pp=0,
             world_size=self._world_size,
-            dp_size=self.device_mesh.size(0),
+            dp_size=mesh_dp_size,
             pp_size=1,
         )
+
+    def _resolve_cp_ep_sizes(self):
+        """Resolve the (context_parallel_size, expert_model_parallel_size) for this run.
+
+        EP/CP are configured per training role under ``cfg.trainer.<role>.fsdp_config``
+        (DeepSpeed/Megatron paths leave them at 1; Megatron overrides this method entirely).
+        ``init_worker_process_group`` is shared across policy/critic/ref, so we take the MAX
+        across the present FSDP2 roles -- for a coherent colocated MoE run they agree, and
+        max is the conservative value that reproduces the actual mesh geometry. Returns
+        ``(1, 1)`` (the byte-identical flag-off path) when no fsdp_config advertises EP/CP.
+        """
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return 1, 1
+        cp_size, ep_size = 1, 1
+        try:
+            trainer = cfg.trainer
+            for role in ("policy", "critic", "ref"):
+                role_cfg = trainer.get(role) if hasattr(trainer, "get") else getattr(trainer, role, None)
+                if role_cfg is None:
+                    continue
+                fc = role_cfg.get("fsdp_config") if hasattr(role_cfg, "get") else getattr(role_cfg, "fsdp_config", None)
+                if fc is None:
+                    continue
+                cp_size = max(cp_size, int(fc.get("context_parallel_size", 1)))
+                ep_size = max(ep_size, int(fc.get("expert_model_parallel_size", 1)))
+        except Exception as _e:
+            logging.warning("[ep-dispatch] _resolve_cp_ep_sizes fell back to (1,1): %r", _e)
+            return 1, 1
+        return cp_size, ep_size
 
     def _seq_parallel_monkey_patch(self, model: PreTrainedModel, use_parent_class: bool = False):
         # NOTE (sumanthrh): This sets a global variable that is used during the forward pass for sequence parallelism
