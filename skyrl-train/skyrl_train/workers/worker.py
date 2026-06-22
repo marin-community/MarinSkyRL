@@ -792,6 +792,47 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
+
+        # --- [EPDISPATCH] (TEMP DIAG, 2026-06-22 ep-dispatch localization) -----------
+        # Probe #1 (decisive, batch/context-INDEPENDENT): at the policy dispatch
+        # CONSUMER (ppo_train receives EXACTLY the per-rank shard that
+        # MeshDispatch.dispatch sent this actor via .ppo_train.remote(data_to_send)),
+        # log on EVERY rank, once per gs: the global torch rank, MeshRank dp/dp_size,
+        # the (ddp,fsdp,cp,ep) FSDP2 device-mesh coords, and a cheap deterministic
+        # FINGERPRINT of the rank's input `sequences` tensor. Ranks in the SAME ep
+        # group (and the SAME cp group) MUST receive REPLICATED data: if their
+        # fingerprints DIFFER -> data mis-distribution confirmed (and MoE math wrong);
+        # if identical -> hypothesis refuted. Env-gated; remove after the probe.
+        if os.environ.get("EPDISPATCH"):
+            try:
+                import torch.distributed as _epd
+
+                _grank = _epd.get_rank() if _epd.is_initialized() else -1
+                _mr = self.mesh_rank
+                # FSDP2 device-mesh coords (ddp<fsdp<cp<ep per create_device_mesh).
+                _dm = getattr(self.strategy, "device_mesh", None)
+                _coords = {}
+                if _dm is not None:
+                    for _dim in ("ddp", "fsdp", "cp", "ep"):
+                        try:
+                            _coords[_dim] = int(_dm.get_local_rank(mesh_dim=_dim))
+                        except Exception:
+                            _coords[_dim] = None
+                _seq = train_data["sequences"]
+                _fp_sum = int(_seq.to(torch.float64).sum().item())
+                _fp_head = _seq.reshape(-1)[:8].tolist()
+                print(
+                    f"[EPDISPATCH] gs={global_step} grank={_grank} "
+                    f"dp={_mr.dp} dp_size={_mr.dp_size} world={_mr.world_size} "
+                    f"coords(ddp={_coords.get('ddp')},fsdp={_coords.get('fsdp')},"
+                    f"cp={_coords.get('cp')},ep={_coords.get('ep')}) "
+                    f"seq_shape={tuple(_seq.shape)} fp_sum={_fp_sum} fp_head={_fp_head}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[EPDISPATCH] grank=? probe-error: {_e!r}", flush=True)
+        # --- end [EPDISPATCH] --------------------------------------------------------
+
         # Per-batch stale_min for StaleClip (None for sync RL, populated for async).
         stale_min = train_data.metadata.get("stale_min")
         # Lazily instantiate spike-mitigation objects on first call.
