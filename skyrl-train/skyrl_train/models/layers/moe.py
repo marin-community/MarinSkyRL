@@ -50,6 +50,111 @@ EPCommBackend = Literal["torch", "deepep"]
 
 
 # --------------------------------------------------------------------------- #
+# [EPDIAG] EP residual-desync diagnostic probe (env-gated, cheap, REMOVABLE)   #
+# --------------------------------------------------------------------------- #
+# References the 2026-06-23 correction: the EP/CP-aware dispatch fix (11556c4)
+# replicated input data across EP-group ranks (EPPROBE 947848: 32->2 unique
+# shards) but the SeqNum=145 ALLTOALL_BASE[128] deadlock in torchtitan's
+# _token_dispatch STILL recurred at ~2:58h (run 948592). That all-to-all is the
+# fixed-size [128] num_tokens_per_expert metadata exchange — it can't desync on
+# shape, only on per-rank ARRIVAL (a straggler) or via a routing/count DIVERGENCE
+# that desyncs the SUBSEQUENT ragged token all-to-all. This probe logs, PER RANK,
+# RIGHT BEFORE self.experts(...) (so it prints even if the all-to-all then hangs):
+#   - a wall-clock time.time() timestamp (to measure the ~382s arrival spread),
+#   - global rank + WORLD_SIZE + decoded (ddp,fsdp,cp,ep) mesh coords,
+#   - the full num_tokens_per_expert vector + a stable hash/sum/min/max/argmax,
+#   - a hash of the routing selected_experts_indices (the histc INPUT),
+#   - whether R3 router-replay was active on this forward + the per-rank fwd index.
+# Reading it across an EP group (same ddp,fsdp,cp; varying ep):
+#   (a) ntpe_hash + sel_hash MATCH but timestamps spread ~382s  -> COMPUTE/arrival
+#       straggler (one rank does more work upstream); NOT a routing problem.
+#   (b) ntpe_hash / sel_hash DIVERGE -> routing produces per-rank-different expert
+#       assignment despite replicated input -> implicates R3 router-replay (does
+#       replay reconstruct identical routing on every rank?) or the CP token-split.
+# Gate: EPDIAG=1. Coord decode reads optional EPDIAG_CP / EPDIAG_EP hints (the
+# FSDP2 mesh is ["ddp","fsdp","cp","ep"], ep-fastest; dp = rank // (sp*cp*ep)).
+# Cheap: a couple of host syncs on a small int vector, only when EPDIAG=1; remove
+# the gate-block + this helper once the mechanism is pinned.
+
+_EPDIAG_FWD_COUNT = 0
+
+
+def _epdiag_enabled() -> bool:
+    return os.environ.get("EPDIAG", "0") in ("1", "true", "True")
+
+
+def _epdiag_decode_coords(rank: int, world: int) -> str:
+    """Decode (ddp,fsdp,cp,ep) for a global rank given EPDIAG_CP/EPDIAG_EP hints.
+
+    Mirrors worker.py's flat decomposition: inner = sp*cp*ep (sp=1 on the cp/ep
+    config), ep-fastest. dp = rank // inner is the (ddp,fsdp) data-parallel group.
+    Falls back to "ep_group=?" if hints are absent (raw rank still logged)."""
+    try:
+        cp = int(os.environ.get("EPDIAG_CP", "0"))
+        ep = int(os.environ.get("EPDIAG_EP", "0"))
+        if cp <= 0 or ep <= 0:
+            return "coords=?(set EPDIAG_CP,EPDIAG_EP)"
+        sp = int(os.environ.get("EPDIAG_SP", "1")) or 1
+        inner = sp * cp * ep
+        dp = rank // inner  # (ddp,fsdp) data-parallel group index
+        rep = rank % inner  # position within the replicated (sp,cp,ep) block
+        ep_coord = rep % ep
+        cp_coord = (rep // ep) % cp
+        # remaining higher dims (sp / fsdp / ddp) collapse into dp here; dp itself
+        # identifies the (ddp,fsdp) group, which is what an EP group shares.
+        return f"dp_group={dp} cp={cp_coord} ep={ep_coord} (inner={inner})"
+    except Exception as e:  # never let the probe break the forward
+        return f"coords=err({e})"
+
+
+def _epdiag_probe(
+    num_tokens_per_expert: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+    routed_experts: Optional[torch.Tensor],
+) -> None:
+    """Emit one [EPDIAG] line per rank right before the EP all_to_all. Best-effort."""
+    global _EPDIAG_FWD_COUNT
+    _EPDIAG_FWD_COUNT += 1
+    fwd_idx = _EPDIAG_FWD_COUNT
+    try:
+        import time
+
+        rank = int(os.environ.get("RANK", "-1"))
+        world = int(os.environ.get("WORLD_SIZE", "-1"))
+        coords = _epdiag_decode_coords(rank, world)
+        ts = time.time()
+
+        # Cheap host syncs on small int tensors (only when EPDIAG=1).
+        ntpe = num_tokens_per_expert.detach().to(torch.int64).reshape(-1)
+        ntpe_list = ntpe.tolist()
+        ntpe_sum = int(ntpe.sum().item())
+        ntpe_min = int(ntpe.min().item()) if ntpe.numel() else 0
+        ntpe_max = int(ntpe.max().item()) if ntpe.numel() else 0
+        ntpe_argmax = int(ntpe.argmax().item()) if ntpe.numel() else -1
+        # Order-INDEPENDENT-free stable hash of the count VECTOR (position matters).
+        ntpe_hash = hash(tuple(ntpe_list)) & 0xFFFFFFFF
+
+        # Hash of the routing indices themselves (the histc input) — tests whether
+        # the ROUTING diverges per rank, not just the resulting counts. Sum the raw
+        # int indices into a single scalar fingerprint (cheap, one reduction).
+        sel = selected_experts_indices.detach().reshape(-1).to(torch.int64)
+        sel_fp = int(sel.sum().item())
+        sel_n = int(sel.numel())
+
+        r3_active = "R3replay" if routed_experts is not None else "natural"
+
+        print(
+            f"[EPDIAG] ts={ts:.3f} rank={rank}/{world} {coords} fwd={fwd_idx} "
+            f"r3={r3_active} ntpe_hash={ntpe_hash} ntpe_sum={ntpe_sum} "
+            f"ntpe_min={ntpe_min} ntpe_max={ntpe_max} ntpe_argmax={ntpe_argmax} "
+            f"sel_fp={sel_fp} sel_n={sel_n} ntpe={ntpe_list}",
+            flush=True,
+        )
+    except Exception as e:  # never let the probe break the forward
+        print(f"[EPDIAG] probe error: {e}", flush=True)
+
+
+# --------------------------------------------------------------------------- #
 # Expert compute kernels (bare impls, no @expert_parallel — Stage 4 re-adds)   #
 # --------------------------------------------------------------------------- #
 
@@ -502,6 +607,13 @@ class MoE(nn.Module):
             token_indices_experts_sorted,
             num_tokens_per_expert,
         ) = self.reorderer(top_scores, selected_experts_indices)
+
+        # [EPDIAG] EP residual-desync probe: log per-rank num_tokens_per_expert +
+        # routing fingerprint + arrival timestamp RIGHT BEFORE the EP all_to_all
+        # (torchtitan _token_dispatch fires inside self.experts on the EP/torch
+        # path). Env-gated (EPDIAG=1), cheap, removable. See helper above.
+        if _epdiag_enabled():
+            _epdiag_probe(num_tokens_per_expert, selected_experts_indices, routed_experts)
 
         routed_output = self._run_routed_experts(
             x,
