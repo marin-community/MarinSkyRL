@@ -491,23 +491,6 @@ class MoE(nn.Module):
 
         top_scores, selected_experts_indices, _ = self.router(x, routed_experts=routed_experts)
 
-        # --- R3_EPTRACE (TEMP DIAG, #232): env-gated per-rank EP-dispatch trace to
-        # localize the SeqNum=145 ALLTOALL_BASE hang. Logs a monotonic per-module
-        # call counter + total routed tokens + replay flag on every MoE.forward.
-        # If the per-rank call counts DIVERGE at the hang -> collective-count desync;
-        # if they match but one rank lags in wall-clock -> straggler. Revert after.
-        if os.environ.get("R3_EPTRACE"):
-            import torch.distributed as _epdist
-
-            _gr = _epdist.get_rank() if _epdist.is_initialized() else -1
-            self._eptrace_n = getattr(self, "_eptrace_n", 0) + 1
-            _epttok = int(selected_experts_indices.numel())
-            print(
-                f"[R3EPTRACE] grank={_gr} fwd_call={self._eptrace_n} "
-                f"ntok={x.shape[0]} routed_slots={_epttok} replay={routed_experts is not None}",
-                flush=True,
-            )
-
         if self.ep_comm_backend == "deepep":
             # DeepEP drives dispatch→local-experts→combine; combine already
             # unpermutes (token i → row i), so no reorderer/scatter_add here.
@@ -519,31 +502,6 @@ class MoE(nn.Module):
             token_indices_experts_sorted,
             num_tokens_per_expert,
         ) = self.reorderer(top_scores, selected_experts_indices)
-
-        # --- [R3EPTRACE-VEC] (TEMP DIAG, 2026-06-22 ep-dispatch localization) --------
-        # Probe #2: extend the df02f51 [R3EPTRACE] (totals-only) to print the FULL
-        # per-expert histogram `num_tokens_per_expert` (all 128 entries) right BEFORE
-        # self.experts(...) (called inside _run_routed_experts -> the ragged expert
-        # all-to-all whose split sizes are this vector). Compare across an EP group at
-        # micro-batch ~4 (the SeqNum=145 hang site): if the vectors DIFFER across EP-
-        # group ranks, the ragged dispatch desyncs (and totals can still match). A
-        # compact hash + min/max/argmax + the full vector is logged. Env-gated by the
-        # same R3_EPTRACE flag; do NOT remove the existing df02f51 trace above.
-        if os.environ.get("R3_EPTRACE"):
-            import torch.distributed as _epdist
-
-            _gr = _epdist.get_rank() if _epdist.is_initialized() else -1
-            _ntpe = num_tokens_per_expert.detach().to(torch.int64).cpu()
-            _vec = _ntpe.tolist()
-            _hash = int(_ntpe.sum().item()) * 1000003 + int((_ntpe * torch.arange(_ntpe.numel())).sum().item())
-            print(
-                f"[R3EPTRACE-VEC] grank={_gr} fwd_call={getattr(self, '_eptrace_n', -1)} "
-                f"n_experts={_ntpe.numel()} total={int(_ntpe.sum().item())} "
-                f"min={int(_ntpe.min().item())} max={int(_ntpe.max().item())} "
-                f"argmax={int(_ntpe.argmax().item())} vechash={_hash} vec={_vec}",
-                flush=True,
-            )
-        # --- end [R3EPTRACE-VEC] -----------------------------------------------------
 
         routed_output = self._run_routed_experts(
             x,
