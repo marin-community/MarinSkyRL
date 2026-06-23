@@ -143,11 +143,40 @@ def _epdiag_probe(
 
         r3_active = "R3replay" if routed_experts is not None else "natural"
 
+        # [EPDIAG2] Degenerate-routing localization (A vs B). The (dp0,cp1) group
+        # collapses all its tokens onto a fixed 8-expert set; the existing fields
+        # only fingerprint that (ntpe_hash / max=63088), they do NOT say WHICH 8
+        # experts nor show the raw forced rows. Add both, cheaply:
+        #   - loaded_experts: the SORTED list of expert IDs that received tokens
+        #     (the non-zero positions of the [128] global histogram). This is the
+        #     A-vs-B tell: {0..7} / sentinel-adjacent (incl. expert 0) => candidate
+        #     A (sentinel/mask collapse); an arbitrary content-dependent 8-set =>
+        #     candidate B (capture/align degenerate row). n_loaded == 8 confirms the
+        #     collapse; >8 = distributed (the non-degenerate groups).
+        #   - sel_rows: a few RAW forced routed_experts rows (the [top_k] sets fed
+        #     into histc) — head rows + a mid row + tail row of this rank's local
+        #     token batch. If every dumped row is the IDENTICAL 8-set => "single
+        #     repeated row" confirmed (and we can read its content); if they vary
+        #     the collapse is statistical not a single replicated row.
+        nz = (ntpe > 0).nonzero().reshape(-1)
+        loaded_experts = nz.tolist()
+        n_loaded = int(nz.numel())
+        sel_rows = "n/a"
+        if routed_experts is not None:
+            re2d = routed_experts.detach().reshape(-1, routed_experts.shape[-1]).to(torch.int64)
+            n_rows = re2d.shape[0]
+            if n_rows > 0:
+                probe_idx = sorted(set([0, 1, 2, n_rows // 2, n_rows - 1] if n_rows > 1 else [0]))
+                probe_idx = [i for i in probe_idx if 0 <= i < n_rows]
+                sel_rows = {i: re2d[i].tolist() for i in probe_idx}
+
         print(
             f"[EPDIAG] ts={ts:.3f} rank={rank}/{world} {coords} fwd={fwd_idx} "
             f"r3={r3_active} ntpe_hash={ntpe_hash} ntpe_sum={ntpe_sum} "
             f"ntpe_min={ntpe_min} ntpe_max={ntpe_max} ntpe_argmax={ntpe_argmax} "
-            f"sel_fp={sel_fp} sel_n={sel_n} ntpe={ntpe_list}",
+            f"sel_fp={sel_fp} sel_n={sel_n} "
+            f"n_loaded={n_loaded} loaded_experts={loaded_experts} sel_rows={sel_rows} "
+            f"ntpe={ntpe_list}",
             flush=True,
         )
     except Exception as e:  # never let the probe break the forward
