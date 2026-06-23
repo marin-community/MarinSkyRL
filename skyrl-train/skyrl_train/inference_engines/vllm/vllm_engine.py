@@ -1,7 +1,7 @@
 import os
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as _dataclass_fields
 from loguru import logger
 from http import HTTPStatus
 import ray
@@ -1201,12 +1201,24 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
         # Use factory to inject engine ID into stat logger
         stat_loggers = [self._create_stat_logger_factory()]
-        engine_args = vllm.AsyncEngineArgs(**kwargs)
 
-        if _parse_vllm_version() >= version.parse("0.10.0"):
+        # vLLM >= 0.10 renamed AsyncEngineArgs' `disable_log_requests=True` to
+        # `enable_log_requests=False` (and removed the old kwarg). Gate on the
+        # ACTUAL field set rather than a parsed version number: source-built
+        # vLLM forks report PEP 440-valid dev versions like "0.1.dev16611+g..."
+        # which parse as 0.1 (< 0.10.0) even though they ship the NEW signature,
+        # so `_parse_vllm_version() >= 0.10.0` wrongly took the old branch and
+        # crashed with `unexpected keyword argument 'disable_log_requests'`.
+        try:
+            _engine_arg_fields = {f.name for f in _dataclass_fields(vllm.AsyncEngineArgs)}
+        except TypeError:
+            _engine_arg_fields = set()
+        if "enable_log_requests" in _engine_arg_fields:
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
-        else:
+        elif "disable_log_requests" in _engine_arg_fields:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
+        else:
+            engine_args = vllm.AsyncEngineArgs(**kwargs)
 
         # Add Ray Prometheus stat loggers if enabled
         if enable_ray_prometheus_stats:
