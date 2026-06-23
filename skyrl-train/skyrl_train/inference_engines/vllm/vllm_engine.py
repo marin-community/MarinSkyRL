@@ -1248,6 +1248,33 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         import random, time
         from torch.distributed import DistNetworkError
 
+        def _is_port_collision(exc: BaseException) -> bool:
+            """True if exc (or any cause in its chain) is an EADDRINUSE port race.
+
+            The within-node port collision can surface two ways:
+              - directly as torch DistNetworkError(EADDRINUSE) on the legacy path;
+              - WRAPPED by vLLM V1 as ``RuntimeError("Engine core initialization
+                failed. ...")`` because the bind happens in the EngineCore child
+                process, where the DistNetworkError is logged but the parent only
+                sees the generic wrapper. Match both: the message OR the wrapper.
+            """
+            seen = set()
+            cur: BaseException | None = exc
+            while cur is not None and id(cur) not in seen:
+                seen.add(id(cur))
+                msg = str(cur).lower()
+                if "eaddrinuse" in msg or "address already in use" in msg or "already in use" in msg:
+                    return True
+                if isinstance(cur, DistNetworkError):
+                    return True
+                if isinstance(cur, RuntimeError) and "engine core initialization failed" in msg:
+                    # V1 EngineCore child died during distributed init — the
+                    # overwhelmingly common transient cause on colocated/host-
+                    # network multi-engine starts is a TCPStore port collision.
+                    return True
+                cur = cur.__cause__ or cur.__context__
+            return False
+
         _MAX_INIT_ATTEMPTS = 5
         _BACKOFF_BASE_SEC = 15.0
         engine = None
@@ -1261,9 +1288,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             try:
                 engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
                 break
-            except DistNetworkError as e:
-                msg = str(e)
-                if "EADDRINUSE" not in msg and "already in use" not in msg.lower():
+            except (DistNetworkError, RuntimeError) as e:
+                if not _is_port_collision(e):
                     raise
                 if _attempt == _MAX_INIT_ATTEMPTS - 1:
                     logger.error(
@@ -1272,8 +1298,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     raise
                 _backoff = _BACKOFF_BASE_SEC * (2 ** _attempt)
                 logger.warning(
-                    f"Engine init hit EADDRINUSE on attempt {_attempt + 1}/{_MAX_INIT_ATTEMPTS}; "
-                    f"retrying in {_backoff:.0f}s (likely kernel socket TIME_WAIT from prior job): {msg.splitlines()[0]}"
+                    f"Engine init hit a port collision (EADDRINUSE / engine-core init) on attempt "
+                    f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: {str(e).splitlines()[0]}"
                 )
                 time.sleep(_backoff)
         assert engine is not None  # loop either breaks with engine set or raises
