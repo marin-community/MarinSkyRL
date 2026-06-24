@@ -880,10 +880,21 @@ class HarborConfigBuilder:
             **agent_direct_fields,
         )
 
-        # Build TrialConfig
+        # Build TrialConfig.
+        #
+        # Pass trials_dir as the RAW string, not pathlib.Path(trials_dir):
+        # pathlib.Path collapses the "//" in a remote URI at construction
+        # (Path("s3://bucket/k") -> "s3:/bucket/k"), so a remote trials_dir
+        # (e.g. the reverify s3://marin-na/iris/rl-reverify/... path) reaches
+        # TrialConfig as "s3:/marin-na/..." and its UPath field rejects it with
+        # "non key-like path provided (bucket/container missing)". Harbor's
+        # TrialConfig._coerce_trials_dir validator already accepts a str and
+        # preserves it verbatim for the UPath chain validator to parse, so the
+        # raw string is the correct (and intended) input for both local and
+        # remote (gs://, s3://) trials_dir. (Local paths are unaffected.)
         return TrialConfig(
             task=TaskConfig(path=task_path),
-            trials_dir=Path(trials_dir),
+            trials_dir=trials_dir,
             environment=environment_config,
             verifier=verifier_config,
             agent=agent_config,
