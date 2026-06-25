@@ -27,6 +27,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
+from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
@@ -392,7 +393,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._local_rank == 0 and not os.path.exists(
             model_path
         ):  # if not local path, try downloading model weights from huggingface
-            snapshot_download(model_path)  # will be no-op if already downloaded
+            # Retry transient HF weight-index/safetensors fetch flakes (EOF /
+            # IncompleteRead / dropped connection / spurious "no .safetensors")
+            # that otherwise kill the whole gang at scale; genuine missing/auth
+            # failures still surface. no-op if already downloaded.
+            load_pretrained_with_retry(lambda: snapshot_download(model_path), model_id=model_path)
         torch.distributed.barrier()
 
         if self._rank == 0:
@@ -737,7 +742,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         if self._local_rank == 0 and not os.path.exists(
             model_path
         ):  # if not local path, try downloading model weights from huggingface
-            snapshot_download(model_path)  # will be no-op if already downloaded
+            # Retry transient HF weight-index/safetensors fetch flakes (EOF /
+            # IncompleteRead / dropped connection / spurious "no .safetensors")
+            # that otherwise kill the whole gang at scale; genuine missing/auth
+            # failures still surface. no-op if already downloaded.
+            load_pretrained_with_retry(lambda: snapshot_download(model_path), model_id=model_path)
         torch.distributed.barrier()
 
         # load weights

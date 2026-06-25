@@ -60,6 +60,16 @@ except ImportError:  # flash-attn not installed (e.g. the CP/sdpa-only env)
         return _flash_missing(*args, **kwargs)
 
 
+# Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now
+# lives in skyrl_train.utils.hf_load_retry (dependency-light) so the Megatron
+# worker can share it without importing this heavy module. Re-exported under the
+# original private names to keep this module's call sites + any importers stable.
+from skyrl_train.utils.hf_load_retry import (  # noqa: E402
+    is_transient_hf_load_error as _is_transient_hf_load_error,
+    load_pretrained_with_retry as _load_pretrained_with_retry,
+)
+
+
 def resolve_attn_implementation(
     attn_backend: str = "auto",
     use_flash_attention_2: bool = False,
@@ -402,14 +412,23 @@ class HFModelWrapper(nn.Module):
             if rope_theta:
                 rope_scaling_kwargs["rope_theta"] = rope_theta
 
-            self.model = model_class.from_pretrained(
-                pretrain_or_model,
-                trust_remote_code=True,
-                attn_implementation=self.attn_implementation,
-                quantization_config=nf4_config,
-                torch_dtype=torch.bfloat16 if bf16 else torch.float32,
-                device_map=device_map,
-                **rope_scaling_kwargs,
+            # Wrapped in a transient-flake retry: at scale a single rank's
+            # weight-index/safetensors resolution here can flake (EOF /
+            # IncompleteRead / dropped connection / spurious "no .safetensors"),
+            # which previously killed the whole gang. Retries only the transient
+            # classes; a genuinely-missing repo/file still surfaces. See
+            # _load_pretrained_with_retry above (SKYRL_HF_LOAD_MAX_RETRIES knob).
+            self.model = _load_pretrained_with_retry(
+                lambda: model_class.from_pretrained(
+                    pretrain_or_model,
+                    trust_remote_code=True,
+                    attn_implementation=self.attn_implementation,
+                    quantization_config=nf4_config,
+                    torch_dtype=torch.bfloat16 if bf16 else torch.float32,
+                    device_map=device_map,
+                    **rope_scaling_kwargs,
+                ),
+                model_id=pretrain_or_model,
             )
 
             # gpt oss
