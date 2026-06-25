@@ -117,13 +117,14 @@ def unwrap_to_text_causal_lm(vlm_model):
     text_model.config = text_config
 
     # Drop the vision class from `_no_split_modules` so the FSDP wrap auto-detect
-    # does not look for a class that no longer exists in this (text-only) module.
+    # (get_fsdp_wrap_policy -> get_module_class_from_name) does not raise on a
+    # class (`Qwen3_5MoeVisionBlock`) that no longer exists in this text-only
+    # module. transformers stores `_no_split_modules` as a per-instance *set* on
+    # the constructed model (the class attribute is a list); we overwrite the
+    # instance attribute with a plain list of the surviving (text) classes.
     nsm = getattr(text_model, "_no_split_modules", None)
-    if nsm is not None:
-        filtered = [c for c in nsm if "Vision" not in c]
-        # Preserve the original container type (set/list) for downstream code that
-        # may branch on it.
-        text_model._no_split_modules = type(nsm)(filtered) if not isinstance(nsm, set) else set(filtered)
+    if nsm:
+        text_model._no_split_modules = [c for c in nsm if "Vision" not in c]
 
     logger.info(
         "[qwen3_5_vlm] unwrapped %s -> %s (text tower); dropped vision + MTP head. "
