@@ -162,7 +162,18 @@ def _moe_attr(hf_block, hf_config, name):
     ``*SparseMoeBlock``; Qwen3-Next moves them onto its router submodule
     (``block.gate`` = ``Qwen3NextTopKRouter``, which carries ``top_k`` /
     ``num_experts`` / ``norm_topk_prob``). Fall back to the HF config last
-    (config field names: num_experts, num_experts_per_tok, norm_topk_prob)."""
+    (config field names: num_experts, num_experts_per_tok, norm_topk_prob).
+
+    For ``norm_topk_prob`` specifically, if it is exposed nowhere (block / gate /
+    config) default to ``True`` — the Qwen3.5/3.6 family
+    (``Qwen3_5MoeForConditionalGeneration``) DROPPED ``norm_topk_prob`` as a
+    config field (it lives on neither the ``Qwen3_5MoeSparseMoeBlock``, its
+    ``.gate``, nor the top-level/text config), yet its native router renormalizes
+    the top-k weights. This matches vLLM's own resolution for the family
+    (``renormalize=getattr(config, "norm_topk_prob", True)`` in qwen3_next.py), so
+    the grouped MoE stays bit-faithful. Topology attrs (num_experts / top_k) still
+    hard-fail if unresolvable — a missing expert count is a real error, not a
+    defaultable one."""
     if hasattr(hf_block, name):
         return getattr(hf_block, name)
     gate = getattr(hf_block, "gate", None)
@@ -171,6 +182,11 @@ def _moe_attr(hf_block, hf_config, name):
     cfg_alias = {"top_k": "num_experts_per_tok"}.get(name, name)
     if hasattr(hf_config, cfg_alias):
         return getattr(hf_config, cfg_alias)
+    if name == "norm_topk_prob":
+        # Faithful default for families that drop the field (Qwen3.5/3.6); mirrors
+        # vLLM's getattr(config, "norm_topk_prob", True). Only norm_topk_prob is
+        # defaulted — topology attrs below still raise.
+        return True
     raise AttributeError(
         f"could not resolve MoE attribute '{name}' on {type(hf_block).__name__}, "
         f"its .gate, or the HF config"
