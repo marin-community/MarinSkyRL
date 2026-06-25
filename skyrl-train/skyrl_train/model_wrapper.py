@@ -431,6 +431,27 @@ class HFModelWrapper(nn.Module):
                 model_id=pretrain_or_model,
             )
 
+            # Qwen3.5/3.6 multimodal shell -> text CausalLM (tmax-aligned: "load
+            # the text backbone, never the *ForConditionalGeneration shell").
+            # For ``Qwen/Qwen3.6-35B-A3B`` and siblings the checkpoint's
+            # ``architectures`` names the multimodal wrapper, so
+            # ``AutoModelForCausalLM.from_pretrained`` instantiates the shell
+            # (text decoder nested under ``model.language_model``, a vision tower,
+            # an MTP head). Carrying the shell breaks the FSDP wrap-policy
+            # auto-detect (vision class in ``_no_split_modules``; VLM config on
+            # ``self.model.config``), ``count_moe_layers``, and the vLLM
+            # weight-sync prefix. We re-point the already-loaded text tower +
+            # lm_head into a plain ``Qwen3_5MoeForCausalLM`` (no re-download; the
+            # text weights map 1:1) and drop vision/MTP. Gated on
+            # SKYRL_QWEN3_5_VLM_UNWRAP (default on).
+            from skyrl_train.models.qwen3_5_vlm import (
+                is_qwen3_5_vlm_shell,
+                unwrap_to_text_causal_lm,
+            )
+
+            if is_qwen3_5_vlm_shell(self.model.config):
+                self.model = unwrap_to_text_causal_lm(self.model)
+
             # gpt oss
             if Version(transformers.__version__) >= Version("4.56.2"):
                 from transformers import GptOssConfig
