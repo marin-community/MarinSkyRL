@@ -216,6 +216,85 @@ def _run_experts_for_loop(
     return out
 
 
+def _grpmm_diag_enabled() -> bool:
+    return os.environ.get("SKYRL_GROUPMM_DIAG", "0") in ("1", "true", "True")
+
+
+def _grpmm_diag(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    offsets: torch.Tensor,
+) -> None:
+    """Emit one [GRPMM] line per rank RIGHT BEFORE the ``torch._grouped_mm`` call.
+
+    Localizes the deterministic ``RuntimeError: matrix batch sizes have to match``
+    crash in the EP8 + DCP=2 + R3 @ 131k geometry: the EP-dispatched per-expert
+    token grouping (``offsets`` = cumsum(``num_tokens_per_expert``)) disagrees with
+    ``w1.shape[0]`` (the LOCAL-expert count after EP+FSDP sharding). ``torch._grouped_mm``
+    requires ``offsets.numel() == w1.shape[0]`` (one offset per weight-stack group).
+
+    The mismatch tell:
+      - ``offsets.numel() - 1`` describes #expert-groups the token side produced
+        (cumsum, exclusive of the implicit 0 start) vs ``offsets.numel()`` groups
+        torch._grouped_mm reads (one per running-sum boundary);
+      - ``w1.shape[0]`` is the #local experts the weight stack holds.
+    If ``offsets.numel() != w1.shape[0]`` the count is off; this dump says which
+    side (token/dispatch vs weight/EP-shard) and by how much. Pure observation —
+    changes no compute. Gate: SKYRL_GROUPMM_DIAG=1. Mirrors the EPDIAG probe style.
+    """
+    try:
+        rank = int(os.environ.get("RANK", "-1"))
+        world = int(os.environ.get("WORLD_SIZE", "-1"))
+        coords = _epdiag_decode_coords(rank, world)
+
+        # EP / mesh hints (same env arm the EPDIAG probe reads).
+        ep = int(os.environ.get("EPDIAG_EP", "0"))
+        cp = int(os.environ.get("EPDIAG_CP", "0"))
+        sp = int(os.environ.get("EPDIAG_SP", "1")) or 1
+        # Configured GLOBAL expert count + expected LOCAL count (num_experts // EP).
+        global_experts = int(os.environ.get("SKYRL_NUM_EXPERTS", "-1"))
+        expected_local = (global_experts // ep) if (ep > 0 and global_experts > 0) else -1
+
+        ntpe = num_tokens_per_expert.detach().to(torch.int64).reshape(-1)
+        ntpe_list = ntpe.tolist()
+        ntpe_numel = int(ntpe.numel())
+        ntpe_sum = int(ntpe.sum().item()) if ntpe_numel else 0
+
+        offs = offsets.detach().to(torch.int64).reshape(-1)
+        offs_list = offs.tolist()
+        offs_numel = int(offs.numel())
+
+        w1_local = int(w1.shape[0])  # == #local experts the weight stack has
+        w1_shape = tuple(w1.shape)
+        w2_shape = tuple(w2.shape) if w2 is not None else None
+        x_shape = tuple(x.shape)
+
+        # ASSERT-style summary: groups the offsets describe vs local experts w1 has.
+        # torch._grouped_mm wants offsets.numel() == w1.shape[0]; the EPDIAG-era
+        # "offsets.numel()-1" framing is the cumsum-with-implicit-0 reading. Dump
+        # both so the supervisor can see which convention is in play.
+        match_strict = "MATCH" if offs_numel == w1_local else f"MISMATCH(off_by={offs_numel - w1_local})"
+        match_minus1 = "MATCH" if (offs_numel - 1) == w1_local else f"MISMATCH(off_by={(offs_numel - 1) - w1_local})"
+
+        print(
+            f"[GRPMM] rank={rank}/{world} {coords} "
+            f"ep={ep} cp={cp} sp={sp} "
+            f"num_experts_global={global_experts} expected_local(num_experts//ep)={expected_local} "
+            f"w1.shape={w1_shape} w1.shape[0]_local_experts={w1_local} "
+            f"w2.shape={w2_shape} x.shape={x_shape} "
+            f"ntpe.numel()={ntpe_numel} ntpe.sum()={ntpe_sum} "
+            f"offsets.numel()={offs_numel} "
+            f"ASSERT offsets.numel()-vs-w1[0]={match_strict} (offsets.numel()-1)-vs-w1[0]={match_minus1} "
+            f"num_tokens_per_expert={ntpe_list} offsets={offs_list}",
+            flush=True,
+        )
+    except Exception as e:  # never let the probe break the forward
+        print(f"[GRPMM] probe error: {e}", flush=True)
+
+
 def _run_experts_grouped_mm(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -226,6 +305,12 @@ def _run_experts_grouped_mm(
     """bf16/SM90 perf path via ``torch._grouped_mm`` (NOT the parity oracle)."""
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     assert x.dim() == 2
+    # [GRPMM] env-gated diagnostic: dump per-expert offsets/num_tokens_per_expert
+    # vs the local w1 weight-stack count RIGHT BEFORE torch._grouped_mm (which
+    # raises "matrix batch sizes have to match" when they disagree). No-op unless
+    # SKYRL_GROUPMM_DIAG=1; pure observation, changes no compute.
+    if _grpmm_diag_enabled():
+        _grpmm_diag(w1, w2, w3, x, num_tokens_per_expert, offsets)
     h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets))
     h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets)
     out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
