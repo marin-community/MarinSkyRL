@@ -4,15 +4,20 @@ Lifted from prime-rl ``src/prime_rl/trainer/models/layers/moe.py`` (the torch
 path) with the expert-parallel / DeepEP surface and the aux-loss / load-balance
 machinery STRIPPED. This is the EP=1 substrate the Stage-3b grouped-GEMM swap
 installs in place of HF's eager ``*SparseMoeBlock`` when ``moe_grouped_gemm`` is
-on. Stage 4 re-adds the ``@expert_parallel`` decorators and DeepEP dispatch.
+on. Stage 4 re-adds the ``@expert_parallel`` decorator and DeepEP dispatch.
 
 What was lifted / changed vs prime-rl:
-  * ``GroupedExperts`` — kept; ``set_ep_comm_backend`` / ``_forward_deepep`` /
-    ``ep_comm_backend`` dropped. The for-loop impl ``_run_experts_for_loop`` is
-    the EP=1 PARITY DEFAULT (fp32-capable, matches HF eager exactly).
-    ``torch._grouped_mm`` is a bf16/SM90-only perf path kept behind
-    ``use_grouped_mm`` (validated separately, not the parity oracle). The
-    ``@expert_parallel`` decorator is NOT applied here (Stage 4).
+  * ``GroupedExperts`` — kept; the ``_forward_deepep`` / ``ep_comm_backend``
+    surface is restored. The for-loop impl ``_run_experts_for_loop`` is the EP=1
+    PARITY DEFAULT (fp32-capable, matches HF eager exactly). ``torch._grouped_mm``
+    is a bf16/SM90-only perf path kept behind ``use_grouped_mm`` (validated
+    separately, not the parity oracle). On the torch-EP path the grouped-mm runs
+    UNDER torchtitan's ``@expert_parallel`` decorator (pinned a1fdd7e): with that
+    pin ``ExpertParallel._token_dispatch`` returns a 128-wide cross-rank-
+    interleaved ``num_tokens_per_expert_group`` and DEFERS the 128->16 local
+    collapse (+ ALIGN_SIZE_M pad) to the decorator. Mirrors prime-rl exactly
+    (``@expert_parallel`` grouped-mm whose inner ``_impl`` does only
+    ``cumsum -> _grouped_mm``; the DeepEP path calls ``_impl`` bare).
   * ``TokenChoiceTopKRouter`` — kept as-is. Its native ``routed_experts`` arg
     (gather ``top_scores = scores.gather(1, routed_experts)``) IS the R3 replay
     hook: it re-gathers weights from the LIVE ``self.gate(x)`` softmax, exactly
@@ -43,6 +48,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+
+# torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
+# does the DTensor->local convert + generate_permute_indices (cross-rank
+# interleaved -> local-expert order) + ALIGN_SIZE_M padding around the bare
+# grouped-mm; on the DeepEP path we bypass it and call the bare *_impl directly
+# (DeepEP delivers tokens in local-expert order already). See the comment at
+# _run_experts_grouped_mm below for why the decorator is REQUIRED under a1fdd7e.
+from torchtitan.distributed.expert_parallel import expert_parallel
 
 # Expert-parallel communication backend. "torch" = torchtitan ExpertParallel
 # all_to_all (Stage 4); "deepep" = DeepEP fused dispatch/combine (Stage 5, lazy-imported).
@@ -184,7 +197,9 @@ def _epdiag_probe(
 
 
 # --------------------------------------------------------------------------- #
-# Expert compute kernels (bare impls, no @expert_parallel — Stage 4 re-adds)   #
+# Expert compute kernels. The for-loop is the EP=1 parity oracle (bare). The    #
+# grouped-mm has a bare ``_impl`` (cumsum -> _grouped_mm) PLUS an               #
+# ``@expert_parallel``-decorated entry for the torch-EP path (a1fdd7e parity).  #
 # --------------------------------------------------------------------------- #
 
 
@@ -295,20 +310,31 @@ def _grpmm_diag(
         print(f"[GRPMM] probe error: {e}", flush=True)
 
 
-def _run_experts_grouped_mm(
+def _run_experts_grouped_mm_impl(
     w1: torch.Tensor,
     w2: torch.Tensor,
     w3: torch.Tensor,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
-    """bf16/SM90 perf path via ``torch._grouped_mm`` (NOT the parity oracle)."""
+    """bf16/SM90 grouped-mm compute, BARE (no permute/pad).
+
+    Expects ``w1`` LOCAL (not a DTensor) and ``num_tokens_per_expert`` already in
+    LOCAL-expert order (one count per local-expert weight group). Used directly on
+    the DeepEP path (DeepEP delivers local-order tokens) and as the inner callee of
+    the ``@expert_parallel``-decorated ``_run_experts_grouped_mm`` on the torch-EP
+    path (the decorator does the DTensor->local + 128->16 collapse + ALIGN_SIZE_M
+    pad first). Mirrors prime-rl's ``_run_experts_grouped_mm_impl``. NOT the parity
+    oracle (the for-loop is).
+    """
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     assert x.dim() == 2
     # [GRPMM] env-gated diagnostic: dump per-expert offsets/num_tokens_per_expert
     # vs the local w1 weight-stack count RIGHT BEFORE torch._grouped_mm (which
     # raises "matrix batch sizes have to match" when they disagree). No-op unless
-    # SKYRL_GROUPMM_DIAG=1; pure observation, changes no compute.
+    # SKYRL_GROUPMM_DIAG=1; pure observation, changes no compute. After the
+    # decorator restoration this should print offsets.numel()==w1.shape[0] (==16)
+    # on the torch-EP path (the decorator collapses the 128-wide group counts).
     if _grpmm_diag_enabled():
         _grpmm_diag(w1, w2, w3, x, num_tokens_per_expert, offsets)
     h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets))
@@ -317,20 +343,39 @@ def _run_experts_grouped_mm(
     return out
 
 
-# Stage 4a: the EP grouped-mm compute path.
+# Stage 4a: the torch-EP grouped-mm compute path.
 #
-# torchtitan API note (0.2.2): the permute/pad that the OLD ``@expert_parallel``
-# decorator performed has moved INTO ``ExpertParallel._token_dispatch`` (the
-# distribute_module input_fn): when EP is active that hook all_to_all's the tokens
-# AND runs ``generate_permute_indices`` to re-shuffle the cross-rank interleaved
-# ``num_tokens_per_expert_group`` into local-expert order + pad each group to
-# ALIGN_SIZE_M, and ``_token_combine`` (output_fn) unpermutes. So the EP COMPUTE
-# below must run the BARE grouped-mm over the already-dispatched/padded local
-# tokens — wrapping it (double-permute/pad) is wrong on the EP path. The standalone
-# padding helper was also renamed ``expert_parallel`` -> ``indices_padding_wrapper``
-# and moved to ``torchtitan.models.moe.utils``; it is the NON-EP grouped-mm padder
-# only (a single rank with no dispatch), which the EP=1 oracle path does not need.
-# Mirrors torchtitan's own ``GroupedExperts.forward`` (models/moe/moe.py).
+# torchtitan API note (pinned a1fdd7e): under THIS pin, ``ExpertParallel.
+# _token_dispatch`` all_to_all's the tokens but returns the 128-wide
+# ``num_tokens_per_expert_group`` STILL in cross-rank-interleaved order
+# ([expert0-from-rank0, expert1-from-rank0, ..., expert0-from-rank1, ...]) — it
+# DEFERS the 128->16 collapse into local-expert order AND the ALIGN_SIZE_M pad to
+# the ``@expert_parallel`` decorator (which calls ``generate_permute_indices`` with
+# ``experts_per_ep_rank = w1.shape[0]``, here 16). So the torch-EP path MUST run
+# the grouped-mm UNDER the decorator: without it, ``cumsum`` runs on the 128-wide
+# vector while ``w1.to_local()`` is 16-wide -> offsets.numel()=128 != w1.shape[0]=16
+# -> "matrix batch sizes have to match" at the first forward (the bug this fix
+# closes). torchtitan MAIN later moved the permute INTO ``token_dispatcher.dispatch``
+# so a bare-forward pattern is correct there — but that is MAIN-only, NOT a1fdd7e;
+# conflating the two was the dropped-decorator regression. The decorator also does
+# its OWN ``w1.to_local()`` (see expert_parallel.py), so we pass the DTensor
+# straight through (NO premature ``.to_local()`` on this branch).
+# Mirrors prime-rl's ``@expert_parallel`` grouped-mm + torchtitan's own
+# ``GroupedExperts._run_experts_grouped_mm`` (models/moe.py).
+
+
+@expert_parallel
+def _run_experts_grouped_mm(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    """torch-EP grouped-mm entry: ``@expert_parallel`` does the DTensor->local +
+    128->16 local-order collapse + ALIGN_SIZE_M pad, then this calls the bare
+    ``_impl``. Mirrors prime-rl's decorated ``_run_experts_grouped_mm``."""
+    return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
 
 
 class GroupedExperts(nn.Module):
@@ -372,26 +417,30 @@ class GroupedExperts(nn.Module):
         w2 = self.w2.to_local()
         w3 = self.w3.to_local()
         if self.use_grouped_mm:
-            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
+            # DeepEP already delivers local-order counts -> call the BARE _impl
+            # (NOT the @expert_parallel-decorated entry, which would re-permute/pad
+            # an already-dispatched batch). Mirrors prime-rl's _forward_deepep.
+            return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
         return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         # DeepEP backend: dispatch/permute happened upstream in MoE; run local experts.
         if self.ep_comm_backend == "deepep":
             return self._forward_deepep(x, num_tokens_per_expert)
-        # EP active ⇒ params are DTensors (Shard(0) on the ep submesh). torchtitan's
-        # ExpertParallel._token_dispatch hook has ALREADY all_to_all'd `x` and run
-        # generate_permute_indices to re-permute into local-expert order + pad each
-        # group to ALIGN_SIZE_M; _token_combine unpermutes after. So here we just drop
-        # the ep Shard(0) (`.to_local()`) and run the BARE grouped-mm over the local
-        # experts — NO padding wrapper (that would double-pad). Mirrors torchtitan's
-        # own GroupedExperts.forward. The for-loop is EP=1-only.
-        if isinstance(self.w1, DTensor):
-            w1 = self.w1.to_local()
-            w2 = self.w2.to_local()
-            w3 = self.w3.to_local()
-            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
-        if self.use_grouped_mm:
+        # torch-EP backend. EP active ⇒ params are DTensors (Shard(0) on the ep
+        # submesh); torchtitan's ExpertParallel._token_dispatch hook has ALREADY
+        # all_to_all'd `x`, but under the pinned a1fdd7e it returns the 128-wide
+        # cross-rank-INTERLEAVED num_tokens_per_expert_group and DEFERS the 128->16
+        # local-order collapse + ALIGN_SIZE_M pad to the @expert_parallel decorator.
+        # So we pass the DTensor w1 STRAIGHT to the decorated _run_experts_grouped_mm
+        # (NO premature .to_local() — the decorator does its own to_local + permute +
+        # pad). Calling the bare grouped-mm here on a .to_local()'d w1 was the bug:
+        # cumsum over the 128-wide vector vs a 16-wide w1 -> "matrix batch sizes have
+        # to match". Mirrors prime-rl's GroupedExperts.forward (DTensor -> decorated
+        # entry). The decorated path also handles the EP=1 (non-DTensor) grouped-mm
+        # case — the decorator's ALIGN_SIZE_M pad is needed even single-device. The
+        # for-loop is the EP=1 parity oracle.
+        if isinstance(self.w1, DTensor) or self.use_grouped_mm:
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
 
