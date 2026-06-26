@@ -554,10 +554,19 @@ class TerminalBenchGenerator(GeneratorInterface):
             val_set_suffix = f"_{val_set_name}" if val_set_name else ""
             self._eval_session_name = f"{run_name}_eval{val_set_suffix}_step{eval_step}"
 
-            # Create unique trials directory for this eval session
+            # Create unique trials directory for this eval session.
+            #
+            # Join as a RAW string, not pathlib.Path: pathlib collapses the "//" in a
+            # remote URI (Path("s3://bucket/k") -> "s3:/bucket/k"), which would corrupt
+            # the eval trials_dir Harbor receives AND make the mkdir below create a bogus
+            # LOCAL "s3:/..." directory. Only mkdir for local paths — object stores
+            # (s3://, gs://) create the prefix implicitly on first write, exactly as the
+            # training trials_dir path does (it is never pre-mkdir'd). Mirrors the
+            # raw-string handling in HarborConfigBuilder.build_trial_config.
             if self.trials_dir:
-                self._eval_trials_dir = str(Path(self.trials_dir) / "eval_sessions" / self._eval_session_name)
-                Path(self._eval_trials_dir).mkdir(parents=True, exist_ok=True)
+                self._eval_trials_dir = f"{self.trials_dir.rstrip('/')}/eval_sessions/{self._eval_session_name}"
+                if "://" not in self.trials_dir:
+                    Path(self._eval_trials_dir).mkdir(parents=True, exist_ok=True)
             else:
                 self._eval_trials_dir = self.trials_dir
 
