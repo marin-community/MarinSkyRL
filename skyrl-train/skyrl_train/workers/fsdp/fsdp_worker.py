@@ -61,13 +61,30 @@ class FSDPWeightExtractor(WeightExtractor):
         # ``translate_moe_name_to_vllm`` renames ONLY Mixtral keys (see moe_weight_remap).
         _cfg = getattr(model, "config", None)
         self._model_type = getattr(_cfg, "model_type", "") or "" if _cfg is not None else ""
+        # Qwen3.5/3.6 VLM-shell weight-sync (tmax Stage 2): the RL policy is the
+        # unwrapped TEXT tower (``Qwen3_5MoeForCausalLM``, names ``model.*``) but the
+        # vLLM rollout engine instantiates the multimodal SHELL
+        # (``Qwen3_5MoeForConditionalGeneration``), whose ``load_weights`` expects the
+        # text decoder under the HF namespace ``model.language_model.*``. When the
+        # policy config is the hybrid text tower, the broadcast names must be
+        # remapped ``model.X`` -> ``model.language_model.X`` (see
+        # ``map_text_name_to_vlm_engine``). Identity for every other arch.
+        from skyrl_train.models.qwen3_5_vlm import is_qwen3_5_text_tower
+
+        self._is_qwen3_5_text_tower = is_qwen3_5_text_tower(_cfg)
 
     def _translate_name(self, name: str) -> str:
         """Apply the per-arch inference-engine name translation (identity for all
-        arches except Mixtral). Scoped via ``self._model_type``."""
+        arches except Mixtral, and the Qwen3.5/3.6 VLM-shell namespace). Scoped via
+        ``self._model_type`` / ``self._is_qwen3_5_text_tower``."""
         from skyrl_train.models.layers.moe_weight_remap import translate_moe_name_to_vllm
 
-        return translate_moe_name_to_vllm(name, self._model_type)
+        name = translate_moe_name_to_vllm(name, self._model_type)
+        if self._is_qwen3_5_text_tower:
+            from skyrl_train.models.qwen3_5_vlm import map_text_name_to_vlm_engine
+
+            name = map_text_name_to_vlm_engine(name)
+        return name
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from FSDP model.

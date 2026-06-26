@@ -52,6 +52,45 @@ _NCCL_FR_ENV_PASSTHROUGH = (
 )
 
 
+def _qwen3_5_vlm_engine_kwargs(pretrain: str) -> Dict[str, Any]:
+    """vLLM EngineArgs overrides for the Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2).
+
+    The Qwen3.6-35B-A3B (``qwen3_5_moe``) checkpoint's ``architectures`` names the
+    multimodal shell ``Qwen3_5MoeForConditionalGeneration``, so vLLM materializes
+    the FULL shell (text tower + vision tower + MTP). For RL rollouts we only need
+    the text tower; tmax sets ``language_model_only=True`` (its
+    ``open_instruct/vllm_utils.py`` ~1556-1559), which in this vLLM fork is a
+    top-level ``EngineArgs`` field (``arg_utils.py``: ``language_model_only =
+    MultiModalConfig.language_model_only``) that forces every modality's
+    ``limit_mm_per_prompt`` to 0. That, via the shell's ``_mark_tower_model``
+    guard (``get_limit_per_prompt(m) == 0`` -> ``no_init_weights``), STUBS the
+    vision tower so it is neither built nor expected at ``load_weights`` (no
+    ``visual.*`` keys required), while the text ``language_model`` tower is built
+    normally. Combined with the sender-side ``model.X`` ->
+    ``model.language_model.X`` name remap (``qwen3_5_vlm.map_text_name_to_vlm_engine``),
+    the policy's text weights land exactly where the shell reads them.
+
+    Returns ``{"language_model_only": True}`` when ``pretrain`` is a qwen3_5 VLM
+    shell, else ``{}`` (byte-identical engine construction for every other model).
+    Reads only the HF config (cheap, no weights) and never raises — on any failure
+    it returns ``{}`` so non-VLM launches are unaffected.
+    """
+    try:
+        from transformers import AutoConfig
+        from skyrl_train.models.qwen3_5_vlm import is_qwen3_5_vlm_shell
+
+        cfg = AutoConfig.from_pretrained(pretrain, trust_remote_code=True)
+        if is_qwen3_5_vlm_shell(cfg):
+            logger.info(
+                f"[qwen3_5_vlm] {pretrain} is a Qwen3.5/3.6 VLM shell; setting vLLM "
+                f"engine language_model_only=True (text tower only, vision stubbed)."
+            )
+            return {"language_model_only": True}
+    except Exception as e:  # pragma: no cover - defensive; never block non-VLM launches
+        logger.warning(f"[qwen3_5_vlm] VLM-shell engine-kwargs probe failed for {pretrain!r}: {e}")
+    return {}
+
+
 def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
     """Forward NCCL flight-recorder/watchdog vars (#232 FIX B) from the launch
     process env into the vLLM engine actor's Ray runtime_env, so they reach the
@@ -202,6 +241,15 @@ def create_ray_wrapped_inference_engines(
         raise ValueError(f"Unsupported backend: {backend}")
 
     inference_engine_actors = []
+    # Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2): materialize the text tower only
+    # (language_model_only=True) so vLLM does not build/expect the vision tower.
+    # Empty {} for every non-VLM-shell model -> byte-identical engine construction.
+    # Do NOT clobber an explicit ++generator.engine_init_kwargs.language_model_only.
+    vlm_engine_kwargs = (
+        _qwen3_5_vlm_engine_kwargs(pretrain)
+        if backend == "vllm" and "language_model_only" not in engine_init_kwargs
+        else {}
+    )
     # #232 FIX B: NCCL flight-recorder env to forward into the engine actor (and,
     # via placement_group_capture_child_tasks, its ray-backend TP worker actors).
     # None for every run that does not set the TORCH_NCCL_* FR vars -> no change.
@@ -496,6 +544,7 @@ def create_ray_wrapped_inference_engines(
                     **dp_kwargs,
                     **mp_extra_kwargs,
                     **dcp_kwargs,
+                    **vlm_engine_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
                     **rope_engine_kwargs,
