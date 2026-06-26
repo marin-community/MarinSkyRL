@@ -1,3 +1,4 @@
+import os
 import torch
 from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any
@@ -351,6 +352,54 @@ def get_generation_prompt_ids(tokenizer, custom_chat_template=None) -> List[int]
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
     return generation_prompt_ids
+
+
+def detect_qwen3_5_empty_think_prefix(tokenizer, generation_prompt_ids: List[int]) -> Optional[List[int]]:
+    """Detect the Qwen3.5/3.6 (``qwen3_5_moe``) empty-think generation prompt and,
+    if present, return the prefix ids UP TO BUT NOT INCLUDING the injected empty
+    ``<think> ... </think>`` block.
+
+    The Qwen3.5/3.6 chat template renders the assistant generation prompt as
+    ``<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n`` — it auto-injects an
+    EMPTY reasoning block. At ROLLOUT time the served ``completion_token_ids`` do
+    NOT contain that injected empty block: the model emits its OWN ``<think>`` with
+    real reasoning content (interleaved-thinking protocol). So the re-tokenized
+    assistant turn (``<|im_start|>assistant\\n<think>real…</think>…``) NEVER matches
+    the full ``generation_prompt_ids`` prefix (which expects the EMPTY think block),
+    the prefix-strip falls back to ``prefix_len=0``, and the re-tokenized generated
+    region diverges from the served stream in both COUNT and CONTENT — collapsing
+    TIS tier-1 exact alignment (observed: served 32/41 vs re-tok 35/49 for the same
+    turn → ``serving↔training tokenizer divergence`` → logprobs zeroed).
+
+    This is qwen3_5-SPECIFIC: it is detected purely from the tokenizer's own
+    generation prompt (a ``<think>`` token immediately followed — modulo a single
+    whitespace token — by ``</think>``). Dense Qwen3 (qwen3_with_thinking custom
+    template) and Qwen2.5 do NOT inject an empty think block, so this returns None
+    for them and every non-qwen3_5 path is byte-identical.
+
+    Returns:
+        The leading ``<|im_start|>assistant\\n`` ids (the prefix BEFORE the injected
+        ``<think>``), to be used as the real generation-prompt prefix for splicing
+        the served ids in. ``None`` when no empty-think block is detected.
+    """
+    think_open_id = tokenizer.convert_tokens_to_ids("<think>")
+    think_close_id = tokenizer.convert_tokens_to_ids("</think>")
+    unk = getattr(tokenizer, "unk_token_id", None)
+    # If the tokenizer has no <think>/</think> special tokens, this is not a
+    # qwen3_5-style thinking model — bail (byte-identical to old behavior).
+    if think_open_id is None or think_close_id is None:
+        return None
+    if think_open_id == unk or think_close_id == unk:
+        return None
+    if think_open_id not in generation_prompt_ids or think_close_id not in generation_prompt_ids:
+        return None
+    open_pos = generation_prompt_ids.index(think_open_id)
+    close_pos = generation_prompt_ids.index(think_close_id)
+    # Require the close to follow the open with at most one intervening token
+    # (the ``\n\n`` whitespace token) — i.e. an EMPTY injected reasoning block.
+    if not (open_pos < close_pos <= open_pos + 2):
+        return None
+    return list(generation_prompt_ids[:open_pos])
 
 
 @torch.no_grad()
@@ -1072,6 +1121,22 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     # Needed to correctly mask it zero for assistant messages.
     generation_prompt_ids = get_generation_prompt_ids(tokenizer, custom_chat_template=custom_chat_template)
 
+    # ARCH-GATED (qwen3_5/3.6 only): the Qwen3.5/3.6 chat template injects an EMPTY
+    # ``<think>\n\n</think>`` block into the assistant generation prompt, which the
+    # served ``completion_token_ids`` do NOT contain (the model emits its own real
+    # think block). That breaks the gen-prompt prefix-strip and makes the
+    # re-tokenized generated region diverge from the served stream → TIS tier-1
+    # collapse. When detected AND the served per-turn ids are available, we SPLICE
+    # the served ids in as the generated region (exact by construction) instead of
+    # re-tokenizing. ``qwen3_5_assistant_prefix_ids`` is the real
+    # ``<|im_start|>assistant\n`` prefix (BEFORE the injected empty think block).
+    # Returns None for every non-qwen3_5 tokenizer → byte-identical old behavior,
+    # consistent with the aa11512 qwen3_5 arch-gating. Disable via
+    # ``SKYRL_QWEN3_5_TIS_SPLICE=0``.
+    qwen3_5_assistant_prefix_ids = None
+    if assistant_token_ids is not None and os.environ.get("SKYRL_QWEN3_5_TIS_SPLICE", "1") in ("1", "true", "True"):
+        qwen3_5_assistant_prefix_ids = detect_qwen3_5_empty_think_prefix(tokenizer, generation_prompt_ids)
+
     # 1. Initalize the things to accumulate
     response_ids = []
     loss_mask = []
@@ -1097,13 +1162,13 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
         cur_token_ids = encode_messages_subset([cur_message], tokenizer, custom_chat_template)
-        response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.
         # Regardless of the message role, each message is responsible for adding its own generation
         # prompt, and we apply the correct masking.
         if cur_message["role"] == "user":
             # 3.1. For user messages, it is simply zeros
+            response_ids.extend(cur_token_ids)
             loss_mask.extend([0] * len(cur_token_ids))
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(cur_token_ids))
@@ -1118,23 +1183,67 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             # 3) tokens after the EOS token (the `\n` in Qwen models) -- mask is 0
             prefix_len = len(generation_prompt_ids)
             prefix_matches = cur_token_ids[:prefix_len] == generation_prompt_ids
-            if not prefix_matches:
-                actual_prefix = cur_token_ids[:prefix_len]
-                logger.warning(
-                    "Assistant message prefix mismatch (expected {}, got {}). "
-                    "Falling back to treating the entire assistant message as generated tokens.",
-                    generation_prompt_ids,
-                    actual_prefix,
-                )
-                prefix_len = 0
 
-            if tokenizer.eos_token_id in cur_token_ids:
-                last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
-                generated_token_ids = cur_token_ids[prefix_len : last_eos_token_index + 1]
-                tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
-            else:
-                generated_token_ids = cur_token_ids[prefix_len:]
-                tokens_after_eos = []
+            # --- ARCH-GATED qwen3_5/3.6 served-id splice (TIS exact-by-construction) ---
+            # When the qwen3_5 empty-think generation prompt is in play AND we have the
+            # served completion_token_ids for this turn, REBUILD this assistant turn so
+            # the generated (loss_mask==1) region IS the served stream verbatim — no
+            # re-tokenization, no divergence. The prefix is the real
+            # ``<|im_start|>assistant\n`` (before the template's injected empty
+            # ``<think></think>``) and tokens_after_eos is the trailing ``\n`` from the
+            # re-tokenized turn. This makes tier-1 align_logprobs_by_token_ids exact by
+            # construction (generated_token_ids == served ids) and dodges the qwen3_5
+            # prefix-mismatch fallback that was zeroing logprobs. Non-qwen3_5 paths
+            # (qwen3_5_assistant_prefix_ids is None) skip this block entirely.
+            spliced = False
+            if (
+                qwen3_5_assistant_prefix_ids is not None
+                and assistant_token_ids is not None
+                and assistant_msg_idx < len(assistant_token_ids)
+            ):
+                served_ids = assistant_token_ids[assistant_msg_idx]
+                if served_ids and isinstance(served_ids, list):
+                    real_prefix = list(qwen3_5_assistant_prefix_ids)
+                    rp = len(real_prefix)
+                    # The re-tokenized turn must start with the real assistant prefix.
+                    if cur_token_ids[:rp] == real_prefix:
+                        # Recover the trailing template tokens AFTER the served content
+                        # (e.g. ``<|im_end|>\n``). The re-tokenized turn ends with the
+                        # SAME trailing template, so take whatever follows the last EOS.
+                        if tokenizer.eos_token_id in cur_token_ids:
+                            _le = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
+                            trailing = cur_token_ids[_le + 1 :]
+                        else:
+                            trailing = []
+                        # The served stream already ends in EOS (vLLM emits it); if it
+                        # somehow does not, the trailing template still masks correctly.
+                        prefix_len = rp
+                        generated_token_ids = list(served_ids)
+                        tokens_after_eos = list(trailing)
+                        cur_token_ids = real_prefix + generated_token_ids + tokens_after_eos
+                        spliced = True
+
+            if not spliced:
+                if not prefix_matches:
+                    actual_prefix = cur_token_ids[:prefix_len]
+                    logger.warning(
+                        "Assistant message prefix mismatch (expected {}, got {}). "
+                        "Falling back to treating the entire assistant message as generated tokens.",
+                        generation_prompt_ids,
+                        actual_prefix,
+                    )
+                    prefix_len = 0
+
+                if tokenizer.eos_token_id in cur_token_ids:
+                    last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
+                    generated_token_ids = cur_token_ids[prefix_len : last_eos_token_index + 1]
+                    tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
+                else:
+                    generated_token_ids = cur_token_ids[prefix_len:]
+                    tokens_after_eos = []
+
+            # Now that cur_token_ids is finalized (re-tok or spliced), accumulate it.
+            response_ids.extend(cur_token_ids)
             assert prefix_len + len(generated_token_ids) + len(tokens_after_eos) == len(
                 cur_token_ids
             ), "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"

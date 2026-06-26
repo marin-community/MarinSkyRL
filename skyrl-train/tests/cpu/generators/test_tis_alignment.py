@@ -92,6 +92,53 @@ def test_extract_float_format_no_longer_disables_tis():
 
 
 # ---------------------------------------------------------------------------
+# qwen3_5/3.6 empty-think prefix detection + served-id splice (arch-gated)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTok:
+    """Minimal tokenizer stub exposing only what the detection helper needs."""
+
+    def __init__(self, think_open=None, think_close=None, unk=None):
+        self._map = {"<think>": think_open, "</think>": think_close}
+        self.unk_token_id = unk
+
+    def convert_tokens_to_ids(self, tok):
+        return self._map.get(tok)
+
+
+def test_detect_qwen3_5_empty_think_prefix_positive():
+    from skyrl_train.generators.utils import detect_qwen3_5_empty_think_prefix
+
+    tok = _FakeTok(think_open=900, think_close=901)
+    # <|im_start|>(1) assistant(2) \n(3) <think>(900) \n\n(4) </think>(901) \n\n(5)
+    gp = [1, 2, 3, 900, 4, 901, 5]
+    prefix = detect_qwen3_5_empty_think_prefix(tok, gp)
+    # Real prefix is everything BEFORE the injected empty <think> block.
+    assert prefix == [1, 2, 3]
+
+
+def test_detect_qwen3_5_empty_think_prefix_negative_dense_qwen3():
+    from skyrl_train.generators.utils import detect_qwen3_5_empty_think_prefix
+
+    # Dense Qwen3 gen-prompt has no think tokens at all -> None (byte-identical path).
+    tok = _FakeTok(think_open=None, think_close=None)
+    assert detect_qwen3_5_empty_think_prefix(tok, [1, 2, 3]) is None
+    # Think tokens exist in vocab but NOT injected into the gen prompt -> None.
+    tok2 = _FakeTok(think_open=900, think_close=901)
+    assert detect_qwen3_5_empty_think_prefix(tok2, [1, 2, 3]) is None
+
+
+def test_detect_qwen3_5_rejects_nonempty_think_block():
+    from skyrl_train.generators.utils import detect_qwen3_5_empty_think_prefix
+
+    tok = _FakeTok(think_open=900, think_close=901)
+    # <think> ... 3 content tokens ... </think>  -> NOT an empty block -> None.
+    gp = [1, 2, 900, 50, 51, 52, 901, 5]
+    assert detect_qwen3_5_empty_think_prefix(tok, gp) is None
+
+
+# ---------------------------------------------------------------------------
 # Integration: exact path through get_response_ids_and_loss_mask_from_messages
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B", "Qwen/Qwen2.5-0.5B-Instruct"])
