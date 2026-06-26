@@ -337,16 +337,33 @@ def normalize_token_ids(encoded) -> List[int]:
     return encoded
 
 
-def get_generation_prompt_ids(tokenizer, custom_chat_template=None) -> List[int]:
+def get_generation_prompt_ids(tokenizer, custom_chat_template=None, chat_template_kwargs=None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
+
+    ``chat_template_kwargs`` (e.g. ``{"enable_thinking": True}``) is forwarded to
+    ``apply_chat_template`` so the rendered generation prompt MATCHES the served
+    vLLM stream. For Qwen3.5/3.6 thinking models this is LOAD-BEARING: with it
+    UNSET the chat template auto-injects an EMPTY ``<think>\\n\\n</think>`` block
+    (the ``enable_thinking is false`` default branch), which the served
+    completion_token_ids never contain -> TIS prefix divergence (see
+    detect_qwen3_5_empty_think_prefix). Passing ``enable_thinking=True`` renders
+    the bare ``<think>`` open instead, matching the served stream. ``None`` ->
+    byte-identical to the old call (no kwargs forwarded).
     """
+    ctk = chat_template_kwargs or {}
     empty_user = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, chat_template=custom_chat_template)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], tokenize=True, chat_template=custom_chat_template, **ctk
+        )
     )
     empty_user_with_generation_prompt = normalize_token_ids(
         tokenizer.apply_chat_template(
-            [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=custom_chat_template
+            [{"role": "user", "content": ""}],
+            add_generation_prompt=True,
+            tokenize=True,
+            chat_template=custom_chat_template,
+            **ctk,
         )
     )
 
@@ -747,7 +764,7 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None):
+def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -771,11 +788,19 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
                  one message. These are assumed to be a subset from a larger conversation.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
         custom_chat_template: Optional custom chat template string to use instead of tokenizer's default.
+        chat_template_kwargs: Optional dict forwarded to apply_chat_template (e.g.
+            ``{"enable_thinking": True}``). Threaded for consistency with the served
+            stream / get_generation_prompt_ids; ``None`` -> byte-identical old behavior.
+            (These calls use ``add_generation_prompt=False``, so enable_thinking does
+            not change the encoded message ids under the current Qwen3.5 templates; it
+            is forwarded defensively so any template that gates message-body rendering
+            on it stays consistent between serve and re-tokenize.)
 
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
     assert len(messages), "messages list cannot be empty"
+    ctk = chat_template_kwargs or {}
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -787,6 +812,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
             add_generation_prompt=False,
             tokenize=True,
             chat_template=custom_chat_template,
+            **ctk,
         )
     )
 
@@ -797,6 +823,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
             add_generation_prompt=False,
             tokenize=True,
             chat_template=custom_chat_template,
+            **ctk,
         )
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
@@ -1077,7 +1104,7 @@ def _re_sentinel_rows(n: int, sentinel_row: Optional[List[List[int]]]) -> List[L
     return [list(sentinel_row) for _ in range(n)]
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None, assistant_routed_experts=None, assistant_token_ids=None, alignment_stats: Optional["AlignmentStats"] = None):
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None, assistant_routed_experts=None, assistant_token_ids=None, alignment_stats: Optional["AlignmentStats"] = None, chat_template_kwargs=None):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -1107,6 +1134,11 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             Enables the EXACT alignment path.
         alignment_stats: Optional AlignmentStats accumulator the caller can read
             afterward to emit tis/* metrics. A local one is created if None.
+        chat_template_kwargs: Optional dict forwarded to apply_chat_template when
+            building the generation prompt / re-tokenizing turns (e.g.
+            ``{"enable_thinking": True}`` for Qwen3.5/3.6 so the re-tokenized
+            generation prompt matches the served stream). ``None`` -> byte-identical
+            old behavior.
 
     Returns:
         Tuple of (response ids, loss mask, rollout logprobs[, rollout routed experts]).
@@ -1119,7 +1151,14 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
         alignment_stats = AlignmentStats()
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer, custom_chat_template=custom_chat_template)
+    # chat_template_kwargs (e.g. {"enable_thinking": True}) is forwarded so the
+    # re-tokenized generation prompt MATCHES the served vLLM stream. For Qwen3.5/3.6
+    # this renders the bare <think> open instead of the empty-think block default
+    # (see get_generation_prompt_ids / detect_qwen3_5_empty_think_prefix). None ->
+    # byte-identical old behavior (empty-think default -> the splice backstop fires).
+    generation_prompt_ids = get_generation_prompt_ids(
+        tokenizer, custom_chat_template=custom_chat_template, chat_template_kwargs=chat_template_kwargs
+    )
 
     # ARCH-GATED (qwen3_5/3.6 only): the Qwen3.5/3.6 chat template injects an EMPTY
     # ``<think>\n\n</think>`` block into the assistant generation prompt, which the
@@ -1161,7 +1200,9 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer, custom_chat_template)
+        cur_token_ids = encode_messages_subset(
+            [cur_message], tokenizer, custom_chat_template, chat_template_kwargs=chat_template_kwargs
+        )
 
         # 3. Set loss mask and rollout logprobs.
         # Regardless of the message role, each message is responsible for adding its own generation

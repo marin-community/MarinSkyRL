@@ -11,6 +11,8 @@ from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, Gene
 from skyrl_train.generators.utils import (
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
+    get_generation_prompt_ids,
+    detect_qwen3_5_empty_think_prefix,
     extract_logprobs_from_rollout_details,
     extract_token_ids_from_rollout_details,
     extract_routed_experts_from_rollout_details,
@@ -265,6 +267,42 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
         else:
             self.custom_chat_template_content = None
+
+        # --- ARCH-GATED qwen3_5/3.6 thinking-enable for the re-tokenize / TIS path ---
+        # The Qwen3.5/3.6 chat template's DEFAULT generation prompt (enable_thinking
+        # unset/false) auto-injects an EMPTY ``<think>\n\n</think>`` block, which the
+        # served completion_token_ids never contain -> TIS prefix divergence (the
+        # 4b76d41 splice exists to paper over exactly this). The ROOT fix is to render
+        # the generation prompt WITH thinking (``enable_thinking=True``), mirroring the
+        # eval path + the served vLLM request (harbor terminus-2 ``extra_body``):
+        # ``enable_thinking=True`` renders the bare ``<think>`` open, matching the
+        # served stream, so the re-tokenized prefix matches naturally and the splice
+        # goes INERT (a clean backstop).
+        #
+        # Arch-gating mirrors the SPLICE's own tokenizer-level predicate
+        # (detect_qwen3_5_empty_think_prefix): we set enable_thinking=True ONLY for a
+        # tokenizer+template whose DEFAULT generation prompt renders the empty-think
+        # block. For every non-qwen3_5 / non-empty-think model this stays None ->
+        # no chat_template_kwargs forwarded -> byte-identical old behavior.
+        self._chat_template_kwargs: Optional[Dict[str, Any]] = None
+        try:
+            default_gen_prompt_ids = get_generation_prompt_ids(
+                self.tokenizer, custom_chat_template=self.custom_chat_template_content
+            )
+            if detect_qwen3_5_empty_think_prefix(self.tokenizer, default_gen_prompt_ids) is not None:
+                self._chat_template_kwargs = {"enable_thinking": True}
+                logger.info(
+                    "TerminalBenchGenerator: detected Qwen3.5/3.6 empty-think generation "
+                    "prompt -> enabling chat_template_kwargs={'enable_thinking': True} for "
+                    "the re-tokenize/TIS path (the served vLLM is enabled via harbor "
+                    "extra_body.chat_template_kwargs). The 4b76d41 empty-think splice "
+                    "becomes an inert backstop."
+                )
+        except Exception as e:
+            logger.warning(
+                f"TerminalBenchGenerator: qwen3_5 thinking-enable probe failed ({e}); "
+                f"leaving chat_template_kwargs unset (the empty-think splice still applies)."
+            )
 
         # Shared QueueOrchestrator state (initialized in startup())
         # This ensures all concurrent generate() calls share a single orchestrator
@@ -1384,6 +1422,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 add_generation_prompt=False,
                 tokenize=True,
                 chat_template=self.custom_chat_template_content,
+                **(self._chat_template_kwargs or {}),
             )
         )
         initial_prompt_length = len(prompt_ids)
@@ -1435,6 +1474,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 assistant_routed_experts=assistant_routed_experts,
                 assistant_token_ids=assistant_token_ids,
                 alignment_stats=alignment_stats,
+                chat_template_kwargs=self._chat_template_kwargs,
             )
         else:
             response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
@@ -1444,6 +1484,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 custom_chat_template=self.custom_chat_template_content,
                 assistant_token_ids=assistant_token_ids,
                 alignment_stats=alignment_stats,
+                chat_template_kwargs=self._chat_template_kwargs,
             )
 
         # Determine stop reason
