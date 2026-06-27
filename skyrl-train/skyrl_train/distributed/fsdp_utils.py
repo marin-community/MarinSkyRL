@@ -954,7 +954,23 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     """Gather an EP+FSDP-composed expert DTensor to a full (replicated) tensor in
     GLOBAL order, WITHOUT torch's ``full_tensor()`` / redistribute.
 
-    WHY THIS EXISTS (the r2–r7 MoE weight-sync corruption root cause).
+    ⚠ CORRECTION (2026-06-27) — THIS IS *NOT* THE r2–r7 SALAD FIX. Committed (ac44079) as
+    the *suspected* root-cause fix, but the +30-min coherence canary (CoreWeave job r8, this
+    fix LIVE on all ranks via ``--skyrl-ref ac44079``) STILL produced token-salad ⇒ this
+    function is NOT the operative cause, and the torch warning quoted below is a RED HERRING
+    for that bug: a CPU repro of ``full_tensor()`` on this composition does NOT mis-order at
+    any torch version, and the WORKING Jupiter MoE runs used plain ``full_tensor()`` too. The
+    real r2–r7 cause is under active investigation — leading suspect is NCCL P2P/NVLS being
+    ENABLED on CoreWeave H100 (the working Jupiter MoE runs set ``NCCL_P2P_DISABLE=1`` +
+    nvls/collnet off; CoreWeave dropped them). See
+    ``agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md``. Two debug subagents
+    were mis-led by the original "root cause" wording — do NOT cite this as the salad fix. It
+    IS a real, SEPARATE correctness improvement for the torch-2.11 ``_StridedShard`` gather-
+    ordering quirk described below (a mirror of the ``5d7fc13`` loader-side fix), kept as
+    hardening.
+
+    WHY THIS EXISTS (a real torch-2.11 ``_StridedShard`` gather-ordering quirk — but NOT the
+    r2–r7 salad; see the correction above).
     ``apply_ep`` composes the grouped-expert dim as
     ``(_StridedShard(dim=0, sf=fsdp_size) [fsdp], Shard(dim=0) [ep])`` on torch
     2.11. The FSDP→vLLM weight sync gathered it via ``DTensor.full_tensor()``,
@@ -971,12 +987,11 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
         different reduction orders. it is not possible to merge non-ascending
         order all_gather operations.
 
-    i.e. the expert ROWS are reassembled in the WRONG global order — a silent,
-    shape-preserving, key-preserving corruption (no missing/unexpected key, no
-    shape mismatch) that vLLM's FusedMoE then loads as scrambled experts →
-    incoherent token-salad → 100% reward-0. It reproduces on every EP MoE arch
-    because the fault is in the generic EP-sharded expert *ordering*, not the
-    arch.
+    i.e. on this code path the expert ROWS *would* be reassembled in the wrong global order
+    — a silent, shape-preserving, key-preserving ordering bug. (It was ORIGINALLY believed to
+    cause the r2–r7 token-salad → 100% reward-0; that is DISPROVEN — see the correction above.
+    This remains a genuine torch-2.11 strided-gather correctness fix worth keeping, just not
+    the salad cause.)
 
     THE FIX. Reconstruct the full tensor using ONLY each placement's own
     ``_split_tensor`` (the TYPE-dispatched primitive the streamed loader already

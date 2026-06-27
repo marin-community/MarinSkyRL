@@ -1,16 +1,23 @@
 """CPU/gloo VALUE-LEVEL smoke for the EP x FSDP grouped-expert WEIGHT-SYNC bug.
 
 Sibling of ``test_ep_fsdp_grouped_load_smoke.py`` (which guards the LOAD path).
-This guards the FSDP->vLLM SYNC path — the mirror-image gather that silently
-corrupted MoE agentic RL for generations r2-r7.
+This guards the FSDP->vLLM SYNC path's expert-ORDERING correctness on the strided
+``(_StridedShard, Shard)`` gather.
 
-Root cause recap (see ``gather_dtensor_strided_safe`` docstring): the grouped
+⚠ CORRECTION (2026-06-27): this gather-ordering path was ORIGINALLY believed to cause
+the r2-r7 MoE token-salad — that is DISPROVEN (the +30-min canary on the ``ac44079`` fix
+still saladded; CPU ``full_tensor()`` never mis-orders; working Jupiter MoE used plain
+full_tensor too). Keep this test — it guards a REAL torch-2.11 strided-gather correctness
+property — but the r2-r7 salad cause lies elsewhere (leading suspect: NCCL P2P/NVLS on the
+CoreWeave H100 runtime). See agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md.
+
+Mechanism recap (see ``gather_dtensor_strided_safe`` docstring): the grouped
 expert dim is composed as ``(_StridedShard(dim=0, sf) [fsdp], Shard(dim=0) [ep])``.
 The sync gathered it with ``DTensor.full_tensor()``, which on torch 2.11
-(``_StridedShard.is_shard()==False``) reassembles the expert ROWS in the WRONG
+(``_StridedShard.is_shard()==False``) *would* reassemble the expert ROWS in the wrong
 GLOBAL order via a non-ascending all_gather — torch itself warns it "may give
-inconsistent results between ranks". No key/shape error; vLLM FusedMoE just loads
-scrambled experts -> token-salad -> 100% reward-0.
+inconsistent results between ranks". (Shape/key-preserving; this test value-checks the
+ordering. NOTE: this did NOT manifest as the r2-r7 salad — see the correction above.)
 
 This test is VALUE-LEVEL, not shape-level (the bug passed every shape/key check
 for 6 generations). Each source expert ``k`` is stamped with a UNIQUE signature
