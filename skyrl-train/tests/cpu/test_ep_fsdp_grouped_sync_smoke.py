@@ -4,12 +4,13 @@ Sibling of ``test_ep_fsdp_grouped_load_smoke.py`` (which guards the LOAD path).
 This guards the FSDP->vLLM SYNC path's expert-ORDERING correctness on the strided
 ``(_StridedShard, Shard)`` gather.
 
-⚠ CORRECTION (2026-06-27): this gather-ordering path was ORIGINALLY believed to cause
-the r2-r7 MoE token-salad — that is DISPROVEN (the +30-min canary on the ``ac44079`` fix
-still saladded; CPU ``full_tensor()`` never mis-orders; working Jupiter MoE used plain
-full_tensor too). Keep this test — it guards a REAL torch-2.11 strided-gather correctness
-property — but the r2-r7 salad cause lies elsewhere (leading suspect: NCCL P2P/NVLS on the
-CoreWeave H100 runtime). See agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md.
+⚠ NOT THE SALAD CAUSE (RESOLVED 2026-06-27): this gather-ordering path was ORIGINALLY
+believed to cause the r2-r9 MoE token-salad — DISPROVEN (the +30-min canary on ``ac44079``
+still saladded; CPU ``full_tensor()`` never mis-orders; the EP=8 on-GPU gather was later
+proven bit-exact vs the disk checkpoint). The real cause was the FlashInfer-CUTLASS ``w13``
+gate/up swap not re-applied on the disaggregated RL weight update (fixed in ``2bb70a88`` /
+``SKYRL_W13_RELOAD_BRACKET``). Keep this test — it guards a REAL torch-2.11 strided-gather
+correctness property. See agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md.
 
 Mechanism recap (see ``gather_dtensor_strided_safe`` docstring): the grouped
 expert dim is composed as ``(_StridedShard(dim=0, sf) [fsdp], Shard(dim=0) [ep])``.

@@ -954,20 +954,19 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     """Gather an EP+FSDP-composed expert DTensor to a full (replicated) tensor in
     GLOBAL order, WITHOUT torch's ``full_tensor()`` / redistribute.
 
-    ⚠ CORRECTION (2026-06-27) — THIS IS *NOT* THE r2–r7 SALAD FIX. Committed (ac44079) as
-    the *suspected* root-cause fix, but the +30-min coherence canary (CoreWeave job r8, this
-    fix LIVE on all ranks via ``--skyrl-ref ac44079``) STILL produced token-salad ⇒ this
-    function is NOT the operative cause, and the torch warning quoted below is a RED HERRING
-    for that bug: a CPU repro of ``full_tensor()`` on this composition does NOT mis-order at
-    any torch version, and the WORKING Jupiter MoE runs used plain ``full_tensor()`` too. The
-    real r2–r7 cause is under active investigation — leading suspect is NCCL P2P/NVLS being
-    ENABLED on CoreWeave H100 (the working Jupiter MoE runs set ``NCCL_P2P_DISABLE=1`` +
-    nvls/collnet off; CoreWeave dropped them). See
-    ``agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md``. Two debug subagents
-    were mis-led by the original "root cause" wording — do NOT cite this as the salad fix. It
-    IS a real, SEPARATE correctness improvement for the torch-2.11 ``_StridedShard`` gather-
-    ordering quirk described below (a mirror of the ``5d7fc13`` loader-side fix), kept as
-    hardening.
+    ⚠ NOT THE r2–r9 SALAD FIX (RESOLVED 2026-06-27). The CoreWeave MoE token-salad was the
+    FlashInfer-CUTLASS ``w13`` gate/up swap not being re-applied on the disaggregated RL
+    weight update — fixed in ``2bb70a88`` (the ``SKYRL_W13_RELOAD_BRACKET`` layerwise-reload
+    bracket; see ``vllm_engine.py`` ``skyrl_begin/finish_weight_reload`` and
+    ``fsdp_worker.broadcast_to_inference_engines``). This gather function is NOT that cause:
+    committed (ac44079) as the *suspected* fix, but the +30-min canary (CoreWeave r8, fix LIVE
+    via ``--skyrl-ref ac44079``) STILL saladded; the EP=8 on-GPU gather was later proven
+    BIT-EXACT vs the disk checkpoint (gather is correct). The torch warning quoted below is a
+    red herring for the salad (CPU ``full_tensor()`` never mis-orders; working Jupiter MoE used
+    plain ``full_tensor()``). This function REMAINS a real, separate correctness improvement for
+    the torch-2.11 ``_StridedShard`` gather-ordering quirk below (a mirror of the ``5d7fc13``
+    loader-side fix), kept as hardening. Full account:
+    ``agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md``.
 
     WHY THIS EXISTS (a real torch-2.11 ``_StridedShard`` gather-ordering quirk — but NOT the
     r2–r7 salad; see the correction above).
