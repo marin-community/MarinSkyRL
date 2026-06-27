@@ -182,12 +182,119 @@ def _check_mapping(full_w1, full_w2, full_w3, num_experts):
     return True, "all experts mapped to correct global slot + projection"
 
 
+# --------------------------------------------------------------------------- #
+# Candidate-A contract check: the gather→convert_tt_layer_to_hf NAMING must     #
+# line up with how vLLM's `determine_expert_map(linear)` BLOCK-places experts.  #
+# --------------------------------------------------------------------------- #
+#
+# WHY (audit Candidate A — global↔local expert-id correspondence). The broadcast
+# emits HF tensors whose NAME carries the global expert id j (convert_tt_layer_to_hf
+# splits w1/w2/w3 POSITIONALLY: row j -> experts.{j}.*). vLLM then maps that named
+# global id to a local slot via `determine_expert_map(linear)`
+# (vllm/model_executor/layers/fused_moe/expert_map_manager.py:67-79):
+#
+#     base       = global_num_experts // ep_size
+#     remainder  = global_num_experts %  ep_size
+#     local_num  = base + 1 if ep_rank < remainder else base
+#     start_idx  = ep_rank*base + min(ep_rank, remainder)
+#     expert_map[start_idx : start_idx + local_num] = arange(local_num)
+#
+# i.e. global expert gj lives on ep_rank == gj // local_num as a CONTIGUOUS block,
+# local slot (gj - start_idx). The SkyRL engine read-back encodes the same
+# assumption (inference_engines/vllm/vllm_engine.py:640 `owner_ep = gj // n_local`).
+#
+# This reproduces that math VERBATIM on CPU (it is pure tensor arithmetic — no GPU,
+# no torch.distributed, no zmq; the full vllm package won't import on this Mac, so
+# we mirror the 13 lines with the source cite rather than import it). We then assert,
+# for EVERY (ep_rank, local_slot), that the gathered+named expert vLLM would pull
+# into that physical slot carries the SIGNATURE of the global expert linear-placement
+# says belongs there. A mismatch is the Candidate-A contract break: the gather's
+# global ROW ORDER disagrees with the ascending-contiguous order the naming + vLLM
+# block-map jointly assume.
+def _vllm_determine_expert_map_linear(ep_size: int, ep_rank: int, global_num_experts: int):
+    """Verbatim CPU mirror of vLLM determine_expert_map(..., 'linear').
+
+    Source: vllm/model_executor/layers/fused_moe/expert_map_manager.py:62-79
+    (linear branch). Returns (local_num_experts, expert_map[global]->local or -1).
+    """
+    assert ep_size > 0
+    if ep_size == 1:
+        return global_num_experts, None
+    base = global_num_experts // ep_size
+    remainder = global_num_experts % ep_size
+    local_num = base + 1 if ep_rank < remainder else base
+    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+    start_idx = ep_rank * base + min(ep_rank, remainder)
+    expert_map[start_idx : start_idx + local_num] = torch.arange(0, local_num, dtype=torch.int32)
+    return local_num, expert_map
+
+
+def _check_vllm_linear_contract(full_w1, full_w2, full_w3, num_experts, ep_size):
+    """Assert the gather→HF-naming order lines up with vLLM linear BLOCK placement.
+
+    For each EP rank, vLLM puts the contiguous global block
+    [start_idx : start_idx+local_num] into local slots 0..local_num-1. The trained
+    value at HF name `gj` (== gather row gj, signature gj+0.1 / +0.3 / +0.2) MUST be
+    the one vLLM loads into (ep_rank=gj//local, local_slot=gj-start_idx). So the
+    per-name signature check below is EXACTLY the per-(ep_rank,slot) contract check.
+
+    On break, returns the m!=j permutation map (which global-expert signature m landed
+    at HF name j) so we can read whether m matches the EP-block-reorder-by-sf signature
+    (Candidate A) vs generate_permute_indices (Candidate B).
+    """
+    sd = {
+        "model.layers.0.mlp.router.gate.weight": torch.zeros(num_experts, 4),
+        "model.layers.0.mlp.experts.w1": full_w1,
+        "model.layers.0.mlp.experts.w2": full_w2,
+        "model.layers.0.mlp.experts.w3": full_w3,
+    }
+    convert_tt_layer_to_hf(sd, 0)
+
+    # Build the global->(ep_rank, local_slot) placement vLLM linear would use, and the
+    # inverse: for each physical (ep_rank, local_slot), which GLOBAL id is expected.
+    expected_global_at = {}  # (ep_rank, local_slot) -> global id
+    for ep_rank in range(ep_size):
+        local_num, emap = _vllm_determine_expert_map_linear(ep_size, ep_rank, num_experts)
+        for gj in range(num_experts):
+            slot = int(emap[gj].item())
+            if slot != -1:
+                expected_global_at[(ep_rank, slot)] = gj
+
+    # For each HF name j (== gather row j), read the signature actually present and the
+    # signature linear-placement EXPECTS at the physical slot vLLM would route name j to.
+    perm = {}  # name j -> source-expert signature m actually found at name j
+    bad = []
+    base = num_experts // ep_size
+    for j in range(num_experts):
+        g = sd[f"model.layers.0.mlp.experts.{j}.gate_proj.weight"]  # <- w1, sig m+0.1
+        m = int(round(float(g.reshape(-1)[0]) - 0.1))  # recover source expert id m
+        perm[j] = m
+        # vLLM routes HF name j to physical (ep_rank=j//local, local_slot=j-start_idx).
+        owner_ep = j // base  # remainder==0 for our divisible geoms; block owner
+        start_idx = owner_ep * base
+        local_slot = j - start_idx
+        want = expected_global_at.get((owner_ep, local_slot))
+        if m != want:
+            bad.append((j, m, want, owner_ep, local_slot))
+
+    if not bad:
+        return True, f"vLLM-linear contract HOLDS: every HF name j == global expert j (ep={ep_size})", perm
+    # Permutation map for the discriminating signature.
+    msg_lines = [
+        f"vLLM-linear contract BREAKS (ep={ep_size}, sf=fsdp, N={num_experts}): "
+        f"{len(bad)}/{num_experts} names carry the WRONG global expert.",
+        "  m!=j map (HF name j -> source-expert signature m found there):",
+        "    " + ", ".join(f"{j}->{m}" for j, m in sorted(perm.items()) if perm[j] != j),
+    ]
+    return False, "\n".join(msg_lines), perm
+
+
 def _worker(rank, world, geom, result_q):
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29556")
     try:
         dist.init_process_group("gloo", rank=rank, world_size=world)
-        num_experts, ep_size, fsdp_size, do_ep, mode = geom
+        num_experts, ep_size, fsdp_size, do_ep, mode, check_contract = geom
 
         experts = _GE(num_experts)
         if do_ep:
@@ -209,6 +316,10 @@ def _worker(rank, world, geom, result_q):
         if rank == 0 and do_ep and ep_size > 1 and fsdp_size > 1:
             info["placements"] = str(experts.w1.placements)
         ok, msg = _check_mapping(fw1, fw2, fw3, num_experts)
+        # Candidate-A contract check: gather→HF-naming order vs vLLM linear block map.
+        if ok and check_contract and do_ep and ep_size > 1:
+            ok, cmsg, _perm = _check_vllm_linear_contract(fw1, fw2, fw3, num_experts, ep_size)
+            msg = cmsg if not ok else (msg + " | " + cmsg)
         result_q.put((rank, "OK" if ok else "BADVALUE", msg, info))
     except Exception as e:
         result_q.put((rank, "FAIL", f"{e}\n{traceback.format_exc()}", {}))
@@ -217,11 +328,13 @@ def _worker(rank, world, geom, result_q):
             dist.destroy_process_group()
 
 
-def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, mode="normal", expect_pass=True):
+def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, mode="normal", expect_pass=True,
+             check_contract=False):
     world = ep_size * fsdp_size if do_ep else fsdp_size
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
-    procs = [ctx.Process(target=_worker, args=(r, world, (num_experts, ep_size, fsdp_size, do_ep, mode), q))
+    procs = [ctx.Process(target=_worker,
+                         args=(r, world, (num_experts, ep_size, fsdp_size, do_ep, mode, check_contract), q))
              for r in range(world)]
     for p in procs:
         p.start()
@@ -240,7 +353,9 @@ def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, mode="normal", expect
             print("  signal: " + str(bad[0][2]).splitlines()[0])
             return True
         print(f"  RESULT: FAIL ({len(bad)}/{world} ranks)")
-        print("  detail: " + str(bad[0][2]).splitlines()[0])
+        # Print the FULL detail (incl. the m!=j permutation map for the contract break).
+        for line in str(bad[0][2]).splitlines():
+            print("  detail: " + line)
         return False
     if not expect_pass:
         print("  RESULT: FAIL — expected scrambled mapping to be caught, but it passed")
@@ -265,6 +380,30 @@ def main():
     # REGRESSION: EP1 (plain 1-D Shard, no _StridedShard) — gather path delegates to
     # full_tensor() and must still map correctly.
     gates.append(("REG EP1/8", run_geom("REG EP1/8", 8, 1, 4, False)))
+
+    # ------------------------------------------------------------------ #
+    # CANDIDATE-A CONTRACT GATES — vLLM-linear block-placement contract.  #
+    # ------------------------------------------------------------------ #
+    # CRITICAL: the _StridedShard stride factor `sf` == EP_SIZE (the size of the
+    # OTHER mesh dim sharding the same expert row dim), NOT fsdp_size — confirmed by
+    # the placement printout (each gate prints `placement=(_StridedShard(dim=0,sf=N),
+    # Shard(dim=0))`). So the PROD stride sf=8 is reproduced by EP=8 (the actual
+    # 30B-A3B salad geometry: hpc/skyrl_yaml/iris/8node_qwen3_30b_a3b_thinking2507_
+    # 131k_cp_dcp2_r3.yaml -> expert_model_parallel_size: 8, fsdp_size: 2, cp: 2).
+    #
+    # The even-shard guard requires (num_experts // ep) % fsdp == 0. Geometries:
+    #   EP2 (sf2): N=16, fsdp=8 -> world=16   (low-stride control)
+    #   EP4 (sf4): N=32, fsdp=8 -> world=32   (mid-stride)
+    #   EP8 (sf8): N=16, fsdp=2 -> world=16   (PROD STRIDE — matches the salad run)
+    # Each asserts BOTH the value-mapping AND the vLLM-linear block-placement contract
+    # (check_contract=True). A break prints the m!=j permutation map (which source
+    # expert m landed at HF name j) — the discriminating signature for Candidate A.
+    gates.append(("CONTRACT EP2 sf2 (N=16,world=16)",
+                  run_geom("CONTRACT EP2 sf2", 16, 2, 8, True, check_contract=True)))
+    gates.append(("CONTRACT EP4 sf4 (N=32,world=32)",
+                  run_geom("CONTRACT EP4 sf4", 32, 4, 8, True, check_contract=True)))
+    gates.append(("CONTRACT EP8 sf8 PROD (N=16,world=16)",
+                  run_geom("CONTRACT EP8 sf8 PROD", 16, 8, 2, True, check_contract=True)))
 
     print("\n================ SUMMARY ================")
     ok = True

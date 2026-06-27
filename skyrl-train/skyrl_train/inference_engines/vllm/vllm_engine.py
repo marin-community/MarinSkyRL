@@ -292,6 +292,84 @@ class WorkerWrap:
 
         Fp8LinearMethod.process_weights_after_loading = patched_process
 
+    def skyrl_begin_weight_reload(self) -> None:
+        """RENAMED from ``start_weight_update`` AND NOW WIRED (the #1685 fix).
+
+        WHY RENAMED: the baked vLLM ``gpu_worker.Worker`` now ALSO defines
+        ``start_weight_update``/``finish_weight_update`` (vllm/v1/worker/gpu_worker.py),
+        so a WorkerWrap method of the SAME name trips vLLM's ``init_worker_extension``
+        shadow-assert ("Worker class already has an attribute finish_weight_update")
+        -> EngineCore crash. (The base Worker versions also REQUIRE a configured
+        ``weight_transfer_engine``, which SkyRL's NCCL-broadcast path does NOT set up, so
+        they cannot be reused directly — hence this SkyRL-native bracket.)
+
+        WHY NOW WIRED (2026-06-27, the disagg-engine diag root cause): on CoreWeave H100
+        the unquantized MoE backend auto-selects FlashInfer CUTLASS, whose
+        ``process_weights_after_loading`` applies ``swap_w13_to_w31`` ([gate;up]->[up;gate]
+        kernel layout) at the INITIAL from-disk load. The RL disaggregated update path
+        does immediate per-chunk ``model.load_weights`` with NO subsequent
+        ``process_weights_after_loading`` (base_loader.py:80 runs it only on load_model),
+        so the update OVERWRITES the [up;gate] kernel buffer with raw checkpoint [gate;up]
+        and NEVER re-swaps -> the kernel reads transposed halves -> token-salad. PROVEN by
+        the kernel-format discriminator: PRE(from-disk)=[up;gate], POST(RL-update)=[gate;up],
+        both ep ranks, layers 0 & 24. The cure is to bracket the whole multi-chunk sync with
+        vLLM's layerwise reload so ``finalize`` re-runs ``process_weights_after_loading``
+        (the swap) EXACTLY once at the end. Triton clusters select no-swap backends, so
+        finalize is swap-inert there -> byte-identical (reconciles Jupiter-OK/CoreWeave-salad).
+
+        Bracket-open one weight sync with a SINGLE vLLM layerwise-reload init.
+
+        Port of SkyRL #1685 + #1737 (the silent-MoE-corruption fix). vLLM's
+        ``process_weights_after_loading`` permutes ``FusedMoE.w13_weight`` in place
+        at engine init (``[w1;w3] -> [w3;w1]`` kernel layout) while our fork's
+        ``replace_parameter`` preserves each param's ``weight_loader``. A naive
+        SECOND ``model.load_weights`` (the RL sync) then re-invokes ``_load_w13`` and
+        writes raw ``[w1;w3]`` into a ``[w3;w1]`` buffer -> silent value corruption ->
+        token-salad. The cure is to run vLLM's layerwise reload ONCE around the whole
+        (multi-chunk, streamed) sync: ``initialize_layerwise_reload`` restores layers
+        to meta + wraps each weight_loader to DEFER processing; per-chunk raw
+        ``model.load_weights`` then just buffers; ``finalize_layerwise_reload``
+        (in ``finish_weight_update``) materializes + processes every layer EXACTLY
+        ONCE. A per-chunk ``reload_weights`` would instead re-finalize on every call
+        and restore layers absent from that chunk (#1737), so we bracket the whole
+        sync rather than reload per chunk.
+
+        Idempotent guard: a second ``start`` without a ``finish`` is a protocol error.
+        """
+        if getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already active. "
+                "Call finish_weight_update first."
+            )
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+
+        model = self.model_runner.model
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            initialize_layerwise_reload(model)
+        self._skyrl_weight_update_active = True
+
+    def skyrl_finish_weight_reload(self) -> None:
+        """RENAMED from ``finish_weight_update`` + NOW WIRED — see
+        ``skyrl_begin_weight_reload`` for the collision + root-cause rationale.
+
+        Bracket-close the weight sync with a SINGLE layerwise-reload finalize.
+
+        Materializes + runs ``process_weights_after_loading`` over the WHOLE weight
+        set exactly once -> re-applies the FlashInfer-CUTLASS ``swap_w13_to_w31`` the
+        per-chunk ``model.load_weights`` skips. Must be called after every chunk's
+        ``load_weights`` (and after ``end_weight_update``'s flush, SKYRL_FUSE path).
+        """
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("skyrl_begin_weight_reload must be called before skyrl_finish_weight_reload.")
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+        model = self.model_runner.model
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            finalize_layerwise_reload(model, self.model_config)
+        self._skyrl_weight_update_active = False
+
     def begin_weight_update(self) -> None:
         """Start accumulating weights for batched load_weights call.
 
@@ -607,6 +685,105 @@ class WorkerWrap:
             except Exception as e:  # never crash the collective_rpc
                 out[name] = {"found": False, "error": repr(e)}
         return out
+
+    def read_expert_slots_raw(self, layer_idx: int):
+        """TEST-ONLY (D1/D2 disaggregated-receive diag): return THIS engine worker's
+        RAW per-local-slot FusedMoE expert weights + the engine's OWN expert_map for
+        ``layer_idx``, with NO assumption about global<->local placement.
+
+        Unlike ``read_named_weights`` (which maps a requested HF expert ``gj`` to a slot
+        via ``gj // n_local`` — a CONTIGUOUS-linear assumption that would HIDE a
+        receive-side placement bug), this dumps every local slot's bytes AS-IS plus the
+        engine's authoritative ``_expert_map`` (global->local, -1 if absent). The driver
+        then does a NON-circular cross-expert nearest-match vs the DISK base checkpoint,
+        so a slot carrying the wrong global expert (D2 placement) surfaces as m!=j even
+        though a per-name readback could not see it.
+
+        Returns dict:
+          __ranks__        : {tp_rank, tp_size, ep_rank, ep_size}
+          expert_map       : list[int] length global_num_experts (global->local slot, -1 absent)
+          slot_to_global   : list[int] length local_num_experts (inverse; -1 if ambiguous)
+          local_num_experts, global_num_experts, w13_inter_half (I), placement_strategy
+          slots            : {local_slot -> {"w13": cpu_fp32 [2I,H], "w2": cpu_fp32 [H,I]}}
+        Heavy (full local expert stack as fp32 CPU); call for ONE layer.
+        """
+        import torch as _torch
+
+        model = self.model_runner.model
+        params = dict(model.named_parameters())
+        buffers = dict(model.named_buffers())
+        all_params = {**params, **buffers}
+
+        try:
+            from vllm.distributed import parallel_state as _ps
+            tp_rank = _ps.get_tensor_model_parallel_rank()
+            tp_size = _ps.get_tensor_model_parallel_world_size()
+        except Exception:
+            tp_rank, tp_size = 0, 1
+        try:
+            ep_rank = _ps.get_ep_group().rank_in_group
+            ep_size = _ps.get_ep_group().world_size
+        except Exception:
+            ep_rank, ep_size = 0, 1
+
+        out = {"__ranks__": {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}}
+        prefix = f"model.layers.{layer_idx}.mlp"
+        w13 = all_params.get(f"{prefix}.experts.w13_weight")
+        w2 = all_params.get(f"{prefix}.experts.w2_weight")
+        if w13 is None or w2 is None:
+            cand = [k for k in all_params if k.startswith(f"{prefix}.experts.") and k.endswith("weight")]
+            out["error"] = f"no w13/w2 under {prefix}; candidates={cand}"
+            return out
+
+        # Find the FusedMoE module to read its authoritative expert_map + counts.
+        emap = None
+        local_num = int(w13.shape[0])
+        global_num = None
+        placement = None
+        for mod_name, mod in model.named_modules():
+            if mod_name == f"{prefix}.experts" or mod_name.endswith(f"layers.{layer_idx}.mlp.experts"):
+                emap = getattr(mod, "_expert_map", None)
+                if emap is None:
+                    emap = getattr(mod, "expert_map", None)
+                local_num = int(getattr(mod, "local_num_experts", local_num))
+                global_num = getattr(mod, "global_num_experts", None)
+                placement = getattr(mod, "expert_placement_strategy", None)
+                break
+
+        # global->local slot map (the engine's OWN authority on placement).
+        if emap is not None:
+            emap_list = [int(x) for x in emap.detach().cpu().tolist()]
+        else:
+            emap_list = None
+        out["expert_map"] = emap_list
+        out["local_num_experts"] = local_num
+        out["global_num_experts"] = (int(global_num) if global_num is not None else None)
+        out["placement_strategy"] = str(placement) if placement is not None else None
+        out["w13_inter_half"] = int(w13.shape[1] // 2)
+
+        # Inverse: local slot -> global expert (per the engine's expert_map).
+        slot_to_global = [-1] * local_num
+        if emap_list is not None:
+            for g, loc in enumerate(emap_list):
+                if 0 <= loc < local_num:
+                    slot_to_global[loc] = g
+        out["slot_to_global"] = slot_to_global
+
+        slots = {}
+        for s in range(local_num):
+            slots[s] = {
+                "w13": w13[s].detach().to("cpu", dtype=_torch.float32).contiguous(),
+                "w2": w2[s].detach().to("cpu", dtype=_torch.float32).contiguous(),
+            }
+        out["slots"] = slots
+        return out
+
+    def report_host(self):
+        """TEST-ONLY (disaggregation proof): this engine worker's hostname (one per
+        TP/EP worker via collective_rpc) so the driver can prove the engine node is
+        DISJOINT from the policy nodes (=> the broadcast is genuinely cross-node)."""
+        import socket
+        return socket.gethostname()
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -1602,6 +1779,31 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         engine = self._get_engine()
         return await engine.collective_rpc("read_named_weights", args=(list(hf_names), dump_inventory))
+
+    async def read_engine_expert_slots_raw(self, layer_idx: int):
+        """TEST-ONLY (D1/D2 diag): per-engine-worker RAW FusedMoE local-slot weights +
+        the engine's own expert_map for ``layer_idx``. Returns List[Dict] (one per
+        engine worker rank). See ``WorkerWrap.read_expert_slots_raw``."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("read_expert_slots_raw", args=(int(layer_idx),))
+
+    async def report_engine_hosts(self):
+        """TEST-ONLY (disaggregation proof): hostname of every engine TP/EP worker."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("report_host")
+
+    async def begin_weight_reload(self):
+        """#1685 fix: open the layerwise-reload bracket on every engine worker so the
+        multi-chunk RL sync defers processing; finalize re-runs process_weights_after_loading
+        (re-applies the FlashInfer-CUTLASS w13 swap). See WorkerWrap.skyrl_begin_weight_reload."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("skyrl_begin_weight_reload")
+
+    async def finish_weight_reload(self):
+        """#1685 fix: close the layerwise-reload bracket -> finalize_layerwise_reload ->
+        process_weights_after_loading (swap_w13_to_w31) re-applied EXACTLY once."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("skyrl_finish_weight_reload")
 
     async def teardown(self):
         await self._destroy_weights_update_group()

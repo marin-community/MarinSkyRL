@@ -360,6 +360,226 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     collected[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
         return collected
 
+    def diag_ep8_geometry(self):
+        """TEST-ONLY (EP=8 cross-node diag): return this rank's mesh geometry +
+        physical-node identity so the driver can PROVE an EP group straddles >=2
+        nodes. No collectives, no gather — pure introspection.
+
+        Returns a dict with global rank, hostname, mesh shape/dim-names, this rank's
+        per-mesh-dim coordinate, and the EP submesh coordinate (the index of this rank
+        within its 8-rank EP group).
+        """
+        import socket
+
+        mesh = self.strategy.device_mesh
+        dim_names = list(mesh.mesh_dim_names)
+        shape = tuple(mesh.shape)
+        coord = list(mesh.get_coordinate())
+        ep_dim = dim_names.index("ep") if "ep" in dim_names else None
+        # The EP-group identity = the coord with the ep dim removed (all ranks sharing
+        # this tuple form one 8-way EP group). The ep coord = position within the group.
+        group_key = tuple(c for i, c in enumerate(coord) if i != ep_dim)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "host": socket.gethostname(),
+            "mesh_dim_names": dim_names,
+            "mesh_shape": shape,
+            "coord": coord,
+            "ep_dim": ep_dim,
+            "ep_coord": (coord[ep_dim] if ep_dim is not None else None),
+            "ep_group_key": group_key,
+        }
+
+    def diag_ep8_disk_ref_compare(self, model_path, layer_idx=0, n_rep_gather=2):
+        """TEST-ONLY (EP=8 cross-node, NON-CIRCULAR weight-equality assert).
+
+        Captures the value-corruption signature of the FSDP->vLLM MoE weight gather
+        WITHOUT any inference engine, rollout, or engine-readback. For ``layer_idx``'s
+        grouped expert stacks (w1/w2/w3) this rank:
+
+          1. ON-GPU: runs the REAL ``self._gather_tensor`` (= ``gather_dtensor_strided_safe``
+             over the ``(_StridedShard(fsdp), Shard(ep))`` composite) ``n_rep_gather``
+             times, keeping every result on the CUDA device (NO ``.cpu().float()``
+             round-trip, which would hide a W3 stream race).
+          2. REFERENCE (non-circular): rank 0 loads the BASE model's per-expert
+             weights independently from the on-disk HF checkpoint shards via
+             ``safetensors.safe_open`` — a path that NEVER touches the EP gather.
+          3. DIFFS each gathered expert row j vs the disk reference row j on GPU:
+             max_abs, a cross-expert nearest-match (find disk m with gathered[j]==ref[m],
+             m!=j => W1 swap), a prefix-block Δ test (rows off by a fixed shift => W2),
+             gather-repeat determinism (gather1 vs gather2 => W3), and a dtype/byte check (W4).
+
+        Collective contract: ``_gather_tensor`` is an all_gather over the (fsdp,ep)
+        submesh, so EVERY rank must call it in the SAME order. All ranks gather; only
+        rank 0 loads the disk reference + emits the signature (returns {} elsewhere).
+        """
+        import hashlib
+        import json
+        import os
+        import socket
+
+        rank = int(torch.distributed.get_rank())
+        host = socket.gethostname()
+
+        # --- locate THIS layer's grouped expert DTensor params (shim layout) ---
+        # Keys look like ``...layers.{i}.mlp.moe.experts.w1`` (GroupedMoEShim) possibly
+        # with an ``_fsdp_wrapped_module`` segment. Match by suffix on the stripped name.
+        named = dict(self.model.model.named_parameters())
+
+        def _strip(n):
+            return n.replace("._fsdp_wrapped_module.", ".").replace(".mlp.moe.", ".mlp.")
+
+        want_suffix = {
+            "w1": f".layers.{layer_idx}.mlp.experts.w1",
+            "w3": f".layers.{layer_idx}.mlp.experts.w3",
+            "w2": f".layers.{layer_idx}.mlp.experts.w2",
+        }
+        found = {}
+        for n, p in named.items():
+            sn = _strip(n)
+            for tag, suf in want_suffix.items():
+                if sn.endswith(suf):
+                    found[tag] = p
+        # ---- ON-GPU gather, repeated, kept on device ----
+        # ``_gather_tensor`` (= gather_dtensor_strided_safe) lives on the weight
+        # EXTRACTOR, not the worker — it is the EXACT gather the broadcast path uses.
+        gather_fn = self.weight_extractor._gather_tensor
+        gathered = {tag: [] for tag in found}  # tag -> list of n_rep CUDA tensors
+        placements_info = {}
+        for rep in range(n_rep_gather):
+            # Deterministic, all-ranks-identical iteration order over w1,w2,w3.
+            for tag in ("w1", "w2", "w3"):
+                if tag not in found:
+                    continue
+                p = found[tag]
+                if rep == 0 and isinstance(p, DTensor):
+                    placements_info[tag] = (str(p.placements), tuple(p.shape), str(p.dtype))
+                g = gather_fn(p)  # ON-GPU gather (gather_dtensor_strided_safe)
+                gathered[tag].append(g)  # keep on CUDA
+
+        if rank != 0:
+            # free + return (non-rank-0 still had to drive the collectives above)
+            return {}
+
+        # ---------------- rank 0: disk reference + signature ----------------
+        out = {"rank": rank, "host": host, "layer": layer_idx,
+               "placements": placements_info, "n_rep_gather": n_rep_gather,
+               "lines": [], "verdict": None, "wrong_expert_map": {}}
+
+        # Resolve the on-disk HF checkpoint shards (local cache or download).
+        from huggingface_hub import snapshot_download
+        from safetensors import safe_open
+
+        local_dir = model_path
+        if not (os.path.isdir(model_path) and os.path.exists(os.path.join(model_path, "config.json"))):
+            local_dir = snapshot_download(
+                model_path,
+                allow_patterns=["*.safetensors", "*.json"],
+            )
+
+        # Build name -> shard-file index.
+        idx_path = os.path.join(local_dir, "model.safetensors.index.json")
+        if os.path.exists(idx_path):
+            with open(idx_path) as f:
+                weight_map = json.load(f)["weight_map"]
+        else:
+            # single-shard model
+            single = os.path.join(local_dir, "model.safetensors")
+            weight_map = None
+            single_file = single
+
+        proj_for = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}
+
+        def _load_disk_expert(tag, j):
+            """Load base disk weight for expert j of this layer/tag as a CUDA tensor."""
+            key = f"model.layers.{layer_idx}.mlp.experts.{j}.{proj_for[tag]}.weight"
+            if weight_map is not None:
+                shard = os.path.join(local_dir, weight_map[key])
+            else:
+                shard = single_file
+            with safe_open(shard, framework="pt", device="cpu") as fp:
+                t = fp.get_tensor(key)
+            return t.to(gathered[tag][0].device)
+
+        def _row_hash(t):
+            return hashlib.md5(t.detach().to(torch.float32).cpu().contiguous().numpy().tobytes()).hexdigest()[:12]
+
+        n_experts = gathered["w1"][0].shape[0] if "w1" in gathered else 0
+        out["num_experts"] = n_experts
+
+        # Pre-load ALL disk gate_proj rows once (for the cross-expert nearest-match on w1).
+        disk_w1_rows = None
+        EPS = 1e-6  # bf16 round-trip epsilon; gathered base == disk base should be exact-ish
+
+        for tag in ("w1", "w2", "w3"):
+            if tag not in gathered:
+                continue
+            g0 = gathered[tag][0]
+            g1 = gathered[tag][min(1, len(gathered[tag]) - 1)]
+            # --- W3: gather determinism (gather0 vs gather1) ---
+            det_max = float((g0.float() - g1.float()).abs().max().item())
+            out["lines"].append(
+                f"[L{layer_idx}.{tag}] shape={tuple(g0.shape)} dtype={g0.dtype} "
+                f"gather-repeat max_abs(g0-g1)={det_max:.3e} "
+                f"({'NON-DETERMINISTIC=>W3' if det_max > EPS else 'deterministic'})"
+            )
+            if tag == "w1":
+                disk_w1_rows = [_load_disk_expert("w1", j).float() for j in range(n_experts)]
+
+            n_corrupt = 0
+            worst = (None, -1.0)
+            for j in range(n_experts):
+                gj = g0[j].float()
+                ref = _load_disk_expert(tag, j).float()
+                if tuple(gj.shape) != tuple(ref.shape):
+                    out["lines"].append(f"    {tag}[{j}] SHAPE_MISMATCH g={tuple(gj.shape)} ref={tuple(ref.shape)}")
+                    n_corrupt += 1
+                    continue
+                ma = float((gj - ref).abs().max().item())
+                if ma > worst[1]:
+                    worst = (j, ma)
+                if ma <= EPS:
+                    continue
+                n_corrupt += 1
+                extra = ""
+                # --- W1: cross-expert nearest-match (does gathered[j] == disk[m], m!=j?) ---
+                if tag == "w1" and disk_w1_rows is not None:
+                    best_m, best_e = None, float("inf")
+                    for m in range(n_experts):
+                        e = float((disk_w1_rows[m] - gj).abs().max().item())
+                        if e < best_e:
+                            best_e, best_m = e, m
+                    if best_m is not None and best_m != j and best_e <= EPS:
+                        extra += f"  WRONG_EXPERT(carries disk expert {best_m})"
+                        out["wrong_expert_map"][j] = best_m
+                    elif best_m is not None:
+                        extra += f"  closest_disk_expert={best_m}@{best_e:.2e}"
+                # --- W2: prefix-block Δ (is gathered row j == disk row j+Δ for a fixed Δ?) ---
+                gh, rh = _row_hash(gj), _row_hash(ref)
+                extra += f"  ghash={gh} refhash={rh}"
+                out["lines"].append(f"    {tag}[{j}] max_abs={ma:.3e}{extra}")
+            out["lines"].append(
+                f"[L{layer_idx}.{tag}] CORRUPT {n_corrupt}/{n_experts}  worst=expert{worst[0]}@{worst[1]:.3e}"
+            )
+
+        # --- W2 contiguous-shift detector: if wrong_expert_map is a constant offset Δ ---
+        if out["wrong_expert_map"]:
+            deltas = {(m - j) % n_experts for j, m in out["wrong_expert_map"].items()}
+            if len(deltas) == 1:
+                d = next(iter(deltas))
+                out["lines"].append(f"[L{layer_idx}] CONSTANT row shift Δ={d} across ALL wrong experts => W2-style block shift")
+            else:
+                out["lines"].append(f"[L{layer_idx}] wrong-expert offsets are NON-uniform (deltas={sorted(deltas)}) => W1 strided permutation")
+
+        # Verdict
+        any_corrupt = any("CORRUPT" in l and not l.endswith("0/" + str(n_experts)) for l in out["lines"])
+        total_corrupt = sum(1 for l in out["lines"] if l.strip().startswith(("w1[", "w2[", "w3[")))
+        out["total_corrupt_rows"] = total_corrupt
+        out["verdict"] = ("CLEAN (gathered==disk at EP=8 on-GPU => corruption is DOWNSTREAM: "
+                          "NCCL broadcast or vLLM load_weights)") if total_corrupt == 0 else (
+                          f"CORRUPT ({total_corrupt} expert rows differ from disk reference at EP=8 cross-node)")
+        return out
+
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
@@ -504,10 +724,29 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         _fuse_weights = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
 
+        # #1685 fix (FlashInfer-CUTLASS w13 swap skipped on RL update -> MoE token-salad):
+        # bracket the WHOLE multi-chunk sync with vLLM's layerwise reload so per-chunk
+        # model.load_weights DEFER processing and a single finalize re-runs
+        # process_weights_after_loading (re-applying swap_w13_to_w31) EXACTLY once. PROVEN
+        # by the disagg kernel-format diag: without this the engine holds checkpoint
+        # [gate;up] while the FlashInfer CUTLASS kernel reads [up;gate]. Inert (swap-wise)
+        # on triton/dense backends, so byte-identical there. Gated by env for safety.
+        _w13_bracket = (
+            not self.use_cuda_ipc
+            and not _fuse_weights
+            and os.environ.get("SKYRL_W13_RELOAD_BRACKET", "1") == "1"
+        )
+
         if not self.use_cuda_ipc:
             # Signal engines to start accumulating weights (for FP8 batched quantization)
             if _fuse_weights and torch.distributed.get_rank() == 0:
                 await inference_engine_client.begin_weight_update()
+
+            # Open the layerwise-reload bracket (rank 0 drives the engine RPC).
+            if _w13_bracket and torch.distributed.get_rank() == 0:
+                await inference_engine_client.begin_weight_reload()
+            if _w13_bracket:
+                torch.distributed.barrier()
 
             # Broadcast path: one chunk per parameter
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
@@ -541,6 +780,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # Flush accumulated weights (triggers FP8 quantization on receiver)
             if _fuse_weights and torch.distributed.get_rank() == 0:
                 await inference_engine_client.end_weight_update()
+
+            # Close the layerwise-reload bracket: finalize_layerwise_reload re-runs
+            # process_weights_after_loading over every layer ONCE -> re-applies the
+            # FlashInfer-CUTLASS w13 [gate;up]->[up;gate] swap the per-chunk loads skipped.
+            if _w13_bracket:
+                torch.distributed.barrier()
+                if torch.distributed.get_rank() == 0:
+                    await inference_engine_client.finish_weight_reload()
         else:
             # CUDA IPC path: batched chunks (batching handled by extractor)
             from torch.multiprocessing.reductions import reduce_tensor

@@ -658,6 +658,16 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
+    async def begin_weight_reload(self):
+        """#1685 fix: open the layerwise-reload bracket on all engines so a multi-chunk
+        RL weight sync defers per-layer processing; finish_weight_reload() then re-runs
+        process_weights_after_loading (re-applying the FlashInfer-CUTLASS w13 swap) once."""
+        return await self._run_on_all_engines("begin_weight_reload")
+
+    async def finish_weight_reload(self):
+        """#1685 fix: close the layerwise-reload bracket on all engines."""
+        return await self._run_on_all_engines("finish_weight_reload")
+
     async def reset_prefix_cache(self):
         return await self._run_on_all_engines("reset_prefix_cache")
 
