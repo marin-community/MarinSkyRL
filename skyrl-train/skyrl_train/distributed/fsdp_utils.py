@@ -949,6 +949,121 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
     return device_mesh
 
 
+@torch.no_grad()
+def gather_dtensor_strided_safe(dt) -> torch.Tensor:
+    """Gather an EP+FSDP-composed expert DTensor to a full (replicated) tensor in
+    GLOBAL order, WITHOUT torch's ``full_tensor()`` / redistribute.
+
+    WHY THIS EXISTS (the r2–r7 MoE weight-sync corruption root cause).
+    ``apply_ep`` composes the grouped-expert dim as
+    ``(_StridedShard(dim=0, sf=fsdp_size) [fsdp], Shard(dim=0) [ep])`` on torch
+    2.11. The FSDP→vLLM weight sync gathered it via ``DTensor.full_tensor()``,
+    which redistributes to ``Replicate`` through torch's transform planner. On
+    torch 2.11 ``_StridedShard.is_shard()`` returns ``False`` (it is no longer a
+    ``Shard`` subclass — the SAME quirk fixed for the streamed *loader* in
+    commit 5d7fc13), so the gather takes a non-ascending, multi-step all_gather
+    path. The live r7 job (``rl-131k-cpdcp2r3-think2507-r7``) logged torch's own
+    warning during ``sync_weights_to_inference_engines``::
+
+        While redistributing from (_StridedShard(dim=0, sf=8), Shard(dim=0)) to
+        (Replicate(), Replicate()), 2 sequential all_gather operations will be
+        performed. ... may give inconsistent results between ranks due to
+        different reduction orders. it is not possible to merge non-ascending
+        order all_gather operations.
+
+    i.e. the expert ROWS are reassembled in the WRONG global order — a silent,
+    shape-preserving, key-preserving corruption (no missing/unexpected key, no
+    shape mismatch) that vLLM's FusedMoE then loads as scrambled experts →
+    incoherent token-salad → 100% reward-0. It reproduces on every EP MoE arch
+    because the fault is in the generic EP-sharded expert *ordering*, not the
+    arch.
+
+    THE FIX. Reconstruct the full tensor using ONLY each placement's own
+    ``_split_tensor`` (the TYPE-dispatched primitive the streamed loader already
+    trusts — it honors ``_StridedShard``'s strided interleave) plus a plain
+    ``all_gather``. We tag each row of the sharded dim with its GLOBAL row id,
+    replay the exact per-mesh-dim split this rank's coordinate underwent to learn
+    which global rows the local shard carries, all_gather every rank's
+    (shard, rowids), and scatter each row to its global position. This never
+    touches torch's ``is_shard()``-gated / non-ascending redistribute planner, so
+    it is correct and deterministic across torch versions.
+
+    For a DTensor with NO ``_StridedShard`` placement (the a3 / non-EP and plain
+    1-D-Shard paths) this returns ``dt.full_tensor()`` unchanged — byte-identical
+    to before, so the non-EP path is untouched.
+    """
+    from torch.distributed.tensor import DTensor
+    from torch.distributed.tensor.placement_types import Shard, _StridedShard
+
+    if not isinstance(dt, DTensor):
+        return dt
+    placements = dt.placements
+    # No strided composition ⇒ torch's full_tensor() is correct (and is what the
+    # a3 / non-EP / plain-Shard paths use). Leave them byte-identical.
+    if not any(isinstance(p, _StridedShard) for p in placements):
+        return dt.full_tensor()
+
+    mesh = dt.device_mesh
+    sdim = next((p.dim for p in placements if isinstance(p, (Shard, _StridedShard))), None)
+    assert sdim is not None, f"strided DTensor with no shard dim: placements={placements}"
+
+    full_shape = list(dt.shape)
+    n = full_shape[sdim]
+    dtype = dt.dtype
+
+    # Replay distribute_tensor's split with each placement's OWN _split_tensor to
+    # discover which GLOBAL rows (along sdim) this rank's local shard holds. Tag
+    # rows with their global id, split identically, read back the surviving ids.
+    shp = [1] * dt.dim()
+    shp[sdim] = n
+    rowids = torch.arange(n).view(shp).expand(full_shape).contiguous()
+    coord = mesh.get_coordinate()
+    cur = rowids
+    for mesh_dim, p in enumerate(placements):
+        if isinstance(p, (Shard, _StridedShard)):
+            shards, _ = p._split_tensor(cur, mesh.size(mesh_dim), with_padding=False, contiguous=True)
+            cur = shards[coord[mesh_dim]]
+    perm = [sdim] + [d for d in range(cur.dim()) if d != sdim]
+    my_rows = cur.permute(*perm).reshape(cur.shape[sdim], -1)[:, 0].tolist()
+
+    local = dt.to_local().detach().contiguous()
+    # FSDP2 may even-pad the local shard along sdim; keep only the rows we own.
+    local = local.narrow(sdim, 0, len(my_rows)).contiguous()
+
+    world = dist.get_world_size()
+    # all_gather needs equal shapes ⇒ pad each rank's shard to the global max rows
+    # and tag padding rows with id -1 so they are ignored on reassembly.
+    cnt = torch.tensor([len(my_rows)], dtype=torch.int64, device=local.device)
+    cnts = [torch.zeros_like(cnt) for _ in range(world)]
+    dist.all_gather(cnts, cnt)
+    max_rows = int(max(c.item() for c in cnts))
+    pad = max_rows - len(my_rows)
+    if pad:
+        pad_shape = list(local.shape)
+        pad_shape[sdim] = pad
+        local = torch.cat([local, torch.zeros(pad_shape, dtype=dtype, device=local.device)], dim=sdim)
+    rows_t = torch.tensor(my_rows + [-1] * pad, dtype=torch.int64, device=local.device)
+
+    gathered_t = [torch.empty_like(local) for _ in range(world)]
+    gathered_r = [torch.empty_like(rows_t) for _ in range(world)]
+    dist.all_gather(gathered_t, local)
+    dist.all_gather(gathered_r, rows_t)
+
+    full = torch.empty(full_shape, dtype=dtype, device=local.device)
+    seen = set()
+    for t, rr in zip(gathered_t, gathered_r):
+        for k, r in enumerate(rr.tolist()):
+            if r < 0 or r in seen:
+                continue
+            seen.add(r)
+            full.select(sdim, r).copy_(t.select(sdim, k))
+    assert len(seen) == n, (
+        f"gather_dtensor_strided_safe: assembled {len(seen)}/{n} expert rows "
+        f"(placements={placements}); missing rows ⇒ shard/rowid map gap."
+    )
+    return full
+
+
 def get_sharding_strategy(device_mesh):
     from torch.distributed.fsdp import ShardingStrategy
 

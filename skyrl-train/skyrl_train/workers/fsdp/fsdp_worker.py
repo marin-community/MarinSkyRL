@@ -150,9 +150,23 @@ class FSDPWeightExtractor(WeightExtractor):
                 yield chunk
 
     def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
-        """Gather sharded tensor into full tensor."""
+        """Gather sharded tensor into full tensor.
+
+        For EP+FSDP-composed grouped-expert params (placement
+        ``(_StridedShard(fsdp), Shard(ep))``) ``full_tensor()`` reassembles the
+        expert ROWS in the WRONG global order on torch 2.11 (the
+        ``_StridedShard.is_shard()==False`` / non-ascending-all_gather quirk that
+        silently corrupted the r2–r7 MoE weight sync). ``gather_dtensor_strided_safe``
+        gathers via each placement's own ``_split_tensor`` instead, so the global
+        expert order is correct and version-independent. It is byte-identical to
+        ``full_tensor()`` for every non-strided (a3 / non-EP / plain-Shard) param.
+        """
+        from skyrl_train.distributed.fsdp_utils import gather_dtensor_strided_safe
+
         device = torch.cuda.current_device()
-        return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+        if not isinstance(param, DTensor):
+            return param
+        return gather_dtensor_strided_safe(param.to(device, non_blocking=True))
 
     def _extract_weights_streamed(self, params, dtype: torch.dtype):
         """Streamed grouped-MoE weight extraction (Stage 7 / 80B OOM fix).
