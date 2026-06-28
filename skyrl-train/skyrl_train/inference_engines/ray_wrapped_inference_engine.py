@@ -43,6 +43,10 @@ _NCCL_FR_ENV_PASSTHROUGH = (
     "TORCH_NCCL_DUMP_ON_TIMEOUT",
     "TORCH_NCCL_TRACE_CPP_STACK",
     "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
+    # torch 2.9+ canonical FR dump-path cvar (deprecation-renamed from
+    # TORCH_NCCL_DEBUG_INFO_TEMP_FILE); forward it too so the engine TP workers
+    # write their flight-recorder pickle to the same in-pod /tmp dir as the policy.
+    "TORCH_FR_DUMP_TEMP_FILE",
     "TORCH_NCCL_DEBUG_INFO_PIPE_FILE",
     "TORCH_FR_BUFFER_SIZE",
     "TORCH_NCCL_TRACE_BUFFER_SIZE",

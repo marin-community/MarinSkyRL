@@ -1107,7 +1107,25 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
     env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
     env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = "/e/data1/datasets/playground/ot-baf/nccl_trace/673_relaunch_rank"
+    # Flight-recorder dump-on-timeout target. This MUST resolve to a path that is
+    # WRITABLE inside the worker process (per-pod on CoreWeave; per-node scratch on
+    # Jupiter). It was previously a hardcoded Jupiter ABSOLUTE path
+    # (/e/data1/.../nccl_trace/673_relaunch_rank), which on the CoreWeave pods does
+    # NOT exist -> FlightRecorder.cpp:21 "Error opening file for writing Flight
+    # Recorder debug info" on EVERY rank => the next-repro pickle was never written
+    # (2026-06-28 MoE NCCL hang: both arms wedged, zero FR dump). Now derive it from
+    # the launcher/yaml env (the iris configs set TORCH_NCCL_DEBUG_INFO_TEMP_FILE /
+    # TORCH_FR_DUMP_TEMP_FILE in extra_env) and DEFAULT to an in-pod /tmp dir that is
+    # writable everywhere. torch 2.9 renamed the cvar TORCH_NCCL_DEBUG_INFO_TEMP_FILE
+    # -> TORCH_FR_DUMP_TEMP_FILE (old name deprecated-but-honored); set BOTH so the
+    # dump lands regardless of the torch version baked in the image.
+    _fr_dump_path = (
+        os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
+        or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
+        or "/tmp/nccl_fr_rank"
+    )
+    env_vars["TORCH_FR_DUMP_TEMP_FILE"] = _fr_dump_path
+    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = _fr_dump_path
     # Finite NCCL collective timeout (20 min). Read by
     # skyrl_train.utils.constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
     # torch.distributed.init_process_group(timeout=...) in worker.py; the EP /
