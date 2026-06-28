@@ -525,6 +525,43 @@ class Worker(DistributedTorchRayActor):
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
         """
+        # FSDP-FORWARD UNSHARD FENCE (default ON -> tensor-value-neutral).
+        #
+        # The per-micro-batch loop below issues FSDP2 parameter-unshard all-gathers
+        # over the `mesh_fsdp` shard group with NO collective fence at forward entry
+        # or exit (`_forward_micro_batch` -> `model_wrapper.forward` -> FSDP2
+        # `_pre_forward` unshard). FSDP's unshard is collective over the FSDP shard
+        # group, so EVERY FSDP-group rank must reach the SAME unshard `collective_seq_id`
+        # in lockstep. The per-rank micro-batch COUNT is already identical (the
+        # MeshDispatch split gives equal-sized shards: `len(data) % dp_size == 0` and
+        # group_size is a multiple of dp_size), so the count is NOT the divergence.
+        # The hazard is an UPSTREAM mesh_fsdp `collective_seq_id` SKEW carried into the
+        # forward: the preceding `sync_weights` gather (`broadcast_to_inference_engines`
+        # -> `gather_dtensor_strided_safe` -> `full_tensor()`) issues mesh_fsdp
+        # sub-mesh all-gathers INTERLEAVED with global-default-PG expert all-gathers
+        # and (rank 0 only) the long nranks=N+1 weight Broadcast, with the only barrier
+        # per-yielded-chunk on the DEFAULT PG -- which does NOT order the mesh_fsdp
+        # sub-comm. If any rank's mesh_fsdp seq counter ends up +/-1 vs the group after
+        # that mixed-PG phase, THIS forward's first unshard lands at a different seq on
+        # that rank and the FSDP all-gather desyncs -> the captured CoreWeave MoE hang
+        # (rank 0 alone in `_all_gather_base` seq 614 on mesh_fsdp [0,8,16,24], ranks
+        # 8/16/24 idle; 2026-06-28 FR `rl-q36-35b-w13fix6`). A single CPU/stream barrier
+        # at forward entry re-establishes lockstep entry regardless of any upstream
+        # seq skew. It changes NO tensor values -> correctness/loss-neutral, and is a
+        # strict no-op for single-rank / uninitialized runs. Env-gated for A/B isolation.
+        if (
+            os.environ.get("SKYRL_FWD_UNSHARD_FENCE", "1") == "1"
+            and self._world_size > 1
+            and torch.distributed.is_initialized()
+        ):
+            # cuda sync first so all PRIOR (weight-sync) mesh_fsdp/default-PG NCCL work
+            # is fully drained on THIS rank before the barrier; then the barrier blocks
+            # forward entry until every rank has likewise drained -> no in-flight
+            # upstream collective can still be racing the forward unshard. (A bare
+            # host-side barrier alone would not order the async NCCL streams.)
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
+
         # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
         micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
