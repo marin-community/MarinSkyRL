@@ -166,7 +166,39 @@ class FSDPWeightExtractor(WeightExtractor):
         device = torch.cuda.current_device()
         if not isinstance(param, DTensor):
             return param
-        return gather_dtensor_strided_safe(param.to(device, non_blocking=True))
+        out = gather_dtensor_strided_safe(param.to(device, non_blocking=True))
+
+        # MIXED-PG WEIGHT-SYNC SERIALIZATION (default OFF -> byte-identical).
+        #
+        # The weight-sync gather sequence interleaves collectives on DIFFERENT
+        # process groups WITHOUT a barrier between them: strided grouped-expert
+        # params (experts.w1/w2/w3) gather via ``dist.all_gather`` on the GLOBAL
+        # default PG (gather_dtensor_strided_safe), while plain-Shard non-expert
+        # params (attn / norm / router.gate / shared_expert) gather via
+        # ``full_tensor()`` on a CP/FSDP SUB-MESH sub-communicator. In the streamed
+        # MoE path these are issued back-to-back inside one layer's gather batch
+        # (_extract_weights_streamed), and on rank 0 the long nranks=N+1 weight
+        # Broadcast to the inference engines is additionally interleaved between
+        # yields. The only barrier in the broadcast loop is per-YIELDED-CHUNK on the
+        # default PG -- it does NOT sit between the intra-layer sub-mesh gathers and
+        # does NOT order NCCL ops across communicators. That mixed-PG overlap is the
+        # CoreWeave MoE weight-sync NCCL deadlock (2026-06-28: both arms wedged on a
+        # mesh_fsdp sub-comm full_tensor() AllGather while default_pg was drained).
+        #
+        # When SKYRL_WEIGHT_SYNC_SERIALIZE=1, fully drain + barrier after EVERY
+        # gather so no two different-group collectives can overlap: stream-complete
+        # this gather on all ranks, then meet at a default-PG barrier before the next
+        # gather (or the rank-0 broadcast) is issued. Pure ordering hardening -- it
+        # changes NO tensor values, so it is correctness/w13-neutral and cannot
+        # re-introduce the 80B materialize-all OOM (still one layer at a time). OFF by
+        # default => the existing a3 / dense / 80B paths are byte-identical.
+        import os
+
+        if os.environ.get("SKYRL_WEIGHT_SYNC_SERIALIZE", "0") == "1":
+            torch.cuda.synchronize()
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+        return out
 
     def _extract_weights_streamed(self, params, dtype: torch.dtype):
         """Streamed grouped-MoE weight extraction (Stage 7 / 80B OOM fix).
