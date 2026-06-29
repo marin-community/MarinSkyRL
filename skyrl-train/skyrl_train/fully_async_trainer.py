@@ -913,6 +913,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
+        # Drain the policy workers' event loops to a hard sync point IMMEDIATELY
+        # before dispatching this step's forward (the MoE-RL async-dispatch wedge
+        # fix, step-1 completion 2026-06-29). The existing post-weight-sync drains
+        # (_train_loop L603 after the INITIAL sync, L739 after each per-step sync)
+        # leave a hazard at STEP 1 specifically: the L603 drain fires at job start,
+        # then `wait_for_generation_buffer` blocks for HOURS (the fully-async rollout
+        # fill — 8813s / 2.45h on rl-131k-30b-drainfix) before this first forward is
+        # dispatched. By then the L603 barrier is stale: the policy async actors'
+        # single event-loop thread has serviced other dispatched coroutines in the
+        # interim, so when the SYNC `forward.remote()` finally arrives only rank 0's
+        # loop is free and runs it (into a lonely mesh_fsdp param-unshard all-gather
+        # — FR-proven: ONLY rank 0 logged WORKER_FORWARD_ENTER at step 1, ranks
+        # 8/16/24 never scheduled their `forward` task → the embed-unshard
+        # `_all_gather_base` on mesh_fsdp deadlocks, NCCL watchdog aborts at 1800s,
+        # global_step never reaches 1). The L739 drain already makes this barrier
+        # ADJACENT to the forward for steps 2+, which is why only step 1 wedged;
+        # doing it here makes the drain adjacent for EVERY step (step 1 included)
+        # regardless of how stale the preceding post-weight-sync drain is. Symmetric
+        # on every rank, changes no tensor values (correctness-neutral), strict no-op
+        # for single-rank / uninitialized runs. Idempotent with the L739 drain (a
+        # second pass-through barrier on an already-free loop is a cheap no-op).
+        await self._drain_policy_event_loops()
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
