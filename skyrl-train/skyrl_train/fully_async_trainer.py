@@ -597,6 +597,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines"):
             await self.async_sync_policy_weights_to_inference_engines()
+            # Drain the policy workers' event loops to a hard sync point so every FSDP
+            # shard rank is free before the step-1 forward is dispatched (the MoE-RL
+            # async-dispatch wedge fix). See _drain_policy_event_loops.
+            await self._drain_policy_event_loops()
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch
@@ -728,6 +732,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     with Timer("sync_weights", self.all_timings):
                         await self.inference_engine_client.pause_generation()
                         await self.async_sync_policy_weights_to_inference_engines()
+                        # Drain the policy workers' event loops to a hard sync point so
+                        # every FSDP shard rank is free before the NEXT step's forward is
+                        # dispatched (the MoE-RL async-dispatch wedge fix). See
+                        # _drain_policy_event_loops.
+                        await self._drain_policy_event_loops()
                         await self.inference_engine_client.resume_generation()
 
                 # 5. Log status and update metrics
@@ -1043,6 +1052,30 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return await self.policy_model.async_run_method(
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
         )
+
+    async def _drain_policy_event_loops(self):
+        """Drain barrier after weight-sync (the MoE-RL async-dispatch fix, 2026-06-29).
+
+        FR-decode proved the CoreWeave MoE-RL wedge: the FSDP policy worker is a Ray
+        ASYNC actor (single event-loop thread, because it has `async def` methods like
+        `broadcast_to_inference_engines`). `forward` is a plain SYNC method. After the
+        initial / per-step disaggregated weight-sync, the peers' event loops had not yet
+        fully unwound the weight-sync coroutine when the driver dispatched the step-1
+        `forward` -> only rank 0's loop was free and ran the forward (into a lonely
+        barrier -> 1200s NCCL watchdog); ranks 8/16/24's queued `forward` task was never
+        scheduled. We caller-`await` `async_sync_...` to completion FIRST (so every peer
+        coroutine has returned), then dispatch this trivial SYNC `barrier_all` to ALL
+        actors (`pass_through`) and block (await its refs) until every rank reaches it.
+        This guarantees each policy shard rank's event loop is at a known sync point and
+        FREE before the next `forward.remote()` arrives, so the forward can be scheduled
+        on every peer. Symmetric / correctness-neutral / no-op for single-rank runs.
+
+        We `await asyncio.gather(*refs)` rather than a blocking `ray.get` so we don't
+        stall the async trainer's event loop thread; the driver coroutine still does not
+        advance to the forward dispatch until every rank's barrier has completed.
+        """
+        refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
+        await asyncio.gather(*refs)
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]

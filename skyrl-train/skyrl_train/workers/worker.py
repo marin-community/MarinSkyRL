@@ -525,7 +525,14 @@ class Worker(DistributedTorchRayActor):
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
         """
-        # FSDP-FORWARD UNSHARD FENCE (default ON -> tensor-value-neutral).
+        # WORKER_FORWARD_ENTER instrument (diagnosis-confirmation for the async-dispatch
+        # drain fix). The MoE-RL wedge stranded every NON-rank-0 policy shard's `forward`
+        # task behind the prior weight-sync coroutine on the async actor's single event
+        # loop (FR-proven 2026-06-29): pre-fix ONLY rank 0 reached worker.forward at step 1
+        # (peers' tasks never scheduled). With the drain working, ALL FSDP shard ranks
+        # (e.g. 0/8/16/24) must print this. Cheap one-line INFO; keep it.
+        logger.info(f"WORKER_FORWARD_ENTER rank={self._rank}")
+        # FSDP-FORWARD UNSHARD FENCE (default OFF -> tensor-value-neutral when on).
         #
         # The per-micro-batch loop below issues FSDP2 parameter-unshard all-gathers
         # over the `mesh_fsdp` shard group with NO collective fence at forward entry
@@ -549,8 +556,16 @@ class Worker(DistributedTorchRayActor):
         # at forward entry re-establishes lockstep entry regardless of any upstream
         # seq skew. It changes NO tensor values -> correctness/loss-neutral, and is a
         # strict no-op for single-rank / uninitialized runs. Env-gated for A/B isolation.
+        # NOTE (2026-06-29): default flipped 1 -> 0. The forward-entry fence was
+        # DISPROVEN as the fix for the CoreWeave MoE-RL wedge: FR decode showed the
+        # divergence is UPSTREAM of every line of worker.forward (peers' `forward`
+        # task is never scheduled on the async actor's event loop, so they never reach
+        # this fence), and the a8446a87 fence merely RELOCATED rank 0's lonely hang into
+        # the barrier here. The real fix is the upstream `barrier_all` drain after each
+        # weight-sync (see fully_async_trainer). Keep the code (harmless when off / a
+        # symmetric A/B knob) but default it OFF so it adds no per-forward barrier.
         if (
-            os.environ.get("SKYRL_FWD_UNSHARD_FENCE", "1") == "1"
+            os.environ.get("SKYRL_FWD_UNSHARD_FENCE", "0") == "1"
             and self._world_size > 1
             and torch.distributed.is_initialized()
         ):
@@ -573,6 +588,25 @@ class Worker(DistributedTorchRayActor):
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
         return output
+
+    def barrier_all(self) -> None:
+        """Trivial SYNC pass-through drain barrier (the MoE-RL async-dispatch fix).
+
+        Dispatched by the async trainer (`pass_through`) AFTER each weight-sync
+        (`broadcast_to_inference_engines`) RETURNS and BEFORE the next forward is
+        dispatched. The driver `await`s the weight-sync to completion first, so by the
+        time this runs every peer's event loop has unwound the (async) weight-sync
+        coroutine; running this SYNC method here forces every rank's loop to reach a
+        known sync point, so the loop is FREE when `forward.remote()` later arrives and
+        the inbound sync `forward` task can no longer be head-of-line-blocked behind a
+        lingering weight-sync coroutine (the FR-proven 2026-06-29 stranding).
+
+        Symmetric on every rank -> cannot itself strand; changes no tensor values
+        (correctness-neutral); strict no-op for single-rank / uninitialized runs.
+        """
+        if self._world_size > 1 and torch.distributed.is_initialized():
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()
