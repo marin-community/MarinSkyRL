@@ -220,27 +220,7 @@ def convert_prompts_responses_to_batch_tensors(
             elif pad_n < 0:
                 normalized = normalized[:max_output_len]
             padded_re.append(normalized)
-        # Width-minimize the expert-id tensor (the R3 by-value forward-arg spill
-        # fix, part 1). This tensor is [B, response_len, L, K] (48*8=384 ids/token
-        # at Qwen3-Coder-30B-A3B) and at 131k it is multiple GB at int64 — the bulk
-        # that, shipped by-value through every per-forward Ray task arg, spilled the
-        # object store and wedged the 32-rank forward. Expert ids are small
-        # non-negative ints, so pick the NARROWEST integer dtype that fits the
-        # actual max id present (NOT hardcoded: Qwen3-Coder has 128 experts -> uint8
-        # (max id 127 <= 255), but Qwen3-Next has 512 -> falls to int16). The
-        # sentinel id (0) and every real id fit by construction. The training-side consumer upcasts back to
-        # int64 (`model_wrapper._build_router_replay_targets`: `.to(dtype=torch.long)`),
-        # so this is downstream-transparent — a pure transport-size optimization.
         routed_experts_tensor = torch.tensor(padded_re, dtype=torch.long)
-        _max_expert_id = int(routed_experts_tensor.max().item()) if routed_experts_tensor.numel() else 0
-        if _max_expert_id <= torch.iinfo(torch.uint8).max:
-            routed_experts_tensor = routed_experts_tensor.to(torch.uint8)
-        elif _max_expert_id <= torch.iinfo(torch.int16).max:
-            # No torch.uint16 storage support across the saved/pinned/transport path;
-            # int16 holds expert ids up to 32767 (covers Qwen3-Next's 512) and the
-            # consumer upcasts to int64 regardless.
-            routed_experts_tensor = routed_experts_tensor.to(torch.int16)
-        # else: leave int64 (defensive; no shipped MoE model exceeds int16 range).
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
     # shaping channel and span tags on the response axis exactly like rewards /
