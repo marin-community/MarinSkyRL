@@ -532,6 +532,19 @@ class Worker(DistributedTorchRayActor):
         # (peers' tasks never scheduled). With the drain working, ALL FSDP shard ranks
         # (e.g. 0/8/16/24) must print this. Cheap one-line INFO; keep it.
         logger.info(f"WORKER_FORWARD_ENTER rank={self._rank}")
+        # R3 RESIDENT-SET per-rank marker (ungated). The by-value forward-arg spill
+        # fix ships `rollout_routed_experts` as a single ray.put ObjectRef shared
+        # across each dp-group (skyrl_train/distributed/dispatch.py) rather than
+        # re-serialized per actor. This line lets us SEE the resident R3 chunk land
+        # on EVERY rank (the A/B PASS criterion: all 32 ranks log R3_RESIDENT_SET +
+        # WORKER_FORWARD_ENTER + a completed step, no watchdog). nbytes==0 when R3 is
+        # off (8B / flag-off), so the marker is a strict no-op signal there.
+        if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
+            _r3 = data["rollout_routed_experts"]
+            logger.info(
+                f"R3_RESIDENT_SET rank={self._rank} nbytes={int(_r3.nbytes)} "
+                f"dtype={_r3.dtype} shape={tuple(_r3.shape)}"
+            )
         # FSDP-FORWARD UNSHARD FENCE (default OFF -> tensor-value-neutral when on).
         #
         # The per-micro-batch loop below issues FSDP2 parameter-unshard all-gathers

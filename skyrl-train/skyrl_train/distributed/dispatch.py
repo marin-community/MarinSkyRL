@@ -1,5 +1,6 @@
 """Defines dispatch and collect logic for distributed training"""
 
+import os
 from dataclasses import dataclass
 from ray.actor import ActorHandle
 from typing import List, Tuple, Optional, Dict, Type, Any
@@ -145,9 +146,59 @@ class MeshDispatch(Dispatch):
         # (the fix below addresses it). If only rank 0 appears here -> keying bug.
         log_dispatch = method == "forward"
         dispatched_ranks = [] if log_dispatch else None
+
+        # R3 by-value forward-arg spill fix (part 2 — the CORE fix). At 131k the
+        # per-dp chunk carries `rollout_routed_experts` ([B/dp, response_len, L, K])
+        # — multiple GB. With `dp_size` data-parallel groups each replicated across
+        # `world//dp_size` actors (here dp_size=2, 16 actors/group), the naive loop
+        # below calls `method.remote(data_chunks[dp])` once PER actor. Each call
+        # passes a FRESH Python object (`data_chunks[dp]` is the same object within
+        # a group, but `.remote()` re-considers each arg): Ray re-serializes /
+        # auto-`ray.put`s the multi-GB chunk PER actor, so a dp-group materializes
+        # ~16 redundant copies into the object store -> spill -> the peer dp-group's
+        # `forward` arg never materializes -> the FR-proven 32-rank forward wedge.
+        #
+        # Fix: `ray.put` each DISTINCT dp-chunk EXACTLY ONCE and pass the resulting
+        # ObjectRef to every actor in that dp-group. Ray dedups by ObjectRef
+        # identity — one store entry per dp-group, fetched once per node, NOT
+        # re-serialized per actor. Ray auto-derefs an ObjectRef positional arg, so
+        # the worker `forward(data)` / `ppo_train(data)` signature is UNCHANGED and
+        # the resident chunk is byte-identical to today's by-value chunk (same
+        # `data.chunk` rows) — so ALL existing row/dp/CP/micro-batch alignment is
+        # inherited unchanged (NO new slicing path; satisfies the #6335 guardrail).
+        # Gated by SKYRL_R3_RESIDENT (default ON); OFF == today's per-actor by-value
+        # dispatch, for A/B isolation.
+        # Only engage the resident-put when the batch actually carries the bulky R3
+        # tensor — so flag-off / 8B (no `rollout_routed_experts`) runs keep TODAY's
+        # exact per-actor by-value dispatch even with SKYRL_R3_RESIDENT=1, and the
+        # A/B flag isolates EXACTLY the R3-transport change. `data.chunk` replicates
+        # the key set to every chunk, so probing chunk 0 answers for all chunks.
+        resident = (
+            os.environ.get("SKYRL_R3_RESIDENT", "1") == "1"
+            and len(data_chunks) > 0
+            and "rollout_routed_experts" in data_chunks[0]
+        )
+        chunk_refs: List[Optional[ObjectRef]] = [None] * len(data_chunks)
         for actor_info in actor_infos:
             # index into tensordict to get the correct data to send
-            data_to_send = data_chunks[actor_info.rank.dp]
+            dp = actor_info.rank.dp
+            if resident:
+                # ray.put the dp-chunk ONCE; share the single ObjectRef across all
+                # actors in this dp-group (no per-actor re-serialization / spill).
+                if chunk_refs[dp] is None:
+                    chunk_refs[dp] = ray.put(data_chunks[dp])
+                    _r3 = data_chunks[dp]["rollout_routed_experts"]
+                    nbytes = int(_r3.nbytes) if _r3 is not None else 0
+                    # UNGATED per-dp-group marker so we can SEE the resident set
+                    # install (target: one line per dp-group, on every step) and
+                    # confirm the R3 bytes are put once, not per-actor.
+                    logger.info(
+                        f"R3_RESIDENT_SET method={method} dp={dp} nbytes={nbytes} "
+                        f"dtype={_r3.dtype if _r3 is not None else None}"
+                    )
+                data_to_send = chunk_refs[dp]
+            else:
+                data_to_send = data_chunks[dp]
             object_refs.append(getattr(actor_info.handle, method).remote(data_to_send))
             if log_dispatch:
                 r = actor_info.rank

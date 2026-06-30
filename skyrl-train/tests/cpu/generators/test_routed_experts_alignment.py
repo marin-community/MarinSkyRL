@@ -186,8 +186,17 @@ def test_packer_shape_and_right_pad(char_tokenizer):
     assert routed_experts_tensor.shape == (2, max_resp, L, K)
     # Invariant #2: routed_experts.shape[:2] == loss_masks.shape.
     assert tuple(routed_experts_tensor.shape[:2]) == tuple(ret_loss_masks.shape)
-    # int dtype (expert indices ≤ int range).
-    assert routed_experts_tensor.dtype == torch.long
+    # Width-minimized int dtype (R3 by-value spill fix): the tensor is narrowed to
+    # the smallest int dtype that fits the max expert id present — uint8 when all
+    # ids ≤ 255 (this fixture's ids are %7+1, so uint8), int16 up to 32767, else
+    # int64. The training-side consumer upcasts back to int64, so this is a pure
+    # transport-size optimization.
+    assert routed_experts_tensor.dtype == torch.uint8
+    # Round-trips exactly to the original int64 values on upcast (what the consumer does).
+    assert torch.equal(
+        routed_experts_tensor.to(torch.long),
+        torch.tensor(routed_experts_tensor.tolist(), dtype=torch.long),
+    )
     # Right-pad: sample 0 (len 3) padded to max_resp with sentinel rows.
     for t in range(3, max_resp):
         assert torch.all(routed_experts_tensor[0, t] == SENTINEL_EXPERT_ID)
