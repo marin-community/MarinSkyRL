@@ -1,5 +1,7 @@
 import asyncio
+import os
 
+from loguru import logger
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray
 import torch
@@ -871,19 +873,88 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model -> DeepSpeedEngine, self.model.module -> AutoModelForCausalLM
         self.model.model.config.pad_token_id = pad_token_id
 
-    def forward(
-        self,
-        data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        """Run forward pass on data in inference mode.
+    def _forward_impl(self, data: TrainingInputBatch) -> TrainingOutputBatch:
+        """SYNC forward body (the heavy FSDP unshard + micro-batch forward + reshard).
 
-        Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
+        This is the exact pre-fix `forward` body. It is invoked either inline (flag
+        OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
+        via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
         return output
+
+    async def forward(
+        self,
+        data: TrainingInputBatch,
+    ) -> TrainingOutputBatch:
+        """COOPERATIVELY-SCHEDULED forward entry (the 131k forward-dispatch wedge fix).
+
+        FR-proven root cause (2026-06-30, EP8xFSDP2xCP2 @ 131k, gs-1): the FSDP policy
+        worker is a Ray ASYNC actor (it defines `async def` methods like
+        `broadcast_to_inference_engines`), so EVERY actor method runs on ONE asyncio
+        event-loop thread. The dispatched per-step `forward` was a plain SYNC `def`.
+        The prior `bdae17bb` weight-sync drain (`barrier_all` async) FIXED the 8k wedge
+        (peers' loops were occupied by the broadcast coroutine; the drain unwound them
+        -> all 32 ran the forward). At 131k it WEDGES one layer down: the drain still
+        frees every peer loop (py-spy: ranks 16-23 IDLE in `select`, NOT in the
+        broadcast coroutine), yet only rank 0 RAN the forward. `MeshDispatch.dispatch`
+        provably issues `forward.remote()` to all 32 actors (code-proven, and now logged
+        via MESH_DISPATCH), so this is NOT a keying bug — it is a SCHEDULING RACE: the
+        fully-async trainer keeps OTHER coroutines (generator loops, staleness-driven
+        weight-sync) running concurrently, so between the driver's drain completing and
+        the SYNC `forward` task being scheduled on a peer's loop, that loop can be
+        RE-OCCUPIED by another dispatched coroutine. A sync method that arrives while
+        the loop is mid-coroutine is queued-not-scheduled and HOL-blocked exactly like
+        the pre-drain forward; only rank 0 (loop still free) ran it, hit the lonely
+        mesh_fsdp `_all_gather_base` unshard, and the 1800s NCCL watchdog SIGABRTed.
+
+        WHY THE ASYNC ENTRY IS ROBUST TO BOTH MODES (the directly-analogous fix to the
+        proven `barrier_all`): as an `async def`, this method is a COROUTINE TASK on the
+        actor loop the instant Ray delivers it. The loop's ready-queue schedules a
+        pending coroutine task regardless of what other coroutine is running (a running
+        coroutine yields at its own `await` points — the broadcast/generator coroutines
+        all `await`), so the forward task CANNOT be permanently head-of-line-blocked the
+        way a sync method is. `await asyncio.sleep(0)` forces it through one full loop
+        turn so it is provably picked up even if it arrived mid-cycle. The heavy sync
+        body then runs via `asyncio.to_thread` so the blocking FSDP unshard collective
+        does not re-occupy the single event-loop thread (mirrors `barrier_all`). If the
+        next run's MESH_DISPATCH log were instead to reveal a keying bug, the async entry
+        is still correct (the dispatch already targets all 32) and harmless.
+
+        CORRECTNESS / THREAD-SAFETY: the forward body is INFERENCE-ONLY
+        (`torch.no_grad()` + `torch.autocast`, no autograd graph is built -> no
+        cross-thread autograd-engine affinity concern; backward/optimizer live in the
+        separate `ppo_train` method, untouched). The whole forward (all micro-batches +
+        reshard) runs in ONE `to_thread` call, so any per-call thread-local CUDA/autocast
+        state is set and used on the same worker thread. CUDA ops enqueue to the device's
+        current stream irrespective of host thread, and they are ordered on that stream;
+        the forward is the SOLE in-flight op per the upstream drain. This off-event-loop
+        pattern is already established in this codebase: the driver runs
+        `fwd_logprobs_values_reward` (which `ray.get`s these forwards) in
+        `asyncio.to_thread`, and `barrier_all` runs its CUDA sync+barrier in `to_thread`.
+        Ray transparently awaits async actor methods, so the driver's `ray.get(refs)`
+        still returns the `TrainingOutputBatch` unchanged -> no driver-side change.
+
+        Gated behind SKYRL_FORWARD_DISPATCH_FIX (default ON). Flag OFF -> the sync body
+        runs INLINE -> byte-identical to the pre-fix forward (still an async method, but
+        no yield / no thread hop, so a single-rank / non-racy run is unaffected).
+        """
+        # UNGATED per-rank rendezvous marker: we MUST see this on all 32 ranks on the
+        # next run (mirrors WORKER_FORWARD_ENTER, which fires deeper inside the sync
+        # body). Pre-fix only rank 0 reached the forward; with this fix every dispatched
+        # rank's coroutine task is scheduled, so all 32 must log this.
+        logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
+        if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
+            return self._forward_impl(data)
+        # Yield so this dispatched coroutine is guaranteed a loop turn and is scheduled
+        # even if it arrived while the loop was mid-cycle servicing another coroutine.
+        await asyncio.sleep(0)
+        # Run the heavy sync FSDP forward off the event-loop thread so the blocking
+        # unshard collective cannot re-occupy the loop (head-of-line-block a peer).
+        return await asyncio.to_thread(self._forward_impl, data)
 
 
 class FSDPCriticWorkerBase(CriticWorkerBase):
@@ -958,19 +1029,32 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         )
         assert self.optimizer is not None
 
-    def forward(
-        self,
-        data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        """Run forward pass on data in inference mode.
-
-        Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
-        """
+    def _forward_impl(self, data: TrainingInputBatch) -> TrainingOutputBatch:
+        """SYNC critic forward body (pre-fix `forward`). See FSDPPolicyWorkerBase.forward."""
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
         return output
+
+    async def forward(
+        self,
+        data: TrainingInputBatch,
+    ) -> TrainingOutputBatch:
+        """Cooperatively-scheduled critic forward entry (131k forward-dispatch wedge fix).
+
+        Identical mechanism/justification to FSDPPolicyWorkerBase.forward (see its
+        docstring): async entry + `await asyncio.sleep(0)` yield + `asyncio.to_thread`
+        of the sync body so the dispatched forward task on this Ray async actor cannot
+        be head-of-line-blocked by a concurrently-running coroutine. Inference-only body
+        (no autograd graph). Gated SKYRL_FORWARD_DISPATCH_FIX (default ON); flag OFF ->
+        inline sync body (byte-identical to pre-fix).
+        """
+        logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
+        if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
+            return self._forward_impl(data)
+        await asyncio.sleep(0)
+        return await asyncio.to_thread(self._forward_impl, data)
 
 
 class FSDPRefWorkerBase(RefWorkerBase):
@@ -1022,19 +1106,30 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()
 
-    def forward(
-        self,
-        data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        """Run forward pass on data in inference mode.
-
-        Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
-        """
+    def _forward_impl(self, data: TrainingInputBatch) -> TrainingOutputBatch:
+        """SYNC ref forward body (pre-fix `forward`). See FSDPPolicyWorkerBase.forward."""
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
         return output
+
+    async def forward(
+        self,
+        data: TrainingInputBatch,
+    ) -> TrainingOutputBatch:
+        """Cooperatively-scheduled ref forward entry (131k forward-dispatch wedge fix).
+
+        Identical mechanism/justification to FSDPPolicyWorkerBase.forward (see its
+        docstring): async entry + `await asyncio.sleep(0)` yield + `asyncio.to_thread`
+        of the sync body. Inference-only body. Gated SKYRL_FORWARD_DISPATCH_FIX
+        (default ON); flag OFF -> inline sync body (byte-identical to pre-fix).
+        """
+        logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
+        if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
+            return self._forward_impl(data)
+        await asyncio.sleep(0)
+        return await asyncio.to_thread(self._forward_impl, data)
 
 
 # Ray remote actors

@@ -9,6 +9,7 @@ import ray
 from ray import ObjectRef
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 import inspect
+from loguru import logger
 
 
 @dataclass
@@ -131,10 +132,31 @@ class MeshDispatch(Dispatch):
         chunk_size = len(data) // dp_size
         data_chunks: List[TrainingInputBatch] = data.chunk(chunk_size)
 
+        # DISPATCH FAN-OUT INSTRUMENT (ungated, only for `forward` to avoid log spam).
+        # The 131k MoE-RL wedge (FR-proven 2026-06-30) showed only rank 0 RAN the
+        # per-step forward after the weight-sync drain, while the FSDP partner (rank
+        # 16 on mesh_fsdp=[0,16]) sat idle in `select`. The open question was whether
+        # the DRIVER only KEYED the forward to rank 0 (a dispatch-keying bug) or
+        # whether it fanned to all 32 actors but only rank 0's async-actor loop
+        # SCHEDULED the dispatched task (a post-drain re-occupation race). This log
+        # makes the answer unambiguous on the next run: it prints every (dp,sp,tp,pp)
+        # rank the `forward.remote()` call is issued to from the driver. If all 32
+        # appear here but only rank 0 logs WORKER_FORWARD_ENTER -> scheduling race
+        # (the fix below addresses it). If only rank 0 appears here -> keying bug.
+        log_dispatch = method == "forward"
+        dispatched_ranks = [] if log_dispatch else None
         for actor_info in actor_infos:
             # index into tensordict to get the correct data to send
             data_to_send = data_chunks[actor_info.rank.dp]
             object_refs.append(getattr(actor_info.handle, method).remote(data_to_send))
+            if log_dispatch:
+                r = actor_info.rank
+                dispatched_ranks.append(f"(dp={r.dp},sp={r.sp},tp={r.tp},pp={r.pp})")
+        if log_dispatch:
+            logger.info(
+                f"MESH_DISPATCH method=forward issued forward.remote() to "
+                f"{len(dispatched_ranks)} actors: {dispatched_ranks}"
+            )
         return object_refs
 
     @classmethod
