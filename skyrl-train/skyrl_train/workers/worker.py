@@ -589,24 +589,60 @@ class Worker(DistributedTorchRayActor):
             output = output.to("cpu")
         return output
 
-    def barrier_all(self) -> None:
-        """Trivial SYNC pass-through drain barrier (the MoE-RL async-dispatch fix).
+    async def barrier_all(self) -> None:
+        """ASYNC pass-through drain barrier (the MoE-RL async-dispatch wedge fix).
 
-        Dispatched by the async trainer (`pass_through`) AFTER each weight-sync
-        (`broadcast_to_inference_engines`) RETURNS and BEFORE the next forward is
-        dispatched. The driver `await`s the weight-sync to completion first, so by the
-        time this runs every peer's event loop has unwound the (async) weight-sync
-        coroutine; running this SYNC method here forces every rank's loop to reach a
-        known sync point, so the loop is FREE when `forward.remote()` later arrives and
-        the inbound sync `forward` task can no longer be head-of-line-blocked behind a
-        lingering weight-sync coroutine (the FR-proven 2026-06-29 stranding).
+        FR-proven root cause (2026-06-29, gs-1 MoE wedge on EP8xFSDP2xCP2): the FSDP
+        policy worker is a Ray ASYNC actor (it defines `async def` methods like
+        `broadcast_to_inference_engines`), so EVERY actor method — sync or async — runs
+        on ONE asyncio event-loop thread. `worker.forward` is a plain SYNC `def`: once it
+        starts it runs to completion on the loop thread WITHOUT yielding. After the
+        disaggregated per-step weight-sync, the peer ranks' loops were still occupied by
+        the `broadcast_to_inference_engines` coroutine task (suspended post-:864 barrier,
+        not yet unwound), so the queued sync `forward` task was NEVER scheduled — only
+        rank 0 (whose loop was free) entered the forward, hit the lonely mesh_fsdp unshard
+        `_all_gather_base` alone, and the 1800s NCCL watchdog SIGABRTed the run.
 
-        Symmetric on every rank -> cannot itself strand; changes no tensor values
-        (correctness-neutral); strict no-op for single-rank / uninitialized runs.
+        WHY THIS METHOD MUST BE `async`, NOT `sync` (the prior fix's flaw): the previous
+        `barrier_all` was a plain SYNC `def`. A sync drain method has the IDENTICAL
+        head-of-line-blocking problem as `forward` — if a peer loop is still occupied by
+        the broadcast coroutine (M2) the sync `barrier_all` task is queued-not-scheduled
+        just like `forward`, so it cannot drain the very loop it is blocked behind, and it
+        adds no yield point (M1). That is why the prior post-weight-sync + per-step sync
+        drains relocated but did NOT fix the wedge.
+
+        As an `async def`, this method is itself a coroutine task on the actor loop: Ray
+        cannot resolve its ObjectRef until the loop became free enough to SCHEDULE and RUN
+        it to completion. The `await asyncio.sleep(0)` forces at least one full loop turn
+        so any lingering weight-sync coroutine task is fully retired and the loop reaches
+        idle BEFORE the collective. The barrier itself runs via `asyncio.to_thread` so the
+        blocking NCCL collective does not re-occupy the single event-loop thread. The
+        driver `await`s this drain's refs (gather) before dispatching `forward.remote()`,
+        so EVERY peer's loop is provably drained-to-idle before the sync forward arrives —
+        robust to BOTH M1 (loop busy) and M2 (coroutine not unwound).
+
+        Gated behind SKYRL_WEIGHTSYNC_DRAIN_BARRIER (default ON). Symmetric on every rank
+        (cannot itself strand), changes no tensor values (correctness/R3-replay neutral),
+        strict no-op for single-rank / uninitialized runs.
         """
+        # UNGATED per-rank marker so we can SEE the drain fire on every rank (mirrors
+        # WORKER_FORWARD_ENTER). Pre-fix only rank 0 reached the forward; post-fix all
+        # FSDP shard ranks (0/8/16/24 ...) must log this immediately before that step.
+        logger.info(f"WORKER_DRAIN_BARRIER rank={self._rank}")
+        if os.environ.get("SKYRL_WEIGHTSYNC_DRAIN_BARRIER", "1") != "1":
+            return
         if self._world_size > 1 and torch.distributed.is_initialized():
-            torch.cuda.synchronize()
-            torch.distributed.barrier()
+            # Yield to the event loop so any lingering weight-sync coroutine task is
+            # fully retired and the loop is idle before we issue the collective.
+            await asyncio.sleep(0)
+
+            def _sync_barrier() -> None:
+                torch.cuda.synchronize()
+                torch.distributed.barrier()
+
+            # Run the blocking collective off the event-loop thread so it can't itself
+            # re-occupy the loop (head-of-line-block a subsequent dispatch).
+            await asyncio.to_thread(_sync_barrier)
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()

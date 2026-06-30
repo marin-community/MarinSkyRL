@@ -1076,25 +1076,30 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     async def _drain_policy_event_loops(self):
-        """Drain barrier after weight-sync (the MoE-RL async-dispatch fix, 2026-06-29).
+        """Drain barrier before each forward (the MoE-RL async-dispatch wedge fix, 2026-06-29).
 
-        FR-decode proved the CoreWeave MoE-RL wedge: the FSDP policy worker is a Ray
+        FR-decode proved the gs-1 CoreWeave MoE wedge: the FSDP policy worker is a Ray
         ASYNC actor (single event-loop thread, because it has `async def` methods like
-        `broadcast_to_inference_engines`). `forward` is a plain SYNC method. After the
-        initial / per-step disaggregated weight-sync, the peers' event loops had not yet
-        fully unwound the weight-sync coroutine when the driver dispatched the step-1
-        `forward` -> only rank 0's loop was free and ran the forward (into a lonely
-        barrier -> 1200s NCCL watchdog); ranks 8/16/24's queued `forward` task was never
-        scheduled. We caller-`await` `async_sync_...` to completion FIRST (so every peer
-        coroutine has returned), then dispatch this trivial SYNC `barrier_all` to ALL
-        actors (`pass_through`) and block (await its refs) until every rank reaches it.
-        This guarantees each policy shard rank's event loop is at a known sync point and
-        FREE before the next `forward.remote()` arrives, so the forward can be scheduled
-        on every peer. Symmetric / correctness-neutral / no-op for single-rank runs.
+        `broadcast_to_inference_engines`). `worker.forward` is a plain SYNC method that
+        runs to completion on the loop thread WITHOUT yielding. After the disaggregated
+        per-step weight-sync, the peer ranks' loops were still occupied by the broadcast
+        coroutine task -> only rank 0's loop was free and ran the forward (into a lonely
+        mesh_fsdp unshard `_all_gather_base` -> 1800s NCCL watchdog); ranks 8/16/24's
+        queued `forward` task was never scheduled.
+
+        `barrier_all` is now an `async def` actor method (see worker.py). Dispatching it
+        and awaiting its refs GUARANTEES each peer's loop drained to idle (Ray cannot
+        resolve an async-method ObjectRef until the loop scheduled+ran the coroutine to
+        completion, and the coroutine `await`s a loop turn before its collective). So by
+        the time `await asyncio.gather(*refs)` returns, every policy shard rank's event
+        loop is provably free, and the subsequent sync `forward.remote()` can be scheduled
+        on every peer. Robust to BOTH M1 (loop busy with the sync forward HOL-block) and
+        M2 (broadcast coroutine not yet unwound) — the prior SYNC `barrier_all` was not,
+        because a sync drain method is HOL-blocked exactly like the sync forward it guards.
 
         We `await asyncio.gather(*refs)` rather than a blocking `ray.get` so we don't
-        stall the async trainer's event loop thread; the driver coroutine still does not
-        advance to the forward dispatch until every rank's barrier has completed.
+        stall the async trainer's own event-loop thread; the driver coroutine still does
+        not advance to the forward dispatch until every rank's drain has completed.
         """
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
