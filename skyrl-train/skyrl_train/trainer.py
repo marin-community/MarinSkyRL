@@ -917,6 +917,50 @@ class RayPPOTrainer:
             ) from None
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
+    def _resolve_num_experts(self) -> Optional[int]:
+        """Resolve the policy model's MoE expert count from its HF config, memoized.
+
+        Used to pick a DETERMINISTIC (rank-invariant) dtype for the
+        rollout_routed_experts transport tensor in the collator — see
+        ``convert_prompts_responses_to_batch_tensors``. Reads the HF config at
+        ``cfg.trainer.policy.model.path`` once and resolves the expert count across
+        MoE arch variants (Qwen3-MoE: ``num_experts``; Mixtral: ``num_local_experts``;
+        DeepSeek/Qwen-style: ``n_routed_experts``). Returns None (and caches None) if
+        the config has no such field (non-MoE) or can't be loaded, in which case the
+        collator falls back to its non-deterministic per-batch-max pick with a warning.
+        """
+        if getattr(self, "_num_experts_cache", "__unset__") != "__unset__":
+            return self._num_experts_cache
+        num_experts: Optional[int] = None
+        try:
+            from transformers import AutoConfig
+
+            model_path = self.cfg.trainer.policy.model.path
+            hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            # Some families nest the expert count under a text/decoder sub-config.
+            candidates = [hf_config, getattr(hf_config, "text_config", None)]
+            for cfg_obj in candidates:
+                if cfg_obj is None:
+                    continue
+                for attr in ("num_experts", "num_local_experts", "n_routed_experts"):
+                    val = getattr(cfg_obj, attr, None)
+                    if isinstance(val, int) and val > 0:
+                        num_experts = val
+                        break
+                if num_experts is not None:
+                    break
+        except Exception as e:  # noqa: BLE001 — config load is best-effort; fallback is safe
+            logger.warning(
+                f"Could not resolve num_experts from policy model config for the "
+                f"routed-experts dtype pick ({e!r}); the collator will use its "
+                f"non-deterministic per-batch-max fallback."
+            )
+            num_experts = None
+        if num_experts is not None:
+            logger.info(f"Resolved policy model num_experts={num_experts} for routed-experts dtype pick.")
+        self._num_experts_cache: Optional[int] = num_experts
+        return num_experts
+
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
@@ -935,6 +979,13 @@ class RayPPOTrainer:
         routed_experts = (
             generator_output.get("rollout_routed_experts", None) if moe_router_replay else None
         )
+        # Deterministic dtype for the rollout_routed_experts transport tensor:
+        # resolve the model's expert count once (memoized) and pass it to the
+        # collator so the narrowed dtype is keyed on num_experts (max possible id),
+        # NOT the per-batch observed max — otherwise ranks whose batch max straddles
+        # a dtype boundary diverge and a later collective on this tensor hangs NCCL.
+        # Only needed when we actually carry routed experts (moe_router_replay on).
+        num_experts = self._resolve_num_experts() if routed_experts is not None else None
 
         # Loop-behavior reward shaping (Stage B / F5 + F4): only pull the per-token
         # shaping channel + span tags when the channel is enabled. Gated so the
@@ -970,6 +1021,7 @@ class RayPPOTrainer:
             routed_experts,
             token_level_shaping,
             response_span_tags,
+            num_experts,
         )
         # sanity check for tis
         #

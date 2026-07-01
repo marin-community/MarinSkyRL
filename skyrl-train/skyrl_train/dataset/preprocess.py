@@ -1,7 +1,36 @@
 from typing import List, Tuple, Optional
 import torch
+from loguru import logger
 from transformers import AutoTokenizer
 from jaxtyping import Float, Integer
+
+
+def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optional[torch.dtype]:
+    """Pick the narrowest integer dtype that can hold ANY valid expert id for a
+    model with ``num_experts`` experts, DETERMINISTICALLY (max possible id =
+    ``num_experts - 1``), independent of the per-batch observed max.
+
+    This is load-bearing: the dtype must NOT depend on the data, or two batches
+    / ranks whose observed max straddles a dtype boundary (e.g. Qwen3-Next with
+    512 experts: one batch max=200 -> uint8, another max=300 -> int16) would
+    pick DIFFERENT dtypes for the same field, size-mismatching a later cross-rank
+    collective on this tensor -> NCCL hang. Keying on ``num_experts`` makes every
+    rank/batch agree.
+
+      * num_experts <= 256      -> uint8  (max id <= 255; Qwen3-Coder 128 -> uint8, identical to the prior per-batch pick)
+      * num_experts <= 32768    -> int16  (max id <= 32767; Qwen3-Next 512 -> int16, deterministic)
+      * otherwise               -> int64  (defensive; no shipped MoE model exceeds int16 range)
+
+    Returns None when ``num_experts`` is None/unknown, signalling the caller to
+    fall back to the (non-deterministic) per-batch-max pick.
+    """
+    if num_experts is None or num_experts <= 0:
+        return None
+    if num_experts <= (torch.iinfo(torch.uint8).max + 1):
+        return torch.uint8
+    if num_experts <= (torch.iinfo(torch.int16).max + 1):
+        return torch.int16
+    return torch.int64
 
 
 def _verify_inputs(
@@ -61,6 +90,7 @@ def convert_prompts_responses_to_batch_tensors(
     routed_experts: Optional[List[List[List[List[int]]]]] = None,
     token_level_shaping: Optional[List[List[float]]] = None,
     response_span_tags: Optional[List[List[int]]] = None,
+    num_experts: Optional[int] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -220,7 +250,47 @@ def convert_prompts_responses_to_batch_tensors(
             elif pad_n < 0:
                 normalized = normalized[:max_output_len]
             padded_re.append(normalized)
+        # Width-minimize the expert-id tensor (the R3 by-value forward-arg spill
+        # fix, part 1). This tensor is [B, response_len, L, K] (48*8=384 ids/token
+        # at Qwen3-Coder-30B-A3B) and at 131k it is multiple GB at int64 — the bulk
+        # that, shipped by-value through every per-forward Ray task arg, spilled the
+        # object store and wedged the 32-rank forward. Expert ids are small
+        # non-negative ints, so pick the NARROWEST integer dtype that can hold ANY
+        # valid id for this model. The choice is keyed on the model's num_experts
+        # (max possible id = num_experts - 1), NOT the per-batch observed max, so it
+        # is DETERMINISTIC across every rank and batch: a data-dependent pick lets
+        # two batches whose observed max straddles a dtype boundary (e.g. Qwen3-Next
+        # 512 experts: one batch max=200 -> uint8, another max=300 -> int16) diverge,
+        # which size-mismatches a later cross-rank collective on this tensor -> NCCL
+        # hang. Qwen3-Coder (128 experts) -> uint8 (max id 127 <= 255, identical to
+        # the earlier per-batch pick); Qwen3-Next (512) -> int16 (deterministic). The
+        # sentinel id (0) and every real id fit by construction. The training-side
+        # consumer upcasts back to int64 (`model_wrapper._build_router_replay_targets`:
+        # `.to(dtype=torch.long)`), so this is downstream-transparent — a pure
+        # transport-size optimization. No torch.uint16 storage support across the
+        # saved/pinned/transport path, so int16 (not uint16) is the mid tier.
         routed_experts_tensor = torch.tensor(padded_re, dtype=torch.long)
+        _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
+        if _re_dtype is None:
+            # Fallback: num_experts unknown (non-MoE / unresolved config). Preserve
+            # the ORIGINAL per-batch-max behavior so those cases are unaffected, but
+            # warn once — this branch is NON-DETERMINISTIC across ranks/batches and
+            # must not be hit on a real MoE-RL run.
+            _max_expert_id = int(routed_experts_tensor.max().item()) if routed_experts_tensor.numel() else 0
+            if _max_expert_id <= torch.iinfo(torch.uint8).max:
+                _re_dtype = torch.uint8
+            elif _max_expert_id <= torch.iinfo(torch.int16).max:
+                _re_dtype = torch.int16
+            else:
+                _re_dtype = torch.int64
+            logger.warning(
+                "convert_prompts_responses_to_batch_tensors: num_experts is None; "
+                "using the NON-DETERMINISTIC per-batch-max dtype pick for "
+                "rollout_routed_experts (chose {}). This is safe for non-MoE / "
+                "unknown-config cases but must NOT be hit on a MoE-RL run — thread "
+                "the model's num_experts through to make the dtype rank-invariant.".format(_re_dtype)
+            )
+        routed_experts_tensor = routed_experts_tensor.to(_re_dtype)
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
     # shaping channel and span tags on the response axis exactly like rewards /
