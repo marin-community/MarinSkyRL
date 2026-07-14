@@ -24,16 +24,15 @@ dependencies = [
     "ninja",
     "tensorboard",
     "func_timeout",
-    "transformers>=4.51.0",
+    # Capped below 5: transformers 5 is a breaking major (peft 0.17 cannot even import against it),
+    # and the trainer is written against the 4.x API. The floor is vLLM 0.20.2's (>=4.56.0), so the
+    # base and vllm environments agree on one transformers line.
+    "transformers>=4.56.0,<5",
     "hydra-core==1.3.2",
     "accelerate",
-    # Stage-1 (FSDP2 CP port): pin base torch>=2.10 so the torch-native context-parallel
-    # API (torch.distributed.tensor.experimental.context_parallel + ring-SDPA load balancer)
-    # is guaranteed present for the trainer. Production SIF runs torch 2.11.0+cu130 today.
-    # The vllm extra pins an exact compatible torch (==2.11.0). Stage-7 reconciled the other
-    # extras as far as upstream allows: sglang->torch 2.11.0 (full), mcore->torch 2.9.1 (partial,
-    # vLLM-capped), flashrl stays at torch 2.7.0 (custom-vLLM-wheel blocker). All remain isolated
-    # by [tool.uv].conflicts.
+    # Floor of 2.10 carries the torch-native context-parallel API
+    # (torch.distributed.tensor.experimental.context_parallel + the ring-SDPA load balancer) that
+    # the trainer needs. Production runs 2.11.0+cu130, which is what every extra now resolves to.
     "torch>=2.10.0",
     "torchdata",
     "omegaconf",
@@ -55,53 +54,29 @@ dependencies = [
 
 [tool.uv]
 required-version = ">=0.8.10"
-conflicts = [
-    [
-        { extra = "vllm" },
-        { extra = "sglang" },
-    ],
-    [
-        { extra = "vllm" },
-        { extra = "flashrl" },
-        { extra = "sglang" },
-    ],
-    [
-        { extra = "flashrl" },
-        { extra = "miniswe" },
-    ],
-    [
-        { extra = "mcore" },
-        { extra = "vllm" },
-        { extra = "sglang" },
-        { extra = "flashrl" },
-    ]
-]
-no-build-isolation-package = [
-    "transformer-engine-torch",
-    "transformer-engine",
-]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools"]
-transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
+# flash-attn ships no static metadata: its sdist computes requires-dist at build time, and
+# building it needs torch, which is the very thing `match-runtime` is trying to resolve. That
+# circularity makes `uv lock` fail outright, which is why this lockfile had gone stale (it still
+# pinned torch 2.8 against a tree that requires >=2.10). Declaring the metadata here is uv's
+# supported way out: resolution reads these requirements instead of building the sdist, and the
+# build itself is unaffected. Values are flash-attn's own install_requires.
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+requires-dist = ["torch", "einops"]
+
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
 # We use `flashinfer-jit-cache` to avoid slow JIT compilation on first run.
-# Different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
-flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm'" }
-# Stage-7: the old cu128torch2.7 flashinfer wheel-URL pins were torch-2.7-only and are
-# incompatible with the reconciled sglang (torch 2.11) / mcore (torch 2.9.1) stacks. sglang 0.5.13
-# and vLLM 0.14.1 each pull a compatible flashinfer transitively, so we no longer force-pin a
-# wheel URL for those extras — let the resolver pick the version each upstream declares.
-# (flashrl stays on torch 2.7.0; if its separately-installed wheel needs the old flashinfer it is
-#  installed out-of-band per examples/flash_rl/README.md, same as the custom vLLM wheel.)
+flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "extra == 'vllm'" }
 # Expert-parallel / router-replay port (see notes/skyrl/fsdp2_ep_router_replay_port_plan.md).
 # torchtitan is pure-python (provides @expert_parallel / ExpertParallel); it does NOT rebuild
 # torch. Pin matches prime-rl (EP + grouped-GEMM + R3 validated there); compatible with our
@@ -113,6 +88,14 @@ torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 # the URL below is inert there (gated by the marker on the `deepep` extra). x86_64-only.
 deep-ep = { url = "https://github.com/PrimeIntellect-ai/prime-rl/releases/download/v0.5.0/deep_ep-1.2.1+29d31c0-cp312-cp312-linux_x86_64.whl" }
 
+# vllm is the only inference extra. Three others (sglang, mcore, flashrl) used to sit here and
+# none of them could be installed: each pinned a torch or transformers version that the base
+# package's own requirements exclude, so `uv lock` had no solution at all and the lockfile had
+# been stale since torch 2.7. sglang 0.5.13 requires transformers==5.8.1, which the trainer's 4.x
+# API and peft cannot use; mcore pinned torch==2.9.1, held there by TransformerEngine; flashrl
+# pinned torch==2.7.0 and is dead upstream (NovaSky-AI/SkyRL#1338). Production runs none of them:
+# the RL SIF build recipe drops TransformerEngine outright ("production RL uses FSDP2 (not
+# Megatron)"), which is what let that image reach torch 2.11 in the first place.
 [project.optional-dependencies]
 deepspeed = [
     "deepspeed==0.17.6"
@@ -141,68 +124,18 @@ sandboxes = [
 # pin must carry torch-native context_parallel (>=2.10). Versions MIRROR the production SIF
 # `skyrl_megatron_vllm0202rc0_r3.sif`, which runs the following resolved stack multi-node on
 # Jupiter today: torch 2.11.0, vLLM 0.20.2rc0, flash-attn 2.6.3, torchvision 0.26.0.
-# (The SIF is a cu130 build via its own build script; the version *pins* here are index-agnostic
-#  and resolve against the pytorch-cu128 index, which also publishes torch-2.11 wheels.)
+# Torch comes from the cu130 index, matching that SIF. CUDA 13 wheels need an NVIDIA driver
+# >= 580; the trainer already assumes this line (see distributed/utils.py, which parses
+# "2.11.0+cu130").
 # flash-attn is only needed for the NON-CP paths after Stage 2 (CP uses SDPA), so a slightly
 # older 2.6.3 paired with torch 2.11 is fine.
 vllm = [
-    "vllm==0.20.2rc0",
+    "vllm==0.20.2",
     "flash-attn==2.6.3",
     "torch==2.11.0",
     "flashinfer-python",
     "flashinfer-jit-cache",
     "torchvision==0.26.0"
-]
-# Stage-7 (FSDP2 CP port) reconciliation status — torch-version matrix per extra:
-#   sglang : RECONCILED → torch 2.11.0 (sglang 0.5.13 ships torch==2.11.0 wheels). uv-resolve
-#            verified (uv 0.10.2, `uv pip compile`, EXIT 0).
-#   mcore  : PARTIAL → torch 2.9.1 (was 2.7.1). The Megatron side (megatron-bridge 0.3.0 /
-#            megatron-core 0.16.x / TE 2.12) supports torch>=2.6 incl. 2.10/2.11, BUT the vLLM in
-#            this extra is the ceiling: every published vLLM through 0.16.1 HARD-PINS torch==2.9.1,
-#            so torch 2.10 is upstream-blocked here until a vLLM release moves to torch 2.10.
-#   flashrl: BLOCKED, left at torch 2.7.0 — see the inline note on the extra below.
-# All three remain isolated from the base torch>=2.10 by the [tool.uv].conflicts table because
-# each ships its OWN exact torch pin (and mcore/flashrl ship their own vLLM), which differs from
-# the base/vllm CP set (torch 2.11.0 + vLLM 0.20.2rc0). Conflicts entries are still required.
-sglang = [
-    # Stage-7: bumped 0.4.8.post1 -> 0.5.13. sglang 0.5.13 pins torch==2.11.0 and
-    # flashinfer_python[cu13]==0.6.12 upstream; this is the first sglang line on torch 2.11.
-    # NOTE: 0.5.x folded the old `srt`/`openai`/`torch_memory_saver` extras into the base package,
-    # so the bare `sglang==` requirement now pulls the full runtime (uv warns if those extras are
-    # named). (The old "0.4.9.post1 weight-broadcast hang" caveat was a 0.4.x-era issue, superseded.)
-    "sglang==0.5.13",
-    "flashinfer-python",
-    "flash-attn==2.6.3",  # paired with torch 2.11 (matches the vllm extra's torch-2.11 flash-attn)
-    "torch==2.11.0",
-    "torchvision==0.26.0",
-]
-mcore = [
-  # Stage-7: bumped the Megatron stack from the NeMo 25.09 line (TE 2.7.0 / mcore 0.14.0 /
-  # mbridge 0.1.0rc4 / vLLM 0.10.1.1 / torch 2.7.1) toward the NeMo 26.02 line. PARTIAL: the
-  # Megatron components support torch 2.10 (mbridge 0.3.0 requires torch>=2.6, TE>=2.10a0,<2.13,
-  # mcore>=0.15a0,<0.17), but vLLM hard-pins torch==2.9.1 (verified for vLLM 0.14.1..0.16.1), so
-  # torch lands at 2.9.1 — a +2-minor bump, the max vLLM allows. torch 2.10 is upstream-blocked on
-  # vLLM, not Megatron. Kept isolated via [tool.uv].conflicts. megatron-core is left unpinned so it
-  # floats within megatron-bridge 0.3.0's accepted range (the old ==0.14.0 pin is incompatible).
-  "transformer-engine[pytorch]==2.12.0",
-  "flash-attn==2.7.4.post1",
-  "vllm==0.14.1",
-  "torch==2.9.1",
-  "flashinfer-python",
-  "torchvision",
-  "megatron-bridge==0.3.0",
-]
-flashrl = [
-    # NOTE: Custom vLLM wheel must be installed separately.
-    # See examples/flash_rl/README.md for installation instructions.
-    # Stage-7 BLOCKED: FlashRL's separately-installed custom vLLM wheel is only built/tested up to
-    # vLLM 0.10.0 / torch 2.7.1 (upstream yaof20/Flash-RL tested-env matrix tops out at the
-    # hiyouga/verl ngc-th2.7.1-cu12.6-vllm0.10.0 image; no torch 2.10/2.11 custom wheel exists).
-    # Bumping torch here would orphan the quantized-rollout wheel. Left pinned + isolated.
-    "flash-attn==2.8.3",
-    "torch==2.7.0",
-    "flashinfer-python",
-    "torchvision",
 ]
 miniswe = [
     # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
@@ -224,13 +157,13 @@ deepep = [
 
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [[tool.uv.index]]
-name = "flashinfer-cu128"
-url = "https://flashinfer.ai/whl/cu128"
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
 explicit = true
 
 [tool.setuptools]
@@ -273,6 +206,7 @@ ignore = [
 "tests/cpu/distributed/test_muon_hybrid.py" = ["E402"]
 "tests/cpu/generators/test_normalize_prompt_token_ids.py" = ["E402"]
 "tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
+"tests/cpu/models/test_models.py" = ["E402"]
 # Optional-dependency shim: the imports inside the try block are the availability probe.
 "examples/terminal_bench/_harbor_compat.py" = ["F401"]
 

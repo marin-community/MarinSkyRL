@@ -1,66 +1,21 @@
 """Unit tests for BufferCheckpointCallback save/restore roundtrip.
 
 Run with: uv run --isolated --extra dev pytest tests/cpu/test_buffer_checkpoint.py
-
-These tests replicate the minimal dataclass/TypedDict shapes to avoid importing
-the full skyrl_train package (which requires skyrl_gym and GPU deps).
 """
 
 import asyncio
 import os
-import sys
 import tempfile
-from dataclasses import dataclass
 
-
-
-# ---------------------------------------------------------------------------
-# Replicate minimal types to avoid heavy imports through generators/__init__.py
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TrajectoryID:
-    instance_id: str
-    repetition_id: int
-
-    def to_string(self) -> str:
-        return f"{self.instance_id}_{self.repetition_id}"
-
-
-@dataclass
-class GeneratedOutputGroup:
-    generator_output: dict  # GeneratorOutput is a TypedDict
-    uid: str
-    global_step_when_scheduled: int
-
-
-# ---------------------------------------------------------------------------
-# Monkey-patch so BufferCheckpointCallback.load_buffer_items can import these
-# from "skyrl_train.fully_async_trainer" and "skyrl_train.generators.base"
-# without pulling in the real module tree.
-# ---------------------------------------------------------------------------
-
-import types
-
-_fake_base = types.ModuleType("skyrl_train.generators.base")
-_fake_base.TrajectoryID = TrajectoryID
-_fake_base.GeneratorOutput = dict
-sys.modules.setdefault("skyrl_train.generators.base", _fake_base)
-
-_fake_generators = types.ModuleType("skyrl_train.generators")
-sys.modules.setdefault("skyrl_train.generators", _fake_generators)
-
-_fake_fat = types.ModuleType("skyrl_train.fully_async_trainer")
-_fake_fat.GeneratedOutputGroup = GeneratedOutputGroup
-sys.modules.setdefault("skyrl_train.fully_async_trainer", _fake_fat)
-
-# Now we can safely import the callback (its own imports are all lightweight)
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
+from skyrl_train.fully_async_trainer import GeneratedOutputGroup
+from skyrl_train.generators.base import TrajectoryID
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_item(uid: str, step: int) -> GeneratedOutputGroup:
     gen_out = {
@@ -88,6 +43,7 @@ class _FakeTrainer:
         class _Cfg:
             class trainer:
                 ckpt_path = None
+
         self.cfg = _Cfg()
         self.cfg.trainer.ckpt_path = ckpt_path
         self._generation_output_group_buffer = buffer
@@ -105,6 +61,7 @@ class _FakeControl:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_roundtrip_empty_buffer():
     """Empty buffer produces no artifact file."""

@@ -19,6 +19,10 @@ Run:
 
 import pytest
 
+# The terminal_bench generator imports harbor, which is an optional integration and is
+# not part of skyrl-train's dependency set.
+pytest.importorskip("harbor")
+
 from examples.terminal_bench.terminal_bench_generator import _normalize_prompt_token_ids
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 

@@ -23,6 +23,11 @@ try:
 except ImportError:  # pytest absent on cluster envs — direct invocation still works
     pytest = None
 
+if pytest is not None:
+    # moe_swap reaches skyrl_train.models.layers.moe, which imports torchtitan's
+    # expert_parallel. torchtitan is not part of skyrl-train's dependency set.
+    pytest.importorskip("torchtitan")
+
 from skyrl_train.models.layers.moe_swap import _build_moe_for_block
 from skyrl_train.models.layers.moe_weight_remap import (
     convert_hf_to_tt_moe,

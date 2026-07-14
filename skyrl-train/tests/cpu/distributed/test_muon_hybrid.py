@@ -15,6 +15,13 @@ import torch
 import torch.nn as nn
 import pytest
 
+# muon_hybrid imports torch.optim.Muon, which landed in torch 2.9. The base dependency
+# asks for torch>=2.10, but skyrl-train's lockfile still resolves 2.8 (it predates that
+# bump and cannot currently be regenerated -- see AGENTS.md), so the CPU environment has
+# no Muon. This skip lifts by itself once the lock catches up.
+if not hasattr(torch.optim, "Muon"):
+    pytest.skip("torch.optim.Muon requires torch>=2.9", allow_module_level=True)
+
 from skyrl_train.distributed.muon_hybrid import (
     build_hybrid_muon,
     is_muon_param,
