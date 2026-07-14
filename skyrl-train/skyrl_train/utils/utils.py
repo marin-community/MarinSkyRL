@@ -80,7 +80,7 @@ def resolve_pinned_local_rank(
 
     if device_count > 0 and 0 <= launcher_local_rank < device_count:
         return str(launcher_local_rank)
-    return str(ray_gpu_ids[0])
+    return str(ray_gpu_ids[0]) if ray_gpu_ids else "0"
 
 
 def resolve_actor_cuda_env(

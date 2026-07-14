@@ -8,6 +8,12 @@ uv run --isolated --extra dev pytest tests/cpu/inf_engines/vllm/test_ray_prometh
 from unittest.mock import patch, MagicMock
 import sys
 
+import pytest
+
+# The test imports skyrl_train.inference_engines.vllm.vllm_engine, which imports vllm. That only
+# exists under the vllm extra, which the CPU environment does not install.
+pytest.importorskip("vllm")
+
 
 class TestRayPrometheusStatLoggers:
     """Test cases for _create_ray_prometheus_stat_loggers method."""

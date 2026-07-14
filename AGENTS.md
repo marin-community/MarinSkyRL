@@ -59,8 +59,10 @@ uv run examples/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
 NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 ```
 
-`skyrl-train`'s `vllm`, `sglang`, `flashrl`, and `mcore` extras are mutually exclusive
-(declared as `[tool.uv] conflicts`) — never combine them in one `uv` invocation.
+`vllm` is `skyrl-train`'s only inference extra. The `sglang`, `mcore`, and `flashrl` extras were
+removed: each pinned a `torch` or `transformers` version that the base package's own requirements
+exclude, so none of them could be installed and their presence alone made `uv lock` unsolvable.
+Production runs none of them.
 
 ## Lint
 

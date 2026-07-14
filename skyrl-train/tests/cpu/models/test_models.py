@@ -1,6 +1,11 @@
 import torch
-from flash_attn.bert_padding import pad_input, unpad_input
 import pytest
+
+# flash-attn is installed from source with FLASH_ATTENTION_SKIP_CUDA_BUILD, so on a CPU-only
+# machine the package is present but its flash_attn_2_cuda extension is not.
+pytest.importorskip("flash_attn")
+
+from flash_attn.bert_padding import pad_input, unpad_input
 
 
 @pytest.fixture

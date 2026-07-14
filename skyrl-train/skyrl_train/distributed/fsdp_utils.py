@@ -811,12 +811,12 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     # coefficient to each grad's device, so a cuda total_norm scales cpu grads
     # correctly. cpu_offload=false (8B / a3 / ablation policy paths) keeps grads
     # on cuda, ``grads_on_cpu`` is False, and this is byte-identical to before.
-    grads_on_cpu = any(g.device.type == "cpu" for g in grads)
-    if grads_on_cpu:
-        cuda_device = torch.cuda.current_device()
-        norm_grads = [g.to(cuda_device) for g in grads]
-    else:
-        norm_grads = grads
+    # With no CUDA at all (a CPU-only box: unit tests, single-process CPU runs) there is nothing to
+    # move the grads to and no nccl backend to appease, so the norm is computed where they already
+    # are. norm_device is the one place this function decides where the reduction happens.
+    norm_device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu")
+    grads_on_cpu = torch.cuda.is_available() and any(g.device.type == "cpu" for g in grads)
+    norm_grads = [g.to(norm_device) for g in grads] if grads_on_cpu else grads
 
     # Group grads by device mesh (DTensors only). Plain tensors / non-DTensors
     # collect under a single ``None`` key. EP introduces >1 distinct mesh.
@@ -832,7 +832,7 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
         # grads are on cuda (norm_grads is grads). Under cpu_offload norm_grads
         # are the cuda copies so the _NormPartial all-reduce runs on nccl.
         total_norm = _get_total_norm(norm_grads, norm_type, error_if_nonfinite, foreach)
-        total_norm = total_norm.to(torch.cuda.current_device(), non_blocking=True)
+        total_norm = total_norm.to(norm_device, non_blocking=True)
         # Clip the ORIGINAL parameters' grads (cpu under cpu_offload);
         # _clip_grads_with_norm_ moves the cuda total_norm to each grad's device.
         _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
@@ -841,7 +841,7 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     # Multi-mesh (EP): reduce each mesh-group to a replicated plain scalar, then
     # combine the per-group p-norms into a single global scalar.
     norm_type = float(norm_type)
-    device = torch.cuda.current_device()
+    device = norm_device
     group_norms = []
     for group_grads in mesh_groups.values():
         gn = _get_total_norm(group_grads, norm_type, error_if_nonfinite, foreach)
