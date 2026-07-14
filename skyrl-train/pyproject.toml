@@ -255,62 +255,26 @@ testpaths = [
 
 
 
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
-line_length = 120
-known_third_party = "wandb"
-
-[tool.black]
+[tool.ruff]
 line-length = 120
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-)/
-'''
-
-[tool.flake8]
-max-line-length = 120
-max-doc-length = 120
-extend-ignore = [
-    # Default ignored errors by flake8
-    "E121", "E123", "E126", "E226", "E24", "E704",
-    # F401 module imported but unused
-    "F401",
-    # E203 whitespace before ':' (conflict with black)
-    "E203",
-    # E231 missing whitespace after ',' (conflict with black)
-    "E231",
-    # E501 line too long (conflict with black)
-    "E501",
-    # E741 do not use variables named 'l', 'O', or 'I'
-    "E741",
-    # W503 line break before binary operator (conflict with black)
-    "W503",
-    # W504 line break after binary operator (conflict with black)
-    "W504",
-    # W505 doc line too long (conflict with black)
-    "W505",
-    # W605 invalid escape sequence 'x' (conflict with latex within docs)
-    "W605",
-]
 
 [tool.ruff.lint]
 ignore = [
-    "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
+    "F722", # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
+    "E741", # Ambiguous variable names (l, I) - carried over from the flake8 config this replaces
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules put the repo root on sys.path so that `tests.*` resolves under a bare
+# `python tests/gpu/...` invocation, so their imports necessarily follow that statement.
+"tests/gpu/test_e2e_moe_rl_step.py" = ["E402"]
+"tests/gpu/test_e2e_moe_rl_step_80b.py" = ["E402"]
+# A skip guarding an optional dependency has to run before the import it guards.
+"tests/cpu/distributed/test_muon_hybrid.py" = ["E402"]
+"tests/cpu/generators/test_normalize_prompt_token_ids.py" = ["E402"]
+"tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
+# Optional-dependency shim: the imports inside the try block are the availability probe.
+"examples/terminal_bench/_harbor_compat.py" = ["F401"]
 
 [pytest]
 markers = [

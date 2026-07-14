@@ -20,48 +20,29 @@ requires-python = ">=3.12"
 # - skyagent/     (install with: pip install ./skyagent)
 packages = []
 
-[tool.black]
-line-length = 120
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-)/
-'''
-
-[tool.flake8]
-max-line-length = 120
-max-doc-length = 120
-extend-ignore = [
-    # Default ignored errors by flake8
-    "E121", "E123", "E126", "E226", "E24", "E704",
-    # F401 module imported but unused
-    "F401",
-    # E203 whitespace before ':' (conflict with black)
-    "E203",
-    # E231 missing whitespace after ',' (conflict with black)
-    "E231",
-    # E501 line too long (conflict with black)
-    "E501",
-    # E741 do not use variables named 'l', 'O', or 'I'
-    "E741",
-    # W503 line break before binary operator (conflict with black)
-    "W503",
-    # W504 line break after binary operator (conflict with black)
-    "W504",
-    # W505 doc line too long (conflict with black)
-    "W505",
-    # W605 invalid escape sequence 'x' (conflict with latex within docs)
-    "W605",
+[dependency-groups]
+dev = [
+    "marin-style @ git+https://github.com/marin-community/marin-style@999ea41d48c05db6f78552ddfa8d3cc6d49cd37f",
 ]
+
+[tool.marin-style]
+# ruff-format is switched on by the reformat PR stacked on top of this one, together with
+# the tree-wide reformat it demands. Enabling it here would just make this PR's lint job
+# fail on 157 files of dialect drift that have nothing to do with the changes in it.
+checks = ["ruff-check"]
+# Pinned rather than inherited from the kit's default, so that bumping marin-style cannot
+# silently reformat the tree: a ruff release that changes the format dialect has to be
+# adopted here, deliberately, as its own commit. This is the only formatter that runs --
+# skyrl-train's dev extra still lists ruff 0.11.9 and black, but nothing invokes them
+# (lint goes through infra/pre-commit.py), and they cannot be dropped while the lockfile
+# is unregenerable.
+ruff_version = "0.14.3"
+# skyrl-agent is a dormant snapshot that nothing in CI builds or tests; reformatting it
+# would be pure churn. The three live packages are linted.
+include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**"]
+
+[tool.ruff]
+line-length = 120
 
 [tool.ruff.lint]
 ignore = [

@@ -1,8 +1,12 @@
 set -e
 
+# Lint and format via the shared marin-style checks.
+uv run infra/pre-commit.py --all-files --fix
+
+# Secret scan (the only hook left in .pre-commit-config.yaml).
 if command -v uv >/dev/null 2>&1; then
     uv pip install -q pre-commit
-else 
+else
     pip install -q pre-commit
 fi
 
