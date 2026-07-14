@@ -10,8 +10,7 @@ teacher vLLM engine, and the resulting logprobs are mapped back to student
 token positions.
 """
 
-import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
 
 import torch

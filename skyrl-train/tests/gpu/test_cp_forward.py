@@ -241,7 +241,7 @@ def main():
             unsupported[method] = str(e).splitlines()[-1]
             if rank == 0:
                 print(f"[Stage4 cp2] method={method}: NOT supported by this torch build -> {unsupported[method]}")
-            del m
+            m = None
             torch.cuda.empty_cache()
             dist.barrier()
             continue
@@ -252,7 +252,7 @@ def main():
         results[method] = logp
         if rank == 0:
             print(f"[Stage4 cp2] method={method}: forward OK, action_logp shape={tuple(logp.shape)}, finite=True")
-        del m
+        m = None
         torch.cuda.empty_cache()
         dist.barrier()
 

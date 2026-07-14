@@ -606,7 +606,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 out["lines"].append(f"[L{layer_idx}] wrong-expert offsets are NON-uniform (deltas={sorted(deltas)}) => W1 strided permutation")
 
         # Verdict
-        any_corrupt = any("CORRUPT" in l and not l.endswith("0/" + str(n_experts)) for l in out["lines"])
         total_corrupt = sum(1 for l in out["lines"] if l.strip().startswith(("w1[", "w2[", "w3[")))
         out["total_corrupt_rows"] = total_corrupt
         out["verdict"] = ("CLEAN (gathered==disk at EP=8 on-GPU => corruption is DOWNSTREAM: "

@@ -12,9 +12,6 @@ High-level notes:
 """
 
 import asyncio
-import os
-import torch
-import traceback
 import sys
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
@@ -24,7 +21,6 @@ from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
-from skyrl_train.utils.io import io
 from skyrl_train.generators.utils import prepare_generator_input, concatenate_generator_outputs
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass

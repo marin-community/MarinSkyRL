@@ -58,7 +58,6 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
-from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
 from packaging import version
@@ -456,7 +455,7 @@ class WorkerWrap:
         patched = []
         for name, param in model.named_parameters():
             subclass_type = getattr(param, 'subclass_type', None)
-            if subclass_type is not None and type(param) != subclass_type:
+            if subclass_type is not None and type(param) is not subclass_type:
                 original_class = type(param)
                 param.__class__ = subclass_type
                 patched.append((param, original_class))
@@ -1422,7 +1421,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # 5 attempts with exponential backoff (15→30→60→120→240 s) bridges
         # the TIME_WAIT window cleanly while staying well under the outer
         # wait_for_engine_startup deadline.
-        import random, time
+        import random
+        import time
         from torch.distributed import DistNetworkError
 
         def _is_port_collision(exc: BaseException) -> bool:

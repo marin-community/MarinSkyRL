@@ -23,7 +23,6 @@ try:
 except ImportError:  # pytest absent on cluster envs — direct invocation still works
     pytest = None
 
-from skyrl_train.models.layers.moe import MoE
 from skyrl_train.models.layers.moe_swap import _build_moe_for_block
 from skyrl_train.models.layers.moe_weight_remap import (
     convert_hf_to_tt_moe,

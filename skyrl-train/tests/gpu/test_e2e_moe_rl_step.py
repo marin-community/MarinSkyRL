@@ -334,7 +334,6 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         asyncio.run(client.wake_up())
 
         prompts = get_test_prompts(MODEL, num_samples=4)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
 
         # Smoke the engine once so a dead-engine failure surfaces before the (much
         # longer) training step; this generate is NOT the gate (the gate is the

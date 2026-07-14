@@ -1,7 +1,6 @@
 """Tests for TeacherInferenceEngineClient logprob extraction."""
 
 import pytest
-import torch
 from skyrl_train.inference_engines.teacher_engine_client import (
     TeacherInferenceEngineClient,
     TeacherScoringOutput,

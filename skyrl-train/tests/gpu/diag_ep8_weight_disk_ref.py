@@ -129,11 +129,11 @@ def main():
         for line in r0["lines"]:
             print("    " + line, flush=True)
         if r0.get("wrong_expert_map"):
-            print(f"\n[ep8diag] WRONG_EXPERT permutation map (gathered j -> disk m, m!=j):", flush=True)
+            print("\n[ep8diag] WRONG_EXPERT permutation map (gathered j -> disk m, m!=j):", flush=True)
             for j, m in sorted(r0["wrong_expert_map"].items()):
                 print(f"    gathered w1[{j}]  ==  disk expert {m}", flush=True)
 
-        print(f"\n[ep8diag] ===== VERDICT =====", flush=True)
+        print("\n[ep8diag] ===== VERDICT =====", flush=True)
         print(f"[ep8diag] {r0['verdict']}", flush=True)
         return 0
     finally:

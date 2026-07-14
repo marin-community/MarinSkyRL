@@ -26,7 +26,6 @@ Run:
 import sys
 import types
 import pytest
-from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
 

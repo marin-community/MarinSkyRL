@@ -14,8 +14,7 @@ import json
 import pytest
 import asyncio
 from http import HTTPStatus
-from typing import Any, Dict, List, Union, Tuple
-from pathlib import Path
+from typing import Any, Dict, List, Union
 from unittest.mock import patch
 import ray
 import hydra

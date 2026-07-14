@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
@@ -41,7 +40,6 @@ from harbor.models.trial.config import (
 )
 from harbor.models.job.config import RetryConfig
 from harbor.models.environment_type import EnvironmentType
-from harbor.models.agent.name import AgentName
 
 
 # =============================================================================
@@ -929,6 +927,6 @@ def print_harbor_schema() -> None:
     for section_name, schema in HARBOR_SCHEMA.items():
         print(f"\n{section_name.upper()}:")
         for yaml_key, mapping in schema.fields.items():
-            field_type = f" (kwargs)" if mapping.field_type == "kwargs" else ""
+            field_type = " (kwargs)" if mapping.field_type == "kwargs" else ""
             default = f" [default: {mapping.default}]" if mapping.default is not None else ""
             print(f"  - {yaml_key} -> {mapping.harbor_field}{field_type}{default}")

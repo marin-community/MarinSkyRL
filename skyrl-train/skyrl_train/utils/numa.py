@@ -16,7 +16,7 @@ are no-ops to avoid interfering with systems that don't need NUMA binding.
 import os
 import re
 import subprocess
-from ctypes import CDLL, Structure, POINTER, c_ulong, c_char_p, c_int, c_void_p
+from ctypes import CDLL, Structure, POINTER, c_ulong, c_char_p, c_int
 from ctypes.util import find_library
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple

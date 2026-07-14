@@ -13,8 +13,8 @@ Key properties:
 """
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Set
+from dataclasses import dataclass
+from typing import Iterable, List, Set
 
 from loguru import logger
 

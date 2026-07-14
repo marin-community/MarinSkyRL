@@ -62,7 +62,6 @@ from transformers import AutoTokenizer, AutoConfig
 from omegaconf import DictConfig
 
 from tests.gpu.utils import (
-    get_available_gpus,
     get_test_actor_config,
     get_test_prompts,
     init_worker_with_type,

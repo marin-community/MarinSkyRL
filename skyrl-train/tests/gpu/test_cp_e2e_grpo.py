@@ -334,7 +334,7 @@ def test2_oom_to_ok(cp_size, cp_mesh, rank):
     except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
         if rank == 0:
             print(f"[TEST2] cp={cp_size} ALSO OOMed at seq_len={seq_len}: {e}")
-        del m_cp
+        m_cp = None
         return False
     dt = time.time() - t0
     peak = torch.cuda.max_memory_allocated() / 1e9
@@ -352,7 +352,7 @@ def test2_oom_to_ok(cp_size, cp_mesh, rank):
             f"step {dt:.2f}s"
         )
         print(f"[TEST2] OOM->OK: cp=1 OOMs at {seq_len}, cp={cp_size} trains -> {'PASS' if ok else 'FAIL'}")
-    del m_cp
+    m_cp = None
     torch.cuda.empty_cache()
     return ok
 
@@ -376,7 +376,7 @@ def test3_cp_ep_moe(world_size, rank):
 
     from skyrl_train.distributed.fsdp_utils import create_device_mesh, apply_ep
     from skyrl_train.models.layers.moe import MoE
-    from skyrl_train.distributed.cp_utils import cp_context, context_parallel_unshard, cp_unshard_grad_safe
+    from skyrl_train.distributed.cp_utils import cp_context, cp_unshard_grad_safe
     from torch.distributed.tensor import DTensor
 
     # ---- Verify the 4-D mesh slices compose (the Stage-3 concern) ----
@@ -559,7 +559,7 @@ def test4_resume_under_cp(cp_size, cp_mesh, rank):
     lp_before = _score(m, input_ids, attention_mask, num_actions)
 
     # save (rank 0 writes a shared path; all ranks read it).
-    ckpt = os.path.join(tempfile.gettempdir(), f"cp_resume_ckpt_rank.pt")
+    ckpt = os.path.join(tempfile.gettempdir(), "cp_resume_ckpt_rank.pt")
     if rank == 0:
         torch.save(m.model.state_dict(), ckpt)
     dist.barrier()

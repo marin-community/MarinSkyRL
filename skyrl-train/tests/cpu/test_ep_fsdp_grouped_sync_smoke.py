@@ -118,7 +118,6 @@ def _scrambled_gather(dt: DTensor) -> torch.Tensor:
     instead concatenates each rank's local rows in flat rank order, which for
     ep>1 yields a DIFFERENT permutation than global id order.
     """
-    mesh = dt.device_mesh
     placements = dt.placements
     sdim = next(p.dim for p in placements if isinstance(p, (Shard, _StridedShard)))
     local = dt.to_local().detach().contiguous()

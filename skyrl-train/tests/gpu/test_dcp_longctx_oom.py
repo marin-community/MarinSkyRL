@@ -168,11 +168,11 @@ def _mode_oom():
     # --- dcp=1: expect a KV-cache OOM at init ---
     dcp1_oomed = False
     dcp1_built = False
-    print(f"[Stage4-DCP] building dcp=1 (expect KV-OOM) ...")
+    print("[Stage4-DCP] building dcp=1 (expect KV-OOM) ...")
     try:
         llm1 = _build(dcp=1, max_model_len=OOM_MAXLEN, gpu_util=OOM_GPUUTIL)
         dcp1_built = True
-        print(f"[Stage4-DCP] dcp=1 BUILT (did NOT OOM) — config not tight enough for a crisp demo.")
+        print("[Stage4-DCP] dcp=1 BUILT (did NOT OOM) — config not tight enough for a crisp demo.")
         _free(llm1)
     except Exception as e:
         if _is_kv_oom(e):
@@ -205,8 +205,8 @@ def _mode_oom():
         print(f"[Stage4-DCP] OOM->OK SHIP GATE: PASS — dcp=1 KV-OOMed; dcp={DCP} fit the KV "
               f"(sharded) and completed the rollout ({gen} tok, {tps:.1f} tok/s).")
     elif dcp1_built:
-        print(f"[Stage4-DCP] OOM->OK SHIP GATE: INCONCLUSIVE — dcp=1 did NOT OOM at this "
-              f"config (max_model_len/gpu_util not tight enough). Falling back to MODE=headroom.")
+        print("[Stage4-DCP] OOM->OK SHIP GATE: INCONCLUSIVE — dcp=1 did NOT OOM at this "
+              "config (max_model_len/gpu_util not tight enough). Falling back to MODE=headroom.")
     print("=" * 78)
     return ok, dcp1_built
 

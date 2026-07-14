@@ -21,7 +21,6 @@ Env:
 """
 import os
 import sys
-import socket
 
 import ray
 from omegaconf import OmegaConf
@@ -43,7 +42,6 @@ FORCE_CVD_MASK = os.environ.get("SMOKE_FORCE_CVD_MASK", "1") == "1"
 
 
 def build_cfg():
-    import hydra
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=config_dir, version_base=None):

@@ -53,7 +53,7 @@ def main():
         apply_fsdp2,
         fsdp2_load_full_state_dict,
     )
-    from torch.distributed.fsdp import MixedPrecisionPolicy, CPUOffloadPolicy
+    from torch.distributed.fsdp import MixedPrecisionPolicy
 
     MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
     cfg = AutoConfig.from_pretrained(MODEL)

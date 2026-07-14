@@ -33,15 +33,13 @@ a clean-but-permuted half ordering is not misread as corruption.
 Run (3 nodes; policy 16 GPU + engine 2 GPU):
     DIAG_POLICY_GPUS_PER_NODE=8 python -m tests.gpu.diag_ep8_disagg_engine_disk
 """
-import asyncio
 import os
 
 import ray
 import torch
-from ray.util.placement_group import placement_group
 
 from tests.gpu.utils import init_worker_with_type, get_test_actor_config, get_available_gpus
-from skyrl_train.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import initialize_ray
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from transformers import AutoTokenizer, AutoConfig
@@ -183,7 +181,7 @@ def main():
             eng_hosts = sorted(set(ray.get(eng_actor.report_engine_hosts.remote())))
         except Exception as e:
             eng_hosts = [f"<rpc-failed:{e}>"]
-        print(f"\n[disagg] ===== DISAGGREGATION PROOF =====", flush=True)
+        print("\n[disagg] ===== DISAGGREGATION PROOF =====", flush=True)
         print(f"[disagg] policy hosts={pol_hosts}  (rank0 host={rank0_host})", flush=True)
         print(f"[disagg] engine hosts={eng_hosts}", flush=True)
         disjoint = all(h not in pol_hosts for h in eng_hosts if not str(h).startswith("<"))
@@ -229,7 +227,7 @@ def main():
         # [gate;up], (b) the POST-UPDATE engine w13 vs disk, (c) pre vs post. The from-disk
         # base-serve is COHERENT, so (a) tells us the CORRECT kernel layout; if the update
         # changes the layout (c != identical) the RL path corrupts it.
-        print(f"\n[disagg] ===== KERNEL-FORMAT DISCRIMINATOR (pre=from-disk load vs post=RL-update) =====", flush=True)
+        print("\n[disagg] ===== KERNEL-FORMAT DISCRIMINATOR (pre=from-disk load vs post=RL-update) =====", flush=True)
         for li in layers:
             d = _load_disk_experts(local_dir, li, num_experts)
             for wr, (rd_pre, rd_post) in enumerate(zip(pre_by_layer[li], slot_reads_by_layer[li][0])):
@@ -343,7 +341,6 @@ def analyze(slot_reads, disk, num_experts):
             lines.append(f"[engine-rank{wr}] no slots ({rd.get('error') if isinstance(rd, dict) else rd})")
             continue
         ranks = rd.get("__ranks__", {})
-        emap = rd.get("expert_map")
         s2g = rd.get("slot_to_global", [])
         inter = rd.get("w13_inter_half")
         local_num = rd.get("local_num_experts")

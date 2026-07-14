@@ -18,7 +18,7 @@ import requests
 import traceback
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, TYPE_CHECKING, Dict, Any
+from typing import Optional, Protocol, Dict, Any
 
 import fastapi
 import uvicorn
@@ -28,13 +28,26 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
-if TYPE_CHECKING:
-    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-
 logger = logging.getLogger(__name__)
 
+
+class CompletionBackend(Protocol):
+    """What this endpoint needs of the engine client it serves.
+
+    InferenceEngineClient satisfies it. It is a protocol rather than that concrete type
+    because the dependency runs the other way: inference_engine_client imports this module
+    for the error types and the server entrypoints below.
+    """
+
+    model_name: str
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
+
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
+
+
 # Global state to hold the inference engine client and backend
-_global_inference_engine_client: Optional["InferenceEngineClient"] = None
+_global_inference_engine_client: Optional[CompletionBackend] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
 
 
@@ -50,7 +63,7 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-def set_global_state(inference_engine_client: "InferenceEngineClient", uvicorn_server: uvicorn.Server):
+def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server: uvicorn.Server):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -327,7 +340,7 @@ def create_app() -> fastapi.FastAPI:
 
 
 def serve(
-    inference_engine_client: "InferenceEngineClient",
+    inference_engine_client: CompletionBackend,
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info",

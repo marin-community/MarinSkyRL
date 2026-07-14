@@ -25,7 +25,6 @@ import os
 import hydra
 import pytest
 import ray
-import torch
 from omegaconf import DictConfig
 
 from skyrl_train.utils.utils import (

@@ -20,7 +20,6 @@ Run:
 
 import math
 
-import pytest
 import torch
 from omegaconf import OmegaConf
 

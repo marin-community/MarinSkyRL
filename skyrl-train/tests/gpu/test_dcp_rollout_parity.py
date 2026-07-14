@@ -299,7 +299,7 @@ def main():
 
     print(f"[Stage3-DCP] vllm={getattr(vllm, '__version__', '?')} model={MODEL_NAME} "
           f"tp={TP} dcp={DCP} max_tokens={MAX_TOKENS} seed={SEED} gpus={ngpu}")
-    print(f"[Stage3-DCP] RE-GATED tolerance criterion (bf16 sharded-attention reduce-order):")
+    print("[Stage3-DCP] RE-GATED tolerance criterion (bf16 sharded-attention reduce-order):")
     print(f"[Stage3-DCP]   (A) teacher-forced p99|Δlogprob| <= {BULK_P99_ATOL:.1e}  (no systematic divergence)")
     print(f"[Stage3-DCP]   (B) teacher-forced max|Δlogprob| <= {MAX_ABS_BOUND:.2f}  (bounded worst case)")
     print(f"[Stage3-DCP]   (C) teacher-forced argmax agreement >= {ARGMAX_AGREE_MIN:.0%} AND every disagreement is a")
@@ -423,7 +423,7 @@ def main():
     # Verdict
     # =====================================================================
     print("\n" + "=" * 78)
-    print(f"[Stage3-DCP] RE-GATED VERDICT (bf16 sharded-attention tolerance):")
+    print("[Stage3-DCP] RE-GATED VERDICT (bf16 sharded-attention tolerance):")
     print(f"[Stage3-DCP]   (A) bulk p99={p99:.3e} <= {BULK_P99_ATOL:.1e} : {'PASS' if ok_bulk else 'FAIL'}")
     print(f"[Stage3-DCP]   (B) max={tf_max:.3e} <= {MAX_ABS_BOUND}      : {'PASS' if ok_max else 'FAIL'}")
     print(f"[Stage3-DCP]   (C) argmax {100.0*argmax_agree_frac:.2f}% >= {ARGMAX_AGREE_MIN:.0%} : {'PASS' if ok_argmax else 'FAIL'}")

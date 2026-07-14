@@ -12,7 +12,6 @@ import sys
 import tempfile
 from dataclasses import dataclass
 
-import torch
 
 
 # ---------------------------------------------------------------------------

@@ -324,7 +324,7 @@ def test_g3a_2_production_noop():
     # Reproduce today's packed forward directly: unpad → model → pad. This is
     # exactly what wrapper.forward does when no controller is installed; the
     # patched SparseMoeBlock short-circuits to orig_forward (no controller).
-    from flash_attn.bert_padding import pad_input, unpad_input
+    from flash_attn.bert_padding import unpad_input
 
     position_ids = attn.long().cumsum(-1) - 1
     position_ids.masked_fill_(attn == 0, 1)

@@ -26,7 +26,6 @@ from skyrl_train.utils.ppo_utils import (
     reduce_loss,
     masked_mean,
 )
-from skyrl_train.utils.distillation_utils import kl_from_sparse_teacher_logprobs
 import hydra
 
 

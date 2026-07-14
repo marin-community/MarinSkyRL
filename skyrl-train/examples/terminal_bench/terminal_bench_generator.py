@@ -4,7 +4,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, List, Optional, Dict, Any, Set, Tuple
+from typing import Callable, Deque, List, Optional, Dict, Any, Tuple
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
@@ -22,7 +22,6 @@ from skyrl_train.generators.utils import (
     SENTINEL_EXPERT_ID,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
 from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping

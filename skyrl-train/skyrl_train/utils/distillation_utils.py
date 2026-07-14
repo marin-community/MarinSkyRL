@@ -5,7 +5,7 @@ Provides KL divergence computation from sparse (top-K) teacher logprobs,
 and Best-of-N selection logic.
 """
 
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F

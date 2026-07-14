@@ -5,6 +5,7 @@
 
 import contextlib
 import os
+import threading
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
@@ -65,7 +66,6 @@ except ImportError:  # flash-attn not installed (e.g. the CP/sdpa-only env)
 # worker can share it without importing this heavy module. Re-exported under the
 # original private names to keep this module's call sites + any importers stable.
 from skyrl_train.utils.hf_load_retry import (  # noqa: E402
-    is_transient_hf_load_error as _is_transient_hf_load_error,
     load_pretrained_with_retry as _load_pretrained_with_retry,
 )
 
@@ -228,9 +228,7 @@ def _cp_force_flash_sdpa():
 # non-CP / CP1 / dense-Qwen3 / generation forward is byte-identical. The patch is
 # installed once, idempotently, and is a no-op (logged) if the MoE module is not
 # importable in this environment.
-import threading as _threading
-
-_cp_moe_force_no_mask = _threading.local()
+_cp_moe_force_no_mask = threading.local()
 
 
 def _cp_moe_no_mask_active() -> bool:

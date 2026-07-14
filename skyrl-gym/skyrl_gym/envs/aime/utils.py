@@ -14,6 +14,7 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 # https://github.com/volcengine/verl/blob/1a62568f801ba35ac1f5387e27232a2df7eac488/verl/utils/reward_score/math_dapo.py
 
+import math
 import re
 from typing import Optional, Dict, Any
 
@@ -241,9 +242,6 @@ def verify(
 
     correct, pred = is_correct_minerva(solution_str, answer)
     return correct, pred
-
-
-import math
 
 
 def compute_length_penalty(

@@ -5,11 +5,9 @@ Extends RayPPOTrainer with teacher model scoring via a separate vLLM inference e
 The FSDP RefWorker continues to serve its KL-regularization role unchanged.
 """
 
-from typing import List, Optional
+from typing import Optional
 
-import torch
 from loguru import logger
-from omegaconf import DictConfig
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch

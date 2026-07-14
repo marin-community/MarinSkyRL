@@ -36,12 +36,10 @@ from __future__ import annotations
 
 import os
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
-
-if TYPE_CHECKING:
-    import torch.nn as nn
+import torch.nn as nn
 
 
 __all__ = [
@@ -164,7 +162,7 @@ class RouterReplay:
 
     def on_router_forward(
         self,
-        module: "nn.Module",
+        module: nn.Module,
         routing_scores: torch.Tensor,
         top_indices: torch.Tensor,
     ) -> torch.Tensor:

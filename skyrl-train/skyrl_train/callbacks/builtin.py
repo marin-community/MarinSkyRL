@@ -18,14 +18,14 @@ Supports two configuration styles:
    ```
 """
 
-from typing import Any, Dict, List, Optional, Type, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
+from omegaconf import DictConfig
+
+from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
-
-if TYPE_CHECKING:
-    from omegaconf import DictConfig
 
 
 # Registry mapping callback type names to classes
@@ -312,7 +312,6 @@ class HFHubUploadCallback(TrainerCallback):
         if not self._ensure_repo_exists():
             return
 
-        import os
         from pathlib import Path
 
         api = self._get_api()
@@ -906,7 +905,7 @@ class VLLMStatsCallback(TrainerCallback):
             logger.warning(f"VLLMStatsCallback: Failed to log to wandb: {e}")
 
 
-def create_default_callbacks(cfg: "DictConfig") -> List[TrainerCallback]:
+def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     """
     Create the default set of callbacks based on trainer configuration.
 
@@ -1043,7 +1042,7 @@ class DefaultCallbackHandler(CallbackHandler):
 
     def __init__(
         self,
-        cfg: Optional["DictConfig"] = None,
+        cfg: Optional[DictConfig] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         """
@@ -1063,7 +1062,7 @@ class DefaultCallbackHandler(CallbackHandler):
     @classmethod
     def from_config(
         cls,
-        cfg: "DictConfig",
+        cfg: DictConfig,
         additional_callbacks: Optional[List[TrainerCallback]] = None,
     ) -> "DefaultCallbackHandler":
         """
@@ -1116,7 +1115,7 @@ def create_callback_from_config(callback_config: Dict[str, Any]) -> TrainerCallb
         ) from e
 
 
-def create_callbacks_from_config(cfg: "DictConfig") -> List[TrainerCallback]:
+def create_callbacks_from_config(cfg: DictConfig) -> List[TrainerCallback]:
     """
     Create callbacks from explicit YAML configuration.
 
@@ -1184,9 +1183,7 @@ class DataTrackingCallback(TrainerCallback):
     error_behavior = "raise"  # data tracking errors should stop training
     ARTIFACT_NAME = "data_consumption_state.pt"
 
-    def __init__(self, tracker: "DataConsumptionTracker"):
-        from skyrl_train.utils.data_tracker import DataConsumptionTracker
-
+    def __init__(self, tracker: DataConsumptionTracker):
         assert isinstance(tracker, DataConsumptionTracker)
         self._tracker = tracker
 
@@ -1236,7 +1233,7 @@ class DataTrackingCallback(TrainerCallback):
     @staticmethod
     def load_from_checkpoint(
         ckpt_path: str,
-        tracker: "DataConsumptionTracker",
+        tracker: DataConsumptionTracker,
     ) -> bool:
         """Load data consumption state from a checkpoint directory.
 

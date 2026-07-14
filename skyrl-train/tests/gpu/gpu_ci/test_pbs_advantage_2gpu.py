@@ -141,7 +141,6 @@ def test_pbs_ppo_train_loss_parity(ray_init_fixture, cfg):
     advantages and the zeros (pure-RLOO-N) advantages run the identical path."""
     cfg.trainer.strategy = "fsdp2"  # production path; deepspeed absent in the rl venv
 
-    bsz, num_actions = 2, 4
     # Pure-RLOO-N-shaped advantages (uniform per trajectory).
     base_adv = torch.tensor([[0.6, 0.6, 0.6, 0.6], [-0.4, -0.4, -0.4, -0.4]])
     # PBS-shaped: same outcome term + a positive edit-token bump on sample 0 tok 1.

@@ -16,7 +16,6 @@ import torch.nn as nn
 import pytest
 
 from skyrl_train.distributed.muon_hybrid import (
-    HybridMuon,
     build_hybrid_muon,
     is_muon_param,
 )

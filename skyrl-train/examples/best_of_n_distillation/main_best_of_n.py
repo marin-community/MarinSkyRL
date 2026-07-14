@@ -22,7 +22,6 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.entrypoints.main_base import create_teacher_inference_engines_from_config
 from skyrl_train.distillation_trainer import DistillationTrainer
-from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray

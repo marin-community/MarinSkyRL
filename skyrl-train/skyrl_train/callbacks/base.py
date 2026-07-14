@@ -13,12 +13,9 @@ import asyncio
 import threading
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Literal, Optional
 
 from loguru import logger
-
-if TYPE_CHECKING:
-    from skyrl_train.trainer import RayPPOTrainer
 
 
 class AtomicStepCounter:
