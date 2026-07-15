@@ -68,7 +68,6 @@ import importlib.util
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 
 import torch
@@ -226,7 +225,7 @@ def _resolve_src(src: str, cache_dir: str | None) -> Path:
 
 
 def convert_checkpoint(src: str, dst: str, dtype: str = "preserve", cache_dir: str | None = None) -> None:
-    from safetensors.torch import load_file, save_file
+    from safetensors.torch import load_file
 
     remap_mod = _load_remap_module()
     src_dir = _resolve_src(src, cache_dir)

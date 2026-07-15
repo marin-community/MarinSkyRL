@@ -91,7 +91,12 @@ class _RemoteCapture:
                     @staticmethod
                     def remote(**kwargs):
                         capture.remote_calls.append(kwargs)
-                        return object()  # a fake actor handle
+                        # Stand-in vLLM actor handle. The disaggregated readiness gate
+                        # calls engine.inference_engine_actor.report_engine_hosts.remote(),
+                        # so the handle must expose that method.
+                        return types.SimpleNamespace(
+                            report_engine_hosts=types.SimpleNamespace(remote=lambda *a, **k: None)
+                        )
 
                 return _Bound()
 
@@ -139,8 +144,9 @@ def _run_create(monkeypatch, dcp: int):
     monkeypatch.setattr(rwie.ray, "get", lambda *a, **k: {})
     # get_rendezvous_addr_port is only used for data_parallel_size>1; stub anyway.
     monkeypatch.setattr(rwie, "get_rendezvous_addr_port", lambda pg, idx: ("127.0.0.1", 12345))
-    # RayWrappedInferenceEngine wraps each handle — keep it trivial.
-    monkeypatch.setattr(rwie, "RayWrappedInferenceEngine", lambda h: h)
+    # The real RayWrappedInferenceEngine wrapper is trivial (it only stores the actor
+    # handle as .inference_engine_actor), so use it unmocked — the readiness gate reads
+    # engine.inference_engine_actor off it.
 
     rwie.create_ray_wrapped_inference_engines(
         num_inference_engines=1,

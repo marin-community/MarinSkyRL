@@ -50,6 +50,13 @@ STAGE2_TRAINER_FIELDS = {
 STAGE0_DCP_GENERATOR_FIELDS = {
     "inference_engine_decode_context_parallel_size": 1,
 }
+# Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
+# (default == False) and unrelated to CP; it landed after the pre-CP golden was
+# snapshotted, so — like the CP fields — it must be stripped from each role's
+# fsdp_config before the structural-identity comparison against the golden.
+MOE_FSDP_FIELDS = {
+    "use_grouped_mm": False,
+}
 ROLES = ("policy", "ref", "critic")
 
 
@@ -87,7 +94,7 @@ def test_all_defaults_is_structurally_identical_to_pre_cp():
     container = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
     for role in ROLES:
         fsdp = container["trainer"][role]["fsdp_config"]
-        for k in CP_FIELDS:  # strip the additive keys -> should reproduce pre-CP shape
+        for k in (*CP_FIELDS, *MOE_FSDP_FIELDS):  # strip the additive keys -> should reproduce pre-CP shape
             fsdp.pop(k, None)
     for k in STAGE2_TRAINER_FIELDS:  # strip Stage-2 additive top-level trainer keys
         container["trainer"].pop(k, None)
@@ -97,19 +104,20 @@ def test_all_defaults_is_structurally_identical_to_pre_cp():
     assert container == golden, "default config drifted from the pre-CP golden baseline"
 
 
-def test_diff_is_exactly_the_three_new_keys_x_three_roles():
-    """The config delta vs the golden is EXACTLY the 3 CP keys in each of the 3 roles."""
+def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
+    """The fsdp_config delta vs the golden is EXACTLY the additive keys (3 CP + grouped-mm) per role."""
     current = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
+    expected_added = set(CP_FIELDS) | set(MOE_FSDP_FIELDS)
     for role in ROLES:
         cur_fsdp = current["trainer"][role]["fsdp_config"]
         gold_fsdp = golden["trainer"][role]["fsdp_config"]
         added = set(cur_fsdp) - set(gold_fsdp)
-        assert added == set(
-            CP_FIELDS
-        ), f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(CP_FIELDS)}"
+        assert (
+            added == expected_added
+        ), f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(expected_added)}"
         # And the added keys carry the disabled defaults.
-        for k, v in CP_FIELDS.items():
+        for k, v in {**CP_FIELDS, **MOE_FSDP_FIELDS}.items():
             assert cur_fsdp[k] == v
     # The only new top-level trainer keys are the Stage-2 additive ones (attn_backend).
     added_trainer = set(current["trainer"]) - set(golden["trainer"])

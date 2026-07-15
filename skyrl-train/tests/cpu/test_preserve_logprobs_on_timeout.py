@@ -18,11 +18,19 @@ import os
 import sys
 import types
 
+import pytest
+
 _EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 if _EXAMPLES not in sys.path:
     sys.path.insert(0, _EXAMPLES)
 
-from terminal_bench.terminal_bench_generator import TerminalBenchGenerator  # noqa: E402
+# TerminalBenchGenerator pulls in the harbor/terminal_bench agentic-RL stack, which
+# the CPU dev extra deliberately does not install. Skip the module where it is absent
+# (it still runs in the agentic RL env where harbor is present).
+try:
+    from terminal_bench.terminal_bench_generator import TerminalBenchGenerator  # noqa: E402
+except ImportError:
+    pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
 
 def _fake_self(*, preserve: bool = True, classification: bool = True):
