@@ -27,6 +27,11 @@ from pathlib import Path
 # loguru line, so the prefix is matched loosely and the JSON object runs to end of line.
 METRIC_LINE = re.compile(r"WANDB_MIRROR kind=(?P<kind>\w+) step=(?P<step>\d+) metrics=(?P<metrics>\{.*\})\s*$")
 
+# The trainer's loguru sink colorizes even when piped, so the payload arrives wrapped in SGR
+# escapes (`\x1b[32m...WANDB_MIRROR...}\x1b[0m`). The trailing reset defeats the `\}\s*$` anchor,
+# which silently parses zero steps out of a perfectly healthy run -- strip the escapes first.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
 TRAIN = "train"
 
 
@@ -48,6 +53,18 @@ class MetricBound:
 
 
 @dataclass(frozen=True)
+class RewardTrend:
+    """A behavioural check: a metric's mean over the last ``window`` steps must exceed its mean
+    over the first ``window`` by at least ``min_improvement``. This is what makes the gate test
+    learning rather than just liveness -- a run that generates and scores but never improves
+    (broken advantages, a dead optimizer, weights that never sync back) stays flat and fails it."""
+
+    metric: str
+    window: int
+    min_improvement: float
+
+
+@dataclass(frozen=True)
 class GateSpec:
     """What a healthy run looks like. See the shipped specs for the recorded values."""
 
@@ -55,22 +72,25 @@ class GateSpec:
     finite_metrics: tuple[str, ...]
     bounds: dict[str, MetricBound]
     max_wall_clock_seconds: float
+    reward_trend: RewardTrend | None = None
 
 
 def load_spec(path: Path) -> GateSpec:
     raw = json.loads(path.read_text())
+    trend = raw.get("reward_trend")
     return GateSpec(
         min_train_steps=raw["min_train_steps"],
         finite_metrics=tuple(raw["finite_metrics"]),
         bounds={k: MetricBound(v["minimum"], v["maximum"]) for k, v in raw["bounds"].items()},
         max_wall_clock_seconds=raw["max_wall_clock_seconds"],
+        reward_trend=RewardTrend(trend["metric"], trend["window"], trend["min_improvement"]) if trend else None,
     )
 
 
 def parse_metrics(log_text: str) -> list[StepMetrics]:
     """Pull every WANDB_MIRROR payload out of a run log, in the order they were logged."""
     steps = []
-    for line in log_text.splitlines():
+    for line in ANSI_ESCAPE.sub("", log_text).splitlines():
         match = METRIC_LINE.search(line)
         if match is None:
             continue
@@ -117,7 +137,31 @@ def check_run(steps: list[StepMetrics], spec: GateSpec, wall_clock_seconds: floa
         if not bound.minimum <= value <= bound.maximum:
             failures.append(f"step {final.step} logged {name}={value}, outside [{bound.minimum}, {bound.maximum}]")
 
+    if spec.reward_trend is not None:
+        trend_failure = _reward_trend_failure(train_steps, spec.reward_trend)
+        if trend_failure is not None:
+            failures.append(trend_failure)
+
     return failures
+
+
+def _reward_trend_failure(train_steps: list[StepMetrics], trend: RewardTrend) -> str | None:
+    """Return a message if the metric did not climb by ``min_improvement`` from the first
+    ``window`` steps to the last, or None if it did (or there are too few steps to judge, which
+    the min_train_steps check already covers)."""
+    series = [s.values.get(trend.metric) for s in train_steps]
+    series = [v for v in series if _is_finite(v)]
+    if len(series) < 2 * trend.window:
+        return None
+    early = sum(series[: trend.window]) / trend.window
+    late = sum(series[-trend.window :]) / trend.window
+    if late - early >= trend.min_improvement:
+        return None
+    return (
+        f"{trend.metric} rose by {late - early:+.4f} over the run (first {trend.window} steps "
+        f"mean {early:.4f}, last {trend.window} mean {late:.4f}), expected at least "
+        f"+{trend.min_improvement:.4f} -- the policy is not learning"
+    )
 
 
 def main() -> int:

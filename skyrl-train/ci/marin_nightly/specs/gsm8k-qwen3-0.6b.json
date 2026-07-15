@@ -1,15 +1,17 @@
 {
   "provenance": {
-    "what": "Gate for the nightly single-H100 GRPO run: GSM8K, Qwen/Qwen3-0.6B, 2 training steps, colocated vLLM rollouts.",
+    "what": "Gate for the nightly single-H100 GRPO run: GSM8K, Qwen/Qwen3-0.6B, 30 training steps (train_batch_size 32, 8 samples/prompt), colocated vLLM rollouts on native attention.",
     "produced_by": "ci/marin_nightly/run_h100.sh, submitted to Iris by .github/workflows/marin-nightly.yaml",
     "why_these_thresholds": [
-      "This is a not-broken check, not a quality check. Two steps of a 0.6B policy on 16 prompts says nothing about model quality, so the gate gates on structure: the run reaches the step count, the trainer logs the metrics it is supposed to log, and none of them are NaN or inf.",
-      "reward/avg_raw_reward is bounded to [0, 1] because the gsm8k environment scores each rollout 0 or 1 (skyrl_gym/envs/gsm8k), so their mean cannot leave that range. A value outside it means the reward path is broken, which is exactly the regression worth catching. There is deliberately no floor above 0: a 0.6B model can legitimately score nothing on 16 GSM8K prompts, and a floor would make the nightly flaky rather than informative.",
-      "max_wall_clock_seconds is the run's own budget (the Iris job is capped separately). The observed cost is dominated by installing the vLLM/torch stack and loading the model, not by the two training steps."
+      "This gates behaviour, not just liveness. 30 steps of GRPO on a 0.6B policy is enough for reward to move, so on top of the structural checks (steps reached, metrics present and finite, reward in range) the gate requires reward/avg_raw_reward to actually climb -- a run that generates and scores but never learns (broken advantages, a dead optimizer, weights that never sync back) stays flat and fails.",
+      "reward_trend.min_improvement=0.03 is deliberately well below what a healthy run does. In the run this spec was cut from, reward/avg_raw_reward rose from a first-5-steps mean of ~0.11 to a last-5 mean of ~0.20 (about +0.09); 0.03 leaves roughly 3x margin so GPU nondeterminism does not make a healthy night flaky. The rollout seed is fixed (42), so the trajectory is close to reproducible night to night.",
+      "reward/avg_raw_reward is bounded to [0, 1] because the gsm8k environment scores each rollout 0 or 1 (skyrl_gym/envs/gsm8k), so their mean cannot leave that range. A value outside it means the reward path is broken.",
+      "max_wall_clock_seconds=1500 is ~2x the observed 747s for the training phase (engine init + 30 steps at ~22s/step); it is a hang/major-regression backstop, not a tight budget. The Iris job has its own server-side timeout.",
+      "min_train_steps=30 matches MAX_STEPS in run_h100.sh: the run must reach its full length, and the reward_trend window needs the steps."
     ],
-    "tightening": "Once a few nightlies have run green, replace the reward bound with a recorded floor from the observed distribution, and lower the wall-clock budget to the observed p95."
+    "tightening": "As nightlies accumulate, raise reward_trend.min_improvement toward the observed floor and lower max_wall_clock_seconds toward the observed p95."
   },
-  "min_train_steps": 2,
+  "min_train_steps": 30,
   "finite_metrics": [
     "policy/policy_loss",
     "policy/final_loss",
@@ -19,5 +21,10 @@
   "bounds": {
     "reward/avg_raw_reward": { "minimum": 0.0, "maximum": 1.0 }
   },
-  "max_wall_clock_seconds": 3600
+  "reward_trend": {
+    "metric": "reward/avg_raw_reward",
+    "window": 5,
+    "min_improvement": 0.03
+  },
+  "max_wall_clock_seconds": 1500
 }

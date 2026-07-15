@@ -22,7 +22,7 @@ on:
         default: Qwen/Qwen3-0.6B
       max_steps:
         description: "Training steps to run"
-        default: "2"
+        default: "30"
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
@@ -88,7 +88,7 @@ jobs:
             --no-sync \
             --timeout 5400 \
             -e MODEL "${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}" \
-            -e MAX_STEPS "${{ github.event.inputs.max_steps || '2' }}" \
+            -e MAX_STEPS "${{ github.event.inputs.max_steps || '30' }}" \
             -- bash skyrl-train/ci/marin_nightly/run_h100.sh 2>&1 | tee nightly.log
 
       - name: Stop any Iris job the run left behind

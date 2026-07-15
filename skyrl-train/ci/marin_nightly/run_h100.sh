@@ -14,27 +14,29 @@
 set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
-MAX_STEPS="${MAX_STEPS:-2}"
+MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
 LOG="${LOG:-$PWD/nightly-run.log}"
 SPEC="${SPEC:-ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json}"
 
-# The training shape is env-overridable so the same script serves both the nightly smoke run
-# (the defaults below: a tiny, fast not-broken check) and a longer behavioural run that can
-# actually show reward moving (larger batch, more samples, longer generations, higher lr, more
-# steps). The defaults reproduce the smoke run exactly.
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
-POLICY_MINI_BATCH_SIZE="${POLICY_MINI_BATCH_SIZE:-4}"
-MICRO_BATCH="${MICRO_BATCH:-4}"
-N_SAMPLES="${N_SAMPLES:-4}"
-MAX_GEN_LEN="${MAX_GEN_LEN:-256}"
-MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-256}"
-LR="${LR:-1.0e-6}"
+# The defaults below are the behavioural shape the shipped gate spec is calibrated against: 30
+# GRPO steps at batch 32 with 8 samples/prompt is enough for reward to visibly climb on a 0.6B
+# policy (~0.04 -> ~0.20 over the run), which is what lets the gate check learning and not just
+# liveness. The shape stays env-overridable so the same script can be driven as a quicker smoke
+# check (smaller batch, fewer steps) without editing it -- but then point it at a spec whose
+# thresholds match, since the shipped spec expects this shape.
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
+POLICY_MINI_BATCH_SIZE="${POLICY_MINI_BATCH_SIZE:-16}"
+MICRO_BATCH="${MICRO_BATCH:-8}"
+N_SAMPLES="${N_SAMPLES:-8}"
+MAX_GEN_LEN="${MAX_GEN_LEN:-512}"
+MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
+LR="${LR:-2.0e-6}"
 
 # train_batch_size * MAX_STEPS prompts get consumed; keep some margin. Evaluation is off, but
 # data.val_data still has to resolve, so a handful of rows is enough.
-TRAIN_ROWS="${TRAIN_ROWS:-64}"
-VAL_ROWS="${VAL_ROWS:-8}"
+TRAIN_ROWS="${TRAIN_ROWS:-2000}"
+VAL_ROWS="${VAL_ROWS:-16}"
 
 cd "$(dirname "$0")/../.."   # skyrl-train/
 
@@ -52,12 +54,18 @@ cp -R ../skyrl-gym skyrl-gym
 echo "::: GPU and driver"
 nvidia-smi --query-gpu=name,driver_version --format=csv
 
-echo "::: syncing skyrl-train (vllm extra)"
-uv sync --frozen --extra vllm --extra dev
+echo "::: syncing skyrl-train (vllm extra, native attention)"
+# flash-attn has no prebuilt wheel for torch 2.11 + cu13 (see pyproject.toml), and compiling it on
+# the pod is impractical, so this run trains on native attention. --no-install-package keeps the
+# package out of the environment entirely: it would otherwise install as a stub with no compiled
+# kernel, and vLLM's rotary does `find_spec("flash_attn")` and imports it -- a stub crashes there,
+# where a genuine absence falls back cleanly. Every later `uv run` is --no-sync so it uses this
+# environment as-is instead of reconciling flash-attn (a base dependency) back in.
+uv sync --frozen --extra vllm --extra dev --no-install-package flash-attn
 
 echo "::: preparing a ${TRAIN_ROWS}-prompt GSM8K slice"
-uv run --frozen python examples/gsm8k/gsm8k_dataset.py --output_dir "$DATA_DIR"
-DATA_DIR="$DATA_DIR" TRAIN_ROWS="$TRAIN_ROWS" VAL_ROWS="$VAL_ROWS" uv run --frozen python - <<'PY'
+uv run --frozen --no-sync python examples/gsm8k/gsm8k_dataset.py --output_dir "$DATA_DIR"
+DATA_DIR="$DATA_DIR" TRAIN_ROWS="$TRAIN_ROWS" VAL_ROWS="$VAL_ROWS" uv run --frozen --no-sync python - <<'PY'
 import os
 import pathlib
 
@@ -73,8 +81,17 @@ PY
 
 echo "::: training ${MODEL} for ${MAX_STEPS} steps on one GPU"
 echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GEN_LEN} lr=${LR}"
+# vLLM warms up DeepGEMM FP8 kernels whenever the GPU supports them (is_deep_gemm_supported() is
+# true on Hopper) regardless of whether the `deep_gemm` package actually imported -- and it is not
+# in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
+# uses FP8, so disable DeepGEMM outright. Exported so the Ray-spawned vLLM workers inherit it.
+export VLLM_USE_DEEP_GEMM=0
+# With no compiled flash-attn (see the sync step) the policy trains on eager attention
+# (trainer.flash_attn=false), and sample packing has to be disabled alongside it: packing
+# sequences into one relies on flash-attn's varlen kernel, so model_wrapper asserts
+# flash_attention_2 whenever use_sample_packing is true.
 START=$(date +%s)
-uv run --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --frozen --no-sync -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator=grpo \
@@ -82,6 +99,8 @@ uv run --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.model.path="$MODEL" \
   trainer.policy.optimizer_config.lr="$LR" \
   trainer.strategy=fsdp2 \
+  trainer.flash_attn=false \
+  trainer.use_sample_packing=false \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node=1 \
   trainer.placement.critic_num_gpus_per_node=1 \
@@ -118,5 +137,5 @@ uv run --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
 ELAPSED=$(( $(date +%s) - START ))
 
 echo "::: gating (run took ${ELAPSED}s)"
-uv run --frozen python -m ci.marin_nightly.gate \
+uv run --frozen --no-sync python -m ci.marin_nightly.gate \
   --log "$LOG" --spec "$SPEC" --wall-clock-seconds "$ELAPSED"

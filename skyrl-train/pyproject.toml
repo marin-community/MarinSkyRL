@@ -55,6 +55,16 @@ dependencies = [
 [tool.uv]
 required-version = ">=0.8.10"
 
+# flash-attn has no prebuilt wheel for this torch/CUDA line (2.11 + cu13): Dao-AILab publishes
+# classic flash-attn wheels only up to cu12/torch2.8, so uv builds it from the sdist. That build
+# needs torch present (match-runtime supplies it), and compiling the CUDA kernels would take tens of
+# minutes and an nvcc toolchain the CPU CI runners do not have -- so SKIP_CUDA_BUILD installs the
+# Python package without its kernels. That is enough for the CPU suites, where every flash-attn
+# import is guarded or `pytest.importorskip`-ed. It is NOT enough to actually run attention: the
+# resulting package imports its Python layer but fails at `import flash_attn_2_cuda`. Anything that
+# needs real flash attention on this line builds the kernels out of band (the production SIF does).
+# The nightly GPU run installs the environment *without* flash-attn and uses native attention
+# instead (see ci/marin_nightly/run_h100.sh) -- a genuine absence is safe where this stub is not.
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 
@@ -133,8 +143,12 @@ vllm = [
     "vllm==0.20.2",
     "flash-attn==2.6.3",
     "torch==2.11.0",
-    "flashinfer-python",
-    "flashinfer-jit-cache",
+    # vllm 0.20.2 hard-pins flashinfer-python==0.6.8.post1, and flashinfer raises at import if the
+    # jit-cache it finds is a different version -- so the jit-cache must be pinned to the same version,
+    # not left to float to the newest on the cu130 index (0.6.14), which is what broke the GPU run.
+    # Both are pinned explicitly so a future vllm bump fails at `uv lock` rather than silently on GPU.
+    "flashinfer-python==0.6.8.post1",
+    "flashinfer-jit-cache==0.6.8.post1",
     "torchvision==0.26.0"
 ]
 miniswe = [
