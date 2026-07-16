@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -1275,6 +1276,90 @@ class TerminalBenchGenerator(GeneratorInterface):
             return False
         return bool(main.get("logprobs"))
 
+    def _load_literal_log_entries(self, log_path: str) -> List[Dict[str, Any]]:
+        """Parse the shared RecordProxy literal log (JSONL) into entry dicts.
+
+        Cached by (path, size) so a batch of N concurrent trials parses the growing
+        log at most once per size (avoids O(N * logsize) re-reads). Returns [] on any
+        read/parse failure — correlation then no-ops and TIS flags the trial honestly.
+        """
+        try:
+            size = os.stat(log_path).st_size
+        except OSError:
+            return []
+        key = (log_path, size)
+        cache = getattr(self, "_literal_log_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        entries: List[Dict[str, Any]] = []
+        try:
+            with open(log_path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+        self._literal_log_cache = (key, entries)
+        return entries
+
+    def _maybe_correlate_opencode_rollout_details(
+        self,
+        result: "TrialResult",
+        rollout_details: Optional[List[Dict[str, Any]]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Recover a CLI agent's (opencode's) rollout_details from the shared proxy log.
+
+        opencode talks to vLLM over its own transport, bypassing harbor Chat, so its
+        ``rollout_details`` is empty even behind a co-located RecordProxy (which writes
+        a single shared worker-side log, not the in-sandbox trial dir). Harbor stamped a
+        per-trial correlation id (``x-ot-trial-id``) into every request and surfaced it
+        on ``context.metadata['rollout_correlation_id']``; the proxy recorded it on each
+        log entry. Here we filter the shared log by this trial's id and build its
+        RolloutDetail (id-based, so concurrent GRPO same-seed trials never bleed).
+
+        No-op (returns the input unchanged) when: rollout_details already populated
+        (terminus native), collect_rollout_details off, no correlation id present, or no
+        proxy log path published (``OTAGENT_LITERAL_LOG_PATH``). Never synthesizes.
+        """
+        if rollout_details:
+            return rollout_details
+        if not self._collect_rollout_details:
+            return rollout_details
+        agent_result = getattr(result, "agent_result", None)
+        metadata = getattr(agent_result, "metadata", None)
+        trial_id = metadata.get("rollout_correlation_id") if isinstance(metadata, dict) else None
+        if not trial_id:
+            return rollout_details
+        log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+        if not log_path:
+            return rollout_details
+        entries = self._load_literal_log_entries(log_path)
+        if not entries:
+            return rollout_details
+        try:
+            from harbor.literal.rollout_build import build_rollout_details_for_trial
+        except Exception:  # harbor without the bridge → no-op
+            return rollout_details
+        built = build_rollout_details_for_trial(entries, trial_id)
+        if not built:
+            return rollout_details
+        # Persist onto the result so downstream consumers see a consistent view.
+        try:
+            result.agent_result.rollout_details = built
+        except Exception:
+            pass
+        n_turns = len(built[0].get("completion_token_ids", []))
+        logger.info(
+            f"[literal-bridge] correlated {n_turns} opencode turn(s) for trial "
+            f"{trial_id} from shared proxy log"
+        )
+        return built
+
     def _process_trial_result(
         self,
         result: TrialResult | Exception,
@@ -1544,6 +1629,13 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Extract per-turn logprobs from Harbor's rollout_details (required for TIS)
         rollout_details = getattr(result.agent_result, "rollout_details", None)
+        # opencode is a CLI agent that bypasses harbor Chat, so it returns EMPTY
+        # rollout_details even under a co-located RecordProxy (the proxy writes a
+        # shared worker-side log, not the in-sandbox trial dir). Recover this trial's
+        # token_ids/logprobs from that shared log by the per-trial correlation id
+        # harbor stamped (x-ot-trial-id). No-op when rollout_details is already
+        # populated (terminus native), the flag is off, or no proxy log is present.
+        rollout_details = self._maybe_correlate_opencode_rollout_details(result, rollout_details)
         assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
         # Exact-alignment ids: Harbor's per-turn completion_token_ids, index-aligned
         # with assistant_logprobs. Enables the exact (no re-tokenization guess) TIS path.

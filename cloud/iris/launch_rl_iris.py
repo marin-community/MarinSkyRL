@@ -901,6 +901,20 @@ def create_parser() -> argparse.ArgumentParser:
         "gpu-rl image). Only installed under --ingress-mode controller (direct mode is "
         f"byte-identical, no install). Default: {DEFAULT_IRIS_VERSION}.",
     )
+    parser.add_argument(
+        "--harbor-ref",
+        "--harbor_ref",
+        dest="harbor_ref",
+        default=None,
+        help="If set, `uv pip install --no-deps --force-reinstall` harbor at this git ref "
+        "into the RL venv at pod bootstrap (pure-python, ~1 min, no image rebuild) BEFORE "
+        "running — the analog of --skyrl-ref for the NON-editable baked harbor. Use to "
+        "apply the opencode literal BRIDGE (harbor branch feuer/opencode-literal-rollout-"
+        "details: the x-ot-trial-id header + rollout_build correlator + hosted_vllm gate) "
+        "without waiting for it to land in the baked image. Under set -e + a hard "
+        "`import harbor.literal.rollout_build` check so a stale/missing bridge fails loud. "
+        "Default: unset = use the baked harbor.",
+    )
     # ----------------------------------------------------------------------- #
     # MarinSkyRL runtime-knob flags (deslop stage 3). Each promotes a live      #
     # SKYRL_* runtime env var to a first-class CLI flag. ALL default to None    #
@@ -1409,6 +1423,25 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             f'echo "[rl-iris] {SKYRL_HOME} is not a git tree (baked image already pinned) — using baked MarinSkyRL; --skyrl-ref not applied"; '
             f"fi; "
         )
+    # Optional: reinstall harbor at a newer/pinned commit BEFORE running. Harbor is baked
+    # NON-editable into the RL venv, so unlike --skyrl-ref there is no editable clone to
+    # `git checkout`; the analog is a `--force-reinstall --no-deps` from git (pure-python,
+    # ~1 min, no image rebuild). --no-deps so only the harbor source swaps (its resolved
+    # deps stay the baked known-good set). Under `set -e` + a hard
+    # `import harbor.literal.rollout_build` check so a failed reinstall or a stale baked
+    # harbor (missing the opencode literal-bridge module) KILLS the job loud rather than
+    # silently no-ops (the false-negative the generator's lazy-import would otherwise hide).
+    harbor_refresh = ""
+    if getattr(args, "harbor_ref", None):
+        hspec = "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@" + args.harbor_ref
+        harbor_refresh = (
+            f"uv pip install --python {shlex.quote(RL_PYTHON)} --no-deps "
+            f"--force-reinstall {shlex.quote(hspec)}; "
+            f'{RL_PYTHON} -c "import harbor, importlib.metadata as m; '
+            f"print('[rl-iris] harbor now', m.version('harbor'))\"; "
+            f'{RL_PYTHON} -c "import harbor.literal.rollout_build; '
+            f"print('[rl-iris] harbor.literal.rollout_build import OK')\"; "
+        )
     # GAP D fix: install marin-iris into the RL venv at bootstrap for the controller-
     # ingress registration/mint path. cloud.iris.ingress_utils hard-imports
     # iris.cluster.client.* / iris.rpc.*, but the gpu-rl image bakes ONLY MarinSkyRL +
@@ -1502,6 +1535,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     bash = (
         f"set -e; cd {APP_DIR}; "
         f"{skyrl_refresh}"
+        f"{harbor_refresh}"
         f"{iris_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "

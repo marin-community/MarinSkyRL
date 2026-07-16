@@ -346,5 +346,12 @@ def maybe_serve_literal_proxy(
         log_path: str | Path = _local_staging_path(job_name, token)
     else:
         log_path = literal_log_path(experiments_dir, job_name, token)
+    # Publish the LOCAL literal-log path so the in-loop RL glue (the opencode literal
+    # bridge, terminal_bench_generator._maybe_correlate_opencode_rollout_details) can
+    # find the shared RecordProxy log and correlate each trial's rollout_details by its
+    # per-trial x-ot-trial-id. This is the worker-side file the proxy APPENDS to (the
+    # staging path when experiments_dir is remote, else the direct log); the correlator
+    # reads it locally, never the gs:// upload. Single source of truth for the path.
+    os.environ["OTAGENT_LITERAL_LOG_PATH"] = str(log_path)
     with serve_record_proxy(upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri) as proxy_endpoint:
         yield proxy_endpoint

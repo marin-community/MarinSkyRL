@@ -104,6 +104,17 @@ AGENT_SCHEMA = SectionSchema(
         # Rollout details collection (for TIS in async training)
         # When true, collects per-token logprobs needed for importance sampling correction
         "collect_rollout_details": FieldMapping("collect_rollout_details", field_type="kwargs", default=False),
+        # Installed-agent version pin (BaseInstalledAgent.__init__ version kwarg -> self._version).
+        # No default: absent -> not forwarded -> the agent installs @latest (byte-identical to
+        # today for every config that omits it). REQUIRED for the opencode RL literal bridge:
+        # the per-trial x-ot-trial-id header only forwards through @ai-sdk/openai-compatible on
+        # the pinned opencode-ai (currently "1.18.2", opencode.py install note); without the pin
+        # opencode drifts on @latest and the correlation header can silently stop forwarding.
+        "version": FieldMapping("version", field_type="kwargs"),
+        # opencode-specific extra config deep-merged into opencode.json (OpenCode.__init__
+        # opencode_config kwarg). No default: absent -> {} in the ctor (byte-identical). Carries
+        # e.g. compaction:{auto,reserved} for the RL smoke's compaction-crossing observable.
+        "opencode_config": FieldMapping("opencode_config", field_type="kwargs"),
         # Strict JSON parser mode (for RL training)
         # When true, treats parser warnings as errors and disables auto-correction.
         # This prevents reward hacking where the model produces garbage output that the
