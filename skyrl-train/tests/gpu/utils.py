@@ -406,9 +406,9 @@ def init_remote_inference_servers(
     model: str,
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()
-    assert (
-        len(available_gpus) >= tp_size
-    ), f"Not enough GPUs available. Need {tp_size}, but only {len(available_gpus)} available: {available_gpus}"
+    assert len(available_gpus) >= tp_size, (
+        f"Not enough GPUs available. Need {tp_size}, but only {len(available_gpus)} available: {available_gpus}"
+    )
 
     selected_gpus = available_gpus[:tp_size]
     gpu_ids_str = ",".join(map(str, selected_gpus))

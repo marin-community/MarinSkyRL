@@ -17,9 +17,7 @@ class IFEvalEnv(BaseTextEnv):
         super().__init__()
 
         assert "reward_model" in extras, "reward_model field is required"
-        assert "ground_truth" in extras["reward_model"], (
-            "ground_truth is required in reward_model field"
-        )
+        assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
         self.ground_truth = extras["reward_model"]["ground_truth"]
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
@@ -30,6 +28,4 @@ class IFEvalEnv(BaseTextEnv):
         metadata = {"acc": score_info["acc"], "func_name": score_info["func_name"]}
 
         # No observation in ifeval, and no tool call
-        return BaseTextEnvStepOutput(
-            observations=[], reward=reward, done=done, metadata=metadata
-        )
+        return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata=metadata)

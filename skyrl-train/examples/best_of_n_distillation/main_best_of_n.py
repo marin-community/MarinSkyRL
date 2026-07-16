@@ -69,21 +69,27 @@ class BestOfNDistillationTrainer(DistillationTrainer):
         self._best_indices = best_of_n_select(response_rewards, N)
 
         best_rewards = [response_rewards[i] for i in self._best_indices]
-        mean_rewards = [
-            np.mean(response_rewards[g * N : (g + 1) * N])
-            for g in range(len(self._best_indices))
-        ]
-        self.all_metrics.update({
-            "best_of_n/best_reward_mean": np.mean(best_rewards),
-            "best_of_n/group_reward_mean": np.mean(mean_rewards),
-            "best_of_n/reward_improvement": np.mean(best_rewards) - np.mean(mean_rewards),
-            "best_of_n/n_samples_per_prompt": N,
-        })
+        mean_rewards = [np.mean(response_rewards[g * N : (g + 1) * N]) for g in range(len(self._best_indices))]
+        self.all_metrics.update(
+            {
+                "best_of_n/best_reward_mean": np.mean(best_rewards),
+                "best_of_n/group_reward_mean": np.mean(mean_rewards),
+                "best_of_n/reward_improvement": np.mean(best_rewards) - np.mean(mean_rewards),
+                "best_of_n/n_samples_per_prompt": N,
+            }
+        )
 
         # Filter generator_output to keep only best completions
-        for key in ["prompt_token_ids", "response_ids", "rewards", "loss_masks",
-                     "stop_reasons", "rollout_logprobs", "is_last_step",
-                     "exclude_from_baseline"]:
+        for key in [
+            "prompt_token_ids",
+            "response_ids",
+            "rewards",
+            "loss_masks",
+            "stop_reasons",
+            "rollout_logprobs",
+            "is_last_step",
+            "exclude_from_baseline",
+        ]:
             if key in generator_output and generator_output[key] is not None:
                 val = generator_output[key]
                 if isinstance(val, list) and len(val) == len(response_rewards):
@@ -110,9 +116,7 @@ class BestOfNDistillationTrainer(DistillationTrainer):
 
 # SFT loss: simple negative log-likelihood on selected completions
 @register_policy_loss("sft")
-def sft_loss(
-    log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None, **kwargs
-):
+def sft_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None, **kwargs):
     """SFT loss — maximize log probability of selected tokens."""
     loss = -log_probs
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
@@ -135,9 +139,7 @@ class BestOfNDistillationExp(BasePPOExp):
         trainer = super()._setup_trainer()
 
         if self.cfg.teacher.model_path is not None:
-            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(
-                self.cfg, self.tokenizer
-            )
+            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(self.cfg, self.tokenizer)
             trainer.setup_teacher_engine(
                 teacher_engines,
                 student_tokenizer=self.tokenizer,

@@ -190,6 +190,7 @@ else:
 try:
     # Prefer harbor's own implementation if a future harbor version restores it.
     from harbor.callbacks import create_rollback_hook  # type: ignore[import-not-found]
+
     _ROLLBACK_HOOK_SOURCE = "legacy"
 except ImportError:
     # Port path. Import the harbor model classes we need; if any of those
@@ -268,9 +269,7 @@ except ImportError:
                 if isinstance(event, _TrialHookEvent):
                     result = event.result
                     if result is None:
-                        self._logger.debug(
-                            "TrialHookEvent has no result, skipping rollback"
-                        )
+                        self._logger.debug("TrialHookEvent has no result, skipping rollback")
                         return
                 else:
                     result = event
@@ -298,8 +297,7 @@ except ImportError:
                 if rollback_result.action == _RollbackAction.CLEARED:
                     if self.on_complete_failure == "raise":
                         self._logger.error(
-                            "Trial %s has no complete turns and "
-                            "on_complete_failure='raise'",
+                            "Trial %s has no complete turns and on_complete_failure='raise'",
                             result.trial_name,
                         )
                         raise RuntimeError(
@@ -347,10 +345,14 @@ except ImportError:
                 # high n_concurrent_trials. TIS-agnostic: this neither reads nor
                 # mutates rollout_details / logprobs — it only reclaims orphaned
                 # Python objects, so behavior is identical with use_tis on or off.
-                if rollback_result.action in (
-                    _RollbackAction.NONE,
-                    _RollbackAction.CLEARED,
-                ) and rollback_result.final_turn_count == 0:
+                if (
+                    rollback_result.action
+                    in (
+                        _RollbackAction.NONE,
+                        _RollbackAction.CLEARED,
+                    )
+                    and rollback_result.final_turn_count == 0
+                ):
                     self._release_dangling_refs()
 
                 # v2 (2026-05-25): elevated from debug → info so we get
@@ -360,8 +362,7 @@ except ImportError:
                 # invocations directly (`grep "rollback_hook fired" .out`)
                 # and correlate against the Ray ref_count warning rate.
                 self._logger.info(
-                    "rollback_hook fired: trial=%s exc=%s action=%s "
-                    "orig_turns=%d final_turns=%d",
+                    "rollback_hook fired: trial=%s exc=%s action=%s orig_turns=%d final_turns=%d",
                     result.trial_name,
                     exception_type,
                     rollback_result.action.value,
@@ -370,17 +371,11 @@ except ImportError:
                 )
 
             def _rollback_to_last_complete_turn(self, result) -> "_RollbackResult":
-                exception_type = (
-                    result.exception_info.exception_type
-                    if result.exception_info
-                    else None
-                )
+                exception_type = result.exception_info.exception_type if result.exception_info else None
 
                 # Missing agent_result entirely -> CLEARED
                 if result.agent_result is None:
-                    self._logger.debug(
-                        "No agent_result, creating empty AgentContext"
-                    )
+                    self._logger.debug("No agent_result, creating empty AgentContext")
                     result.agent_result = _AgentContext()
                     return _RollbackResult(
                         action=_RollbackAction.CLEARED,
@@ -393,9 +388,7 @@ except ImportError:
                 rollout_details = result.agent_result.rollout_details
                 if not rollout_details:
                     # No rollout collected at all -> NONE (nothing to fix).
-                    self._logger.debug(
-                        "No rollout_details collected, nothing to rollback"
-                    )
+                    self._logger.debug("No rollout_details collected, nothing to rollback")
                     return _RollbackResult(
                         action=_RollbackAction.NONE,
                         original_turn_count=0,
@@ -424,9 +417,7 @@ except ImportError:
                 # even when logprobs are collected, so we accept either.
                 response_count = max(completion_count, logprobs_count)
                 if response_count == 0:
-                    self._logger.debug(
-                        "No complete turns (no completion_token_ids or logprobs)"
-                    )
+                    self._logger.debug("No complete turns (no completion_token_ids or logprobs)")
                     self._clear_rollout_details(main_rollout)
                     return _RollbackResult(
                         action=_RollbackAction.CLEARED,
@@ -443,18 +434,12 @@ except ImportError:
 
                 # Target turn count = min over non-empty lists (keeps only
                 # turns where every collected field is present).
-                non_empty_counts = [
-                    c
-                    for c in (prompt_count, completion_count, logprobs_count)
-                    if c > 0
-                ]
+                non_empty_counts = [c for c in (prompt_count, completion_count, logprobs_count) if c > 0]
                 target_count = min(non_empty_counts)
                 all_consistent = len(set(non_empty_counts)) <= 1
 
                 if target_count == original_max_count and all_consistent:
-                    self._logger.debug(
-                        "Rollout details already consistent, no action needed"
-                    )
+                    self._logger.debug("Rollout details already consistent, no action needed")
                     return _RollbackResult(
                         action=_RollbackAction.NONE,
                         original_turn_count=original_max_count,
@@ -463,11 +448,7 @@ except ImportError:
                     )
 
                 self._truncate_rollout_detail(main_rollout, target_count)
-                action = (
-                    _RollbackAction.TRUNCATED
-                    if target_count < original_max_count
-                    else _RollbackAction.NORMALIZED
-                )
+                action = _RollbackAction.TRUNCATED if target_count < original_max_count else _RollbackAction.NORMALIZED
 
                 return _RollbackResult(
                     action=action,
@@ -485,13 +466,9 @@ except ImportError:
             def _truncate_rollout_detail(self, rollout, target_count: int) -> None:
                 """Truncate all per-turn lists in a RolloutDetail to ``target_count``."""
                 if "prompt_token_ids" in rollout:
-                    rollout["prompt_token_ids"] = rollout["prompt_token_ids"][
-                        :target_count
-                    ]
+                    rollout["prompt_token_ids"] = rollout["prompt_token_ids"][:target_count]
                 if "completion_token_ids" in rollout:
-                    rollout["completion_token_ids"] = rollout[
-                        "completion_token_ids"
-                    ][:target_count]
+                    rollout["completion_token_ids"] = rollout["completion_token_ids"][:target_count]
                 if "logprobs" in rollout:
                     if self.preserve_partial_logprobs:
                         rollout["logprobs"] = rollout["logprobs"][:target_count]

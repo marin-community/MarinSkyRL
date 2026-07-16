@@ -3,6 +3,7 @@
 
 This script is useful to debug if multi-node communication works and if the right network interfaces (eg: RDMA) is being used.
 """
+
 import os
 import sys
 import ray

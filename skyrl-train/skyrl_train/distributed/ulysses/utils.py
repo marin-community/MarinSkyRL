@@ -325,6 +325,6 @@ def ulysses_pad_and_slice_inputs(
 
 def validate_ulysses_config(num_heads, ulysses_sequence_size):
     if ulysses_sequence_size > 1:
-        assert (
-            num_heads % ulysses_sequence_size == 0
-        ), f"num_heads ({num_heads}) must be divisible by ulysses sequence size({ulysses_sequence_size})"
+        assert num_heads % ulysses_sequence_size == 0, (
+            f"num_heads ({num_heads}) must be divisible by ulysses sequence size({ulysses_sequence_size})"
+        )

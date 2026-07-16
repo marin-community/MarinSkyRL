@@ -12,8 +12,11 @@ def text(tokenizer: PreTrainedTokenizer, dataset: Dataset, batch_size: int) -> L
         # We pad to multiples of 128 here so jax needs to compile less different shapes
         batch = tokenizer(data["text"], return_tensors="np", padding=True, pad_to_multiple_of=128)
         batch = {k: jnp.asarray(v) for k, v in batch.items()}
-        yield {
-            "text": batch["input_ids"][:, :-1],
-            "attention_mask": batch["attention_mask"][:, :-1],
-            "target": batch["input_ids"][:, 1:],
-        }, {"shape": batch["input_ids"].shape, "tokens": batch["attention_mask"].sum()}
+        yield (
+            {
+                "text": batch["input_ids"][:, :-1],
+                "attention_mask": batch["attention_mask"][:, :-1],
+                "target": batch["input_ids"][:, 1:],
+            },
+            {"shape": batch["input_ids"].shape, "tokens": batch["attention_mask"].sum()},
+        )

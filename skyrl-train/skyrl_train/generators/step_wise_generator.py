@@ -26,7 +26,6 @@ class StepWiseGeneratorOutput(GeneratorOutput):
 
 
 class StepWiseGenerator(SkyRLGymGenerator):
-
     def __init__(
         self,
         generator_cfg: DictConfig,
@@ -112,7 +111,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
         while not done:
-
             if retokenize_chat_history:
                 input_ids = self.tokenizer.apply_chat_template(
                     chat_history,
@@ -185,13 +183,13 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 env_metrics=env.get_metrics() if done else {},
             )
 
-            assert len(per_step_output.loss_mask) == len(
-                per_step_output.response_ids
-            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} and {len(per_step_output.response_ids)=}"
+            assert len(per_step_output.loss_mask) == len(per_step_output.response_ids), (
+                f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} and {len(per_step_output.response_ids)=}"
+            )
             if per_step_output.rollout_logprobs is not None:
-                assert len(per_step_output.rollout_logprobs) == len(
-                    per_step_output.response_ids
-                ), f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
+                assert len(per_step_output.rollout_logprobs) == len(per_step_output.response_ids), (
+                    f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
+                )
 
             if len(input_ids) > max_input_length:
                 stop_reason = "length"

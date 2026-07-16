@@ -375,11 +375,7 @@ class MeshDispatch(Dispatch):
                     _r3 = data_chunks[dp]["rollout_routed_experts"]
                     nbytes = int(_r3.nbytes) if _r3 is not None else 0
                     dtype = _r3.dtype if _r3 is not None else None
-                    node_id = (
-                        _resolve_actor_node_id(actor_info.handle, dispatch_put_timeout_s)
-                        if decentral
-                        else None
-                    )
+                    node_id = _resolve_actor_node_id(actor_info.handle, dispatch_put_timeout_s) if decentral else None
                     if decentral and node_id is not None:
                         # Materialize the chunk's object-store copy on a CONSUMER
                         # node (this actor's node), NOT the driver head plasma.
@@ -392,8 +388,7 @@ class MeshDispatch(Dispatch):
                         # so the smoke test can confirm the DECENTRAL path is taken
                         # AND that the head-resident R3_RESIDENT_SET put is NOT.
                         logger.info(
-                            f"R3_DECENTRAL_SET method={method} dp={dp} nbytes={nbytes} "
-                            f"dtype={dtype} node={node_id[:8]}"
+                            f"R3_DECENTRAL_SET method={method} dp={dp} nbytes={nbytes} dtype={dtype} node={node_id[:8]}"
                         )
                     else:
                         # Default / fallback: bounded driver-side ray.put (today's
@@ -404,9 +399,7 @@ class MeshDispatch(Dispatch):
                         # UNGATED per-dp-group marker so we can SEE the resident set
                         # install (target: one line per dp-group, on every step) and
                         # confirm the R3 bytes are put once, not per-actor.
-                        logger.info(
-                            f"R3_RESIDENT_SET method={method} dp={dp} nbytes={nbytes} dtype={dtype}"
-                        )
+                        logger.info(f"R3_RESIDENT_SET method={method} dp={dp} nbytes={nbytes} dtype={dtype}")
                 data_to_send = chunk_refs[dp]
             else:
                 data_to_send = data_chunks[dp]
@@ -488,9 +481,9 @@ class PassThroughDispatch(Dispatch):
     def sync_collect(cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]) -> Optional[TrainingOutputBatch]:
         data_batches = ray.get(object_refs)
         if len(data_batches) > 0 and data_batches[0] is not None:
-            assert isinstance(
-                data_batches[0], TrainingOutputBatch
-            ), "data_batches must be a list of `TrainingOutputBatch` objects"
+            assert isinstance(data_batches[0], TrainingOutputBatch), (
+                "data_batches must be a list of `TrainingOutputBatch` objects"
+            )
             return concatenate_outputs_after_mesh_dispatch(actor_infos, data_batches)
         # all should be none
         assert all(obj is None for obj in data_batches), "Got a mix of `None` and non-`None` objects"

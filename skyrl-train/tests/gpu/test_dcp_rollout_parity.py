@@ -86,10 +86,10 @@ os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
 # ---- RE-GATED tolerance thresholds (see module docstring for the bf16 rationale) --
 # Primary gate is TEACHER-FORCED (both engines score the SAME token sequence):
-BULK_P99_ATOL = float(os.environ.get("DCP_BULK_P99_ATOL", "2e-2"))   # (A) no systematic divergence
-MAX_ABS_BOUND = float(os.environ.get("DCP_MAX_ABS_BOUND", "0.15"))   # (B) bounded worst case
+BULK_P99_ATOL = float(os.environ.get("DCP_BULK_P99_ATOL", "2e-2"))  # (A) no systematic divergence
+MAX_ABS_BOUND = float(os.environ.get("DCP_MAX_ABS_BOUND", "0.15"))  # (B) bounded worst case
 ARGMAX_AGREE_MIN = float(os.environ.get("DCP_ARGMAX_AGREE_MIN", "0.90"))  # (C) high, not 100%
-NEARTIE_GAP_MAX = float(os.environ.get("DCP_NEARTIE_GAP_MAX", "0.10"))    # (C) flips are near-ties
+NEARTIE_GAP_MAX = float(os.environ.get("DCP_NEARTIE_GAP_MAX", "0.10"))  # (C) flips are near-ties
 
 MODEL_NAME = os.environ.get("DCP_PARITY_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 TP = int(os.environ.get("DCP_PARITY_TP", "4"))
@@ -158,7 +158,7 @@ def _build_engine(dcp):
     kwargs = dict(
         model=MODEL_NAME,
         tensor_parallel_size=TP,
-        enforce_eager=True,         # determinism: no cudagraph capture differences
+        enforce_eager=True,  # determinism: no cudagraph capture differences
         seed=SEED,
         dtype="bfloat16",
         gpu_memory_utilization=0.45,  # two engines may coexist; keep each modest
@@ -182,7 +182,7 @@ def _run_greedy(llm, prompt_token_ids):
         temperature=0.0,
         top_p=1.0,
         max_tokens=MAX_TOKENS,
-        logprobs=0,        # request the chosen-token logprob (the TIS contract field)
+        logprobs=0,  # request the chosen-token logprob (the TIS contract field)
         seed=SEED,
     )
     outputs = llm.generate(
@@ -229,7 +229,7 @@ def _score_teacher_forced(llm, full_token_ids):
     sp = SamplingParams(
         temperature=0.0,
         max_tokens=1,
-        prompt_logprobs=20,   # enough to always include top-2 + the actual token
+        prompt_logprobs=20,  # enough to always include top-2 + the actual token
         logprobs=0,
     )
     outputs = llm.generate(
@@ -297,8 +297,10 @@ def main():
     import vllm
     from transformers import AutoTokenizer
 
-    print(f"[Stage3-DCP] vllm={getattr(vllm, '__version__', '?')} model={MODEL_NAME} "
-          f"tp={TP} dcp={DCP} max_tokens={MAX_TOKENS} seed={SEED} gpus={ngpu}")
+    print(
+        f"[Stage3-DCP] vllm={getattr(vllm, '__version__', '?')} model={MODEL_NAME} "
+        f"tp={TP} dcp={DCP} max_tokens={MAX_TOKENS} seed={SEED} gpus={ngpu}"
+    )
     print("[Stage3-DCP] RE-GATED tolerance criterion (bf16 sharded-attention reduce-order):")
     print(f"[Stage3-DCP]   (A) teacher-forced p99|Δlogprob| <= {BULK_P99_ATOL:.1e}  (no systematic divergence)")
     print(f"[Stage3-DCP]   (B) teacher-forced max|Δlogprob| <= {MAX_ABS_BOUND:.2f}  (bounded worst case)")
@@ -341,10 +343,10 @@ def main():
     # =====================================================================
     # PRIMARY GATE — TEACHER-FORCED per-position parity (no decode-accum confound)
     # =====================================================================
-    all_diffs = []          # |Δ teacher-forced logprob| over all completion positions
+    all_diffs = []  # |Δ teacher-forced logprob| over all completion positions
     argmax_positions = 0
     argmax_agree = 0
-    nontie_flips = []       # disagreements whose ref top-2 gap exceeds NEARTIE_GAP_MAX
+    nontie_flips = []  # disagreements whose ref top-2 gap exceeds NEARTIE_GAP_MAX
     worst_tf = None
     for i in range(n):
         m = min(len(tf_lp_a[i]), len(tf_lp_b[i]))
@@ -371,23 +373,33 @@ def main():
     argmax_agree_frac = argmax_agree / max(argmax_positions, 1)
 
     print("\n[Stage3-DCP] === PRIMARY GATE: teacher-forced per-position parity ===")
-    print(f"[Stage3-DCP] (A) |Δlogprob| over {len(all_diffs)} completion positions: "
-          f"p50={p50:.3e}  p99={p99:.3e}  max={tf_max:.3e}")
+    print(
+        f"[Stage3-DCP] (A) |Δlogprob| over {len(all_diffs)} completion positions: "
+        f"p50={p50:.3e}  p99={p99:.3e}  max={tf_max:.3e}"
+    )
     print(f"[Stage3-DCP] (B) max|Δlogprob|={tf_max:.3e} (bound {MAX_ABS_BOUND})")
     if worst_tf is not None:
-        print(f"[Stage3-DCP]     worst Δ at prompt={worst_tf[0]} pos={worst_tf[1]} "
-              f"A={worst_tf[3]:.5f} B={worst_tf[4]:.5f}")
-    print(f"[Stage3-DCP] (C) argmax agreement {argmax_agree}/{argmax_positions} "
-          f"({100.0*argmax_agree_frac:.2f}%)  [min {ARGMAX_AGREE_MIN:.0%}]")
-    print(f"[Stage3-DCP] (C) argmax disagreements that are NOT near-ties "
-          f"(ref top-2 gap > {NEARTIE_GAP_MAX}): {len(nontie_flips)}")
+        print(
+            f"[Stage3-DCP]     worst Δ at prompt={worst_tf[0]} pos={worst_tf[1]} "
+            f"A={worst_tf[3]:.5f} B={worst_tf[4]:.5f}"
+        )
+    print(
+        f"[Stage3-DCP] (C) argmax agreement {argmax_agree}/{argmax_positions} "
+        f"({100.0 * argmax_agree_frac:.2f}%)  [min {ARGMAX_AGREE_MIN:.0%}]"
+    )
+    print(
+        f"[Stage3-DCP] (C) argmax disagreements that are NOT near-ties "
+        f"(ref top-2 gap > {NEARTIE_GAP_MAX}): {len(nontie_flips)}"
+    )
     for f in nontie_flips[:5]:
-        print(f"[Stage3-DCP]     NON-TIE FLIP prompt={f[0]} pos={f[1]} ref_gap={f[2]:.4f} A_argmax={f[3]} B_argmax={f[4]}")
+        print(
+            f"[Stage3-DCP]     NON-TIE FLIP prompt={f[0]} pos={f[1]} ref_gap={f[2]:.4f} A_argmax={f[3]} B_argmax={f[4]}"
+        )
 
-    ok_bulk = (p99 <= BULK_P99_ATOL)
-    ok_max = (tf_max <= MAX_ABS_BOUND)
-    ok_argmax = (argmax_agree_frac >= ARGMAX_AGREE_MIN)
-    ok_neartie = (len(nontie_flips) == 0)
+    ok_bulk = p99 <= BULK_P99_ATOL
+    ok_max = tf_max <= MAX_ABS_BOUND
+    ok_argmax = argmax_agree_frac >= ARGMAX_AGREE_MIN
+    ok_neartie = len(nontie_flips) == 0
     all_ok = ok_bulk and ok_max and ok_argmax and ok_neartie
 
     # =====================================================================
@@ -409,13 +421,17 @@ def main():
                 first_divergence = (i, j, a[j], b[j])
     greedy_seq_pct = 100.0 * greedy_match / n
     greedy_tok_pct = 100.0 * greedy_tokens_match / max(greedy_tokens_total, 1)
-    print(f"\n[Stage3-DCP] [diagnostic] FREE-RUNNING greedy decode (accumulation EXPECTED, not a gate): "
-          f"{greedy_match}/{n} seq exact ({greedy_seq_pct:.1f}%); "
-          f"token-level {greedy_tokens_match}/{greedy_tokens_total} ({greedy_tok_pct:.2f}%)")
+    print(
+        f"\n[Stage3-DCP] [diagnostic] FREE-RUNNING greedy decode (accumulation EXPECTED, not a gate): "
+        f"{greedy_match}/{n} seq exact ({greedy_seq_pct:.1f}%); "
+        f"token-level {greedy_tokens_match}/{greedy_tokens_total} ({greedy_tok_pct:.2f}%)"
+    )
     if first_divergence is not None:
-        print(f"[Stage3-DCP] [diagnostic] first free-run divergence: prompt={first_divergence[0]} "
-              f"pos={first_divergence[1]} A={first_divergence[2]} B={first_divergence[3]} "
-              f"(after this the two engines walk different token paths — expected)")
+        print(
+            f"[Stage3-DCP] [diagnostic] first free-run divergence: prompt={first_divergence[0]} "
+            f"pos={first_divergence[1]} A={first_divergence[2]} B={first_divergence[3]} "
+            f"(after this the two engines walk different token paths — expected)"
+        )
     samp_match = sum(int(ids_a_samp[i] == ids_b_samp[i]) for i in range(n))
     print(f"[Stage3-DCP] [diagnostic] sampled (seed={SEED}, temp=0.8) seq match: {samp_match}/{n}")
 
@@ -426,8 +442,12 @@ def main():
     print("[Stage3-DCP] RE-GATED VERDICT (bf16 sharded-attention tolerance):")
     print(f"[Stage3-DCP]   (A) bulk p99={p99:.3e} <= {BULK_P99_ATOL:.1e} : {'PASS' if ok_bulk else 'FAIL'}")
     print(f"[Stage3-DCP]   (B) max={tf_max:.3e} <= {MAX_ABS_BOUND}      : {'PASS' if ok_max else 'FAIL'}")
-    print(f"[Stage3-DCP]   (C) argmax {100.0*argmax_agree_frac:.2f}% >= {ARGMAX_AGREE_MIN:.0%} : {'PASS' if ok_argmax else 'FAIL'}")
-    print(f"[Stage3-DCP]   (C) all flips near-ties (0 non-tie) : {'PASS' if ok_neartie else 'FAIL'} ({len(nontie_flips)} non-tie)")
+    print(
+        f"[Stage3-DCP]   (C) argmax {100.0 * argmax_agree_frac:.2f}% >= {ARGMAX_AGREE_MIN:.0%} : {'PASS' if ok_argmax else 'FAIL'}"
+    )
+    print(
+        f"[Stage3-DCP]   (C) all flips near-ties (0 non-tie) : {'PASS' if ok_neartie else 'FAIL'} ({len(nontie_flips)} non-tie)"
+    )
     print(f"[Stage3-DCP] G2 GATE (tolerance): {'PASS' if all_ok else 'NO-GO'}")
     print("=" * 78)
     assert all_ok, (

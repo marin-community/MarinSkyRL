@@ -78,13 +78,7 @@ import torch
 # the Mac). moe_weight_remap.py itself imports only ``torch``, so we load that   #
 # single module by file path.                                                   #
 # --------------------------------------------------------------------------- #
-_REMAP_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "skyrl_train"
-    / "models"
-    / "layers"
-    / "moe_weight_remap.py"
-)
+_REMAP_PATH = Path(__file__).resolve().parent.parent / "skyrl_train" / "models" / "layers" / "moe_weight_remap.py"
 
 
 def _load_remap_module():
@@ -203,7 +197,15 @@ def self_test() -> None:
 # Full checkpoint conversion (safetensors sharded -> safetensors sharded)       #
 # --------------------------------------------------------------------------- #
 
-_PASSTHROUGH_COPY = ("tokenizer", "generation_config", "special_tokens", "vocab", "merges", "added_tokens", "chat_template")
+_PASSTHROUGH_COPY = (
+    "tokenizer",
+    "generation_config",
+    "special_tokens",
+    "vocab",
+    "merges",
+    "added_tokens",
+    "chat_template",
+)
 
 
 def _resolve_src(src: str, cache_dir: str | None) -> Path:
@@ -292,7 +294,7 @@ def _save_sharded(state_dict: dict, dst_dir: Path, max_shard_bytes: int = 5_000_
         total += sizes[i - 1]
     index = {"metadata": {"total_size": total}, "weight_map": weight_map}
     (dst_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
-    print(f"[convert] wrote {n} shard(s), {len(weight_map)} tensors, {total/1e9:.2f} GB")
+    print(f"[convert] wrote {n} shard(s), {len(weight_map)} tensors, {total / 1e9:.2f} GB")
 
 
 def _copy_aux(src_dir: Path, dst_dir: Path) -> None:
@@ -301,9 +303,12 @@ def _copy_aux(src_dir: Path, dst_dir: Path) -> None:
     for p in src_dir.iterdir():
         if p.suffix == ".safetensors" or p.name == "model.safetensors.index.json":
             continue
-        if p.name == "config.json" or p.suffix in (".txt", ".model") or any(
-            t in p.name for t in _PASSTHROUGH_COPY
-        ) or p.name.endswith(".json"):
+        if (
+            p.name == "config.json"
+            or p.suffix in (".txt", ".model")
+            or any(t in p.name for t in _PASSTHROUGH_COPY)
+            or p.name.endswith(".json")
+        ):
             shutil.copy2(p, dst_dir / p.name)
 
 

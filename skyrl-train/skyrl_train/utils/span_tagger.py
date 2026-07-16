@@ -187,9 +187,7 @@ def tag_response_spans(
         if cur_message["role"] != "assistant":
             tags.extend([SPAN_OTHER] * len(cur_token_ids))
             continue
-        prefix_len, gen_start, gen_end = _generated_slice_bounds(
-            cur_token_ids, generation_prompt_ids, eos_token_id
-        )
+        prefix_len, gen_start, gen_end = _generated_slice_bounds(cur_token_ids, generation_prompt_ids, eos_token_id)
         # generation-prompt prefix -> OTHER
         tags.extend([SPAN_OTHER] * prefix_len)
         generated_token_ids = cur_token_ids[gen_start:gen_end]

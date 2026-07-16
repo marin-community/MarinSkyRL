@@ -92,9 +92,7 @@ class ZClip:
 
         if self.mode == "zscore":
             if clip_option.lower() not in ("mean", "adaptive_scaling"):
-                raise ValueError(
-                    f"ZClip clip_option must be 'mean' or 'adaptive_scaling', got {clip_option!r}"
-                )
+                raise ValueError(f"ZClip clip_option must be 'mean' or 'adaptive_scaling', got {clip_option!r}")
             self.clip_option = clip_option.lower()
         elif self.mode == "percentile":
             self.clip_option = None

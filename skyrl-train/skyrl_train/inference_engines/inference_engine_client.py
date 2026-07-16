@@ -98,10 +98,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     def _pick_fallback_engine(self, exclude_idx: int) -> int | None:
         """Pick a random live engine, excluding the given index."""
-        live = [
-            i for i in range(len(self.engines))
-            if i not in self._dead_engines and i != exclude_idx
-        ]
+        live = [i for i in range(len(self.engines)) if i not in self._dead_engines and i != exclude_idx]
         return random.choice(live) if live else None
 
     def _resolve_engine_idx(self, engine_idx: int) -> int:
@@ -183,10 +180,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Call a method on all live engines concurrently and gather the results.
         """
-        live_engines = [
-            engine for i, engine in enumerate(self.engines)
-            if i not in self._dead_engines
-        ]
+        live_engines = [engine for i, engine in enumerate(self.engines) if i not in self._dead_engines]
         if not live_engines:
             raise RuntimeError("All inference engines have died")
 
@@ -458,9 +452,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
         headers: Dict[str, str] = original_request_payload.get("headers", {}).copy()
 
-        assert not original_request_json.get(
-            "continue_final_message", False
-        ), "continue_final_message must be False for /chat/completions requests"
+        assert not original_request_json.get("continue_final_message", False), (
+            "continue_final_message must be False for /chat/completions requests"
+        )
 
         # Accumulated fields for building subsequent requests and final response. It is inplace-updated
         # in `_parse_partial_response_and_inplace_update_accum()`.
@@ -518,7 +512,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             # Error responses have "error" key (vLLM) or "object"="error" (sglang), not "choices".
             if "error" in partial_response or partial_response.get("object", "") == "error":
                 error_info = partial_response.get("error", partial_response)
-                error_msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                error_msg = (
+                    error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                )
 
                 # Handle continue_final_message errors by falling back to fresh request.
                 # This can happen when chat templates (e.g., Qwen3 thinking) modify assistant
@@ -668,9 +664,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 cur_prompt = [prompt[j] for j in indices_list[i]]
                 cur_json = dict(body)
                 cur_json["prompt"] = cur_prompt
-                results[i] = await self.engines[fallback].completion(
-                    {"json": cur_json, "headers": headers}
-                )
+                results[i] = await self.engines[fallback].completion({"json": cur_json, "headers": headers})
             elif isinstance(result, BaseException):
                 raise result
 
@@ -818,11 +812,21 @@ class InferenceEngineClient(InferenceEngineInterface):
                 "avg_median_gpu_cache_usage_perc": 0.0,
                 "avg_median_prefix_cache_hit_rate": 0.0,
                 # Per-request latency stats
-                "avg_latency_prefill_mean": 0.0, "max_latency_prefill_p90": 0.0, "avg_latency_prefill_median": 0.0,
-                "avg_latency_decode_mean": 0.0, "max_latency_decode_p90": 0.0, "avg_latency_decode_median": 0.0,
-                "avg_latency_e2e_mean": 0.0, "max_latency_e2e_p90": 0.0, "avg_latency_e2e_median": 0.0,
-                "avg_latency_queued_mean": 0.0, "max_latency_queued_p90": 0.0, "avg_latency_queued_median": 0.0,
-                "avg_latency_ttft_mean": 0.0, "max_latency_ttft_p90": 0.0, "avg_latency_ttft_median": 0.0,
+                "avg_latency_prefill_mean": 0.0,
+                "max_latency_prefill_p90": 0.0,
+                "avg_latency_prefill_median": 0.0,
+                "avg_latency_decode_mean": 0.0,
+                "max_latency_decode_p90": 0.0,
+                "avg_latency_decode_median": 0.0,
+                "avg_latency_e2e_mean": 0.0,
+                "max_latency_e2e_p90": 0.0,
+                "avg_latency_e2e_median": 0.0,
+                "avg_latency_queued_mean": 0.0,
+                "max_latency_queued_p90": 0.0,
+                "avg_latency_queued_median": 0.0,
+                "avg_latency_ttft_mean": 0.0,
+                "max_latency_ttft_p90": 0.0,
+                "avg_latency_ttft_median": 0.0,
                 "total_finished_requests": 0,
                 "total_preempted_reqs": 0,
                 # Legacy field names for backwards compatibility
@@ -838,50 +842,32 @@ class InferenceEngineClient(InferenceEngineInterface):
             }
 
         # Aggregate PEAK stats
-        total_peak_running = sum(
-            s.get("peak_running_reqs", s.get("num_running_reqs", 0))
-            for s in engine_stats_list
+        total_peak_running = sum(s.get("peak_running_reqs", s.get("num_running_reqs", 0)) for s in engine_stats_list)
+        total_peak_waiting = sum(s.get("peak_waiting_reqs", s.get("num_waiting_reqs", 0)) for s in engine_stats_list)
+        avg_peak_prompt_tp = (
+            sum(s.get("peak_prompt_throughput", s.get("avg_prompt_throughput", 0.0)) for s in engine_stats_list)
+            / num_engines
         )
-        total_peak_waiting = sum(
-            s.get("peak_waiting_reqs", s.get("num_waiting_reqs", 0))
-            for s in engine_stats_list
+        avg_peak_gen_tp = (
+            sum(s.get("peak_generation_throughput", s.get("avg_generation_throughput", 0.0)) for s in engine_stats_list)
+            / num_engines
         )
-        avg_peak_prompt_tp = sum(
-            s.get("peak_prompt_throughput", s.get("avg_prompt_throughput", 0.0))
-            for s in engine_stats_list
-        ) / num_engines
-        avg_peak_gen_tp = sum(
-            s.get("peak_generation_throughput", s.get("avg_generation_throughput", 0.0))
-            for s in engine_stats_list
-        ) / num_engines
-        avg_peak_gpu_cache = sum(
-            s.get("peak_gpu_cache_usage_perc", s.get("gpu_cache_usage_perc", 0.0))
-            for s in engine_stats_list
-        ) / num_engines
-        avg_peak_prefix_hit = sum(
-            s.get("peak_prefix_cache_hit_rate", s.get("prefix_cache_hit_rate", 0.0))
-            for s in engine_stats_list
-        ) / num_engines
+        avg_peak_gpu_cache = (
+            sum(s.get("peak_gpu_cache_usage_perc", s.get("gpu_cache_usage_perc", 0.0)) for s in engine_stats_list)
+            / num_engines
+        )
+        avg_peak_prefix_hit = (
+            sum(s.get("peak_prefix_cache_hit_rate", s.get("prefix_cache_hit_rate", 0.0)) for s in engine_stats_list)
+            / num_engines
+        )
 
         # Aggregate MEDIAN stats (average of medians across engines)
-        avg_median_prompt_tp = sum(
-            s.get("median_prompt_throughput", 0.0) for s in engine_stats_list
-        ) / num_engines
-        avg_median_gen_tp = sum(
-            s.get("median_generation_throughput", 0.0) for s in engine_stats_list
-        ) / num_engines
-        avg_median_running = sum(
-            s.get("median_running_reqs", 0.0) for s in engine_stats_list
-        ) / num_engines
-        avg_median_waiting = sum(
-            s.get("median_waiting_reqs", 0.0) for s in engine_stats_list
-        ) / num_engines
-        avg_median_gpu_cache = sum(
-            s.get("median_gpu_cache_usage_perc", 0.0) for s in engine_stats_list
-        ) / num_engines
-        avg_median_prefix_hit = sum(
-            s.get("median_prefix_cache_hit_rate", 0.0) for s in engine_stats_list
-        ) / num_engines
+        avg_median_prompt_tp = sum(s.get("median_prompt_throughput", 0.0) for s in engine_stats_list) / num_engines
+        avg_median_gen_tp = sum(s.get("median_generation_throughput", 0.0) for s in engine_stats_list) / num_engines
+        avg_median_running = sum(s.get("median_running_reqs", 0.0) for s in engine_stats_list) / num_engines
+        avg_median_waiting = sum(s.get("median_waiting_reqs", 0.0) for s in engine_stats_list) / num_engines
+        avg_median_gpu_cache = sum(s.get("median_gpu_cache_usage_perc", 0.0) for s in engine_stats_list) / num_engines
+        avg_median_prefix_hit = sum(s.get("median_prefix_cache_hit_rate", 0.0) for s in engine_stats_list) / num_engines
 
         # Total samples collected (useful for debugging stats collection)
         total_samples = sum(s.get("num_samples", 0) for s in engine_stats_list)
@@ -895,18 +881,21 @@ class InferenceEngineClient(InferenceEngineInterface):
         for key in latency_keys:
             if total_finished > 0:
                 # Weighted mean across engines
-                latency_agg[f"avg_latency_{key}_mean"] = sum(
-                    s.get(f"latency_{key}_mean", 0.0) * s.get("latency_num_finished_requests", 0)
-                    for s in engine_stats_list
-                ) / total_finished
+                latency_agg[f"avg_latency_{key}_mean"] = (
+                    sum(
+                        s.get(f"latency_{key}_mean", 0.0) * s.get("latency_num_finished_requests", 0)
+                        for s in engine_stats_list
+                    )
+                    / total_finished
+                )
                 # Max of p90s across engines (worst-case engine)
                 latency_agg[f"max_latency_{key}_p90"] = max(
                     (s.get(f"latency_{key}_p90", 0.0) for s in engine_stats_list), default=0.0
                 )
                 # Avg of medians across engines
-                latency_agg[f"avg_latency_{key}_median"] = sum(
-                    s.get(f"latency_{key}_median", 0.0) for s in engine_stats_list
-                ) / num_engines
+                latency_agg[f"avg_latency_{key}_median"] = (
+                    sum(s.get(f"latency_{key}_median", 0.0) for s in engine_stats_list) / num_engines
+                )
             else:
                 latency_agg[f"avg_latency_{key}_mean"] = 0.0
                 latency_agg[f"max_latency_{key}_p90"] = 0.0
@@ -1151,9 +1140,9 @@ def _prepare_retry_request(
     cur_request_json["continue_final_message"] = True
     cur_request_json["add_generation_prompt"] = False
     if orig_max_tokens is not None:
-        assert (
-            orig_max_tokens - accum.completion_tokens >= 0
-        ), "orig_max_tokens - accum.completion_tokens must be non-negative"
+        assert orig_max_tokens - accum.completion_tokens >= 0, (
+            "orig_max_tokens - accum.completion_tokens must be non-negative"
+        )
         assert max_key is not None
         cur_request_json[max_key] = orig_max_tokens - accum.completion_tokens
 
@@ -1174,9 +1163,9 @@ def _parse_partial_response_and_inplace_update_accum(
     stop_reason: Optional[str] = choice.get("stop_reason", None)
     new_content: str = choice["message"]["content"]
 
-    assert (
-        partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None
-    ), "partial_response['usage']['completion_tokens'] must be present"
+    assert partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None, (
+        "partial_response['usage']['completion_tokens'] must be present"
+    )
     new_completion_tokens: int = partial_response["usage"]["completion_tokens"]
 
     if response_role is None:

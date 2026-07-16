@@ -11,6 +11,7 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
 try:
@@ -234,6 +235,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
     if executor_backend not in ("ray", "mp"):
         try:
             from skyrl_train.utils.numa import is_numa_affinity_enabled, set_numa_affinity_for_gpu
+
             numa_enabled = is_numa_affinity_enabled()
             logger.info(f"setup_envvars_for_vllm: numa_enabled={numa_enabled}")
             if numa_enabled:
@@ -257,6 +259,7 @@ class WorkerWrap:
         """
         try:
             from skyrl_train.utils.numa import set_numa_affinity_for_gpu
+
             gpu_id = self.device.index if self.device is not None else 0
             set_numa_affinity_for_gpu(gpu_id)
         except Exception:
@@ -323,6 +326,7 @@ class WorkerWrap:
         from the original specialized parameter so weight sync can reload weights.
         """
         import os
+
         if os.environ.get("SKYRL_FUSE_WEIGHTS", "0") != "1":
             return
 
@@ -338,13 +342,22 @@ class WorkerWrap:
             saved_attrs = {}
             for pname, param in layer.named_parameters():
                 attrs = {}
-                for attr in ('weight_loader', 'output_dim', 'input_dim',
-                             '_output_dim', '_input_dim', 'packed_dim',
-                             'packed_factor', 'tp_rank', 'tp_size',
-                             'logical_widths', 'output_sizes'):
+                for attr in (
+                    "weight_loader",
+                    "output_dim",
+                    "input_dim",
+                    "_output_dim",
+                    "_input_dim",
+                    "packed_dim",
+                    "packed_factor",
+                    "tp_rank",
+                    "tp_size",
+                    "logical_widths",
+                    "output_sizes",
+                ):
                     if hasattr(param, attr):
                         attrs[attr] = getattr(param, attr)
-                attrs['subclass_type'] = type(param)
+                attrs["subclass_type"] = type(param)
                 saved_attrs[pname] = attrs
 
             # Call original process_weights_after_loading
@@ -409,8 +422,7 @@ class WorkerWrap:
         """
         if getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError(
-                "start_weight_update called while a weight update is already active. "
-                "Call finish_weight_update first."
+                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
             )
         # Register the RMSNorm Meta/fake kernels BEFORE the reload restores layers
         # to the meta device — the CP>1 finalize path traces _C::rms_norm on those
@@ -460,10 +472,11 @@ class WorkerWrap:
 
     def _is_fp8_model(self):
         """Check if the model uses FP8 quantization."""
-        quant_config = getattr(self.model_runner.model, 'quant_config', None)
+        quant_config = getattr(self.model_runner.model, "quant_config", None)
         if quant_config is None:
             return False
         from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
         return isinstance(quant_config, Fp8Config)
 
     def _quantize_weights_for_fp8(self, weights):
@@ -482,9 +495,10 @@ class WorkerWrap:
         fp8_param_names = set()
         for name, module in model.named_modules():
             from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-            if hasattr(module, 'quant_method') and isinstance(module.quant_method, Fp8LinearMethod):
+
+            if hasattr(module, "quant_method") and isinstance(module.quant_method, Fp8LinearMethod):
                 for pname, _ in module.named_parameters():
-                    if 'weight' in pname and 'scale' not in pname:
+                    if "weight" in pname and "scale" not in pname:
                         full_name = f"{name}.{pname}" if name else pname
                         fp8_param_names.add(full_name)
 
@@ -494,7 +508,7 @@ class WorkerWrap:
             # FP8 param is "layers.0.self_attn.qkv_proj.weight"
             # We need to check the ORIGINAL unfused name against the fused params
             is_fp8 = False
-            packed_mapping = getattr(model, 'packed_modules_mapping', {})
+            packed_mapping = getattr(model, "packed_modules_mapping", {})
             # Reverse mapping: q_proj -> qkv_proj, gate_proj -> gate_up_proj
             reverse_map = {}
             for fused, originals in packed_mapping.items():
@@ -503,7 +517,7 @@ class WorkerWrap:
 
             # Try to find the FP8 param name
             check_name = name
-            parts = name.rsplit('.', 2)
+            parts = name.rsplit(".", 2)
             if len(parts) >= 2:
                 module_part = parts[-2]  # e.g. "q_proj"
                 if module_part in reverse_map:
@@ -514,11 +528,11 @@ class WorkerWrap:
 
             if is_fp8 and tensor.dtype != torch.float8_e4m3fn:
                 # Move to GPU, quantize, move back to CPU
-                gpu_tensor = tensor.to(device='cuda', dtype=torch.bfloat16)
+                gpu_tensor = tensor.to(device="cuda", dtype=torch.bfloat16)
                 fp8_tensor, scale = scaled_fp8_quant(gpu_tensor)
                 yield (name, fp8_tensor.cpu())
                 # Yield the scale with the FUSED param name
-                scale_name = check_name.replace('.weight', '.weight_scale')
+                scale_name = check_name.replace(".weight", ".weight_scale")
                 yield (scale_name, scale.cpu())
                 del gpu_tensor, fp8_tensor
             else:
@@ -533,7 +547,7 @@ class WorkerWrap:
         """
         patched = []
         for name, param in model.named_parameters():
-            subclass_type = getattr(param, 'subclass_type', None)
+            subclass_type = getattr(param, "subclass_type", None)
             if subclass_type is not None and type(param) is not subclass_type:
                 original_class = type(param)
                 param.__class__ = subclass_type
@@ -553,6 +567,7 @@ class WorkerWrap:
         types so weight_loader dispatch works correctly with FP8 params.
         """
         import gc
+
         if hasattr(self, "_accumulated_weights") and self._accumulated_weights:
             model = self.model_runner.model
             if self._is_fp8_model():
@@ -573,7 +588,7 @@ class WorkerWrap:
                 ]
 
                 for mname, module in model.named_modules():
-                    if not (hasattr(module, 'quant_method') and isinstance(module.quant_method, Fp8LinearMethod)):
+                    if not (hasattr(module, "quant_method") and isinstance(module.quant_method, Fp8LinearMethod)):
                         continue
                     param = module.weight
                     device = param.device
@@ -589,22 +604,22 @@ class WorkerWrap:
                                 shard_list.append(weight_index[src_name])
                         if shard_list:
                             full_bf16 = torch.cat(shard_list, dim=0).to(
-                                device=device, dtype=torch.bfloat16, non_blocking=True)
+                                device=device, dtype=torch.bfloat16, non_blocking=True
+                            )
                             torch.cuda.current_stream().synchronize()
                             fp8_full, scale = scaled_fp8_quant(full_bf16)
                             param.data.copy_(fp8_full)
-                            if hasattr(module, 'weight_scale'):
+                            if hasattr(module, "weight_scale"):
                                 module.weight_scale.data.copy_(scale.squeeze())
                             del full_bf16, fp8_full, scale, shard_list
                     else:
                         src_name = mname + ".weight"
                         if src_name in weight_index:
-                            bf16_w = weight_index[src_name].to(
-                                device=device, dtype=torch.bfloat16, non_blocking=True)
+                            bf16_w = weight_index[src_name].to(device=device, dtype=torch.bfloat16, non_blocking=True)
                             torch.cuda.current_stream().synchronize()
                             fp8_w, scale = scaled_fp8_quant(bf16_w)
                             param.data.copy_(fp8_w)
-                            if hasattr(module, 'weight_scale'):
+                            if hasattr(module, "weight_scale"):
                                 module.weight_scale.data.copy_(scale.squeeze())
                             del bf16_w, fp8_w, scale
 
@@ -626,6 +641,7 @@ class WorkerWrap:
             del self._accumulated_weights
             gc.collect()
             import torch
+
             torch.cuda.empty_cache()
 
     def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
@@ -697,6 +713,7 @@ class WorkerWrap:
 
         try:
             from vllm.distributed import parallel_state as _ps
+
             tp_rank = _ps.get_tensor_model_parallel_rank()
             tp_size = _ps.get_tensor_model_parallel_world_size()
         except Exception:
@@ -737,7 +754,11 @@ class WorkerWrap:
                     w2 = all_params.get(f"{prefix}.experts.w2_weight")
                     if w13 is None or w2 is None:
                         # Fallback: scan for any experts.*weight tensor under this prefix.
-                        cand = {k: v for k, v in all_params.items() if k.startswith(f"{prefix}.experts.") and k.endswith("weight")}
+                        cand = {
+                            k: v
+                            for k, v in all_params.items()
+                            if k.startswith(f"{prefix}.experts.") and k.endswith("weight")
+                        }
                         entry = {"found": False, "note": f"no w13/w2; candidates={list(cand.keys())}"}
                         out[name] = entry
                         continue
@@ -753,7 +774,13 @@ class WorkerWrap:
                     else:
                         inter = w13.shape[1] // 2
                         t = w13[local_e, :inter] if proj == "gate_proj" else w13[local_e, inter:]
-                    entry = {"found": True, "mode": "expert", "owner_ep": owner_ep, "local_e": local_e, "tensor": _cpu(t)}
+                    entry = {
+                        "found": True,
+                        "mode": "expert",
+                        "owner_ep": owner_ep,
+                        "local_e": local_e,
+                        "tensor": _cpu(t),
+                    }
                     out[name] = entry
                     continue
 
@@ -794,6 +821,7 @@ class WorkerWrap:
 
         try:
             from vllm.distributed import parallel_state as _ps
+
             tp_rank = _ps.get_tensor_model_parallel_rank()
             tp_size = _ps.get_tensor_model_parallel_world_size()
         except Exception:
@@ -835,7 +863,7 @@ class WorkerWrap:
             emap_list = None
         out["expert_map"] = emap_list
         out["local_num_experts"] = local_num
-        out["global_num_experts"] = (int(global_num) if global_num is not None else None)
+        out["global_num_experts"] = int(global_num) if global_num is not None else None
         out["placement_strategy"] = str(placement) if placement is not None else None
         out["w13_inter_half"] = int(w13.shape[1] // 2)
 
@@ -861,6 +889,7 @@ class WorkerWrap:
         TP/EP worker via collective_rpc) so the driver can prove the engine node is
         DISJOINT from the policy nodes (=> the broadcast is genuinely cross-node)."""
         import socket
+
         return socket.gethostname()
 
 
@@ -920,9 +949,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
 
-        assert (
-            prompts is None and prompt_token_ids is not None
-        ), "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
+        assert prompts is None and prompt_token_ids is not None, (
+            "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
+        )
 
         sampling_params = (
             SamplingParams(**request_sampling_params) if request_sampling_params is not None else SamplingParams()
@@ -940,9 +969,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         for output in outputs:
             # TODO(tgriggs): Support n>1 sampling.
-            assert (
-                len(output.outputs) == 1
-            ), "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
+            assert len(output.outputs) == 1, (
+                "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
+            )
             resp = output.outputs[0]
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
@@ -969,10 +998,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     if pos_logprobs is None:
                         prompt_lps.append(None)
                     else:
-                        prompt_lps.append({
-                            token_id: lp.logprob if hasattr(lp, "logprob") else lp
-                            for token_id, lp in pos_logprobs.items()
-                        })
+                        prompt_lps.append(
+                            {
+                                token_id: lp.logprob if hasattr(lp, "logprob") else lp
+                                for token_id, lp in pos_logprobs.items()
+                            }
+                        )
                 all_prompt_logprobs.append(prompt_lps)
 
         if len(response_logprobs) and response_logprobs[0] is None:
@@ -995,7 +1026,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         is_lora = request["names"][0] == "lora_disk_load"
         if is_lora:
             assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
+                "vLLM LoRA weight update requests must contain the disk load path under key `lora_disk_path`"
             )
         return is_lora
 
@@ -1129,6 +1160,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def _destroy_weights_update_group(self):
         engine = self._get_engine()
         return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
+
 
 class V1LoggingStatLoggerFixed(LoggingStatLogger):
     """
@@ -1419,6 +1451,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
 
             return result
 
+
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
 
@@ -1548,11 +1581,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 if not _is_port_collision(e):
                     raise
                 if _attempt == _MAX_INIT_ATTEMPTS - 1:
-                    logger.error(
-                        f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up"
-                    )
+                    logger.error(f"Engine init still hit EADDRINUSE after {_MAX_INIT_ATTEMPTS} attempts; giving up")
                     raise
-                _backoff = _BACKOFF_BASE_SEC * (2 ** _attempt)
+                _backoff = _BACKOFF_BASE_SEC * (2**_attempt)
                 logger.warning(
                     f"Engine init hit a port collision (EADDRINUSE / engine-core init) on attempt "
                     f"{_attempt + 1}/{_MAX_INIT_ATTEMPTS}; retrying in {_backoff:.0f}s: {str(e).splitlines()[0]}"
@@ -1592,7 +1623,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 custom_chat_template_content = f.read()
-            logger.info(f"Initializing OpenAIServingChat with custom_chat_template read from: {custom_chat_template_path}")
+            logger.info(
+                f"Initializing OpenAIServingChat with custom_chat_template read from: {custom_chat_template_path}"
+            )
         else:
             custom_chat_template_content = None
 
@@ -1784,7 +1817,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 logger.warning(
                     "generate() failed with %r and vllm engine.abort cleanup "
                     "also failed with %r — Ray ObjectRefs may leak",
-                    e, abort_exc,
+                    e,
+                    abort_exc,
                 )
             raise
 
@@ -1910,12 +1944,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Harbor requests may include their own sampling params; we override
         # with the SkyRL generator config so rollout exploration is consistent.
         sp = getattr(self, "_openai_sampling_params", {})
-        body.update({
-            "temperature": sp.get("temperature", 1.0),
-            "top_p": sp.get("top_p", 1.0),
-            "top_k": sp.get("top_k", -1),
-            "min_p": sp.get("min_p", 0.0),
-        })
+        body.update(
+            {
+                "temperature": sp.get("temperature", 1.0),
+                "top_p": sp.get("top_p", 1.0),
+                "top_k": sp.get("top_k", -1),
+                "min_p": sp.get("min_p", 0.0),
+            }
+        )
 
         # 1. Build request
         try:
@@ -1925,9 +1961,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            return _build_error_response(
-                str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value
-            )
+            return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
 
         # 2. Call vllm engine
         try:
@@ -2151,6 +2185,7 @@ class VLLMWeightTransferReceiver:
     def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via torch.distributed.broadcast."""
         import os
+
         _fuse = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
@@ -2173,9 +2208,9 @@ class VLLMWeightTransferReceiver:
         if packed:
             assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
             assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-            assert (
-                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
-            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
+            assert str_to_torch_dtype(dtypes[0]) == self.model_config.dtype, (
+                f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
+            )
             assert len(sizes) == len(names), "sizes must be provided for packed weight update"
             assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
 

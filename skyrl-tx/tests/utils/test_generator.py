@@ -103,9 +103,9 @@ def test_prompt_logprobs():
     result_with = model.generate(input_ids, attention_mask, sampling_params=[sampling], prompt_logprobs=True)
     assert result_with.prompt_logprobs is not None, "prompt_logprobs should not be None when enabled"
     assert len(result_with.prompt_logprobs) == 1, "Should have prompt_logprobs for 1 sequence in batch"
-    assert (
-        len(result_with.prompt_logprobs[0]) == expected_length
-    ), f"prompt_logprobs should have length {expected_length} (prompt_length - 1)"
+    assert len(result_with.prompt_logprobs[0]) == expected_length, (
+        f"prompt_logprobs should have length {expected_length} (prompt_length - 1)"
+    )
 
     # Test with prompt_logprobs=False
     result_without = model.generate(input_ids, attention_mask, sampling_params=[sampling], prompt_logprobs=False)
@@ -121,6 +121,6 @@ def test_prompt_logprobs():
     assert result_batch.prompt_logprobs is not None
     assert len(result_batch.prompt_logprobs) == batch_size, f"Should have prompt_logprobs for {batch_size} sequences"
     for i in range(batch_size):
-        assert (
-            len(result_batch.prompt_logprobs[i]) == expected_length
-        ), f"Sequence {i}: expected prompt_logprobs length {expected_length}"
+        assert len(result_batch.prompt_logprobs[i]) == expected_length, (
+            f"Sequence {i}: expected prompt_logprobs length {expected_length}"
+        )

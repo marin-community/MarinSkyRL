@@ -226,13 +226,9 @@ def kl_from_sparse_teacher_logprobs(
         [B, S] per-token divergence values.
     """
     if kl_type == "forward":
-        return forward_kl_from_sparse(
-            teacher_top_k_logprobs, teacher_top_k_indices, student_log_probs_full, loss_mask
-        )
+        return forward_kl_from_sparse(teacher_top_k_logprobs, teacher_top_k_indices, student_log_probs_full, loss_mask)
     elif kl_type == "reverse":
-        return reverse_kl_from_sparse(
-            teacher_top_k_logprobs, teacher_top_k_indices, student_log_probs_full, loss_mask
-        )
+        return reverse_kl_from_sparse(teacher_top_k_logprobs, teacher_top_k_indices, student_log_probs_full, loss_mask)
     elif kl_type == "jsd":
         return jsd_from_sparse(
             teacher_top_k_logprobs, teacher_top_k_indices, student_log_probs_full, loss_mask, jsd_alpha

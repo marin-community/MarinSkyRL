@@ -34,9 +34,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
             terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
-            moe_router_replay=bool(
-                cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)
-            ),
+            moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
             use_tis=bool(cfg.trainer.algorithm.get("use_tis", False)),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
         )
@@ -64,9 +62,9 @@ class TerminalBenchGenerateExp(BasePPOExp):
         prompts_dataset = TerminalBenchTaskDataset(
             data_files=self.cfg.data.train_data,
         )
-        assert (
-            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
+            f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        )
         return prompts_dataset
 
     def run(self):

@@ -88,9 +88,7 @@ def _log():
     return logger
 
 
-def _scale_terminal_bench_cfg(
-    terminal_bench_cfg: DictConfig, num_coordinators: int
-) -> DictConfig:
+def _scale_terminal_bench_cfg(terminal_bench_cfg: DictConfig, num_coordinators: int) -> DictConfig:
     """Return a deep copy of the terminal_bench config scaled for one coordinator.
 
     Divides the two per-process knobs the design identifies by K:
@@ -108,9 +106,7 @@ def _scale_terminal_bench_cfg(
     if num_coordinators <= 1:
         # K=1 parity: hand back an exact copy (no scaling) so the single
         # coordinator is behavior-identical to the non-fanout generator.
-        return OmegaConf.create(
-            OmegaConf.to_container(terminal_bench_cfg, resolve=False)
-        )
+        return OmegaConf.create(OmegaConf.to_container(terminal_bench_cfg, resolve=False))
 
     scaled = OmegaConf.create(OmegaConf.to_container(terminal_bench_cfg, resolve=False))
 
@@ -120,10 +116,7 @@ def _scale_terminal_bench_cfg(
         full = int(harbor["n_concurrent_trials"])
         per_actor = max(1, full // num_coordinators)
         harbor["n_concurrent_trials"] = per_actor
-        _log().info(
-            f"[RolloutCoordinator] scaled n_concurrent_trials {full} -> {per_actor} "
-            f"(// {num_coordinators})"
-        )
+        _log().info(f"[RolloutCoordinator] scaled n_concurrent_trials {full} -> {per_actor} (// {num_coordinators})")
 
     # connection_pool_maxsize lives under environment.kwargs.* when configured.
     env = scaled.get("environment", None)
@@ -187,6 +180,7 @@ class RolloutCoordinator:
         # libuv 1.48.0 io_uring path) AND neutralizes uvloop in-process so no
         # uvloop loop can be created at all. Idempotent + best-effort.
         from skyrl_train.utils.utils import _force_stock_asyncio_in_worker
+
         _force_stock_asyncio_in_worker()
         # Import here so the heavy Harbor/terminal-bench import only happens in
         # the actor process, not on the dispatcher when fan-out is off.
@@ -201,9 +195,7 @@ class RolloutCoordinator:
         try:
             start_fd_monitor()
         except Exception as e:  # pragma: no cover - best-effort
-            _log().warning(
-                f"[RolloutCoordinator {shard_idx}] start_fd_monitor failed: {e}"
-            )
+            _log().warning(f"[RolloutCoordinator {shard_idx}] start_fd_monitor failed: {e}")
 
         self._shard_idx = shard_idx
         self._num_coordinators = num_coordinators
@@ -233,9 +225,7 @@ class RolloutCoordinator:
             terminal_bench_cfg=scaled_tb_cfg,
             inference_engine_client=None,
             tokenizer=tokenizer,
-            moe_router_replay=bool(
-                cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)
-            ),
+            moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
             use_tis=bool(cfg.trainer.algorithm.get("use_tis", False)),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
         )
@@ -275,9 +265,7 @@ class RolloutCoordinator:
                 f"max_workers={workers} (litellm acompletion preamble concurrency)"
             )
         except Exception as e:
-            _log().warning(
-                f"[RolloutCoordinator {self._shard_idx}] set_default_executor failed: {e}"
-            )
+            _log().warning(f"[RolloutCoordinator {self._shard_idx}] set_default_executor failed: {e}")
         await self._generator.startup()
         _log().info(f"[RolloutCoordinator {self._shard_idx}] startup complete")
 
@@ -285,9 +273,7 @@ class RolloutCoordinator:
         await self._generator.shutdown()
         _log().info(f"[RolloutCoordinator {self._shard_idx}] shutdown complete")
 
-    async def run_shard(
-        self, sub_batch: GeneratorInput, global_step: Optional[int]
-    ) -> GeneratorOutput:
+    async def run_shard(self, sub_batch: GeneratorInput, global_step: Optional[int]) -> GeneratorOutput:
         """Run one group's generation locally and return the GeneratorOutput.
 
         ``global_step`` is the dispatcher's current step at submission time. We
@@ -334,9 +320,7 @@ class RolloutCoordinator:
         return None
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
-    async def start_eval_session(
-        self, run_name: str, eval_step: int, val_set_name=None
-    ) -> None:
+    async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
         if hasattr(self._generator, "start_eval_session"):
             await self._generator.start_eval_session(run_name, eval_step, val_set_name)
 
@@ -379,12 +363,8 @@ class RolloutDispatcher:
         # it changes only HOW configs are shipped, not their values. Mirrors the
         # pattern already used by `_scale_terminal_bench_cfg` in this file.
         self.cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
-        self._generator_cfg = OmegaConf.create(
-            OmegaConf.to_container(generator_cfg, resolve=True)
-        )
-        self._terminal_bench_cfg = OmegaConf.create(
-            OmegaConf.to_container(terminal_bench_cfg, resolve=True)
-        )
+        self._generator_cfg = OmegaConf.create(OmegaConf.to_container(generator_cfg, resolve=True))
+        self._terminal_bench_cfg = OmegaConf.create(OmegaConf.to_container(terminal_bench_cfg, resolve=True))
 
         # --- Fan-out connectivity fix (head-IP injection) ---
         # The vLLM HTTP inference endpoint (InferenceEngineClient) is bound on the
@@ -453,10 +433,7 @@ class RolloutDispatcher:
         from ray.util.placement_group import placement_group
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        bundles = [
-            {"CPU": float(self._cpus_per_coordinator)}
-            for _ in range(self._num_coordinators)
-        ]
+        bundles = [{"CPU": float(self._cpus_per_coordinator)} for _ in range(self._num_coordinators)]
         self._pg = placement_group(bundles, strategy="SPREAD")
         await self._pg.ready()
         _log().info(
@@ -494,17 +471,12 @@ class RolloutDispatcher:
             # load finishes (and pages settle) before the next begins.
             await actor.startup.remote()
             self._actors.append(actor)
-            _log().info(
-                f"[RolloutDispatcher] coordinator {shard_idx + 1}/"
-                f"{self._num_coordinators} started"
-            )
+            _log().info(f"[RolloutDispatcher] coordinator {shard_idx + 1}/{self._num_coordinators} started")
             # Spread the page-in further: brief pause between coordinators.
             if shard_idx + 1 < self._num_coordinators:
                 await asyncio.sleep(2)
 
-        _log().info(
-            f"[RolloutDispatcher] {self._num_coordinators} coordinators started"
-        )
+        _log().info(f"[RolloutDispatcher] {self._num_coordinators} coordinators started")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Route one group to one coordinator and await its GeneratorOutput.
@@ -538,9 +510,7 @@ class RolloutDispatcher:
     async def shutdown(self) -> None:
         if self._actors:
             try:
-                await asyncio.gather(
-                    *[a.shutdown.remote() for a in self._actors], return_exceptions=True
-                )
+                await asyncio.gather(*[a.shutdown.remote() for a in self._actors], return_exceptions=True)
             except Exception as e:  # pragma: no cover - best-effort
                 _log().warning(f"[RolloutDispatcher] coordinator shutdown error: {e}")
         if self._pg is not None:
@@ -559,13 +529,9 @@ class RolloutDispatcher:
     # (eval_interval is effectively infinite), so this path is rarely exercised
     # under fan-out; routing to one coordinator avoids fanning eval-session
     # state across K orchestrators.
-    async def start_eval_session(
-        self, run_name: str, eval_step: int, val_set_name=None
-    ) -> None:
+    async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
         if self._actors:
-            await self._actors[0].start_eval_session.remote(
-                run_name, eval_step, val_set_name
-            )
+            await self._actors[0].start_eval_session.remote(run_name, eval_step, val_set_name)
             self._eval_session_active = True
 
     async def stop_eval_session(self) -> None:

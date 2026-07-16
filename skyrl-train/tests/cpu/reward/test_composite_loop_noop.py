@@ -103,9 +103,9 @@ def test_composite_loop_noop_bit_identical_to_pass_ratio(label, stdout, original
     # Bit-for-bit identity (use repr to catch any float drift, not just ==).
     assert loop_reward == baseline, f"[{label}] composite_loop {loop_reward!r} != pass_ratio {baseline!r}"
     # The outcome term must itself equal the baseline (no clamp applied at default).
-    assert (
-        components["outcome"] == baseline
-    ), f"[{label}] outcome term {components['outcome']!r} != baseline {baseline!r}"
+    assert components["outcome"] == baseline, (
+        f"[{label}] outcome term {components['outcome']!r} != baseline {baseline!r}"
+    )
     # No shaping applied at default.
     assert components["shaping_total"] == 0.0
 

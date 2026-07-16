@@ -69,8 +69,7 @@ def _run_ppo_train(cfg, think_token_weight, with_span_tags: bool):
     if with_span_tags:
         # Tag the first two response tokens THINK, the rest ACTION.
         tags = torch.tensor(
-            [[SPAN_THINK, SPAN_THINK, SPAN_ACTION, SPAN_ACTION],
-             [SPAN_THINK, SPAN_ACTION, SPAN_ACTION, SPAN_ACTION]],
+            [[SPAN_THINK, SPAN_THINK, SPAN_ACTION, SPAN_ACTION], [SPAN_THINK, SPAN_ACTION, SPAN_ACTION, SPAN_ACTION]],
             dtype=torch.long,
         )
         batch_data["response_span_tags"] = tags
@@ -106,11 +105,9 @@ def test_think_weighted_loss_byte_identical_at_weight_one(ray_init_fixture, cfg)
     try:
         status_no_tags = _run_ppo_train(cfg, think_token_weight=1.0, with_span_tags=False)
         status_with_tags = _run_ppo_train(cfg, think_token_weight=1.0, with_span_tags=True)
-        assert math.isclose(
-            status_no_tags["policy_loss"], status_with_tags["policy_loss"], rel_tol=0.0, abs_tol=0.0
-        ), "weight=1.0 must be byte-identical with vs without span tags"
-        assert math.isclose(
-            status_no_tags["final_loss"], status_with_tags["final_loss"], rel_tol=0.0, abs_tol=0.0
+        assert math.isclose(status_no_tags["policy_loss"], status_with_tags["policy_loss"], rel_tol=0.0, abs_tol=0.0), (
+            "weight=1.0 must be byte-identical with vs without span tags"
         )
+        assert math.isclose(status_no_tags["final_loss"], status_with_tags["final_loss"], rel_tol=0.0, abs_tol=0.0)
     finally:
         ray.shutdown()

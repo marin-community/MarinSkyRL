@@ -49,10 +49,12 @@ def test_exact_path_returns_none_on_id_divergence():
 
 def test_lcs_records_fallback_in_stats():
     stats = AlignmentStats()
+
     # retok ids [1,2,3] map to strings via a stub tokenizer.
     class _Tok:
         def convert_ids_to_tokens(self, ids):
             return {1: "Hello", 2: " world", 3: "!"}.get
+
     tok = _Tok()
     tok.convert_ids_to_tokens = lambda ids: ["Hello", " world", "!"]
     vllm = [{"token": "Hello", "logprob": -0.1}, {"token": " world", "logprob": -0.2}, {"token": "!", "logprob": -0.3}]
@@ -124,11 +126,13 @@ def test_extract_float_format_no_longer_disables_tis():
 # Full TITO: prompt-id extractor + flag scaffold (Stage 2)
 # ---------------------------------------------------------------------------
 def test_extract_prompt_token_ids():
-    rd = [{
-        "prompt_token_ids": [[1, 2, 3], [1, 2, 3, 10, 20, 4, 5]],
-        "completion_token_ids": [[10, 20], [30]],
-        "logprobs": [[-0.1, -0.2], [-0.3]],
-    }]
+    rd = [
+        {
+            "prompt_token_ids": [[1, 2, 3], [1, 2, 3, 10, 20, 4, 5]],
+            "completion_token_ids": [[10, 20], [30]],
+            "logprobs": [[-0.1, -0.2], [-0.3]],
+        }
+    ]
     assert extract_prompt_token_ids_from_rollout_details(rd) == [[1, 2, 3], [1, 2, 3, 10, 20, 4, 5]]
     # absent -> None (None-safe)
     assert extract_prompt_token_ids_from_rollout_details([{"completion_token_ids": [[10]]}]) is None
@@ -174,8 +178,11 @@ def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
 
     # prompt[1] does NOT start with prompt[0] + completion[0] -> invariant fails.
     out = _assemble_response_ids_tito_full(
-        messages=[{"role": "assistant", "content": "a"}, {"role": "user", "content": "b"},
-                  {"role": "assistant", "content": "c"}],
+        messages=[
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "b"},
+            {"role": "assistant", "content": "c"},
+        ],
         tokenizer=_Tok(),
         generation_prompt_ids=[1, 2],
         assistant_logprobs=[[-0.1], [-0.2]],
@@ -251,12 +258,10 @@ def test_exact_alignment_end_to_end(model_name):
     # slicing the assistant message the same way the function does, so the
     # completion_token_ids match the re-tokenized generated tokens by construction.
     gen_prompt = get_generation_prompt_ids(tokenizer)
-    assistant_full = get_response_ids_and_loss_mask_from_messages(
-        [messages[1]], tokenizer
-    )[0]
+    assistant_full = get_response_ids_and_loss_mask_from_messages([messages[1]], tokenizer)[0]
     # generated tokens = full assistant encoding minus the generation-prompt prefix,
     # up to and including EOS.
-    body = assistant_full[len(gen_prompt):]
+    body = assistant_full[len(gen_prompt) :]
     if tokenizer.eos_token_id in body:
         last_eos = len(body) - 1 - body[::-1].index(tokenizer.eos_token_id)
         gen_ids = body[: last_eos + 1]
@@ -292,7 +297,7 @@ def test_float_format_without_ids_uses_positional_exact():
     ]
     gen_prompt = get_generation_prompt_ids(tokenizer)
     assistant_full = get_response_ids_and_loss_mask_from_messages([messages[1]], tokenizer)[0]
-    body = assistant_full[len(gen_prompt):]
+    body = assistant_full[len(gen_prompt) :]
     if tokenizer.eos_token_id in body:
         last_eos = len(body) - 1 - body[::-1].index(tokenizer.eos_token_id)
         gen_ids = body[: last_eos + 1]

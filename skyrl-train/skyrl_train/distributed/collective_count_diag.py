@@ -82,9 +82,7 @@ def log_phase(phase: str, rank=None) -> None:
     try:
         r = rank if rank is not None else _rank()
         n = _default_pg_seq()
-        logger.info(
-            f"COLLECTIVE_COUNT_DIAG rank={r} phase={phase} default_pg_collective_count={n}"
-        )
+        logger.info(f"COLLECTIVE_COUNT_DIAG rank={r} phase={phase} default_pg_collective_count={n}")
     except Exception:
         pass
 

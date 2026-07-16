@@ -330,12 +330,12 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 
             # Observations and EOS expectations only strictly apply when the model finished turns
             if stop_reason == "stop":
-                assert (
-                    f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
-                ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
-                assert (
-                    f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
-                ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+                assert f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str, (
+                    f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
+                )
+                assert f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str, (
+                    f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+                )
                 # TODO(Charlie): add more rigorous tests that is robust to stop_reason being length.
                 # Either make GeneratorOutput return stop reason for each turn, or change the way we manage
                 # max generation length.
@@ -400,12 +400,12 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
             masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
             masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert (
-                f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
-            ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
-            assert (
-                f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
-            ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+            assert f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str, (
+                f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
+            )
+            assert f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str, (
+                f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+            )
             assert (
                 prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
                 + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])

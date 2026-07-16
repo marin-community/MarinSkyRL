@@ -342,9 +342,11 @@ def main():
             return d.max().item() if d.numel() else 0.0
 
         d_logp = _masked_max(logp_cp1, logp_cp2)
-        mean_logp = (logp_cp1 - logp_cp2).abs()[amask].mean().item() if amask.shape == logp_cp1.shape else (
-            logp_cp1 - logp_cp2
-        ).abs().mean().item()
+        mean_logp = (
+            (logp_cp1 - logp_cp2).abs()[amask].mean().item()
+            if amask.shape == logp_cp1.shape
+            else (logp_cp1 - logp_cp2).abs().mean().item()
+        )
         ent_cp1_a = ent_cp1[:, -num_actions:]
         ent_cp2_a = ent_cp2[:, -num_actions:]
         d_ent = _masked_max(ent_cp1_a, ent_cp2_a)

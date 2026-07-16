@@ -315,9 +315,9 @@ def validate_batch_sizes(cfg: DictConfig):
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
-    assert (
-        cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0
-    ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
+    assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
+        f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
+    )
     policy_mini_batch_size_per_gpu = (
         cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
@@ -327,29 +327,29 @@ def validate_batch_sizes(cfg: DictConfig):
         f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
         f"dp_size={policy_dp_size}"
     )
-    assert (
-        policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0
-    ), f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-    assert (
-        policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0
-    ), f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
+    assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
     policy_train_batch_size_per_gpu = (
         cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
 
     # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
-    assert (
-        policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0
-    ), f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) {policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu (policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+    assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
+        f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) {policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu (policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+    )
 
     # Validate critic mini batch size
     critic_world_size = cfg.trainer.placement.critic_num_nodes * cfg.trainer.placement.critic_num_gpus_per_node
     critic_dp_size = critic_world_size // cfg.trainer.critic.sequence_parallel_size
 
     if cfg.trainer.critic.model.path is not None:
-        assert (
-            cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0
-        ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
+        assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
+            f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
+        )
         critic_mini_batch_size_per_gpu = (
             cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
         )
@@ -359,18 +359,18 @@ def validate_batch_sizes(cfg: DictConfig):
             f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
             f"dp_size={critic_dp_size}"
         )
-        assert (
-            critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0
-        ), f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        assert (
-            critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0
-        ), f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
         critic_train_batch_size_per_gpu = (
             cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
         )
-        assert (
-            critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0
-        ), f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+        assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
+            f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+        )
 
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
@@ -418,9 +418,9 @@ def validate_megatron_cfg(cfg: DictConfig):
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
-        assert (
-            config.sequence_parallel_size == 1
-        ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
+        assert config.sequence_parallel_size == 1, (
+            f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
+        )
 
 
 def _validate_cp_cfg(cfg: DictConfig):
@@ -490,39 +490,38 @@ def _validate_cp_cfg(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
-
     # Validate generation config separately
     validate_generator_cfg(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
     _validate_cp_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
 
-    assert (
-        cfg.trainer.sequence_parallel_backend == "ulysses"
-    ), f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
+    assert cfg.trainer.sequence_parallel_backend == "ulysses", (
+        f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
+    )
 
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":
-        assert (
-            cfg.trainer.critic.model.path
-        ), "`trainer.critic.model.path` should be provided for PPO training, got `None`"
+        assert cfg.trainer.critic.model.path, (
+            "`trainer.critic.model.path` should be provided for PPO training, got `None`"
+        )
 
-    assert not (
-        cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
-    ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
+    assert not (cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss), (
+        "use_kl_in_reward and use_kl_loss should be mutually exclusive"
+    )
 
     if cfg.trainer.strategy in ("fsdp", "fsdp2"):
-        assert not (
-            cfg.trainer.policy.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
-        ), "fwd pass cpu offloading is not supported for FSDP1 policy worker, use FSDP2 instead"
-        assert not (
-            cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
-        ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
+        assert not (cfg.trainer.policy.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"), (
+            "fwd pass cpu offloading is not supported for FSDP1 policy worker, use FSDP2 instead"
+        )
+        assert not (cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"), (
+            "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
+        )
 
     if cfg.trainer.strategy == "deepspeed":
-        assert (
-            cfg.trainer.policy.deepspeed_config.zero_optimization.stage == 3
-        ), "only deepspeed stage 3 is currently supported!"
+        assert cfg.trainer.policy.deepspeed_config.zero_optimization.stage == 3, (
+            "only deepspeed stage 3 is currently supported!"
+        )
 
     validate_batch_sizes(cfg)
 
@@ -536,21 +535,23 @@ def validate_cfg(cfg: DictConfig):
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
 
-    assert (
-        cfg.trainer.algorithm.policy_loss_type in available_policy_losses
-    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+    assert cfg.trainer.algorithm.policy_loss_type in available_policy_losses, (
+        f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+    )
 
     available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
-    assert (
-        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
-    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
+    assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
+        f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
+    )
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "sequence_mean",
         "seq_mean_token_sum_norm",
         "seq_mean_token_sum_norm_global",
-    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', 'seq_mean_token_sum_norm_global']`"
+    ), (
+        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', 'seq_mean_token_sum_norm_global']`"
+    )
 
     # add field to algorithm config needed for loss functions
     # create a new config to make it modifiable
@@ -581,7 +582,7 @@ def validate_cfg(cfg: DictConfig):
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
             raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
+                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap}"
             )
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
@@ -621,18 +622,18 @@ def validate_cfg(cfg: DictConfig):
             * cfg.generator.inference_engine_pipeline_parallel_size
             * cfg.generator.inference_engine_data_parallel_size
         )
-        assert (
-            num_policy_gpus == num_rollout_gpus
-        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+        assert num_policy_gpus == num_rollout_gpus, (
+            f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+        )
     else:
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
-            assert (
-                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
-            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
-            assert (
-                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
-            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
+            assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
+                f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            )
+            assert cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node, (
+                f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
+            )
 
 
 def validate_generator_cfg(cfg: DictConfig):
@@ -647,23 +648,23 @@ def validate_generator_cfg(cfg: DictConfig):
     """
 
     if cfg.generator.max_turns == 1:
-        assert (
-            cfg.generator.max_input_length == cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
+        assert cfg.generator.max_input_length == cfg.trainer.max_prompt_length, (
+            "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
+        )
     else:
-        assert (
-            cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
+        assert cfg.generator.max_input_length >= cfg.trainer.max_prompt_length, (
+            "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
+        )
 
     if not cfg.generator.run_engines_locally:
-        assert cfg.generator.num_inference_engines == len(
-            cfg.generator.remote_inference_engine_urls
-        ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
+        assert cfg.generator.num_inference_engines == len(cfg.generator.remote_inference_engine_urls), (
+            "num_inference_engines should be equal to the number of remote_inference_engine_urls"
+        )
 
     if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
-        assert (
-            cfg.generator.batched
-        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
+        assert cfg.generator.batched, (
+            "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
+        )
 
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
@@ -829,9 +830,7 @@ def _assert_dcp_capable_arch(model_cfg, dcp: int):
         return  # MLA is DCP-capable (FlashMLA / FlashAttnMLA).
     # GQA / dense decoders run on FlashAttention (DCP-capable). Reject only an explicit,
     # known-incapable attention implementation pinned in the config.
-    attn_impl = getattr(model_cfg, "_attn_implementation", None) or getattr(
-        model_cfg, "attn_implementation", None
-    )
+    attn_impl = getattr(model_cfg, "_attn_implementation", None) or getattr(model_cfg, "attn_implementation", None)
     incapable = {"eager", "sdpa"}
     if attn_impl is not None and str(attn_impl).lower() in incapable:
         raise AssertionError(
@@ -1545,7 +1544,7 @@ def str_to_torch_dtype(dtype: str) -> torch.dtype:
 
 
 def format_gib(mem_bytes: int) -> str:
-    return f"{mem_bytes / (1024 ** 3):.2f} GiB"
+    return f"{mem_bytes / (1024**3):.2f} GiB"
 
 
 def print_mem(tag: str, mem: dict):

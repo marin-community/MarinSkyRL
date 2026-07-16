@@ -242,9 +242,13 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
         else:
             # For chat templating, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
             expected_loss_masks = (
-                expected_assistant_loss_mask_without_thinking  # `<|im_start|>assistant\nb<|im_end|>\n`
-                + expected_user_loss_mask  # `<|im_start|>user\n1<|im_end|>\n`
-            ) * 2 + expected_assistant_loss_mask_with_thinking  # last `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
+                (
+                    expected_assistant_loss_mask_without_thinking  # `<|im_start|>assistant\nb<|im_end|>\n`
+                    + expected_user_loss_mask  # `<|im_start|>user\n1<|im_end|>\n`
+                )
+                * 2
+                + expected_assistant_loss_mask_with_thinking
+            )  # last `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
     else:
         # `<|im_start|>assistant\nb<|im_end|>\n`
         expected_assistant_loss_mask = [0] * len(generation_prompt_ids) + [

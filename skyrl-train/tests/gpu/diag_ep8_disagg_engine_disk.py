@@ -33,6 +33,7 @@ a clean-but-permuted half ordering is not misread as corruption.
 Run (3 nodes; policy 16 GPU + engine 2 GPU):
     DIAG_POLICY_GPUS_PER_NODE=8 python -m tests.gpu.diag_ep8_disagg_engine_disk
 """
+
 import os
 
 import ray
@@ -45,8 +46,8 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from transformers import AutoTokenizer, AutoConfig
 
 MODEL = os.environ.get("DIAG_MODEL", "Qwen/Qwen3-30B-A3B-Thinking-2507")
-DIAG_EP = int(os.environ.get("DIAG_EP", "8"))          # policy EP
-DIAG_FSDP = int(os.environ.get("DIAG_FSDP", "2"))      # policy FSDP
+DIAG_EP = int(os.environ.get("DIAG_EP", "8"))  # policy EP
+DIAG_FSDP = int(os.environ.get("DIAG_FSDP", "2"))  # policy FSDP
 POLICY_GPUS_PER_NODE = int(os.environ.get("DIAG_POLICY_GPUS_PER_NODE", "8"))
 ENGINE_TP = int(os.environ.get("DIAG_ENGINE_TP", "2"))
 ENGINE_EP = int(os.environ.get("DIAG_ENGINE_EP", "2"))
@@ -94,9 +95,11 @@ def _get_cfg(policy_gpus, policy_nodes):
 
 def _disk_local_dir(model_path):
     import os as _os
+
     if _os.path.isdir(model_path) and _os.path.exists(_os.path.join(model_path, "config.json")):
         return model_path
     from huggingface_hub import snapshot_download
+
     return snapshot_download(model_path, allow_patterns=["*.safetensors", "*.json"])
 
 
@@ -104,6 +107,7 @@ def _load_disk_experts(local_dir, layer_idx, num_experts):
     """Return {global_j: {'gate':T,'up':T,'down':T}} fp32 CPU from base disk shards."""
     import json
     from safetensors import safe_open
+
     idx = os.path.join(local_dir, "model.safetensors.index.json")
     if os.path.exists(idx):
         with open(idx) as f:
@@ -130,9 +134,12 @@ def main():
     pol_pg = None
     try:
         cfg = _get_cfg(POLICY_GPUS_PER_NODE, policy_nodes)
-        print(f"[disagg] model={MODEL} policy EP={DIAG_EP}xFSDP={DIAG_FSDP}={policy_world} "
-              f"({policy_nodes} nodes x {POLICY_GPUS_PER_NODE}gpu) | engine TP={ENGINE_TP} EP={ENGINE_EP} "
-              f"| torch={torch.__version__}", flush=True)
+        print(
+            f"[disagg] model={MODEL} policy EP={DIAG_EP}xFSDP={DIAG_FSDP}={policy_world} "
+            f"({policy_nodes} nodes x {POLICY_GPUS_PER_NODE}gpu) | engine TP={ENGINE_TP} EP={ENGINE_EP} "
+            f"| torch={torch.__version__}",
+            flush=True,
+        )
         initialize_ray(cfg)
 
         # ---- POLICY FIRST, claiming its WHOLE nodes. init_worker_with_type(shared_pg=None)
@@ -143,8 +150,12 @@ def main():
         # (ABORTs if the engine still overlaps a policy node). ----
         pol_pg = None  # owned by init_worker_with_type (its own PG); nothing to clean here.
         policy = init_worker_with_type(
-            "policy", shared_pg=None, colocate_all=False,
-            num_gpus_per_node=POLICY_GPUS_PER_NODE, num_nodes=policy_nodes, cfg=cfg,
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=POLICY_GPUS_PER_NODE,
+            num_nodes=policy_nodes,
+            cfg=cfg,
         )
 
         # ---- ENGINE AFTER policy occupies its nodes (non-colocated, shared_pg=None ->
@@ -160,7 +171,7 @@ def main():
             vllm_v1_disable_multiproc=True,
             enable_prefix_caching=False,
             enforce_eager=True,
-            shared_pg=None,                      # DISAGGREGATED
+            shared_pg=None,  # DISAGGREGATED
             gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
             inference_engine_enable_sleep=False,  # not colocated -> no sleep
             async_engine=True,
@@ -186,11 +197,17 @@ def main():
         print(f"[disagg] engine hosts={eng_hosts}", flush=True)
         disjoint = all(h not in pol_hosts for h in eng_hosts if not str(h).startswith("<"))
         if not disjoint:
-            print(f"[disagg] !!! BLOCKER: engine host(s) {eng_hosts} OVERLAP policy hosts "
-                  f"{pol_hosts}. Broadcast would be INTRA-node. ABORTING.", flush=True)
+            print(
+                f"[disagg] !!! BLOCKER: engine host(s) {eng_hosts} OVERLAP policy hosts "
+                f"{pol_hosts}. Broadcast would be INTRA-node. ABORTING.",
+                flush=True,
+            )
             return 3
-        print(f"[disagg] PROOF OK: engine node(s) {eng_hosts} DISJOINT from policy nodes "
-              f"{pol_hosts} => broadcast_to_inference_engines is genuinely CROSS-NODE.", flush=True)
+        print(
+            f"[disagg] PROOF OK: engine node(s) {eng_hosts} DISJOINT from policy nodes "
+            f"{pol_hosts} => broadcast_to_inference_engines is genuinely CROSS-NODE.",
+            flush=True,
+        )
 
         mc = AutoConfig.from_pretrained(MODEL, trust_remote_code=True)
         num_experts = int(getattr(mc, "num_experts", getattr(mc, "num_local_experts", 128)))
@@ -206,7 +223,7 @@ def main():
         pre_by_layer = {}
         for li in layers:
             pr = ray.get(eng_actor.read_engine_expert_slots_raw.remote(li))
-            pre_by_layer[li] = ([pr] if isinstance(pr, dict) else pr)
+            pre_by_layer[li] = [pr] if isinstance(pr, dict) else pr
 
         # ---- REAL disaggregated transfer, TWICE (transport-race check) ----
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
@@ -231,7 +248,9 @@ def main():
         for li in layers:
             d = _load_disk_experts(local_dir, li, num_experts)
             for wr, (rd_pre, rd_post) in enumerate(zip(pre_by_layer[li], slot_reads_by_layer[li][0])):
-                if not (isinstance(rd_pre, dict) and "slots" in rd_pre and isinstance(rd_post, dict) and "slots" in rd_post):
+                if not (
+                    isinstance(rd_pre, dict) and "slots" in rd_pre and isinstance(rd_post, dict) and "slots" in rd_post
+                ):
                     continue
                 s2g = rd_pre.get("slot_to_global", [])
                 inter = rd_pre.get("w13_inter_half")
@@ -242,6 +261,7 @@ def main():
                 pre = rd_pre["slots"][sl]["w13"].float()
                 post = rd_post["slots"][sl]["w13"].float()
                 dg, du = d[g]["gate"], d[g]["up"]
+
                 def fmt(x):
                     # which order does engine w13 hold? compare top half to disk gate vs up.
                     e_nat = max((x[:I] - dg).abs().max().item(), (x[I:] - du).abs().max().item())  # [gate;up]
@@ -251,14 +271,21 @@ def main():
                     if e_swp <= EPS:
                         return f"[up;gate] (SWAPPED/kernel; e_swp={e_swp:.1e})"
                     return f"NEITHER (e_nat={e_nat:.1e} e_swp={e_swp:.1e})"
+
                 pre_post_id = (pre - post).abs().max().item()
-                print(f"    L{li} rank{wr} slot{sl}(g={g}): PRE(from-disk)={fmt(pre)} | "
-                      f"POST(RL-update)={fmt(post)} | max|pre-post|={pre_post_id:.3e}", flush=True)
+                print(
+                    f"    L{li} rank{wr} slot{sl}(g={g}): PRE(from-disk)={fmt(pre)} | "
+                    f"POST(RL-update)={fmt(post)} | max|pre-post|={pre_post_id:.3e}",
+                    flush=True,
+                )
         agg_wrong, agg_nondet, agg_corrupt, agg_swaps = {}, False, 0, []
         for li in layers:
             disk = _load_disk_experts(local_dir, li, num_experts)
-            print(f"\n[disagg] ===== ENGINE(received) vs DISK — layer {li}, {num_experts} experts "
-                  f"(W13_STRICT={W13_STRICT}) =====", flush=True)
+            print(
+                f"\n[disagg] ===== ENGINE(received) vs DISK — layer {li}, {num_experts} experts "
+                f"(W13_STRICT={W13_STRICT}) =====",
+                flush=True,
+            )
             vlines, wmap, ndet, tcorr, gswaps = analyze(slot_reads_by_layer[li], disk, num_experts)
             for ln in vlines:
                 print("    " + ln, flush=True)
@@ -273,28 +300,46 @@ def main():
         if gate_up_swaps:
             ranks_hit = sorted(set(s[1] for s in gate_up_swaps))
             layers_hit = sorted(set(s[0] for s in gate_up_swaps))
-            print(f"[disagg] GATE_UP_SWAP present at layers {layers_hit}, ep-ranks {ranks_hit}; "
-                  f"{len(gate_up_swaps)} slots total.", flush=True)
-            print(f"[disagg] VERDICT = W13 GATE_UP_SWAP: {len(gate_up_swaps)} engine expert slots hold "
-                  f"w13 as [up; gate] instead of [gate; up] (ep ranks {ranks_hit}). The RL disaggregated "
-                  f"update-weights path did NOT apply vLLM's [w1;w3]->[w3;w1] process_weights permute "
-                  f"(=> #1685 silent MoE corruption). down_proj/placement correct; ONLY the w13 halves "
-                  f"are transposed. THIS is the token-salad root cause on this path.", flush=True)
+            print(
+                f"[disagg] GATE_UP_SWAP present at layers {layers_hit}, ep-ranks {ranks_hit}; "
+                f"{len(gate_up_swaps)} slots total.",
+                flush=True,
+            )
+            print(
+                f"[disagg] VERDICT = W13 GATE_UP_SWAP: {len(gate_up_swaps)} engine expert slots hold "
+                f"w13 as [up; gate] instead of [gate; up] (ep ranks {ranks_hit}). The RL disaggregated "
+                f"update-weights path did NOT apply vLLM's [w1;w3]->[w3;w1] process_weights permute "
+                f"(=> #1685 silent MoE corruption). down_proj/placement correct; ONLY the w13 halves "
+                f"are transposed. THIS is the token-salad root cause on this path.",
+                flush=True,
+            )
         elif nondet:
-            print("[disagg] VERDICT = TRANSPORT RACE: the two broadcasts disagree "
-                  "(non-deterministic engine bytes) => race in broadcast_to_inference_engines / receive.", flush=True)
+            print(
+                "[disagg] VERDICT = TRANSPORT RACE: the two broadcasts disagree "
+                "(non-deterministic engine bytes) => race in broadcast_to_inference_engines / receive.",
+                flush=True,
+            )
         elif wrong_map:
-            print(f"[disagg] VERDICT = D2 RECEIVE PLACEMENT: {len(wrong_map)} engine slots carry a "
-                  f"DIFFERENT global expert than the engine expert_map claims (m!=j). The receive-side "
-                  f"grouped-MoE expert mapping (expert_map / update-weights slotting) is WRONG.", flush=True)
+            print(
+                f"[disagg] VERDICT = D2 RECEIVE PLACEMENT: {len(wrong_map)} engine slots carry a "
+                f"DIFFERENT global expert than the engine expert_map claims (m!=j). The receive-side "
+                f"grouped-MoE expert mapping (expert_map / update-weights slotting) is WRONG.",
+                flush=True,
+            )
         elif corrupt:
-            print("[disagg] VERDICT = D1 BROADCAST TRANSPORT: engine slots differ from disk in VALUE "
-                  "(garbage/partial/dtype), placement OK => broadcast_to_inference_engines corrupts the "
-                  "~400MB grouped-expert tensor (chunking/dtype/contiguity/order).", flush=True)
+            print(
+                "[disagg] VERDICT = D1 BROADCAST TRANSPORT: engine slots differ from disk in VALUE "
+                "(garbage/partial/dtype), placement OK => broadcast_to_inference_engines corrupts the "
+                "~400MB grouped-expert tensor (chunking/dtype/contiguity/order).",
+                flush=True,
+            )
         else:
-            print("[disagg] VERDICT = CLEAN: engine-held weights EQUAL disk for every slot in FIXED order "
-                  "(w13[:I]==gate, w13[I:]==up), placement matches expert_map. Broadcast+receive+w13-layout "
-                  "all correct => corruption is FURTHER DOWNSTREAM (forward/kernel).", flush=True)
+            print(
+                "[disagg] VERDICT = CLEAN: engine-held weights EQUAL disk for every slot in FIXED order "
+                "(w13[:I]==gate, w13[I:]==up), placement matches expert_map. Broadcast+receive+w13-layout "
+                "all correct => corruption is FURTHER DOWNSTREAM (forward/kernel).",
+                flush=True,
+            )
         return 0
     finally:
         if pol_pg is not None:
@@ -307,6 +352,7 @@ def main():
 
 def _hash(t):
     import hashlib
+
     return hashlib.md5(t.to(torch.float32).contiguous().numpy().tobytes()).hexdigest()[:12]
 
 
@@ -344,18 +390,20 @@ def analyze(slot_reads, disk, num_experts):
         s2g = rd.get("slot_to_global", [])
         inter = rd.get("w13_inter_half")
         local_num = rd.get("local_num_experts")
-        lines.append(f"[engine-rank{wr}] tp={ranks.get('tp_rank')}/{ranks.get('tp_size')} "
-                     f"ep={ranks.get('ep_rank')}/{ranks.get('ep_size')} local_experts={local_num} "
-                     f"placement={rd.get('placement_strategy')} slot_to_global={s2g}")
+        lines.append(
+            f"[engine-rank{wr}] tp={ranks.get('tp_rank')}/{ranks.get('tp_size')} "
+            f"ep={ranks.get('ep_rank')}/{ranks.get('ep_size')} local_experts={local_num} "
+            f"placement={rd.get('placement_strategy')} slot_to_global={s2g}"
+        )
         slots = rd["slots"]
         n_corrupt = 0
         for sl in sorted(slots):
             w13 = slots[sl]["w13"].float()  # [2I, H]
-            w2 = slots[sl]["w2"].float()    # [H, I]
+            w2 = slots[sl]["w2"].float()  # [H, I]
             claimed_g = s2g[sl] if (s2g and sl < len(s2g)) else None
             # split engine w13 into halves (order unknown post process_weights).
             I = inter
-            hA, hB = w13[:I], w13[I:]   # engine w13 top half / bottom half
+            hA, hB = w13[:I], w13[I:]  # engine w13 top half / bottom half
             # --- per-slot value diff vs the engine-claimed global expert ---
             best_for_claim = None
             swap_tag = ""
@@ -368,20 +416,24 @@ def analyze(slot_reads, disk, num_experts):
                     # w13[I:] MUST equal disk up. NO both-order tolerance. If the RL update
                     # path skipped the [w1;w3]->[w3;w1] process_weights permute (#1685), the
                     # halves are SWAPPED and this fires GATE_UP_SWAP.
-                    e_top_gate = (hA - disk_gate[g]).abs().max().item()   # expect ~0 if correct
-                    e_bot_up = (hB - disk_up[g]).abs().max().item()      # expect ~0 if correct
-                    e_top_up = (hA - disk_up[g]).abs().max().item()      # ~0 if halves SWAPPED
+                    e_top_gate = (hA - disk_gate[g]).abs().max().item()  # expect ~0 if correct
+                    e_bot_up = (hB - disk_up[g]).abs().max().item()  # expect ~0 if correct
+                    e_top_up = (hA - disk_up[g]).abs().max().item()  # ~0 if halves SWAPPED
                     e_bot_gate = (hB - disk_gate[g]).abs().max().item()  # ~0 if halves SWAPPED
-                    e_w13 = max(e_top_gate, e_bot_up)                    # the FIXED-ORDER error
+                    e_w13 = max(e_top_gate, e_bot_up)  # the FIXED-ORDER error
                     best_for_claim = max(e_w13, e_w2)
                     # SWAP signature: the WRONG order matches but the RIGHT order does not.
                     if e_w13 > EPS and max(e_top_up, e_bot_gate) <= EPS:
-                        swap_tag = (f"GATE_UP_SWAP (w13[:I]==disk_up & w13[I:]==disk_gate; "
-                                    f"fixed-order err top_gate={e_top_gate:.2e} bot_up={e_bot_up:.2e})")
+                        swap_tag = (
+                            f"GATE_UP_SWAP (w13[:I]==disk_up & w13[I:]==disk_gate; "
+                            f"fixed-order err top_gate={e_top_gate:.2e} bot_up={e_bot_up:.2e})"
+                        )
                     elif e_w13 > EPS:
-                        swap_tag = (f"w13 fixed-order MISMATCH top_gate={e_top_gate:.2e} "
-                                    f"bot_up={e_bot_up:.2e} (swap-order top_up={e_top_up:.2e} "
-                                    f"bot_gate={e_bot_gate:.2e})")
+                        swap_tag = (
+                            f"w13 fixed-order MISMATCH top_gate={e_top_gate:.2e} "
+                            f"bot_up={e_bot_up:.2e} (swap-order top_up={e_top_up:.2e} "
+                            f"bot_gate={e_bot_gate:.2e})"
+                        )
                 else:
                     # both-order tolerant (the prior, w13-blind compare).
                     e_gu = max((hA - disk_gate[g]).abs().max().item(), (hB - disk_up[g]).abs().max().item())
@@ -414,8 +466,10 @@ def analyze(slot_reads, disk, num_experts):
             elif best_for_claim is not None and best_for_claim > EPS:
                 # value corruption vs the claimed expert; report nearest + magnitude
                 gh = _hash(w13)
-                tag = (f"CORRUPT vs claimed_g={claimed_g} max_abs={best_for_claim:.3e} "
-                       f"nearest_disk={best_m}@{best_e:.2e} w13hash={gh}")
+                tag = (
+                    f"CORRUPT vs claimed_g={claimed_g} max_abs={best_for_claim:.3e} "
+                    f"nearest_disk={best_m}@{best_e:.2e} w13hash={gh}"
+                )
                 if best_e > EPS:
                     tag += " GARBAGE(no disk expert matches)"
             else:
@@ -428,4 +482,5 @@ def analyze(slot_reads, disk, num_experts):
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

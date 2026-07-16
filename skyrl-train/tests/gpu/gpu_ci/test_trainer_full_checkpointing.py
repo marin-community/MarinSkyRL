@@ -205,9 +205,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         )
 
         # Check key configuration values are preserved
-        assert (
-            loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size
-        ), "train_batch_size not preserved in checkpoint"
+        assert loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size, (
+            "train_batch_size not preserved in checkpoint"
+        )
         assert loaded_trainer_state["config"]["trainer"]["strategy"] == strategy, "strategy not preserved in checkpoint"
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
@@ -232,9 +232,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
 
         # Load checkpoints
         loaded_global_step, loaded_checkpoint_dir = trainer2.load_checkpoints()
-        assert (
-            loaded_global_step == saved_global_step
-        ), f"Expected global_step={saved_global_step}, got {loaded_global_step}"
+        assert loaded_global_step == saved_global_step, (
+            f"Expected global_step={saved_global_step}, got {loaded_global_step}"
+        )
         assert loaded_checkpoint_dir == checkpoint_dir, "Checkpoint path mismatch"
 
         # ============= PHASE 3: Continue Training =============

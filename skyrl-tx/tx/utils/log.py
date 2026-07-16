@@ -48,7 +48,6 @@ class ExperimentTracker(str, Enum):
 
 
 class Tracker:
-
     def __init__(self, config: dict[str, Any], **kwargs):
         logger.info(f"model config: {config}")
 
@@ -62,7 +61,6 @@ class Tracker:
 
 
 class WandbTracker(Tracker):
-
     def __init__(self, config: dict[str, Any], **kwargs):
         super().__init__(config, **kwargs)
         if wandb is None:

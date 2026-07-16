@@ -72,7 +72,7 @@ def log_example(
         response_fmt, response_kwargs = _color_block_format_and_kwargs(response_str, response_color, "r")
 
         # Single format string with only our own markup and placeholders
-        log_format = "Example:\n" f"  Input: {prompt_fmt}\n" "  Output (Total Reward: {reward}):\n" f"{response_fmt}"
+        log_format = f"Example:\n  Input: {prompt_fmt}\n  Output (Total Reward: {{reward}}):\n{response_fmt}"
 
         # Merge all args for str.format
         format_kwargs = {**prompt_kwargs, **response_kwargs, "reward": reward_str}
@@ -82,5 +82,3 @@ def log_example(
     except Exception as e:
         print(f"Error pretty printing example, debug printing instead: {e}")
         print(f"Example:\n  Input: {prompt}\n  Output (Total Reward: {reward_str}):\n{response}")
-
-

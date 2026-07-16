@@ -149,7 +149,6 @@ def make_function(code: str) -> str:
 
 
 def call_method(method, inputs):
-
     if isinstance(inputs, list):
         inputs = "\n".join(inputs)
 
@@ -589,9 +588,9 @@ def postprocess_lcb_sample(sample):
     if sample[0].get("testtype") == "functional":
         metadata = sample[0].get("metadata", {})
         fn_name = metadata.get("func_name", None)
-        assert (
-            fn_name is not None
-        ), f"Function name is not found, check if your LCB data is preprocessed correctly: {metadata}"
+        assert fn_name is not None, (
+            f"Function name is not found, check if your LCB data is preprocessed correctly: {metadata}"
+        )
         # Fill in the blank
         sample_dict["fn_name"] = fn_name
 

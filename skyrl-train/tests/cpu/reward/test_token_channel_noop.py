@@ -50,9 +50,7 @@ def test_collator_flag_off_byte_identical(tokenizer):
     logprobs = [[0.0] * len(r) for r in responses]
 
     # Pre-Stage-B-equivalent call (no channel args at all).
-    res_off = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, responses, rewards, loss_masks, logprobs
-    )
+    res_off = convert_prompts_responses_to_batch_tensors(tokenizer, prompts, responses, rewards, loss_masks, logprobs)
     assert len(res_off) == 9
     assert res_off[7] is None  # token_level_shaping_tensor
     assert res_off[8] is None  # response_span_tags_tensor

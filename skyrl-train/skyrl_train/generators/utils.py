@@ -524,7 +524,10 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     # concatenated list stays 1:1 with response_ids. When the flag is off, NO batch
     # carries the key (the generator omits it), so this stays None and the result
     # dict is byte-identical to today.
-    has_routed_experts = ["rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None for output in generator_outputs]
+    has_routed_experts = [
+        "rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None
+        for output in generator_outputs
+    ]
     rollout_routed_experts_concat = None
     if any(has_routed_experts):
         # Learn the real [L, K] per-token row shape from the FIRST sample that
@@ -550,9 +553,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
                 rollout_routed_experts_concat.extend(output["rollout_routed_experts"])
             else:
                 for response_ids in output["response_ids"]:
-                    rollout_routed_experts_concat.append(
-                        _re_sentinel_rows(len(response_ids), _concat_sentinel_row)
-                    )
+                    rollout_routed_experts_concat.append(_re_sentinel_rows(len(response_ids), _concat_sentinel_row))
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): mix the per-token shaping
     # channel + span tags the same way as routed_experts — sentinel-fill (zeros)
@@ -574,8 +575,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
                     token_level_shaping_concat.append([0.0] * len(response_ids))
 
     has_span_tags = [
-        "response_span_tags" in output and output.get("response_span_tags") is not None
-        for output in generator_outputs
+        "response_span_tags" in output and output.get("response_span_tags") is not None for output in generator_outputs
     ]
     response_span_tags_concat = None
     if any(has_span_tags):
@@ -650,9 +650,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         rollout_metrics["generate/tis/lcs_fallback_messages"] = sum_lcs_msgs
         # Recompute the metered LCS-guard alert from the recombined fraction so it
         # stays keyset-stable and consistent with the per-trajectory emission.
-        rollout_metrics["generate/tis/lcs_fallback_alert"] = (
-            1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
-        )
+        rollout_metrics["generate/tis/lcs_fallback_alert"] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
 
     result["rollout_metrics"] = rollout_metrics
 
@@ -968,9 +966,7 @@ def extract_token_ids_from_rollout_details(
         logger.warning(f"Unexpected completion_token_ids type: {type(token_ids)}, expected list")
         return None
     if len(token_ids) > 0 and not isinstance(token_ids[0], list):
-        logger.warning(
-            f"Unexpected completion_token_ids[0] type: {type(token_ids[0])}, expected list."
-        )
+        logger.warning(f"Unexpected completion_token_ids[0] type: {type(token_ids[0])}, expected list.")
         return None
     return token_ids
 
@@ -1010,9 +1006,7 @@ def extract_prompt_token_ids_from_rollout_details(
         logger.warning(f"Unexpected prompt_token_ids type: {type(token_ids)}, expected list")
         return None
     if len(token_ids) > 0 and not isinstance(token_ids[0], list):
-        logger.warning(
-            f"Unexpected prompt_token_ids[0] type: {type(token_ids[0])}, expected list."
-        )
+        logger.warning(f"Unexpected prompt_token_ids[0] type: {type(token_ids[0])}, expected list.")
         return None
     return token_ids
 
@@ -1152,9 +1146,7 @@ def align_routed_experts_with_lcs(
         # expressed as np.int16 array-row slice-assign instead of list-row copy. The
         # returned [n_retok, L, K] array's .tolist() is bit-identical to the list
         # branch's output (see test_align_flag_parity).
-        return _align_routed_experts_with_lcs_array(
-            retokenized_ids, vllm_routed_experts, tokenizer, vllm_token_strings
-        )
+        return _align_routed_experts_with_lcs_array(retokenized_ids, vllm_routed_experts, tokenizer, vllm_token_strings)
 
     if not vllm_routed_experts:
         # No routed_experts to align — caller sentinel-pads; return [] so the
@@ -1196,10 +1188,7 @@ def align_routed_experts_with_lcs(
             aligned[a_start + i] = vllm_routed_experts[b_start + i]
             matched_any = True
     if not matched_any:
-        logger.debug(
-            f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); "
-            f"all rows sentinel."
-        )
+        logger.debug(f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); all rows sentinel.")
     return aligned
 
 
@@ -1246,10 +1235,7 @@ def _align_routed_experts_with_lcs_array(
             aligned[a_start : a_start + size] = vllm_routed_experts[b_start : b_start + size]
             matched_any = True
     if not matched_any:
-        logger.debug(
-            f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); "
-            f"all rows sentinel."
-        )
+        logger.debug(f"routed_experts LCS: no positional match (retok={n_retok}, vLLM={n_vllm}); all rows sentinel.")
     return aligned
 
 
@@ -1288,9 +1274,7 @@ def _re_sentinel_rows(n: int, sentinel_row: Optional[List[List[int]]]) -> List[L
         # Fix B: contiguous [n, L, K] int16 sentinel block. Consumers .extend() /
         # slice-assign this, which iterates axis-0 into per-token [L, K] array rows
         # — identical rows/values to the nested-list list-of-copies below.
-        return np.broadcast_to(sentinel_row, (n,) + sentinel_row.shape).astype(
-            _ROUTED_EXPERTS_ARRAY_DTYPE, copy=True
-        )
+        return np.broadcast_to(sentinel_row, (n,) + sentinel_row.shape).astype(_ROUTED_EXPERTS_ARRAY_DTYPE, copy=True)
     if sentinel_row is None:
         sentinel_row = [[SENTINEL_EXPERT_ID]]
     return [list(sentinel_row) for _ in range(n)]
@@ -1467,9 +1451,7 @@ def _assemble_response_ids_tito_full(
             if t < len(assistant_logprobs):
                 _, floats = _normalize_candidate_logprobs(assistant_logprobs[t])
                 # Exact by construction: region_tokens == comp (served ids).
-                msg_logprobs = align_logprobs_by_token_ids(
-                    region_tokens, comp, floats, stats=alignment_stats
-                )
+                msg_logprobs = align_logprobs_by_token_ids(region_tokens, comp, floats, stats=alignment_stats)
             if msg_logprobs is None:
                 # Should not happen given the invariant checks; record loudly.
                 alignment_stats.n_unaligned += len(comp)
@@ -1501,9 +1483,7 @@ def _assemble_response_ids_tito_full(
     if rollout_routed_experts is not None:
         for i in range(total_len):
             if rollout_routed_experts[i] is None:
-                rollout_routed_experts[i] = (
-                    _re_sentinel_row if _re_sentinel_row is not None else [[SENTINEL_EXPERT_ID]]
-                )
+                rollout_routed_experts[i] = _re_sentinel_row if _re_sentinel_row is not None else [[SENTINEL_EXPERT_ID]]
 
     # Byte-parity tail: the re-tok path appends the FINAL assistant turn's trailing
     # template tokens after its EOS (e.g. the ``\n`` after ``<|im_end|>``). The served
@@ -1511,9 +1491,7 @@ def _assemble_response_ids_tito_full(
     # the last assistant message and append (masked) — makes the clean case byte-identical
     # to the re-tok path while the body stays exact-from-served-ids.
     last_msg = assistant_msgs[-1]
-    cur = encode_messages_subset(
-        [last_msg], tokenizer, custom_chat_template, chat_template_kwargs=chat_template_kwargs
-    )
+    cur = encode_messages_subset([last_msg], tokenizer, custom_chat_template, chat_template_kwargs=chat_template_kwargs)
     if tokenizer.eos_token_id in cur:
         _le = len(cur) - 1 - cur[::-1].index(tokenizer.eos_token_id)
         trailing = cur[_le + 1 :]
@@ -1533,7 +1511,19 @@ def _assemble_response_ids_tito_full(
     return response_ids, loss_mask, rollout_logprobs, rollout_routed_experts
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None, assistant_routed_experts=None, assistant_token_ids=None, alignment_stats: Optional["AlignmentStats"] = None, chat_template_kwargs=None, assistant_prompt_token_ids=None, use_tis: bool = False, tito_full: Optional[bool] = None):
+def get_response_ids_and_loss_mask_from_messages(
+    messages: ConversationType,
+    tokenizer,
+    assistant_logprobs=None,
+    custom_chat_template=None,
+    assistant_routed_experts=None,
+    assistant_token_ids=None,
+    alignment_stats: Optional["AlignmentStats"] = None,
+    chat_template_kwargs=None,
+    assistant_prompt_token_ids=None,
+    use_tis: bool = False,
+    tito_full: Optional[bool] = None,
+):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -1596,7 +1586,11 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     # served. Fails loud → None → falls through to the re-tok + splice path below
     # (byte-identical), so a malformed capture never yields a wrong sequence. Default
     # OFF ⇒ this block is skipped entirely (byte-identical to prior behavior).
-    if _tito_full_enabled(use_tis=use_tis, tito_full=tito_full) and assistant_prompt_token_ids is not None and assistant_token_ids is not None:
+    if (
+        _tito_full_enabled(use_tis=use_tis, tito_full=tito_full)
+        and assistant_prompt_token_ids is not None
+        and assistant_token_ids is not None
+    ):
         _tito = _assemble_response_ids_tito_full(
             messages,
             tokenizer,
@@ -1674,9 +1668,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(cur_token_ids))
             if assistant_routed_experts is not None:
-                rollout_routed_experts.extend(
-                    _re_sentinel_rows(len(cur_token_ids), _re_sentinel_row)
-                )
+                rollout_routed_experts.extend(_re_sentinel_rows(len(cur_token_ids), _re_sentinel_row))
         elif cur_message["role"] == "assistant":
             # 3.2. For assistant messages, we need to separate out:
             # 1) generation prompt IDs -- mask is 0
@@ -1795,18 +1787,16 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
 
             # Now that cur_token_ids is finalized (re-tok or spliced), accumulate it.
             response_ids.extend(cur_token_ids)
-            assert prefix_len + len(generated_token_ids) + len(tokens_after_eos) == len(
-                cur_token_ids
-            ), "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"
+            assert prefix_len + len(generated_token_ids) + len(tokens_after_eos) == len(cur_token_ids), (
+                "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"
+            )
 
             # 3.2.1. Add the generation prompt IDs.
             loss_mask.extend([0] * prefix_len)
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * prefix_len)
             if assistant_routed_experts is not None:
-                rollout_routed_experts.extend(
-                    _re_sentinel_rows(prefix_len, _re_sentinel_row)
-                )
+                rollout_routed_experts.extend(_re_sentinel_rows(prefix_len, _re_sentinel_row))
 
             # 3.2.2. Add what the assistant actually generated
             loss_mask.extend([1] * len(generated_token_ids))
@@ -1840,10 +1830,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
                     # --- Tier 1: EXACT alignment by token id (preferred) ---
                     # Use Harbor's per-turn completion_token_ids when available.
                     candidate_ids = None
-                    if (
-                        assistant_token_ids is not None
-                        and assistant_msg_idx < len(assistant_token_ids)
-                    ):
+                    if assistant_token_ids is not None and assistant_msg_idx < len(assistant_token_ids):
                         candidate_ids = assistant_token_ids[assistant_msg_idx]
                     if candidate_ids is not None:
                         msg_logprobs = align_logprobs_by_token_ids(
@@ -1906,11 +1893,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
                         vllm_token_strings = None
                         if assistant_logprobs and assistant_msg_idx < len(assistant_logprobs):
                             lp_candidate = assistant_logprobs[assistant_msg_idx]
-                            if (
-                                lp_candidate
-                                and isinstance(lp_candidate[0], dict)
-                                and "token" in lp_candidate[0]
-                            ):
+                            if lp_candidate and isinstance(lp_candidate[0], dict) and "token" in lp_candidate[0]:
                                 vllm_token_strings = [tl["token"] for tl in lp_candidate]
                         msg_routed_experts = align_routed_experts_with_lcs(
                             generated_token_ids,
@@ -1934,9 +1917,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             if assistant_logprobs:
                 rollout_logprobs.extend([0.0] * len(tokens_after_eos))
             if assistant_routed_experts is not None:
-                rollout_routed_experts.extend(
-                    _re_sentinel_rows(len(tokens_after_eos), _re_sentinel_row)
-                )
+                rollout_routed_experts.extend(_re_sentinel_rows(len(tokens_after_eos), _re_sentinel_row))
 
             assistant_msg_idx += 1
         else:

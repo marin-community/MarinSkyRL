@@ -102,9 +102,7 @@ def convert_hf_layer_to_tt(state_dict: dict[str, Tensor], layer_idx: int) -> Non
         w3 = gate_up_proj[:, moe_dim:, :]  # up
         w2 = down_proj  # down
     else:
-        num_experts = len(
-            [k for k in state_dict.keys() if f"model.layers.{i}.mlp.experts" in k and "gate_proj" in k]
-        )
+        num_experts = len([k for k in state_dict.keys() if f"model.layers.{i}.mlp.experts" in k and "gate_proj" in k])
         if num_experts == 0:
             return
         dim, moe_dim = state_dict[f"model.layers.{i}.mlp.experts.0.down_proj.weight"].shape

@@ -23,8 +23,7 @@ def load_supabase_keys() -> bool:
     keys_env = os.environ.get("KEYS")
     if not keys_env:
         warnings.warn(
-            "Supabase credentials not loaded: set KEYS env variable to a secrets file "
-            "to enable database registration."
+            "Supabase credentials not loaded: set KEYS env variable to a secrets file to enable database registration."
         )
         return False
 
@@ -43,7 +42,7 @@ def load_supabase_keys() -> bool:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 if line.startswith("export "):
-                    line = line[len("export "):].strip()
+                    line = line[len("export ") :].strip()
                 key, value = line.split("=", 1)
                 key = key.strip()
                 if not key:
@@ -52,8 +51,7 @@ def load_supabase_keys() -> bool:
                 os.environ[key] = os.path.expandvars(value)
     except Exception as exc:
         warnings.warn(
-            f"Failed to load Supabase credentials from '{keys_path}': {exc!r}. "
-            "Database registration will be skipped."
+            f"Failed to load Supabase credentials from '{keys_path}': {exc!r}. Database registration will be skipped."
         )
         return False
 
@@ -79,11 +77,12 @@ def get_supabase_client(use_admin: bool = False):
 
 # ==================== DATASET UTILITIES ====================
 
+
 def get_dataset_by_name(name: str) -> Optional[Dict[str, Any]]:
     """Retrieve a dataset from the database by name."""
     try:
         client = get_supabase_client()
-        response = client.table('datasets').select('*').eq('name', name).execute()
+        response = client.table("datasets").select("*").eq("name", name).execute()
 
         if not response.data:
             return None
@@ -98,7 +97,7 @@ def create_dataset(dataset_data: Dict[str, Any]) -> Dict[str, Any]:
     """Create a new dataset in the database."""
     try:
         client = get_supabase_client(use_admin=True)
-        response = client.table('datasets').insert(dataset_data).execute()
+        response = client.table("datasets").insert(dataset_data).execute()
 
         if not response.data:
             raise ValueError("Failed to create dataset")
@@ -113,7 +112,7 @@ def update_dataset(dataset_id: str, dataset_data: Dict[str, Any]) -> Dict[str, A
     """Update an existing dataset in the database."""
     try:
         client = get_supabase_client(use_admin=True)
-        response = client.table('datasets').update(dataset_data).eq('id', dataset_id).execute()
+        response = client.table("datasets").update(dataset_data).eq("id", dataset_id).execute()
 
         if not response.data:
             raise ValueError(f"Failed to update dataset with ID {dataset_id}")
@@ -130,7 +129,7 @@ def register_hf_dataset(
     name: Optional[str] = None,
     created_by: Optional[str] = None,
     forced_update: bool = False,
-    **kwargs
+    **kwargs,
 ) -> Dict[str, Any]:
     """Register a HuggingFace dataset (simplified version for SkyRL)."""
     try:
@@ -141,8 +140,8 @@ def register_hf_dataset(
             return {"success": True, "dataset": existing, "exists": True}
 
         if not created_by:
-            if '/' in repo_name:
-                created_by = repo_name.split('/')[0]
+            if "/" in repo_name:
+                created_by = repo_name.split("/")[0]
             else:
                 created_by = "hf-uploader"
 
@@ -167,7 +166,7 @@ def register_hf_dataset(
             dataset_data.update(kwargs)
 
         if existing:
-            updated = update_dataset(existing['id'], dataset_data)
+            updated = update_dataset(existing["id"], dataset_data)
             return {"success": True, "dataset": updated, "updated": True}
         else:
             created = create_dataset(dataset_data)
@@ -180,11 +179,12 @@ def register_hf_dataset(
 
 # ==================== MODEL UTILITIES ====================
 
+
 def get_model_by_name(name: str) -> Optional[Dict[str, Any]]:
     """Retrieve a model from the database by name."""
     try:
         client = get_supabase_client()
-        response = client.table('models').select('*').eq('name', name).execute()
+        response = client.table("models").select("*").eq("name", name).execute()
 
         if not response.data:
             return None
@@ -199,7 +199,7 @@ def create_model(model_data: Dict[str, Any]) -> Dict[str, Any]:
     """Create a new model in the database."""
     try:
         client = get_supabase_client(use_admin=True)
-        response = client.table('models').insert(model_data).execute()
+        response = client.table("models").insert(model_data).execute()
 
         if not response.data:
             raise ValueError("Failed to create model")
@@ -214,7 +214,7 @@ def update_model(model_id: str, model_data: Dict[str, Any]) -> Dict[str, Any]:
     """Update an existing model in the database."""
     try:
         client = get_supabase_client(use_admin=True)
-        response = client.table('models').update(model_data).eq('id', model_id).execute()
+        response = client.table("models").update(model_data).eq("id", model_id).execute()
 
         if not response.data:
             raise ValueError(f"Failed to update model with ID {model_id}")
@@ -227,11 +227,12 @@ def update_model(model_id: str, model_data: Dict[str, Any]) -> Dict[str, Any]:
 
 # ==================== AGENT UTILITIES ====================
 
+
 def get_agent_by_name(name: str) -> Optional[Dict[str, Any]]:
     """Retrieve an agent from the database by name."""
     try:
         client = get_supabase_client()
-        response = client.table('agents').select('*').eq('name', name).execute()
+        response = client.table("agents").select("*").eq("name", name).execute()
 
         if not response.data:
             return None
@@ -246,7 +247,7 @@ def create_agent(agent_data: Dict[str, Any]) -> Dict[str, Any]:
     """Create a new agent in the database."""
     try:
         client = get_supabase_client(use_admin=True)
-        response = client.table('agents').insert(agent_data).execute()
+        response = client.table("agents").insert(agent_data).execute()
 
         if not response.data:
             raise ValueError("Failed to create agent")
@@ -261,7 +262,7 @@ def update_agent(agent_id: str, agent_data: Dict[str, Any]) -> Dict[str, Any]:
     """Update an existing agent in the database."""
     try:
         client = get_supabase_client(use_admin=True)
-        response = client.table('agents').update(agent_data).eq('id', agent_id).execute()
+        response = client.table("agents").update(agent_data).eq("id", agent_id).execute()
 
         if not response.data:
             raise ValueError(f"Failed to update agent with ID {agent_id}")
@@ -273,9 +274,7 @@ def update_agent(agent_id: str, agent_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def register_agent(
-    name: str,
-    agent_version_hash: Optional[str] = None,
-    description: Optional[str] = None
+    name: str, agent_version_hash: Optional[str] = None, description: Optional[str] = None
 ) -> Dict[str, Any]:
     """Register or update an agent in the database."""
     try:
@@ -289,7 +288,7 @@ def register_agent(
         }
 
         if existing:
-            updated = update_agent(existing['id'], agent_data)
+            updated = update_agent(existing["id"], agent_data)
             return {"success": True, "agent": updated, "updated": True}
         else:
             created = create_agent(agent_data)
@@ -302,10 +301,8 @@ def register_agent(
 
 # ==================== TRAINED MODEL REGISTRATION ====================
 
-def register_trained_model(
-    training_record: Dict[str, Any],
-    forced_update: bool = False
-) -> Dict[str, Any]:
+
+def register_trained_model(training_record: Dict[str, Any], forced_update: bool = False) -> Dict[str, Any]:
     """
     Register a newly trained model (SFT/RL) to the database.
 
@@ -328,6 +325,7 @@ def register_trained_model(
         Dict with success status and model data or error message
     """
     try:
+
         def _unwrap(value):
             """Unwrap single-element lists/tuples to their value."""
             if isinstance(value, (list, tuple, set)):
@@ -340,15 +338,15 @@ def register_trained_model(
                 return _unwrap(first)
             return value
 
-        agent_name = _unwrap(training_record.get('agent_name'))
-        base_model_name = _unwrap(training_record.get('base_model_name'))
-        training_type = _unwrap(training_record.get('training_type'))
+        agent_name = _unwrap(training_record.get("agent_name"))
+        base_model_name = _unwrap(training_record.get("base_model_name"))
+        training_type = _unwrap(training_record.get("training_type"))
 
         if not agent_name:
             return {"success": False, "error": "agent_name is required"}
         if not base_model_name:
             return {"success": False, "error": "base_model_name is required"}
-        if training_type not in ('SFT', 'RL'):
+        if training_type not in ("SFT", "RL"):
             return {"success": False, "error": "training_type must be 'SFT' or 'RL'"}
 
         def _normalize_dataset_list(raw: Any) -> List[str]:
@@ -356,7 +354,7 @@ def register_trained_model(
             if raw is None:
                 return []
             if isinstance(raw, str):
-                parts = raw.split(',')
+                parts = raw.split(",")
             elif isinstance(raw, (list, tuple, set)):
                 parts = list(raw)
             else:
@@ -368,9 +366,9 @@ def register_trained_model(
                     normalized.append(name)
             return normalized
 
-        dataset_list = _normalize_dataset_list(training_record.get('dataset_names'))
+        dataset_list = _normalize_dataset_list(training_record.get("dataset_names"))
         if not dataset_list:
-            dataset_list = _normalize_dataset_list(training_record.get('dataset_name'))
+            dataset_list = _normalize_dataset_list(training_record.get("dataset_name"))
         if not dataset_list:
             return {"success": False, "error": "dataset_name is required"}
 
@@ -381,19 +379,19 @@ def register_trained_model(
             if isinstance(val, datetime):
                 return val
             if isinstance(val, str):
-                if val.endswith('Z'):
-                    return datetime.fromisoformat(val.replace('Z', '+00:00'))
+                if val.endswith("Z"):
+                    return datetime.fromisoformat(val.replace("Z", "+00:00"))
                 return datetime.fromisoformat(val)
             raise ValueError("timestamp must be datetime or ISO string")
 
-        raw_start = training_record.get('training_start')
+        raw_start = training_record.get("training_start")
         if not raw_start:
             return {"success": False, "error": "training_start is required"}
         training_start_dt = _parse_ts(raw_start)
-        training_end_dt = _parse_ts(training_record.get('training_end'))
+        training_end_dt = _parse_ts(training_record.get("training_end"))
 
         # Clean training parameters
-        training_params = training_record.get('training_parameters')
+        training_params = training_record.get("training_parameters")
         if training_params is None:
             training_params = {}
         elif isinstance(training_params, str):
@@ -417,17 +415,17 @@ def register_trained_model(
             except TypeError:
                 training_params = {"raw": str(training_params)}
 
-        created_by = training_record.get('created_by') or ''
-        wandb_link = training_record.get('wandb_link') or ''
-        traces_location_s3 = training_record.get('traces_location_s3') or ''
-        explicit_name = training_record.get('model_name') or ''
+        created_by = training_record.get("created_by") or ""
+        wandb_link = training_record.get("wandb_link") or ""
+        traces_location_s3 = training_record.get("traces_location_s3") or ""
+        explicit_name = training_record.get("model_name") or ""
 
         # Register agent
         agent_res = register_agent(name=agent_name)
-        if not agent_res.get('success'):
+        if not agent_res.get("success"):
             return agent_res
-        agent = agent_res['agent']
-        agent_id = agent['id']
+        agent = agent_res["agent"]
+        agent_id = agent["id"]
 
         # Register datasets
         dataset_id: Optional[str] = None
@@ -442,10 +440,10 @@ def register_trained_model(
                     name=dataset_name_single,
                     created_by=created_by,
                 )
-                if not ds_res.get('success'):
-                    return {"success": False, "error": ds_res.get('error', 'Dataset registration failed')}
-                ds = ds_res['dataset']
-            dataset_id = ds['id']
+                if not ds_res.get("success"):
+                    return {"success": False, "error": ds_res.get("error", "Dataset registration failed")}
+                ds = ds_res["dataset"]
+            dataset_id = ds["id"]
         else:
             for name in dataset_list:
                 ds = get_dataset_by_name(name)
@@ -456,8 +454,8 @@ def register_trained_model(
                         name=name,
                         created_by=created_by,
                     )
-                    if not ds_res.get('success'):
-                        return {"success": False, "error": ds_res.get('error', 'Dataset registration failed')}
+                    if not ds_res.get("success"):
+                        return {"success": False, "error": ds_res.get("error", "Dataset registration failed")}
 
         # Register or find base model
         base_m = get_model_by_name(base_model_name)
@@ -468,7 +466,9 @@ def register_trained_model(
             base_training_end = training_end_dt or base_training_start
             base_payload = {
                 "name": base_model_name,
-                "created_by": (created_by or (base_model_name.split('/')[0] if '/' in base_model_name else "hf-uploader")),
+                "created_by": (
+                    created_by or (base_model_name.split("/")[0] if "/" in base_model_name else "hf-uploader")
+                ),
                 "creation_location": "HuggingFace",
                 "creation_time": now_ts,
                 "updated_at": now_ts,
@@ -485,20 +485,20 @@ def register_trained_model(
                 "training_end": base_training_end.isoformat(),
             }
             base_m = create_model(base_payload)
-        base_model_id = base_m['id']
+        base_model_id = base_m["id"]
 
         # Determine model name
         if explicit_name:
             model_name = explicit_name
         else:
             dataset_name_for_default = dataset_list[0]
-            date_str = (training_end_dt or training_start_dt).strftime('%Y%m%d')
+            date_str = (training_end_dt or training_start_dt).strftime("%Y%m%d")
             model_name = f"{dataset_name_for_default}_{date_str}"
 
         existing = get_model_by_name(model_name)
         now_ts = datetime.now(timezone.utc).isoformat()
         weights_location = f"https://huggingface.co/{model_name}"
-        training_status = 'completed' if training_end_dt else 'in_progress'
+        training_status = "completed" if training_end_dt else "in_progress"
 
         model_data = {
             "name": model_name,
@@ -525,7 +525,7 @@ def register_trained_model(
         if existing and not forced_update:
             return {"success": True, "model": existing, "exists": True}
         if existing and forced_update:
-            updated = update_model(existing['id'], model_data)
+            updated = update_model(existing["id"], model_data)
             return {"success": True, "model": updated, "updated": True}
         created = create_model(model_data)
         return {"success": True, "model": created}

@@ -235,23 +235,23 @@ class MegatronStrategy(DistributedStrategy):
             )
 
         # Load the model, optimizer, and scheduler state dicts.
-        assert (
-            "model" in state_dict
-        ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+        assert "model" in state_dict, (
+            f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+        )
         model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
         self.print("Loaded model state dict.")
 
         if optimizer and load_optimizer_states:
-            assert (
-                "optimizer" in state_dict
-            ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            assert "optimizer" in state_dict, (
+                f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            )
             optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
 
         if scheduler and load_lr_scheduler_states:
-            assert (
-                "lr_scheduler" in state_dict
-            ), f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            assert "lr_scheduler" in state_dict, (
+                f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            )
             scheduler.load_state_dict(state_dict["lr_scheduler"])
             self.print("Loaded LR scheduler state dict.")
 

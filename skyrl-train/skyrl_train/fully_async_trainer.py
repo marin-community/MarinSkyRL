@@ -129,16 +129,16 @@ class _AsyncStalenessManager:
         """
         async with self._cond:
             assert self._stat.running == 0, "We expect no rollouts are running at end of an epoch."
-            assert (
-                self._stat.submitted == self._stat.accepted
-            ), "We expect all submitted rollouts to be accepted at end of an epoch."
+            assert self._stat.submitted == self._stat.accepted, (
+                "We expect all submitted rollouts to be accepted at end of an epoch."
+            )
             consumed = (global_step - 1) * self.mini_batch_size
-            assert (
-                self._stat.accepted == consumed
-            ), f"Unexpected number of accepted rollouts. Got {self._stat.accepted} != {consumed}."
-            assert (
-                self._current_global_step == global_step
-            ), f"Unexpected current version. Got {self._current_global_step} != {global_step}."
+            assert self._stat.accepted == consumed, (
+                f"Unexpected number of accepted rollouts. Got {self._stat.accepted} != {consumed}."
+            )
+            assert self._current_global_step == global_step, (
+                f"Unexpected current version. Got {self._current_global_step} != {global_step}."
+            )
             assert self._stat.submitted == self._stat.accepted, (
                 "We expect all submitted rollouts to be accepted at end of an epoch. "
                 f"Got {self._stat.submitted} != {self._stat.accepted}."
@@ -204,7 +204,9 @@ class _AsyncDataloader:
     is handled by DataConsumptionTracker + DataTrackingCallback, not by this class.
     """
 
-    def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int, data_tracker: DataConsumptionTracker):
+    def __init__(
+        self, train_dataloader: StatefulDataLoader, mini_batch_size: int, data_tracker: DataConsumptionTracker
+    ):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
         self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
@@ -341,12 +343,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._rollout_fanout_enabled = False
 
         # Some async-specific validations
-        assert (
-            self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size
-        ), "train_batch_size must equal policy_mini_batch_size for fully async training"
-        assert (
-            self.cfg.trainer.algorithm.dynamic_sampling.type is None
-        ), "dynamic sampling is not supported for fully async training yet."
+        assert self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size, (
+            "train_batch_size must equal policy_mini_batch_size for fully async training"
+        )
+        assert self.cfg.trainer.algorithm.dynamic_sampling.type is None, (
+            "dynamic sampling is not supported for fully async training yet."
+        )
         assert not self.cfg.generator.batched, "batched is not supported for fully async training."
         assert self.cfg.generator.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
@@ -382,7 +384,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
-        max_steps = getattr(self.cfg.trainer, 'max_steps', None)
+        max_steps = getattr(self.cfg.trainer, "max_steps", None)
         if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
@@ -419,9 +421,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return
         n_running = sum(1 for t in tasks if not t.done())
         if n_running:
-            logger.warning(
-                f"Cancelling {n_running} orphaned generator tasks from abnormal train loop exit"
-            )
+            logger.warning(f"Cancelling {n_running} orphaned generator tasks from abnormal train loop exit")
             for t in tasks:
                 t.cancel()
         self._active_generator_tasks = []
@@ -442,8 +442,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     restored += 1
                 except asyncio.QueueFull:
                     logger.warning(
-                        f"Generation buffer full after restoring {restored}/{len(items)} items, "
-                        "skipping remaining"
+                        f"Generation buffer full after restoring {restored}/{len(items)} items, skipping remaining"
                     )
                     break
 
@@ -465,9 +464,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         state; it only shards generate() and ships back compact GeneratorOutput.
         """
         rollout_cfg = OmegaConf.select(self.cfg, "rollout.fanout")
-        self._rollout_fanout_enabled = bool(
-            rollout_cfg is not None and getattr(rollout_cfg, "enabled", False)
-        )
+        self._rollout_fanout_enabled = bool(rollout_cfg is not None and getattr(rollout_cfg, "enabled", False))
         if not self._rollout_fanout_enabled:
             return
 
@@ -521,7 +518,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._train_loop()
         except Exception as e:
-            logger.opt(exception=True).error("Train loop failed at global_step " + str(self.global_step) + ": " + str(e))
+            logger.opt(exception=True).error(
+                "Train loop failed at global_step " + str(self.global_step) + ": " + str(e)
+            )
             raise
         finally:
             # Cancel any orphaned generator tasks that survived an early exit
@@ -662,18 +661,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # (byte-identical to prior behavior) but can be bounded independently via
             # trainer.fully_async.max_buffered_groups to cap head-node memory — see
             # self.max_buffered_groups in __init__.
-            generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                maxsize=self.max_buffered_groups
-            )
+            generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self.max_buffered_groups)
 
             # Store buffer ref for checkpoint callback access
             self._generation_output_group_buffer = generation_output_group_buffer
 
             # Restore buffer from checkpoint if resuming
             if self._pending_buffer_restore_path is not None:
-                self._restore_buffer_from_checkpoint(
-                    generation_output_group_buffer, self._pending_buffer_restore_path
-                )
+                self._restore_buffer_from_checkpoint(generation_output_group_buffer, self._pending_buffer_restore_path)
                 self._pending_buffer_restore_path = None
 
             # Provide the generator with a live reference to global_step so it can
@@ -717,7 +712,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     while training_input is None:
                         with Timer("convert_to_training_input", self.all_timings):
                             training_input = await asyncio.to_thread(
-                                self.convert_generation_group_mini_batch_to_training_input, cur_generation_group_mini_batch
+                                self.convert_generation_group_mini_batch_to_training_input,
+                                cur_generation_group_mini_batch,
                             )
                         if training_input is None:
                             logger.info("Waiting for fresh generation data (refilling mini-batch)...")
@@ -736,17 +732,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         batch_skipped = float(getattr(self, "_tis_batch_skipped_no_logprobs", 0.0))
                         self._tis_skipped_count = getattr(self, "_tis_skipped_count", 0.0) + batch_skipped
                         self._tis_total_count = getattr(self, "_tis_total_count", 0.0) + 1.0
-                        self.all_metrics.update({
-                            "tis/batch_skipped_no_logprobs": batch_skipped,
-                            "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
-                        })
+                        self.all_metrics.update(
+                            {
+                                "tis/batch_skipped_no_logprobs": batch_skipped,
+                                "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
+                            }
+                        )
 
                     # 3. Run training and record consumed UIDs in the tracker.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
-                        await self.data_tracker.mark_consumed(
-                            [g.uid for g in cur_generation_group_mini_batch]
-                        )
+                        await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
 
                     # 4. After training: sync weights to the inference engines.
                     #    The inference engines are a SHARED HTTP backend that every
@@ -778,8 +774,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
 
                 # 6. Create trainer state and call on_step_end callbacks
-                is_epoch_end = (_ == (1 + epoch) * self.num_steps_per_epoch)
-                is_last_step = (self.global_step == self.total_training_steps)
+                is_epoch_end = _ == (1 + epoch) * self.num_steps_per_epoch
+                is_last_step = self.global_step == self.total_training_steps
                 step_state = TrainerState(
                     global_step=self.global_step,
                     epoch=epoch,
@@ -802,9 +798,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if self._control.should_save:
                     with Timer("save_checkpoints", self.all_timings):
                         await asyncio.to_thread(self.save_checkpoints)
-                    await self.callback_handler.call_event_async(
-                        "on_save", step_state, self._control, trainer=self
-                    )
+                    await self.callback_handler.call_event_async("on_save", step_state, self._control, trainer=self)
                     self._control.should_save = False
 
                 # Handle HF model saving
@@ -831,7 +825,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         **get_system_memory_metrics(),
                     }
                     self._log_metrics_stdout(log_payload, step=self.global_step, kind="train")
-                    self.tracker.log(log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+                    self.tracker.log(
+                        log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step
+                    )
                     await self.callback_handler.call_event_async(
                         "on_log", step_state, self._control, logs=log_payload, trainer=self
                     )
@@ -865,11 +861,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # Handle ref model update at epoch end (via RefModelUpdateCallback or direct config)
             ref_callback = self._get_ref_update_callback()
-            if (
-                self.ref_model is not None
-                and ref_callback is not None
-                and ref_callback.should_update_ref
-            ):
+            if self.ref_model is not None and ref_callback is not None and ref_callback.should_update_ref:
                 with Timer("update_ref_with_policy", self.all_timings):
                     await asyncio.to_thread(self.update_ref_with_policy)
 
@@ -883,9 +875,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self._active_generator_tasks = []
 
             # Per-epoch reset/validation for data loading and staleness management
-            assert all(
-                t.done() for t in generator_tasks
-            ), "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
+            assert all(t.done() for t in generator_tasks), (
+                "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
+            )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
             n_drained = 0

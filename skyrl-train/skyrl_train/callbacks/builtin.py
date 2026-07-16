@@ -45,9 +45,11 @@ def register_callback(name: str):
         class MyCallback(TrainerCallback):
             ...
     """
+
     def decorator(cls: Type[TrainerCallback]) -> Type[TrainerCallback]:
         CALLBACK_REGISTRY[name] = cls
         return cls
+
     return decorator
 
 
@@ -232,6 +234,7 @@ class HFHubUploadCallback(TrainerCallback):
         if self._api is None:
             try:
                 from huggingface_hub import HfApi
+
                 self._api = HfApi()
             except ImportError:
                 logger.error("huggingface_hub not installed. Run: pip install huggingface_hub")
@@ -330,9 +333,7 @@ class HFHubUploadCallback(TrainerCallback):
             upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
             if self.upload_mode == "all":
                 archive_path = f"{self.path_in_repo_prefix}/step_{step}"
-                upload_targets.append(
-                    (archive_path, f"Archive checkpoint at step {step}")
-                )
+                upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
 
             for path_in_repo, commit_message in upload_targets:
                 dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
@@ -636,8 +637,7 @@ class ProgressCallback(TrainerCallback):
     ) -> Optional[TrainerControl]:
         if self.log_interval > 0 and state.global_step % self.log_interval == 0:
             logger.info(
-                f"Step {state.global_step}/{state.total_steps} "
-                f"(Epoch {state.epoch + 1}, Step {state.step_in_epoch})"
+                f"Step {state.global_step}/{state.total_steps} (Epoch {state.epoch + 1}, Step {state.step_in_epoch})"
             )
         return control
 
@@ -712,8 +712,7 @@ class VLLMStatsCallback(TrainerCallback):
             self._inference_engine_client = getattr(trainer, "inference_engine_client", None)
             if self._inference_engine_client is None:
                 logger.warning(
-                    "VLLMStatsCallback: No inference_engine_client found on trainer. "
-                    "Stats collection will be disabled."
+                    "VLLMStatsCallback: No inference_engine_client found on trainer. Stats collection will be disabled."
                 )
         return control
 
@@ -813,6 +812,7 @@ class VLLMStatsCallback(TrainerCallback):
         if self._wandb_available is None:
             try:
                 import wandb
+
                 self._wandb_available = wandb.run is not None
             except ImportError:
                 self._wandb_available = False
@@ -830,10 +830,18 @@ class VLLMStatsCallback(TrainerCallback):
                     # Peak metrics
                     "vllm/peak_running_reqs": stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0)),
                     "vllm/peak_waiting_reqs": stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0)),
-                    "vllm/peak_prompt_throughput": stats.get("avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0)),
-                    "vllm/peak_generation_throughput": stats.get("avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0)),
-                    "vllm/peak_gpu_cache_usage_perc": stats.get("avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0)),
-                    "vllm/peak_prefix_cache_hit_rate": stats.get("avg_peak_prefix_cache_hit_rate", stats.get("avg_prefix_cache_hit_rate", 0.0)),
+                    "vllm/peak_prompt_throughput": stats.get(
+                        "avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0)
+                    ),
+                    "vllm/peak_generation_throughput": stats.get(
+                        "avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0)
+                    ),
+                    "vllm/peak_gpu_cache_usage_perc": stats.get(
+                        "avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0)
+                    ),
+                    "vllm/peak_prefix_cache_hit_rate": stats.get(
+                        "avg_peak_prefix_cache_hit_rate", stats.get("avg_prefix_cache_hit_rate", 0.0)
+                    ),
                     # Median metrics
                     "vllm/median_running_reqs": stats.get("avg_median_running_reqs", 0.0),
                     "vllm/median_waiting_reqs": stats.get("avg_median_waiting_reqs", 0.0),
@@ -883,8 +891,12 @@ class VLLMStatsCallback(TrainerCallback):
                                 "peak_gpu_cache_usage_perc", engine_stats.get("gpu_cache_usage_perc", 0.0)
                             ),
                             # Median metrics per engine
-                            f"vllm/engine_{i}/median_prompt_throughput": engine_stats.get("median_prompt_throughput", 0.0),
-                            f"vllm/engine_{i}/median_generation_throughput": engine_stats.get("median_generation_throughput", 0.0),
+                            f"vllm/engine_{i}/median_prompt_throughput": engine_stats.get(
+                                "median_prompt_throughput", 0.0
+                            ),
+                            f"vllm/engine_{i}/median_generation_throughput": engine_stats.get(
+                                "median_generation_throughput", 0.0
+                            ),
                             f"vllm/engine_{i}/median_running_reqs": engine_stats.get("median_running_reqs", 0.0),
                             f"vllm/engine_{i}/median_waiting_reqs": engine_stats.get("median_waiting_reqs", 0.0),
                             # Per-engine latency stats
@@ -1098,10 +1110,7 @@ def create_callback_from_config(callback_config: Dict[str, Any]) -> TrainerCallb
     callback_type = callback_config["type"]
     if callback_type not in CALLBACK_REGISTRY:
         available = ", ".join(CALLBACK_REGISTRY.keys())
-        raise ValueError(
-            f"Unknown callback type '{callback_type}'. "
-            f"Available types: {available}"
-        )
+        raise ValueError(f"Unknown callback type '{callback_type}'. Available types: {available}")
 
     # Get the callback class and instantiate with remaining params
     callback_cls = CALLBACK_REGISTRY[callback_type]
@@ -1110,9 +1119,7 @@ def create_callback_from_config(callback_config: Dict[str, Any]) -> TrainerCallb
     try:
         return callback_cls(**params)
     except TypeError as e:
-        raise ValueError(
-            f"Invalid parameters for callback '{callback_type}': {e}"
-        ) from e
+        raise ValueError(f"Invalid parameters for callback '{callback_type}': {e}") from e
 
 
 def create_callbacks_from_config(cfg: DictConfig) -> List[TrainerCallback]:
@@ -1280,9 +1287,7 @@ class DataTrackingCallback(TrainerCallback):
                     * tracker._mini_batch_size,
                 )
                 tracker.load_state(state)
-                logger.info(
-                    f"Loaded legacy fully_async_state.pt with {len(consumed)} consumed UIDs"
-                )
+                logger.info(f"Loaded legacy fully_async_state.pt with {len(consumed)} consumed UIDs")
                 return True
 
         return False
@@ -1338,11 +1343,13 @@ class BufferCheckpointCallback(TrainerCallback):
 
             serialized = []
             for item in items:
-                serialized.append({
-                    "generator_output": dict(item.generator_output),
-                    "uid": item.uid,
-                    "global_step_when_scheduled": item.global_step_when_scheduled,
-                })
+                serialized.append(
+                    {
+                        "generator_output": dict(item.generator_output),
+                        "uid": item.uid,
+                        "global_step_when_scheduled": item.global_step_when_scheduled,
+                    }
+                )
 
             ckpt_path = os.path.join(
                 trainer.cfg.trainer.ckpt_path,
@@ -1351,9 +1358,7 @@ class BufferCheckpointCallback(TrainerCallback):
             artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
             with io.open_file(artifact_path, "wb") as f:
                 torch.save(serialized, f)
-            logger.info(
-                f"Saved {len(serialized)} generation buffer items to {artifact_path}"
-            )
+            logger.info(f"Saved {len(serialized)} generation buffer items to {artifact_path}")
         except Exception as e:
             logger.warning(f"BufferCheckpointCallback.on_save failed (best-effort): {e}")
 
@@ -1384,11 +1389,13 @@ class BufferCheckpointCallback(TrainerCallback):
             items = []
             for entry in serialized:
                 gen_out: GeneratorOutput = entry["generator_output"]
-                items.append(GeneratedOutputGroup(
-                    generator_output=gen_out,
-                    uid=entry["uid"],
-                    global_step_when_scheduled=entry["global_step_when_scheduled"],
-                ))
+                items.append(
+                    GeneratedOutputGroup(
+                        generator_output=gen_out,
+                        uid=entry["uid"],
+                        global_step_when_scheduled=entry["global_step_when_scheduled"],
+                    )
+                )
             return items
         except Exception as e:
             logger.warning(f"BufferCheckpointCallback.load_buffer_items failed: {e}")

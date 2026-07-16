@@ -846,9 +846,9 @@ def test_build_dataloader_seeding(dummy_config):
     first_batch2 = next(iter(dataloader2))
 
     # With same seed, first batches should be identical
-    assert (
-        first_batch1 == first_batch2
-    ), f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
+    assert first_batch1 == first_batch2, (
+        f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
+    )
 
     # Test 2: Different seeds should produce different shuffling
     config3 = dummy_config.copy()
@@ -860,9 +860,9 @@ def test_build_dataloader_seeding(dummy_config):
 
     # With different seed, first batch should be different
     # Note: There's a tiny chance they could be the same by random chance, but very unlikely with 20 items
-    assert (
-        first_batch1 != first_batch3
-    ), f"Different seeds should produce different first batches, but both gave {first_batch1}"
+    assert first_batch1 != first_batch3, (
+        f"Different seeds should produce different first batches, but both gave {first_batch1}"
+    )
 
 
 def test_validate_generator_output_invalid_rewards():

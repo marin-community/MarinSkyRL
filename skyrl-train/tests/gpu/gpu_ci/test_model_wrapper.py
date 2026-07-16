@@ -58,9 +58,9 @@ def test_hf_model_wrapper_fwd_with_sample_packing(mock_logprobs_from_logits):
 
     action_log_probs = model(input_ids, num_actions, attention_mask)
     expected_log_probs = actual_actions.to("cuda")
-    assert torch.equal(
-        action_log_probs, expected_log_probs
-    ), f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
+    assert torch.equal(action_log_probs, expected_log_probs), (
+        f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
+    )
 
 
 @patch("skyrl_train.model_wrapper.logprobs_from_logits")
@@ -93,9 +93,9 @@ def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
 
     action_log_probs = model(input_ids, num_actions, attention_mask)
     expected_log_probs = actual_actions.to("cuda")
-    assert torch.equal(
-        action_log_probs, expected_log_probs
-    ), f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
+    assert torch.equal(action_log_probs, expected_log_probs), (
+        f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
+    )
 
 
 @ray.remote(num_gpus=1)
@@ -133,7 +133,6 @@ class ActorTask:
 
 @pytest.mark.parametrize("use_sample_packing", [True, False])
 def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_packing):
-
     # Create input sequence
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
     input_ids = [
@@ -180,12 +179,12 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_
     # # Since we're using sequence parallelism, each GPU processes half the sequence
     # # and the outputs should be gathered and match the non-parallel output
     for i, (logprob_sp, output_sp) in enumerate(results_sp):
-        assert torch.allclose(
-            logprob_sp, logprobs_no_sp
-        ), f"Logprobs with sequence parallelism don't match logprobs without sequence parallelism for rank {i}"
-        assert torch.allclose(
-            output_no_sp["entropy"], output_sp["entropy"]
-        ), "Entropy with sequence parallelism doesn't match entropy without sequence parallelism"
+        assert torch.allclose(logprob_sp, logprobs_no_sp), (
+            f"Logprobs with sequence parallelism don't match logprobs without sequence parallelism for rank {i}"
+        )
+        assert torch.allclose(output_no_sp["entropy"], output_sp["entropy"]), (
+            "Entropy with sequence parallelism doesn't match entropy without sequence parallelism"
+        )
 
     # Cleanup
     ray.get([actor.cleanup.remote() for actor in actors])
@@ -233,6 +232,6 @@ def test_actor_entropy_consistency_sample_packing():
         )
 
     # Entropy results should be very close
-    assert torch.allclose(
-        output_no_pack["entropy"], output_pack["entropy"]
-    ), "Entropy with sample packing doesn't match entropy without sample packing"
+    assert torch.allclose(output_no_pack["entropy"], output_pack["entropy"]), (
+        "Entropy with sample packing doesn't match entropy without sample packing"
+    )

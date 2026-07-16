@@ -47,9 +47,7 @@ def cfg() -> DictConfig:
 
 
 def _adv_cfg():
-    return type(
-        "C", (), {"rloo_n_min_group_size": 2, "rloo_n_filter_zero_reward_groups": False}
-    )()
+    return type("C", (), {"rloo_n_min_group_size": 2, "rloo_n_filter_zero_reward_groups": False})()
 
 
 def test_pbs_dispatcher_on_gpu(ray_init_fixture):

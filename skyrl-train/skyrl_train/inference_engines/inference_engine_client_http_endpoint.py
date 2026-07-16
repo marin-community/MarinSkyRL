@@ -213,7 +213,7 @@ def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds:
             requests.get(health_url, timeout=1)
         except requests.exceptions.RequestException:
             # A network error / connection refused means server is down.
-            logger.info(f"Server shut down after {i+1} seconds")
+            logger.info(f"Server shut down after {i + 1} seconds")
             return
         time.sleep(1)
 
@@ -239,7 +239,7 @@ def wait_for_server_ready(host: str = "127.0.0.1", port: int = 8000, max_wait_se
         try:
             response = requests.get(health_url, timeout=1)
             if response.status_code == 200:
-                logger.info(f"Server ready after {i+1} attempts ({i+1} seconds)")
+                logger.info(f"Server ready after {i + 1} attempts ({i + 1} seconds)")
                 return
         except (requests.exceptions.RequestException, requests.exceptions.ConnectionError):
             if i == max_retries - 1:

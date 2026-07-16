@@ -29,6 +29,7 @@ from skyrl_train.callbacks import (
 @dataclass
 class TrialPathInfo:
     """Information about a trial's paths and status."""
+
     trial_id: str
     trial_path: Path
     created_at: datetime
@@ -182,10 +183,7 @@ class TrialPathTracker:
         count = 0
         with self._lock:
             for trial in self._trials.values():
-                if (
-                    not trial.is_completed
-                    and trial.global_step_created <= global_step
-                ):
+                if not trial.is_completed and trial.global_step_created <= global_step:
                     trial.is_completed = True
                     trial.completed_at = datetime.now()
                     trial.global_step_completed = global_step
@@ -222,10 +220,7 @@ class TrialPathTracker:
     def get_completed_unarchived(self) -> List[TrialPathInfo]:
         """Get completed trials that haven't been archived yet."""
         with self._lock:
-            return [
-                t for t in self._trials.values()
-                if t.is_completed and not t.is_archived
-            ]
+            return [t for t in self._trials.values() if t.is_completed and not t.is_archived]
 
     def get_archived_trials(self) -> List[TrialPathInfo]:
         """Get all archived trials."""
@@ -236,10 +231,7 @@ class TrialPathTracker:
         """Get statistics about tracked trials."""
         with self._lock:
             active = sum(1 for t in self._trials.values() if not t.is_completed)
-            completed = sum(
-                1 for t in self._trials.values()
-                if t.is_completed and not t.is_archived
-            )
+            completed = sum(1 for t in self._trials.values() if t.is_completed and not t.is_archived)
             archived = sum(1 for t in self._trials.values() if t.is_archived)
             return {
                 "total": len(self._trials),
@@ -355,10 +347,7 @@ class TrialArchiveCallback(TrainerCallback):
         self.tracker.mark_trials_completed_for_step(state.global_step)
 
         # Check if we should archive
-        if (
-            self.archive_every_steps > 0
-            and state.global_step % self.archive_every_steps == 0
-        ):
+        if self.archive_every_steps > 0 and state.global_step % self.archive_every_steps == 0:
             await self._archive_completed_trials(state.global_step)
 
         return control
@@ -402,9 +391,7 @@ class TrialArchiveCallback(TrainerCallback):
                 return 0
 
             if not force and len(to_archive) < self.min_trials_to_archive:
-                logger.debug(
-                    f"Only {len(to_archive)} trials ready, need {self.min_trials_to_archive}"
-                )
+                logger.debug(f"Only {len(to_archive)} trials ready, need {self.min_trials_to_archive}")
                 return 0
 
             # Ensure archive directory exists
@@ -416,9 +403,7 @@ class TrialArchiveCallback(TrainerCallback):
             archive_name = f"trials_step{global_step}_{timestamp}{ext}"
             archive_path = self.archive_dir / archive_name
 
-            logger.info(
-                f"Archiving {len(to_archive)} trials to {archive_path}"
-            )
+            logger.info(f"Archiving {len(to_archive)} trials to {archive_path}")
 
             # Run archiving in thread pool to not block event loop
             archived_trial_ids, bytes_archived = await asyncio.to_thread(
@@ -435,9 +420,9 @@ class TrialArchiveCallback(TrainerCallback):
 
                 logger.info(
                     f"Archived {len(archived_trial_ids)} trials "
-                    f"({bytes_archived / (1024*1024):.2f} MB) to {archive_path}. "
+                    f"({bytes_archived / (1024 * 1024):.2f} MB) to {archive_path}. "
                     f"Total archived: {self._total_archived} trials, "
-                    f"{self._total_bytes_archived / (1024*1024):.2f} MB"
+                    f"{self._total_bytes_archived / (1024 * 1024):.2f} MB"
                 )
 
                 # Delete original directories if configured
@@ -484,17 +469,11 @@ class TrialArchiveCallback(TrainerCallback):
                             # Calculate size
                             for root, dirs, files in os.walk(trial.trial_path):
                                 for f in files:
-                                    bytes_archived += os.path.getsize(
-                                        os.path.join(root, f)
-                                    )
+                                    bytes_archived += os.path.getsize(os.path.join(root, f))
                         except Exception as e:
-                            logger.warning(
-                                f"Failed to add trial {trial.trial_id} to archive: {e}"
-                            )
+                            logger.warning(f"Failed to add trial {trial.trial_id} to archive: {e}")
                     else:
-                        logger.warning(
-                            f"Trial path does not exist: {trial.trial_path}"
-                        )
+                        logger.warning(f"Trial path does not exist: {trial.trial_path}")
 
         except Exception as e:
             logger.error(f"Failed to create archive {archive_path}: {e}")
@@ -530,9 +509,7 @@ class TrialArchiveCallback(TrainerCallback):
                     deleted += 1
                     logger.debug(f"Deleted archived trial directory: {trial.trial_path}")
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to delete trial directory {trial.trial_path}: {e}"
-                    )
+                    logger.warning(f"Failed to delete trial directory {trial.trial_path}: {e}")
 
         if deleted > 0:
             logger.info(f"Deleted {deleted} archived trial directories")

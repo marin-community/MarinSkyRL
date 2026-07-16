@@ -39,8 +39,7 @@ def _messages():
         {"role": "user", "content": "<observation>1 failed, 3 passed</observation>"},
         {
             "role": "assistant",
-            "content": "<think>I need to patch the bug</think>"
-            "cat > foo.py <<EOF\ndef foo():\n    return 42\nEOF",
+            "content": "<think>I need to patch the bug</think>cat > foo.py <<EOF\ndef foo():\n    return 42\nEOF",
         },
     ]
 

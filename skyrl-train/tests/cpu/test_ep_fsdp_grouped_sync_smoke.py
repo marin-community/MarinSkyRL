@@ -168,7 +168,7 @@ def _check_mapping(full_w1, full_w2, full_w3, num_experts):
     convert_tt_layer_to_hf(sd, 0)
     for k in range(num_experts):
         g = sd[f"model.layers.0.mlp.experts.{k}.gate_proj.weight"]  # <- w1
-        u = sd[f"model.layers.0.mlp.experts.{k}.up_proj.weight"]    # <- w3
+        u = sd[f"model.layers.0.mlp.experts.{k}.up_proj.weight"]  # <- w3
         d = sd[f"model.layers.0.mlp.experts.{k}.down_proj.weight"]  # <- w2
         gv = round(float(g.reshape(-1)[0]), 3)
         uv = round(float(u.reshape(-1)[0]), 3)
@@ -328,14 +328,14 @@ def _worker(rank, world, geom, result_q):
             dist.destroy_process_group()
 
 
-def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, mode="normal", expect_pass=True,
-             check_contract=False):
+def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, mode="normal", expect_pass=True, check_contract=False):
     world = ep_size * fsdp_size if do_ep else fsdp_size
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
-    procs = [ctx.Process(target=_worker,
-                         args=(r, world, (num_experts, ep_size, fsdp_size, do_ep, mode, check_contract), q))
-             for r in range(world)]
+    procs = [
+        ctx.Process(target=_worker, args=(r, world, (num_experts, ep_size, fsdp_size, do_ep, mode, check_contract), q))
+        for r in range(world)
+    ]
     for p in procs:
         p.start()
     results = [q.get() for _ in range(world)]
@@ -369,9 +369,12 @@ def main():
     gates = []
     # FAIL-BEFORE: a scrambled (EP-major / wrong-order) gather MUST be caught by the
     # value assert. Proves the test catches the r2-r7 corruption class.
-    gates.append(("FAIL-BEFORE scramble EP2xFSDP2/8",
-                  run_geom("FAIL-BEFORE scramble EP2xFSDP2/8", 8, 2, 2, True,
-                           mode="scramble", expect_pass=False)))
+    gates.append(
+        (
+            "FAIL-BEFORE scramble EP2xFSDP2/8",
+            run_geom("FAIL-BEFORE scramble EP2xFSDP2/8", 8, 2, 2, True, mode="scramble", expect_pass=False),
+        )
+    )
     # FIX: the shipped strided-safe gather maps every expert to its correct global
     # slot + projection. EP2xFSDP2 (sf=2) and EP4xFSDP4 (experts straddle both
     # shard boundaries).
@@ -398,12 +401,18 @@ def main():
     # Each asserts BOTH the value-mapping AND the vLLM-linear block-placement contract
     # (check_contract=True). A break prints the m!=j permutation map (which source
     # expert m landed at HF name j) — the discriminating signature for Candidate A.
-    gates.append(("CONTRACT EP2 sf2 (N=16,world=16)",
-                  run_geom("CONTRACT EP2 sf2", 16, 2, 8, True, check_contract=True)))
-    gates.append(("CONTRACT EP4 sf4 (N=32,world=32)",
-                  run_geom("CONTRACT EP4 sf4", 32, 4, 8, True, check_contract=True)))
-    gates.append(("CONTRACT EP8 sf8 PROD (N=16,world=16)",
-                  run_geom("CONTRACT EP8 sf8 PROD", 16, 8, 2, True, check_contract=True)))
+    gates.append(
+        ("CONTRACT EP2 sf2 (N=16,world=16)", run_geom("CONTRACT EP2 sf2", 16, 2, 8, True, check_contract=True))
+    )
+    gates.append(
+        ("CONTRACT EP4 sf4 (N=32,world=32)", run_geom("CONTRACT EP4 sf4", 32, 4, 8, True, check_contract=True))
+    )
+    gates.append(
+        (
+            "CONTRACT EP8 sf8 PROD (N=16,world=16)",
+            run_geom("CONTRACT EP8 sf8 PROD", 16, 8, 2, True, check_contract=True),
+        )
+    )
 
     print("\n================ SUMMARY ================")
     ok = True

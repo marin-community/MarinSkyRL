@@ -195,8 +195,7 @@ def unwrap_to_text_causal_lm(vlm_model):
         text_model._no_split_modules = [c for c in nsm if "Vision" not in c]
 
     logger.info(
-        "[qwen3_5_vlm] unwrapped %s -> %s (text tower); dropped vision + MTP head. "
-        "_no_split_modules=%s",
+        "[qwen3_5_vlm] unwrapped %s -> %s (text tower); dropped vision + MTP head. _no_split_modules=%s",
         type(vlm_model).__name__,
         type(text_model).__name__,
         getattr(text_model, "_no_split_modules", None),

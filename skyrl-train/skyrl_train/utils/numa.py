@@ -45,6 +45,7 @@ def _nvidia_smi_env() -> Dict[str, str]:
 # Method 1: nvidia-smi topo -m (fastest, but unreliable under proxychains)
 # ---------------------------------------------------------------------------
 
+
 @lru_cache(maxsize=1)
 def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
     """Parse nvidia-smi topo -m to get GPU -> (cpu_list, numa_node) mapping.
@@ -56,7 +57,9 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
     try:
         result = subprocess.run(
             ["nvidia-smi", "topo", "-m"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
             env=_nvidia_smi_env(),
         )
         if result.returncode != 0:
@@ -112,6 +115,7 @@ def _parse_cpu_range(cpu_str: str) -> List[int]:
 # Method 2: Pure sysfs + numactl (no nvidia-smi needed)
 # ---------------------------------------------------------------------------
 
+
 @lru_cache(maxsize=1)
 def _enumerate_gpus_from_sysfs() -> Optional[Dict[int, int]]:
     """Enumerate NVIDIA GPUs and their NUMA nodes directly from sysfs.
@@ -163,7 +167,9 @@ def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
     try:
         result = subprocess.run(
             ["numactl", "--hardware"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return None
@@ -188,9 +194,7 @@ def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
     return node_cpus if node_cpus else None
 
 
-def _find_closest_cpu_numa_node(
-    gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]
-) -> Optional[int]:
+def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]) -> Optional[int]:
     """Find the CPU NUMA node closest to a GPU NUMA node using the kernel distance matrix.
 
     On GH200, GPU NUMA nodes (4, 12, 20, 28) have no CPUs — their HBM memory lives
@@ -218,10 +222,7 @@ def _find_closest_cpu_numa_node(
             best_node = node_id
 
     if best_node is not None:
-        logger.debug(
-            f"NUMA: GPU NUMA node {gpu_numa_node} -> closest CPU NUMA node {best_node} "
-            f"(distance={best_dist})"
-        )
+        logger.debug(f"NUMA: GPU NUMA node {gpu_numa_node} -> closest CPU NUMA node {best_node} (distance={best_dist})")
     return best_node
 
 
@@ -259,6 +260,7 @@ def _get_affinity_via_sysfs_numactl(gpu_physical_id: int) -> Optional[Tuple[List
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def get_gpu_cpu_affinity(gpu_physical_id: int) -> Optional[Tuple[List[int], int]]:
     """Get the optimal CPU list and NUMA node for a GPU.
@@ -324,14 +326,10 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
         )
         if overlap:
             target_cpus = overlap
-            logger.info(
-                f"NUMA affinity: falling back to {len(overlap)} overlapping CPUs "
-                f"for GPU {gpu_id}"
-            )
+            logger.info(f"NUMA affinity: falling back to {len(overlap)} overlapping CPUs for GPU {gpu_id}")
         else:
             logger.warning(
-                f"NUMA affinity: no overlap between target and allowed CPUs for GPU {gpu_id}, "
-                f"skipping CPU binding"
+                f"NUMA affinity: no overlap between target and allowed CPUs for GPU {gpu_id}, skipping CPU binding"
             )
             return
 

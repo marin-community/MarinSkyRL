@@ -137,9 +137,7 @@ def test_pytest_rerun_tool_call_form_after_different_edits_not_penalized():
         return {
             "role": "assistant",
             "content": "",
-            "tool_calls": [
-                {"function_name": "write_file", "arguments": {"path": "f.py", "content": body}}
-            ],
+            "tool_calls": [{"function_name": "write_file", "arguments": {"path": "f.py", "content": body}}],
         }
 
     def run_tc() -> dict:

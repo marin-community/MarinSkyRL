@@ -58,9 +58,7 @@ class DataConsumptionTracker:
         async with self._lock:
             for uid in uids:
                 if uid in self._consumed_uids_in_epoch:
-                    logger.warning(
-                        f"Duplicate UID {uid} in epoch {self._current_epoch}, skipping"
-                    )
+                    logger.warning(f"Duplicate UID {uid} in epoch {self._current_epoch}, skipping")
                     continue
                 self._consumed_uids_in_epoch.add(uid)
                 self._total_samples_consumed += 1

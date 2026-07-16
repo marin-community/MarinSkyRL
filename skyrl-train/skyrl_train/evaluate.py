@@ -208,7 +208,9 @@ async def evaluate_step_wise(
                 )
             }
             for traj_id in generator_output["trajectory_ids"]:
-                assert traj_id.instance_id in traj_id_to_input, f"Trajectory ID {traj_id.instance_id} not found in input"
+                assert traj_id.instance_id in traj_id_to_input, (
+                    f"Trajectory ID {traj_id.instance_id} not found in input"
+                )
                 concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
                 concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
                 concat_uids.append(traj_id.instance_id)

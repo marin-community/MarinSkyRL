@@ -1,6 +1,7 @@
 """
 Main entrypoint for training on terminal bench tasks.
 """
+
 import signal
 import sys
 import ray
@@ -13,6 +14,7 @@ from skyrl_train.utils.utils import initialize_ray
 from examples.terminal_bench.entrypoints.main_tbench import TerminalBenchExp
 from examples.on_policy_distillation.main_on_policy_distill import OnPolicyDistillationTrainer
 
+
 class OnPolicyDistillationTerminalBenchExp(TerminalBenchExp):
     def get_trainer(self, *args, **kwargs):
         return OnPolicyDistillationTrainer(*args, **kwargs)
@@ -23,6 +25,7 @@ def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
     exp = OnPolicyDistillationTerminalBenchExp(cfg)
     exp.run()
+
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:

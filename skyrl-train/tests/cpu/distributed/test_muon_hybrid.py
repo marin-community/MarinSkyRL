@@ -39,10 +39,10 @@ class TinyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed_tokens = nn.Embedding(16, 8)  # 2-D but name-excluded -> AdamW
-        self.ln = nn.LayerNorm(8)                 # 1-D weight + bias -> AdamW
-        self.mlp_up = nn.Linear(8, 32, bias=True)   # 2-D weight -> Muon; bias -> AdamW
+        self.ln = nn.LayerNorm(8)  # 1-D weight + bias -> AdamW
+        self.mlp_up = nn.Linear(8, 32, bias=True)  # 2-D weight -> Muon; bias -> AdamW
         self.mlp_down = nn.Linear(32, 8, bias=False)  # 2-D weight -> Muon
-        self.lm_head = nn.Linear(8, 16, bias=False)   # 2-D but name-excluded -> AdamW
+        self.lm_head = nn.Linear(8, 16, bias=False)  # 2-D but name-excluded -> AdamW
 
     def forward(self, idx):
         x = self.embed_tokens(idx)
@@ -66,15 +66,22 @@ def test_is_muon_param_classification():
 
 def test_build_split_counts():
     m = TinyModel()
-    cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999],
-               optimizer_kwargs={"muon_lr": 0.02, "muon_momentum": 0.95, "ns_steps": 5})
+    cfg = _Cfg(
+        lr=8e-6,
+        weight_decay=0.0,
+        adam_betas=[0.9, 0.999],
+        optimizer_kwargs={"muon_lr": 0.02, "muon_momentum": 0.95, "ns_steps": 5},
+    )
     opt = build_hybrid_muon(m.named_parameters(), cfg)
     # Muon should get exactly mlp_up.weight + mlp_down.weight (2 tensors)
     assert set(opt._muon_param_names) == {"mlp_up.weight", "mlp_down.weight"}
     # everything else -> AdamW
     expected_adamw = {
-        "embed_tokens.weight", "ln.weight", "ln.bias",
-        "mlp_up.bias", "lm_head.weight",
+        "embed_tokens.weight",
+        "ln.weight",
+        "ln.bias",
+        "mlp_up.bias",
+        "lm_head.weight",
     }
     assert set(opt._adamw_param_names) == expected_adamw
     # hyperparameters threaded through
@@ -110,8 +117,7 @@ def test_zero_param_muon_raises():
 def test_step_updates_and_finite():
     torch.manual_seed(0)
     m = TinyModel()
-    cfg = _Cfg(lr=1e-3, weight_decay=0.01, adam_betas=[0.9, 0.999],
-               optimizer_kwargs={"muon_lr": 0.02, "ns_steps": 5})
+    cfg = _Cfg(lr=1e-3, weight_decay=0.01, adam_betas=[0.9, 0.999], optimizer_kwargs={"muon_lr": 0.02, "ns_steps": 5})
     opt = build_hybrid_muon(m.named_parameters(), cfg)
 
     before = {n: p.detach().clone() for n, p in m.named_parameters()}
@@ -131,8 +137,7 @@ def test_step_updates_and_finite():
 def test_state_dict_roundtrip():
     torch.manual_seed(0)
     m = TinyModel()
-    cfg = _Cfg(lr=1e-3, weight_decay=0.0, adam_betas=[0.9, 0.999],
-               optimizer_kwargs={"muon_lr": 0.02})
+    cfg = _Cfg(lr=1e-3, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={"muon_lr": 0.02})
     opt = build_hybrid_muon(m.named_parameters(), cfg)
     idx = torch.randint(0, 16, (4, 5))
     m(idx).sum().backward()
@@ -166,8 +171,7 @@ def test_offload_backload_utils_compatible():
 
 def test_per_group_lr_mutation_routes_to_child():
     m = TinyModel()
-    cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999],
-               optimizer_kwargs={"muon_lr": 0.02})
+    cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={"muon_lr": 0.02})
     opt = build_hybrid_muon(m.named_parameters(), cfg)
     # StaleClip path scales pg["lr"] in place; verify it reaches the child opt.
     for pg in opt.param_groups:

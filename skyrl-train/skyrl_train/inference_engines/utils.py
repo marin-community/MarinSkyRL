@@ -96,9 +96,9 @@ def route_prompts_to_engines(
     assert num_prompts > 0, "Number of prompts must be greater than 0"
     assert num_inference_engines > 0, "Number of inference engines must be greater than 0"
     if session_ids is not None:
-        assert isinstance(session_ids, list) and all(
-            isinstance(sid, (int, str)) for sid in session_ids
-        ), "Session ID must be a list of integers or strings"
+        assert isinstance(session_ids, list) and all(isinstance(sid, (int, str)) for sid in session_ids), (
+            "Session ID must be a list of integers or strings"
+        )
         assert len(session_ids) == num_prompts, "Session ID must have the same length as the number of prompts"
 
     # 1. session_id not provided, with a single prompt: route to a random engine for a naive load balancing.
@@ -237,11 +237,12 @@ def get_rendezvous_addr_port(placement_group, pg_index: int) -> Tuple[str, int]:
                 except (ImportError, ModuleNotFoundError):
                     # Fallback implementation
                     import socket
+
                     def get_address_and_port():
                         hostname = socket.gethostname()
                         addr = socket.gethostbyname(hostname)
                         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                            s.bind(('', 0))
+                            s.bind(("", 0))
                             port = s.getsockname()[1]
                         return addr, port
 

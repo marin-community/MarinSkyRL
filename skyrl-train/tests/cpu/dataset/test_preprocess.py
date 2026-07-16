@@ -70,14 +70,22 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
     loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
     rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_routed_experts, _tls, _rst = (
-        convert_prompts_responses_to_batch_tensors(
-            tokenizer,
-            prompts,
-            outputs,
-            rewards,
-            loss_masks,
-        )
+    (
+        sequences,
+        attention_mask,
+        action_mask,
+        ret_rewards,
+        ret_loss_masks,
+        ret_log_probs,
+        ret_routed_experts,
+        _tls,
+        _rst,
+    ) = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts,
+        outputs,
+        rewards,
+        loss_masks,
     )
 
     # loss mask should be the same length as the action mask (padded to the longest input)
@@ -98,14 +106,22 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
     rewards = [torch.tensor([1.0, 0.5, 0.3]), torch.tensor([0.8])]
     loss_masks = [[1, 1, 1], [1]]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_routed_experts, _tls, _rst = (
-        convert_prompts_responses_to_batch_tensors(
-            tokenizer,
-            prompts,
-            outputs,
-            rewards,
-            loss_masks,
-        )
+    (
+        sequences,
+        attention_mask,
+        action_mask,
+        ret_rewards,
+        ret_loss_masks,
+        ret_log_probs,
+        ret_routed_experts,
+        _tls,
+        _rst,
+    ) = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts,
+        outputs,
+        rewards,
+        loss_masks,
     )
 
     max_response_len = max([len(output) for output in outputs])

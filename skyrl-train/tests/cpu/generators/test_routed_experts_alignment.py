@@ -217,9 +217,7 @@ def test_packer_noop_flag_off(char_tokenizer):
 
     # With routed_experts omitted (flag off), the 7th return is None and the first
     # six tensors are byte-identical to a pre-rail call.
-    res_off = convert_prompts_responses_to_batch_tensors(
-        char_tokenizer, prompts, responses, rewards, loss_masks
-    )
+    res_off = convert_prompts_responses_to_batch_tensors(char_tokenizer, prompts, responses, rewards, loss_masks)
     assert len(res_off) == 9
     assert res_off[6] is None  # routed_experts_tensor
     assert res_off[7] is None  # token_level_shaping_tensor (Stage B, off)

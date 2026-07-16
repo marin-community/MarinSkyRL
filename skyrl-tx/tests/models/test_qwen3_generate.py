@@ -156,6 +156,6 @@ def test_qwen3_generate_speed():
         total_new_tokens = len(result.generated_ids) * 50
 
     print(f"Generation stats (50 tokens, {runs} runs):")
-    print(f"Mean time: {mean_time*1000:.2f} ± {std_time*1000:.2f} ms")
-    print(f"Min/Max: {times.min()*1000:.2f} / {times.max()*1000:.2f} ms")
+    print(f"Mean time: {mean_time * 1000:.2f} ± {std_time * 1000:.2f} ms")
+    print(f"Min/Max: {times.min() * 1000:.2f} / {times.max() * 1000:.2f} ms")
     print(f"New tokens/sec: {total_new_tokens / mean_time:.2f}")

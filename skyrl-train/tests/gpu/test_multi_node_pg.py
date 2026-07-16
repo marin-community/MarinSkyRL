@@ -142,17 +142,17 @@ def test_multi_node_pg_init(ray_init_fixture, cfg, colocate_all, placement_group
         # use dp rank in mesh rank as proxy for world rank to verify correct layout
         for rank, mesh_rank in enumerate(mesh_ranks):
             assert rank == mesh_rank.dp, f"Mesh rank {mesh_rank} has incorrect dp rank"
-            assert (
-                rank % cfg.trainer.placement.policy_num_gpus_per_node == gpu_ids[rank]
-            ), f"Mesh rank {mesh_rank} has incorrect gpu id"
+            assert rank % cfg.trainer.placement.policy_num_gpus_per_node == gpu_ids[rank], (
+                f"Mesh rank {mesh_rank} has incorrect gpu id"
+            )
 
         num_nodes = len(set(node_ids))
         gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
         for i in range(num_nodes):
             node_ids_for_group = node_ids[i * gpus_per_node : (i + 1) * gpus_per_node]
             unique_node_ids = set(node_ids_for_group)
-            assert (
-                len(unique_node_ids) == 1
-            ), f"Node IDs are not consistent for node group {i}. Found: {unique_node_ids}"
+            assert len(unique_node_ids) == 1, (
+                f"Node IDs are not consistent for node group {i}. Found: {unique_node_ids}"
+            )
     finally:
         ray.shutdown()

@@ -117,7 +117,6 @@ class Llama3Attention(nnx.Module):
 
 
 class Llama3MLP(nnx.Module):
-
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.gate_proj = LoRALinear(
             config.hidden_size,
@@ -160,7 +159,6 @@ class Llama3MLP(nnx.Module):
 
 
 class Llama3DecoderLayer(nnx.Module):
-
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
@@ -196,7 +194,6 @@ class Llama3DecoderLayer(nnx.Module):
 
 
 class Llama3Model(nnx.Module):
-
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
 
@@ -262,7 +259,6 @@ class Llama3Model(nnx.Module):
 
 
 class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
-
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)

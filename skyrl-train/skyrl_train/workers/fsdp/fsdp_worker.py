@@ -478,9 +478,16 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return {}
 
         # ---------------- rank 0: disk reference + signature ----------------
-        out = {"rank": rank, "host": host, "layer": layer_idx,
-               "placements": placements_info, "n_rep_gather": n_rep_gather,
-               "lines": [], "verdict": None, "wrong_expert_map": {}}
+        out = {
+            "rank": rank,
+            "host": host,
+            "layer": layer_idx,
+            "placements": placements_info,
+            "n_rep_gather": n_rep_gather,
+            "lines": [],
+            "verdict": None,
+            "wrong_expert_map": {},
+        }
 
         # Resolve the on-disk HF checkpoint shards (local cache or download).
         from huggingface_hub import snapshot_download
@@ -583,16 +590,22 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             deltas = {(m - j) % n_experts for j, m in out["wrong_expert_map"].items()}
             if len(deltas) == 1:
                 d = next(iter(deltas))
-                out["lines"].append(f"[L{layer_idx}] CONSTANT row shift Δ={d} across ALL wrong experts => W2-style block shift")
+                out["lines"].append(
+                    f"[L{layer_idx}] CONSTANT row shift Δ={d} across ALL wrong experts => W2-style block shift"
+                )
             else:
-                out["lines"].append(f"[L{layer_idx}] wrong-expert offsets are NON-uniform (deltas={sorted(deltas)}) => W1 strided permutation")
+                out["lines"].append(
+                    f"[L{layer_idx}] wrong-expert offsets are NON-uniform (deltas={sorted(deltas)}) => W1 strided permutation"
+                )
 
         # Verdict
         total_corrupt = sum(1 for l in out["lines"] if l.strip().startswith(("w1[", "w2[", "w3[")))
         out["total_corrupt_rows"] = total_corrupt
-        out["verdict"] = ("CLEAN (gathered==disk at EP=8 on-GPU => corruption is DOWNSTREAM: "
-                          "NCCL broadcast or vLLM load_weights)") if total_corrupt == 0 else (
-                          f"CORRUPT ({total_corrupt} expert rows differ from disk reference at EP=8 cross-node)")
+        out["verdict"] = (
+            ("CLEAN (gathered==disk at EP=8 on-GPU => corruption is DOWNSTREAM: NCCL broadcast or vLLM load_weights)")
+            if total_corrupt == 0
+            else (f"CORRUPT ({total_corrupt} expert rows differ from disk reference at EP=8 cross-node)")
+        )
         return out
 
     def init_model(self, model_path, num_training_steps: int = None):
@@ -624,7 +637,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
         with init_context():
-
             wrapped_model = HFModelWrapper(
                 model_path,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
@@ -664,9 +676,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
         )
-        assert (
-            self.optimizer is not None and self.scheduler is not None
-        ), "FSDP preparation should create optimizer and scheduler"
+        assert self.optimizer is not None and self.scheduler is not None, (
+            "FSDP preparation should create optimizer and scheduler"
+        )
 
         # Initialize weight extractor
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
@@ -790,9 +802,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # [gate;up] while the FlashInfer CUTLASS kernel reads [up;gate]. Inert (swap-wise)
         # on triton/dense backends, so byte-identical there. Gated by env for safety.
         _w13_bracket = (
-            not self.use_cuda_ipc
-            and not _fuse_weights
-            and os.environ.get("SKYRL_W13_RELOAD_BRACKET", "1") == "1"
+            not self.use_cuda_ipc and not _fuse_weights and os.environ.get("SKYRL_W13_RELOAD_BRACKET", "1") == "1"
         )
 
         if not self.use_cuda_ipc:

@@ -89,9 +89,9 @@ def process_example(example: Dict[str, Any], idx: int, dataset_name: str, split:
     tests = example.pop("tests")
 
     if example.get("metadata", {}):
-        assert (
-            "func_name" in example["metadata"]
-        ), f"Function name is not found, check if your LCB data is preprocessed correctly: {example['metadata']}"
+        assert "func_name" in example["metadata"], (
+            f"Function name is not found, check if your LCB data is preprocessed correctly: {example['metadata']}"
+        )
         if isinstance(tests, dict):
             tests["metadata"] = example["metadata"]
         else:

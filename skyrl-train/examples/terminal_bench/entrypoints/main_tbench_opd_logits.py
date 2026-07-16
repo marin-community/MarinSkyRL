@@ -83,9 +83,7 @@ class OnPolicyDistillationLogitsTerminalBenchExp(TerminalBenchExp):
 
         # Create teacher engines if configured
         if hasattr(self.cfg, "teacher") and self.cfg.teacher.model_path is not None:
-            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(
-                self.cfg, self.tokenizer
-            )
+            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(self.cfg, self.tokenizer)
             trainer.setup_teacher_engine(
                 teacher_engines,
                 student_tokenizer=self.tokenizer,

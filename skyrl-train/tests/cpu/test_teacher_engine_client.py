@@ -24,13 +24,15 @@ class TestExtractResponseLogprobs:
 
         # Simulate vLLM output: 1 sample, prompt_len=2, response_len=3
         # prompt_logprobs covers positions 0..4 (prompt[0,1] + response[0,1,2])
-        prompt_logprobs_batch = [[
-            None,                           # position 0 (first prompt token, always None)
-            {10: -1.0, 20: -2.0, 30: -3.0},  # position 1 (second prompt token)
-            {100: -0.5, 200: -1.5, 300: -2.5},  # position 2 (response token 0)
-            {101: -0.3, 201: -1.8, 301: -3.0},  # position 3 (response token 1)
-            {102: -0.1, 202: -2.0, 302: -4.0},  # position 4 (response token 2)
-        ]]
+        prompt_logprobs_batch = [
+            [
+                None,  # position 0 (first prompt token, always None)
+                {10: -1.0, 20: -2.0, 30: -3.0},  # position 1 (second prompt token)
+                {100: -0.5, 200: -1.5, 300: -2.5},  # position 2 (response token 0)
+                {101: -0.3, 201: -1.8, 301: -3.0},  # position 3 (response token 1)
+                {102: -0.1, 202: -2.0, 302: -4.0},  # position 4 (response token 2)
+            ]
+        ]
 
         output = {
             "responses": ["test"],
@@ -53,9 +55,9 @@ class TestExtractResponseLogprobs:
         assert result.chosen_token_logprobs.shape == (1, 3)
 
         # Check response token 0 (position 2): top-K should be sorted by logprob desc
-        assert result.top_k_logprobs[0, 0, 0].item() == pytest.approx(-0.5)   # token 100
-        assert result.top_k_logprobs[0, 0, 1].item() == pytest.approx(-1.5)   # token 200
-        assert result.top_k_logprobs[0, 0, 2].item() == pytest.approx(-2.5)   # token 300
+        assert result.top_k_logprobs[0, 0, 0].item() == pytest.approx(-0.5)  # token 100
+        assert result.top_k_logprobs[0, 0, 1].item() == pytest.approx(-1.5)  # token 200
+        assert result.top_k_logprobs[0, 0, 2].item() == pytest.approx(-2.5)  # token 300
         assert result.top_k_indices[0, 0, 0].item() == 100
         assert result.top_k_indices[0, 0, 1].item() == 200
 
@@ -72,14 +74,14 @@ class TestExtractResponseLogprobs:
             # Sample 0: prompt_len=1, response_len=2
             [
                 None,
-                {50: -1.0, 60: -2.0},   # response token 0
-                {51: -0.5, 61: -1.5},   # response token 1
+                {50: -1.0, 60: -2.0},  # response token 0
+                {51: -0.5, 61: -1.5},  # response token 1
             ],
             # Sample 1: prompt_len=2, response_len=1
             [
                 None,
                 {70: -0.8, 80: -1.2},
-                {71: -0.3, 81: -0.9},   # response token 0
+                {71: -0.3, 81: -0.9},  # response token 0
             ],
         ]
 
@@ -110,7 +112,7 @@ class TestExtractResponseLogprobs:
         client = self._make_client()
 
         prompt_logprobs_batch = [
-            [None, {10: -1.0}],              # prompt_len=1, response_len=1
+            [None, {10: -1.0}],  # prompt_len=1, response_len=1
             [None, {20: -0.5}, {21: -0.3}],  # prompt_len=1, response_len=2
         ]
 
@@ -161,11 +163,13 @@ class TestExtractResponseLogprobs:
         """Test when the chosen token isn't in the top-K alternatives."""
         client = self._make_client()
 
-        prompt_logprobs_batch = [[
-            None,
-            # Top-3 are tokens 10, 20, 30 — but chosen token is 99 (not in dict)
-            {10: -0.5, 20: -1.0, 30: -1.5},
-        ]]
+        prompt_logprobs_batch = [
+            [
+                None,
+                # Top-3 are tokens 10, 20, 30 — but chosen token is 99 (not in dict)
+                {10: -0.5, 20: -1.0, 30: -1.5},
+            ]
+        ]
 
         output = {
             "responses": ["test"],

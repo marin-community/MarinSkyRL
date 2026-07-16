@@ -124,10 +124,10 @@ def _verify_inputs(
     rewards: Optional[List[torch.Tensor]],
     loss_masks: List[List[int]],
 ):
-    assert (
-        len(prompts) == len(responses) and len(prompts) > 0
-    ), "prompts and responses must have the same length and length must be greater than 0, got {} and {}".format(
-        len(prompts), len(responses)
+    assert len(prompts) == len(responses) and len(prompts) > 0, (
+        "prompts and responses must have the same length and length must be greater than 0, got {} and {}".format(
+            len(prompts), len(responses)
+        )
     )
 
     if rewards is not None:
@@ -220,7 +220,6 @@ def convert_prompts_responses_to_batch_tensors(
     prompt_token_lens, response_token_lens = [], []
     inputs_token_ids, outputs_token_ids = [], []
     for prompt, response in zip(prompts, responses):
-
         inputs_token_ids.append(prompt)
         outputs_token_ids.append(response)
 
@@ -290,9 +289,7 @@ def convert_prompts_responses_to_batch_tensors(
         # [B, resp_len, L, K] int16 tensor is BYTE-IDENTICAL to the nested-list
         # branch below (same ids, same sentinel-0 right-pad, same deterministic
         # dtype narrow) — only how we GET there changes.
-        routed_experts_tensor = _collate_routed_experts_from_arrays(
-            routed_experts, action_mask.size(1), num_experts
-        )
+        routed_experts_tensor = _collate_routed_experts_from_arrays(routed_experts, action_mask.size(1), num_experts)
     elif routed_experts:
         max_output_len = action_mask.size(1)
         # Infer the true [L, K] per-token row shape by scanning ALL samples for the

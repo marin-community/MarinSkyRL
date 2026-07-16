@@ -29,7 +29,7 @@ def example_question(env_name: str) -> List[str]:
     """
 
     # Shared instruction appended to each example
-    instruction = "Wrap the action between <action> and </action> tags.\n" "For example: <action>ACTION_HERE</action>."
+    instruction = "Wrap the action between <action> and </action> tags.\nFor example: <action>ACTION_HERE</action>."
 
     if env_name == "echo_env":
         # Echo environment simply echoes the text back.

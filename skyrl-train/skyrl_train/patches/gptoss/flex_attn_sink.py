@@ -1,4 +1,4 @@
-"""Flex attention implementation for attention sink 
+"""Flex attention implementation for attention sink
 
 Modified from Unsloth to support attention masks: https://github.com/unslothai/unsloth-zoo/blob/main/unsloth_zoo/flex_attention/attention_sink.py
 """

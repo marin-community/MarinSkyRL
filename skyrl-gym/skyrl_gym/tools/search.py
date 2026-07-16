@@ -133,7 +133,7 @@ def _passages2string(retrieval_result):
     format_reference = ""
     for idx, doc_item in enumerate(retrieval_result):
         content = doc_item["document"]["contents"].strip()
-        format_reference += f"Doc {idx+1}: {content}\n"
+        format_reference += f"Doc {idx + 1}: {content}\n"
     return format_reference
 
 

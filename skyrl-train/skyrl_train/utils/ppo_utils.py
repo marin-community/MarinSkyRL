@@ -562,9 +562,14 @@ def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10) -> dict:
     or the helper raises. Mismatched keysets across ranks deadlock the per-key
     NCCL all_reduce (this killed v2 and v3 of the diagnostic).
     """
-    keys_base = ["log_ratio_abs_mean", "log_ratio_abs_max",
-                 "n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct",
-                 "log_ratio_abs_p99"]
+    keys_base = [
+        "log_ratio_abs_mean",
+        "log_ratio_abs_max",
+        "n_tokens_dp_gt_1pct",
+        "n_tokens_dp_gt_10pct",
+        "n_tokens_dp_gt_50pct",
+        "log_ratio_abs_p99",
+    ]
     keys_pos = [f"log_ratio_abs_pos{i * (100 // n_position_buckets):02d}" for i in range(n_position_buckets)]
     return {k: 0.0 for k in keys_base + keys_pos}
 
@@ -652,9 +657,9 @@ def compute_log_ratio_diagnostics(
 
     # Build all GPU-resident scalar tensors first; no sync until the final stack.
     out_tensors = {
-        "log_ratio_abs_mean":   masked.sum() / n_valid_t,
-        "log_ratio_abs_max":    masked.max(),
-        "n_tokens_dp_gt_1pct":  ((abs_log_ratio > 0.01) * mask_f).sum(),
+        "log_ratio_abs_mean": masked.sum() / n_valid_t,
+        "log_ratio_abs_max": masked.max(),
+        "n_tokens_dp_gt_1pct": ((abs_log_ratio > 0.01) * mask_f).sum(),
         "n_tokens_dp_gt_10pct": ((abs_log_ratio > 0.10) * mask_f).sum(),
         "n_tokens_dp_gt_50pct": ((abs_log_ratio > 0.50) * mask_f).sum(),
     }
@@ -709,15 +714,15 @@ def _empty_log_ratio_accumulator(device, n_position_buckets: int = 10) -> dict:
     via torch.cat in `merge_log_ratio_partial`.
     """
     return {
-        "abs_sum":    torch.zeros((), device=device, dtype=torch.float32),
-        "n_valid":    torch.zeros((), device=device, dtype=torch.float32),
-        "abs_max":    torch.zeros((), device=device, dtype=torch.float32),
-        "n_gt_1pct":  torch.zeros((), device=device, dtype=torch.float32),
+        "abs_sum": torch.zeros((), device=device, dtype=torch.float32),
+        "n_valid": torch.zeros((), device=device, dtype=torch.float32),
+        "abs_max": torch.zeros((), device=device, dtype=torch.float32),
+        "n_gt_1pct": torch.zeros((), device=device, dtype=torch.float32),
         "n_gt_10pct": torch.zeros((), device=device, dtype=torch.float32),
         "n_gt_50pct": torch.zeros((), device=device, dtype=torch.float32),
-        "topk_abs":   torch.zeros((0,), device=device, dtype=torch.float32),
-        "bsums":      torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
-        "bcounts":    torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
+        "topk_abs": torch.zeros((0,), device=device, dtype=torch.float32),
+        "bsums": torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
+        "bcounts": torch.zeros(n_position_buckets, device=device, dtype=torch.float32),
     }
 
 
@@ -774,15 +779,15 @@ def compute_log_ratio_partial(
     bcounts.scatter_add_(0, buckets.flatten(), mask_f.flatten())
 
     return {
-        "abs_sum":    masked.sum().float(),
-        "n_valid":    torch.as_tensor(float(n_valid_int), device=device, dtype=torch.float32),
-        "abs_max":    masked.max().float(),
-        "n_gt_1pct":  ((abs_log_ratio > 0.01) * mask_f).sum().float(),
+        "abs_sum": masked.sum().float(),
+        "n_valid": torch.as_tensor(float(n_valid_int), device=device, dtype=torch.float32),
+        "abs_max": masked.max().float(),
+        "n_gt_1pct": ((abs_log_ratio > 0.01) * mask_f).sum().float(),
         "n_gt_10pct": ((abs_log_ratio > 0.10) * mask_f).sum().float(),
         "n_gt_50pct": ((abs_log_ratio > 0.50) * mask_f).sum().float(),
-        "topk_abs":   topk_abs,
-        "bsums":      bsums,
-        "bcounts":    bcounts,
+        "topk_abs": topk_abs,
+        "bsums": bsums,
+        "bcounts": bcounts,
     }
 
 
@@ -790,15 +795,15 @@ def merge_log_ratio_partial(acc: dict, partial: dict) -> None:
     """In-place merge: additive for sums/counts, max for abs_max, concat for
     topk_abs. Mutates `acc`.
     """
-    acc["abs_sum"]    = acc["abs_sum"]    + partial["abs_sum"]
-    acc["n_valid"]    = acc["n_valid"]    + partial["n_valid"]
-    acc["abs_max"]    = torch.maximum(acc["abs_max"], partial["abs_max"])
-    acc["n_gt_1pct"]  = acc["n_gt_1pct"]  + partial["n_gt_1pct"]
+    acc["abs_sum"] = acc["abs_sum"] + partial["abs_sum"]
+    acc["n_valid"] = acc["n_valid"] + partial["n_valid"]
+    acc["abs_max"] = torch.maximum(acc["abs_max"], partial["abs_max"])
+    acc["n_gt_1pct"] = acc["n_gt_1pct"] + partial["n_gt_1pct"]
     acc["n_gt_10pct"] = acc["n_gt_10pct"] + partial["n_gt_10pct"]
     acc["n_gt_50pct"] = acc["n_gt_50pct"] + partial["n_gt_50pct"]
-    acc["topk_abs"]   = torch.cat([acc["topk_abs"], partial["topk_abs"]])
-    acc["bsums"]      = acc["bsums"]      + partial["bsums"]
-    acc["bcounts"]    = acc["bcounts"]    + partial["bcounts"]
+    acc["topk_abs"] = torch.cat([acc["topk_abs"], partial["topk_abs"]])
+    acc["bsums"] = acc["bsums"] + partial["bsums"]
+    acc["bcounts"] = acc["bcounts"] + partial["bcounts"]
 
 
 def finalize_log_ratio_metrics(acc: dict, n_position_buckets: int = 10) -> dict:
@@ -826,18 +831,27 @@ def finalize_log_ratio_metrics(acc: dict, n_position_buckets: int = 10) -> dict:
     bucket_means = acc["bsums"] / acc["bcounts"].clamp(min=1.0)
 
     base_keys = [
-        "log_ratio_abs_mean", "log_ratio_abs_max",
-        "n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct",
+        "log_ratio_abs_mean",
+        "log_ratio_abs_max",
+        "n_tokens_dp_gt_1pct",
+        "n_tokens_dp_gt_10pct",
+        "n_tokens_dp_gt_50pct",
         "log_ratio_abs_p99",
     ]
-    base_vals = torch.stack([
-        abs_mean.float(),
-        abs_max.float(),
-        acc["n_gt_1pct"].float(),
-        acc["n_gt_10pct"].float(),
-        acc["n_gt_50pct"].float(),
-        abs_p99.float(),
-    ]).cpu().tolist()
+    base_vals = (
+        torch.stack(
+            [
+                abs_mean.float(),
+                abs_max.float(),
+                acc["n_gt_1pct"].float(),
+                acc["n_gt_10pct"].float(),
+                acc["n_gt_50pct"].float(),
+                abs_p99.float(),
+            ]
+        )
+        .cpu()
+        .tolist()
+    )
     metrics = dict(zip(base_keys, base_vals))
 
     bucket_vals = bucket_means.cpu().tolist()
@@ -1254,9 +1268,7 @@ def build_think_weighted_loss_mask(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal[
-        "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"
-    ],
+    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"],
     max_seq_len: Optional[int] = None,
     global_denom: Optional[float] = None,
 ) -> torch.Tensor:
@@ -1468,8 +1480,8 @@ def compute_rloo_n_outcome_advantage(
     min_group_size = 2  # backwards-compatible default
     filter_zero_reward_groups = True  # skip all-zero-reward groups by default
     if config is not None:
-        min_group_size = getattr(config, 'rloo_n_min_group_size', 2)
-        filter_zero_reward_groups = getattr(config, 'rloo_n_filter_zero_reward_groups', True)
+        min_group_size = getattr(config, "rloo_n_min_group_size", 2)
+        filter_zero_reward_groups = getattr(config, "rloo_n_filter_zero_reward_groups", True)
 
     # Default: include all samples in baseline
     if exclude_from_baseline is None:
@@ -1557,22 +1569,20 @@ def compute_rloo_n_outcome_advantage(
 
         # Log summary statistics
         n_excluded = sum(len(v) for v in id2excluded_indices.values())
-        n_groups_all_excluded = sum(
-            1 for group_id in set(index)
-            if len(id2included_scores[group_id]) == 0
-        )
-        n_groups_below_min = sum(
-            1 for group_id in set(index)
-            if 0 < len(id2included_scores[group_id]) < min_group_size
-        )
+        n_groups_all_excluded = sum(1 for group_id in set(index) if len(id2included_scores[group_id]) == 0)
+        n_groups_below_min = sum(1 for group_id in set(index) if 0 < len(id2included_scores[group_id]) < min_group_size)
         n_total_groups = len(set(index))
         if n_excluded > 0 or n_groups_below_min > 0 or n_no_variance_groups > 0:
             logger_.info(
                 f"RLOO-N: {n_excluded}/{bsz} samples excluded from baseline, "
                 f"{n_groups_all_excluded} groups had all samples excluded, "
                 f"{n_groups_below_min} groups below min_group_size={min_group_size}"
-                + (f", {n_no_variance_groups}/{n_total_groups} groups filtered "
-                   f"(zero reward variance, {n_no_variance_samples} samples)" if n_no_variance_groups > 0 else "")
+                + (
+                    f", {n_no_variance_groups}/{n_total_groups} groups filtered "
+                    f"(zero reward variance, {n_no_variance_samples} samples)"
+                    if n_no_variance_groups > 0
+                    else ""
+                )
             )
 
         scores = scores.unsqueeze(-1) * response_mask

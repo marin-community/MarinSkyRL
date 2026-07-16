@@ -293,9 +293,9 @@ def spec(env_id: str) -> EnvSpec:
     if env_spec is None:
         raise error.Error(f"No registered env with id: {env_id}")
     else:
-        assert isinstance(
-            env_spec, EnvSpec
-        ), f"Expected the registry for {env_id} to be an `EnvSpec`, actual type is {type(env_spec)}"
+        assert isinstance(env_spec, EnvSpec), (
+            f"Expected the registry for {env_id} to be an `EnvSpec`, actual type is {type(env_spec)}"
+        )
         return env_spec
 
 

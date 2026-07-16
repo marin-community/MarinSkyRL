@@ -570,9 +570,9 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
     num_responses = len(generator_output["response_ids"])
     num_prompt_tokens = len(generator_output["prompt_token_ids"])
     assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
-    assert (
-        num_responses == num_prompt_tokens
-    ), f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
+    assert num_responses == num_prompt_tokens, (
+        f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
+    )
 
     # make sure all batch elements have the same length as response_ids (which should be non-zero)
     for key in generator_output:
@@ -582,26 +582,26 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "rewards",
             "rollout_logprobs",
         ]:
-            assert len(generator_output[key]) == len(
-                generator_output["response_ids"]
-            ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+            assert len(generator_output[key]) == len(generator_output["response_ids"]), (
+                f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+            )
 
     # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
     for i, (response_ids, loss_masks, rewards) in enumerate(
         zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
     ):
-        assert len(response_ids) == len(
-            loss_masks
-        ), f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        assert len(response_ids) == len(loss_masks), (
+            f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        )
         if isinstance(rewards, list):
-            assert len(rewards) == len(
-                response_ids
-            ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
+            assert len(rewards) == len(response_ids), (
+                f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
+            )
 
         if generator_output["rollout_logprobs"]:
-            assert len(response_ids) == len(
-                generator_output["rollout_logprobs"][i]
-            ), f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
+                f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            )
 
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
@@ -610,13 +610,13 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
     # check that the rewards are either List[float-like] or List[List[float-like]]
     rewards = generator_output["rewards"]
     if isinstance(rewards[0], list):
-        assert all(
-            isinstance(reward, list) for reward in rewards
-        ), "rewards must be `List[float]` or `List[List[float]]`"
+        assert all(isinstance(reward, list) for reward in rewards), (
+            "rewards must be `List[float]` or `List[List[float]]`"
+        )
     else:
-        assert all(
-            not isinstance(reward, list) for reward in rewards
-        ), "rewards must be `List[float]` or `List[List[float]]`"
+        assert all(not isinstance(reward, list) for reward in rewards), (
+            "rewards must be `List[float]` or `List[List[float]]`"
+        )
 
 
 def build_dataloader(

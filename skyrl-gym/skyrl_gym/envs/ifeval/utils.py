@@ -139,9 +139,7 @@ def validate_placeholders(text: str, N: int) -> bool:
 def verify_bullet_points(text: str, N: int) -> bool:
     """Verify the text contains exactly N markdown bullet points."""
     lines = text.split("\n")
-    bullet_points = [
-        line.strip() for line in lines if line.strip().startswith(("*", "-"))
-    ]
+    bullet_points = [line.strip() for line in lines if line.strip().startswith(("*", "-"))]
     return len(bullet_points) == N
 
 
@@ -329,14 +327,10 @@ def check_constraint(response: str, ground_truth: str) -> bool:
         True if the response satisfies the constraint, False otherwise (including the
         unknown/malformed-spec and validator-error cases).
     """
-    spec: Dict[str, Any] = (
-        json.loads(ground_truth) if isinstance(ground_truth, str) else ground_truth
-    )
+    spec: Dict[str, Any] = json.loads(ground_truth) if isinstance(ground_truth, str) else ground_truth
     func_name = spec.get("func_name")
     if func_name is None:
-        logger.warning(
-            "ifeval: ground_truth missing 'func_name' (%r); scoring 0.", spec
-        )
+        logger.warning("ifeval: ground_truth missing 'func_name' (%r); scoring 0.", spec)
         return False
     if func_name not in IF_FUNCTIONS_MAP:
         logger.warning(
@@ -351,9 +345,7 @@ def check_constraint(response: str, ground_truth: str) -> bool:
     kwargs = {name: spec[name] for name in arg_names if spec.get(name) is not None}
     try:
         return bool(func(response, **kwargs))
-    except (
-        Exception
-    ) as e:  # a bad completion must never crash the trainer — penalize it
+    except Exception as e:  # a bad completion must never crash the trainer — penalize it
         logger.warning("ifeval: checker %r raised %s; scoring 0.", func_name, e)
         return False
 

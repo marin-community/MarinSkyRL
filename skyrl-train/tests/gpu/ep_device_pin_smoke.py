@@ -19,6 +19,7 @@ Env:
   SMOKE_FORCE_CVD_MASK = "1" | "0"   (toggle the fix; default "1")
   SMOKE_NUM_GPUS       = "4"         (world size; EP=2 x FSDP=2)
 """
+
 import os
 import sys
 
@@ -75,8 +76,7 @@ def build_cfg():
 
 def main():
     cfg = build_cfg()
-    print(f"[smoke] MODEL={MODEL} EP={EP} FSDP={FSDP} world={NUM_GPUS} "
-          f"force_cvd_mask={FORCE_CVD_MASK}", flush=True)
+    print(f"[smoke] MODEL={MODEL} EP={EP} FSDP={FSDP} world={NUM_GPUS} force_cvd_mask={FORCE_CVD_MASK}", flush=True)
 
     initialize_ray(cfg)
 

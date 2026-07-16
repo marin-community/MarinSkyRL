@@ -51,14 +51,18 @@ class TestBestOfNSelect:
 class TestReconstructSparseLogProbs:
     def test_basic_reconstruction(self):
         B, S, V = 2, 3, 5
-        top_k_logprobs = torch.tensor([
-            [[-0.5, -1.0], [-0.3, -0.7], [-0.1, -0.9]],
-            [[-0.2, -0.8], [-0.4, -0.6], [-0.5, -1.5]],
-        ])
-        top_k_indices = torch.tensor([
-            [[0, 2], [1, 3], [4, 0]],
-            [[3, 1], [2, 4], [0, 3]],
-        ])
+        top_k_logprobs = torch.tensor(
+            [
+                [[-0.5, -1.0], [-0.3, -0.7], [-0.1, -0.9]],
+                [[-0.2, -0.8], [-0.4, -0.6], [-0.5, -1.5]],
+            ]
+        )
+        top_k_indices = torch.tensor(
+            [
+                [[0, 2], [1, 3], [4, 0]],
+                [[3, 1], [2, 4], [0, 3]],
+            ]
+        )
         full = reconstruct_sparse_log_probs(top_k_logprobs, top_k_indices, V)
         assert full.shape == (B, S, V)
         # Check that specified positions have correct values
@@ -101,13 +105,17 @@ class TestKLFromSparse:
             "teacher_top_k_indices": top_k_indices,
             "teacher_log_probs_full": teacher_log_probs_full,
             "student_log_probs_full": student_log_probs_full,
-            "B": B, "S": S, "V": V, "K": K,
+            "B": B,
+            "S": S,
+            "V": V,
+            "K": K,
         }
 
     def test_forward_kl_shape(self, setup_distributions):
         d = setup_distributions
         kl = forward_kl_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
             d["student_log_probs_full"],
         )
         assert kl.shape == (d["B"], d["S"])
@@ -115,7 +123,8 @@ class TestKLFromSparse:
     def test_forward_kl_non_negative(self, setup_distributions):
         d = setup_distributions
         kl = forward_kl_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
             d["student_log_probs_full"],
         )
         # Forward KL should be non-negative (up to floating point error)
@@ -152,7 +161,8 @@ class TestKLFromSparse:
     def test_reverse_kl_shape(self, setup_distributions):
         d = setup_distributions
         kl = reverse_kl_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
             d["student_log_probs_full"],
         )
         assert kl.shape == (d["B"], d["S"])
@@ -172,7 +182,8 @@ class TestKLFromSparse:
     def test_jsd_shape(self, setup_distributions):
         d = setup_distributions
         jsd = jsd_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
             d["student_log_probs_full"],
         )
         assert jsd.shape == (d["B"], d["S"])
@@ -180,7 +191,8 @@ class TestKLFromSparse:
     def test_jsd_non_negative(self, setup_distributions):
         d = setup_distributions
         jsd = jsd_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
             d["student_log_probs_full"],
         )
         assert (jsd >= -1e-6).all()
@@ -189,7 +201,8 @@ class TestKLFromSparse:
         """JSD is bounded by log(2) for alpha=0.5."""
         d = setup_distributions
         jsd = jsd_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
             d["student_log_probs_full"],
         )
         assert (jsd <= torch.log(torch.tensor(2.0)) + 1e-5).all()
@@ -210,8 +223,10 @@ class TestKLFromSparse:
         mask[:, 0] = 1.0  # only first position
 
         kl = forward_kl_from_sparse(
-            d["teacher_top_k_logprobs"], d["teacher_top_k_indices"],
-            d["student_log_probs_full"], loss_mask=mask,
+            d["teacher_top_k_logprobs"],
+            d["teacher_top_k_indices"],
+            d["student_log_probs_full"],
+            loss_mask=mask,
         )
         # Masked positions should be zero
         assert (kl[:, 1:] == 0).all()

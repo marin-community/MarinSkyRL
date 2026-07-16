@@ -58,10 +58,7 @@ def test_legacy_modulo_when_cvd_unset_and_pin_off():
 
 
 def test_legacy_modulo_out_of_range_falls_back_to_ray_id():
-    assert (
-        _resolve(cuda_visible_devices=None, launcher_local_rank=9, device_count=4, ray_gpu_ids=[1])
-        == "1"
-    )
+    assert _resolve(cuda_visible_devices=None, launcher_local_rank=9, device_count=4, ray_gpu_ids=[1]) == "1"
 
 
 # --- Case 3: per-GPU {GPU:1} bundle (THE FIX) -------------------------------
@@ -77,10 +74,7 @@ def test_per_gpu_bundle_pins_to_distinct_ray_gpu_id():
 def test_per_gpu_bundle_four_actors_get_distinct_devices():
     # Simulate one node's 4 policy actors in per-GPU-bundle mode. Each actor's
     # bundle is a distinct physical GPU -> get_gpu_ids() returns [0],[1],[2],[3].
-    results = [
-        _resolve(cuda_visible_devices=None, ray_gpu_ids=[g], pin_to_ray_gpu_id=True)
-        for g in (0, 1, 2, 3)
-    ]
+    results = [_resolve(cuda_visible_devices=None, ray_gpu_ids=[g], pin_to_ray_gpu_id=True) for g in (0, 1, 2, 3)]
     assert results == ["0", "1", "2", "3"]
     assert len(set(results)) == 4  # distinct -> no GPU-0 collision
 
@@ -89,8 +83,9 @@ def test_per_gpu_bundle_falls_back_when_ray_id_out_of_range():
     # Defensive: if get_gpu_ids() returned something nonsensical, fall back to
     # the launcher local_rank rather than crashing.
     assert (
-        _resolve(cuda_visible_devices=None, ray_gpu_ids=[99], device_count=4,
-                 launcher_local_rank=1, pin_to_ray_gpu_id=True)
+        _resolve(
+            cuda_visible_devices=None, ray_gpu_ids=[99], device_count=4, launcher_local_rank=1, pin_to_ray_gpu_id=True
+        )
         == "1"
     )
 
@@ -109,15 +104,23 @@ def test_whole_node_bundle_sif_collision_reproduction():
     documented behavior so a regression is visible.
     """
     # OLD get_gpu_ids approach would have produced all "0":
-    all_zero = [_resolve(cuda_visible_devices=None, ray_gpu_ids=[0], pin_to_ray_gpu_id=True,
-                         launcher_local_rank=r, device_count=4) for r in range(4)]
+    all_zero = [
+        _resolve(
+            cuda_visible_devices=None, ray_gpu_ids=[0], pin_to_ray_gpu_id=True, launcher_local_rank=r, device_count=4
+        )
+        for r in range(4)
+    ]
     # Because each shared-bundle actor reports [0], pin-to-ray-id gives "0" for
     # all -> THIS is why per-GPU bundles (not shared {GPU:4}) are required.
     assert all_zero == ["0", "0", "0", "0"]
 
     # Current whole-node modulo path (pin off) spreads logically:
-    modulo = [_resolve(cuda_visible_devices=None, ray_gpu_ids=[0], pin_to_ray_gpu_id=False,
-                       launcher_local_rank=r, device_count=4) for r in range(4)]
+    modulo = [
+        _resolve(
+            cuda_visible_devices=None, ray_gpu_ids=[0], pin_to_ray_gpu_id=False, launcher_local_rank=r, device_count=4
+        )
+        for r in range(4)
+    ]
     assert modulo == ["0", "1", "2", "3"]
 
 

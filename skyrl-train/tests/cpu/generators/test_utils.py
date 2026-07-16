@@ -745,9 +745,9 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         assistant_msg_tokens = encode_messages_subset([{"role": "assistant", "content": "b"}], qwen3_tokenizer)
         # For Qwen3 with content "b": <|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n
         # = 3 (gen prompt) + 6 (content with thinking + eos) + 1 (\n after eos) = 10 tokens
-        assert (
-            len(assistant_msg_tokens) == 10
-        ), f"Assistant message 'b' should be 10 tokens, got {len(assistant_msg_tokens)}"
+        assert len(assistant_msg_tokens) == 10, (
+            f"Assistant message 'b' should be 10 tokens, got {len(assistant_msg_tokens)}"
+        )
         assert assistant_msg_tokens[-2] == qwen3_tokenizer.eos_token_id, "Second to last token should be EOS"
 
         # Expected loss mask:
@@ -791,9 +791,9 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         # For Qwen3 with thinking_content "<think>\nmock thinking\n</think>\n\nb":
         # <|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n
         # = 3 (gen prompt) + 9 (content with thinking + eos) + 1 (\n after eos) = 13 tokens
-        assert (
-            len(assistant_msg_tokens) == 13
-        ), f"Assistant message with thinking should be 13 tokens, got {len(assistant_msg_tokens)}"
+        assert len(assistant_msg_tokens) == 13, (
+            f"Assistant message with thinking should be 13 tokens, got {len(assistant_msg_tokens)}"
+        )
         assert assistant_msg_tokens[-2] == qwen3_tokenizer.eos_token_id, "Second to last token should be EOS"
 
         # Expected loss mask:

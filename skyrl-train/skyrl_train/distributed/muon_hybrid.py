@@ -87,7 +87,7 @@ def is_muon_param(name: str, param: Tensor) -> bool:
         return False
     lname = name.lower()
     adamw_name_markers = (
-        "embed",   # embed_tokens, word_embeddings, wte, position_embeddings
+        "embed",  # embed_tokens, word_embeddings, wte, position_embeddings
         "lm_head",  # output projection
         "wte",
         "wpe",
@@ -167,9 +167,7 @@ class HybridMuon(Optimizer):
         # ``param_groups`` is a plain list whose *elements* are the children's
         # live group dicts → pg["lr"] = x and group.setdefault("initial_lr", ..)
         # mutate the child group in place.
-        self.param_groups = list(
-            chain.from_iterable(c.param_groups for c in self._children)
-        )
+        self.param_groups = list(chain.from_iterable(c.param_groups for c in self._children))
         self.state = _MergedState(self._children)
 
     # --- children iteration helper ----------------------------------------

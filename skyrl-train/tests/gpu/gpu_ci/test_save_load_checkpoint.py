@@ -145,18 +145,18 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         memory_after_offloading = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
         print_mem("memory after offloading", memory_after_offloading)
 
-        assert (
-            memory_after_offloading["allocated"] < memory_after_saving["allocated"]
-        ), f"Memory after offloading should be less than after saving: {memory_after_offloading} bytes < {memory_after_saving} bytes"
+        assert memory_after_offloading["allocated"] < memory_after_saving["allocated"], (
+            f"Memory after offloading should be less than after saving: {memory_after_offloading} bytes < {memory_after_saving} bytes"
+        )
         actor_group.backload_to_gpu()
 
         # check that relevant files are saved
         huggingface_dir = os.path.join(checkpoint_path, "huggingface")
         expected_files = ["config.json", "generation_config.json", "tokenizer.json"]
         for file in expected_files:
-            assert os.path.exists(
-                os.path.join(huggingface_dir, file)
-            ), f"File {file} not found in huggingface directory"
+            assert os.path.exists(os.path.join(huggingface_dir, file)), (
+                f"File {file} not found in huggingface directory"
+            )
         if "fsdp" in strategy:
             fsdp_config_path = os.path.join(checkpoint_path, "fsdp_config.json")
             with open(fsdp_config_path, "r") as f:

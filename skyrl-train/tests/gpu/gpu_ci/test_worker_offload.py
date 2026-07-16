@@ -111,43 +111,45 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         actor_group.offload_to_cpu(offload_optimizer=True, offload_model=False)
         after_offload_optimizer = get_rank_0_memory(actor_group, "After optimizer offload")
 
-        assert (
-            after_offload_optimizer < after_training
-        ), f"Memory after offload optimizer should be less than after training: {after_offload_optimizer} bytes, after training: {after_training} bytes"
+        assert after_offload_optimizer < after_training, (
+            f"Memory after offload optimizer should be less than after training: {after_offload_optimizer} bytes, after training: {after_training} bytes"
+        )
 
         actor_group.offload_to_cpu(offload_optimizer=False, offload_model=True)
         after_offload = get_rank_0_memory(actor_group, "After model offload")
 
         if strategy != "deepspeed":  # deepspeed currently just supports offloading optimizer
-            assert (
-                after_offload < after_offload_optimizer
-            ), f"Memory after offload model should be less than after offload optimizer: {after_offload} bytes, after offload optimizer: {after_offload_optimizer} bytes"
+            assert after_offload < after_offload_optimizer, (
+                f"Memory after offload model should be less than after offload optimizer: {after_offload} bytes, after offload optimizer: {after_offload_optimizer} bytes"
+            )
 
         # check that allocated memory is similar to initial offload memory
         delta = abs(initial_offload_mem - after_offload)
         assert (
             delta < 4e8  # 400MB (should be close to 0 diff)
-        ), f"Memory after training step + offload is not similar to initial offloaded memory: {delta} bytes. Initial offload mem: {initial_offload_mem}, after offload mem: {after_offload} bytes"
+        ), (
+            f"Memory after training step + offload is not similar to initial offloaded memory: {delta} bytes. Initial offload mem: {initial_offload_mem}, after offload mem: {after_offload} bytes"
+        )
 
         # also check that allocated memory goes down after offloading
         delta_forward = after_training - after_offload
-        assert (
-            delta_forward > 0
-        ), f"Memory after offloading should be less than after forward pass: {delta_forward} bytes"
+        assert delta_forward > 0, (
+            f"Memory after offloading should be less than after forward pass: {delta_forward} bytes"
+        )
 
         # Backload model to GPU
         actor_group.backload_to_gpu(backload_optimizer=True, backload_model=False)
         after_backload_optimizer = get_rank_0_memory(actor_group, "After backload optimizer")
-        assert (
-            after_backload_optimizer > after_offload
-        ), f"Memory after backload optimizer should be greater than after offload: {after_backload_optimizer} bytes, after offload: {after_offload} bytes"
+        assert after_backload_optimizer > after_offload, (
+            f"Memory after backload optimizer should be greater than after offload: {after_backload_optimizer} bytes, after offload: {after_offload} bytes"
+        )
 
         actor_group.backload_to_gpu(backload_optimizer=False, backload_model=True)
         after_backload = get_rank_0_memory(actor_group, "After backload model")
         if strategy != "deepspeed":  # deepspeed currently just supports offloading optimizer
-            assert (
-                after_backload > after_backload_optimizer
-            ), f"Memory after backload model should be greater than after backload optimizer: {after_backload} bytes, after backload optimizer: {after_backload_optimizer} bytes"
+            assert after_backload > after_backload_optimizer, (
+                f"Memory after backload model should be greater than after backload optimizer: {after_backload} bytes, after backload optimizer: {after_backload_optimizer} bytes"
+            )
 
         # Run training again and ensure output consistency
         results_backload = ray.get(
@@ -212,9 +214,9 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
         initial_offload_mem = get_rank_0_memory(actor_group, "After initial offload")
 
         # should be close to 0
-        assert (
-            initial_offload_mem < 1e8
-        ), f"Memory after offloading should be close to 0: instead {initial_offload_mem} bytes"
+        assert initial_offload_mem < 1e8, (
+            f"Memory after offloading should be close to 0: instead {initial_offload_mem} bytes"
+        )
 
         # Backload to GPU
         actor_group.backload_to_gpu()
@@ -239,9 +241,9 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
 
         # also check that allocated memory goes down after offloading
         delta_forward = after_forward - after_offload
-        assert (
-            delta_forward > 0
-        ), f"Memory after offloading should be less than after forward pass: {delta_forward} bytes"
+        assert delta_forward > 0, (
+            f"Memory after offloading should be less than after forward pass: {delta_forward} bytes"
+        )
 
         # Backload model to GPU
         actor_group.backload_to_gpu()
@@ -251,9 +253,9 @@ async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, wo
         # Run forward again and ensure output consistency
         results_backload: TrainingOutputBatch = actor_group.run_method("pass_through", "forward", dummy_batch)
 
-        assert (
-            results == results_backload
-        ), f"Results mismatch after backload. Results: {results}, Results backload: {results_backload}"
+        assert results == results_backload, (
+            f"Results mismatch after backload. Results: {results}, Results backload: {results_backload}"
+        )
     finally:
         ray.shutdown()  # Clean up Ray resources after the test
 

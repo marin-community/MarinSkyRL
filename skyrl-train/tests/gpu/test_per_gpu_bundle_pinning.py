@@ -95,8 +95,7 @@ def _probe_device_id(self):
     try:
         cpu_affinity = sorted(os.sched_getaffinity(0))
         cpu_affinity_summary = (
-            f"{cpu_affinity[0]}-{cpu_affinity[-1]} (n={len(cpu_affinity)})"
-            if cpu_affinity else "none"
+            f"{cpu_affinity[0]}-{cpu_affinity[-1]} (n={len(cpu_affinity)})" if cpu_affinity else "none"
         )
     except Exception:
         cpu_affinity_summary = "unavailable"
@@ -155,19 +154,14 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
     )
 
     # Bind the probe as a remote method on each actor handle.
-    probes = ray.get([
-        actor.__ray_call__.remote(_probe_device_id) for actor in policy._actor_handlers
-    ])
+    probes = ray.get([actor.__ray_call__.remote(_probe_device_id) for actor in policy._actor_handlers])
 
     # --- Per-rank evidence (UUID / device / NUMA / Ray-case), printed for the
     # report. The (noset, CVD) pair identifies which resolve_pinned_local_rank
     # branch fired: noset=True -> Case 1 (LOCAL_RANK=ray_gpu_ids[0]); CVD masked
     # to one device -> Case 2 (LOCAL_RANK="0"); CVD unset + pin -> Case 3. ---
     p0 = probes[0]
-    print(
-        f"\n=== trial {trial}: per-rank pinning evidence "
-        f"(noset_visible_devices={p0['noset_visible_devices']}) ==="
-    )
+    print(f"\n=== trial {trial}: per-rank pinning evidence (noset_visible_devices={p0['noset_visible_devices']}) ===")
     for p in sorted(probes, key=lambda x: x["rank"]):
         print(
             f"  rank={p['rank']:>2} local_rank={p['local_rank']} "
@@ -203,9 +197,7 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
         # single GPU at index 0 -> current_device()==0 and gpu_numa==0 for
         # everyone by construction; the distinct UUID asserted above is the proof
         # of a distinct physical GPU + NUMA domain in that case.
-        cvd_unset = all(
-            (p["cuda_visible_devices"] in (None, "")) for p in node_probes
-        )
+        cvd_unset = all((p["cuda_visible_devices"] in (None, "")) for p in node_probes)
         if cvd_unset:
             assert len(set(devs)) == len(devs), (
                 f"node {node_ip}: ranks collided on the same torch device index: {node_probes}"
@@ -218,7 +210,7 @@ def test_per_gpu_bundle_distinct_physical_gpus(trial):
     # --- NVLink locality: a node's ranks are contiguous in rank order. ---
     ranks_sorted = sorted(probes, key=lambda p: p["rank"])
     for n in range(NUM_NODES):
-        group = ranks_sorted[n * GPUS_PER_NODE:(n + 1) * GPUS_PER_NODE]
+        group = ranks_sorted[n * GPUS_PER_NODE : (n + 1) * GPUS_PER_NODE]
         assert len(set(p["node_ip"] for p in group)) == 1, (
             f"rank group {n} spans multiple nodes (NVLink locality broken): {group}"
         )

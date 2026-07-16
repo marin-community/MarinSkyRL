@@ -62,15 +62,11 @@ class BatchIterator:
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
-            rollout_routed_experts=(
-                batch["rollout_routed_experts"] if "rollout_routed_experts" in batch else None
-            ),
+            rollout_routed_experts=(batch["rollout_routed_experts"] if "rollout_routed_experts" in batch else None),
             # Stage D (F7): per-token span tags for <think> loss down-weighting.
             # Present only when the token-reward channel is on; None otherwise
             # (flag-off -> Experience.response_span_tags stays None -> no-op).
-            response_span_tags=(
-                batch["response_span_tags"] if "response_span_tags" in batch else None
-            ),
+            response_span_tags=(batch["response_span_tags"] if "response_span_tags" in batch else None),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},

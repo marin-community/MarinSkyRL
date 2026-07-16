@@ -32,8 +32,10 @@ class WandbNodeLogger:
     """
     A Ray actor that initializes wandb on a specific node to capture system metrics.
     """
+
     def __init__(self, project_name, experiment_name, config, run_id, group_name, x_label):
         import wandb
+
         # Initialize wandb with the same run ID to aggregate system metrics
         run = wandb.init(
             project=project_name,
@@ -48,7 +50,7 @@ class WandbNodeLogger:
                 x_primary=False,
                 x_update_finish_state=False,
                 x_label=x_label,
-            )
+            ),
         )
         self.wandb = run
 
@@ -85,12 +87,14 @@ class Tracking:
                 settings=wandb.Settings(
                     mode="shared",  # mainly for multi-node training's systems metrics aggregation
                     x_primary=True,
-                    x_label=f"node-{current_node_ip}"
-                )
+                    x_label=f"node-{current_node_ip}",
+                ),
             )
             run_id = run.id
             self.logger["wandb"] = run
-            self._prepare_worker_nodes_systems_logging_wandb(project_name, experiment_name, run_id, config, current_node_ip)
+            self._prepare_worker_nodes_systems_logging_wandb(
+                project_name, experiment_name, run_id, config, current_node_ip
+            )
 
         if "mlflow" in backends:
             self.logger["mlflow"] = _MlflowLoggingAdapter(project_name, experiment_name, config)
@@ -121,8 +125,9 @@ class Tracking:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
 
-
-    def _prepare_worker_nodes_systems_logging_wandb(self, project_name, experiment_name, run_id, config, current_node_ip):
+    def _prepare_worker_nodes_systems_logging_wandb(
+        self, project_name, experiment_name, run_id, config, current_node_ip
+    ):
         """
         In multi-node training, we spawn WandbNodeLogger actors on each worker node to capture system metrics like
         GPU utilization. We use `mode="shared"` to aggregate system metrics from all nodes to the same Wandb run.
@@ -160,7 +165,7 @@ class Tracking:
                             config=OmegaConf.to_container(config, resolve=True),
                             run_id=run_id,
                             group_name=experiment_name,
-                            x_label=f"node-{node_ip}"
+                            x_label=f"node-{node_ip}",
                         )
                         self.remote_loggers.append(logger_actor)
                     except Exception as e:
@@ -171,7 +176,6 @@ class Tracking:
                 logger.warning(f"Failed to setup distributed wandb logging: {e}")
         else:
             logger.warning("Ray is not initialized, skipping distributed wandb logging")
-
 
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():

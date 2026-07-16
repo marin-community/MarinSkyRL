@@ -58,9 +58,11 @@ class OnPolicyDistillationLogitsTrainer(DistillationTrainer):
 
         # Log teacher KL metrics
         kl_mean = masked_mean(rewards.abs(), loss_mask, dim=-1).mean().item()
-        self.all_metrics.update({
-            "distill/token_kl_mean": kl_mean,
-        })
+        self.all_metrics.update(
+            {
+                "distill/token_kl_mean": kl_mean,
+            }
+        )
 
         return data
 
@@ -90,9 +92,7 @@ class OnPolicyDistillationLogitsExp(BasePPOExp):
 
         # Create teacher engines if configured
         if self.cfg.teacher.model_path is not None:
-            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(
-                self.cfg, self.tokenizer
-            )
+            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(self.cfg, self.tokenizer)
             trainer.setup_teacher_engine(
                 teacher_engines,
                 student_tokenizer=self.tokenizer,

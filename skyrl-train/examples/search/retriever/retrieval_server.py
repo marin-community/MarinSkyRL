@@ -346,7 +346,6 @@ def retrieve_endpoint(request: QueryRequest):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description="Launch the local faiss retriever.")
     parser.add_argument(
         "--index_path", type=str, default="/home/peterjin/mnt/index/wiki-18/e5_Flat.index", help="Corpus indexing file."

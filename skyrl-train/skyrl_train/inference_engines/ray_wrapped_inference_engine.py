@@ -372,8 +372,7 @@ def create_ray_wrapped_inference_engines(
             # The {GPU: tp_pp_size} bundle is already atomic-per-node, so the mp path
             # was never affected by the cross-node split; keep its single PACK PG.
             bundles = [
-                {"GPU": tp_pp_size, "CPU": tp_pp_size}
-                for _ in range(num_inference_engines * data_parallel_size)
+                {"GPU": tp_pp_size, "CPU": tp_pp_size} for _ in range(num_inference_engines * data_parallel_size)
             ]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
@@ -443,16 +442,15 @@ def create_ray_wrapped_inference_engines(
                     rope_factor = rope_scaling.get("factor", None)
                     rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
                     assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
-                    assert (
-                        rope_max_pos is not None
-                    ), "Please provide rope `original_max_position_embeddings` to compute model max length"
+                    assert rope_max_pos is not None, (
+                        "Please provide rope `original_max_position_embeddings` to compute model max length"
+                    )
                     rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
             if rope_theta is not None:
                 rope_engine_kwargs["rope_theta"] = rope_theta
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
-
                 # Contiguous TP*PP slice reserved for a single DP rank.
                 base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
                 dp_rank_bundles = (

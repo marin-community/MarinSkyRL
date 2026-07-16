@@ -76,8 +76,7 @@ def test_g3b_3_state_dict_roundtrip_lossless():
     convert_tt_to_hf_moe(sd)
 
     assert set(sd.keys()) == set(original.keys()), (
-        f"key mismatch after roundtrip: "
-        f"+{set(sd) - set(original)} -{set(original) - set(sd)}"
+        f"key mismatch after roundtrip: +{set(sd) - set(original)} -{set(original) - set(sd)}"
     )
     for k in original:
         assert torch.equal(sd[k], original[k]), f"value mismatch at {k}"

@@ -172,9 +172,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         prompt_token_ids: Optional[List[List[int]]] = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
 
-        assert (
-            prompts is None and prompt_token_ids is not None
-        ), "RemoteInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
+        assert prompts is None and prompt_token_ids is not None, (
+            "RemoteInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
+        )
 
         sampling_params = request_sampling_params if request_sampling_params is not None else {}
         if "n" in sampling_params and sampling_params["n"] > 1:
@@ -288,9 +288,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         if "names" not in request:
             raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
 
-        assert (
-            len(request["names"]) == 1
-        ), f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
+        assert len(request["names"]) == 1, (
+            f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
+        )
 
         if request.get("extras") and "ipc_handles" in request["extras"][0]:
             raise ValueError(

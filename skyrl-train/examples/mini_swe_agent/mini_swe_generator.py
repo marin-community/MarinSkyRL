@@ -97,7 +97,15 @@ def init_and_run(
                 eval_error = str(e)
                 error = str(e)
 
-            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info, reward=reward, eval_error=eval_error)  # type: ignore[arg-type]
+            save_traj(
+                agent,
+                path,
+                exit_status=exit_status,
+                result=result,
+                extra_info=extra_info,
+                reward=reward,
+                eval_error=eval_error,
+            )  # type: ignore[arg-type]
 
     return (agent.messages if agent is not None else [], reward, error)
 
@@ -111,7 +119,6 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         tokenizer,
         model_name: str,
     ):
-
         # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
@@ -142,7 +149,6 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         trajectory_id: TrajectoryID,
         batch_metadata: BatchMetadata,
     ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
-
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         messages, reward, error = await init_and_run.remote(

@@ -8,6 +8,7 @@ import torch
 from skyrl_train.weight_sync import WeightChunk
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 # vLLM fuses certain layers (gate+up → gate_up_proj, q+k+v → qkv_proj).

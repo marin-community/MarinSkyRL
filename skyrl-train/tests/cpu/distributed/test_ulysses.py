@@ -69,7 +69,6 @@ def test_sequence_parallel_forward():
             ) as mock_gather_heads_scatter_seq,
             patch("torch.distributed.all_gather") as mock_all_gather,
         ):
-
             # Mock the gather/scatter operations
             mock_gather_seq_scatter_heads.side_effect = lambda x, **kwargs: x[:, :, : n_heads // sp_size, :].repeat(
                 1, sp_size, 1, 1

@@ -14,6 +14,7 @@ prefix/format as the datagen monitor so existing greps keep working, and uses
 Only start this on the driver / main entrypoint process (not every Ray
 worker) to avoid log spam.
 """
+
 from __future__ import annotations
 
 import os
@@ -80,11 +81,7 @@ def _get_mem_usage() -> tuple:
                     mem_avail_kb = int(line.split()[1])
                 elif line.startswith("MemTotal:"):
                     mem_total_kb = int(line.split()[1])
-        system_pct = (
-            (mem_total_kb - mem_avail_kb) / mem_total_kb * 100
-            if mem_total_kb > 0
-            else 0.0
-        )
+        system_pct = (mem_total_kb - mem_avail_kb) / mem_total_kb * 100 if mem_total_kb > 0 else 0.0
         return rss_kb, mem_avail_kb, mem_total_kb, system_pct
     except Exception:
         return -1, -1, -1, 0.0
@@ -150,8 +147,10 @@ def _get_cgroup_pids() -> list:
     ``cgroup.procs``, falling back to v1 ``memory/cgroup.procs``) so we can sum
     + bucket per-process RSS. Returns [] on any failure (non-Linux, no cgroupfs).
     """
-    for p in ("/sys/fs/cgroup/cgroup.procs",  # v2 unified hierarchy (container root)
-              "/sys/fs/cgroup/memory/cgroup.procs"):  # v1 memory controller
+    for p in (
+        "/sys/fs/cgroup/cgroup.procs",  # v2 unified hierarchy (container root)
+        "/sys/fs/cgroup/memory/cgroup.procs",
+    ):  # v1 memory controller
         try:
             if os.path.exists(p):
                 with open(p) as f:
@@ -192,8 +191,7 @@ def _bucket_for_cmdline(cmd: str) -> str:
         return "raylet"
     if "plasma" in c:  # separate plasma_store_server (older Ray); embedded in raylet on newer
         return "plasma"
-    if ("rolloutcoordinator" in c or "rollout_coordinator" in c
-            or "skyrl_entrypoint" in c):
+    if "rolloutcoordinator" in c or "rollout_coordinator" in c or "skyrl_entrypoint" in c:
         return "coord"
     if "policyworker" in c or "fsdppolicyworker" in c or "policy_worker" in c:
         return "workers"
@@ -394,8 +392,7 @@ def _log_status(peaks: dict | None = None, breakdown: bool = False) -> None:
                 )
         else:
             print(
-                f"[fd-monitor] [{timestamp}] OK: cgroup mem {cg_cur / gib_b:.2f} GiB "
-                f"(no cap){cg_peak_str}",
+                f"[fd-monitor] [{timestamp}] OK: cgroup mem {cg_cur / gib_b:.2f} GiB (no cap){cg_peak_str}",
                 flush=True,
             )
 
@@ -425,9 +422,7 @@ def _run(stop_event: threading.Event, interval: int, breakdown: bool = False) ->
             _log_status(peaks, breakdown)
 
 
-def start_fd_monitor(
-    interval_seconds: int = DEFAULT_FD_MONITOR_INTERVAL, breakdown: bool = False
-) -> threading.Event:
+def start_fd_monitor(interval_seconds: int = DEFAULT_FD_MONITOR_INTERVAL, breakdown: bool = False) -> threading.Event:
     """Start a daemon thread that periodically logs FD usage of this process.
 
     Self-contained and best-effort: never raises into the caller. Intended to

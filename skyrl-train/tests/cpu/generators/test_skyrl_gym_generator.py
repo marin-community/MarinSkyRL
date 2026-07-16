@@ -439,29 +439,29 @@ async def test_generate_interface_compliance(
     }
 
     # Validate input conforms to interface
-    assert validate_generator_input(
-        input_batch
-    ), f"Input does not conform to GeneratorInput interface (batched={batched})"
+    assert validate_generator_input(input_batch), (
+        f"Input does not conform to GeneratorInput interface (batched={batched})"
+    )
 
     # Call generate method
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
     # Validate output conforms to interface
-    assert validate_generator_output(
-        generator_output
-    ), f"Output does not conform to GeneratorOutput interface (batched={batched})"
+    assert validate_generator_output(generator_output), (
+        f"Output does not conform to GeneratorOutput interface (batched={batched})"
+    )
 
     # Additional specific type checks
     assert isinstance(generator_output, dict), "Output should be a dictionary"
-    assert len(generator_output["response_ids"]) == len(
-        prompts
-    ), f"Number of responses should match number of prompts (batched={batched})"
-    assert len(generator_output["rewards"]) == len(
-        prompts
-    ), f"Number of rewards should match number of prompts (batched={batched})"
-    assert len(generator_output["loss_masks"]) == len(
-        prompts
-    ), f"Number of loss masks should match number of prompts (batched={batched})"
+    assert len(generator_output["response_ids"]) == len(prompts), (
+        f"Number of responses should match number of prompts (batched={batched})"
+    )
+    assert len(generator_output["rewards"]) == len(prompts), (
+        f"Number of rewards should match number of prompts (batched={batched})"
+    )
+    assert len(generator_output["loss_masks"]) == len(prompts), (
+        f"Number of loss masks should match number of prompts (batched={batched})"
+    )
 
     # Test with None env_extras to ensure Optional handling works (only test this once)
     if batched:
@@ -551,9 +551,9 @@ async def test_length_limit_exceeded_during_conversation(
 
     # Verify environment step was called the expected number of times
     expected_calls = turns_to_exceed
-    assert (
-        mock_env.step.call_count == expected_calls
-    ), f"Expected {expected_calls} environment steps, got {mock_env.step.call_count}"
+    assert mock_env.step.call_count == expected_calls, (
+        f"Expected {expected_calls} environment steps, got {mock_env.step.call_count}"
+    )
 
     # Verify response is still properly formatted
     assert isinstance(output.response_ids, list)
@@ -640,12 +640,12 @@ async def test_multi_turn_response_truncation(
 
     # Verify truncation occurred
     assert len(output.response_ids) <= expected_max_response_tokens
-    assert (
-        len(output.response_ids) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} response tokens, got {len(output.response_ids)}"
-    assert (
-        len(output.loss_mask) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} loss mask entries, got {len(output.loss_mask)}"
+    assert len(output.response_ids) == expected_final_response_tokens, (
+        f"Expected {expected_final_response_tokens} response tokens, got {len(output.response_ids)}"
+    )
+    assert len(output.loss_mask) == expected_final_response_tokens, (
+        f"Expected {expected_final_response_tokens} loss mask entries, got {len(output.loss_mask)}"
+    )
 
     # Verify stop reason is "length" due to truncation
     assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
@@ -720,13 +720,13 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
 
     # Check that the postprocessed response tokens (42) are present in response_ids
     # This verifies that postprocessed_action was used instead of raw LLM output
-    assert any(
-        token == 42 for token in output.response_ids
-    ), f"Expected postprocessed response tokens (42) in {output.response_ids}"
+    assert any(token == 42 for token in output.response_ids), (
+        f"Expected postprocessed response tokens (42) in {output.response_ids}"
+    )
     # Make sure raw LLM tokens (99) are NOT present
-    assert not any(
-        token == 99 for token in output.response_ids
-    ), f"Raw LLM output tokens (99) should not be in {output.response_ids}"
+    assert not any(token == 99 for token in output.response_ids), (
+        f"Raw LLM output tokens (99) should not be in {output.response_ids}"
+    )
 
     if isinstance(output.reward, list):
         assert sum(output.reward) == 1.0
@@ -779,7 +779,6 @@ async def test_apply_overlong_filtering_non_batched(
 
     # First test: response that doesn't end with eos token (should be filtered)
     async def llm_generate_side_effect(input_batch):
-
         if input_batch.get("sampling_params") is not None:
             max_len = input_batch["sampling_params"]["max_generate_length"]
         else:
@@ -946,9 +945,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
 
     # LLM returns fixed response tokens per step: 3 tokens + eos
     async def llm_generate_side_effect(input_batch):
-        num = (
-            len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
-        )  # noqa: E501
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])  # noqa: E501
         return {
             "responses": ["aaa"] * num,
             "stop_reasons": ["stop"] * num,
@@ -1035,9 +1032,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
 
     # LLM outputs include EOS and are kept in multi-turn path
     async def llm_generate_side_effect(input_batch):
-        num = (
-            len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
-        )  # noqa: E501
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])  # noqa: E501
         return {
             "responses": ["aaa"] * num,
             "stop_reasons": ["stop"] * num,
@@ -1126,9 +1121,7 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
 
     # LLM generate in retokenize mode uses prompts; we can return any ids
     async def llm_generate_side_effect(input_batch):
-        num = (
-            len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        )  # noqa: E501
+        num = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])  # noqa: E501
         return {
             "responses": ["bbb"] * num,
             "stop_reasons": ["stop"] * num,

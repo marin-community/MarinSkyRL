@@ -444,7 +444,7 @@ class HarborConfigBuilder:
 
         prm_kwargs = {k: v for k, v in prm_cfg.items() if k != "name"}
         prm_instance = get_prm(prm_name, **prm_kwargs)
-        logger.info(f"PRM '{prm_name}' enabled as turn_callback " f"(params: {prm_kwargs})")
+        logger.info(f"PRM '{prm_name}' enabled as turn_callback (params: {prm_kwargs})")
         return prm_instance.as_turn_callback()
 
     def _extract_harbor_fields_legacy(self, cfg: DictConfig) -> Dict[str, Any]:
@@ -488,8 +488,7 @@ class HarborConfigBuilder:
                 else:
                     # Completely unknown field
                     self._warn_once(
-                        f"Unknown harbor config key '{key}' - ignoring. "
-                        f"Check spelling or Harbor version compatibility."
+                        f"Unknown harbor config key '{key}' - ignoring. Check spelling or Harbor version compatibility."
                     )
 
     def _warn_once(self, message: str) -> None:

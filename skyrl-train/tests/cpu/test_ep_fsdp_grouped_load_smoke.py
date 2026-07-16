@@ -128,9 +128,7 @@ def _build_and_wrap(num_experts, ep_size, fsdp_size, dim=4, hidden_dim=6, do_ep=
 
     if do_ep:
         ddp = dist.get_world_size() // (fsdp_size * ep_size)
-        mesh = init_device_mesh(
-            "cpu", (ddp, fsdp_size, ep_size), mesh_dim_names=("ddp", "fsdp", "ep")
-        )
+        mesh = init_device_mesh("cpu", (ddp, fsdp_size, ep_size), mesh_dim_names=("ddp", "fsdp", "ep"))
         ep_mesh = mesh["ep"]
         fsdp_mesh = mesh["fsdp"]
         parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=_EPShard0())
@@ -178,9 +176,7 @@ def _streamed_load_emulation(model, full_sd, ep_enabled, stale_snapshot_sd=None)
             # ---- Loader hardening assert (B1): assembled local == LIVE param local
             live_p = live_params.get(key, None)
             expected = (
-                tuple(live_p.to_local().shape)
-                if isinstance(live_p, DTensor)
-                else tuple(local_state.to_local().shape)
+                tuple(live_p.to_local().shape) if isinstance(live_p, DTensor) else tuple(local_state.to_local().shape)
             )
             assert tuple(local_cpu.shape) == expected, (
                 f"[EP-LOADER] {key}: assembled local shard {tuple(local_cpu.shape)} != "
@@ -265,7 +261,8 @@ def _worker(rank, world, geom, result_q):
         stale_snapshot_sd = None
         if mode == "stale_b1":
             ep_mesh = init_device_mesh(
-                "cpu", (dist.get_world_size() // (fsdp_size * ep_size), fsdp_size, ep_size),
+                "cpu",
+                (dist.get_world_size() // (fsdp_size * ep_size), fsdp_size, ep_size),
                 mesh_dim_names=("ddp", "fsdp", "ep"),
             )["ep"]
             stale_snapshot_sd = {}
@@ -309,10 +306,10 @@ def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, expect_pass=True, mod
     world = ep_size * fsdp_size if do_ep else fsdp_size
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
-    procs = [ctx.Process(
-        target=_worker,
-        args=(r, world, (num_experts, ep_size, fsdp_size, do_ep, mode), q))
-        for r in range(world)]
+    procs = [
+        ctx.Process(target=_worker, args=(r, world, (num_experts, ep_size, fsdp_size, do_ep, mode), q))
+        for r in range(world)
+    ]
     for p in procs:
         p.start()
     results = [q.get() for _ in range(world)]
@@ -321,13 +318,11 @@ def run_geom(name, num_experts, ep_size, fsdp_size, do_ep, expect_pass=True, mod
 
     fails = [r for r in results if r[1] == "FAIL"]
     rank0 = next((r for r in results if r[0] == 0), None)
-    print(f"\n=== {name}: E={num_experts} ep={ep_size} fsdp={fsdp_size} do_ep={do_ep} "
-          f"mode={mode} world={world} ===")
+    print(f"\n=== {name}: E={num_experts} ep={ep_size} fsdp={fsdp_size} do_ep={do_ep} mode={mode} world={world} ===")
     if fails:
         if not expect_pass:
             # BUG-REPRO geometry: the load/assert MUST fail loud (this is the bug).
-            print(f"  RESULT: PASS (expected-fail) — load failed loud as intended on "
-                  f"{len(fails)}/{world} ranks")
+            print(f"  RESULT: PASS (expected-fail) — load failed loud as intended on {len(fails)}/{world} ranks")
             print("  first (expected) error:\n   " + str(fails[0][2]).splitlines()[0])
             return True
         print(f"  RESULT: FAIL ({len(fails)}/{world} ranks)")
@@ -348,16 +343,24 @@ def main():
     gates = []
     # BUG REPRO A: the un-composed (ep-only) leak MUST fail loud at the composition
     # assert (A) at wrap time.
-    gates.append(("BUGREPRO assertA EP2xFSDP2/64 (ep-only)",
-                  run_geom("BUGREPRO assertA EP2xFSDP2/64 (ep-only)", 64, 2, 2, True,
-                           expect_pass=False, mode="leak_assertA")))
+    gates.append(
+        (
+            "BUGREPRO assertA EP2xFSDP2/64 (ep-only)",
+            run_geom("BUGREPRO assertA EP2xFSDP2/64 (ep-only)", 64, 2, 2, True, expect_pass=False, mode="leak_assertA"),
+        )
+    )
     # BUG REPRO B1: composed 2-D live param but a STALE 1-D ep-only snapshot fed to
     # the loader (the report's snapshot-vs-live divergence). The loader shape assert
     # (B1) must catch the 32-vs-16 mismatch precisely, before the opaque
     # `start(0)+length(32) exceeds dimension size(16)` crash at assign.
-    gates.append(("BUGREPRO assertB1 EP2xFSDP2/64 (stale snapshot)",
-                  run_geom("BUGREPRO assertB1 EP2xFSDP2/64 (stale snapshot)", 64, 2, 2, True,
-                           expect_pass=False, mode="stale_b1")))
+    gates.append(
+        (
+            "BUGREPRO assertB1 EP2xFSDP2/64 (stale snapshot)",
+            run_geom(
+                "BUGREPRO assertB1 EP2xFSDP2/64 (stale snapshot)", 64, 2, 2, True, expect_pass=False, mode="stale_b1"
+            ),
+        )
+    )
     # FIX GATE: OLMoE EP=2 x FSDP=2, 64 experts.
     gates.append(("FIX EP2xFSDP2/64", run_geom("FIX EP2xFSDP2/64", 64, 2, 2, True)))
     # REGRESSION GATE 1: Qwen3-Coder-shaped EP=4 x FSDP=4, 128 experts.

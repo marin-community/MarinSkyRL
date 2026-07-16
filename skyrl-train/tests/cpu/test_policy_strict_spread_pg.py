@@ -118,6 +118,7 @@ def test_bundle_count_matches_policy_nodes_80b():
     num_inference_gpus = 16 * 4
     assert total_gpus + num_inference_gpus == 24 * 4
 
+
 def test_bundle_count_matches_policy_nodes_a3_8b():
     """a3 8B shape: 2 nodes x 4 GPU -> 2 whole-node bundles, 8 GPU total.
 

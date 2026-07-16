@@ -21,6 +21,7 @@ identically on both sides can no longer look clean.
 Run (4 nodes; DIAG_NUM_GPUS=16 total, 4 GPU/node). NO pytest needed (callable __main__):
     DIAG_NUM_GPUS=16 DIAG_GPUS_PER_NODE=4 python -m tests.gpu.diag_ep8_weight_disk_ref
 """
+
 import os
 
 import ray
@@ -73,9 +74,12 @@ def main():
     try:
         cfg = _get_cfg()
         n_nodes = cfg.trainer.placement.policy_num_nodes
-        print(f"[ep8diag] model={MODEL} EP={DIAG_EP} FSDP={DIAG_FSDP} "
-              f"world={NUM_GPUS} layout={n_nodes}nodes x {GPUS_PER_NODE}gpu "
-              f"| torch={torch.__version__}", flush=True)
+        print(
+            f"[ep8diag] model={MODEL} EP={DIAG_EP} FSDP={DIAG_FSDP} "
+            f"world={NUM_GPUS} layout={n_nodes}nodes x {GPUS_PER_NODE}gpu "
+            f"| torch={torch.__version__}",
+            flush=True,
+        )
 
         initialize_ray(cfg)
 
@@ -98,28 +102,35 @@ def main():
         geos = sorted([g for g in geos if isinstance(g, dict)], key=lambda d: d["rank"])
         print("\n[ep8diag] ===== MESH GEOMETRY (rank | host | coord | ep_coord | ep_group_key) =====", flush=True)
         from collections import defaultdict
+
         group_hosts = defaultdict(set)
         for g in geos:
-            print(f"    r{g['rank']:>2} host={g['host']:<24} coord={g['coord']} "
-                  f"ep={g['ep_coord']} group={g['ep_group_key']} mesh={g['mesh_dim_names']}{g['mesh_shape']}",
-                  flush=True)
+            print(
+                f"    r{g['rank']:>2} host={g['host']:<24} coord={g['coord']} "
+                f"ep={g['ep_coord']} group={g['ep_group_key']} mesh={g['mesh_dim_names']}{g['mesh_shape']}",
+                flush=True,
+            )
             group_hosts[g["ep_group_key"]].add(g["host"])
         cross_node_groups = {k: hs for k, hs in group_hosts.items() if len(hs) >= 2}
-        print(f"\n[ep8diag] EP groups: {len(group_hosts)} total; "
-              f"{len(cross_node_groups)} span >=2 nodes.", flush=True)
+        print(f"\n[ep8diag] EP groups: {len(group_hosts)} total; {len(cross_node_groups)} span >=2 nodes.", flush=True)
         for k, hs in group_hosts.items():
             print(f"    group {k}: {len(hs)} node(s) -> {sorted(hs)}", flush=True)
         if not cross_node_groups:
-            print("[ep8diag] !!! BLOCKER: NO EP group straddles 2 nodes. The geometry did NOT "
-                  "force cross-node EP. Adjust DIAG_GPUS_PER_NODE / layout. ABORTING.", flush=True)
+            print(
+                "[ep8diag] !!! BLOCKER: NO EP group straddles 2 nodes. The geometry did NOT "
+                "force cross-node EP. Adjust DIAG_GPUS_PER_NODE / layout. ABORTING.",
+                flush=True,
+            )
             return 3
-        print(f"[ep8diag] PROOF OK: {len(cross_node_groups)}/{len(group_hosts)} EP groups span >=2 nodes "
-              f"=> the EP=8 gather IS exercised cross-node.", flush=True)
+        print(
+            f"[ep8diag] PROOF OK: {len(cross_node_groups)}/{len(group_hosts)} EP groups span >=2 nodes "
+            f"=> the EP=8 gather IS exercised cross-node.",
+            flush=True,
+        )
 
         # ---- 2-5. NON-CIRCULAR on-GPU gather-vs-disk compare ----
         print(f"\n[ep8diag] ===== GATHER vs DISK-REFERENCE (layer {LAYER_IDX}, on-GPU) =====", flush=True)
-        res = ray.get(policy.async_run_ray_method(
-            "pass_through", "diag_ep8_disk_ref_compare", MODEL, LAYER_IDX, 2))
+        res = ray.get(policy.async_run_ray_method("pass_through", "diag_ep8_disk_ref_compare", MODEL, LAYER_IDX, 2))
         r0 = next((d for d in res if isinstance(d, dict) and d.get("rank") == 0), None)
         if r0 is None:
             print("[ep8diag] !!! rank-0 returned no result.", flush=True)
@@ -147,4 +158,5 @@ def main():
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

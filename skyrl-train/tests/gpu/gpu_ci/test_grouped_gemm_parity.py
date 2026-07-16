@@ -119,8 +119,13 @@ def _inputs(device, batch=1, seq_len=32, num_actions=16, vocab=256):
 
 def _forward_logits(wrapper, input_ids, attn, num_actions, rollout_routed_experts=None):
     _, output = wrapper(
-        input_ids, num_actions, attention_mask=attn, temperature=1.0,
-        return_output=True, compute_entropy=False, rollout_routed_experts=rollout_routed_experts,
+        input_ids,
+        num_actions,
+        attention_mask=attn,
+        temperature=1.0,
+        return_output=True,
+        compute_entropy=False,
+        rollout_routed_experts=rollout_routed_experts,
     )
     return output["logits"]
 
@@ -194,9 +199,7 @@ def _g3b_1(build, name, device):
     out_eager = _forward_logits(w_eager, input_ids, attn, num_actions)
     out_grouped = _forward_logits(w_grouped, input_ids, attn, num_actions)
     diff = (out_eager - out_grouped).abs().max().item()
-    assert torch.allclose(out_eager, out_grouped, atol=2e-2), (
-        f"[{name}] grouped fwd != HF eager (max diff {diff:.4e})"
-    )
+    assert torch.allclose(out_eager, out_grouped, atol=2e-2), f"[{name}] grouped fwd != HF eager (max diff {diff:.4e})"
 
     # Backward: grad on embed_tokens should be bounded-close.
     w_eager.model.zero_grad()

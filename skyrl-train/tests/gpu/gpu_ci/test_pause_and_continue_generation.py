@@ -126,9 +126,9 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             assert cur.get("status_code") == 200, f"Request {i} failed: {cur.get('status_code')} {cur.get('text')}"
             out = cur["response"]
             assert "choices" in out and len(out["choices"]) == 1, f"Invalid choices for request {i}: {out}"
-            assert (
-                out["choices"][0].get("finish_reason") == "length"
-            ), f"Request {i} finish_reason is not 'length': {out['choices'][0].get('finish_reason')}"
+            assert out["choices"][0].get("finish_reason") == "length", (
+                f"Request {i} finish_reason is not 'length': {out['choices'][0].get('finish_reason')}"
+            )
 
             choice = out["choices"][0]
             logprobs = choice["logprobs"]
@@ -136,29 +136,29 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             print(f"Output first 1500 chars: {choice['message']['content'][:1500]}...")
 
             # Check completion tokens
-            assert (
-                out["usage"]["completion_tokens"] == sampling_params["max_tokens"]
-            ), f"Request {i} expected completion_tokens={sampling_params['max_tokens']}, got {out['usage']['completion_tokens']}"
-            assert (
-                token_count_from_logprobs == sampling_params["max_tokens"]
-            ), f"Request {i} expected {sampling_params['max_tokens']} tokens from logprobs, got {token_count_from_logprobs}"
+            assert out["usage"]["completion_tokens"] == sampling_params["max_tokens"], (
+                f"Request {i} expected completion_tokens={sampling_params['max_tokens']}, got {out['usage']['completion_tokens']}"
+            )
+            assert token_count_from_logprobs == sampling_params["max_tokens"], (
+                f"Request {i} expected {sampling_params['max_tokens']} tokens from logprobs, got {token_count_from_logprobs}"
+            )
 
             # Spot-check structure of each logprob entry: token contains token_id and top_logprobs length matches request
             top_logprobs = sampling_params["top_logprobs"]
             for entry in logprobs["content"]:
                 # tokens are token_id:<int> when return_tokens_as_token_ids=True
                 parts = str(entry["token"]).split(":")
-                assert (
-                    len(parts) >= 2 and parts[-1].isdigit()
-                ), f"Request {i} token field not token_id:int: {entry['token']}"
-                assert (
-                    len(entry["top_logprobs"]) == top_logprobs
-                ), f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
+                assert len(parts) >= 2 and parts[-1].isdigit(), (
+                    f"Request {i} token field not token_id:int: {entry['token']}"
+                )
+                assert len(entry["top_logprobs"]) == top_logprobs, (
+                    f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
+                )
             # Check prompt tokens
             prompt_tokens = client.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-            assert (
-                len(prompt_tokens) == out["usage"]["prompt_tokens"]
-            ), f"Request {i} expected {len(prompt_tokens)} tokens from prompt, got {out['usage']['prompt_tokens']}"
+            assert len(prompt_tokens) == out["usage"]["prompt_tokens"], (
+                f"Request {i} expected {len(prompt_tokens)} tokens from prompt, got {out['usage']['prompt_tokens']}"
+            )
             # TODO(Charlie): after we bump vllm such that it supports returnining tokens, check `choice["token_ids"]`
             # TODO(Charlie): after we add model version to the output, check that as well
     finally:
@@ -247,14 +247,14 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         assert out["stop_reasons"][0] == "length", f"Request {i} stop_reason is not 'length': {out['stop_reasons'][0]}"
         # Check completion tokens via response_ids
         token_ids = out["response_ids"][0]
-        assert (
-            len(token_ids) == sampling_params["max_tokens"]
-        ), f"Request {i} expected {sampling_params['max_tokens']} tokens, got {len(token_ids)}"
+        assert len(token_ids) == sampling_params["max_tokens"], (
+            f"Request {i} expected {sampling_params['max_tokens']} tokens, got {len(token_ids)}"
+        )
         # Check response_logprobs length
         assert "response_logprobs" in out, f"Request {i} missing response_logprobs"
-        assert (
-            len(out["response_logprobs"][0]) == sampling_params["max_tokens"]
-        ), f"Request {i} expected {sampling_params['max_tokens']} logprobs, got {len(out['response_logprobs'][0])}"
+        assert len(out["response_logprobs"][0]) == sampling_params["max_tokens"], (
+            f"Request {i} expected {sampling_params['max_tokens']} logprobs, got {len(out['response_logprobs'][0])}"
+        )
         # Check string output is
         assert out["responses"][0] == client.tokenizer.decode(token_ids, skip_special_tokens=True)
         # Print a preview to aid debugging
@@ -299,7 +299,6 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     for api in ["chat_completion", "completion"]:
-
         # 2. Build 4 chat prompts that have no early stops
         convs: List[ConversationType] = [
             [
@@ -347,9 +346,9 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
 
         # Two requests should have never got to run because we have max_num_seqs=2, and yet they should
         # be aborted.
-        assert (
-            num_completion_tokens_is_zero == 2
-        ), f"Expected 2 requests with completion_tokens=0, got {num_completion_tokens_is_zero}."
+        assert num_completion_tokens_is_zero == 2, (
+            f"Expected 2 requests with completion_tokens=0, got {num_completion_tokens_is_zero}."
+        )
 
         # Unpause for the next API run
         asyncio.run(client.resume_generation())

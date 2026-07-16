@@ -41,8 +41,9 @@ SPAN_OTHER, SPAN_THINK, SPAN_ACTION, SPAN_EDIT = 0, 1, 2, 3
 # ---------------------------------------------------------------------------
 def test_weighted_mask_weight_one_returns_same_object():
     loss_mask = torch.tensor([[1, 1, 0, 1], [1, 0, 1, 1]], dtype=torch.long)
-    tags = torch.tensor([[SPAN_THINK, SPAN_THINK, 0, SPAN_ACTION],
-                         [SPAN_THINK, 0, SPAN_EDIT, SPAN_ACTION]], dtype=torch.long)
+    tags = torch.tensor(
+        [[SPAN_THINK, SPAN_THINK, 0, SPAN_ACTION], [SPAN_THINK, 0, SPAN_EDIT, SPAN_ACTION]], dtype=torch.long
+    )
     out = build_think_weighted_loss_mask(loss_mask, tags, think_token_weight=1.0)
     assert out is loss_mask, "weight==1.0 must return the ORIGINAL loss_mask object"
 
@@ -54,16 +55,18 @@ def test_weighted_mask_no_tags_returns_same_object():
 
 
 def _loss_cfg():
-    return OmegaConf.create({
-        "policy_loss_type": "regular",
-        "loss_reduction": "token_mean",
-        "eps_clip_low": 0.2,
-        "eps_clip_high": 0.2,
-        "clip_ratio_c": 3.0,
-        "use_tis": False,
-        "tis_imp_ratio_cap": -1.0,
-        "max_seq_len": 8,
-    })
+    return OmegaConf.create(
+        {
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "clip_ratio_c": 3.0,
+            "use_tis": False,
+            "tis_imp_ratio_cap": -1.0,
+            "max_seq_len": 8,
+        }
+    )
 
 
 def test_policy_loss_byte_identical_at_weight_one():
@@ -75,9 +78,14 @@ def test_policy_loss_byte_identical_at_weight_one():
     old_log_probs = torch.randn(B, A)
     advantages = torch.randn(B, A)
     loss_mask = torch.tensor([[1, 1, 0, 1, 1], [1, 1, 1, 0, 0], [1, 0, 1, 1, 1]], dtype=torch.long)
-    tags = torch.tensor([[SPAN_THINK, SPAN_THINK, 0, SPAN_ACTION, SPAN_ACTION],
-                         [SPAN_THINK, SPAN_ACTION, SPAN_EDIT, 0, 0],
-                         [SPAN_ACTION, 0, SPAN_THINK, SPAN_EDIT, SPAN_ACTION]], dtype=torch.long)
+    tags = torch.tensor(
+        [
+            [SPAN_THINK, SPAN_THINK, 0, SPAN_ACTION, SPAN_ACTION],
+            [SPAN_THINK, SPAN_ACTION, SPAN_EDIT, 0, 0],
+            [SPAN_ACTION, 0, SPAN_THINK, SPAN_EDIT, SPAN_ACTION],
+        ],
+        dtype=torch.long,
+    )
     cfg = _loss_cfg()
 
     loss_ref, clip_ref = ppo_policy_loss(log_probs, old_log_probs, advantages, cfg, loss_mask=loss_mask)
@@ -143,8 +151,9 @@ def test_weighted_mean_denominator_is_weighted():
 def test_weighted_reduce_loss_token_mean_matches_weighted_mean():
     loss = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     loss_mask = torch.tensor([[1, 1, 1], [1, 1, 0]], dtype=torch.long)
-    tags = torch.tensor([[SPAN_THINK, SPAN_ACTION, SPAN_ACTION],
-                         [SPAN_THINK, SPAN_THINK, SPAN_OTHER]], dtype=torch.long)
+    tags = torch.tensor(
+        [[SPAN_THINK, SPAN_ACTION, SPAN_ACTION], [SPAN_THINK, SPAN_THINK, SPAN_OTHER]], dtype=torch.long
+    )
     w = 0.25
     wmask = build_think_weighted_loss_mask(loss_mask, tags, think_token_weight=w)
     got = reduce_loss(loss, wmask, "token_mean", max_seq_len=8)

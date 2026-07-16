@@ -228,8 +228,7 @@ class PytestOutputParser(OutputParser):
         # Return None to fall back to original verifier reward.
         if self._is_collection_error(output):
             logger.debug(
-                "Detected pytest collection error - skipping reward shaping. "
-                "Falling back to original verifier reward."
+                "Detected pytest collection error - skipping reward shaping. Falling back to original verifier reward."
             )
             return None
 
@@ -1770,9 +1769,7 @@ class CompositeLoopShaper:
         chat_history: Optional[List[Dict[str, Any]]] = None,
         trajectory_context: Optional[Dict[str, Any]] = None,
     ) -> float:
-        final_reward, _ = self.shape_with_components(
-            stdout, original_reward, chat_history, trajectory_context
-        )
+        final_reward, _ = self.shape_with_components(stdout, original_reward, chat_history, trajectory_context)
         return final_reward
 
 
@@ -1983,16 +1980,14 @@ def shape_reward_from_output(
         parsed = parse_test_output(stdout, parser_name) if stdout else None
         composite = CompositeShaper(**kwargs)
         shaped, component_rewards = composite.shape_with_components(parsed, original_reward, chat_history)
-        logger.debug(
-            f"Composite shaped reward: {original_reward:.3f} -> {shaped:.3f} " f"(components={component_rewards})"
-        )
+        logger.debug(f"Composite shaped reward: {original_reward:.3f} -> {shaped:.3f} (components={component_rewards})")
         return shaped
 
     # Handle trajectory-based shapers
     if shaper_name in _TRAJECTORY_SHAPER_REGISTRY:
         shaper = get_trajectory_shaper(shaper_name, **kwargs)
         shaped = shaper.shape(chat_history or [], original_reward)
-        logger.debug(f"Trajectory shaped reward: {original_reward:.3f} -> {shaped:.3f} " f"(shaper={shaper_name})")
+        logger.debug(f"Trajectory shaped reward: {original_reward:.3f} -> {shaped:.3f} (shaper={shaper_name})")
         return shaped
 
     # Verifier-based shapers — need test output
@@ -2024,7 +2019,7 @@ def shape_reward_from_output(
     shaper = get_reward_shaper(shaper_name, **kwargs)
     shaped = shaper.shape(parsed, original_reward)
 
-    logger.debug(f"Shaped reward: {original_reward:.3f} -> {shaped:.3f} " f"(shaper={shaper_name})")
+    logger.debug(f"Shaped reward: {original_reward:.3f} -> {shaped:.3f} (shaper={shaper_name})")
 
     return shaped
 
@@ -2061,9 +2056,7 @@ def shape_reward_with_components(
 
     if shaper_name == "composite_loop":
         shaper = CompositeLoopShaper(**kwargs)
-        return shaper.shape_with_components(
-            stdout, original_reward, chat_history, trajectory_context
-        )
+        return shaper.shape_with_components(stdout, original_reward, chat_history, trajectory_context)
 
     # Default: weighted-average composite shaper.
     parsed = parse_test_output(stdout, parser_name) if stdout else None

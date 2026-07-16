@@ -195,7 +195,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         captured_global_step: Optional[int] = None
 
         while not done:
-
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
                 break
@@ -303,9 +302,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
         else:
-            assert not any(
-                loss_mask[response_end_idx - initial_prompt_length + 1 :]
-            ), "loss_mask at index after response end should be all 0"
+            assert not any(loss_mask[response_end_idx - initial_prompt_length + 1 :]), (
+                "loss_mask at index after response end should be all 0"
+            )
             loss_mask = loss_mask[: response_end_idx - initial_prompt_length + 1]
             response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]

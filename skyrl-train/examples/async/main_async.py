@@ -33,7 +33,7 @@ class AsyncPPOExp(BasePPOExp):
             generator=generator,
             colocate_pg=colocate_pg,
         )
-        
+
     def run(self):
         trainer = self._setup_trainer()
         # Start the async training loop

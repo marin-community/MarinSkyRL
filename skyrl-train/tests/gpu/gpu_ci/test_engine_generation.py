@@ -144,23 +144,23 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
         remote_batch_responses, batch_finish_reasons = asyncio.run(
             run_batch_generation(llm_client, prompts, sampling_params)
         )
-        assert len(remote_batch_responses) == len(
-            prompts
-        ), f"Number of responses should match number of prompts, got {len(remote_batch_responses)} responses but {len(prompts)} prompts"
-        assert len(batch_finish_reasons) == len(
-            prompts
-        ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
+        assert len(remote_batch_responses) == len(prompts), (
+            f"Number of responses should match number of prompts, got {len(remote_batch_responses)} responses but {len(prompts)} prompts"
+        )
+        assert len(batch_finish_reasons) == len(prompts), (
+            f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
+        )
 
         # Single generation (ie, submit individual requests)
         remote_single_responses, single_finish_reasons = asyncio.run(
             run_single_generation(llm_client, prompts, sampling_params)
         )
-        assert len(remote_single_responses) == len(
-            prompts
-        ), f"Number of responses should match number of prompts, got {len(remote_single_responses)} responses but {len(prompts)} prompts"
-        assert len(single_finish_reasons) == len(
-            prompts
-        ), f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
+        assert len(remote_single_responses) == len(prompts), (
+            f"Number of responses should match number of prompts, got {len(remote_single_responses)} responses but {len(prompts)} prompts"
+        )
+        assert len(single_finish_reasons) == len(prompts), (
+            f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
+        )
 
         # Ensure batched and single generation outputs are (roughly) the same
         for i in range(len(prompts)):
@@ -181,23 +181,23 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
     local_batch_responses, batch_finish_reasons = asyncio.run(
         run_batch_generation(llm_client, prompts, sampling_params)
     )
-    assert len(local_batch_responses) == len(
-        prompts
-    ), f"Number of responses should match number of prompts, got {len(local_batch_responses)} responses but {len(prompts)} prompts"
-    assert len(batch_finish_reasons) == len(
-        prompts
-    ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
+    assert len(local_batch_responses) == len(prompts), (
+        f"Number of responses should match number of prompts, got {len(local_batch_responses)} responses but {len(prompts)} prompts"
+    )
+    assert len(batch_finish_reasons) == len(prompts), (
+        f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
+    )
 
     # Single generation (ie, submit individual requests)
     local_single_responses, single_finish_reasons = asyncio.run(
         run_single_generation(llm_client, prompts, sampling_params)
     )
-    assert len(local_single_responses) == len(
-        prompts
-    ), f"Number of responses should match number of prompts, got {len(local_single_responses)} responses but {len(prompts)} prompts"
-    assert len(single_finish_reasons) == len(
-        prompts
-    ), f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
+    assert len(local_single_responses) == len(prompts), (
+        f"Number of responses should match number of prompts, got {len(local_single_responses)} responses but {len(prompts)} prompts"
+    )
+    assert len(single_finish_reasons) == len(prompts), (
+        f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
+    )
 
     # Ensure batched and single generation outputs are (roughly) the same
     for i in range(len(prompts)):

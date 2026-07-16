@@ -126,9 +126,11 @@ class DistillationTrainer(RayPPOTrainer):
         if loss_mask is not None:
             masked_logprobs = chosen_logprobs[loss_mask > 0]
             if masked_logprobs.numel() > 0:
-                self.all_metrics.update({
-                    "teacher/chosen_logprob_mean": masked_logprobs.mean().item(),
-                    "teacher/chosen_logprob_std": masked_logprobs.std().item(),
-                })
+                self.all_metrics.update(
+                    {
+                        "teacher/chosen_logprob_mean": masked_logprobs.mean().item(),
+                        "teacher/chosen_logprob_std": masked_logprobs.std().item(),
+                    }
+                )
 
         return training_input

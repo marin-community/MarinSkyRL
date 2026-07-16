@@ -354,9 +354,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             for mesh_dim, placement in enumerate(placements):
                 if isinstance(placement, (Shard, _StridedShard)):
                     num_chunks = mesh.size(mesh_dim)
-                    shards, _ = placement._split_tensor(
-                        cur, num_chunks, with_padding=False, contiguous=True
-                    )
+                    shards, _ = placement._split_tensor(cur, num_chunks, with_padding=False, contiguous=True)
                     cur = shards[coord[mesh_dim]]
                 # Replicate / Partial: no narrowing on this mesh dim.
             return cur.contiguous()
@@ -557,7 +555,9 @@ def fsdp2_get_full_state_dict(model: torch.nn.Module, cpu_offload=True, rank0_on
 
     # All ranks must participate in the collective operation
     options = StateDictOptions(
-        full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=False  # We want to get, not set
+        full_state_dict=True,
+        cpu_offload=cpu_offload,
+        broadcast_from_rank0=False,  # We want to get, not set
     )
 
     # This must be called on all ranks for the collective operation to work
@@ -635,9 +635,7 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     assert ep_comm_backend in ("torch", "deepep"), (
         f"ep_comm_backend must be 'torch' or 'deepep'; got {ep_comm_backend!r}"
     )
-    assert sequence_parallel_size == 1, (
-        "SP+EP is deferred (scope §5): apply_ep requires sequence_parallel_size==1"
-    )
+    assert sequence_parallel_size == 1, "SP+EP is deferred (scope §5): apply_ep requires sequence_parallel_size==1"
 
     from torch.distributed.tensor.parallel import parallelize_module
 
@@ -701,9 +699,7 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
             fsdp_size = fsdp_mesh.size()
             if num_experts is not None and ep_size > 1 and fsdp_size > 1:
                 experts_per_ep_rank = num_experts // ep_size
-                assert num_experts % ep_size == 0, (
-                    f"num_experts={num_experts} must be divisible by ep_size={ep_size}"
-                )
+                assert num_experts % ep_size == 0, f"num_experts={num_experts} must be divisible by ep_size={ep_size}"
                 assert experts_per_ep_rank % fsdp_size == 0, (
                     f"fsdp_size={fsdp_size} must divide num_experts//ep_size="
                     f"{experts_per_ep_rank} (num_experts={num_experts}, ep_size={ep_size}); "
@@ -928,9 +924,9 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
     # Total numel must equal world_size (ddp absorbs the residual; assert anyway).
     import math
 
-    assert (
-        math.prod(mesh_shape) == world_size
-    ), f"mesh_shape={tuple(mesh_shape)} numel={math.prod(mesh_shape)} != world_size={world_size}"
+    assert math.prod(mesh_shape) == world_size, (
+        f"mesh_shape={tuple(mesh_shape)} numel={math.prod(mesh_shape)} != world_size={world_size}"
+    )
     device_mesh = init_device_mesh(device_type, mesh_shape=tuple(mesh_shape), mesh_dim_names=mesh_dim_names)
     return device_mesh
 
@@ -1157,7 +1153,6 @@ class PrecisionType:
 
 # Reference: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
 def layered_summon_lora_params(fsdp_module) -> OrderedDict:
-
     def __prefix_submodules(module, prefix):
         for name, submodule in module.named_modules():
             if name.startswith(prefix) and "." not in name[len(prefix) :]:

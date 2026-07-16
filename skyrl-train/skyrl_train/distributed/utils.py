@@ -90,6 +90,7 @@ def init_custom_process_group(
     # keyword argument 'pg_options'). Signature inspection is correct on every
     # torch (2.9 baked SIF picks backend_options exactly as before -> no regression).
     import inspect as _inspect
+
     _helper_params = _inspect.signature(_new_process_group_helper).parameters
     if "backend_options" in _helper_params:
         pg_options_param_name = "backend_options"

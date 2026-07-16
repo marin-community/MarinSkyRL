@@ -14,7 +14,6 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
 class AsyncRayPPOTrainer(RayPPOTrainer):
-
     async def train(self):
         """
         Main training loop for PPO

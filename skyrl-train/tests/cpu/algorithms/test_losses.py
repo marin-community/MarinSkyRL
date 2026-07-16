@@ -221,13 +221,13 @@ def test_policy_loss_reduction_modes():
     torch.testing.assert_close(loss_seq_with_mask, expected_seq_with_mask, rtol=1e-5, atol=1e-8)
 
     # Verify that the two reduction modes give the same results when sequences have equal length and no mask
-    assert torch.allclose(
-        loss_token_no_mask, loss_seq_no_mask, rtol=1e-5
-    ), "token_mean and sequence_mean should give same results when sequences have equal length and no mask"
+    assert torch.allclose(loss_token_no_mask, loss_seq_no_mask, rtol=1e-5), (
+        "token_mean and sequence_mean should give same results when sequences have equal length and no mask"
+    )
     # But they should give different results when mask creates different effective sequence lengths
-    assert not torch.allclose(
-        loss_token_with_mask, loss_seq_with_mask, rtol=1e-3
-    ), "token_mean and sequence_mean with mask should give different results"
+    assert not torch.allclose(loss_token_with_mask, loss_seq_with_mask, rtol=1e-3), (
+        "token_mean and sequence_mean with mask should give different results"
+    )
 
 
 def test_policy_loss_reduction_edge_cases():
@@ -403,9 +403,9 @@ def test_gspo_importance_sampling_levels():
 
     # Core GSPO benefit test: Different clipping behavior
     # GSPO should produce different clipping patterns due to sequence-level importance sampling
-    assert not torch.allclose(
-        clip_ratio_token, clip_ratio_sequence, rtol=1e-2
-    ), f"Clipping ratios should differ: token={clip_ratio_token:.4f} vs sequence={clip_ratio_sequence:.4f}"
+    assert not torch.allclose(clip_ratio_token, clip_ratio_sequence, rtol=1e-2), (
+        f"Clipping ratios should differ: token={clip_ratio_token:.4f} vs sequence={clip_ratio_sequence:.4f}"
+    )
 
     # Test stability: sequence-level should smooth out extreme per-token variations
     # Check that sequence-level ratios have lower variance within each sequence
@@ -414,14 +414,13 @@ def test_gspo_importance_sampling_levels():
 
     # The key insight: GSPO should reduce within-sequence variance by using sequence-averaged ratios
     assert sequence_ratio_variance < token_ratio_variance, (
-        f"GSPO should reduce ratio variance: sequence={sequence_ratio_variance:.4f} < "
-        f"token={token_ratio_variance:.4f}"
+        f"GSPO should reduce ratio variance: sequence={sequence_ratio_variance:.4f} < token={token_ratio_variance:.4f}"
     )
 
     # Token-level and sequence-level should give different results due to different importance weighting
-    assert not torch.allclose(
-        loss_token, loss_sequence, rtol=1e-3
-    ), f"Loss values should differ: token={loss_token:.6f} vs sequence={loss_sequence:.6f}"
+    assert not torch.allclose(loss_token, loss_sequence, rtol=1e-3), (
+        f"Loss values should differ: token={loss_token:.6f} vs sequence={loss_sequence:.6f}"
+    )
 
     # Test length normalization effect: sequences with different lengths should be handled more uniformly
     # This is a key stability benefit of GSPO mentioned in the paper
@@ -434,9 +433,9 @@ def test_gspo_importance_sampling_levels():
         if seq_len > 1:
             # All importance weights within a sequence should be identical (GSPO property)
             seq_weights = log_importance_weights_seq[seq_idx, :seq_len]
-            assert torch.allclose(
-                seq_weights, seq_weights[0], rtol=1e-6
-            ), f"GSPO should have uniform importance weights within sequence {seq_idx}"
+            assert torch.allclose(seq_weights, seq_weights[0], rtol=1e-6), (
+                f"GSPO should have uniform importance weights within sequence {seq_idx}"
+            )
 
 
 def test_clip_cov_policy_loss():
@@ -498,9 +497,9 @@ def test_clip_cov_policy_loss():
     regular_loss, regular_clip_frac = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # Clip-Cov should give different results due to covariance-based correction
-    assert not torch.allclose(
-        loss, regular_loss, rtol=1e-3
-    ), f"Clip-Cov and regular PPO should differ: clip_cov={loss:.6f} vs regular={regular_loss:.6f}"
+    assert not torch.allclose(loss, regular_loss, rtol=1e-3), (
+        f"Clip-Cov and regular PPO should differ: clip_cov={loss:.6f} vs regular={regular_loss:.6f}"
+    )
 
 
 def test_kl_cov_policy_loss():
@@ -560,9 +559,9 @@ def test_kl_cov_policy_loss():
     regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # KL-Cov should give different results due to KL regularization on selected tokens
-    assert not torch.allclose(
-        loss, regular_loss, rtol=1e-3
-    ), f"KL-Cov and regular PPO should differ: kl_cov={loss:.6f} vs regular={regular_loss:.6f}"
+    assert not torch.allclose(loss, regular_loss, rtol=1e-3), (
+        f"KL-Cov and regular PPO should differ: kl_cov={loss:.6f} vs regular={regular_loss:.6f}"
+    )
 
 
 def test_sapo_policy_loss_basic():
@@ -670,18 +669,14 @@ def test_reduce_loss_seq_mean_token_sum_norm_global():
     # --- Regression guard: the existing modes are unchanged with default global_denom=None ---
     # token_mean == masked_mean
     tm = reduce_loss(loss, loss_mask, "token_mean", max_seq_len=max_seq_len)
-    torch.testing.assert_close(
-        tm, (loss * loss_mask).sum() / (loss_mask.sum() + 1e-8), rtol=1e-6, atol=1e-8
-    )
+    torch.testing.assert_close(tm, (loss * loss_mask).sum() / (loss_mask.sum() + 1e-8), rtol=1e-6, atol=1e-8)
     # sequence_mean == per-seq masked mean, then batch mean
     sm = reduce_loss(loss, loss_mask, "sequence_mean", max_seq_len=max_seq_len)
     seq_means = (loss * loss_mask).sum(dim=-1) / (loss_mask.sum(dim=-1) + 1e-8)
     torch.testing.assert_close(sm, seq_means.mean(), rtol=1e-6, atol=1e-8)
     # seq_mean_token_sum_norm (Dr.GRPO) == per-seq token-sum / max_seq_len, then mean
     drgrpo = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", max_seq_len=max_seq_len)
-    torch.testing.assert_close(
-        drgrpo, (torch.sum(loss * loss_mask, dim=-1) / max_seq_len).mean(), rtol=1e-6, atol=1e-8
-    )
+    torch.testing.assert_close(drgrpo, (torch.sum(loss * loss_mask, dim=-1) / max_seq_len).mean(), rtol=1e-6, atol=1e-8)
 
     # The new mode is genuinely different from Dr.GRPO (sum-vs-mean of seq terms)
     assert not torch.allclose(out, drgrpo, rtol=1e-3)
@@ -718,23 +713,30 @@ def test_tis_graceful_degrade_on_none_logprobs():
     # Reference: TIS off.
     cfg_off = DictConfig({**base_cfg, "use_tis": False})
     loss_off, _ = loss_fn(
-        log_probs=log_probs, old_log_probs=old_log_probs, advantages=advantages,
-        config=cfg_off, rollout_logprobs=None,
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=cfg_off,
+        rollout_logprobs=None,
     )
 
     # 1. TIS on but logprobs missing -> must equal the TIS-off loss (degraded).
     cfg_on = DictConfig({**base_cfg, "use_tis": True})
     loss_degraded, _ = loss_fn(
-        log_probs=log_probs, old_log_probs=old_log_probs, advantages=advantages,
-        config=cfg_on, rollout_logprobs=None,
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=cfg_on,
+        rollout_logprobs=None,
     )
     torch.testing.assert_close(loss_degraded, loss_off, rtol=1e-6, atol=1e-8)
 
     # 2. TIS on WITH logprobs -> ratio applied -> loss differs from degraded.
     loss_tis, _ = loss_fn(
-        log_probs=log_probs, old_log_probs=old_log_probs, advantages=advantages,
-        config=cfg_on, rollout_logprobs=rollout_logprobs,
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=cfg_on,
+        rollout_logprobs=rollout_logprobs,
     )
-    assert not torch.allclose(loss_tis, loss_off), (
-        "TIS ratio should be applied when rollout_logprobs is present"
-    )
+    assert not torch.allclose(loss_tis, loss_off), "TIS ratio should be applied when rollout_logprobs is present"

@@ -220,9 +220,9 @@ def main():
             f"per-rank sharded logits shape={sharded_shape} (expect [B={B}, S/cp={expected_shard_S}, V])"
         )
     assert sharded_shape[0] == B, sharded_shape
-    assert (
-        sharded_shape[1] == expected_shard_S
-    ), f"logits NOT sequence-sharded: got S={sharded_shape[1]}, expected {expected_shard_S}"
+    assert sharded_shape[1] == expected_shard_S, (
+        f"logits NOT sequence-sharded: got S={sharded_shape[1]}, expected {expected_shard_S}"
+    )
     dist.barrier()
 
     # --- full forward, both rotate methods; pad masked (no NaN/inf); determinism ---
@@ -263,9 +263,9 @@ def main():
         d = (results["allgather"] - results["all_to_all"]).abs().max().item()
         if rank == 0:
             print(f"[Stage4 cp2] allgather vs all_to_all action_logp max diff={d:.3e} (atol={ROTATE_ATOL})")
-        assert torch.allclose(
-            results["allgather"], results["all_to_all"], atol=ROTATE_ATOL, rtol=0.0
-        ), f"rotate methods diverged: {d:.3e} > {ROTATE_ATOL}"
+        assert torch.allclose(results["allgather"], results["all_to_all"], atol=ROTATE_ATOL, rtol=0.0), (
+            f"rotate methods diverged: {d:.3e} > {ROTATE_ATOL}"
+        )
     elif rank == 0:
         print(
             "[Stage4 cp2] determinism cross-check SKIPPED: "

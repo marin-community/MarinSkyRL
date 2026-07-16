@@ -22,13 +22,11 @@ def _get_supabase():
         try:
             import supabase
             from supabase import Client
+
             _supabase_module = supabase
             _Client = Client
         except ImportError:
-            raise ImportError(
-                "supabase-py is required for database registration. "
-                "Install with: pip install supabase"
-            )
+            raise ImportError("supabase-py is required for database registration. Install with: pip install supabase")
     return _supabase_module, _Client
 
 
@@ -90,8 +88,7 @@ def create_supabase_client(use_admin: bool = False):
 
     if not supabase_config.is_configured:
         raise ValueError(
-            "Supabase not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY "
-            "in your environment variables."
+            "Supabase not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your environment variables."
         )
 
     # Choose the appropriate key
@@ -103,6 +100,7 @@ def create_supabase_client(use_admin: bool = False):
     # Try to create client with optional timeout settings
     try:
         from supabase.lib.client_options import ClientOptions
+
         options = ClientOptions(
             postgrest_client_timeout=30,
             storage_client_timeout=30,

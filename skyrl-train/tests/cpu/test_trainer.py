@@ -601,22 +601,22 @@ def test_ppo_train_batch_calculations():
         result = policy_worker.ppo_train(dummy_databatch)
 
     # Verify Policy Worker Results
-    assert (
-        len(policy_training_calls) == total_micro_batches
-    ), f"PolicyWorker: Expected {total_micro_batches} training_step calls, got {len(policy_training_calls)}"
+    assert len(policy_training_calls) == total_micro_batches, (
+        f"PolicyWorker: Expected {total_micro_batches} training_step calls, got {len(policy_training_calls)}"
+    )
 
     # Verify accumulation_steps are consistent (should equal micro_batches_per_mini_batch)
     for call in policy_training_calls:
-        assert (
-            call["accumulation_steps"] == expected_accumulation_steps
-        ), f"PolicyWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
+        assert call["accumulation_steps"] == expected_accumulation_steps, (
+            f"PolicyWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
+        )
 
     # Verify no early termination (all micro batches processed)
     expected_local_steps = list(range(total_micro_batches))
     actual_local_steps = [call["local_step"] for call in policy_training_calls]
-    assert (
-        actual_local_steps == expected_local_steps
-    ), f"PolicyWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
+    assert actual_local_steps == expected_local_steps, (
+        f"PolicyWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
+    )
 
     # Verify result structure
     assert "train_status" in result.metadata
@@ -647,21 +647,21 @@ def test_ppo_train_batch_calculations():
         result = critic_worker.ppo_train(dummy_databatch)
 
     # Verify Critic Worker Results
-    assert (
-        len(critic_training_calls) == total_micro_batches
-    ), f"CriticWorker: Expected {total_micro_batches} training_step calls, got {len(critic_training_calls)}"
+    assert len(critic_training_calls) == total_micro_batches, (
+        f"CriticWorker: Expected {total_micro_batches} training_step calls, got {len(critic_training_calls)}"
+    )
 
     # Verify accumulation_steps are consistent for critic (should equal micro_batches_per_mini_batch)
     for call in critic_training_calls:
-        assert (
-            call["accumulation_steps"] == expected_accumulation_steps
-        ), f"CriticWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
+        assert call["accumulation_steps"] == expected_accumulation_steps, (
+            f"CriticWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
+        )
 
     # Verify no early termination for critic
     actual_local_steps = [call["local_step"] for call in critic_training_calls]
-    assert (
-        actual_local_steps == expected_local_steps
-    ), f"CriticWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
+    assert actual_local_steps == expected_local_steps, (
+        f"CriticWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
+    )
 
     # Verify result structure for critic
     assert "train_status" in result.metadata

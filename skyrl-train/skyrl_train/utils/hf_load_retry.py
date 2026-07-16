@@ -77,7 +77,7 @@ try:
     import httpcore as _httpcore  # type: ignore
 
     _HF_TRANSIENT_EXC = _HF_TRANSIENT_EXC + (
-        _httpx.TransportError,   # base: connect/read/write/protocol/pool errors
+        _httpx.TransportError,  # base: connect/read/write/protocol/pool errors
         _httpcore.ProtocolError,
     )
 except Exception:  # noqa: BLE001
@@ -166,7 +166,7 @@ def load_pretrained_with_retry(load_fn, *, model_id: str):
                     f"{str(e).splitlines()[0] if str(e) else type(e).__name__}"
                 )
                 raise
-            backoff = min(backoff_base * (2 ** attempt), backoff_cap)
+            backoff = min(backoff_base * (2**attempt), backoff_cap)
             logger.warning(
                 f"[rank {rank}] transient HF weight-index/safetensors fetch error loading "
                 f"'{model_id}' on attempt {attempt + 1}/{total_attempts}; retrying in "

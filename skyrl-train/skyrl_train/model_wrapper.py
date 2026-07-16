@@ -394,9 +394,9 @@ class HFModelWrapper(nn.Module):
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
-            assert (
-                self.attn_implementation == "flash_attention_2"
-            ), "Flash attention 2 should be used for `use_sample_packing`"
+            assert self.attn_implementation == "flash_attention_2", (
+                "Flash attention 2 should be used for `use_sample_packing`"
+            )
 
         if isinstance(pretrain_or_model, str):
             # Qwen3-Next GatedDeltaNet kernel routing (Stage 7/8): when the fla
@@ -639,7 +639,9 @@ class HFModelWrapper(nn.Module):
                     )
 
     @torch.no_grad()
-    def generate(self, input_ids: torch.Tensor, **kwargs) -> Union[
+    def generate(
+        self, input_ids: torch.Tensor, **kwargs
+    ) -> Union[
         Tuple[torch.LongTensor, torch.LongTensor],
         Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],
     ]:
@@ -739,9 +741,7 @@ class HFModelWrapper(nn.Module):
                 # max_seqlen); >= 2.7 adds a 5th `seqused`. We only consume the
                 # first two, so star the tail to stay version-agnostic (the SIF
                 # ships flash_attn 2.6.3 -> 4-tuple).
-                sequences_fwd, nnz_indices, *_ = unpad_input(
-                    sequences.unsqueeze(-1), attention_mask=attention_mask
-                )
+                sequences_fwd, nnz_indices, *_ = unpad_input(sequences.unsqueeze(-1), attention_mask=attention_mask)
                 # (nnz, 1) -> (1, nnz)
                 sequences_fwd = sequences_fwd.transpose(0, 1)
                 position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
@@ -998,9 +998,7 @@ class HFModelWrapper(nn.Module):
                             # attn_mask=None + is_causal=True and CP ring-shards cleanly.
                             # Pad RoPE is masked out post-hoc, so monotonic is correctness-safe.
                             with _cp_moe_no_mask():
-                                output = self.model(
-                                    sequences_fwd, attention_mask=None, position_ids=cp_position_ids
-                                )
+                                output = self.model(sequences_fwd, attention_mask=None, position_ids=cp_position_ids)
                 else:
                     output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -1131,9 +1129,7 @@ class HFModelWrapper(nn.Module):
             if self.use_sample_packing:
                 entropy_BS = pad_input(
                     entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
-                ).squeeze(
-                    -1
-                )  # (1, nnz) -> (B, S)
+                ).squeeze(-1)  # (1, nnz) -> (B, S)
 
             output["entropy"] = entropy_BS
 
@@ -1328,7 +1324,7 @@ class HFModelWrapper(nn.Module):
 
         if isinstance(num_actions, (list, np.ndarray)):
             raise NotImplementedError(
-                "router_replay requires a scalar num_actions (dense unpacked path); " "got a per-sample list/array."
+                "router_replay requires a scalar num_actions (dense unpacked path); got a per-sample list/array."
             )
         device = sequences.device
         batch_size, seq_len = sequences.shape
@@ -1421,13 +1417,11 @@ def _get_critic_model(
             # CP mask contract probe (computed once): dense Qwen3 accepts the
             # per-layer-type mask DICT, Qwen3-MoE does not. Gates the CP forward
             # below. See _cp_mask_dict_supported (mirrors HFModelWrapper).
-            self._cp_mask_dict_supported = _cp_mask_dict_supported(
-                getattr(self, self.base_model_prefix)
-            )
+            self._cp_mask_dict_supported = _cp_mask_dict_supported(getattr(self, self.base_model_prefix))
             if use_sample_packing:
-                assert (
-                    config._attn_implementation == "flash_attention_2"
-                ), "Flash attention must be used with sample packing"
+                assert config._attn_implementation == "flash_attention_2", (
+                    "Flash attention must be used with sample packing"
+                )
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
@@ -1449,14 +1443,10 @@ def _get_critic_model(
                 with torch.no_grad():
                     # remove padding. `unpad_input` expects 3 dimensional tensor
                     # version-agnostic unpack (flash_attn 2.6 -> 4-tuple, 2.7+ -> 5-tuple)
-                    input_ids_fwd, nnz_indices, *_ = unpad_input(
-                        input_ids.unsqueeze(-1), attention_mask=attention_mask
-                    )
+                    input_ids_fwd, nnz_indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
                     # (nnz, 1) -> (1, nnz)
                     input_ids_fwd = input_ids_fwd.transpose(0, 1)
-                    position_ids_fwd, *_ = unpad_input(
-                        position_ids.unsqueeze(-1), attention_mask=attention_mask
-                    )
+                    position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask=attention_mask)
                     # (nnz, 1) -> (1, nnz)
                     position_ids_fwd = position_ids_fwd.transpose(0, 1)
                     # don't use attention mask with FA2
@@ -1574,9 +1564,9 @@ def _get_critic_model(
                     if torch.is_grad_enabled() and last_hidden_states_BSH.requires_grad:
                         last_hidden_states_BSH = cp_unshard_grad_safe(self.cp_mesh, last_hidden_states_BSH, 1)
                     else:
-                        last_hidden_states_BSH = context_parallel_unshard(
-                            self.cp_mesh, [last_hidden_states_BSH], [1]
-                        )[0]
+                        last_hidden_states_BSH = context_parallel_unshard(self.cp_mesh, [last_hidden_states_BSH], [1])[
+                            0
+                        ]
 
             if self.sequence_parallel_size > 1:
                 last_hidden_states_SH = last_hidden_states_BSH.squeeze(0)

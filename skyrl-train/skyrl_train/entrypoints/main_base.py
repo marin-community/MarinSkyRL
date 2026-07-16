@@ -128,13 +128,8 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
     # Load teacher's own tokenizer for cross-model retokenization.
     # The teacher vLLM engine uses its own tokenizer internally for vocab
     # validation, so we must send it token IDs in its own vocabulary.
-    teacher_tokenizer = AutoTokenizer.from_pretrained(
-        teacher_cfg.model_path, trust_remote_code=True
-    )
-    logger.info(
-        f"Loaded teacher tokenizer: {teacher_cfg.model_path} "
-        f"(vocab_size={teacher_tokenizer.vocab_size})"
-    )
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_cfg.model_path, trust_remote_code=True)
+    logger.info(f"Loaded teacher tokenizer: {teacher_cfg.model_path} (vocab_size={teacher_tokenizer.vocab_size})")
 
     engine_kwargs = {
         "num_inference_engines": teacher_cfg.num_inference_engines,
@@ -210,6 +205,7 @@ class BasePPOExp:
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
         import sys
+
         log_level = getattr(self.cfg.trainer, "log_level", "INFO").upper()
         # Remove default handler and add one with configured level
         logger.remove()
@@ -217,9 +213,9 @@ class BasePPOExp:
             sys.stderr,
             level=log_level,
             format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-                   "<level>{level: <8}</level> | "
-                   "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-                   "<level>{message}</level>",
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>",
             colorize=True,
         )
         logger.info(f"SkyRL log level set to: {log_level}")
@@ -254,9 +250,9 @@ class BasePPOExp:
             num_workers=8,
         )
         # make sure the dataset is large enough to train on
-        assert (
-            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
+            f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        )
         return prompts_dataset
 
     def get_eval_dataset(self):

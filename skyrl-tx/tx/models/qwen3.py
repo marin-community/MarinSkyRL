@@ -118,7 +118,6 @@ class Qwen3Attention(nnx.Module):
 
 
 class Qwen3MLP(nnx.Module):
-
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.gate_proj = LoRALinear(
             config.hidden_size,
@@ -161,7 +160,6 @@ class Qwen3MLP(nnx.Module):
 
 
 class Qwen3Experts(nnx.Module):
-
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.gate_proj = LoRAExpert(
@@ -227,7 +225,6 @@ class Qwen3Experts(nnx.Module):
 
 
 class Qwen3MoeSparseMoeBlock(nnx.Module):
-
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.gate = nnx.Linear(
@@ -264,7 +261,6 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
 
 
 class Qwen3DecoderLayer(nnx.Module):
-
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
@@ -303,7 +299,6 @@ class Qwen3DecoderLayer(nnx.Module):
 
 
 class Qwen3Model(nnx.Module):
-
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
 
@@ -369,7 +364,6 @@ class Qwen3Model(nnx.Module):
 
 
 class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
-
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)

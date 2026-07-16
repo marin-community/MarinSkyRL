@@ -23,7 +23,6 @@ args = parser.parse_args()
 
 @ray.remote(num_gpus=1)
 def run_bench(args):
-
     BATCH_SIZE = args.batch_size
     SEQUENCE_LENGTH = args.sequence_length
     MODEL_NAME = "unsloth/gpt-oss-20b-BF16"
@@ -73,7 +72,6 @@ def run_bench(args):
     bwd_times = []
     try:
         for i in range(NUM_TRIALS):
-
             prompt, attention_mask = generate_inputs(
                 BATCH_SIZE, SEQUENCE_LENGTH, config.hidden_size, DEVICE, TORCH_DTYPE, args.with_attention
             )
@@ -118,7 +116,6 @@ def run_bench(args):
     bwd_times = []
     try:
         for i in range(NUM_TRIALS):
-
             prompt, attention_mask = generate_inputs(
                 BATCH_SIZE, SEQUENCE_LENGTH, config.hidden_size, DEVICE, TORCH_DTYPE, args.with_attention
             )

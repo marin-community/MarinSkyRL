@@ -42,7 +42,6 @@ class NamedWeightsUpdateRequest(TypedDict):
 
 
 class InferenceEngineInterface(ABC):
-
     @abstractmethod
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         raise NotImplementedError()

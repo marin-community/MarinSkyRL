@@ -113,17 +113,17 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
         cur_fsdp = current["trainer"][role]["fsdp_config"]
         gold_fsdp = golden["trainer"][role]["fsdp_config"]
         added = set(cur_fsdp) - set(gold_fsdp)
-        assert (
-            added == expected_added
-        ), f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(expected_added)}"
+        assert added == expected_added, (
+            f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(expected_added)}"
+        )
         # And the added keys carry the disabled defaults.
         for k, v in {**CP_FIELDS, **MOE_FSDP_FIELDS}.items():
             assert cur_fsdp[k] == v
     # The only new top-level trainer keys are the Stage-2 additive ones (attn_backend).
     added_trainer = set(current["trainer"]) - set(golden["trainer"])
-    assert added_trainer == set(
-        STAGE2_TRAINER_FIELDS
-    ), f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(STAGE2_TRAINER_FIELDS)}"
+    assert added_trainer == set(STAGE2_TRAINER_FIELDS), (
+        f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(STAGE2_TRAINER_FIELDS)}"
+    )
     for k, v in STAGE2_TRAINER_FIELDS.items():
         assert current["trainer"][k] == v
 

@@ -28,9 +28,9 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         self.http_endpoint_port = generator_cfg.http_endpoint_port
 
         assert self.enable_http_endpoint, "HTTP endpoint must be enabled for SkyRLGymHTTPGenerator"
-        assert (
-            self.use_conversation_multi_turn
-        ), "HTTP endpoint in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
+        assert self.use_conversation_multi_turn, (
+            "HTTP endpoint in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
+        )
         assert self.custom_chat_template is not None, "SkyRLGymHTTPGenerator requires a custom chat template."
         # Store the base URL for direct HTTP requests
         self.base_url = f"http://{self.http_endpoint_host}:{self.http_endpoint_port}"
@@ -101,7 +101,6 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
-
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
                 break
@@ -129,9 +128,9 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
-            assert (
-                env_step_output.get("postprocessed_action", None) is None
-            ), "postprocessed action is not supported for SkyRLGymHTTPGenerator"
+            assert env_step_output.get("postprocessed_action", None) is None, (
+                "postprocessed action is not supported for SkyRLGymHTTPGenerator"
+            )
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # We always re-tokenize the entire chat history every turn and at the end.

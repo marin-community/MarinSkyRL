@@ -3,7 +3,6 @@ from functools import partial
 
 
 class Mnist(nnx.Module):
-
     def __init__(self, *, rngs: nnx.Rngs):
         self.conv1 = nnx.Conv(1, 32, kernel_size=(3, 3), rngs=rngs)
         self.batch_norm1 = nnx.BatchNorm(32, rngs=rngs)

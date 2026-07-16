@@ -366,9 +366,9 @@ def test_sample_max_num_sequences():
 
         # If we have logprobs, they should match the number of tokens
         if seq.logprobs:
-            assert len(seq.logprobs) == len(
-                tokens
-            ), f"Request {request_id}: {len(tokens)} tokens but {len(seq.logprobs)} logprobs"
+            assert len(seq.logprobs) == len(tokens), (
+                f"Request {request_id}: {len(tokens)} tokens but {len(seq.logprobs)} logprobs"
+            )
 
 
 def test_sample_with_prompt_logprobs():
@@ -415,9 +415,9 @@ def test_sample_with_prompt_logprobs():
         assert result.prompt_logprobs is not None, f"Request {request_id}: prompt_logprobs should not be None"
         # Prompt logprobs should have length = prompt_length - 1
         expected_length = len(tokens) - 1
-        assert (
-            len(result.prompt_logprobs) == expected_length
-        ), f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
+        assert len(result.prompt_logprobs) == expected_length, (
+            f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
+        )
 
     # Test mixed batch: one request with prompt_logprobs=True and one with =False
     reqs_mixed = {
@@ -505,6 +505,6 @@ def test_sample_prompt_logprobs_with_microbatching():
 
         # Verify correct length
         expected_length = len(tokens) - 1
-        assert (
-            len(result.prompt_logprobs) == expected_length
-        ), f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
+        assert len(result.prompt_logprobs) == expected_length, (
+            f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
+        )

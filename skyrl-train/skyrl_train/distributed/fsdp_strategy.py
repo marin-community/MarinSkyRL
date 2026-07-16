@@ -401,8 +401,7 @@ class FSDPStrategy(DistributedStrategy):
                 # the exact dtype/shape/requires_grad so apply_ep / apply_fsdp2 see the
                 # same param spec they would for the original.
                 _param_specs = [
-                    (_name, _p.dtype, tuple(_p.shape), _p.requires_grad)
-                    for _name, _p in module.named_parameters()
+                    (_name, _p.dtype, tuple(_p.shape), _p.requires_grad) for _name, _p in module.named_parameters()
                 ]
                 for _name, _dtype, _shape, _rg in _param_specs:
                     _parent_name, _, _attr = _name.rpartition(".")
@@ -411,9 +410,7 @@ class FSDPStrategy(DistributedStrategy):
                     setattr(_submod, _attr, torch.nn.Parameter(_meta, requires_grad=_rg))
 
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
-                num_sharded = apply_ep(
-                    module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs
-                )
+                num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs)
                 assert num_sharded > 0, (
                     "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
                     "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."

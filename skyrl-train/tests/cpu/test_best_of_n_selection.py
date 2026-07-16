@@ -61,6 +61,7 @@ class TestBestOfNSelection:
     def test_many_groups(self):
         # 100 prompts × 4 samples each
         import random
+
         random.seed(42)
         rewards = [random.random() for _ in range(400)]
         indices = best_of_n_select(rewards, n_samples_per_prompt=4)
@@ -69,7 +70,7 @@ class TestBestOfNSelection:
         # Verify each index points to the best in its group
         for g, idx in enumerate(indices):
             group_start = g * 4
-            group_rewards = rewards[group_start:group_start + 4]
+            group_rewards = rewards[group_start : group_start + 4]
             assert rewards[idx] == max(group_rewards)
 
     def test_invalid_length_raises(self):

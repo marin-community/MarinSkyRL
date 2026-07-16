@@ -221,28 +221,18 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
         # per-token shaping channel + span tagger. Default False -> the generator
         # emits neither field, so the GeneratorOutput is byte-identical to today.
-        self._enable_token_reward_channel = bool(
-            self._reward_shaping_config.get("enable_token_reward_channel", False)
-        )
-        self._enable_span_tagging = bool(
-            self._reward_shaping_config.get("enable_span_tagging", True)
-        )
+        self._enable_token_reward_channel = bool(self._reward_shaping_config.get("enable_token_reward_channel", False))
+        self._enable_span_tagging = bool(self._reward_shaping_config.get("enable_span_tagging", True))
 
         # Loop-behavior reward shaping (Stage C / F2 + F6): potential-based
         # shaping (PBS) of the EDIT-token span from the in-trajectory test-delta.
         # Default False -> the channel ships Stage-B ZEROS (no-op). Requires the
         # token reward channel AND span tagging to be on (PBS scatters onto the
         # F4 EDIT tags). PBS is policy-invariant (Ng 1999) and bounded.
-        self._enable_pbs_shaping = bool(
-            self._reward_shaping_config.get("enable_pbs_shaping", False)
-        )
+        self._enable_pbs_shaping = bool(self._reward_shaping_config.get("enable_pbs_shaping", False))
         self._pbs_gamma = float(self._reward_shaping_config.get("pbs_gamma", 1.0))
-        self._pbs_max_total_shaping = float(
-            self._reward_shaping_config.get("pbs_max_total_shaping", 0.3)
-        )
-        self._pbs_potential_shape = str(
-            self._reward_shaping_config.get("pbs_potential_shape", "linear")
-        )
+        self._pbs_max_total_shaping = float(self._reward_shaping_config.get("pbs_max_total_shaping", 0.3))
+        self._pbs_potential_shape = str(self._reward_shaping_config.get("pbs_potential_shape", "linear"))
 
         # Error handling config (for RLOO-N advantage estimator)
         self._error_handling_config = self._harbor_config_builder.get_error_handling_config()
@@ -256,9 +246,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # generation has no TIS-valid (length-matched) logprobs. Default ON; set
         # harbor.error_handling.preserve_logprobs_on_timeout=false for the old
         # discard-everything behavior.
-        self._preserve_logprobs_on_timeout = self._error_handling_config.get(
-            "preserve_logprobs_on_timeout", True
-        )
+        self._preserve_logprobs_on_timeout = self._error_handling_config.get("preserve_logprobs_on_timeout", True)
 
         # TIS (Truncated Importance Sampling) config
         # Only show TIS-related warnings when collect_rollout_details is enabled
@@ -490,7 +478,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             self._orchestrator_restart_count += 1
             if self._orchestrator_restart_count > MAX_ORCHESTRATOR_RESTART_ATTEMPTS:
                 logger.error(
-                    f"Max orchestrator restart attempts ({MAX_ORCHESTRATOR_RESTART_ATTEMPTS}) " f"exceeded. Giving up."
+                    f"Max orchestrator restart attempts ({MAX_ORCHESTRATOR_RESTART_ATTEMPTS}) exceeded. Giving up."
                 )
                 return False
 
@@ -787,7 +775,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 else:
                     # Still unavailable, we need to restart
                     logger.warning(
-                        "QueueOrchestrator not available. Was startup() called? " "Attempting emergency restart..."
+                        "QueueOrchestrator not available. Was startup() called? Attempting emergency restart..."
                     )
             # Release lock before calling _restart_orchestrator (it acquires its own lock)
             if not orchestrator_started or active_orchestrator is None:
@@ -827,9 +815,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Attempt to restart the training orchestrator
             restart_success = await self._restart_orchestrator()
             if not restart_success:
-                logger.error(
-                    "Orchestrator restart failed. Returning all-failed output " "to avoid killing training job."
-                )
+                logger.error("Orchestrator restart failed. Returning all-failed output to avoid killing training job.")
                 return self._create_all_failed_output(
                     trajectory_ids, f"OrchestratorFailure_{type(orchestrator_error).__name__}"
                 )
@@ -842,7 +828,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 results = await asyncio.gather(*futures, return_exceptions=True)
             except Exception as retry_error:
                 logger.error(
-                    f"Retry after orchestrator restart also failed: " f"{type(retry_error).__name__}: {retry_error}"
+                    f"Retry after orchestrator restart also failed: {type(retry_error).__name__}: {retry_error}"
                 )
                 return self._create_all_failed_output(
                     trajectory_ids, f"OrchestratorRetryFailure_{type(retry_error).__name__}"
@@ -1244,7 +1230,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             return self._PASSTHROUGH, exception_type
         exclude = default_treatment == "mask"
         logger.debug(
-            f"Exception {exception_type} not in config, using default treatment: " f"{'MASK' if exclude else 'ZERO'}"
+            f"Exception {exception_type} not in config, using default treatment: {'MASK' if exclude else 'ZERO'}"
         )
         return exclude, exception_type
 
@@ -1343,8 +1329,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             if treatment is self._PASSTHROUGH:
                 if result.verifier_result:
                     logger.info(
-                        f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH, "
-                        f"using verifier reward"
+                        f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH, using verifier reward"
                     )
                     # Fall through to normal processing below
                 elif self._should_preserve_timeout_trajectory(result):
@@ -1514,7 +1499,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         if len(conversation) < 2 or conversation[0]["role"] != "user":
             # Invalid chat history is typically an infrastructure/serialization issue
             logger.warning(
-                f"Trajectory {trajectory_id} failed: Invalid chat history structure. " f"chat_history: {chat_history}"
+                f"Trajectory {trajectory_id} failed: Invalid chat history structure. chat_history: {chat_history}"
             )
             return TerminalBenchAgentOutput(
                 response_ids=[0],
@@ -1641,10 +1626,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         assistant_token_ids=assistant_token_ids,
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"Trajectory {trajectory_id}: span tagging failed ({e}); "
-                        f"emitting all-OTHER tags."
-                    )
+                    logger.warning(f"Trajectory {trajectory_id}: span tagging failed ({e}); emitting all-OTHER tags.")
                     tags = [0] * len(response_ids)
                 # Length-parity guard: the tagger re-walks the same segmentation,
                 # but truncate/pad to response_ids length to stay 1:1 even if a
@@ -1670,8 +1652,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Trajectory {trajectory_id}: PBS shaping failed ({e}); "
-                        f"falling back to zeros (outcome-only)."
+                        f"Trajectory {trajectory_id}: PBS shaping failed ({e}); falling back to zeros (outcome-only)."
                     )
                     pbs_vector = [0.0] * len(response_span_tags)
                 # Length-parity: pbs_vector is built on response_span_tags length.

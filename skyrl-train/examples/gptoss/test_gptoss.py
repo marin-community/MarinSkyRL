@@ -5,7 +5,6 @@ import ray
 
 @ray.remote(num_gpus=1)
 def run_task(with_padding: bool = True):
-
     from skyrl_train.patches.gptoss.patch_transformers import custom_attention_mask, custom_attention
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer

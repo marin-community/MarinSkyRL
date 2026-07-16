@@ -146,9 +146,7 @@ def test_missing_func_name_scores_zero():
     env = skyrl_gym.make(
         "ifeval",
         env_config=DictConfig({"env_class": "ifeval"}),
-        extras={
-            "reward_model": {"method": "rule", "ground_truth": _gt()}
-        },  # func_name=None
+        extras={"reward_model": {"method": "rule", "ground_truth": _gt()}},  # func_name=None
     )
     step_output = env.step("anything")
     assert step_output["reward"] == 0.0

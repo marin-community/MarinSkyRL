@@ -296,9 +296,9 @@ class SGLangWeightLoader(WeightLoader):
         Uses SGLang's native update_weights_from_distributed API which internally
         uses the process group created during init_weights_update_group.
         """
-        assert (
-            len(request["names"]) == 1
-        ), f"Broadcast only supports a single weight at a time, got {len(request['names'])} entries"
+        assert len(request["names"]) == 1, (
+            f"Broadcast only supports a single weight at a time, got {len(request['names'])} entries"
+        )
 
         obj = UpdateWeightsFromDistributedReqInput(
             name=request["names"][0], dtype=request["dtypes"][0], shape=request["shapes"][0]
@@ -359,9 +359,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
 
-        assert (
-            prompts is None and prompt_token_ids is not None
-        ), "SGLangInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
+        assert prompts is None and prompt_token_ids is not None, (
+            "SGLangInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
+        )
 
         # Use request sampling params if provided.
         sampling_params = request_sampling_params if request_sampling_params is not None else {}

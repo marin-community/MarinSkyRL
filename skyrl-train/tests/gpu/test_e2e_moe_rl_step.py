@@ -424,7 +424,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         rep_names = [
             "model.embed_tokens.weight",
             "model.layers.0.self_attn.o_proj.weight",
-            "model.layers.0.mlp.gate.weight",   # router (layer 0)
+            "model.layers.0.mlp.gate.weight",  # router (layer 0)
             "model.layers.12.mlp.gate.weight",  # router (layer 12)
         ]
         for j in rep_experts:
@@ -435,9 +435,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
 
         # (a) Trainer POST-STEP HF tensors (model still on GPU; SAME extract+remap as
         #     broadcast). Collective over all ranks; rank 0 carries the full tensors.
-        trainer_w_per_rank = ray.get(
-            policy.async_run_ray_method("pass_through", "read_post_step_weights", rep_names)
-        )
+        trainer_w_per_rank = ray.get(policy.async_run_ray_method("pass_through", "read_post_step_weights", rep_names))
         trainer_w = {}
         for d in trainer_w_per_rank:
             if isinstance(d, dict):
@@ -451,9 +449,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         # (b) ENGINE-side readback of the SAME HF names, gathered across all TP/EP
         #     workers (inventory dumped once for diagnosis).
         engine_actor = client.engines[0].inference_engine_actor
-        engine_per_rank = ray.get(
-            engine_actor.read_engine_weights.remote(rep_names, True)
-        )
+        engine_per_rank = ray.get(engine_actor.read_engine_weights.remote(rep_names, True))
         # collective_rpc returns one dict per worker rank.
         if isinstance(engine_per_rank, dict):
             engine_per_rank = [engine_per_rank]
@@ -463,10 +459,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
             inv = rd.get("__inventory__") if isinstance(rd, dict) else None
             ranks = rd.get("__ranks__") if isinstance(rd, dict) else None
             if inv is not None:
-                sample = {
-                    k: v for k, v in inv.items()
-                    if "layers.0." in k or "embed_tokens" in k
-                }
+                sample = {k: v for k, v in inv.items() if "layers.0." in k or "embed_tokens" in k}
                 print(f"[Stage6][weight-eq][engine-rank{rk}] ranks={ranks} layer0/embed inventory:")
                 for k in sorted(sample):
                     print(f"    {k} {sample[k]}")
@@ -525,7 +518,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         EPS = 1e-4  # fp32-readback + bf16-roundtrip epsilon; transport is byte-exact otherwise.
         results_tbl = []  # (name, status, max_abs, shape)
         TP_SHARDED = {
-            "model.embed_tokens.weight": 0,             # VocabParallelEmbedding -> dim0
+            "model.embed_tokens.weight": 0,  # VocabParallelEmbedding -> dim0
             "model.layers.0.self_attn.o_proj.weight": 1,  # RowParallelLinear -> dim1 (input)
         }
 
@@ -552,7 +545,12 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
                     eng_f = eng_f.t().contiguous()
                 else:
                     results_tbl.append(
-                        (name, f"SHAPE_MISMATCH trainer={tuple(tr_f.shape)} engine={tuple(eng_f.shape)}", float("nan"), list(tr_f.shape))
+                        (
+                            name,
+                            f"SHAPE_MISMATCH trainer={tuple(tr_f.shape)} engine={tuple(eng_f.shape)}",
+                            float("nan"),
+                            list(tr_f.shape),
+                        )
                     )
                     continue
             max_abs = float((tr_f - eng_f).abs().max().item())
@@ -571,10 +569,7 @@ def test_e2e_moe_rl_step_replay_ep_grouped():
         hard_fail = [r for r in results_tbl if r[1] == "DIFF"]
         # router + expert tensors MUST be present and OK (these are the EP+grouped+
         # replay reshard/remap surfaces the gate exists to validate).
-        critical = [
-            n for n in rep_names
-            if n.endswith("mlp.gate.weight") or ".mlp.experts." in n
-        ]
+        critical = [n for n in rep_names if n.endswith("mlp.gate.weight") or ".mlp.experts." in n]
         crit_status = {n: s for (n, s, _, _) in results_tbl}
         missing_critical = [n for n in critical if crit_status.get(n) != "OK"]
 

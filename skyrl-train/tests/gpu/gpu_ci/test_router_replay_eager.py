@@ -100,7 +100,7 @@ def _ragged_inputs(seq_len=32, num_actions=16, vocab=256, device="cuda", seed=7)
     attention_mask = torch.zeros(batch, seq_len, dtype=torch.long, device=device)
     for b, rl in enumerate(real_lens):
         rl = min(rl, seq_len)
-        attention_mask[b, seq_len - rl:] = 1
+        attention_mask[b, seq_len - rl :] = 1
         # zero out the left-pad token ids (cosmetic; FA2 ignores them anyway)
         input_ids[b, : seq_len - rl] = 0
     return input_ids, attention_mask, num_actions
@@ -143,9 +143,9 @@ def _all_one_expert_mask(batch, num_actions, L, K, expert_id, device):
     re = torch.empty(batch, num_actions, L, K, dtype=torch.long, device=device)
     re[..., 0] = expert_id
     if K > 1:
-        re[..., 1] = (expert_id + 1)
+        re[..., 1] = expert_id + 1
     for k in range(2, K):
-        re[..., k] = (expert_id + k)
+        re[..., k] = expert_id + k
     return re
 
 
@@ -258,12 +258,8 @@ def test_extra_layer_count_and_sentinel():
     re_sentinel = torch.full(
         (input_ids.shape[0], num_actions, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device
     )
-    out_sentinel = _forward_logits(
-        wrapper, input_ids, attn, num_actions, rollout_routed_experts=re_sentinel
-    )
-    assert torch.equal(out_natural, out_sentinel), (
-        "all-sentinel mask did not fall through to natural routing"
-    )
+    out_sentinel = _forward_logits(wrapper, input_ids, attn, num_actions, rollout_routed_experts=re_sentinel)
+    assert torch.equal(out_natural, out_sentinel), "all-sentinel mask did not fall through to natural routing"
     print(f"[extra] layer count == {expected} and sentinel routes naturally: PASS")
 
 
@@ -336,9 +332,7 @@ def test_g3a_2_production_noop():
     # The wrapper returns logits in packed [1, nnz, V] form (no pad_input on
     # logits inside forward — only log_probs/entropy get re-padded). Compare
     # the packed logits directly.
-    assert torch.equal(out_wrapper, stock_packed), (
-        "flag-off packed forward not byte-identical to stock packed forward"
-    )
+    assert torch.equal(out_wrapper, stock_packed), "flag-off packed forward not byte-identical to stock packed forward"
     print("[G3a-2] production packed no-op byte-identical: PASS")
 
 
@@ -358,9 +352,7 @@ def test_g3a_3_ragged_alignment():
     K = cfg.num_experts_per_tok
 
     # Packed wrapper → re-pad [1, nnz, V] to [B, seq, V] before the response slice.
-    out_natural = _repad_packed(
-        _forward_logits(wrapper, input_ids, attn, num_actions), input_ids, attn
-    ).float()
+    out_natural = _repad_packed(_forward_logits(wrapper, input_ids, attn, num_actions), input_ids, attn).float()
 
     # All-sentinel everywhere except sequence index 1's response → forced.
     re = torch.full((batch, num_actions, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)

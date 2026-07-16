@@ -163,7 +163,7 @@ def wait_for_all_servers(server_addresses: List[Tuple[str, int]], timeout_second
 
 def print_server_info(server_infos: List[Tuple[int, str, str, str]], args):
     for i, (pid, addr, stdout_log, stderr_log) in enumerate(server_infos):
-        print(f"Server {i+1}:")
+        print(f"Server {i + 1}:")
         print(f"TP: {args.tp_size}")
         print(f"  PID: {pid}")
         print(f"  Address: {addr}")

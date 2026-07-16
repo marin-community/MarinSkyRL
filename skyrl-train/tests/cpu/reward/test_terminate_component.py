@@ -89,9 +89,7 @@ def _shape(stdout, original_reward, shaper_kwargs, trajectory_context):
 
 
 def test_green_complete_adds_green_bonus():
-    reward, comps = _shape(
-        GREEN_STDOUT, GREEN_BASE, TERMINATE_ON, _ctx(True, GREEN_BASE, False)
-    )
+    reward, comps = _shape(GREEN_STDOUT, GREEN_BASE, TERMINATE_ON, _ctx(True, GREEN_BASE, False))
     assert comps["outcome"] == GREEN_BASE
     assert comps["terminate"] == pytest.approx(GREEN_BONUS)
     # shaping_total is the clamped sum; green_bonus (0.3) == cap (0.3) -> survives.
@@ -105,9 +103,7 @@ def test_green_complete_adds_green_bonus():
 
 
 def test_red_complete_subtracts_red_penalty_and_stays_nonpositive():
-    reward, comps = _shape(
-        RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(True, RED_BASE, False)
-    )
+    reward, comps = _shape(RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(True, RED_BASE, False))
     assert comps["outcome"] == RED_BASE  # 0.0
     assert comps["terminate"] == pytest.approx(-RED_PENALTY)
     assert reward == pytest.approx(RED_BASE - RED_PENALTY)
@@ -122,9 +118,7 @@ def test_red_complete_subtracts_red_penalty_and_stays_nonpositive():
 
 def test_no_terminate_subtracts_noterm_penalty():
     # never marked complete, ran to the wall (premature_stop True), verifier red.
-    reward, comps = _shape(
-        RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(False, RED_BASE, True)
-    )
+    reward, comps = _shape(RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(False, RED_BASE, True))
     assert comps["terminate"] == pytest.approx(-NOTERM_PENALTY)
     assert reward == pytest.approx(RED_BASE - NOTERM_PENALTY)
     assert reward <= 0.0
@@ -134,9 +128,7 @@ def test_no_terminate_on_green_verifier_still_penalized():
     # Pathological-but-possible: tests pass yet the agent never confirmed done.
     # noterm penalty still applies (we want decisive termination), but it can
     # never push a green trajectory below its own merit beyond the cap.
-    reward, comps = _shape(
-        GREEN_STDOUT, GREEN_BASE, TERMINATE_ON, _ctx(False, GREEN_BASE, True)
-    )
+    reward, comps = _shape(GREEN_STDOUT, GREEN_BASE, TERMINATE_ON, _ctx(False, GREEN_BASE, True))
     assert comps["terminate"] == pytest.approx(-NOTERM_PENALTY)
     assert reward == pytest.approx(GREEN_BASE - NOTERM_PENALTY)
 
@@ -203,9 +195,7 @@ def test_disabled_is_byte_identical_to_stage0(label, kwargs, stdout, base, ctx):
 
 def test_green_bonus_never_fires_on_failing_verifier():
     # mark_complete True but verifier red: must be a PENALTY, not a bonus.
-    reward, comps = _shape(
-        RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(True, RED_BASE, False)
-    )
+    reward, comps = _shape(RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(True, RED_BASE, False))
     assert comps["terminate"] < 0.0, "green_bonus must not fire on a red verifier"
     assert comps["terminate"] != pytest.approx(GREEN_BONUS)
     assert reward <= 0.0
@@ -226,21 +216,15 @@ def test_red_complete_and_noterm_comparably_penalized():
     """Risk mitigation: if red_penalty >> noterm_penalty the policy learns
     "never finish" is safer than "finish red". Assert the two penalties are of
     the same order so neither strategy dominates."""
-    _, red_comps = _shape(
-        RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(True, RED_BASE, False)
-    )
-    _, noterm_comps = _shape(
-        RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(False, RED_BASE, True)
-    )
+    _, red_comps = _shape(RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(True, RED_BASE, False))
+    _, noterm_comps = _shape(RED_STDOUT, RED_BASE, TERMINATE_ON, _ctx(False, RED_BASE, True))
     red_pen = -red_comps["terminate"]
     noterm_pen = -noterm_comps["terminate"]
     assert red_pen > 0.0 and noterm_pen > 0.0
     # Comparable: same order of magnitude (within 2x), and not so lopsided that
     # never-terminating becomes a strictly cheaper escape than finishing red.
     ratio = red_pen / noterm_pen
-    assert 0.5 <= ratio <= 2.0, (
-        f"penalties not comparable: red={red_pen}, noterm={noterm_pen}, ratio={ratio}"
-    )
+    assert 0.5 <= ratio <= 2.0, f"penalties not comparable: red={red_pen}, noterm={noterm_pen}, ratio={ratio}"
     # Spec defaults: red 0.3, noterm 0.2 -> finishing-red is penalized slightly
     # MORE than never-finishing, so the policy is never pushed to avoid
     # terminating; but the gap is small enough not to encourage false "done".

@@ -35,6 +35,7 @@ again on each constructed model):
     ... model = AutoModelForCausalLM.from_pretrained(...) ...
     engage_flashqla(model)     # no-op unless SKYRL_GDN_FLASHQLA=1
 """
+
 import os
 import logging
 
@@ -73,6 +74,7 @@ def _build_flashqla_chunk():
     """Build the FlashQLA chunk_gated_delta_rule drop-in. Returns None if the
     Stage-8 overlay (tilelang + flash_qla) is not importable."""
     import torch
+
     try:
         from flash_qla import (
             chunk_gated_delta_rule_fwd as _fqla_fwd,
@@ -89,9 +91,16 @@ def _build_flashqla_chunk():
         def forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens):
             q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
             g2, A, o, _h, final_state = _fqla_fwd(
-                q=q, k=k, v=v, g=g, beta=beta, scale=scale,
-                initial_state=initial_state, output_final_state=output_final_state,
-                output_h=False, cu_seqlens=cu_seqlens,
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                output_h=False,
+                cu_seqlens=cu_seqlens,
             )
             ctx.save_for_backward(q, k, v, g2, beta, A, initial_state, cu_seqlens)
             ctx.scale = scale
@@ -103,24 +112,51 @@ def _build_flashqla_chunk():
         def backward(ctx, do, dht):
             q, k, v, g2, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
             dq, dk, dv, db, dg, dh0 = _fqla_bwd(
-                q=q, k=k, v=v, g=g2, beta=beta, A=A, do=do.contiguous(),
-                dht=dht, scale=ctx.scale, initial_state=initial_state, cu_seqlens=cu_seqlens,
+                q=q,
+                k=k,
+                v=v,
+                g=g2,
+                beta=beta,
+                A=A,
+                do=do.contiguous(),
+                dht=dht,
+                scale=ctx.scale,
+                initial_state=initial_state,
+                cu_seqlens=cu_seqlens,
             )
             d_init = dh0 if ctx.has_initial_state else None
-            return (dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype),
-                    dg.to(g2.dtype), db.to(beta.dtype), None, d_init, None, None)
+            return (
+                dq.to(q.dtype),
+                dk.to(k.dtype),
+                dv.to(v.dtype),
+                dg.to(g2.dtype),
+                db.to(beta.dtype),
+                None,
+                d_init,
+                None,
+                None,
+            )
 
-    def flashqla_chunk(q, k, v, g=None, beta=None, scale=None, initial_state=None,
-                       output_final_state=False, use_qk_l2norm_in_kernel=False,
-                       cu_seqlens=None, head_first=False):
+    def flashqla_chunk(
+        q,
+        k,
+        v,
+        g=None,
+        beta=None,
+        scale=None,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=False,
+        cu_seqlens=None,
+        head_first=False,
+    ):
         assert not head_first, "head_first unsupported"
         if scale is None:
             scale = k.shape[-1] ** -0.5
         if use_qk_l2norm_in_kernel:
             q = _fqla_l2norm(q)
             k = _fqla_l2norm(k)
-        return _FlashQLAChunk.apply(q, k, v, g, beta, scale, initial_state,
-                                    output_final_state, cu_seqlens)
+        return _FlashQLAChunk.apply(q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens)
 
     flashqla_chunk._flashqla = True
     return flashqla_chunk

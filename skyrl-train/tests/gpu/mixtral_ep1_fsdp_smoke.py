@@ -107,9 +107,7 @@ def main():
     if rank == 0:
         _log(f"device_mesh: {device_mesh} (ep_size=1 => no 'ep' dim => apply_ep skipped)")
 
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16, reduce_dtype=torch.float32, cast_forward_inputs=True
-    )
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, cast_forward_inputs=True)
     # NOTE: offload_policy=None for the smoke. cpu_offload is a memory knob for the
     # full 47B run; it is NOT what this smoke validates (swap + EP=1 mesh + the
     # distributed state-dict load + a finite microstep). Enabling it here would

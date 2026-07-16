@@ -25,6 +25,7 @@ For each name we compute a signature vs source:
 Run (1 node; NUM_GPUS ranks). NO pytest needed (callable __main__):
     python -m tests.gpu.diag_ep_weight_sync_compare
 """
+
 import asyncio
 import os
 import re
@@ -137,7 +138,9 @@ def _signature(name, tr, eng, src_all_experts=None, gj=None):
     if tr.dim() >= 2 and tr.shape[0] == eng.shape[0] and tr.shape[0] <= 4096:
         tr_fp = tr.reshape(tr.shape[0], -1)[:, 0]
         eng_fp = eng.reshape(eng.shape[0], -1)[:, 0]
-        if torch.allclose(tr_fp.sort().values, eng_fp.sort().values, atol=10 * EPS) and not torch.allclose(tr_fp, eng_fp, atol=10 * EPS):
+        if torch.allclose(tr_fp.sort().values, eng_fp.sort().values, atol=10 * EPS) and not torch.allclose(
+            tr_fp, eng_fp, atol=10 * EPS
+        ):
             sig_extra.append("ROW_PERMUTED(dim0)")
     rel = max_abs / (float(tr.abs().max()) + 1e-9)
     extra = ("  [" + "; ".join(sig_extra) + "]") if sig_extra else ""
@@ -146,6 +149,7 @@ def _signature(name, tr, eng, src_all_experts=None, gj=None):
 
 def main():
     from tests.gpu.utils import get_available_gpus
+
     avail = get_available_gpus()
     if len(avail) < NUM_GPUS:
         print(f"[diag] need {NUM_GPUS} GPUs, found {len(avail)}: {avail}")
@@ -190,6 +194,7 @@ def main():
         )
 
         from transformers import AutoConfig
+
         mc = AutoConfig.from_pretrained(MODEL, trust_remote_code=True)
         num_experts = int(getattr(mc, "num_experts", getattr(mc, "num_local_experts", 60)))
         num_layers = int(getattr(mc, "num_hidden_layers", 24))
@@ -198,14 +203,15 @@ def main():
         # Also pull EVERY sampled-layer expert's source (gate_proj) so WRONG_EXPERT
         # (engine name j carries source expert m!=j) is detectable PER LAYER.
         all_expert_names = [
-            f"model.layers.{li}.mlp.experts.{j}.gate_proj.weight"
-            for li in sampled_layers for j in range(num_experts)
+            f"model.layers.{li}.mlp.experts.{j}.gate_proj.weight" for li in sampled_layers for j in range(num_experts)
         ]
 
         print(f"[diag] model={MODEL} num_experts={num_experts} num_layers={num_layers}")
-        print(f"[diag] NUM_GPUS={NUM_GPUS} policy ep={DIAG_EP} fsdp={DIAG_FSDP} "
-              f"(experts//ep={num_experts//DIAG_EP}, %fsdp={(num_experts//DIAG_EP)%DIAG_FSDP}) "
-              f"| torch={torch.__version__}")
+        print(
+            f"[diag] NUM_GPUS={NUM_GPUS} policy ep={DIAG_EP} fsdp={DIAG_FSDP} "
+            f"(experts//ep={num_experts // DIAG_EP}, %fsdp={(num_experts // DIAG_EP) % DIAG_FSDP}) "
+            f"| torch={torch.__version__}"
+        )
         print(f"[diag] sampling {len(rep_names)} tensors (all types), experts={rep_experts}")
 
         # ---- ONE sync ----
@@ -253,9 +259,14 @@ def main():
         layer_re = re.compile(r"model\.layers\.(\d+)\.")
         # TP-sharded tensors, matched layer-AGNOSTICALLY (regex on the suffix) so both
         # the layer-0 and mid-layer attn projections assemble across TP ranks.
-        TP_SHARD_DIM = {"model.embed_tokens.weight": 0, "lm_head.weight": 0,
-                        "self_attn.o_proj.weight": 1, "self_attn.q_proj.weight": 0,
-                        "self_attn.k_proj.weight": 0, "self_attn.v_proj.weight": 0}
+        TP_SHARD_DIM = {
+            "model.embed_tokens.weight": 0,
+            "lm_head.weight": 0,
+            "self_attn.o_proj.weight": 1,
+            "self_attn.q_proj.weight": 0,
+            "self_attn.k_proj.weight": 0,
+            "self_attn.v_proj.weight": 0,
+        }
 
         def _tp_shard_dim(name):
             if name in TP_SHARD_DIM:
@@ -276,8 +287,11 @@ def main():
                     entries.append((rkc, e["tensor"]))
             if not entries:
                 # report any per-rank notes for diagnosis
-                notes = [rd.get(name, {}).get("note") or rd.get(name, {}).get("error")
-                         for rd in eng_per_rank if isinstance(rd, dict)]
+                notes = [
+                    rd.get(name, {}).get("note") or rd.get(name, {}).get("error")
+                    for rd in eng_per_rank
+                    if isinstance(rd, dict)
+                ]
                 return None, f"MISSING ({[n for n in notes if n][:1]})"
             tp_dim = _tp_shard_dim(name)
             if tp_dim is not None:
@@ -308,8 +322,7 @@ def main():
             # WRONG_EXPERT search uses THIS layer's gate_proj source map (only
             # meaningful for gate_proj names — shapes differ for up/down, skipped).
             sae = src_all_experts.get(li) if (gj is not None and name.endswith("gate_proj.weight")) else None
-            sig, ma = _signature(name, tr.float().cpu(), eng.float().cpu(),
-                                  src_all_experts=sae, gj=gj)
+            sig, ma = _signature(name, tr.float().cpu(), eng.float().cpu(), src_all_experts=sae, gj=gj)
             results.append((name, emode, sig, ma))
 
         # Per-tensor dump: print ALL non-expert tensors + ALL non-CLEAN expert
@@ -338,8 +351,12 @@ def main():
         nonexp_rows = [r for r in results if expert_re.search(r[0]) is None]
         e_cln, e_dff, e_mis = _bucket(expert_rows)
         n_cln, n_dff, n_mis = _bucket(nonexp_rows)
-        print(f"\n[diag] SUMMARY  experts:    {len(e_cln)} CLEAN / {len(e_dff)} CORRUPT / {len(e_mis)} missing  (of {len(expert_rows)})")
-        print(f"[diag] SUMMARY  non-expert: {len(n_cln)} CLEAN / {len(n_dff)} CORRUPT / {len(n_mis)} missing  (of {len(nonexp_rows)})")
+        print(
+            f"\n[diag] SUMMARY  experts:    {len(e_cln)} CLEAN / {len(e_dff)} CORRUPT / {len(e_mis)} missing  (of {len(expert_rows)})"
+        )
+        print(
+            f"[diag] SUMMARY  non-expert: {len(n_cln)} CLEAN / {len(n_dff)} CORRUPT / {len(n_mis)} missing  (of {len(nonexp_rows)})"
+        )
 
         # WRONG_EXPERT permutation map (engine name j carries source expert m!=j).
         wrong = [(r[0], r[2]) for r in expert_rows if "WRONG_EXPERT" in r[2]]
@@ -349,23 +366,29 @@ def main():
                 print(f"    {nm}  ->  {sg}")
 
         # ---- W-vs-I VERDICT ----
-        experts_clean = (len(e_dff) == 0 and len(e_cln) > 0)
-        nonexp_clean = (len(n_dff) == 0)
+        experts_clean = len(e_dff) == 0 and len(e_cln) > 0
+        nonexp_clean = len(n_dff) == 0
         print("\n[diag] ===== W-vs-I VERDICT =====")
         if experts_clean and nonexp_clean:
-            print("[diag] VERDICT = CLASS I (inference-time): engine-held weights EQUAL the FSDP "
-                  "source for ALL experts AND non-expert tensors. Weights are faithfully synced "
-                  "=> the salad is the EP=2 inference-time all-to-all (dispatch/combine), NOT weight "
-                  "corruption. Next target: the EP dispatch/combine path, not the weight-load.")
+            print(
+                "[diag] VERDICT = CLASS I (inference-time): engine-held weights EQUAL the FSDP "
+                "source for ALL experts AND non-expert tensors. Weights are faithfully synced "
+                "=> the salad is the EP=2 inference-time all-to-all (dispatch/combine), NOT weight "
+                "corruption. Next target: the EP dispatch/combine path, not the weight-load."
+            )
         elif len(e_dff) > 0:
-            print(f"[diag] VERDICT = CLASS W (weight corruption): {len(e_dff)} EXPERT tensors differ "
-                  f"from source. The FSDP->vLLM EP weight-load/remap corrupts experts. See the "
-                  f"signature lines above (WRONG_EXPERT m!=j => permutation; GATE_UP_SWAP/ROW_PERMUTED/"
-                  f"SCALED/ZEROED => the sub-candidate). non-expert tensors: "
-                  f"{'CLEAN (control holds)' if nonexp_clean else 'ALSO CORRUPT (not expert-specific!)'}")
+            print(
+                f"[diag] VERDICT = CLASS W (weight corruption): {len(e_dff)} EXPERT tensors differ "
+                f"from source. The FSDP->vLLM EP weight-load/remap corrupts experts. See the "
+                f"signature lines above (WRONG_EXPERT m!=j => permutation; GATE_UP_SWAP/ROW_PERMUTED/"
+                f"SCALED/ZEROED => the sub-candidate). non-expert tensors: "
+                f"{'CLEAN (control holds)' if nonexp_clean else 'ALSO CORRUPT (not expert-specific!)'}"
+            )
         else:
-            print(f"[diag] VERDICT = INDETERMINATE: experts all CLEAN/missing but {len(n_dff)} NON-expert "
-                  f"tensors differ — investigate the non-expert corruption (not the expected expert-EP class).")
+            print(
+                f"[diag] VERDICT = INDETERMINATE: experts all CLEAN/missing but {len(n_dff)} NON-expert "
+                f"tensors differ — investigate the non-expert corruption (not the expected expert-EP class)."
+            )
     finally:
         if pg is not None:
             try:
@@ -378,4 +401,5 @@ def main():
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

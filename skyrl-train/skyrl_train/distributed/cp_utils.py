@@ -105,9 +105,7 @@ def cp_unshard_grad_safe(cp_mesh, tensor: torch.Tensor, seq_dim: int) -> torch.T
     #     resulting tag sequence gives perm such that gathered[perm] == natural.
     local_len = tensor.size(seq_dim)
     rank_in_cp = cp_mesh.get_local_rank()
-    tag = torch.arange(
-        rank_in_cp * local_len, (rank_in_cp + 1) * local_len, device=tensor.device, dtype=torch.long
-    )
+    tag = torch.arange(rank_in_cp * local_len, (rank_in_cp + 1) * local_len, device=tensor.device, dtype=torch.long)
     # shape the tag like the buffer along seq_dim ([1, L] then unshard expects (B,S)).
     tag2d = tag.unsqueeze(0)  # [1, L]
     natural_slots = context_parallel_unshard(cp_mesh, [tag2d], [1])[0][0]  # [S] natural-order slot ids
@@ -115,6 +113,7 @@ def cp_unshard_grad_safe(cp_mesh, tensor: torch.Tensor, seq_dim: int) -> torch.T
 
     out = torch.index_select(gathered, dim=seq_dim, index=perm)
     return out
+
 
 # Track the last rotate method we set so `set_rotate_method` is called once
 # (idempotent) rather than per-step. torch's `set_rotate_method` mutates a
@@ -134,9 +133,9 @@ def set_cp_rotate_method(rotate_method: Optional[str]) -> None:
     global _CURRENT_ROTATE_METHOD
     if rotate_method is None:
         return
-    assert (
-        rotate_method in _VALID_ROTATE_METHODS
-    ), f"cp_rotate_method='{rotate_method}' invalid; must be one of {_VALID_ROTATE_METHODS}"
+    assert rotate_method in _VALID_ROTATE_METHODS, (
+        f"cp_rotate_method='{rotate_method}' invalid; must be one of {_VALID_ROTATE_METHODS}"
+    )
     if rotate_method == _CURRENT_ROTATE_METHOD:
         return
     set_rotate_method(rotate_method)

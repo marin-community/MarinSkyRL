@@ -130,7 +130,9 @@ def _run_create(monkeypatch, dcp: int):
         def remote(self):
             return None
 
-    monkeypatch.setattr(rwie, "placement_group", lambda bundles, strategy=None: ("PG", tuple(len(bundles) for _ in [0])))
+    monkeypatch.setattr(
+        rwie, "placement_group", lambda bundles, strategy=None: ("PG", tuple(len(bundles) for _ in [0]))
+    )
     # Stub the helpers pulled from skyrl_train.utils inside the function body.
     import skyrl_train.utils as skutils
 

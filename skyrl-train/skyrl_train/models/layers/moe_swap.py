@@ -188,8 +188,7 @@ def _moe_attr(hf_block, hf_config, name):
         # defaulted — topology attrs below still raise.
         return True
     raise AttributeError(
-        f"could not resolve MoE attribute '{name}' on {type(hf_block).__name__}, "
-        f"its .gate, or the HF config"
+        f"could not resolve MoE attribute '{name}' on {type(hf_block).__name__}, its .gate, or the HF config"
     )
 
 

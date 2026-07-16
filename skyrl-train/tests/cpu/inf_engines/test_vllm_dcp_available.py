@@ -30,9 +30,8 @@ def test_engine_args_exposes_dcp_field():
     """
     from vllm.engine.arg_utils import EngineArgs
 
-    assert (
-        "decode_context_parallel_size" in EngineArgs.__dataclass_fields__
-        or hasattr(EngineArgs, "decode_context_parallel_size")
+    assert "decode_context_parallel_size" in EngineArgs.__dataclass_fields__ or hasattr(
+        EngineArgs, "decode_context_parallel_size"
     ), "vLLM EngineArgs lacks decode_context_parallel_size — DCP unsupported on this vLLM (SIF-rebuild blocker)"
 
 
@@ -40,9 +39,9 @@ def test_parallel_config_exposes_dcp_field():
     """`ParallelConfig.decode_context_parallel_size` — the exact symbol Stage 2/3 rely on."""
     from vllm.config.parallel import ParallelConfig
 
-    assert hasattr(
-        ParallelConfig, "decode_context_parallel_size"
-    ), "vLLM ParallelConfig lacks decode_context_parallel_size — DCP unsupported (SIF-rebuild blocker)"
+    assert hasattr(ParallelConfig, "decode_context_parallel_size"), (
+        "vLLM ParallelConfig lacks decode_context_parallel_size — DCP unsupported (SIF-rebuild blocker)"
+    )
 
 
 def test_get_dcp_group_importable():

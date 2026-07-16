@@ -222,8 +222,8 @@ class TeacherInferenceEngineClient:
 
         if self._needs_retokenization:
             # Cross-tokenizer path: decode student → re-encode with teacher
-            teacher_full_sequences, teacher_prompt_lengths, response_alignments = (
-                self._retokenize_for_teacher(prompt_token_ids, response_token_ids)
+            teacher_full_sequences, teacher_prompt_lengths, response_alignments = self._retokenize_for_teacher(
+                prompt_token_ids, response_token_ids
             )
             full_sequences = teacher_full_sequences
             prompt_lengths = teacher_prompt_lengths
@@ -266,9 +266,7 @@ class TeacherInferenceEngineClient:
                 "session_ids": None,
             }
             output = await engine.generate(input_batch)
-            return self._extract_response_logprobs(
-                output, prompt_lengths, response_token_ids, k, response_alignments
-            )
+            return self._extract_response_logprobs(output, prompt_lengths, response_token_ids, k, response_alignments)
 
         # Chunked scoring: process chunk_size sequences at a time
         logger.info(f"Chunked teacher scoring: {B} sequences in chunks of {chunk_size}")

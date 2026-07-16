@@ -81,8 +81,8 @@ MODEL = os.environ.get("SKYRL_80B_MODEL_PATH", "Qwen/Qwen3-Next-80B-A3B-Instruct
 NUM_NODES = int(os.environ.get("SKYRL_80B_NUM_NODES", "8"))
 GPUS_PER_NODE = int(os.environ.get("SKYRL_80B_GPUS_PER_NODE", "4"))
 NUM_GPUS = NUM_NODES * GPUS_PER_NODE  # 32
-EP_SIZE = int(os.environ.get("SKYRL_80B_EP_SIZE", "8"))        # 512 experts / 8 ranks = 64/rank
-FSDP_SIZE = int(os.environ.get("SKYRL_80B_FSDP_SIZE", "4"))    # ddp=1, ep=8, fsdp=4 -> world 32
+EP_SIZE = int(os.environ.get("SKYRL_80B_EP_SIZE", "8"))  # 512 experts / 8 ranks = 64/rank
+FSDP_SIZE = int(os.environ.get("SKYRL_80B_FSDP_SIZE", "4"))  # ddp=1, ep=8, fsdp=4 -> world 32
 # vLLM EP inference engine: EP=8 spans 8 GPUs (TP=8 group hosts the EP=8 experts).
 INFER_TP = int(os.environ.get("SKYRL_80B_INFER_TP", "8"))
 INFER_EP = int(os.environ.get("SKYRL_80B_INFER_EP", "8"))
@@ -365,14 +365,13 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
         n_experts = int(model_config.num_experts)
         experts_per_ep = n_experts // EP  # 64
         # First + last expert of EVERY EP shard -> covers all 8 shards' reshard/remap.
-        rep_experts = sorted(set(
-            [s * experts_per_ep for s in range(EP)] +
-            [s * experts_per_ep + experts_per_ep - 1 for s in range(EP)]
-        ))
+        rep_experts = sorted(
+            set([s * experts_per_ep for s in range(EP)] + [s * experts_per_ep + experts_per_ep - 1 for s in range(EP)])
+        )
         rep_names = [
             "model.embed_tokens.weight",
             "model.layers.0.self_attn.o_proj.weight",
-            "model.layers.0.mlp.gate.weight",   # router (layer 0)
+            "model.layers.0.mlp.gate.weight",  # router (layer 0)
             "model.layers.12.mlp.gate.weight",  # router (layer 12)
         ]
         for j in rep_experts:
@@ -381,9 +380,7 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
         print(f"[Stage7][weight-eq] EP={EP} experts_per_ep={experts_per_ep} rep_experts={rep_experts}")
         print(f"[Stage7][weight-eq] comparing {len(rep_names)} representative tensors")
 
-        trainer_w_per_rank = ray.get(
-            policy.async_run_ray_method("pass_through", "read_post_step_weights", rep_names)
-        )
+        trainer_w_per_rank = ray.get(policy.async_run_ray_method("pass_through", "read_post_step_weights", rep_names))
         trainer_w = {}
         for d in trainer_w_per_rank:
             if isinstance(d, dict):
@@ -469,7 +466,12 @@ def test_e2e_moe_rl_step_80b_replay_ep_grouped():
                     eng_f = eng_f.t().contiguous()
                 else:
                     results_tbl.append(
-                        (name, f"SHAPE_MISMATCH trainer={tuple(tr_f.shape)} engine={tuple(eng_f.shape)}", float("nan"), list(tr_f.shape))
+                        (
+                            name,
+                            f"SHAPE_MISMATCH trainer={tuple(tr_f.shape)} engine={tuple(eng_f.shape)}",
+                            float("nan"),
+                            list(tr_f.shape),
+                        )
                     )
                     continue
             max_abs = float((tr_f - eng_f).abs().max().item())
