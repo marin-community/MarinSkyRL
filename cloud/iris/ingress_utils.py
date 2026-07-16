@@ -702,6 +702,14 @@ PARENT_CONTROLLER_CONFIG_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG"
 PARENT_INGRESS_HOST_ENV = "OTAGENT_PARENT_INGRESS_HOST"
 DEFAULT_PARENT_INGRESS_HOST = "iris.oa.dev"
 
+# The launcher may forward the parent (marin) cluster YAML *content* so the in-pod
+# worker can materialize marin.yaml — it is neither baked into the gpu-rl image nor
+# part of the synced workspace, so the launch-host path in PARENT_CONTROLLER_CONFIG_ENV
+# does not resolve in-pod. marin.yaml carries no secrets (signing_key is a
+# gcp-secret:// reference resolved server-side; images/storage are ghcr/gs refs), so
+# forwarding its content is safe and unconditional on the federated path.
+PARENT_CONTROLLER_CONFIG_YAML_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG_YAML"
+
 # The launcher may forward the operator's cached `iris login` record (the JSON at
 # ~/.config/marin/credentials/<cluster>.json, carrying edge_refresh_token) so the in-pod
 # worker can mint at marin. SECRET: it contains a long-lived refresh token, so forwarding
@@ -746,6 +754,37 @@ def materialize_parent_credentials() -> Optional[str]:
     return str(dest)
 
 
+def materialize_parent_controller_config() -> Optional[str]:
+    """Write the forwarded parent (marin) cluster YAML to a real in-pod path.
+
+    ``marin.yaml`` is neither baked into the gpu-rl image nor part of the synced
+    workspace, so the launch-host path forwarded in :data:`PARENT_CONTROLLER_CONFIG_ENV`
+    does not resolve in-pod — ``load_config`` on it would raise ``FileNotFoundError``.
+    When the launcher forwards the file CONTENT via
+    :data:`PARENT_CONTROLLER_CONFIG_YAML_ENV`, write it to a stable path
+    (``~/.config/marin/marin.yaml``) and repoint :data:`PARENT_CONTROLLER_CONFIG_ENV`
+    at it so ``_ParentControllerClient`` / ``load_config`` read a real file. marin.yaml
+    carries no secrets (see the env-const note), so this is unconditional on the
+    federated path.
+
+    Returns the resolved config path. No content forwarded ⇒ returns the existing
+    :data:`PARENT_CONTROLLER_CONFIG_ENV` value unchanged (the deploy-choice alternative
+    where marin.yaml is baked/synced into the pod). Idempotent: never overwrites an
+    existing on-disk record.
+    """
+    raw = os.environ.get(PARENT_CONTROLLER_CONFIG_YAML_ENV)
+    if not raw:
+        return os.environ.get(PARENT_CONTROLLER_CONFIG_ENV)
+    from pathlib import Path
+
+    dest = Path.home() / ".config" / "marin" / "marin.yaml"
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(raw)
+    os.environ[PARENT_CONTROLLER_CONFIG_ENV] = str(dest)
+    return str(dest)
+
+
 _FED_TOKEN_CACHE: Optional[FederatedCapabilityTokenCache] = None
 _FED_TOKEN_CACHE_LOCK = threading.Lock()
 
@@ -759,7 +798,10 @@ def _default_federated_token_cache() -> FederatedCapabilityTokenCache:
     global _FED_TOKEN_CACHE
     with _FED_TOKEN_CACHE_LOCK:
         if _FED_TOKEN_CACHE is None:
-            parent_cfg = os.environ.get(PARENT_CONTROLLER_CONFIG_ENV)
+            # Materialize the forwarded marin.yaml (write-from-env) BEFORE reading the
+            # path — the launch-host path does not resolve in-pod; this repoints the env
+            # at the in-pod file. No-op when marin.yaml is baked/synced (returns the path).
+            parent_cfg = materialize_parent_controller_config()
             if not parent_cfg:
                 raise RuntimeError(
                     "federated parent-minting requires the parent (marin) controller "

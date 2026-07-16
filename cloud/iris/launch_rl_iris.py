@@ -386,6 +386,19 @@ SKYRL_HOME = "/opt/skyrl"
 # self-contained here (cloud.iris.*) — no OpenThoughts-Agent workspace is required in-pod.
 APP_DIR = "/app"
 
+# marin-iris wheel installed into the RL venv at pod bootstrap for the controller-ingress
+# registration path (GAP D). The gpu-rl image bakes ONLY MarinSkyRL + harbor, never iris (a
+# marin-monorepo pkg), so cloud.iris.ingress_utils' `import iris.cluster.client.* / iris.rpc.*`
+# would ModuleNotFoundError in driver init. This dev build is validated against the live
+# marin controller's registration/mint RPC protocol; override via --iris-ref.
+DEFAULT_IRIS_VERSION = "marin-iris==0.2.49.dev202607160749"
+# The frozen known-good RL-env pin set, baked into the image (Dockerfile.gpu-rl
+# `ENV UV_CONSTRAINT=/opt/openthoughts/docker/rl_env_constraints.txt`). The marin-iris
+# install is `--constraint`ed against it so no baked pin (grpcio/protobuf/pyarrow/pydantic/
+# numpy/google-auth/…) can be downgraded. This is the image-baked absolute path (NOT the
+# synced /app workspace, which is MarinSkyRL and does not carry this OT-Agent artifact).
+RL_ENV_CONSTRAINTS = "/opt/openthoughts/docker/rl_env_constraints.txt"
+
 
 def _resolve_cluster_config_default() -> str:
     """Find the marin repo's cw-us-east-02a cluster YAML."""
@@ -877,6 +890,16 @@ def create_parser() -> argparse.ArgumentParser:
         "MarinSkyRL fix that landed AFTER the image was built without waiting for an "
         "image rebuild (deps are baked, but skyrl-train is an editable git clone, so "
         "a checkout is live). Default: unset = use whatever commit the image baked.",
+    )
+    parser.add_argument(
+        "--iris-ref",
+        "--iris_ref",
+        dest="iris_ref",
+        default=DEFAULT_IRIS_VERSION,
+        help="marin-iris pip spec installed into the RL venv at pod bootstrap for the "
+        "controller-ingress registration/mint path (GAP D: iris is NOT baked into the "
+        "gpu-rl image). Only installed under --ingress-mode controller (direct mode is "
+        f"byte-identical, no install). Default: {DEFAULT_IRIS_VERSION}.",
     )
     # ----------------------------------------------------------------------- #
     # MarinSkyRL runtime-knob flags (deslop stage 3). Each promotes a live      #
@@ -1386,6 +1409,52 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             f'echo "[rl-iris] {SKYRL_HOME} is not a git tree (baked image already pinned) — using baked MarinSkyRL; --skyrl-ref not applied"; '
             f"fi; "
         )
+    # GAP D fix: install marin-iris into the RL venv at bootstrap for the controller-
+    # ingress registration/mint path. cloud.iris.ingress_utils hard-imports
+    # iris.cluster.client.* / iris.rpc.*, but the gpu-rl image bakes ONLY MarinSkyRL +
+    # harbor (never iris, a marin-monorepo pkg) -> `ModuleNotFoundError: No module named
+    # 'iris'` in driver init. This is the lightweight analog of --skyrl-ref (no ~40-min
+    # kaniko rebuild): marin-iris is a pure-python wheel, installed live. Only needed in
+    # controller mode (direct mode never imports iris), so gate on ingress_mode ==
+    # controller -> the default direct path is byte-identical (no install, no env change).
+    #   - NO [controller] extra: the CLIENT registration path (EndpointClient + rpc stubs)
+    #     needs neither kubernetes<36 nor Secret-Manager (it loads grpc + connectrpc +
+    #     rigging + finelog only), so skipping it avoids the biggest dep-conflict source.
+    #   - --constraint the image-baked frozen RL-env set: iris's deps are all already
+    #     present with satisfied >= bounds, so uv adds only the pure-python leaves and no
+    #     baked pin is downgraded; torch/vllm/flash_attn aren't in iris's tree.
+    #   - GAP E#2 boto guard: the marin-iris solve DOWNGRADES the (deliberately-unpinned)
+    #     botocore cluster (1.43.46 -> 1.43.0), breaking `from botocore.docs.utils import
+    #     DocumentModifiedShape` (accelerate imports it transitively -> a MASKED
+    #     "accelerate circular import" that killed every prior controller-ingress smoke).
+    #     Snapshot the baked boto pins with `uv pip freeze` (the venv is uv-managed, NO
+    #     pip module) BEFORE the install and force-restore them (--no-deps) AFTER.
+    #   - Under `set -e` + a hard import of the exact registration path AND torch/vllm/
+    #     flash_attn + DocumentModifiedShape asserts: a clobbered pin KILLS the job loud
+    #     at bootstrap rather than dying deep in driver init.
+    iris_refresh = ""
+    if getattr(args, "ingress_mode", "direct") == "controller":
+        ispec = getattr(args, "iris_ref", None) or DEFAULT_IRIS_VERSION
+        iris_refresh = (
+            f"_BOTO_BAKED=$(uv pip freeze --python {shlex.quote(RL_PYTHON)} 2>/dev/null | "
+            f"grep -iE '^(botocore|boto3|s3transfer|awscli)==' | tr '\\n' ' ' || true); "
+            f'echo "[rl-iris] boto baked pins: $_BOTO_BAKED"; '
+            f"uv pip install --python {shlex.quote(RL_PYTHON)} "
+            f"--constraint {shlex.quote(RL_ENV_CONSTRAINTS)} {shlex.quote(ispec)}; "
+            f'if [ -n "$_BOTO_BAKED" ]; then uv pip install --python '
+            f"{shlex.quote(RL_PYTHON)} --no-deps $_BOTO_BAKED; fi; "
+            f'{RL_PYTHON} -c "import importlib.metadata as m; '
+            f"import iris.cluster.client.endpoint_client, iris.cluster.client.job_info, "
+            f"iris.rpc.controller_connect, iris.cluster.types; "
+            f"print('[rl-iris] marin-iris now', m.version('marin-iris'), "
+            f"'(controller-ingress import OK)')\"; "
+            f'{RL_PYTHON} -c "import botocore; from botocore.docs.utils import '
+            f"DocumentModifiedShape; print('[rl-iris] boto cluster intact: botocore', "
+            f'botocore.__version__)"; '
+            f'{RL_PYTHON} -c "import torch, vllm, flash_attn, flash_attn_2_cuda; '
+            f"print('[rl-iris] post-iris pins intact: torch', torch.__version__, "
+            f"'vllm', vllm.__version__)\"; "
+        )
     ctrl = shlex.join(controller_cmd)
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
     # SKYRL_GDN_FLASHQLA=1 lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
@@ -1433,6 +1502,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     bash = (
         f"set -e; cd {APP_DIR}; "
         f"{skyrl_refresh}"
+        f"{iris_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"export VLLM_USE_V1=1; "
@@ -1674,6 +1744,7 @@ def main() -> int:
     if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
         from cloud.iris.ingress_utils import (
             PARENT_CONTROLLER_CONFIG_ENV,
+            PARENT_CONTROLLER_CONFIG_YAML_ENV,
             PARENT_CREDENTIALS_JSON_ENV,
         )
 
@@ -1684,6 +1755,17 @@ def main() -> int:
         )
         if parent_cfg:
             env_vars[PARENT_CONTROLLER_CONFIG_ENV] = parent_cfg
+            # marin.yaml is not baked into the gpu-rl image and is not part of the
+            # synced workspace, so the path above won't resolve in-pod. Forward the
+            # file CONTENT (write-from-env, mirroring --forward-marin-login) so the
+            # in-pod worker (materialize_parent_controller_config) writes it to a real
+            # path and repoints the env. marin.yaml carries no secrets (signing_key is
+            # a gcp-secret:// ref resolved server-side). When parent_cfg is an explicit
+            # in-pod path (baked/synced), os.path.isfile is False on the launch host →
+            # no content forwarded (operator owns materialization).
+            if os.path.isfile(parent_cfg):
+                with open(parent_cfg) as _pf:
+                    env_vars[PARENT_CONTROLLER_CONFIG_YAML_ENV] = _pf.read()
         for k in (
             "IRIS_IAP_REFRESH_TOKEN",
             "GOOGLE_APPLICATION_CREDENTIALS",

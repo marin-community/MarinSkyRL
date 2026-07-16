@@ -12,6 +12,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -203,3 +204,39 @@ def test_materialize_parent_credentials_noop_without_env(tmp_path, monkeypatch):
     monkeypatch.delenv(PARENT_CREDENTIALS_JSON_ENV, raising=False)
     assert materialize_parent_credentials() is None
     assert not (tmp_path / ".config" / "marin" / "credentials" / "marin.json").exists()
+
+
+def test_materialize_parent_controller_config_writes_and_repoints(tmp_path, monkeypatch):
+    """Forwarded marin.yaml content is written in-pod and PARENT_CONTROLLER_CONFIG_ENV repointed."""
+    from cloud.iris.ingress_utils import (
+        PARENT_CONTROLLER_CONFIG_ENV,
+        PARENT_CONTROLLER_CONFIG_YAML_ENV,
+        materialize_parent_controller_config,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # The launcher forwards a launch-host path that does NOT resolve in-pod ...
+    monkeypatch.setenv(PARENT_CONTROLLER_CONFIG_ENV, "/launch-host/marin.yaml")
+    # ... plus the file content (write-from-env).
+    monkeypatch.setenv(PARENT_CONTROLLER_CONFIG_YAML_ENV, "name: marin\ndashboard_url: https://iris.oa.dev\n")
+    dest = materialize_parent_controller_config()
+    assert dest is not None and dest.endswith("marin.yaml")
+    written = (tmp_path / ".config" / "marin" / "marin.yaml").read_text()
+    assert "dashboard_url: https://iris.oa.dev" in written
+    # The env is repointed at the real in-pod file so load_config reads it.
+    assert os.environ[PARENT_CONTROLLER_CONFIG_ENV] == dest
+
+
+def test_materialize_parent_controller_config_noop_returns_existing_path(tmp_path, monkeypatch):
+    """No content forwarded => returns the existing path unchanged (baked/synced marin.yaml)."""
+    from cloud.iris.ingress_utils import (
+        PARENT_CONTROLLER_CONFIG_ENV,
+        PARENT_CONTROLLER_CONFIG_YAML_ENV,
+        materialize_parent_controller_config,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv(PARENT_CONTROLLER_CONFIG_YAML_ENV, raising=False)
+    monkeypatch.setenv(PARENT_CONTROLLER_CONFIG_ENV, "/in-pod/baked/marin.yaml")
+    assert materialize_parent_controller_config() == "/in-pod/baked/marin.yaml"
+    assert not (tmp_path / ".config" / "marin" / "marin.yaml").exists()
