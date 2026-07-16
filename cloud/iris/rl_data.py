@@ -44,9 +44,11 @@ def resolve_rl_train_data(
                 break
         else:
             scratch_dir = "/tmp"
-            print("[rl_data] WARNING: Using /tmp for task extraction. "
-                  "This is local to each node and may fail on multi-node jobs. "
-                  "Set $SCRATCH, $DCFT, or $DCFT_PRIVATE to a shared filesystem path.")
+            print(
+                "[rl_data] WARNING: Using /tmp for task extraction. "
+                "This is local to each node and may fail on multi-node jobs. "
+                "Set $SCRATCH, $DCFT, or $DCFT_PRIVATE to a shared filesystem path."
+            )
     tasks_base = Path(scratch_dir) / "tasks"
 
     resolved_paths = []
@@ -67,10 +69,15 @@ def resolve_rl_train_data(
                 continue
 
             cmd = [
-                sys.executable, "-m", "cloud.iris.extract_tasks_from_parquet",
-                "--parquet", data_path,
-                "--output_dir", str(output_dir),
-                "--on_exist", on_exist,
+                sys.executable,
+                "-m",
+                "cloud.iris.extract_tasks_from_parquet",
+                "--parquet",
+                data_path,
+                "--output_dir",
+                str(output_dir),
+                "--on_exist",
+                on_exist,
             ]
 
             if verbose:
@@ -96,19 +103,19 @@ def resolve_rl_train_data(
                         print(result.stdout)
                     break
                 except subprocess.TimeoutExpired:
-                    last_err = (f"extract stalled > {extract_attempt_timeout}s "
-                                "(mid-download socket hang); killed, retrying (HF resumes the partial shard)")
+                    last_err = (
+                        f"extract stalled > {extract_attempt_timeout}s "
+                        "(mid-download socket hang); killed, retrying (HF resumes the partial shard)"
+                    )
                     print(f"[rl_data] extract attempt {attempt}/6 TIMED OUT for {data_path}: {last_err}")
-                    time.sleep(min(30, 2 ** attempt))
+                    time.sleep(min(30, 2**attempt))
                 except subprocess.CalledProcessError as e:
                     last_err = f"stdout: {e.stdout}\n  stderr: {e.stderr}"
                     print(f"[rl_data] extract attempt {attempt}/6 failed for {data_path}:")
                     print(f"  {last_err}")
-                    time.sleep(min(30, 2 ** attempt))
+                    time.sleep(min(30, 2**attempt))
             else:
-                raise RuntimeError(
-                    f"Failed to extract HF dataset after 6 attempts: {data_path}: {last_err}"
-                )
+                raise RuntimeError(f"Failed to extract HF dataset after 6 attempts: {data_path}: {last_err}")
 
             _fix_task_permissions(output_dir, verbose=verbose)
             resolved_paths.append(str(output_dir))
@@ -138,13 +145,11 @@ def _fix_task_permissions(task_dir: Path, verbose: bool = True) -> None:
         mode = task_dir.stat().st_mode
         if (mode & rx_bits) == rx_bits:
             if verbose:
-                print(f"[rl_data] Permissions already a+rX on top-level "
-                      f"dir, skipping recursive chmod: {task_dir}")
+                print(f"[rl_data] Permissions already a+rX on top-level dir, skipping recursive chmod: {task_dir}")
             return
     except OSError as e:
         if verbose:
-            print(f"[rl_data] stat probe failed on {task_dir} ({e}); "
-                  f"running recursive chmod to be safe.")
+            print(f"[rl_data] stat probe failed on {task_dir} ({e}); running recursive chmod to be safe.")
 
     if verbose:
         print(f"[rl_data] Fixing permissions on: {task_dir}")

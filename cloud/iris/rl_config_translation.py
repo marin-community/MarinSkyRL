@@ -33,44 +33,46 @@ SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 # Source: skyrl_train/inference_engines/ray_wrapped_inference_engine.py
 # =============================================================================
 
-SKYRL_INTERNAL_ENGINE_KWARGS = frozenset({
-    # Hardcoded values
-    "trust_remote_code",        # Always True
-    "worker_extension_cls",     # vLLM SkyRL extension path
-    "data_parallel_backend",    # Hardcoded "mp"
-    "max_logprobs",             # Hardcoded 1
-    # Calculated from config/environment
-    "distributed_executor_backend",  # Calculated from TP size ("uni" or "ray")
-    "enforce_eager",            # Set from generator.enforce_eager config
-    "tensor_parallel_size",     # Set from generator config
-    "data_parallel_size",       # Set from generator config
-    "seed",                     # Set from config
-    "enable_prefix_caching",    # Set from generator config
-    "dtype",                    # Set from generator.model_dtype
-    "gpu_memory_utilization",   # Set from generator config
-    "max_num_batched_tokens",   # Set from generator config
-    "max_num_seqs",             # Set from generator config
-    "enable_sleep_mode",        # Set from trainer.placement.colocate_all
-    "vllm_v1_disable_multiproc",  # Set from generator config
-    # Ray internal management
-    "bundle_indices",           # Calculated from parallelism config
-    "num_gpus",                 # Ray resource allocation
-    "noset_visible_devices",    # Ray CUDA_VISIBLE_DEVICES handling
-    # SGLang-specific (if using SGLang backend)
-    "model_path",               # Set from trainer.policy.model.path
-    "tp_size",                  # Alias for tensor_parallel_size
-    "mem_fraction_static",      # Alias for gpu_memory_utilization
-    "random_seed",              # Alias for seed
-    "disable_radix_cache",      # Inverse of enable_prefix_caching
-    "max_prefill_tokens",       # Alias for max_num_batched_tokens
-    "max_running_requests",     # Alias for max_num_seqs
-    "mm_attention_backend",     # Hardcoded "fa3"
-    "attention_backend",        # Hardcoded "fa3"
-    "enable_memory_saver",      # Set from inference_engine_enable_sleep
-    "tokenizer",                # Passed from external tokenizer
-    "custom_weight_loader",     # Hardcoded SkyRL path
-    "skip_tokenizer_init",      # Hardcoded True for SGLang
-})
+SKYRL_INTERNAL_ENGINE_KWARGS = frozenset(
+    {
+        # Hardcoded values
+        "trust_remote_code",  # Always True
+        "worker_extension_cls",  # vLLM SkyRL extension path
+        "data_parallel_backend",  # Hardcoded "mp"
+        "max_logprobs",  # Hardcoded 1
+        # Calculated from config/environment
+        "distributed_executor_backend",  # Calculated from TP size ("uni" or "ray")
+        "enforce_eager",  # Set from generator.enforce_eager config
+        "tensor_parallel_size",  # Set from generator config
+        "data_parallel_size",  # Set from generator config
+        "seed",  # Set from config
+        "enable_prefix_caching",  # Set from generator config
+        "dtype",  # Set from generator.model_dtype
+        "gpu_memory_utilization",  # Set from generator config
+        "max_num_batched_tokens",  # Set from generator config
+        "max_num_seqs",  # Set from generator config
+        "enable_sleep_mode",  # Set from trainer.placement.colocate_all
+        "vllm_v1_disable_multiproc",  # Set from generator config
+        # Ray internal management
+        "bundle_indices",  # Calculated from parallelism config
+        "num_gpus",  # Ray resource allocation
+        "noset_visible_devices",  # Ray CUDA_VISIBLE_DEVICES handling
+        # SGLang-specific (if using SGLang backend)
+        "model_path",  # Set from trainer.policy.model.path
+        "tp_size",  # Alias for tensor_parallel_size
+        "mem_fraction_static",  # Alias for gpu_memory_utilization
+        "random_seed",  # Alias for seed
+        "disable_radix_cache",  # Inverse of enable_prefix_caching
+        "max_prefill_tokens",  # Alias for max_num_batched_tokens
+        "max_running_requests",  # Alias for max_num_seqs
+        "mm_attention_backend",  # Hardcoded "fa3"
+        "attention_backend",  # Hardcoded "fa3"
+        "enable_memory_saver",  # Set from inference_engine_enable_sleep
+        "tokenizer",  # Passed from external tokenizer
+        "custom_weight_loader",  # Hardcoded SkyRL path
+        "skip_tokenizer_init",  # Hardcoded True for SGLang
+    }
+)
 
 
 def validate_engine_init_kwargs(
@@ -143,8 +145,7 @@ def resolve_rl_config_path(raw_path: str) -> Path:
         return fallback_yaml.resolve()
 
     raise FileNotFoundError(
-        f"RL config not found: {raw_path}\n"
-        f"Searched: {path}, {SKYRL_CONFIG_DIR / raw_path}, {fallback_yaml}"
+        f"RL config not found: {raw_path}\nSearched: {path}, {SKYRL_CONFIG_DIR / raw_path}, {fallback_yaml}"
     )
 
 
@@ -293,18 +294,13 @@ def _format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
                 return f"[{items}]"
             else:
                 return str(v)
-        dict_items = ", ".join(
-            f"{k}: {_fmt_val(v)}"
-            for k, v in value.items()
-        )
+
+        dict_items = ", ".join(f"{k}: {_fmt_val(v)}" for k, v in value.items())
         return f"{prefix}{key}={{{dict_items}}}"
     elif isinstance(value, (list, tuple)):
         # Format as a YAML list WITHOUT outer quotes so Hydra parses it as a list.
         # Double-quote string items to handle paths with special chars.
-        items = ",".join(
-            f'"{v}"' if isinstance(v, str) else str(v)
-            for v in value
-        )
+        items = ",".join(f'"{v}"' if isinstance(v, str) else str(v) for v in value)
         return f"{prefix}{key}=[{items}]"
     elif isinstance(value, str):
         if _needs_quoting(value):
@@ -389,6 +385,7 @@ def build_skyrl_hydra_args(
         train_data = exp_args["train_data"]
         if isinstance(train_data, str) and train_data.startswith("["):
             import ast
+
             try:
                 train_data = ast.literal_eval(train_data)
             except (ValueError, SyntaxError):
@@ -399,6 +396,7 @@ def build_skyrl_hydra_args(
         val_data = exp_args["val_data"]
         if isinstance(val_data, str) and val_data.startswith("["):
             import ast
+
             try:
                 val_data = ast.literal_eval(val_data)
             except (ValueError, SyntaxError):
@@ -446,8 +444,14 @@ def build_skyrl_hydra_args(
     # SkyRL's base config, so use the ++ prefix (add-or-override):
     #   engine_init_kwargs, hf_hub_*, enable_db_registration, optimizer_kwargs,
     #   rope_scaling, wrap_policy.
-    optional_patterns = {".engine_init_kwargs", ".hf_hub_", ".enable_db_registration",
-                         ".optimizer_kwargs", ".rope_scaling", ".wrap_policy"}
+    optional_patterns = {
+        ".engine_init_kwargs",
+        ".hf_hub_",
+        ".enable_db_registration",
+        ".optimizer_kwargs",
+        ".rope_scaling",
+        ".wrap_policy",
+    }
 
     for section, values in [("trainer", trainer), ("generator", generator), ("data", data)]:
         for key, val in _flatten_dict(values, section).items():

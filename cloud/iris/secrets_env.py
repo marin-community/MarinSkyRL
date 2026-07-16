@@ -23,7 +23,7 @@ def load_secrets_env_into_os_environ(secrets_env: str | None) -> int:
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
-            line = line[len("export "):].lstrip()
+            line = line[len("export ") :].lstrip()
         if "=" not in line:
             continue
         k, _, v = line.partition("=")

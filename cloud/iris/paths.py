@@ -28,11 +28,30 @@ def resolve_repo_path(path_like: str) -> Path:
 # Common config/template/data file extensions used to distinguish file paths from
 # HuggingFace repo IDs in resolve_paths_in_dict.
 _PATH_EXTENSIONS = {
-    ".yaml", ".yml", ".json", ".jsonl", ".txt", ".md",
-    ".py", ".sh", ".jinja", ".jinja2", ".j2",
-    ".parquet", ".csv", ".tsv", ".arrow",
-    ".safetensors", ".bin", ".pt", ".pth", ".ckpt",
-    ".toml", ".ini", ".cfg", ".conf",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".jsonl",
+    ".txt",
+    ".md",
+    ".py",
+    ".sh",
+    ".jinja",
+    ".jinja2",
+    ".j2",
+    ".parquet",
+    ".csv",
+    ".tsv",
+    ".arrow",
+    ".safetensors",
+    ".bin",
+    ".pt",
+    ".pth",
+    ".ckpt",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
 }
 
 

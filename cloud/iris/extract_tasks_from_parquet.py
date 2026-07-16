@@ -104,9 +104,7 @@ def main() -> None:
             else:
                 parquet_files = sorted(candidate_path.rglob("*.parquet"))
                 if not parquet_files:
-                    raise FileNotFoundError(
-                        f"No parquet files or raw tasks found under directory: {candidate_path}"
-                    )
+                    raise FileNotFoundError(f"No parquet files or raw tasks found under directory: {candidate_path}")
                 if args.parquet_name:
                     matching = [p for p in parquet_files if p.name == args.parquet_name]
                     if not matching:

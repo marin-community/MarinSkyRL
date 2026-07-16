@@ -53,6 +53,7 @@ def _ray_bin() -> str:
     found = shutil.which("ray")
     return found or "ray"
 
+
 # Generous: cold GPU nodes (image pull + setup) take minutes to reach rendezvous.
 DEFAULT_RENDEZVOUS_TIMEOUT = 1800
 DEFAULT_CLUSTER_JOIN_TIMEOUT = 1800
@@ -148,7 +149,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     from huggingface_hub import constants as _hf_constants
 
     # Parse s3://bucket/prefix... -> (bucket, prefix without trailing slash).
-    without_scheme = warm_source[len("s3://"):]
+    without_scheme = warm_source[len("s3://") :]
     bucket, _, prefix = without_scheme.partition("/")
     prefix = prefix.rstrip("/")
     if not bucket or not prefix:
@@ -157,9 +158,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
 
     endpoint = os.environ.get("AWS_ENDPOINT_URL")
     style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
-    client = boto3.client(
-        "s3", endpoint_url=endpoint, config=Config(s3={"addressing_style": style})
-    )
+    client = boto3.client("s3", endpoint_url=endpoint, config=Config(s3={"addressing_style": style}))
 
     # List every seeded object under the prefix (paginated).
     list_prefix = prefix + "/"
@@ -182,8 +181,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     # Completeness guard: a config.json is mandatory for from_pretrained. Its absence means
     # a half-seeded / wrong prefix -> do NOT build a broken cache; fall back to HF.
     if not any(os.path.basename(k) == "config.json" for k, _ in objects):
-        _log(f"warm sync: {warm_source} has {len(objects)} objects but NO config.json "
-             f"(incomplete seed); HF fallback")
+        _log(f"warm sync: {warm_source} has {len(objects)} objects but NO config.json (incomplete seed); HF fallback")
         return False
 
     cache = _hf_constants.HF_HUB_CACHE
@@ -195,10 +193,9 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     os.makedirs(refs_dir, exist_ok=True)
 
     total_files = total_bytes = skipped = 0
-    _log(f"warm sync: {len(objects)} object(s) from {warm_source} -> {snap_dir} "
-         f"(rank {_rank()}/{_num_tasks()})")
+    _log(f"warm sync: {len(objects)} object(s) from {warm_source} -> {snap_dir} (rank {_rank()}/{_num_tasks()})")
     for key, size in objects:
-        rel = key[len(list_prefix):]
+        rel = key[len(list_prefix) :]
         if not rel:
             continue
         dest = os.path.join(snap_dir, rel)
@@ -225,7 +222,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
                     os.path.exists(tmp_dest) and os.remove(tmp_dest)
                 except OSError:
                     pass
-                time.sleep(min(10, 2 ** attempt))
+                time.sleep(min(10, 2**attempt))
         if last_exc is not None:
             # A partial in-region sync would leave a broken cache; fail this warm attempt so
             # the caller falls back to the HF prestage rather than shipping a corrupt cache.
@@ -235,9 +232,11 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     # Point refs/main at the synthetic snapshot so offline resolution finds it.
     with open(os.path.join(refs_dir, "main"), "w") as f:
         f.write(snap_hash)
-    _log(f"warm sync: DONE — {total_files} downloaded ({total_bytes / 1073741824.0:.2f} GiB), "
-         f"{skipped} already-present; refs/main -> {snap_hash}. Offline from_pretrained "
-         f"({model_path}) resolves from {snap_dir}.")
+    _log(
+        f"warm sync: DONE — {total_files} downloaded ({total_bytes / 1073741824.0:.2f} GiB), "
+        f"{skipped} already-present; refs/main -> {snap_hash}. Offline from_pretrained "
+        f"({model_path}) resolves from {snap_dir}."
+    )
     return True
 
 
@@ -273,11 +272,14 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
         try:
             if _warm_sync_model_from_s3(model_path, warm_source):
                 return
-            _log(f"stage_model: warm source {warm_source} missing/empty/incomplete "
-                 f"-> HF snapshot_download prestage fallback")
+            _log(
+                f"stage_model: warm source {warm_source} missing/empty/incomplete "
+                f"-> HF snapshot_download prestage fallback"
+            )
         except Exception as exc:  # noqa: BLE001 - never let the warm path block bring-up
-            _log(f"stage_model: warm sync from {warm_source} FAILED ({exc!r}) "
-                 f"-> HF snapshot_download prestage fallback")
+            _log(
+                f"stage_model: warm sync from {warm_source} FAILED ({exc!r}) -> HF snapshot_download prestage fallback"
+            )
 
     # Weights + config + tokenizer + any trust_remote_code modeling files. Mirrors
     # mirror_hf_to_gcs.INCLUDE_PATTERNS so from_pretrained resolves fully offline.
@@ -290,8 +292,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     # OfflineModeIsEnabled. A fresh child process re-reads the (cleaned) env at
     # its own import. The child inherits HF_HOME/HF_HUB_CACHE, so it populates
     # the SAME node-local cache the offline ranks then read.
-    child_env = {k: v for k, v in os.environ.items()
-                 if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
+    child_env = {k: v for k, v in os.environ.items() if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")}
     child_env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # keep captured stderr bounded
     code = (
         "import sys\n"
@@ -311,14 +312,18 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
-                env=child_env, capture_output=True, text=True,
+                env=child_env,
+                capture_output=True,
+                text=True,
                 timeout=PRESTAGE_ATTEMPT_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired:
-            last_err = (f"snapshot_download stalled > {PRESTAGE_ATTEMPT_TIMEOUT_S}s "
-                        "(mid-download socket hang); killed, retrying (HF resumes the partial shard)")
+            last_err = (
+                f"snapshot_download stalled > {PRESTAGE_ATTEMPT_TIMEOUT_S}s "
+                "(mid-download socket hang); killed, retrying (HF resumes the partial shard)"
+            )
             _log(f"model prestage attempt {attempt}/6 TIMED OUT: {last_err}")
-            time.sleep(min(30, 2 ** attempt))
+            time.sleep(min(30, 2**attempt))
             continue
         if proc.returncode == 0:
             local_dir = ""
@@ -329,10 +334,8 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
             return
         last_err = (proc.stderr or proc.stdout or "")[-800:]
         _log(f"model prestage attempt {attempt}/6 failed (rc={proc.returncode}): {last_err}")
-        time.sleep(min(30, 2 ** attempt))
-    raise RuntimeError(
-        f"model prestage failed after 6 attempts for {model_path}: {last_err}"
-    )
+        time.sleep(min(30, 2**attempt))
+    raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
 
 
 def _rank() -> int:
@@ -429,8 +432,10 @@ def _pin_boto3_s3_addressing_style() -> None:
             f"(boto3/Ray-object-spill virtual-hosted addressing for CoreWeave R2)."
         )
     except OSError as exc:  # noqa: BLE001 - best-effort; falls back to boto3 default
-        _log(f"WARNING: could not write AWS config for S3 addressing_style ({exc}); "
-             f"Ray object-spill may hit PathStyleRequestNotAllowed on CoreWeave R2.")
+        _log(
+            f"WARNING: could not write AWS config for S3 addressing_style ({exc}); "
+            f"Ray object-spill may hit PathStyleRequestNotAllowed on CoreWeave R2."
+        )
 
 
 def ensure_fr_dump_dir() -> None:
@@ -451,10 +456,7 @@ def ensure_fr_dump_dir() -> None:
     # TORCH_FR_DUMP_TEMP_FILE is the newer alias torch checks first;
     # TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical name. The value is a per-rank
     # FILENAME PREFIX (torch appends the global rank), so the dir to create is its dirname.
-    dump_prefix = (
-        os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
-        or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
-    )
+    dump_prefix = os.environ.get("TORCH_FR_DUMP_TEMP_FILE") or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
     if not dump_prefix:
         _log("FR dump dir: no TORCH_(FR_DUMP|NCCL_DEBUG_INFO)_TEMP_FILE set; nothing to create.")
         return
@@ -467,8 +469,10 @@ def ensure_fr_dump_dir() -> None:
         os.makedirs(dump_dir, exist_ok=True)
         _log(f"FR dump dir ensured (mkdir -p): {dump_dir} (from cvar prefix {dump_prefix!r})")
     except OSError as exc:  # noqa: BLE001 - best-effort; never block bring-up on instrumentation
-        _log(f"WARNING: could not create FR dump dir {dump_dir} ({exc}); "
-             f"NCCL flight-recorder dumps may fail to write on a collective timeout.")
+        _log(
+            f"WARNING: could not create FR dump dir {dump_dir} ({exc}); "
+            f"NCCL flight-recorder dumps may fail to write on a collective timeout."
+        )
 
 
 def _rendezvous_uri(rendezvous_dir: str) -> str:
@@ -518,18 +522,14 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
             except BaseException as exc:  # noqa: BLE001 - surface to the joiner
                 result_box["exc"] = exc
 
-        writer = threading.Thread(
-            target=_target, name=f"rendezvous-write-{attempt}", daemon=True
-        )
+        writer = threading.Thread(target=_target, name=f"rendezvous-write-{attempt}", daemon=True)
         writer.start()
         writer.join(timeout=RENDEZVOUS_WRITE_TIMEOUT)
         if writer.is_alive():
             # STALLED: the put is still running past the timeout. Abandon the daemon
             # thread (never joined at exit, so it cannot wedge process teardown) and
             # fall through to retry / fail-fast.
-            last_exc = TimeoutError(
-                f"rendezvous PutObject did not complete within {RENDEZVOUS_WRITE_TIMEOUT}s"
-            )
+            last_exc = TimeoutError(f"rendezvous PutObject did not complete within {RENDEZVOUS_WRITE_TIMEOUT}s")
             _log(
                 f"Rendezvous write STALLED — timed out after {time.time() - t0:.1f}s "
                 f"(attempt {attempt}/{RENDEZVOUS_WRITE_ATTEMPTS}); object-store PutObject "
@@ -709,9 +709,11 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
     try:
         import boto3  # noqa: F401
     except ImportError:
-        _log("WARNING: boto3 missing -> Ray R2 object-spilling DISABLED (local /tmp fallback); "
-             "rebuild gpu-rl image with boto3 (Dockerfile.gpu-rl) to enable. This run risks "
-             "the ephemeral-storage eviction if its object store spills > the --disk limit.")
+        _log(
+            "WARNING: boto3 missing -> Ray R2 object-spilling DISABLED (local /tmp fallback); "
+            "rebuild gpu-rl image with boto3 (Dockerfile.gpu-rl) to enable. This run risks "
+            "the ephemeral-storage eviction if its object store spills > the --disk limit."
+        )
         return None
     return f"{rendezvous_dir.rstrip('/')}/ray_spill"
 
@@ -730,9 +732,7 @@ def _ray_spill_flags(spill_uri: str | None) -> list[str]:
             "params": {"uri": spill_uri, "buffer_size": RAY_SPILL_BUFFER_SIZE},
         }
     )
-    system_config = json.dumps(
-        {"object_spilling_config": spilling_config, "min_spilling_size": 0}
-    )
+    system_config = json.dumps({"object_spilling_config": spilling_config, "min_spilling_size": 0})
     return [f"--system-config={system_config}"]
 
 
@@ -754,19 +754,21 @@ _RAY_STORE_CAP_ENV = "OT_AGENT_RAY_OBJECT_STORE_CAP_GIB"
 def _cgroup_mem_limit_bytes() -> int | None:
     """The container's memory cgroup limit in bytes (cgroup v2 then v1), or None if
     unreadable / unlimited (so callers fall back to Ray's own detection for --memory)."""
-    for path in ("/sys/fs/cgroup/memory.max",                    # cgroup v2
-                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # cgroup v1
+    for path in (
+        "/sys/fs/cgroup/memory.max",  # cgroup v2
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):  # cgroup v1
         try:
             raw = open(path).read().strip()
         except OSError:
             continue
-        if raw in ("max", ""):           # v2 unlimited
+        if raw in ("max", ""):  # v2 unlimited
             return None
         try:
             v = int(raw)
         except ValueError:
             continue
-        if v <= 0 or v > (1 << 62):      # v1 "unlimited" sentinel is a near-2^63 value
+        if v <= 0 or v > (1 << 62):  # v1 "unlimited" sentinel is a near-2^63 value
             return None
         return v
     return None
@@ -778,30 +780,37 @@ def _ray_mem_flags() -> list[str]:
     try:
         cap_gib = float(os.environ.get(_RAY_STORE_CAP_ENV, RAY_OBJECT_STORE_CAP_GIB))
     except ValueError:
-        _log(f"Ray cgroup-aware: {_RAY_STORE_CAP_ENV}={os.environ.get(_RAY_STORE_CAP_ENV)!r} "
-             f"not a number; falling back to default {RAY_OBJECT_STORE_CAP_GIB}GiB")
+        _log(
+            f"Ray cgroup-aware: {_RAY_STORE_CAP_ENV}={os.environ.get(_RAY_STORE_CAP_ENV)!r} "
+            f"not a number; falling back to default {RAY_OBJECT_STORE_CAP_GIB}GiB"
+        )
         cap_gib = float(RAY_OBJECT_STORE_CAP_GIB)
     store_cap = int(cap_gib * (1 << 30))
     if cap_gib != RAY_OBJECT_STORE_CAP_GIB:
-        _log(f"Ray cgroup-aware: plasma cap overridden via {_RAY_STORE_CAP_ENV} -> "
-             f"~{cap_gib:.0f}GiB (pre-guard)")
+        _log(f"Ray cgroup-aware: plasma cap overridden via {_RAY_STORE_CAP_ENV} -> ~{cap_gib:.0f}GiB (pre-guard)")
     limit = _cgroup_mem_limit_bytes()
     flags: list[str] = []
     if limit:
         store_cap = min(store_cap, limit // 8)  # never let the store exceed ~1/8 of the container
         flags.append(f"--memory={limit}")
-        _log(f"Ray cgroup-aware: --memory={limit} (~{limit / (1 << 30):.0f}GiB cgroup limit), "
-             f"--object-store-memory={store_cap} (~{store_cap / (1 << 30):.0f}GiB plasma cap)")
+        _log(
+            f"Ray cgroup-aware: --memory={limit} (~{limit / (1 << 30):.0f}GiB cgroup limit), "
+            f"--object-store-memory={store_cap} (~{store_cap / (1 << 30):.0f}GiB plasma cap)"
+        )
     else:
-        _log(f"Ray cgroup-aware: no cgroup mem limit readable; bounding "
-             f"--object-store-memory={store_cap} (~{store_cap / (1 << 30):.0f}GiB) only")
+        _log(
+            f"Ray cgroup-aware: no cgroup mem limit readable; bounding "
+            f"--object-store-memory={store_cap} (~{store_cap / (1 << 30):.0f}GiB) only"
+        )
     flags.append(f"--object-store-memory={store_cap}")
     return flags
 
 
 def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) -> None:
     cmd = [
-        _ray_bin(), "start", "--head",
+        _ray_bin(),
+        "start",
+        "--head",
         f"--node-ip-address={head_ip}",
         f"--port={ray_port}",
         "--dashboard-host=0.0.0.0",
@@ -822,15 +831,18 @@ def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str |
     # (see the R2-spill block comment). The head's config propagates to this worker via
     # GCS; the worker still spills its own objects per-node.
     cmd = [
-        _ray_bin(), "start",
+        _ray_bin(),
+        "start",
         f"--address={head_ip}:{ray_port}",
         f"--node-ip-address={node_ip}",
         *_ray_port_flags(),
         *_ray_mem_flags(),
     ]
     if spill_uri:
-        _log(f"Ray object spilling -> R2 prefix {spill_uri} (cluster config from head; "
-             f"this worker spills per-node, no local /tmp spill)")
+        _log(
+            f"Ray object spilling -> R2 prefix {spill_uri} (cluster config from head; "
+            f"this worker spills per-node, no local /tmp spill)"
+        )
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
@@ -907,23 +919,25 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 
     def _run(cmd: str, timeout: int = 7) -> str:
         try:
-            return _sp.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=timeout).stdout
+            return _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout).stdout
         except Exception as exc:  # noqa: BLE001 - best-effort
             return f"<{cmd!r} failed: {exc}>"
 
-    summary = "\n".join([
-        f"=== TERMINATION ARTIFACT task={task_id} ts={ts} reason={reason} ===",
-        "--- df -h /tmp /dev/shm ---", _run("df -h /tmp /dev/shm 2>&1"),
-        "--- top /tmp disk hogs (ephemeral-storage eviction cause) ---",
-        _run("du -sh /tmp/* /tmp/ray/session*/logs /tmp/ray/session*/*spill* 2>/dev/null | sort -rh | head -25", 9),
-        "--- nvidia-smi (VRAM OOM cause) ---",
-        _run("nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv 2>&1"),
-        "--- top RSS procs (host-RAM OOM cause) ---",
-        _run("ps -eo pid,rss,comm --sort=-rss 2>/dev/null | head -12"),
-        "--- dmesg OOM/kill tail ---",
-        _run("dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory|Xid' | tail -10"),
-    ])
+    summary = "\n".join(
+        [
+            f"=== TERMINATION ARTIFACT task={task_id} ts={ts} reason={reason} ===",
+            "--- df -h /tmp /dev/shm ---",
+            _run("df -h /tmp /dev/shm 2>&1"),
+            "--- top /tmp disk hogs (ephemeral-storage eviction cause) ---",
+            _run("du -sh /tmp/* /tmp/ray/session*/logs /tmp/ray/session*/*spill* 2>/dev/null | sort -rh | head -25", 9),
+            "--- nvidia-smi (VRAM OOM cause) ---",
+            _run("nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv 2>&1"),
+            "--- top RSS procs (host-RAM OOM cause) ---",
+            _run("ps -eo pid,rss,comm --sort=-rss 2>/dev/null | head -12"),
+            "--- dmesg OOM/kill tail ---",
+            _run("dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory|Xid' | tail -10"),
+        ]
+    )
     try:
         uri = f"{rendezvous_dir.rstrip('/')}/term_artifacts/{task_id}_{ts}.txt"
         fs, path = _fs_and_path(uri)
@@ -982,10 +996,7 @@ def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str)
                     n_bytes += sz
                 except Exception:  # noqa: BLE001 - skip a single unreadable/racing file
                     continue
-    _log(
-        f"[ray-log-sync] uploaded {n_files} file(s) / {n_bytes / 1073741824.0:.2f} GiB "
-        f"-> {dest_base} [{reason}]"
-    )
+    _log(f"[ray-log-sync] uploaded {n_files} file(s) / {n_bytes / 1073741824.0:.2f} GiB -> {dest_base} [{reason}]")
 
 
 def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Event:
@@ -1083,7 +1094,9 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
         # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
         wait_for_nodes(
-            ray_address, num_tasks, args.cluster_join_timeout,
+            ray_address,
+            num_tasks,
+            args.cluster_join_timeout,
             rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port),
         )
     else:
@@ -1128,8 +1141,7 @@ def run_worker(args: argparse.Namespace) -> int:
 
     if not args.rendezvous_dir:
         raise ValueError(
-            "Worker rank requires --rendezvous-dir (or OT_AGENT_IRIS_RENDEZVOUS_DIR) "
-            "to discover the head IP."
+            "Worker rank requires --rendezvous-dir (or OT_AGENT_IRIS_RENDEZVOUS_DIR) to discover the head IP."
         )
 
     payload = poll_rendezvous(args.rendezvous_dir, args.rendezvous_timeout, min_written_at=worker_start)
@@ -1243,9 +1255,16 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 def _print_env_snapshot() -> None:
     _log("environment snapshot:")
     for key in (
-        "IRIS_TASK_ID", "IRIS_NUM_TASKS", "IRIS_ADVERTISE_HOST",
-        "RAY_ADDRESS", "SKYRL_HOME", "PYTHONPATH", "HF_HOME",
-        "NUM_INFERENCE_ENGINES", "POLICY_NUM_NODES", "TENSOR_PARALLEL_SIZE",
+        "IRIS_TASK_ID",
+        "IRIS_NUM_TASKS",
+        "IRIS_ADVERTISE_HOST",
+        "RAY_ADDRESS",
+        "SKYRL_HOME",
+        "PYTHONPATH",
+        "HF_HOME",
+        "NUM_INFERENCE_ENGINES",
+        "POLICY_NUM_NODES",
+        "TENSOR_PARALLEL_SIZE",
     ):
         print(f"  {key}={os.environ.get(key, '<unset>')}", flush=True)
 

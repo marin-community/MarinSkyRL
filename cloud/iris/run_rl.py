@@ -228,12 +228,16 @@ class LocalRLRunner:
         """
         ray_address = os.environ.get("RAY_ADDRESS")
         if not ray_address:
-            print("ERROR: RAY_ADDRESS is not set. This runner attaches to a Ray cluster "
-                  "bootstrapped by start_rl_iris_controller.py; run it via that controller.",
-                  file=sys.stderr)
+            print(
+                "ERROR: RAY_ADDRESS is not set. This runner attaches to a Ray cluster "
+                "bootstrapped by start_rl_iris_controller.py; run it via that controller.",
+                file=sys.stderr,
+            )
             return 1
-        print(f"\nAttaching to external Ray cluster at {ray_address} "
-              f"(num_nodes={self.config.num_nodes}, gpus_per_node={self._gpus_per_node()})")
+        print(
+            f"\nAttaching to external Ray cluster at {ray_address} "
+            f"(num_nodes={self.config.num_nodes}, gpus_per_node={self._gpus_per_node()})"
+        )
 
         python_exe = str(self.rl_env_path / "bin" / "python") if self.rl_env_path else sys.executable
         cmd = [python_exe, "-m", entrypoint] + hydra_args
@@ -261,6 +265,7 @@ class LocalRLRunner:
 @dataclass
 class _LocalHPCStub:
     """Minimal HPC-like object for build_skyrl_hydra_args compatibility."""
+
     gpus_per_node: int = 4
     cpus_per_node: int = 48
     name: str = "local"
@@ -305,13 +310,17 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpus", type=int, default=0, help="Number of CPUs (0 = auto-detect).")
 
     parser.add_argument(
-        "--num_nodes", type=int, default=1,
+        "--num_nodes",
+        type=int,
+        default=1,
         help="Number of nodes. >1 attaches to an external Ray cluster via RAY_ADDRESS.",
     )
     parser.add_argument("--num-nodes", dest="num_nodes", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--gpus_per_node", type=int, default=0,
+        "--gpus_per_node",
+        type=int,
+        default=0,
         help="GPUs per node (0 = use --gpus; set for multi-node placement).",
     )
     parser.add_argument("--gpus-per-node", dest="gpus_per_node", help=argparse.SUPPRESS)
@@ -326,7 +335,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skyrl-override", dest="skyrl_override", action="append", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--experiments_dir", default=str(PROJECT_ROOT / "experiments"),
+        "--experiments_dir",
+        default=str(PROJECT_ROOT / "experiments"),
         help="Directory for experiment outputs.",
     )
     parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)

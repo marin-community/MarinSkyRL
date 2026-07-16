@@ -277,7 +277,7 @@ _SUPERSEDED_RL_IMAGES = (
     "@sha256:d9c7e6046e8392f3bb50567fa46e8ef3d39e49bd7fdc34409bf40f380a8596a2"
 )
 DEFAULT_GPU_VARIANT = "H100"
-DEFAULT_GPUS_PER_NODE = 8           # gd-8xh100ib-i128 = 8x H100-80GB + IB
+DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
 # These H100 nodes are requested WHOLE-NODE-EXCLUSIVE (no co-tenants) — so request ALL the
 # node's allocatable resources; don't under-request (wasted capacity + a too-low --memory
 # caused a container-cgroup OOM at FSDP weight-load on the 30B run). Node allocatable ≈ 128
@@ -337,10 +337,18 @@ def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
 
     try:
         out = subprocess.run(
-            ["kubectl", "get", "nodes", "-o",
-             r'jsonpath={range .items[*]}{.status.capacity.nvidia\.com/gpu}{" "}'
-             r'{.status.allocatable.ephemeral-storage}{"\n"}{end}'],
-            capture_output=True, text=True, timeout=20, check=True,
+            [
+                "kubectl",
+                "get",
+                "nodes",
+                "-o",
+                r'jsonpath={range .items[*]}{.status.capacity.nvidia\.com/gpu}{" "}'
+                r'{.status.allocatable.ephemeral-storage}{"\n"}{end}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
         ).stdout
         allocs = [
             _parse_quantity_to_gib(p[1])
@@ -349,15 +357,25 @@ def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
         ]
         if allocs:
             gib = int(min(allocs) * fraction)
-            print(f"[rl-iris] --disk auto: {fraction:.0%} of node allocatable "
-                  f"(min {min(allocs):.0f}GiB across {len(allocs)} GPU nodes) = {gib}Gi", flush=True)
+            print(
+                f"[rl-iris] --disk auto: {fraction:.0%} of node allocatable "
+                f"(min {min(allocs):.0f}GiB across {len(allocs)} GPU nodes) = {gib}Gi",
+                flush=True,
+            )
             return f"{gib}Gi"
-        print("[rl-iris] --disk auto: no 8-GPU nodes returned by kubectl; "
-              f"using fallback {FALLBACK_DISK_GIB}Gi", flush=True)
+        print(
+            f"[rl-iris] --disk auto: no 8-GPU nodes returned by kubectl; using fallback {FALLBACK_DISK_GIB}Gi",
+            flush=True,
+        )
     except Exception as exc:  # noqa: BLE001 - best-effort; fall back rather than block a launch
-        print(f"[rl-iris] --disk auto: kubectl node query failed ({type(exc).__name__}: {exc}); "
-              f"using fallback {FALLBACK_DISK_GIB}Gi", flush=True)
+        print(
+            f"[rl-iris] --disk auto: kubectl node query failed ({type(exc).__name__}: {exc}); "
+            f"using fallback {FALLBACK_DISK_GIB}Gi",
+            flush=True,
+        )
     return f"{FALLBACK_DISK_GIB}Gi"
+
+
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
 RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
@@ -396,188 +414,257 @@ def create_parser() -> argparse.ArgumentParser:
 
     # --- RL job args (mirror launch_rl_cloud.py) ---
     parser.add_argument(
-        "--rl_config", required=True,
+        "--rl_config",
+        required=True,
         help="Path to SkyRL/MarinSkyRL config YAML (repo-relative or absolute).",
     )
     parser.add_argument("--rl-config", dest="rl_config", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--model_path", required=True,
+        "--model_path",
+        required=True,
         help="Model path or HuggingFace ID (e.g., Qwen/Qwen3-8B).",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--model-warm-source", "--model_warm_source", dest="model_warm_source",
+        "--model-warm-source",
+        "--model_warm_source",
+        dest="model_warm_source",
         default=None,
         help="In-region CW-object-store prefix seeded (once, via scripts/iris/"
-             "mirror_hf_to_s3.py) with the model weights, so the controller SYNCS them "
-             "from there into each node's HF cache instead of cold-pulling ~160 GB per "
-             "node from HF Hub (the flaky path behind the 80B r4a/r4b bring-up failures). "
-             "Default: AUTO-DERIVE s3://marin-us-east-02a/models/<org>--<name> from the "
-             "repo id (a missing/empty source is a clean no-op -> HF prestage fallback, "
-             "byte-identical to today). Pass 'none'/'off' to DISABLE the warm path (pure "
-             "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
-             "repo-id model_path (same gate as --prestage-model).",
+        "mirror_hf_to_s3.py) with the model weights, so the controller SYNCS them "
+        "from there into each node's HF cache instead of cold-pulling ~160 GB per "
+        "node from HF Hub (the flaky path behind the 80B r4a/r4b bring-up failures). "
+        "Default: AUTO-DERIVE s3://marin-us-east-02a/models/<org>--<name> from the "
+        "repo id (a missing/empty source is a clean no-op -> HF prestage fallback, "
+        "byte-identical to today). Pass 'none'/'off' to DISABLE the warm path (pure "
+        "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
+        "repo-id model_path (same gate as --prestage-model).",
     )
 
     parser.add_argument(
-        "--train_data", default="[]",
+        "--train_data",
+        default="[]",
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
     )
     parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--val_data", default="[]",
+        "--val_data",
+        default="[]",
         help="Validation data paths as a JSON list.",
     )
     parser.add_argument("--val-data", dest="val_data", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--skyrl_override", action="append", default=[],
+        "--skyrl_override",
+        action="append",
+        default=[],
         help="SkyRL Hydra override (repeatable).",
     )
     parser.add_argument("--skyrl-override", dest="skyrl_override", action="append", help=argparse.SUPPRESS)
 
     parser.add_argument(
-        "--experiments_dir", default="/app/experiments",
+        "--experiments_dir",
+        default="/app/experiments",
         help="In-container experiments output dir (on the synced /app workspace).",
     )
     parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
 
     # --- Resource / topology args (GPU multi-node) ---
     parser.add_argument(
-        "--num-nodes", "--num_nodes", dest="num_nodes", type=int, default=1,
+        "--num-nodes",
+        "--num_nodes",
+        dest="num_nodes",
+        type=int,
+        default=1,
         help="Number of WHOLE H100 nodes to request EXCLUSIVELY, gang/co-scheduled "
-             "(one iris task per node, all 8 GPUs each, coscheduled by leafgroup/IB).",
+        "(one iris task per node, all 8 GPUs each, coscheduled by leafgroup/IB).",
     )
     parser.add_argument(
-        "--gpus-per-node", "--gpus_per_node", dest="gpus_per_node", type=int,
+        "--gpus-per-node",
+        "--gpus_per_node",
+        dest="gpus_per_node",
+        type=int,
         default=DEFAULT_GPUS_PER_NODE,
         help="GPUs per node (CoreWeave nodes are 8x H100).",
     )
     parser.add_argument(
-        "--gpu-variant", "--gpu_variant", dest="gpu_variant", default=DEFAULT_GPU_VARIANT,
+        "--gpu-variant",
+        "--gpu_variant",
+        dest="gpu_variant",
+        default=DEFAULT_GPU_VARIANT,
         help="GPU variant (default H100).",
     )
     parser.add_argument(
-        "--cpu", type=float, default=DEFAULT_CPU_PER_NODE,
+        "--cpu",
+        type=float,
+        default=DEFAULT_CPU_PER_NODE,
         help="CPU cores per node.",
     )
     parser.add_argument(
-        "--memory", default=DEFAULT_MEMORY_PER_NODE,
+        "--memory",
+        default=DEFAULT_MEMORY_PER_NODE,
         help="Memory per node.",
     )
     parser.add_argument(
-        "--disk", default=DEFAULT_DISK_PER_NODE,
+        "--disk",
+        default=DEFAULT_DISK_PER_NODE,
         help=f"Ephemeral disk per node. Default 'auto' = {int(DISK_FRACTION * 100)}%% of the GPU "
-             "node's live allocatable ephemeral-storage (whole-node-exclusive gangs have no "
-             "co-tenants, so claim most of the node NVMe — keeps Ray object-spill / checkpoints "
-             "clear of the ephemeral-storage eviction). Pass an explicit value (e.g. 4000GB) to override.",
+        "node's live allocatable ephemeral-storage (whole-node-exclusive gangs have no "
+        "co-tenants, so claim most of the node NVMe — keeps Ray object-spill / checkpoints "
+        "clear of the ephemeral-storage eviction). Pass an explicit value (e.g. 4000GB) to override.",
     )
     parser.add_argument(
-        "--ray-port", "--ray_port", dest="ray_port", type=int, default=6379,
+        "--ray-port",
+        "--ray_port",
+        dest="ray_port",
+        type=int,
+        default=6379,
         help="Port the cross-node Ray head binds.",
     )
     parser.add_argument(
-        "--rendezvous-dir", "--rendezvous_dir", dest="rendezvous_dir", default=None,
+        "--rendezvous-dir",
+        "--rendezvous_dir",
+        dest="rendezvous_dir",
+        default=None,
         help="Shared object-store/path (gs://, s3://, or shared dir) for the multi-node "
-             "Ray head/worker rendezvous. Required for --num-nodes>1. On cw-us-east-02a "
-             "use an s3:// URI under the cluster's default bucket, e.g. "
-             "s3://marin-us-east-02a/iris/rl-rdv/<job>; the cluster injects working creds "
-             "+ AWS_ENDPOINT_URL into every task pod (iris-task-env Secret), so no external "
-             "creds are needed. NOTE: the default object store moved R2 (s3://marin-na) -> "
-             "CW (s3://marin-us-east-02a) on 2026-07-05 (marin c7caecc95a); pods now inject "
-             "CW creds+endpoint and can NO LONGER reach s3://marin-na (R2).",
+        "Ray head/worker rendezvous. Required for --num-nodes>1. On cw-us-east-02a "
+        "use an s3:// URI under the cluster's default bucket, e.g. "
+        "s3://marin-us-east-02a/iris/rl-rdv/<job>; the cluster injects working creds "
+        "+ AWS_ENDPOINT_URL into every task pod (iris-task-env Secret), so no external "
+        "creds are needed. NOTE: the default object store moved R2 (s3://marin-na) -> "
+        "CW (s3://marin-us-east-02a) on 2026-07-05 (marin c7caecc95a); pods now inject "
+        "CW creds+endpoint and can NO LONGER reach s3://marin-na (R2).",
     )
     parser.add_argument(
-        "--rendezvous-timeout", "--rendezvous_timeout", dest="rendezvous_timeout",
-        type=int, default=None,
+        "--rendezvous-timeout",
+        "--rendezvous_timeout",
+        dest="rendezvous_timeout",
+        type=int,
+        default=None,
         help="Seconds the worker ranks poll for rank-0's Ray-head rendezvous file "
-             "(forwarded to start_rl_iris_controller.py --rendezvous-timeout). Unset = the "
-             "controller default (1800s). RAISE it (e.g. 3600) for a big model whose rank-0 "
-             "pre-stage/snapshot_download can legitimately take >30 min, so a SLOW-but-not-hung "
-             "head prestage completes inside the window instead of the workers timing out and "
-             "killing the gang (the 80B rank-spread bring-up flake, 2026-07-11).",
+        "(forwarded to start_rl_iris_controller.py --rendezvous-timeout). Unset = the "
+        "controller default (1800s). RAISE it (e.g. 3600) for a big model whose rank-0 "
+        "pre-stage/snapshot_download can legitimately take >30 min, so a SLOW-but-not-hung "
+        "head prestage completes inside the window instead of the workers timing out and "
+        "killing the gang (the 80B rank-spread bring-up flake, 2026-07-11).",
     )
     parser.add_argument(
-        "--trials-dir", "--trials_dir", dest="trials_dir", default="auto",
+        "--trials-dir",
+        "--trials_dir",
+        dest="trials_dir",
+        default="auto",
         help="Where Harbor writes per-trial agentic-RL rollout artifacts "
-             "(terminal_bench_config.trials_dir). 'auto' (default) = the durable shared store at "
-             "s3://marin-us-east-02a/iris/<job_name>/trace_jobs (pods reach it via auto-injected "
-             "creds; inspectable post-hoc). 'local'/'off' = keep the config default (node-local "
-             "/app/experiments/<run>/trace_jobs). Or pass an explicit s3://, gs://, or path URI. "
-             "Ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
+        "(terminal_bench_config.trials_dir). 'auto' (default) = the durable shared store at "
+        "s3://marin-us-east-02a/iris/<job_name>/trace_jobs (pods reach it via auto-injected "
+        "creds; inspectable post-hoc). 'local'/'off' = keep the config default (node-local "
+        "/app/experiments/<run>/trace_jobs). Or pass an explicit s3://, gs://, or path URI. "
+        "Ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
     )
 
     # --- Iris submission args (mirror launch_eval_iris.py / IrisLauncher) ---
     parser.add_argument(
-        "--cluster", default=DEFAULT_CLUSTER,
+        "--cluster",
+        default=DEFAULT_CLUSTER,
         help="Iris cluster name (default cw-us-east-02a).",
     )
     parser.add_argument(
-        "--cluster-config", "--cluster_config", dest="cluster_config",
+        "--cluster-config",
+        "--cluster_config",
+        dest="cluster_config",
         default=_resolve_cluster_config_default(),
         help="Path to the iris cluster YAML (default: cw-us-east-02a in the marin repo).",
     )
     parser.add_argument(
-        "--task-image", "--task_image", "--docker_image", "--docker-image",
-        dest="task_image", default=DEFAULT_RL_DOCKER_IMAGE,
+        "--task-image",
+        "--task_image",
+        "--docker_image",
+        "--docker-image",
+        dest="task_image",
+        default=DEFAULT_RL_DOCKER_IMAGE,
         help=f"Container image (default {DEFAULT_RL_DOCKER_IMAGE}).",
     )
     parser.add_argument(
-        "--job-name", "--job_name", dest="job_name", default=None,
+        "--job-name",
+        "--job_name",
+        dest="job_name",
+        default=None,
         help="Job name (auto-derived if not set).",
     )
     parser.add_argument(
-        "--priority", default=DEFAULT_PRIORITY,
+        "--priority",
+        default=DEFAULT_PRIORITY,
         choices=["production", "interactive", "batch"],
         help="Iris priority band.",
     )
     parser.add_argument(
-        "--max-retries", "--max_retries", dest="max_retries", type=int, default=0,
+        "--max-retries",
+        "--max_retries",
+        dest="max_retries",
+        type=int,
+        default=0,
         help="Max retries on failure (iris auto-retries preemptions separately).",
     )
     parser.add_argument(
-        "--timeout", type=int, default=0,
+        "--timeout",
+        type=int,
+        default=0,
         help="Job timeout in seconds (0 = no timeout).",
     )
     parser.add_argument(
-        "--no-wait", dest="no_wait", action="store_true", default=False,
+        "--no-wait",
+        dest="no_wait",
+        action="store_true",
+        default=False,
         help="Submit and detach instead of streaming logs.",
     )
     parser.add_argument(
-        "--preemptible", dest="preemptible", action="store_true", default=None,
+        "--preemptible",
+        dest="preemptible",
+        action="store_true",
+        default=None,
         help="Force scheduling on preemptible workers.",
     )
     parser.add_argument(
-        "--no-preemptible", dest="preemptible", action="store_false",
+        "--no-preemptible",
+        dest="preemptible",
+        action="store_false",
         help="Force scheduling on non-preemptible workers.",
     )
     parser.add_argument(
-        "--secrets-env", "--secrets_env", dest="secrets_env", default=_default_secrets_env(),
+        "--secrets-env",
+        "--secrets_env",
+        dest="secrets_env",
+        default=_default_secrets_env(),
         help="KEY=VALUE env file injected into the task (HF_TOKEN, WANDB_API_KEY, etc.). "
-             "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
+        "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
     )
     parser.add_argument(
-        "--daytona-api-key-env", "--daytona_api_key_env", dest="daytona_api_key_env",
+        "--daytona-api-key-env",
+        "--daytona_api_key_env",
+        dest="daytona_api_key_env",
         default=os.environ.get("DAYTONA_KEY_OVERRIDE"),
         help="Name of an env var whose VALUE is forwarded to the pod as DAYTONA_API_KEY "
-             "(routes agentic RL onto a dedicated Daytona org, e.g. "
-             "--daytona-api-key-env DAYTONA_RL_API_KEY). Applied AFTER --secrets-env is "
-             "re-sourced (which does 'file overrides shell'), so the override actually STICKS "
-             "where a plain shell `export DAYTONA_API_KEY=...` is silently clobbered. "
-             "Referenced by NAME only; no key value on the command line. "
-             "Defaults to $DAYTONA_KEY_OVERRIDE.",
+        "(routes agentic RL onto a dedicated Daytona org, e.g. "
+        "--daytona-api-key-env DAYTONA_RL_API_KEY). Applied AFTER --secrets-env is "
+        "re-sourced (which does 'file overrides shell'), so the override actually STICKS "
+        "where a plain shell `export DAYTONA_API_KEY=...` is silently clobbered. "
+        "Referenced by NAME only; no key value on the command line. "
+        "Defaults to $DAYTONA_KEY_OVERRIDE.",
     )
     parser.add_argument(
-        "--skyrl-ref", "--skyrl_ref", dest="skyrl_ref", default=None,
+        "--skyrl-ref",
+        "--skyrl_ref",
+        dest="skyrl_ref",
+        default=None,
         help="If set, `git fetch && git checkout <ref>` the baked MarinSkyRL clone at "
-             "/opt/skyrl BEFORE running, so the live editable install picks up a newer "
-             "(or pinned) commit than the one baked into the image. Use to apply a "
-             "MarinSkyRL fix that landed AFTER the image was built without waiting for an "
-             "image rebuild (deps are baked, but skyrl-train is an editable git clone, so "
-             "a checkout is live). Default: unset = use whatever commit the image baked.",
+        "/opt/skyrl BEFORE running, so the live editable install picks up a newer "
+        "(or pinned) commit than the one baked into the image. Use to apply a "
+        "MarinSkyRL fix that landed AFTER the image was built without waiting for an "
+        "image rebuild (deps are baked, but skyrl-train is an editable git clone, so "
+        "a checkout is live). Default: unset = use whatever commit the image baked.",
     )
     # ----------------------------------------------------------------------- #
     # MarinSkyRL runtime-knob flags (deslop stage 3). Each promotes a live      #
@@ -589,92 +676,137 @@ def create_parser() -> argparse.ArgumentParser:
     # ----------------------------------------------------------------------- #
     g = parser.add_argument_group("MarinSkyRL runtime knobs (SKYRL_* -> flags)")
     g.add_argument(
-        "--r3-transport", "--r3_transport", dest="r3_transport",
-        choices=["by_value", "resident", "decentral"], default=None,
+        "--r3-transport",
+        "--r3_transport",
+        dest="r3_transport",
+        choices=["by_value", "resident", "decentral"],
+        default=None,
         help="R3 (rollout routed-experts) transport for MoE async RL. 'decentral' "
-             "(code default) routes the captured routed-experts generation-worker -> "
-             "node-resident consumer (head holds ~0 R3); 'resident' de-dups to 1 "
-             "copy/dp-group on the driver head plasma; 'by_value' is the old per-actor "
-             "by-value dispatch. Folds SKYRL_R3_RESIDENT + SKYRL_R3_DECENTRAL. "
-             "Default: unset = code default (decentral).",
+        "(code default) routes the captured routed-experts generation-worker -> "
+        "node-resident consumer (head holds ~0 R3); 'resident' de-dups to 1 "
+        "copy/dp-group on the driver head plasma; 'by_value' is the old per-actor "
+        "by-value dispatch. Folds SKYRL_R3_RESIDENT + SKYRL_R3_DECENTRAL. "
+        "Default: unset = code default (decentral).",
     )
     g.add_argument(
-        "--r3-put-timeout-s", "--r3_put_timeout_s", dest="r3_put_timeout_s", type=int, default=None,
+        "--r3-put-timeout-s",
+        "--r3_put_timeout_s",
+        dest="r3_put_timeout_s",
+        type=int,
+        default=None,
         help="Bounded ray.put() timeout (s) for an R3 dp-chunk dispatch "
-             "(SKYRL_DISPATCH_PUT_TIMEOUT_S). Default: unset = 600.",
+        "(SKYRL_DISPATCH_PUT_TIMEOUT_S). Default: unset = 600.",
     )
     g.add_argument(
-        "--nccl-timeout-s", "--nccl_timeout_s", dest="nccl_timeout_s", type=int, default=None,
-        help="Worker NCCL-collective timeout in seconds (SKYRL_WORKER_NCCL_TIMEOUT_IN_S). "
-             "Default: unset = 1800.",
+        "--nccl-timeout-s",
+        "--nccl_timeout_s",
+        dest="nccl_timeout_s",
+        type=int,
+        default=None,
+        help="Worker NCCL-collective timeout in seconds (SKYRL_WORKER_NCCL_TIMEOUT_IN_S). Default: unset = 1800.",
     )
     g.add_argument(
-        "--host-ram-monitor", dest="host_ram_monitor", choices=["on", "off"], default=None,
-        help="Policy-worker host-RAM/cgroup-mem monitor thread "
-             "(SKYRL_POLICY_HOST_RAM_MONITOR). Default: unset = on.",
+        "--host-ram-monitor",
+        dest="host_ram_monitor",
+        choices=["on", "off"],
+        default=None,
+        help="Policy-worker host-RAM/cgroup-mem monitor thread (SKYRL_POLICY_HOST_RAM_MONITOR). Default: unset = on.",
     )
     g.add_argument(
-        "--host-ram-monitor-interval-s", dest="host_ram_monitor_interval_s", type=int, default=None,
-        help="Host-RAM monitor sample interval, s (SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL). "
-             "Default: unset = 60.",
+        "--host-ram-monitor-interval-s",
+        dest="host_ram_monitor_interval_s",
+        type=int,
+        default=None,
+        help="Host-RAM monitor sample interval, s (SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL). Default: unset = 60.",
     )
     g.add_argument(
-        "--tis-splice", dest="tis_splice", choices=["on", "off"], default=None,
+        "--tis-splice",
+        dest="tis_splice",
+        choices=["on", "off"],
+        default=None,
         help="TIS served-id splice policy (SKYRL_TIS_SPLICE) — use vLLM's raw served "
-             "token ids as the generated region for exact-by-id TIS alignment. "
-             "Default: unset = on (no-op on non-thinking turns).",
+        "token ids as the generated region for exact-by-id TIS alignment. "
+        "Default: unset = on (no-op on non-thinking turns).",
     )
     g.add_argument(
-        "--gdn-mask-fla", dest="gdn_mask_fla", choices=["auto", "on", "off"], default=None,
+        "--gdn-mask-fla",
+        dest="gdn_mask_fla",
+        choices=["auto", "on", "off"],
+        default=None,
         help="Force the pure-torch GatedDeltaNet path / mask the broken fla wheel "
-             "(SKYRL_GDN_MASK_FLA). 'auto' (and unset) derive it from the model arch "
-             "(on for Qwen3-Next/GDN, off for dense). Default: unset = auto.",
+        "(SKYRL_GDN_MASK_FLA). 'auto' (and unset) derive it from the model arch "
+        "(on for Qwen3-Next/GDN, off for dense). Default: unset = auto.",
     )
     g.add_argument(
-        "--gdn-flashqla", dest="gdn_flashqla", choices=["on", "off"], default=None,
+        "--gdn-flashqla",
+        dest="gdn_flashqla",
+        choices=["on", "off"],
+        default=None,
         help="Opt-in FlashQLA fused GDN tilelang kernel (SKYRL_GDN_FLASHQLA); needs the "
-             "fla_tilelang overlay. Default: unset = off.",
+        "fla_tilelang overlay. Default: unset = off.",
     )
     g.add_argument(
-        "--forward-dispatch-fix", dest="forward_dispatch_fix", choices=["on", "off"], default=None,
+        "--forward-dispatch-fix",
+        dest="forward_dispatch_fix",
+        choices=["on", "off"],
+        default=None,
         help="MoE async-dispatch forward fix (SKYRL_FORWARD_DISPATCH_FIX), a correctness "
-             "knob. Default: unset = on. Pass off only for an A/B.",
+        "knob. Default: unset = on. Pass off only for an A/B.",
     )
     g.add_argument(
-        "--weightsync-drain-barrier", dest="weightsync_drain_barrier", choices=["on", "off"], default=None,
+        "--weightsync-drain-barrier",
+        dest="weightsync_drain_barrier",
+        choices=["on", "off"],
+        default=None,
         help="Post-weight-sync async drain barrier (SKYRL_WEIGHTSYNC_DRAIN_BARRIER), a "
-             "correctness knob. Default: unset = on.",
+        "correctness knob. Default: unset = on.",
     )
     g.add_argument(
-        "--cp-require-right-align", dest="cp_require_right_align", choices=["on", "off"], default=None,
+        "--cp-require-right-align",
+        dest="cp_require_right_align",
+        choices=["on", "off"],
+        default=None,
         help="Require right-aligned attention mask under context-parallel "
-             "(SKYRL_CP_REQUIRE_RIGHT_ALIGN), a correctness knob. Default: unset = on.",
+        "(SKYRL_CP_REQUIRE_RIGHT_ALIGN), a correctness knob. Default: unset = on.",
     )
     g.add_argument(
-        "--w13-reload-bracket", dest="w13_reload_bracket", choices=["on", "off"], default=None,
+        "--w13-reload-bracket",
+        dest="w13_reload_bracket",
+        choices=["on", "off"],
+        default=None,
         help="Bracket the MoE weight-sync with layerwise-reload init/finalize so FusedMoE "
-             "w13 is re-swapped exactly once (SKYRL_W13_RELOAD_BRACKET), a correctness "
-             "knob. Default: unset = on.",
+        "w13 is re-swapped exactly once (SKYRL_W13_RELOAD_BRACKET), a correctness "
+        "knob. Default: unset = on.",
     )
     g.add_argument(
-        "--ep-loader-chunk-rows", dest="ep_loader_chunk_rows", type=int, default=None,
+        "--ep-loader-chunk-rows",
+        dest="ep_loader_chunk_rows",
+        type=int,
+        default=None,
         help="Per-broadcast dim-0 row budget for the streamed EP full-state-dict loader "
-             "(SKYRL_EP_LOADER_CHUNK_ROWS). Default: unset = 8.",
+        "(SKYRL_EP_LOADER_CHUNK_ROWS). Default: unset = 8.",
     )
     g.add_argument(
-        "--collective-count-diag", dest="collective_count_diag", choices=["on", "off"], default=None,
+        "--collective-count-diag",
+        dest="collective_count_diag",
+        choices=["on", "off"],
+        default=None,
         help="GC-proof per-rank default-PG collective-count instrumentation "
-             "(SKYRL_COLLECTIVE_COUNT_DIAG), a DIAGNOSTIC knob for the 80B gs1 NCCL "
-             "desync. Logs each policy rank's default-PG collective count at forward "
-             "phase boundaries (forward/_forward_impl enter+exit + the first MoE-EP "
-             "all-to-all per forward) to the finelog, which survives pod GC — diffing "
-             "the counts across ranks at the wedge localizes the divergent EP group. "
-             "O(phases), reads torch's own PG seq counter (no perturbation). "
-             "Default: unset = off.",
+        "(SKYRL_COLLECTIVE_COUNT_DIAG), a DIAGNOSTIC knob for the 80B gs1 NCCL "
+        "desync. Logs each policy rank's default-PG collective count at forward "
+        "phase boundaries (forward/_forward_impl enter+exit + the first MoE-EP "
+        "all-to-all per forward) to the finelog, which survives pod GC — diffing "
+        "the counts across ranks at the wedge localizes the divergent EP group. "
+        "O(phases), reads torch's own PG seq counter (no perturbation). "
+        "Default: unset = off.",
     )
 
     parser.add_argument(
-        "--dry-run", "--dry_run", dest="dry_run", action="store_true", default=False,
+        "--dry-run",
+        "--dry_run",
+        dest="dry_run",
+        action="store_true",
+        default=False,
         help="Print the resolved config + in-container command without submitting.",
     )
 
@@ -743,11 +875,11 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
         full = PROJECT_ROOT / rl_config_path
         path = full if full.exists() else Path(rl_config_path)
         import yaml
+
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
     except Exception as exc:  # noqa: BLE001
-        print(f"[rl-iris] WARNING: could not read extra_env from {rl_config_path}: {exc}",
-              file=sys.stderr)
+        print(f"[rl-iris] WARNING: could not read extra_env from {rl_config_path}: {exc}", file=sys.stderr)
         return {}
     extra = dict(raw.get("extra_env") or {})
     container_env = (raw.get("container") or {}).get("extra_env") or {}
@@ -776,11 +908,11 @@ def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
         full = PROJECT_ROOT / rl_config_path
         path = full if full.exists() else Path(rl_config_path)
         import yaml
+
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
     except Exception as exc:  # noqa: BLE001
-        print(f"[rl-iris] WARNING: could not read ckpt_path from {rl_config_path}: {exc}",
-              file=sys.stderr)
+        print(f"[rl-iris] WARNING: could not read ckpt_path from {rl_config_path}: {exc}", file=sys.stderr)
         return None
     val = (raw.get("trainer") or {}).get("ckpt_path")
     if val is None or (isinstance(val, str) and not val.strip()):
@@ -805,10 +937,10 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
     ONLY rewrites the job-scoped ``.../fr_dumps/<slug>/<file>`` pattern; a bare
     generic path (``/tmp/nccl_fr_rank``, which every non-80B iris config uses) has no
     slug segment and is returned UNCHANGED (byte-identical for those configs)."""
-    parent = os.path.dirname(prefix)          # e.g. /tmp/fr_dumps/<slug>
-    grandparent = os.path.dirname(parent)     # e.g. /tmp/fr_dumps
+    parent = os.path.dirname(prefix)  # e.g. /tmp/fr_dumps/<slug>
+    grandparent = os.path.dirname(parent)  # e.g. /tmp/fr_dumps
     if os.path.basename(grandparent) != "fr_dumps":
-        return prefix                         # not a job-scoped fr_dumps path; leave it
+        return prefix  # not a job-scoped fr_dumps path; leave it
     return os.path.join(grandparent, job_name, os.path.basename(prefix))
 
 
@@ -834,9 +966,11 @@ def normalize(args: argparse.Namespace) -> None:
                 args.rl_config = str(cand)
                 break
         else:
-            print(f"[rl-iris] WARNING: --rl_config {args.rl_config!r} not found under "
-                  f"{PROJECT_ROOT}; the worker will error if it isn't on /app.",
-                  file=sys.stderr)
+            print(
+                f"[rl-iris] WARNING: --rl_config {args.rl_config!r} not found under "
+                f"{PROJECT_ROOT}; the worker will error if it isn't on /app.",
+                file=sys.stderr,
+            )
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -868,21 +1002,31 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # The MarinSkyRL training command rank 0 runs (run_rl.py owns config parse,
     # hydra-arg build, HF data resolution, and the SkyRL entrypoint launch).
     train_cmd: List[str] = [
-        RL_PYTHON, "-m", "cloud.iris.run_rl",
-        "--rl_config", args.rl_config,
-        "--model_path", args.model_path,
-        "--job_name", args.job_name,
-        "--gpus", str(total_gpus),
-        "--num_nodes", str(args.num_nodes),
-        "--gpus_per_node", str(args.gpus_per_node),
-        "--experiments_dir", args.experiments_dir,
-        "--ray_port", str(args.ray_port),
+        RL_PYTHON,
+        "-m",
+        "cloud.iris.run_rl",
+        "--rl_config",
+        args.rl_config,
+        "--model_path",
+        args.model_path,
+        "--job_name",
+        args.job_name,
+        "--gpus",
+        str(total_gpus),
+        "--num_nodes",
+        str(args.num_nodes),
+        "--gpus_per_node",
+        str(args.gpus_per_node),
+        "--experiments_dir",
+        args.experiments_dir,
+        "--ray_port",
+        str(args.ray_port),
     ]
     if args.train_data and args.train_data != "[]":
         train_cmd.extend(["--train_data", args.train_data])
     if args.val_data and args.val_data != "[]":
         train_cmd.extend(["--val_data", args.val_data])
-    for override in (args.skyrl_override or []):
+    for override in args.skyrl_override or []:
         train_cmd.extend(["--skyrl_override", override])
 
     # Durable Harbor rollout artifacts. The config default (trials_dir: null) resolves to a
@@ -920,8 +1064,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
-        RL_PYTHON, "cloud/iris/start_rl_iris_controller.py",
-        "--ray-port", str(args.ray_port),
+        RL_PYTHON,
+        "cloud/iris/start_rl_iris_controller.py",
+        "--ray-port",
+        str(args.ray_port),
     ]
     if args.rendezvous_dir:
         controller_cmd.extend(["--rendezvous-dir", args.rendezvous_dir])
@@ -992,7 +1138,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             # is recompiled. Best-effort (|| true) — must not block on a read-only fs.
             f"find {shlex.quote(SKYRL_HOME)}/skyrl-train -name '*.pyc' -delete 2>/dev/null || true; "
             f"find {shlex.quote(SKYRL_HOME)}/skyrl-train -name __pycache__ -type d -prune -exec rm -rf {{}} + 2>/dev/null || true; "
-            f"echo \"[rl-iris] MarinSkyRL now at $(git -C {shlex.quote(SKYRL_HOME)} rev-parse HEAD)\"; "
+            f'echo "[rl-iris] MarinSkyRL now at $(git -C {shlex.quote(SKYRL_HOME)} rev-parse HEAD)"; '
         )
     ctrl = shlex.join(controller_cmd)
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
@@ -1024,19 +1170,19 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # interrupted by the trapped signal (rc>128); we re-`wait` to reap the child's
     # real exit code after its forwarded-TERM shutdown.
     gdn_branch = (
-        f'if [ \"${{SKYRL_GDN_FLASHQLA:-0}}\" = \"1\" ] || '
-        f'[ \"${{SKYRL_GDN_FLASHQLA:-}}\" = \"true\" ] || '
-        f'[ \"${{SKYRL_GDN_FLASHQLA:-}}\" = \"on\" ]; then '
-        f'export TILELANG_CACHE_DIR=\"${{TILELANG_CACHE_DIR:-/root/.tilelang/cache}}\"; '
-        f'export TILELANG_CACHE_MODEL_PATH={shlex.quote(args.model_path)}; '
-        f'{tl_down}; '
-        f'trap {shlex.quote(tl_up)} EXIT; '
-        f'trap \'[ -n \"$_child\" ] && kill -TERM \"$_child\" 2>/dev/null\' TERM INT; '
-        f'set +e; {ctrl} & _child=$!; '
-        f'wait \"$_child\"; _rc=$?; '
-        f'if [ $_rc -gt 128 ]; then wait \"$_child\" 2>/dev/null; _rc=$?; fi; '
-        f'exit $_rc; '
-        f'else exec {ctrl}; fi'
+        f'if [ "${{SKYRL_GDN_FLASHQLA:-0}}" = "1" ] || '
+        f'[ "${{SKYRL_GDN_FLASHQLA:-}}" = "true" ] || '
+        f'[ "${{SKYRL_GDN_FLASHQLA:-}}" = "on" ]; then '
+        f'export TILELANG_CACHE_DIR="${{TILELANG_CACHE_DIR:-/root/.tilelang/cache}}"; '
+        f"export TILELANG_CACHE_MODEL_PATH={shlex.quote(args.model_path)}; "
+        f"{tl_down}; "
+        f"trap {shlex.quote(tl_up)} EXIT; "
+        f'trap \'[ -n "$_child" ] && kill -TERM "$_child" 2>/dev/null\' TERM INT; '
+        f"set +e; {ctrl} & _child=$!; "
+        f'wait "$_child"; _rc=$?; '
+        f'if [ $_rc -gt 128 ]; then wait "$_child" 2>/dev/null; _rc=$?; fi; '
+        f"exit $_rc; "
+        f"else exec {ctrl}; fi"
     )
     bash = (
         f"set -e; cd {APP_DIR}; "
@@ -1098,8 +1244,11 @@ def main() -> int:
     print(f"[rl-iris] Job:        /{user}/{args.job_name}", flush=True)
     print(f"[rl-iris] Cluster:    {args.cluster}  ({args.cluster_config})", flush=True)
     print(f"[rl-iris] Image:      {args.task_image}", flush=True)
-    print(f"[rl-iris] Topology:   {args.num_nodes} node(s) x {gpu_spec}  "
-          f"(= {args.num_nodes * args.gpus_per_node} GPUs, exclusive, gang/leafgroup)", flush=True)
+    print(
+        f"[rl-iris] Topology:   {args.num_nodes} node(s) x {gpu_spec}  "
+        f"(= {args.num_nodes * args.gpus_per_node} GPUs, exclusive, gang/leafgroup)",
+        flush=True,
+    )
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
     print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
@@ -1108,9 +1257,10 @@ def main() -> int:
     # This is display-only; main() re-derives it (idempotent, pure fn of args) below.
     _flag_env_preview = build_skyrl_flag_env(args)
     if _flag_env_preview:
-        print("[rl-iris] SKYRL flag env: "
-              f"{', '.join(f'{k}={v}' for k, v in sorted(_flag_env_preview.items()))}",
-              flush=True)
+        print(
+            f"[rl-iris] SKYRL flag env: {', '.join(f'{k}={v}' for k, v in sorted(_flag_env_preview.items()))}",
+            flush=True,
+        )
     if args.num_nodes > 1:
         print(f"[rl-iris] Rendezvous: {args.rendezvous_dir}", flush=True)
     print(f"[rl-iris] Command:    {shlex.join(command)}", flush=True)
@@ -1141,9 +1291,7 @@ def main() -> int:
     from iris.rpc import job_pb2
 
     # Per-task resources: whole node, all GPUs (no co-tenant → exclusive).
-    resources = build_resources(
-        None, gpu_spec, cpu=args.cpu, memory=args.memory, disk=args.disk
-    )
+    resources = build_resources(None, gpu_spec, cpu=args.cpu, memory=args.memory, disk=args.disk)
 
     # Multi-node gang: replicas=num_nodes; for GPUs with replicas>1 this returns
     # CoschedulingConfig(group_by="leafgroup") — co-schedule all nodes on one IB
@@ -1175,8 +1323,7 @@ def main() -> int:
     flag_env = build_skyrl_flag_env(args)
     if flag_env:
         env_vars.update(flag_env)
-        print(f"[rl-iris] SKYRL flag env: "
-              f"{', '.join(f'{k}={v}' for k, v in sorted(flag_env.items()))}", flush=True)
+        print(f"[rl-iris] SKYRL flag env: {', '.join(f'{k}={v}' for k, v in sorted(flag_env.items()))}", flush=True)
     # Forward the RL config YAML's top-level `extra_env:` block (the Iris analog of
     # the SLURM container.extra_env exports — see load_config_extra_env). Overlaid
     # ON TOP of the flag env so an explicit config value wins; the launcher's own
@@ -1236,11 +1383,19 @@ def main() -> int:
     os.environ.setdefault("WANDB_ENTITY", "dogml")
     os.environ.setdefault("WANDB_PROJECT", "OpenThoughts-Agent")
     for k in (
-        "HF_TOKEN", "WANDB_API_KEY", "WANDB_ENTITY", "WANDB_PROJECT",
-        "DAYTONA_API_KEY", "DAYTONA_JWT_TOKEN", "DAYTONA_ORGANIZATION_ID",
+        "HF_TOKEN",
+        "WANDB_API_KEY",
+        "WANDB_ENTITY",
+        "WANDB_PROJECT",
+        "DAYTONA_API_KEY",
+        "DAYTONA_JWT_TOKEN",
+        "DAYTONA_ORGANIZATION_ID",
         "DAYTONA_API_URL",
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY", "GEMINI_API_KEY", "TOGETHER_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "TOGETHER_API_KEY",
     ):
         v = os.environ.get(k)
         if v:
@@ -1258,9 +1413,8 @@ def main() -> int:
     if iris_config.controller.controller_kind() == "local":
         controller_address = LocalCluster(iris_config).start()
     else:
-        controller_address = (
-            iris_config.controller_address()
-            or bundle.controller.discover_controller(iris_config.controller)
+        controller_address = iris_config.controller_address() or bundle.controller.discover_controller(
+            iris_config.controller
         )
 
     with bundle.controller.tunnel(address=controller_address) as controller_url:
@@ -1280,8 +1434,11 @@ def main() -> int:
             timeout=None if args.timeout == 0 else _seconds_to_duration(args.timeout),
         )
         full_job_id = str(job.job_id)
-        print(f"[rl-iris] Submitted: {full_job_id}  (replicas={replicas}, "
-              f"coscheduling={getattr(coscheduling, 'group_by', None)})", flush=True)
+        print(
+            f"[rl-iris] Submitted: {full_job_id}  (replicas={replicas}, "
+            f"coscheduling={getattr(coscheduling, 'group_by', None)})",
+            flush=True,
+        )
 
         if args.no_wait:
             return 0
@@ -1298,6 +1455,7 @@ def main() -> int:
 
 def _seconds_to_duration(secs: int):
     from rigging.timing import Duration
+
     return Duration.from_seconds(secs)
 
 

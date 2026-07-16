@@ -80,12 +80,12 @@ from typing import Iterable, List, Optional
 # --------------------------------------------------------------------------- #
 # Constants (all overridable via env; NO credentials ever hardcoded).
 # --------------------------------------------------------------------------- #
-DEFAULT_BUCKET = "marin-us-east-02a"          # CW object store; override via TILELANG_CACHE_BUCKET
-CACHE_ROOT_PREFIX = "iris/tilelang-cache"      # s3://<bucket>/iris/tilelang-cache/<key>/...
-SEED_TARBALL_NAME = "cache.tgz"                # the pre-captured warm cache (expands to cache/<hash>/...)
-KERNELS_SUBPREFIX = "kernels"                  # per-hash incremental objects: .../<key>/kernels/<hash>/...
-DEFAULT_MODEL_KEY = "qwen3-next-80b-a3b"       # r4f lineage default
-DEFAULT_GPU_ARCH = "sm90"                      # H100
+DEFAULT_BUCKET = "marin-us-east-02a"  # CW object store; override via TILELANG_CACHE_BUCKET
+CACHE_ROOT_PREFIX = "iris/tilelang-cache"  # s3://<bucket>/iris/tilelang-cache/<key>/...
+SEED_TARBALL_NAME = "cache.tgz"  # the pre-captured warm cache (expands to cache/<hash>/...)
+KERNELS_SUBPREFIX = "kernels"  # per-hash incremental objects: .../<key>/kernels/<hash>/...
+DEFAULT_MODEL_KEY = "qwen3-next-80b-a3b"  # r4f lineage default
+DEFAULT_GPU_ARCH = "sm90"  # H100
 # Files that identify a directory as a TileLang compiled-kernel hash-dir.
 KERNEL_SENTINELS = ("executable.so", "params.pkl", "kernel_lib.so", "wrapped_kernel.cu")
 # Best-effort marker written by --down listing the hashes present at boot, so
@@ -140,12 +140,12 @@ def derive_gpu_arch() -> str:
         return ovr.strip()
     try:
         import torch  # noqa: PLC0415 - optional/heavy; only imported when acting
+
         if torch.cuda.is_available():
             major, minor = torch.cuda.get_device_capability()
             return f"sm{major}{minor}"
     except Exception as exc:  # noqa: BLE001 - best-effort
-        _log(f"WARN could not read GPU capability ({type(exc).__name__}: {exc}); "
-             f"defaulting to {DEFAULT_GPU_ARCH}")
+        _log(f"WARN could not read GPU capability ({type(exc).__name__}: {exc}); defaulting to {DEFAULT_GPU_ARCH}")
     return DEFAULT_GPU_ARCH
 
 
@@ -156,6 +156,7 @@ def derive_tilelang_tag() -> str:
         return ovr.strip()
     try:
         from importlib.metadata import version  # noqa: PLC0415
+
         v = version("tilelang")
         return "tilelang" + re.sub(r"[^0-9]", "", v)
     except Exception as exc:  # noqa: BLE001 - best-effort
@@ -257,8 +258,7 @@ def run_down() -> int:
 
     present = [p.name for p in _iter_hash_dirs(root)]
     _write_baseline(root, present)
-    _log(f"--down: done — {pulled} kernel object(s)/tarball(s) pulled; "
-         f"{len(present)} hash-dir(s) now warm in {root}")
+    _log(f"--down: done — {pulled} kernel object(s)/tarball(s) pulled; {len(present)} hash-dir(s) now warm in {root}")
     return 0
 
 
@@ -267,6 +267,7 @@ def _pull_seed_tarball(s3, bucket: str, key: str, root: Path) -> int:
     ``root/<hash>/``. The tarball may wrap the hashes under a top-level ``cache/``
     dir (its capture layout) or not — both are handled. Missing = no-op."""
     from botocore.exceptions import ClientError  # noqa: PLC0415
+
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
         data = obj["Body"].read()
@@ -311,7 +312,7 @@ def _pull_kernels_prefix(s3, bucket: str, prefix: str, root: Path) -> int:
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
                 s3key = obj["Key"]
-                rel = s3key[len(prefix):]
+                rel = s3key[len(prefix) :]
                 if not rel or rel.endswith("/"):
                     continue
                 dst = root / rel
@@ -324,8 +325,7 @@ def _pull_kernels_prefix(s3, bucket: str, prefix: str, root: Path) -> int:
                 except Exception as exc:  # noqa: BLE001
                     _log(f"--down: WARN could not download {s3key} ({type(exc).__name__}: {exc})")
     except Exception as exc:  # noqa: BLE001
-        _log(f"--down: WARN listing {prefix} failed ({type(exc).__name__}: {exc}); "
-             f"continuing with whatever seeded")
+        _log(f"--down: WARN listing {prefix} failed ({type(exc).__name__}: {exc}); continuing with whatever seeded")
     if n:
         _log(f"--down: pulled {n} incremental kernel file(s) from s3://{bucket}/{prefix}")
     return n
@@ -365,14 +365,17 @@ def run_up() -> int:
         if pushed:
             uploaded_dirs += 1
             uploaded_files += pushed
-    _log(f"--up: done — pushed {uploaded_dirs} new hash-dir(s) "
-         f"({uploaded_files} file(s)) to s3://{bucket}/{base_prefix}/")
+    _log(
+        f"--up: done — pushed {uploaded_dirs} new hash-dir(s) "
+        f"({uploaded_files} file(s)) to s3://{bucket}/{base_prefix}/"
+    )
     return 0
 
 
 def _hash_dir_present(s3, bucket: str, dir_prefix: str, hd: Path) -> bool:
     """True if a sentinel object for this hash-dir already exists in S3."""
     from botocore.exceptions import ClientError  # noqa: PLC0415
+
     for s in KERNEL_SENTINELS:
         if not (hd / s).exists():
             continue
@@ -422,6 +425,7 @@ def _safe_extract(tf: tarfile.TarFile, dest: str) -> None:
 
 def _copytree(src: Path, dst: Path) -> None:
     import shutil  # noqa: PLC0415
+
     shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
@@ -433,8 +437,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--down", action="store_true", help="pull+unpack the warm cache at pod boot")
     mode.add_argument("--up", action="store_true", help="push newly-compiled kernels at pod exit")
-    parser.add_argument("--force", action="store_true",
-                        help="act even if SKYRL_GDN_FLASHQLA is not set (for manual/testing use)")
+    parser.add_argument(
+        "--force", action="store_true", help="act even if SKYRL_GDN_FLASHQLA is not set (for manual/testing use)"
+    )
     args = parser.parse_args(argv)
 
     if not args.force and not gdn_flashqla_enabled():
@@ -447,8 +452,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             run_up()
     except Exception as exc:  # noqa: BLE001 - the shim must never fail the job
-        _log(f"WARN unexpected error in {'--down' if args.down else '--up'} "
-             f"({type(exc).__name__}: {exc}); continuing (best-effort)")
+        _log(
+            f"WARN unexpected error in {'--down' if args.down else '--up'} "
+            f"({type(exc).__name__}: {exc}); continuing (best-effort)"
+        )
     return 0
 
 
