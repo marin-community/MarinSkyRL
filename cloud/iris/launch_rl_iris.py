@@ -362,9 +362,10 @@ def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
 RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
 # In-container source sync target. iris syncs the launcher's `workspace`
-# (the OT-Agent repo) to /app and sets IRIS_WORKDIR=/app; putting /app first on
-# PYTHONPATH makes the live synced OT-Agent code win over the image's baked
-# /opt/openthoughts copy.
+# (this MarinSkyRL repo, PROJECT_ROOT — see IrisClient.remote(..., workspace=PROJECT_ROOT))
+# to /app and sets IRIS_WORKDIR=/app; putting /app first on PYTHONPATH makes the live
+# synced cloud.iris + skyrl-train code win over the image's baked copies. The runtime is
+# self-contained here (cloud.iris.*) — no OpenThoughts-Agent workspace is required in-pod.
 APP_DIR = "/app"
 
 
