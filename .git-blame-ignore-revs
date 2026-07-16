@@ -1,0 +1,8 @@
+# Revisions to skip when running git blame. Configure git to use it with:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (GitHub applies it automatically.)
+
+# Reformat with ruff format
+f887277a6ac38f209aa964607b995d4c55698a33
