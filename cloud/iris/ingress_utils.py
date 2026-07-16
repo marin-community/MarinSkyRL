@@ -653,6 +653,15 @@ class _ParentControllerClient:
         from iris.cluster.config import load_config
         from iris.cli.connect import open_controller_endpoint, rpc_client
 
+        # Make the parent (marin) IAP credential available to iris's own resolver
+        # BEFORE opening the endpoint. In-pod on CoreWeave there is no cached
+        # `iris login` (~/.config/marin/credentials/<cluster>.json) and no marin-
+        # allowlisted ambient service account, so without this the IAP mint fails
+        # UNAUTHENTICATED. If the launcher forwarded the operator's login record via
+        # OTAGENT_MARIN_CREDENTIALS_JSON, materialize it to the path rigging's
+        # load_credentials() reads; otherwise this is a no-op and iris falls back to
+        # ambient SA creds (the deploy-choice alternative).
+        materialize_parent_credentials()
         self._config = load_config(parent_config_path)
         # open_controller_endpoint resolves the parent URL + IAP ClientCredentials
         # exactly as the CLI does; rpc_client threads them into the RPC interceptors.
@@ -694,6 +703,49 @@ class _ParentControllerClient:
 PARENT_CONTROLLER_CONFIG_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG"
 PARENT_INGRESS_HOST_ENV = "OTAGENT_PARENT_INGRESS_HOST"
 DEFAULT_PARENT_INGRESS_HOST = "iris.oa.dev"
+
+# The launcher may forward the operator's cached `iris login` record (the JSON at
+# ~/.config/marin/credentials/<cluster>.json, carrying edge_refresh_token) so the in-pod
+# worker can mint at marin. SECRET: it contains a long-lived refresh token, so forwarding
+# is opt-in on the launch side; the pod materializes it to the path load_credentials reads.
+PARENT_CREDENTIALS_JSON_ENV = "OTAGENT_MARIN_CREDENTIALS_JSON"
+
+
+def materialize_parent_credentials() -> Optional[str]:
+    """Write a forwarded marin login record to the path rigging's ``load_credentials`` reads.
+
+    In-pod on CoreWeave there is no cached ``iris login`` and no marin-allowlisted ambient
+    service account, so ``rigging.credentials._edge_provider`` finds neither a human login
+    nor usable SA creds and the parent mint fails UNAUTHENTICATED. When the launcher has
+    forwarded the operator's login record via :data:`PARENT_CREDENTIALS_JSON_ENV`, write it
+    to ``~/.config/marin/credentials/<cluster>.json`` (mode 0600) so
+    ``iap_edge_provider`` builds an ``IapRefreshTokenProvider`` from the forwarded
+    ``edge_refresh_token`` and the in-pod mint authenticates as the logged-in user.
+
+    No-op (returns None) when the env is unset — then iris falls back to ambient
+    service-account credentials, the deploy-choice alternative (an allowlisted SA key/ADC
+    provisioned into the pod). Idempotent: never overwrites an existing on-disk record.
+    """
+    raw = os.environ.get(PARENT_CREDENTIALS_JSON_ENV)
+    if not raw:
+        return None
+    import json
+    from pathlib import Path
+
+    try:
+        cluster = (json.loads(raw).get("cluster") or "marin").strip() or "marin"
+    except Exception:  # noqa: BLE001 — a malformed record must fail loud at mint, not here
+        cluster = "marin"
+    dest = Path.home() / ".config" / "marin" / "credentials" / f"{cluster}.json"
+    if dest.exists():
+        return str(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(raw)
+    try:
+        dest.chmod(0o600)
+    except OSError:
+        pass
+    return str(dest)
 
 _FED_TOKEN_CACHE: Optional[FederatedCapabilityTokenCache] = None
 _FED_TOKEN_CACHE_LOCK = threading.Lock()

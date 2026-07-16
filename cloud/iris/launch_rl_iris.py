@@ -834,6 +834,18 @@ def create_parser() -> argparse.ArgumentParser:
         "in-pod — see the OTAGENT_PARENT_CONTROLLER_CONFIG forwarding NOTE).",
     )
     parser.add_argument(
+        "--forward-marin-login",
+        "--forward_marin_login",
+        dest="forward_marin_login",
+        action="store_true",
+        default=False,
+        help="Federated in-pod mint credential: forward the operator's cached marin "
+        "`iris login` record (~/.config/marin/credentials/marin.json, carrying a "
+        "long-lived edge_refresh_token) into the pod env so the in-pod worker can mint "
+        "at iris.oa.dev. SECRET rides in the job env spec — explicit opt-in. Omit to "
+        "instead provision an allowlisted service-account credential in-pod.",
+    )
+    parser.add_argument(
         "--secrets-env",
         "--secrets_env",
         dest="secrets_env",
@@ -1660,7 +1672,10 @@ def main() -> int:
     # forwarded refresh token) are the remaining operator/deploy steps. Direct submission
     # (no --target-cluster) forwards none of this.
     if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
-        from cloud.iris.ingress_utils import PARENT_CONTROLLER_CONFIG_ENV
+        from cloud.iris.ingress_utils import (
+            PARENT_CONTROLLER_CONFIG_ENV,
+            PARENT_CREDENTIALS_JSON_ENV,
+        )
 
         parent_cfg = (
             getattr(args, "parent_controller_config_in_pod", None)
@@ -1677,6 +1692,33 @@ def main() -> int:
             v = os.environ.get(k)
             if v:
                 env_vars[k] = v
+        # In-pod parent-mint IAP credential. The cw pod has no cached `iris login` and no
+        # marin-allowlisted ambient SA, so the in-pod mint at iris.oa.dev fails
+        # UNAUTHENTICATED unless we supply a credential. --forward-marin-login opts INTO
+        # forwarding the operator's cached login record (`~/.config/marin/credentials/
+        # <cluster>.json`, carrying a long-lived edge_refresh_token) into the pod env; the
+        # in-pod worker materializes it (ingress_utils.materialize_parent_credentials) so
+        # rigging's load_credentials mints under the operator's identity. This is a SECRET
+        # exposure (the token rides in the job's env spec) — hence explicit opt-in. The
+        # deploy-choice alternative is to provision an allowlisted GCP service-account
+        # credential into the pod (ADC/key) instead and NOT forward the token.
+        if getattr(args, "forward_marin_login", False):
+            login_path = os.path.expanduser("~/.config/marin/credentials/marin.json")
+            if os.path.isfile(login_path):
+                with open(login_path) as _f:
+                    env_vars[PARENT_CREDENTIALS_JSON_ENV] = _f.read()
+                print(
+                    "[rl-iris] --forward-marin-login: forwarding the cached marin login "
+                    "record into the pod env (edge_refresh_token) for the in-pod parent "
+                    "mint. SECRET rides in the job env spec.",
+                    flush=True,
+                )
+            else:
+                raise SystemExit(
+                    "[rl-iris] --forward-marin-login set but no cached login at "
+                    f"{login_path}. Run `iris --cluster=marin login` first, or drop the "
+                    "flag and provision an allowlisted service-account credential in-pod."
+                )
 
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin

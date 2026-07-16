@@ -179,3 +179,28 @@ def test_federated_capability_api_base_builds_parent_url():
 
 def test_default_parent_ingress_host_is_marin():
     assert DEFAULT_PARENT_INGRESS_HOST == "iris.oa.dev"
+
+
+def test_materialize_parent_credentials_writes_forwarded_record(tmp_path, monkeypatch):
+    """A forwarded login record is written to the path load_credentials reads (in-pod)."""
+    import json
+    from cloud.iris.ingress_utils import (
+        PARENT_CREDENTIALS_JSON_ENV,
+        materialize_parent_credentials,
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rec = json.dumps({"cluster": "marin", "endpoint": "https://iris.oa.dev", "edge_refresh_token": "RT"})
+    monkeypatch.setenv(PARENT_CREDENTIALS_JSON_ENV, rec)
+    dest = materialize_parent_credentials()
+    assert dest is not None and dest.endswith("marin.json")
+    written = json.loads((tmp_path / ".config" / "marin" / "credentials" / "marin.json").read_text())
+    assert written["edge_refresh_token"] == "RT"
+
+
+def test_materialize_parent_credentials_noop_without_env(tmp_path, monkeypatch):
+    """No forwarded record => no-op (iris falls back to ambient service-account creds)."""
+    from cloud.iris.ingress_utils import PARENT_CREDENTIALS_JSON_ENV, materialize_parent_credentials
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv(PARENT_CREDENTIALS_JSON_ENV, raising=False)
+    assert materialize_parent_credentials() is None
+    assert not (tmp_path / ".config" / "marin" / "credentials" / "marin.json").exists()
