@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import os
 import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.rl_config_translation import (
@@ -65,6 +66,15 @@ class LocalRLConfig:
     skyrl_overrides: List[str] = field(default_factory=list)
     dry_run: bool = False
     tensor_parallel_size: int = 1  # auto-derived
+    # --- Native controller-ingress (Exp2 opencode-RL literal capture) ---
+    # Mirrors the datagen ground truth (hpc/local_runner_utils.py::_serving_endpoint_meta):
+    # the WORKER registers the co-located RecordProxy/vLLM with the IN-POD controller and
+    # mints a capability token; ingress_host only builds the public URL string. No user
+    # login, no federated submission. All default OFF => byte-identical to today.
+    ingress_mode: str = "direct"  # "direct" (off) | "controller"
+    ingress_host: str = ""  # public controller-ingress host, e.g. https://iris.oa.dev
+    record_literal: bool = False  # co-locate harbor RecordProxy for literal.jsonl capture
+    vllm_http_port: int = 8000  # local vLLM HTTP endpoint (= generator.http_endpoint_port)
 
 
 class LocalRLRunner:
@@ -168,7 +178,100 @@ class LocalRLRunner:
             return 0
 
         self._setup_environment(exp_args)
-        return self._run_skyrl(parsed.entrypoint, hydra_args)
+        # Native controller-ingress (opencode-RL literal capture): when enabled, stand up
+        # the co-located RecordProxy + register the endpoint with the IN-POD controller +
+        # mint the capability token and publish it as HARBOR_MODEL_ENDPOINT BEFORE the
+        # SkyRL subprocess is spawned, so the generator (which inherits this env) points
+        # opencode at <ingress_host>/proxy/t/<token>/... The default (direct) path is a
+        # null CM. This mirrors the datagen worker path 1:1.
+        with self._ingress_context():
+            return self._run_skyrl(parsed.entrypoint, hydra_args)
+
+    @contextlib.contextmanager
+    def _ingress_context(self) -> Iterator[None]:
+        """Native controller-ingress standup around the SkyRL subprocess.
+
+        Ports the datagen worker recipe (``hpc/local_runner_utils.py::_serving_endpoint_meta``
+        + ``hpc/ingress_utils.py``) into the canonical MarinSkyRL runner, VERBATIM in
+        mechanism:
+
+          1. co-locate harbor's RecordProxy (``record_literal``) in front of the local
+             vLLM HTTP endpoint so agent completions are captured to ``literal.jsonl``;
+          2. ``register_controller_endpoint(name, address, access=LINK)`` against the
+             IN-POD controller (``IRIS_CONTROLLER_ADDRESS``; in-cluster network trust — no
+             user login), leased + kept alive for the whole run;
+          3. ``capability_api_base(ingress_host, name)`` mints a scoped token on that same
+             in-pod controller and builds ``<ingress_host>/proxy/t/<token>/<name>/v1``,
+             published as ``HARBOR_MODEL_ENDPOINT`` + the inert sandbox key injected.
+
+        No federated submission, no parent-mint, no FederationSync poll — exactly what the
+        datagen job does (proven working 2026-07-06). Default ``ingress_mode=direct`` yields
+        immediately (no proxy, no register, no env mutation) — byte-identical to today.
+        """
+        if self.config.ingress_mode != "controller":
+            yield
+            return
+
+        # Lazy imports: these modules hard-import iris/harbor only at call time and are
+        # only needed on the (opt-in) controller-ingress path.
+        from cloud.iris.ingress_utils import (
+            capability_api_base,
+            controller_registration_plan,
+            inject_ingress_agent_key,
+            register_controller_endpoint,
+        )
+        from cloud.iris.literal_proxy_utils import (
+            DEFAULT_LITERAL_PROXY_PORT,
+            maybe_serve_literal_proxy,
+        )
+
+        if not self.config.ingress_host:
+            raise ValueError(
+                "ingress_mode=controller requires --ingress_host (the public "
+                "controller-ingress host, e.g. https://iris.oa.dev)."
+            )
+        # Reachability on the iris path comes ONLY from the controller registration (no
+        # pinggy tunnel here), so literal capture needs controller mode (datagen parity).
+        if self.config.record_literal and self.config.ingress_mode != "controller":
+            raise ValueError(
+                "--record_literal on the iris path requires --ingress_mode controller."
+            )
+
+        endpoint_name, register_address = controller_registration_plan(
+            self.config.job_name,
+            record_literal=self.config.record_literal,
+            proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+            vllm_port=self.config.vllm_http_port,
+        )
+        vllm_local = f"http://localhost:{self.config.vllm_http_port}/v1"
+        # RecordProxy binds 0.0.0.0 so the (remote) controller reaches it at
+        # IRIS_ADVERTISE_HOST; record_literal off => maybe_serve_literal_proxy is a null
+        # CM and the plan registered raw vLLM's port instead.
+        with maybe_serve_literal_proxy(
+            self.config.record_literal,
+            vllm_local,
+            experiments_dir=self.config.experiments_dir,
+            job_name=self.config.job_name,
+            host="0.0.0.0",
+        ):
+            registration = register_controller_endpoint(endpoint_name, register_address)
+            try:
+                # Mint + build the capability api_base AFTER register (the mint resolves
+                # the just-registered endpoint) — on the SAME in-pod controller.
+                api_base = capability_api_base(self.config.ingress_host, endpoint_name)
+                os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
+                injected = inject_ingress_agent_key()
+                print(
+                    f"[run_rl] ingress_mode=controller record_literal="
+                    f"{self.config.record_literal}: registered {endpoint_name} -> "
+                    f"{register_address} (id={registration.endpoint_id}, access=LINK); "
+                    f"HARBOR_MODEL_ENDPOINT=/proxy/t/<token>/{endpoint_name}/v1 "
+                    f"(dummy key injected={injected})",
+                    flush=True,
+                )
+                yield
+            finally:
+                registration.close()
 
     def _gpus_per_node(self) -> int:
         """GPUs per node, defaulting to total `gpus` for the single-node case."""
@@ -344,6 +447,40 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry_run", action="store_true", help="Print config and command without running.")
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", help=argparse.SUPPRESS)
 
+    # --- Native controller-ingress (Exp2 opencode-RL literal capture) --- #
+    # Forwarded by the launcher under --ingress-mode controller. Default off => the
+    # standup context is a null CM (byte-identical). Mirrors datagen; NO federation.
+    parser.add_argument(
+        "--ingress_mode",
+        default="direct",
+        choices=["direct", "controller"],
+        help="'controller' stands up the RecordProxy + registers the endpoint with the "
+        "in-pod controller + mints the capability URL, published as HARBOR_MODEL_ENDPOINT. "
+        "Default 'direct' off.",
+    )
+    parser.add_argument("--ingress-mode", dest="ingress_mode", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--ingress_host",
+        default="",
+        help="Public controller-ingress host for the capability URL (e.g. "
+        "https://iris.oa.dev). Required with --ingress_mode controller.",
+    )
+    parser.add_argument("--ingress-host", dest="ingress_host", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--record_literal",
+        action="store_true",
+        help="Co-locate harbor's RecordProxy in front of vLLM to capture literal.jsonl.",
+    )
+    parser.add_argument("--record-literal", dest="record_literal", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--vllm_http_port",
+        type=int,
+        default=8000,
+        help="Local vLLM HTTP endpoint port the RecordProxy relays to "
+        "(= generator.http_endpoint_port; default 8000).",
+    )
+    parser.add_argument("--vllm-http-port", dest="vllm_http_port", type=int, help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -370,6 +507,10 @@ def main() -> None:
         master_port=args.master_port,
         skyrl_overrides=skyrl_overrides,
         dry_run=args.dry_run,
+        ingress_mode=args.ingress_mode,
+        ingress_host=args.ingress_host,
+        record_literal=bool(args.record_literal),
+        vllm_http_port=int(args.vllm_http_port),
     )
 
     runner = LocalRLRunner(config)

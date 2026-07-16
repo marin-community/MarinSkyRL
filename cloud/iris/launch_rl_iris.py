@@ -633,6 +633,44 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Force scheduling on non-preemptible workers.",
     )
+    # ----------------------------------------------------------------------- #
+    # Native controller-ingress (Exp2 opencode-RL literal capture).            #
+    #                                                                          #
+    # Job SUBMISSION is UNCHANGED (direct to --cluster's controller). These    #
+    # flags only select the SERVING-ingress plane: the in-pod worker registers #
+    # the co-located RecordProxy/vLLM with the controller and mints a          #
+    # capability token, so a Daytona sandbox reaches vLLM at                   #
+    # <ingress_host>/proxy/t/<token>/... This is the native recipe datagen     #
+    # already uses (needs NO iris login). Forwarded to the in-pod run_rl.      #
+    # Default (direct) forwards nothing (byte-identical).                      #
+    # ----------------------------------------------------------------------- #
+    parser.add_argument(
+        "--ingress-mode",
+        "--ingress_mode",
+        dest="ingress_mode",
+        default="direct",
+        choices=["direct", "controller"],
+        help="'controller' selects native serving-ingress: the in-pod worker registers the "
+        "co-located RecordProxy/vLLM + mints a capability URL (same recipe as datagen; no "
+        "iris login). 'direct' (default) = no ingress wiring (byte-identical).",
+    )
+    parser.add_argument(
+        "--ingress-host",
+        "--ingress_host",
+        dest="ingress_host",
+        default=None,
+        help="Public controller-ingress host the capability URL is built against, e.g. "
+        "https://iris.oa.dev. Required with --ingress-mode controller.",
+    )
+    parser.add_argument(
+        "--record-literal",
+        "--record_literal",
+        dest="record_literal",
+        action="store_true",
+        default=False,
+        help="Co-locate harbor's RecordProxy in the pod so agent completions are captured "
+        "to literal.jsonl (opencode-RL literal interceptor). Requires --ingress-mode controller.",
+    )
     parser.add_argument(
         "--secrets-env",
         "--secrets_env",
@@ -1029,6 +1067,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     for override in args.skyrl_override or []:
         train_cmd.extend(["--skyrl_override", override])
 
+    # Native controller-ingress (opencode-RL literal capture): forward the ingress flags to
+    # the in-pod runner (cloud.iris.run_rl), which stands up the RecordProxy + registers +
+    # mints the capability URL against the in-pod controller. Only emitted under
+    # --ingress-mode controller; the default (direct) path adds nothing (byte-identical
+    # run_rl invocation). Job submission below is UNCHANGED regardless.
+    if getattr(args, "ingress_mode", "direct") == "controller":
+        train_cmd.extend(["--ingress_mode", "controller"])
+        if getattr(args, "ingress_host", None):
+            train_cmd.extend(["--ingress_host", args.ingress_host])
+        if getattr(args, "record_literal", False):
+            train_cmd.append("--record_literal")
+
     # Durable Harbor rollout artifacts. The config default (trials_dir: null) resolves to a
     # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); point
     # terminal_bench_config.trials_dir at the durable shared store (s3://, creds auto-injected)
@@ -1212,6 +1262,15 @@ def main() -> int:
     parser = create_parser()
     args = parser.parse_args()
     normalize(args)
+
+    # Native controller-ingress needs a public host to build the capability URL (mirrors
+    # datagen's worker-side check, surfaced at launch time before the submit). Submission
+    # itself is unchanged.
+    if getattr(args, "ingress_mode", "direct") == "controller" and not getattr(args, "ingress_host", None):
+        raise SystemExit(
+            "[rl-iris] --ingress-mode controller requires --ingress-host (the public "
+            "controller-ingress host, e.g. https://iris.oa.dev)."
+        )
 
     if not args.job_name:
         args.job_name = f"rl-iris-{time.strftime('%Y%m%d-%H%M%S')}"

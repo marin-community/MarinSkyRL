@@ -186,6 +186,19 @@ class TerminalBenchGenerator(GeneratorInterface):
                 ``SKYRL_TITO_FULL`` still wins over both. Default None.
         """
         self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
+        # Native controller-ingress (opencode-RL literal capture): when the runner stood up
+        # a controller-ingress endpoint it publishes the capability URL as
+        # HARBOR_MODEL_ENDPOINT. The AGENT (opencode, in a Daytona sandbox) must reach vLLM
+        # over the public internet at that URL — NOT the loopback self.base_url, which only
+        # resolves in-cluster. So the per-trial agent api_base prefers the ingress URL when
+        # present; unset (default/direct) => exactly f"{self.base_url}/v1" as before
+        # (byte-identical). The verifier + re-tokenize/TIS paths keep using self.base_url.
+        _ingress_endpoint = os.environ.get("HARBOR_MODEL_ENDPOINT", "").strip()
+        self._agent_api_base = _ingress_endpoint or f"{self.base_url}/v1"
+        if _ingress_endpoint:
+            logging.getLogger("harbor").info(
+                "[terminal_bench] agent api_base <- HARBOR_MODEL_ENDPOINT (controller ingress)"
+            )
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
@@ -749,7 +762,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 task_path=prompt,
                 trials_dir=active_trials_dir,
                 model_name=f"hosted_vllm/{model_alias}",
-                api_base=f"{self.base_url}/v1",
+                api_base=self._agent_api_base,
                 session_id=session_id,
                 timeout_override_sec=timeout_override,
             )
