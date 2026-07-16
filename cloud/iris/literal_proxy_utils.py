@@ -165,9 +165,7 @@ def _local_staging_path(job_name: str, token: str) -> Path:
     return Path(tempfile.gettempdir()) / "ot-agent-literal" / _literal_log_name(job_name, token)
 
 
-def literal_proxy_endpoint(
-    host: str = DEFAULT_LITERAL_PROXY_HOST, port: int = DEFAULT_LITERAL_PROXY_PORT
-) -> str:
+def literal_proxy_endpoint(host: str = DEFAULT_LITERAL_PROXY_HOST, port: int = DEFAULT_LITERAL_PROXY_PORT) -> str:
     """The OpenAI-compatible base URL the agent should target to hit the proxy."""
     return f"http://{host}:{port}/v1"
 
@@ -267,15 +265,14 @@ def serve_record_proxy(
         waited += step
     if not server.started:
         server.should_exit = True
-        raise RuntimeError(
-            f"RecordProxy failed to start on {host}:{port} within {startup_timeout}s"
-        )
+        raise RuntimeError(f"RecordProxy failed to start on {host}:{port} within {startup_timeout}s")
 
     # Periodic uploader: snapshot the growing local log to durable storage so a
     # preemption between flushes loses at most ``flush_interval`` of records.
     stop_flushing = threading.Event()
     uploader: Optional[threading.Thread] = None
     if remote_uri:
+
         def _flush_loop() -> None:
             while not stop_flushing.wait(flush_interval):
                 try:
@@ -288,9 +285,7 @@ def serve_record_proxy(
 
     print(
         f"[literal-proxy] RecordProxy serving {literal_proxy_endpoint(host, port)} "
-        f"-> {origin} (log: {log_path}"
-        + (f" -> {remote_uri}" if remote_uri else "")
-        + ")",
+        f"-> {origin} (log: {log_path}" + (f" -> {remote_uri}" if remote_uri else "") + ")",
         flush=True,
     )
     try:
@@ -351,7 +346,5 @@ def maybe_serve_literal_proxy(
         log_path: str | Path = _local_staging_path(job_name, token)
     else:
         log_path = literal_log_path(experiments_dir, job_name, token)
-    with serve_record_proxy(
-        upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri
-    ) as proxy_endpoint:
+    with serve_record_proxy(upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri) as proxy_endpoint:
         yield proxy_endpoint

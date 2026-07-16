@@ -69,7 +69,5 @@ def test_literal_log_remote_uri_none_for_local(tmp_path):
 def test_maybe_serve_disabled_is_null_context_manager():
     # Default OFF: yields the upstream endpoint UNCHANGED, starts no server.
     upstream = "http://localhost:8000/v1"
-    with maybe_serve_literal_proxy(
-        False, upstream, experiments_dir="/tmp/x", job_name="j"
-    ) as ep:
+    with maybe_serve_literal_proxy(False, upstream, experiments_dir="/tmp/x", job_name="j") as ep:
         assert ep == upstream

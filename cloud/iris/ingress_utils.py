@@ -373,9 +373,7 @@ class _LeasedEndpointRegistrar:
         from iris.cluster.types import EndpointAccess
 
         access_mode = access if access is not None else EndpointAccess.ENDPOINT_ACCESS_LINK
-        return self._client.register(
-            name, address, self._task_attempt, metadata or {}, access=access_mode
-        )
+        return self._client.register(name, address, self._task_attempt, metadata or {}, access=access_mode)
 
     def close(self) -> None:
         # Stops the renewer daemon and best-effort unregisters everything still
@@ -746,6 +744,7 @@ def materialize_parent_credentials() -> Optional[str]:
     except OSError:
         pass
     return str(dest)
+
 
 _FED_TOKEN_CACHE: Optional[FederatedCapabilityTokenCache] = None
 _FED_TOKEN_CACHE_LOCK = threading.Lock()

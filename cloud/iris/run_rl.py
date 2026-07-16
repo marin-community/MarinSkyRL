@@ -236,9 +236,7 @@ class LocalRLRunner:
             from cloud.iris.ingress_utils import PARENT_CONTROLLER_CONFIG_ENV
 
             if self.config.parent_controller_config:
-                os.environ.setdefault(
-                    PARENT_CONTROLLER_CONFIG_ENV, self.config.parent_controller_config
-                )
+                os.environ.setdefault(PARENT_CONTROLLER_CONFIG_ENV, self.config.parent_controller_config)
             if not os.environ.get(PARENT_CONTROLLER_CONFIG_ENV):
                 raise ValueError(
                     "federated ingress (target_cluster set) requires the parent marin "
@@ -266,9 +264,7 @@ class LocalRLRunner:
             registration = register_controller_endpoint(endpoint_name, register_address)
             try:
                 if self.config.target_cluster:
-                    api_base = federated_capability_api_base(
-                        endpoint_name, ingress_host=self.config.ingress_host
-                    )
+                    api_base = federated_capability_api_base(endpoint_name, ingress_host=self.config.ingress_host)
                     mint_where = f"PARENT (federated -> {self.config.target_cluster})"
                 else:
                     api_base = capability_api_base(self.config.ingress_host, endpoint_name)
@@ -505,8 +501,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--vllm_http_port",
         type=int,
         default=8000,
-        help="Local vLLM HTTP endpoint port the RecordProxy relays to "
-        "(= generator.http_endpoint_port; default 8000).",
+        help="Local vLLM HTTP endpoint port the RecordProxy relays to (= generator.http_endpoint_port; default 8000).",
     )
     parser.add_argument("--vllm-http-port", dest="vllm_http_port", type=int, help=argparse.SUPPRESS)
 

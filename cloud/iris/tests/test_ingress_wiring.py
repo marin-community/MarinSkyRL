@@ -80,10 +80,7 @@ def test_build_capability_api_base_puts_token_in_path():
         build_capability_api_base("ingress.example", "otagent-job1", "JWT.abc")
         == "https://ingress.example/proxy/t/JWT.abc/otagent-job1/v1"
     )
-    assert (
-        build_capability_api_base("http://10.0.0.1:8443/", "ep", "TK")
-        == "http://10.0.0.1:8443/proxy/t/TK/ep/v1"
-    )
+    assert build_capability_api_base("http://10.0.0.1:8443/", "ep", "TK") == "http://10.0.0.1:8443/proxy/t/TK/ep/v1"
 
 
 def test_capability_api_base_uses_cached_token():
@@ -120,17 +117,13 @@ def test_controller_registration_plan_picks_proxy_port_when_record_literal():
 def test_wait_for_endpoint_mirror_returns_when_ready():
     resolver = _FakeResolver(ready_after=2)
     slept = []
-    wait_for_endpoint_mirror(
-        "otagent-x", resolver, timeout_s=100, interval_s=1, sleep=slept.append, now=lambda: 0.0
-    )
+    wait_for_endpoint_mirror("otagent-x", resolver, timeout_s=100, interval_s=1, sleep=slept.append, now=lambda: 0.0)
     assert resolver.calls == 3 and slept == [1, 1]
 
 
 def test_wait_for_endpoint_mirror_tolerates_transient_errors():
     resolver = _FakeResolver(ready_after=0, raise_first=2)
-    wait_for_endpoint_mirror(
-        "otagent-x", resolver, timeout_s=100, interval_s=1, sleep=lambda _s: None, now=lambda: 0.0
-    )
+    wait_for_endpoint_mirror("otagent-x", resolver, timeout_s=100, interval_s=1, sleep=lambda _s: None, now=lambda: 0.0)
     assert resolver.calls == 3
 
 
@@ -139,8 +132,12 @@ def test_wait_for_endpoint_mirror_times_out():
     clock = {"t": 0.0}
     with pytest.raises(TimeoutError, match="was not mirrored"):
         wait_for_endpoint_mirror(
-            "otagent-x", resolver, timeout_s=5, interval_s=2,
-            sleep=lambda s: clock.__setitem__("t", clock["t"] + s), now=lambda: clock["t"],
+            "otagent-x",
+            resolver,
+            timeout_s=5,
+            interval_s=2,
+            sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+            now=lambda: clock["t"],
         )
 
 
@@ -188,6 +185,7 @@ def test_materialize_parent_credentials_writes_forwarded_record(tmp_path, monkey
         PARENT_CREDENTIALS_JSON_ENV,
         materialize_parent_credentials,
     )
+
     monkeypatch.setenv("HOME", str(tmp_path))
     rec = json.dumps({"cluster": "marin", "endpoint": "https://iris.oa.dev", "edge_refresh_token": "RT"})
     monkeypatch.setenv(PARENT_CREDENTIALS_JSON_ENV, rec)
@@ -200,6 +198,7 @@ def test_materialize_parent_credentials_writes_forwarded_record(tmp_path, monkey
 def test_materialize_parent_credentials_noop_without_env(tmp_path, monkeypatch):
     """No forwarded record => no-op (iris falls back to ambient service-account creds)."""
     from cloud.iris.ingress_utils import PARENT_CREDENTIALS_JSON_ENV, materialize_parent_credentials
+
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(PARENT_CREDENTIALS_JSON_ENV, raising=False)
     assert materialize_parent_credentials() is None
