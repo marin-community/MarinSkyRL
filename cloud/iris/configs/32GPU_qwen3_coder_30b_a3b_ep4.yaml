@@ -1,0 +1,280 @@
+entrypoint: examples.terminal_bench.entrypoints.main_tbench
+
+# ===========================================================================
+# REPLAY-vs-MESH ISOLATION FOLLOW-UP (label: v1ep4 / mesh-iso)
+# Identical to 64GPU_qwen3_coder_30b_a3b.yaml (v0l) EXCEPT the EP mesh:
+#   expert_model_parallel_size 8 -> 4  (policy AND ref)
+#   policy_num_nodes 4 -> 2, ref_num_nodes 4 -> 2  (policy mesh = 16 GPU)
+#   num_inference_engines 4 -> 2       (keep the 1:1 trainer:gen GPU ratio)
+#   max_steps 20 -> 3                  (SHORT measurement run: bank gs1 + a warm fwd)
+# moe_router_replay stays TRUE on both — replay is the variable being isolated.
+# Policy training mesh: fsdp(4) x ep(4) x cp(1) = 16 GPU = 2 nodes x 8  ✓
+# matches the 866390 EP=4/16-GPU reference mesh (which had fwd ~55s, no replay).
+# Total footprint: 2 (policy+ref colocated) + 2 (inference) = 4 nodes / 32 GPU.
+# ===========================================================================
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+terminal_bench:
+  trials_dir: s3://marin-us-east-02a/iris/rno2a-30b-coder-v1ep4/trace_jobs
+
+  harbor:
+    name: terminus-2
+    max_episodes: 999999
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+    upload_agent_logs: false
+
+    strict_json_parser: true
+
+    interleaved_thinking: true
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+    override_timeout_sec: 1800
+
+    override_cpus: 1
+    override_memory_mb: 2048
+    override_storage_mb: 2048
+
+    auto_snapshot: true
+
+    verifier_override_timeout_sec: 300
+
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+      - VerifierRuntimeError
+
+    n_concurrent_trials: 288
+
+    log_level: INFO
+
+    enable_reward_shaping: false
+
+    collect_rollout_details: true
+
+    enable_error_classification: true
+    mask_exceptions:
+      - VerifierTimeoutError
+      - DaytonaError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+
+  model_info:
+    max_input_tokens: 130000
+    max_output_tokens: 16384
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: true
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+trainer:
+  strategy: fsdp2
+  attn_backend: sdpa
+  flash_attn: false
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: true
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    eps_clip_low: 0.2
+    eps_clip_high: 0.05
+    loss_reduction: sequence_mean
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+    tito_full: true
+
+  epochs: 2
+  max_steps: 3
+  update_epochs_per_batch: 1
+
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+
+  micro_forward_batch_size_per_gpu: 4
+  micro_train_batch_size_per_gpu: 1
+
+  max_prompt_length: 999999
+
+  use_sample_packing: false
+
+  eval_interval: 999999
+  eval_before_train: false
+  ckpt_interval: 1
+  resume_mode: latest
+  hf_save_interval: 5
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  enable_db_registration: false
+
+  project_name: OpenThoughts-Agent
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  policy:
+    optimizer_config:
+      lr: 8e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 0.9
+      optimizer_kwargs:
+        foreach: false
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 4
+      expert_model_parallel_size: 4
+      context_parallel_size: 1
+      cp_style: ring_sdpa
+      cp_rotate_method: allgather
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      use_grouped_mm: true
+      ep_comm_backend: torch
+  ref:
+    model:
+      path: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      fsdp_size: 4
+      expert_model_parallel_size: 4
+      context_parallel_size: 1
+      cp_style: ring_sdpa
+      cp_rotate_method: allgather
+      moe_router_replay: true
+      moe_grouped_gemm: true
+      use_grouped_mm: true
+      ep_comm_backend: torch
+
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+    policy_strict_spread_pg: true
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+
+  fully_async:
+    max_staleness_steps: 16
+    num_parallel_generation_workers: 128
+
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+
+  enforce_eager: false
+
+  inference_engine_tensor_parallel_size: 8
+  num_inference_engines: 2
+
+  inference_engine_expert_parallel_size: 1
+
+  inference_engine_decode_context_parallel_size: 2
+
+  inference_engine_mp_backend: false
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  gpu_memory_utilization: 0.80
+
+  max_num_seqs: 24
+  max_num_batched_tokens: 16384
+
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  enable_ray_prometheus_stats: false
+  vllm_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  max_turns: 999999
+
+  sampling_params:
+    max_generate_length: 16384
+    temperature: 1.2
+    top_p: 0.95
+    top_k: 20
+
+  engine_init_kwargs:
+    max_model_len: 131072
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    disable_custom_all_reduce: true
+    enable_return_routed_experts: true
+    async_scheduling: false
+
+data:
+  train_data: []
+  val_data: []
+
+rollout:
+  fanout:
+    enabled: true
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+
+extra_env:
+  SKYRL_GDN_MASK_FLA: "1"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  SKYRL_TIS_SERVED_ID_SPLICE: "1"
+  SKYRL_POLICY_HOST_RAM_MONITOR: "1"
+  SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
+  VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  NCCL_DEBUG: WARN
+  VLLM_ALLOW_ROUTED_EXPERTS_DCP: "1"
+  VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
+  VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
+  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  TORCH_NCCL_ENABLE_MONITORING: "1"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_FR_BUFFER_SIZE: "2000"
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank

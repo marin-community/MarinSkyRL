@@ -39,7 +39,7 @@ checks = ["ruff-check", "ruff-format"]
 ruff_version = "0.14.3"
 # skyrl-agent is a dormant snapshot that nothing in CI builds or tests; reformatting it
 # would be pure churn. The three live packages are linted.
-include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**"]
+include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**"]
 
 [tool.ruff]
 line-length = 120
