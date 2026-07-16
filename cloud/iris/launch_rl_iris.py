@@ -401,6 +401,126 @@ def _resolve_cluster_config_default() -> str:
     return rel
 
 
+def _resolve_parent_cluster_config(cluster_config: Optional[str]) -> Optional[str]:
+    """Path to the PARENT (marin) cluster YAML for federated submission.
+
+    The marin meta-scheduler config (marin.yaml) that owns iris.oa.dev and lists the
+    CoreWeave clusters as delegation peers. Defaults to the ``marin.yaml`` sibling of
+    ``--cluster-config`` (they live in the same ``lib/iris/config/`` dir); falls back
+    to the same search roots as :func:`_resolve_cluster_config_default`.
+    """
+    if cluster_config:
+        sib = Path(cluster_config).with_name("marin.yaml")
+        if sib.exists():
+            return str(sib)
+    rel = "lib/iris/config/marin.yaml"
+    for c in (
+        Path.home() / "Documents/marin" / rel,
+        Path("/Users/benjaminfeuer/Documents/marin") / rel,
+        Path(os.environ.get("MARIN_ROOT", "")) / rel,
+    ):
+        if c.exists():
+            return str(c)
+    return None
+
+
+def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
+    """Bare host of a cluster config's ``dashboard_url`` — the public host of the
+    controller that OWNS endpoints registered on that cluster. None if unreadable."""
+    if not cluster_config_path:
+        return None
+    try:
+        import yaml
+        from urllib.parse import urlparse
+
+        with open(cluster_config_path) as f:
+            raw = yaml.safe_load(f) or {}
+        url = raw.get("dashboard_url")
+        return urlparse(url).hostname if url else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
+    """Fail loud BEFORE submit when ``--ingress-mode controller`` would produce a
+    capability URL a Daytona sandbox CANNOT reach — the Exp2 opencode-RL blocker
+    (ported from OT-Agent 8fdabb12, extended for the federated remediation).
+
+    opencode runs in a Daytona sandbox and reaches the co-located vLLM over the public
+    internet at ``https://<ingress_host>/proxy/t/<token>/<endpoint>/v1``. The endpoint
+    is REGISTERED on the controller of the cluster the job runs on and the token is
+    minted with that controller's key, so the capability URL only resolves when
+    ``<ingress_host>`` is a controller that can BOTH route to the endpoint AND be
+    reached from Daytona:
+
+      * A **directly-submitted CoreWeave** job cannot: the peer controller's own host
+        (``dashboard_url``, e.g. ``iris-cw-us-east-02a.oa.dev``) is IP-locked to the
+        marin egress; and iris.oa.dev (marin) only FEDERATES ``/proxy`` to a CoreWeave
+        endpoint for a job it DELEGATED. A direct submit → iris.oa.dev has no route →
+        404 → opencode never reaches vLLM → RecordProxy captures 0 traffic, the job
+        burns an H100 node making 0 trials.
+      * The **federated** path (``--target-cluster <peer>``) fixes it: marin delegates
+        the job to the peer child, so ``has_received_job_from_peer`` passes and marin
+        federation-proxies ``/proxy``. The endpoint is registered on the peer AND
+        MIRRORED onto marin by FederationSync; the capability token is minted at the
+        PARENT (iris.oa.dev) for the mirrored endpoint. So controller-ingress on
+        CoreWeave is ALLOWED iff ``--target-cluster`` is set and ``--ingress-host`` is
+        the marin host.
+
+    Escape hatch (once a further remediation is wired): ``OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1``.
+    """
+    if getattr(args, "ingress_mode", "direct") != "controller":
+        return
+    if os.environ.get("OTAGENT_ALLOW_INGRESS_HOST_MISMATCH") == "1":
+        print(
+            "[rl-iris] WARNING: OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1 — skipping the "
+            "controller-ingress reachability guard.",
+            flush=True,
+        )
+        return
+
+    cluster = str(getattr(args, "cluster", "") or "")
+    ingress_host = str(getattr(args, "ingress_host", "") or "")
+    target_cluster = str(getattr(args, "target_cluster", "") or "")
+    dash_host = _cluster_dashboard_host(getattr(args, "cluster_config", None))
+    is_coreweave = cluster.startswith("cw-") or (dash_host or "") not in ("", "iris.oa.dev")
+
+    if is_coreweave:
+        # The ONLY reachable CoreWeave topology: federated submission through marin.
+        if not target_cluster:
+            raise SystemExit(
+                "[rl-iris] BLOCKED: --ingress-mode controller on a directly-submitted "
+                f"CoreWeave job (--cluster={cluster or '?'}, controller host="
+                f"{dash_host or '?'}) is NOT reachable from a Daytona sandbox.\n"
+                "  The capability URL would 404: iris.oa.dev only federates /proxy for a "
+                "job it DELEGATED, and the CoreWeave controller's own host is IP-locked. "
+                "opencode would never reach vLLM (0 trials, RecordProxy captures nothing) "
+                "— the 2026-07-16 Exp2 blocker.\n"
+                "  Fix: pass --target-cluster " + (cluster or "<peer>") + " to federate "
+                "the job through the marin meta-scheduler (keep --ingress-host iris.oa.dev), "
+                "so marin delegates it to the peer and federation-proxies /proxy.\n"
+                "  Override (only once another remediation is wired): "
+                "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
+            )
+        if ingress_host and ingress_host != "iris.oa.dev":
+            raise SystemExit(
+                f"[rl-iris] BLOCKED: federated CoreWeave controller-ingress needs "
+                f"--ingress-host iris.oa.dev (the marin parent that owns the mirrored "
+                f"endpoint + signs the token), got --ingress-host {ingress_host}. A "
+                "peer-signed token 401s at iris.oa.dev (federation trust is "
+                "unidirectional: cw trusts marin, not the reverse)."
+            )
+        return
+    # Non-CoreWeave (e.g. a marin-local submission): the host must match the controller
+    # that owns the endpoint.
+    if ingress_host and dash_host and ingress_host != dash_host and not target_cluster:
+        raise SystemExit(
+            f"[rl-iris] BLOCKED: --ingress-host {ingress_host} does not match this "
+            f"cluster's controller host {dash_host} (--cluster={cluster}). Override with "
+            "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
+        )
+
+
 def _default_secrets_env() -> Optional[str]:
     cand = os.environ.get("OT_AGENT_SECRETS_ENV") or os.path.expanduser("~/Documents/secrets.env")
     return cand if os.path.isfile(cand) else None
@@ -634,15 +754,19 @@ def create_parser() -> argparse.ArgumentParser:
         help="Force scheduling on non-preemptible workers.",
     )
     # ----------------------------------------------------------------------- #
-    # Native controller-ingress (Exp2 opencode-RL literal capture).            #
-    #                                                                          #
-    # Job SUBMISSION is UNCHANGED (direct to --cluster's controller). These    #
-    # flags only select the SERVING-ingress plane: the in-pod worker registers #
-    # the co-located RecordProxy/vLLM with the controller and mints a          #
-    # capability token, so a Daytona sandbox reaches vLLM at                   #
-    # <ingress_host>/proxy/t/<token>/... This is the native recipe datagen     #
-    # already uses (needs NO iris login). Forwarded to the in-pod run_rl.      #
-    # Default (direct) forwards nothing (byte-identical).                      #
+    # Cross-cluster ingress / federated submission (Exp2 opencode-RL fix #1).   #
+    #                                                                           #
+    # The default (direct) path is UNCHANGED: submit straight to --cluster's    #
+    # own controller (byte-identical to before). The federated path is opt-in   #
+    # via --target-cluster: submit through the marin meta-scheduler             #
+    # (iris.oa.dev) with a `cluster EQ <peer>` constraint so marin DELEGATES    #
+    # the whole job to the peer child and can then federation-proxy /proxy      #
+    # requests to the peer's endpoint. This is the ONLY topology in which a     #
+    # Daytona sandbox can reach a co-located CoreWeave vLLM through a single    #
+    # public host (iris.oa.dev): the peer controller's own host is IP-locked    #
+    # with no off-cluster surface, and marin only federates /proxy for a job it #
+    # delegated (controller has_received_job_from_peer). See                    #
+    # validate_controller_ingress_reachability() + .claude/ops/iris/iris_ingress.md. #
     # ----------------------------------------------------------------------- #
     parser.add_argument(
         "--ingress-mode",
@@ -650,17 +774,44 @@ def create_parser() -> argparse.ArgumentParser:
         dest="ingress_mode",
         default="direct",
         choices=["direct", "controller"],
-        help="'controller' selects native serving-ingress: the in-pod worker registers the "
-        "co-located RecordProxy/vLLM + mints a capability URL (same recipe as datagen; no "
-        "iris login). 'direct' (default) = no ingress wiring (byte-identical).",
+        help="How the co-located served model (RecordProxy/vLLM) is exposed to a "
+        "Daytona sandbox. 'direct' (default) = legacy path, no controller-ingress "
+        "wiring (byte-identical). 'controller' = register the endpoint with the iris "
+        "controller and serve it through the /proxy/t/<token>/... capability URL; on a "
+        "CoreWeave cluster this REQUIRES --target-cluster (federated submission) so the "
+        "capability URL is reachable — see validate_controller_ingress_reachability().",
     )
     parser.add_argument(
         "--ingress-host",
         "--ingress_host",
         dest="ingress_host",
         default=None,
-        help="Public controller-ingress host the capability URL is built against, e.g. "
-        "https://iris.oa.dev. Required with --ingress-mode controller.",
+        help="Public controller-ingress host the sandbox-facing capability URL is built "
+        "against (only used with --ingress-mode controller). For the federated CoreWeave "
+        "path this MUST be the marin meta-scheduler host 'iris.oa.dev' (the parent that "
+        "owns the mirrored endpoint + signs the token), NOT the peer's own host.",
+    )
+    parser.add_argument(
+        "--target-cluster",
+        "--target_cluster",
+        dest="target_cluster",
+        default=None,
+        help="Federate the whole job to this peer cluster via the marin meta-scheduler "
+        "instead of submitting directly to --cluster's controller. Appends a "
+        "`cluster EQ <peer>` constraint and submits through the marin controller "
+        "(iris.oa.dev, IAP-gated — needs `iris login`), so marin delegates the job to "
+        "the peer child and can federation-proxy /proxy to the peer's endpoint. Required "
+        "to make --ingress-mode controller reachable from Daytona on CoreWeave. Leave "
+        "unset for the default direct submission.",
+    )
+    parser.add_argument(
+        "--parent-cluster-config",
+        "--parent_cluster_config",
+        dest="parent_cluster_config",
+        default=None,
+        help="Path to the PARENT (marin) iris cluster YAML used for federated submission "
+        "when --target-cluster is set. Defaults to the marin.yaml sibling of "
+        "--cluster-config. The direct path never reads this.",
     )
     parser.add_argument(
         "--record-literal",
@@ -668,8 +819,19 @@ def create_parser() -> argparse.ArgumentParser:
         dest="record_literal",
         action="store_true",
         default=False,
-        help="Co-locate harbor's RecordProxy in the pod so agent completions are captured "
-        "to literal.jsonl (opencode-RL literal interceptor). Requires --ingress-mode controller.",
+        help="Co-locate harbor's RecordProxy in front of vLLM in the pod so agent "
+        "completions are captured to literal.jsonl (opencode-RL literal interceptor). "
+        "Forwarded to the in-pod runner; requires --ingress-mode controller.",
+    )
+    parser.add_argument(
+        "--parent-controller-config-in-pod",
+        "--parent_controller_config_in_pod",
+        dest="parent_controller_config_in_pod",
+        default=None,
+        help="In-pod path to the parent (marin) cluster YAML the in-pod worker mints "
+        "against, if it differs from the launch-host --parent-cluster-config path. "
+        "Defaults to the launch-host resolved marin.yaml path (must be materialized "
+        "in-pod — see the OTAGENT_PARENT_CONTROLLER_CONFIG forwarding NOTE).",
     )
     parser.add_argument(
         "--secrets-env",
@@ -1067,17 +1229,26 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     for override in args.skyrl_override or []:
         train_cmd.extend(["--skyrl_override", override])
 
-    # Native controller-ingress (opencode-RL literal capture): forward the ingress flags to
-    # the in-pod runner (cloud.iris.run_rl), which stands up the RecordProxy + registers +
-    # mints the capability URL against the in-pod controller. Only emitted under
-    # --ingress-mode controller; the default (direct) path adds nothing (byte-identical
-    # run_rl invocation). Job submission below is UNCHANGED regardless.
+    # Cross-cluster ingress (opencode-RL literal capture): forward the ingress flags to
+    # the in-pod runner (cloud.iris.run_rl), which stands up the RecordProxy + registers
+    # + mints the capability URL. Only emitted under --ingress-mode controller; the
+    # default (direct) path adds nothing (byte-identical run_rl invocation).
     if getattr(args, "ingress_mode", "direct") == "controller":
         train_cmd.extend(["--ingress_mode", "controller"])
         if getattr(args, "ingress_host", None):
             train_cmd.extend(["--ingress_host", args.ingress_host])
         if getattr(args, "record_literal", False):
             train_cmd.append("--record_literal")
+        if getattr(args, "target_cluster", None):
+            train_cmd.extend(["--target_cluster", args.target_cluster])
+            # Parent (marin) config the in-pod worker mints against. Prefer an explicit
+            # in-pod path; else pass the resolved marin.yaml path (must be materialized
+            # in-pod — see the OTAGENT_PARENT_CONTROLLER_CONFIG env forwarding + NOTE).
+            parent_cfg_in_pod = getattr(args, "parent_controller_config_in_pod", None) or (
+                args.parent_cluster_config or _resolve_parent_cluster_config(args.cluster_config)
+            )
+            if parent_cfg_in_pod:
+                train_cmd.extend(["--parent_controller_config", parent_cfg_in_pod])
 
     # Durable Harbor rollout artifacts. The config default (trials_dir: null) resolves to a
     # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); point
@@ -1263,14 +1434,11 @@ def main() -> int:
     args = parser.parse_args()
     normalize(args)
 
-    # Native controller-ingress needs a public host to build the capability URL (mirrors
-    # datagen's worker-side check, surfaced at launch time before the submit). Submission
-    # itself is unchanged.
-    if getattr(args, "ingress_mode", "direct") == "controller" and not getattr(args, "ingress_host", None):
-        raise SystemExit(
-            "[rl-iris] --ingress-mode controller requires --ingress-host (the public "
-            "controller-ingress host, e.g. https://iris.oa.dev)."
-        )
+    # Fail loud (before any submit / GPU allocation) when controller-ingress would
+    # produce a capability URL the Daytona sandbox cannot reach — the Exp2 blocker
+    # (opencode never reaches vLLM on CoreWeave via a directly-submitted job). The
+    # default direct path returns immediately (byte-identical).
+    validate_controller_ingress_reachability(args)
 
     if not args.job_name:
         args.job_name = f"rl-iris-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -1371,6 +1539,9 @@ def main() -> int:
     replicas, coscheduling = resolve_multinode_defaults(None, args.gpu_variant, args.num_nodes)
 
     resources_proto = resources.to_proto()
+    # --target-cluster (federated submission) appends a `cluster EQ <peer>` constraint
+    # so the marin meta-scheduler DELEGATES the whole job to the peer child (see the
+    # submission block below). None on the default direct path (byte-identical).
     constraints = build_job_constraints(
         resources_proto=resources_proto,
         tpu_variants=[],
@@ -1378,6 +1549,7 @@ def main() -> int:
         regions=None,
         zone=None,
         preemptible=args.preemptible,
+        target_cluster=args.target_cluster,
     )
 
     priority_band = {
@@ -1473,6 +1645,39 @@ def main() -> int:
         if v:
             env_vars[k] = v
 
+    # Federated controller-ingress pod plumbing (opencode-RL literal capture): the in-pod
+    # worker mints the capability token at the PARENT (marin/iris.oa.dev) for the mirrored
+    # endpoint, which needs (a) the parent cluster config path and (b) IAP credentials to
+    # authenticate to iris.oa.dev. We forward the config path + any launch-host IAP cred
+    # env so the in-pod _ParentControllerClient can re-mint the IAP OIDC token.
+    #
+    # ⚠ POST-LOGIN VALIDATION ITEM (cannot be exercised until `iris login` succeeds): the
+    # parent config FILE and a usable IAP credential must actually be PRESENT in the pod.
+    # The marin.yaml is not baked into the gpu-rl image, and forwarding a user refresh
+    # token into a pod is a secret-handling decision. Today we forward the path + known
+    # IAP-cred env vars; materializing marin.yaml in-pod (bake / workspace-sync / write
+    # from a forwarded value) and choosing the IAP cred mechanism (allowlisted SA vs.
+    # forwarded refresh token) are the remaining operator/deploy steps. Direct submission
+    # (no --target-cluster) forwards none of this.
+    if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
+        from cloud.iris.ingress_utils import PARENT_CONTROLLER_CONFIG_ENV
+
+        parent_cfg = (
+            getattr(args, "parent_controller_config_in_pod", None)
+            or args.parent_cluster_config
+            or _resolve_parent_cluster_config(args.cluster_config)
+        )
+        if parent_cfg:
+            env_vars[PARENT_CONTROLLER_CONFIG_ENV] = parent_cfg
+        for k in (
+            "IRIS_IAP_REFRESH_TOKEN",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "IRIS_EDGE_REFRESH_TOKEN",
+        ):
+            v = os.environ.get(k)
+            if v:
+                env_vars[k] = v
+
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin
     # CLI's own path (iris/cli/connect.py::require_controller_url): for a local
@@ -1480,7 +1685,30 @@ def main() -> int:
     # controller_address() (defaults.worker.controller_address) if set, else fall
     # back to the backend's discover_controller(). cw-us-east-02a's controller
     # kind is "coreweave" (non-local, no IAP auth) → the discover path.
-    iris_config = load_config(args.cluster_config)
+    #
+    # FEDERATED submission (--target-cluster set): submit through the PARENT (marin)
+    # meta-scheduler instead of the peer's own controller. We load marin.yaml (whose
+    # dashboard_url is the IAP-gated iris.oa.dev) and tunnel THERE; the `cluster EQ
+    # <peer>` constraint appended above makes marin delegate the whole job to the peer
+    # child. This is what lets marin later federation-proxy /proxy to the peer's
+    # (mirrored) endpoint — the only Daytona-reachable CoreWeave ingress topology.
+    # Reaching iris.oa.dev requires IAP creds (`iris login` with an @openathena.ai
+    # account, or an allowlisted service account); tunnel()/IrisClient handle the auth.
+    submit_cluster_config = args.cluster_config
+    if args.target_cluster:
+        parent_cfg = args.parent_cluster_config or _resolve_parent_cluster_config(args.cluster_config)
+        if not parent_cfg:
+            raise SystemExit(
+                "[rl-iris] --target-cluster set but no parent (marin) cluster config "
+                "could be resolved. Pass --parent-cluster-config <path to marin.yaml>."
+            )
+        submit_cluster_config = parent_cfg
+        print(
+            f"[rl-iris] Federated submission: delegating to peer '{args.target_cluster}' "
+            f"via the marin meta-scheduler ({parent_cfg}).",
+            flush=True,
+        )
+    iris_config = load_config(submit_cluster_config)
     bundle = provider_bundle(iris_config)
     if iris_config.controller.controller_kind() == "local":
         controller_address = LocalCluster(iris_config).start()

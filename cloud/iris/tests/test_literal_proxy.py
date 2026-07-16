@@ -1,9 +1,9 @@
 """Unit tests for cloud/iris/literal_proxy_utils.py — RecordProxy wiring pure helpers.
 
-Exercises the pure/disabled paths WITHOUT binding a socket or importing harbor/upath (both
-lazy-imported only on the enabled/remote paths): the upstream-origin normalization (the
-/v1-doubling guard), per-serve token uniqueness, the local log path, and that the DISABLED
-wrapper is a null context manager (byte-identical handoff).
+Exercises the pure/disabled paths WITHOUT binding a socket or importing harbor/upath
+(both are lazy-imported only on the enabled/remote paths): the upstream-origin
+normalization (the /v1-doubling guard), the per-serve token uniqueness, the local log
+path, and that the DISABLED wrapper is a null context manager (byte-identical handoff).
 
 Run:
     python -m pytest cloud/iris/tests/test_literal_proxy.py -v
@@ -33,6 +33,7 @@ from cloud.iris.literal_proxy_utils import (  # noqa: E402
 
 
 def test_upstream_origin_strips_path_to_avoid_double_v1():
+    # RecordProxy re-appends the full request path, so it must get the ORIGIN only.
     assert upstream_origin("http://localhost:8000/v1") == "http://localhost:8000"
     assert upstream_origin("https://h:8443/v1/") == "https://h:8443"
     with pytest.raises(ValueError):
@@ -48,9 +49,10 @@ def test_slug_is_filesystem_safe():
     assert _slug("") == "job"
 
 
-def test_serve_token_folds_in_task_attempt(monkeypatch):
+def test_serve_token_is_unique_per_call(monkeypatch):
     monkeypatch.setenv("IRIS_TASK_ID", "/user/job/0:2")
-    assert serve_token().endswith("0-2")
+    t = serve_token()
+    assert t.endswith("0-2")  # rank + retry leaf folded in
 
 
 def test_literal_log_path_local(tmp_path):
@@ -60,10 +62,14 @@ def test_literal_log_path_local(tmp_path):
 
 
 def test_literal_log_remote_uri_none_for_local(tmp_path):
+    # A plain local experiments_dir needs no upload.
     assert literal_log_remote_uri(str(tmp_path), "myjob", "tok1") is None
 
 
 def test_maybe_serve_disabled_is_null_context_manager():
+    # Default OFF: yields the upstream endpoint UNCHANGED, starts no server.
     upstream = "http://localhost:8000/v1"
-    with maybe_serve_literal_proxy(False, upstream, experiments_dir="/tmp/x", job_name="j") as ep:
+    with maybe_serve_literal_proxy(
+        False, upstream, experiments_dir="/tmp/x", job_name="j"
+    ) as ep:
         assert ep == upstream

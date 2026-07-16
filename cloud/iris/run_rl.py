@@ -66,14 +66,14 @@ class LocalRLConfig:
     skyrl_overrides: List[str] = field(default_factory=list)
     dry_run: bool = False
     tensor_parallel_size: int = 1  # auto-derived
-    # --- Native controller-ingress (Exp2 opencode-RL literal capture) ---
-    # Mirrors the datagen ground truth (hpc/local_runner_utils.py::_serving_endpoint_meta):
-    # the WORKER registers the co-located RecordProxy/vLLM with the IN-POD controller and
-    # mints a capability token; ingress_host only builds the public URL string. No user
-    # login, no federated submission. All default OFF => byte-identical to today.
+    # --- Cross-cluster ingress (Exp2 opencode-RL literal capture) ---
+    # All default to the OFF/direct value so an all-defaults run stands up NO proxy,
+    # registers NO endpoint, and touches NO env — byte-identical to today.
     ingress_mode: str = "direct"  # "direct" (off) | "controller"
-    ingress_host: str = ""  # public controller-ingress host, e.g. https://iris.oa.dev
+    ingress_host: str = ""  # public controller-ingress host (marin: iris.oa.dev)
     record_literal: bool = False  # co-locate harbor RecordProxy for literal.jsonl capture
+    target_cluster: str = ""  # set => federated: mint at the PARENT for the mirrored endpoint
+    parent_controller_config: str = ""  # marin.yaml path for federated parent-minting
     vllm_http_port: int = 8000  # local vLLM HTTP endpoint (= generator.http_endpoint_port)
 
 
@@ -178,45 +178,45 @@ class LocalRLRunner:
             return 0
 
         self._setup_environment(exp_args)
-        # Native controller-ingress (opencode-RL literal capture): when enabled, stand up
-        # the co-located RecordProxy + register the endpoint with the IN-POD controller +
-        # mint the capability token and publish it as HARBOR_MODEL_ENDPOINT BEFORE the
+        # Cross-cluster ingress (opencode-RL literal capture): when enabled, stand up
+        # the co-located RecordProxy + register the endpoint + mint the (parent, when
+        # federated) capability URL and publish it as HARBOR_MODEL_ENDPOINT BEFORE the
         # SkyRL subprocess is spawned, so the generator (which inherits this env) points
-        # opencode at <ingress_host>/proxy/t/<token>/... The default (direct) path is a
-        # null CM. This mirrors the datagen worker path 1:1.
+        # opencode at iris.oa.dev/proxy/t/<token>/... and the sandbox traffic flows
+        # controller -> RecordProxy -> vLLM. The default (direct) path is a null CM.
         with self._ingress_context():
             return self._run_skyrl(parsed.entrypoint, hydra_args)
 
     @contextlib.contextmanager
     def _ingress_context(self) -> Iterator[None]:
-        """Native controller-ingress standup around the SkyRL subprocess.
+        """Guarded controller-ingress standup around the SkyRL subprocess.
 
-        Ports the datagen worker recipe (``hpc/local_runner_utils.py::_serving_endpoint_meta``
-        + ``hpc/ingress_utils.py``) into the canonical MarinSkyRL runner, VERBATIM in
-        mechanism:
+        Mirrors the OT-Agent RLJobRunner controller-ingress path, consolidated into the
+        canonical MarinSkyRL runner:
 
           1. co-locate harbor's RecordProxy (``record_literal``) in front of the local
              vLLM HTTP endpoint so agent completions are captured to ``literal.jsonl``;
-          2. ``register_controller_endpoint(name, address, access=LINK)`` against the
-             IN-POD controller (``IRIS_CONTROLLER_ADDRESS``; in-cluster network trust — no
-             user login), leased + kept alive for the whole run;
-          3. ``capability_api_base(ingress_host, name)`` mints a scoped token on that same
-             in-pod controller and builds ``<ingress_host>/proxy/t/<token>/<name>/v1``,
-             published as ``HARBOR_MODEL_ENDPOINT`` + the inert sandbox key injected.
+          2. register that upstream (RecordProxy, else raw vLLM) with the in-pod iris
+             controller under ENDPOINT_ACCESS_LINK (leased, kept alive for the run);
+          3. mint a scoped capability token — at the PARENT (marin) for the MIRRORED
+             endpoint when ``target_cluster`` is set (federated: cw-signed tokens 401 at
+             iris.oa.dev), else at the local controller — and publish the
+             ``/proxy/t/<token>/<name>/v1`` URL as ``HARBOR_MODEL_ENDPOINT`` +
+             inject the inert sandbox agent key.
 
-        No federated submission, no parent-mint, no FederationSync poll — exactly what the
-        datagen job does (proven working 2026-07-06). Default ``ingress_mode=direct`` yields
-        immediately (no proxy, no register, no env mutation) — byte-identical to today.
+        Default ``ingress_mode=direct`` yields immediately (no proxy, no register, no
+        env mutation) — byte-identical to today.
         """
         if self.config.ingress_mode != "controller":
             yield
             return
 
-        # Lazy imports: these modules hard-import iris/harbor only at call time and are
+        # Lazy imports: these modules hard-import iris/harbor only at call time, and are
         # only needed on the (opt-in) controller-ingress path.
         from cloud.iris.ingress_utils import (
             capability_api_base,
             controller_registration_plan,
+            federated_capability_api_base,
             inject_ingress_agent_key,
             register_controller_endpoint,
         )
@@ -228,14 +228,23 @@ class LocalRLRunner:
         if not self.config.ingress_host:
             raise ValueError(
                 "ingress_mode=controller requires --ingress_host (the public "
-                "controller-ingress host, e.g. https://iris.oa.dev)."
+                "controller-ingress host; iris.oa.dev for the federated CoreWeave path)."
             )
-        # Reachability on the iris path comes ONLY from the controller registration (no
-        # pinggy tunnel here), so literal capture needs controller mode (datagen parity).
-        if self.config.record_literal and self.config.ingress_mode != "controller":
-            raise ValueError(
-                "--record_literal on the iris path requires --ingress_mode controller."
-            )
+        # Federated parent-minting reads the parent (marin) controller config from the
+        # env the launcher forwards; surface it here so a misconfig fails loud early.
+        if self.config.target_cluster:
+            from cloud.iris.ingress_utils import PARENT_CONTROLLER_CONFIG_ENV
+
+            if self.config.parent_controller_config:
+                os.environ.setdefault(
+                    PARENT_CONTROLLER_CONFIG_ENV, self.config.parent_controller_config
+                )
+            if not os.environ.get(PARENT_CONTROLLER_CONFIG_ENV):
+                raise ValueError(
+                    "federated ingress (target_cluster set) requires the parent marin "
+                    f"controller config via {PARENT_CONTROLLER_CONFIG_ENV} (or "
+                    "--parent_controller_config); needed to mint at iris.oa.dev."
+                )
 
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
@@ -256,15 +265,22 @@ class LocalRLRunner:
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
             try:
-                # Mint + build the capability api_base AFTER register (the mint resolves
-                # the just-registered endpoint) — on the SAME in-pod controller.
-                api_base = capability_api_base(self.config.ingress_host, endpoint_name)
+                if self.config.target_cluster:
+                    api_base = federated_capability_api_base(
+                        endpoint_name, ingress_host=self.config.ingress_host
+                    )
+                    mint_where = f"PARENT (federated -> {self.config.target_cluster})"
+                else:
+                    api_base = capability_api_base(self.config.ingress_host, endpoint_name)
+                    mint_where = "local controller"
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
                 injected = inject_ingress_agent_key()
                 print(
                     f"[run_rl] ingress_mode=controller record_literal="
-                    f"{self.config.record_literal}: registered {endpoint_name} -> "
-                    f"{register_address} (id={registration.endpoint_id}, access=LINK); "
+                    f"{self.config.record_literal} target_cluster="
+                    f"{self.config.target_cluster or '(direct)'}: registered "
+                    f"{endpoint_name} -> {register_address} "
+                    f"(id={registration.endpoint_id}, access=LINK); minted at {mint_where}; "
                     f"HARBOR_MODEL_ENDPOINT=/proxy/t/<token>/{endpoint_name}/v1 "
                     f"(dummy key injected={injected})",
                     flush=True,
@@ -447,23 +463,22 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry_run", action="store_true", help="Print config and command without running.")
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", help=argparse.SUPPRESS)
 
-    # --- Native controller-ingress (Exp2 opencode-RL literal capture) --- #
+    # --- Cross-cluster ingress (Exp2 opencode-RL literal capture) --- #
     # Forwarded by the launcher under --ingress-mode controller. Default off => the
-    # standup context is a null CM (byte-identical). Mirrors datagen; NO federation.
+    # standup context is a null CM (byte-identical).
     parser.add_argument(
         "--ingress_mode",
         default="direct",
         choices=["direct", "controller"],
-        help="'controller' stands up the RecordProxy + registers the endpoint with the "
-        "in-pod controller + mints the capability URL, published as HARBOR_MODEL_ENDPOINT. "
-        "Default 'direct' off.",
+        help="'controller' stands up the RecordProxy + registers the endpoint + mints "
+        "the capability URL and publishes it as HARBOR_MODEL_ENDPOINT. Default 'direct' off.",
     )
     parser.add_argument("--ingress-mode", dest="ingress_mode", help=argparse.SUPPRESS)
     parser.add_argument(
         "--ingress_host",
         default="",
-        help="Public controller-ingress host for the capability URL (e.g. "
-        "https://iris.oa.dev). Required with --ingress_mode controller.",
+        help="Public controller-ingress host for the capability URL (iris.oa.dev for "
+        "the federated CoreWeave path). Required with --ingress_mode controller.",
     )
     parser.add_argument("--ingress-host", dest="ingress_host", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -472,6 +487,20 @@ def create_parser() -> argparse.ArgumentParser:
         help="Co-locate harbor's RecordProxy in front of vLLM to capture literal.jsonl.",
     )
     parser.add_argument("--record-literal", dest="record_literal", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--target_cluster",
+        default="",
+        help="Set for federated ingress: mint the capability token at the PARENT (marin) "
+        "for the mirrored endpoint (a peer-signed token 401s at iris.oa.dev).",
+    )
+    parser.add_argument("--target-cluster", dest="target_cluster", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--parent_controller_config",
+        default="",
+        help="Parent (marin) cluster YAML for federated parent-minting; also honored via "
+        "the OTAGENT_PARENT_CONTROLLER_CONFIG env.",
+    )
+    parser.add_argument("--parent-controller-config", dest="parent_controller_config", help=argparse.SUPPRESS)
     parser.add_argument(
         "--vllm_http_port",
         type=int,
@@ -510,6 +539,8 @@ def main() -> None:
         ingress_mode=args.ingress_mode,
         ingress_host=args.ingress_host,
         record_literal=bool(args.record_literal),
+        target_cluster=args.target_cluster,
+        parent_controller_config=args.parent_controller_config,
         vllm_http_port=int(args.vllm_http_port),
     )
 

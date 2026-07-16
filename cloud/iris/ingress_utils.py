@@ -488,3 +488,258 @@ def controller_registration_plan(
     port = proxy_port if record_literal else vllm_port
     register_address = controller_upstream_address(port, env=env)
     return endpoint_name, register_address
+
+
+# --------------------------------------------------------------------------- #
+# FEDERATED parent-minting (cross-cluster ingress — Exp2 opencode-RL fix #1)
+# --------------------------------------------------------------------------- #
+#
+# WHY a SEPARATE mint path. The plain :func:`capability_api_base` mints against the
+# task's OWN in-cluster controller (``_ControllerCapabilityMinter`` uses
+# ``IRIS_CONTROLLER_ADDRESS``). On a CoreWeave peer that controller is the CoreWeave
+# controller, whose signing key marin (iris.oa.dev) does NOT trust: federation trust
+# is UNIDIRECTIONAL (cw trusts marin, not the reverse), so a cw-minted token 401s at
+# iris.oa.dev. And the peer controller's own public host is IP-locked. So a Daytona
+# sandbox can only reach the co-located vLLM through iris.oa.dev, which requires:
+#
+#   1. the job be DELEGATED by marin to the peer (launcher --target-cluster), so
+#      marin's ``has_received_job_from_peer`` gate passes and it federation-proxies
+#      ``/proxy`` to the peer endpoint;
+#   2. the endpoint be registered on the peer (local, exactly as today) and then
+#      MIRRORED onto marin by FederationSync (a mirrored row carries a ``peer_id``);
+#   3. the capability token be minted at the PARENT (marin) for that mirrored
+#      endpoint, so it is signed with marin's key → the ``/proxy/t/<token>/...`` LINK
+#      check at iris.oa.dev passes and the request forwards to the peer.
+#
+# FederationSync mirroring is ASYNC, so between register (2) and mint (3) there is a
+# race — :func:`wait_for_endpoint_mirror` bounds it with a poll+timeout and fails
+# loud rather than minting a token the parent can't yet resolve. The pure poll/mint
+# core takes injectable resolver/minter Protocols (unit-testable with fakes, no live
+# controller); the production adapters authenticate to marin via iris's own IAP client
+# construction.
+
+
+# Bounded wait for FederationSync to mirror the peer endpoint onto the parent.
+DEFAULT_MIRROR_TIMEOUT_SECONDS = 180.0
+DEFAULT_MIRROR_POLL_INTERVAL_SECONDS = 3.0
+
+
+class ParentEndpointResolver(Protocol):
+    """Reports whether ``endpoint_name`` is MIRRORED onto the parent controller yet.
+
+    A mirrored row is one FederationSync copied from a peer — it carries a non-empty
+    ``peer_id``. Returns True once such a row exists at the parent. The in-cluster
+    parent-controller adapter and unit-test fakes both satisfy it.
+    """
+
+    def is_mirrored(self, endpoint_name: str) -> bool: ...
+
+
+def wait_for_endpoint_mirror(
+    endpoint_name: str,
+    resolver: ParentEndpointResolver,
+    *,
+    timeout_s: float = DEFAULT_MIRROR_TIMEOUT_SECONDS,
+    interval_s: float = DEFAULT_MIRROR_POLL_INTERVAL_SECONDS,
+    sleep: Optional[Callable[[float], None]] = None,
+    now: Optional[Callable[[], float]] = None,
+) -> None:
+    """Block until ``endpoint_name`` is mirrored onto the parent, or raise ``TimeoutError``.
+
+    Polls ``resolver.is_mirrored`` every ``interval_s`` up to ``timeout_s``. This
+    bounds the async FederationSync gap between registering the endpoint on the peer
+    and minting a token for it at the parent — minting before the mirror appears would
+    yield a token the parent cannot resolve (the mint's ``resolve`` returns nothing).
+    ``sleep``/``now`` are injectable for deterministic tests.
+    """
+    _sleep = sleep if sleep is not None else time.sleep
+    _now = now if now is not None else time.monotonic
+    deadline = _now() + timeout_s
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            if resolver.is_mirrored(endpoint_name):
+                return
+        except Exception as exc:  # noqa: BLE001 — a transient resolve error should not abort the wait
+            last_err: Optional[Exception] = exc
+        else:
+            last_err = None
+        if _now() >= deadline:
+            raise TimeoutError(
+                f"endpoint {endpoint_name!r} was not mirrored onto the parent controller "
+                f"within {timeout_s:.0f}s ({attempts} poll(s)); FederationSync has not "
+                "propagated the delegated peer endpoint, so a parent-minted capability "
+                "token would not resolve. Is the job actually DELEGATED to the peer "
+                "(launcher --target-cluster) and the endpoint registered on the peer?"
+                + (f" Last resolve error: {last_err}" if last_err else "")
+            )
+        _sleep(interval_s)
+
+
+@dataclass
+class _FederatedTokenState:
+    mirrored: bool = False
+
+
+class FederatedCapabilityTokenCache:
+    """Parent-minting analog of :class:`CapabilityTokenCache`.
+
+    On the first ``token_for`` for an endpoint it waits (once) for FederationSync to
+    mirror the endpoint onto the parent, then mints at the PARENT and caches the token,
+    re-minting within :data:`TOKEN_REFRESH_MARGIN_SECONDS` of expiry (the mirror wait
+    is NOT repeated on re-mint — a mirrored row does not un-mirror mid-run).
+    """
+
+    def __init__(
+        self,
+        minter: CapabilityMinter,
+        resolver: ParentEndpointResolver,
+        *,
+        ttl_hours: float = DEFAULT_TOKEN_TTL_HOURS,
+        mirror_timeout_s: float = DEFAULT_MIRROR_TIMEOUT_SECONDS,
+        mirror_interval_s: float = DEFAULT_MIRROR_POLL_INTERVAL_SECONDS,
+    ) -> None:
+        self._minter = minter
+        self._resolver = resolver
+        self._ttl_hours = ttl_hours
+        self._mirror_timeout_s = mirror_timeout_s
+        self._mirror_interval_s = mirror_interval_s
+        self._lock = threading.Lock()
+        self._cache: Dict[str, _CachedToken] = {}
+        self._state: Dict[str, _FederatedTokenState] = {}
+
+    def token_for(self, endpoint_name: str, *, now: Optional[float] = None) -> str:
+        now = time.time() if now is None else now
+        with self._lock:
+            cached = self._cache.get(endpoint_name)
+            if cached is not None and cached.expires_at - now > TOKEN_REFRESH_MARGIN_SECONDS:
+                return cached.token
+            state = self._state.setdefault(endpoint_name, _FederatedTokenState())
+            if not state.mirrored:
+                wait_for_endpoint_mirror(
+                    endpoint_name,
+                    self._resolver,
+                    timeout_s=self._mirror_timeout_s,
+                    interval_s=self._mirror_interval_s,
+                )
+                state.mirrored = True
+            token, expires_at = self._minter.mint(endpoint_name, self._ttl_hours)
+            if not token:
+                raise RuntimeError(
+                    f"parent-minting a capability token for {endpoint_name} returned an "
+                    "empty token; refusing to build an unreachable api_base."
+                )
+            self._cache[endpoint_name] = _CachedToken(token=token, expires_at=expires_at)
+            return token
+
+
+class _ParentControllerClient:
+    """Authenticated client to the PARENT (marin) controller for mirror-check + mint.
+
+    Builds an IAP-authenticated ``ControllerServiceClientSync`` against the parent
+    cluster config (default: iris.oa.dev / marin.yaml) using iris's own credential
+    wiring — the same path ``iris endpoints list`` / ``iris endpoints mint`` use, so
+    the mint runs under the caller's identity and the parent owner check passes for a
+    ``*@openathena.ai`` submitter. Requires IAP credentials to be available (an
+    ``iris login`` refresh token, or an allowlisted service account); raises loudly
+    otherwise rather than silently producing an unreachable api_base.
+
+    Satisfies BOTH :class:`ParentEndpointResolver` (``is_mirrored``) and
+    :class:`CapabilityMinter` (``mint``).
+    """
+
+    def __init__(self, parent_config_path: str) -> None:
+        from iris.cluster.config import load_config
+        from iris.cli.connect import open_controller_endpoint, rpc_client
+
+        self._config = load_config(parent_config_path)
+        # open_controller_endpoint resolves the parent URL + IAP ClientCredentials
+        # exactly as the CLI does; rpc_client threads them into the RPC interceptors.
+        self._endpoint_cm = open_controller_endpoint(config_file=parent_config_path)
+        endpoint = self._endpoint_cm.__enter__()
+        self._client = rpc_client(endpoint.url, getattr(endpoint, "credentials", None))
+
+    def is_mirrored(self, endpoint_name: str) -> bool:
+        from iris.rpc import controller_pb2
+
+        resp = self._client.list_endpoints(
+            controller_pb2.Controller.ListEndpointsRequest(prefix=endpoint_name, exact=True)
+        )
+        # A mirrored (federated) row carries a non-empty peer_id; a purely-local
+        # parent endpoint of the same name (there should be none) would not.
+        return any(getattr(e, "peer_id", "") for e in resp.endpoints)
+
+    def mint(self, endpoint_name: str, ttl_hours: float) -> Tuple[str, float]:
+        from iris.rpc import controller_pb2
+        from iris.time_proto import duration_to_proto
+        from rigging.timing import Duration
+
+        resp = self._client.mint_endpoint_token(
+            controller_pb2.Controller.MintEndpointTokenRequest(
+                endpoint_name=endpoint_name,
+                ttl=duration_to_proto(Duration.from_hours(ttl_hours)),
+            )
+        )
+        return resp.token, resp.expires_at.epoch_ms / 1000.0
+
+    def close(self) -> None:
+        try:
+            self._endpoint_cm.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# Env vars the production wiring reads for the parent (marin) controller.
+PARENT_CONTROLLER_CONFIG_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG"
+PARENT_INGRESS_HOST_ENV = "OTAGENT_PARENT_INGRESS_HOST"
+DEFAULT_PARENT_INGRESS_HOST = "iris.oa.dev"
+
+_FED_TOKEN_CACHE: Optional[FederatedCapabilityTokenCache] = None
+_FED_TOKEN_CACHE_LOCK = threading.Lock()
+
+
+def _default_federated_token_cache() -> FederatedCapabilityTokenCache:
+    """Process-wide federated cache backed by the live parent-controller client.
+
+    Reads the parent config from :data:`PARENT_CONTROLLER_CONFIG_ENV`. Constructed
+    lazily (the parent client needs IAP creds unavailable at import time).
+    """
+    global _FED_TOKEN_CACHE
+    with _FED_TOKEN_CACHE_LOCK:
+        if _FED_TOKEN_CACHE is None:
+            parent_cfg = os.environ.get(PARENT_CONTROLLER_CONFIG_ENV)
+            if not parent_cfg:
+                raise RuntimeError(
+                    "federated parent-minting requires the parent (marin) controller "
+                    f"config; set {PARENT_CONTROLLER_CONFIG_ENV} to its cluster YAML "
+                    "(the marin.yaml whose dashboard_url is iris.oa.dev)."
+                )
+            client = _ParentControllerClient(parent_cfg)
+            _FED_TOKEN_CACHE = FederatedCapabilityTokenCache(client, client)
+        return _FED_TOKEN_CACHE
+
+
+def federated_capability_api_base(
+    endpoint_name: str,
+    *,
+    ingress_host: Optional[str] = None,
+    cache: Optional[FederatedCapabilityTokenCache] = None,
+    now: Optional[float] = None,
+) -> str:
+    """Resolve the capability api_base for a MIRRORED, PARENT-minted federated endpoint.
+
+    Waits (once) for FederationSync to mirror the peer endpoint onto the parent, mints
+    a scoped token at the PARENT (marin), and returns
+    ``https://<parent_ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1``. The
+    endpoint MUST already be registered on the peer (see
+    :func:`register_controller_endpoint`, run in-cluster as today) and the job must be
+    delegated by marin to the peer (launcher ``--target-cluster``). ``ingress_host``
+    defaults to :data:`DEFAULT_PARENT_INGRESS_HOST` / :data:`PARENT_INGRESS_HOST_ENV`;
+    it MUST be the marin host (a peer-signed token 401s at iris.oa.dev). ``cache`` is
+    injectable for tests; production uses the process-wide parent-authenticated cache.
+    """
+    host = ingress_host or os.environ.get(PARENT_INGRESS_HOST_ENV) or DEFAULT_PARENT_INGRESS_HOST
+    token_cache = cache if cache is not None else _default_federated_token_cache()
+    token = token_cache.token_for(endpoint_name, now=now)
+    return build_capability_api_base(host, endpoint_name, token)

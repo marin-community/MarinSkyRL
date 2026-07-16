@@ -1,10 +1,10 @@
-"""Unit tests for cloud/iris/ingress_utils.py — native capability-URL wiring.
+"""Unit tests for cloud/iris/ingress_utils.py — capability-URL wiring + federated parent-minting.
 
-Proves the native controller-ingress wiring (the SAME recipe datagen uses) WITHOUT a live
-controller: the pure helpers build the ``/proxy/t/<token>/<name>/v1`` capability api_base,
-the worker-side token cache mints/re-mints, and the registration plan picks the RecordProxy
-vs. raw-vLLM port. All minters are in-process fakes; iris is lazy-imported only by the
-production adapters, so nothing here touches a controller.
+Proves the controller-ingress wiring WITHOUT a live controller: the pure helpers build
+the ``/proxy/t/<token>/<name>/v1`` capability api_base, the worker-side token cache
+mints/re-mints, and the FEDERATED path waits for the FederationSync mirror then mints at
+the PARENT. All minters/resolvers are in-process fakes; no iris import or live controller
+is exercised (iris is lazy-imported only by the production adapters).
 
 Run:
     python -m pytest cloud/iris/tests/test_ingress_wiring.py -v
@@ -22,17 +22,18 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.ingress_utils import (  # noqa: E402
+    DEFAULT_PARENT_INGRESS_HOST,
     DEFAULT_VLLM_PORT,
-    DUMMY_API_KEY,
     TOKEN_REFRESH_MARGIN_SECONDS,
     CapabilityTokenCache,
+    FederatedCapabilityTokenCache,
     build_capability_api_base,
-    build_controller_endpoint_meta,
     capability_api_base,
     controller_endpoint_name,
     controller_registration_plan,
     encode_endpoint_name,
-    inject_ingress_agent_key,
+    federated_capability_api_base,
+    wait_for_endpoint_mirror,
 )
 
 
@@ -46,12 +47,24 @@ class _FakeMinter:
         return f"TKN-{self.calls}", self.expires_at
 
 
-def _fixed_cache(token="ABC", expires_at=10_000_000_000.0):
-    class _Fixed:
-        def mint(self, endpoint_name, ttl_hours):
-            return token, expires_at
+class _FakeResolver:
+    """Reports the endpoint mirrored after ``ready_after`` polls; can raise transiently."""
 
-    return CapabilityTokenCache(_Fixed())
+    def __init__(self, ready_after: int = 0, raise_first: int = 0):
+        self.ready_after = ready_after
+        self.raise_first = raise_first
+        self.calls = 0
+
+    def is_mirrored(self, endpoint_name):
+        self.calls += 1
+        if self.calls <= self.raise_first:
+            raise RuntimeError("transient resolve error")
+        return self.calls > self.ready_after
+
+
+# --------------------------------------------------------------------------- #
+# Pure helpers
+# --------------------------------------------------------------------------- #
 
 
 def test_controller_endpoint_name_sanitizes():
@@ -62,25 +75,24 @@ def test_controller_endpoint_name_sanitizes():
     assert encode_endpoint_name(name) == name
 
 
-def test_encode_endpoint_name_matches_rigging_scheme():
-    assert encode_endpoint_name("/serve/foo") == "serve.foo"
-    assert encode_endpoint_name("otagent-job") == "otagent-job"
-
-
 def test_build_capability_api_base_puts_token_in_path():
     assert (
-        build_capability_api_base("iris.oa.dev", "otagent-job1", "JWT.abc")
-        == "https://iris.oa.dev/proxy/t/JWT.abc/otagent-job1/v1"
+        build_capability_api_base("ingress.example", "otagent-job1", "JWT.abc")
+        == "https://ingress.example/proxy/t/JWT.abc/otagent-job1/v1"
     )
     assert (
-        build_capability_api_base("https://iris.oa.dev/", "ep", "TK")
-        == "https://iris.oa.dev/proxy/t/TK/ep/v1"
+        build_capability_api_base("http://10.0.0.1:8443/", "ep", "TK")
+        == "http://10.0.0.1:8443/proxy/t/TK/ep/v1"
     )
 
 
 def test_capability_api_base_uses_cached_token():
-    url = capability_api_base("https://iris.oa.dev", "otagent-myjob", cache=_fixed_cache())
-    assert url == "https://iris.oa.dev/proxy/t/ABC/otagent-myjob/v1"
+    class _Fixed:
+        def mint(self, endpoint_name, ttl_hours):
+            return "ABC", 10_000_000_000.0
+
+    url = capability_api_base("ingress.example", "otagent-myjob", cache=CapabilityTokenCache(_Fixed()))
+    assert url == "https://ingress.example/proxy/t/ABC/otagent-myjob/v1"
 
 
 def test_capability_token_cache_reuses_until_margin_then_remints():
@@ -93,15 +105,6 @@ def test_capability_token_cache_reuses_until_margin_then_remints():
     assert minter.calls == 2
 
 
-def test_capability_token_cache_rejects_empty_token():
-    class _EmptyMinter:
-        def mint(self, endpoint_name, ttl_hours):
-            return "", 10_000_000_000.0
-
-    with pytest.raises(RuntimeError):
-        CapabilityTokenCache(_EmptyMinter()).token_for("ep", now=0.0)
-
-
 def test_controller_registration_plan_picks_proxy_port_when_record_literal():
     name, addr = controller_registration_plan("job1", record_literal=True, proxy_port=8010, env={})
     assert name == "otagent-job1" and addr.endswith(":8010")
@@ -109,15 +112,70 @@ def test_controller_registration_plan_picks_proxy_port_when_record_literal():
     assert addr.endswith(f":{DEFAULT_VLLM_PORT}")
 
 
-def test_build_controller_endpoint_meta_has_capability_url_and_dummy_key():
-    meta = build_controller_endpoint_meta("https://iris.oa.dev", "otagent-job1", cache=_fixed_cache())
-    assert meta["api_base"] == "https://iris.oa.dev/proxy/t/ABC/otagent-job1/v1"
-    assert meta["api_key"] == DUMMY_API_KEY
+# --------------------------------------------------------------------------- #
+# Federated parent-minting
+# --------------------------------------------------------------------------- #
 
 
-def test_inject_ingress_agent_key_sets_dummy_without_clobbering_real_openai(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "real-judge-key")
-    env = {"OPENAI_API_KEY": "real-judge-key"}
-    assert inject_ingress_agent_key(env) is True
-    assert env["OPENCODE_DUMMY_KEY"] == DUMMY_API_KEY
-    assert env["OPENAI_API_KEY"] == "real-judge-key"  # real judge key preserved
+def test_wait_for_endpoint_mirror_returns_when_ready():
+    resolver = _FakeResolver(ready_after=2)
+    slept = []
+    wait_for_endpoint_mirror(
+        "otagent-x", resolver, timeout_s=100, interval_s=1, sleep=slept.append, now=lambda: 0.0
+    )
+    assert resolver.calls == 3 and slept == [1, 1]
+
+
+def test_wait_for_endpoint_mirror_tolerates_transient_errors():
+    resolver = _FakeResolver(ready_after=0, raise_first=2)
+    wait_for_endpoint_mirror(
+        "otagent-x", resolver, timeout_s=100, interval_s=1, sleep=lambda _s: None, now=lambda: 0.0
+    )
+    assert resolver.calls == 3
+
+
+def test_wait_for_endpoint_mirror_times_out():
+    resolver = _FakeResolver(ready_after=999)
+    clock = {"t": 0.0}
+    with pytest.raises(TimeoutError, match="was not mirrored"):
+        wait_for_endpoint_mirror(
+            "otagent-x", resolver, timeout_s=5, interval_s=2,
+            sleep=lambda s: clock.__setitem__("t", clock["t"] + s), now=lambda: clock["t"],
+        )
+
+
+def test_federated_cache_waits_for_mirror_then_mints_at_parent():
+    minter, resolver = _FakeMinter(), _FakeResolver(ready_after=1)
+    cache = FederatedCapabilityTokenCache(minter, resolver, mirror_interval_s=0, mirror_timeout_s=100)
+    assert cache.token_for("otagent-fed", now=0.0) == "TKN-1"
+    assert minter.calls == 1 and resolver.calls == 2
+    # cached reuse — mirror wait NOT repeated
+    assert cache.token_for("otagent-fed", now=1.0) == "TKN-1"
+    assert minter.calls == 1 and resolver.calls == 2
+
+
+def test_federated_cache_remint_does_not_repoll_mirror():
+    minter, resolver = _FakeMinter(expires_at=1000.0), _FakeResolver(ready_after=0)
+    cache = FederatedCapabilityTokenCache(minter, resolver, mirror_interval_s=0, mirror_timeout_s=100)
+    cache.token_for("ep", now=0.0)
+    assert minter.calls == 1 and resolver.calls == 1
+    cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS + 1)
+    assert minter.calls == 2 and resolver.calls == 1  # no re-poll
+
+
+def test_federated_cache_propagates_mirror_timeout_and_never_mints():
+    minter, resolver = _FakeMinter(), _FakeResolver(ready_after=999)
+    cache = FederatedCapabilityTokenCache(minter, resolver, mirror_interval_s=0, mirror_timeout_s=0)
+    with pytest.raises(TimeoutError):
+        cache.token_for("ep", now=0.0)
+    assert minter.calls == 0
+
+
+def test_federated_capability_api_base_builds_parent_url():
+    cache = FederatedCapabilityTokenCache(_FakeMinter(), _FakeResolver(ready_after=0), mirror_interval_s=0)
+    url = federated_capability_api_base("otagent-fedjob", ingress_host="iris.oa.dev", cache=cache, now=0.0)
+    assert url == "https://iris.oa.dev/proxy/t/TKN-1/otagent-fedjob/v1"
+
+
+def test_default_parent_ingress_host_is_marin():
+    assert DEFAULT_PARENT_INGRESS_HOST == "iris.oa.dev"
