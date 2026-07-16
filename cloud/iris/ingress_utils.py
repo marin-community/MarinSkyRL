@@ -649,23 +649,57 @@ class _ParentControllerClient:
 
     def __init__(self, parent_config_path: str) -> None:
         from iris.cluster.config import load_config
-        from iris.cli.connect import open_controller_endpoint, rpc_client
+        from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
+        from iris.rpc.controller_connect import ControllerServiceClientSync
+        from rigging.cluster_manifest import AuthProvider, ClusterAuth, IapAuth
+        from rigging.credentials import credentials_for
 
-        # Make the parent (marin) IAP credential available to iris's own resolver
-        # BEFORE opening the endpoint. In-pod on CoreWeave there is no cached
-        # `iris login` (~/.config/marin/credentials/<cluster>.json) and no marin-
-        # allowlisted ambient service account, so without this the IAP mint fails
-        # UNAUTHENTICATED. If the launcher forwarded the operator's login record via
-        # OTAGENT_MARIN_CREDENTIALS_JSON, materialize it to the path rigging's
-        # load_credentials() reads; otherwise this is a no-op and iris falls back to
-        # ambient SA creds (the deploy-choice alternative).
+        # Make the parent (marin) IAP credential available to rigging's resolver BEFORE
+        # building the client. In-pod on CoreWeave there is no cached `iris login`
+        # (~/.config/marin/credentials/<cluster>.json) and no marin-allowlisted ambient
+        # service account, so without this the IAP mint fails UNAUTHENTICATED. If the
+        # launcher forwarded the operator's login record via OTAGENT_MARIN_CREDENTIALS_JSON,
+        # materialize it to the path rigging's load_credentials() reads; otherwise this is
+        # a no-op and rigging falls back to ambient SA creds (the deploy-choice alternative).
         materialize_parent_credentials()
-        self._config = load_config(parent_config_path)
-        # open_controller_endpoint resolves the parent URL + IAP ClientCredentials
-        # exactly as the CLI does; rpc_client threads them into the RPC interceptors.
-        self._endpoint_cm = open_controller_endpoint(config_file=parent_config_path)
-        endpoint = self._endpoint_cm.__enter__()
-        self._client = rpc_client(endpoint.url, getattr(endpoint, "credentials", None))
+        config = load_config(parent_config_path)
+        self._config = config
+        # Resolve the parent URL + IAP credentials WITHOUT importing iris.cli.connect —
+        # its module-level `from iris.cluster.composer import provider_bundle` drags in
+        # iris.cluster.controller.log_stack -> finelog.deploy.config, which is version-
+        # skewed in the RL venv (ImportError: INTRA_CLUSTER_CIDRS) and, more to the point,
+        # is CONTROLLER-server code a mint client never needs. An IAP-fronted cluster
+        # (marin) is reachable directly over HTTPS at the IAP ingress URL — no SSH tunnel,
+        # no provider bundle. This mirrors iris.cli.connect.require_controller_url's IAP
+        # branch + client_credentials, using only the light config/rpc/rigging modules.
+        auth = getattr(config, "auth", None)
+        if auth is None or auth.provider_kind() != "iap" or auth.iap is None or not auth.iap.url:
+            raise RuntimeError(
+                "federated parent-minting requires an IAP-fronted parent controller config "
+                "(marin.yaml with auth.iap.url = https://iris.oa.dev); "
+                f"got {parent_config_path} with no usable IAP auth block."
+            )
+        iap = auth.iap
+        cluster_auth = ClusterAuth(
+            AuthProvider.IAP,
+            iap=IapAuth(
+                url=iap.url,
+                desktop_oauth_client_id=iap.oauth_client_id or None,
+                desktop_oauth_client_secret=iap.oauth_client_secret or None,
+                programmatic_audiences=tuple(iap.programmatic_audiences),
+                signed_header_audience=iap.signed_header_audience or None,
+            ),
+        )
+        cluster_name = getattr(config, "name", None) or "marin"
+        credentials = credentials_for(cluster_name, cluster_auth)
+        self._endpoint_cm = None
+        self._client = ControllerServiceClientSync(
+            iap.url,
+            timeout_ms=30_000,
+            interceptors=credentials.interceptors(),
+            accept_compression=IRIS_RPC_COMPRESSIONS,
+            send_compression=None,
+        )
 
     def is_mirrored(self, endpoint_name: str) -> bool:
         from iris.rpc import controller_pb2
@@ -691,10 +725,15 @@ class _ParentControllerClient:
         return resp.token, resp.expires_at.epoch_ms / 1000.0
 
     def close(self) -> None:
-        try:
-            self._endpoint_cm.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            pass
+        # No SSH tunnel to tear down (IAP is direct HTTPS); best-effort close the RPC
+        # client if it exposes one.
+        for closer in (self._endpoint_cm, getattr(self._client, "close", None)):
+            if closer is None:
+                continue
+            try:
+                closer.__exit__(None, None, None) if closer is self._endpoint_cm else closer()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # Env vars the production wiring reads for the parent (marin) controller.

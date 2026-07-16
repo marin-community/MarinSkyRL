@@ -1832,17 +1832,40 @@ def main() -> int:
             f"via the marin meta-scheduler ({parent_cfg}).",
             flush=True,
         )
-    iris_config = load_config(submit_cluster_config)
-    bundle = provider_bundle(iris_config)
-    if iris_config.controller.controller_kind() == "local":
-        controller_address = LocalCluster(iris_config).start()
-    else:
-        controller_address = iris_config.controller_address() or bundle.controller.discover_controller(
-            iris_config.controller
-        )
+    from contextlib import contextmanager as _contextmanager
 
-    with bundle.controller.tunnel(address=controller_address) as controller_url:
-        client = IrisClient.remote(controller_url, workspace=PROJECT_ROOT)
+    @_contextmanager
+    def _direct_client():
+        # Direct submission to --cluster's own controller. On CoreWeave the loopback SSH
+        # tunnel presents as the trusted local_admin identity (no IAP login needed) —
+        # byte-identical to before.
+        iris_config = load_config(submit_cluster_config)
+        bundle = provider_bundle(iris_config)
+        if iris_config.controller.controller_kind() == "local":
+            controller_address = LocalCluster(iris_config).start()
+        else:
+            controller_address = iris_config.controller_address() or bundle.controller.discover_controller(
+                iris_config.controller
+            )
+        with bundle.controller.tunnel(address=controller_address) as controller_url:
+            yield IrisClient.remote(controller_url, workspace=PROJECT_ROOT)
+
+    if args.target_cluster:
+        # Federated submission MUST carry the IAP *user* identity: the controller rejects
+        # a loopback/local_admin tunnel identity for a federated job ("a local_admin
+        # (CIDR/loopback) identity cannot submit a federated job"), because delegation
+        # forwards the submitter's identity to the peer for its owner check. Connect to
+        # the marin parent exactly as the `iris job run` CLI does — open_iris_client
+        # threads the IAP ClientCredentials (iris JWT + IAP OIDC token) from the cached
+        # `iris login`, so the submission carries the user identity rather than loopback.
+        # Requires a completed `iris --cluster=marin login` (@openathena.ai).
+        from iris.cli.connect import open_iris_client
+
+        client_cm = open_iris_client(config_file=Path(submit_cluster_config), workspace=PROJECT_ROOT)
+    else:
+        client_cm = _direct_client()
+
+    with client_cm as client:
         entrypoint = Entrypoint.from_command(*command)
         job = client.submit(
             entrypoint=entrypoint,
