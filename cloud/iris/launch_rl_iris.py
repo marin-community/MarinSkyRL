@@ -1125,9 +1125,19 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     skyrl_refresh = ""
     if args.skyrl_ref:
         ref = shlex.quote(args.skyrl_ref)
+        skyrl_home = shlex.quote(SKYRL_HOME)
         skyrl_refresh = (
-            f"git -C {shlex.quote(SKYRL_HOME)} fetch --quiet --all || true; "
-            f"git -C {shlex.quote(SKYRL_HOME)} checkout {ref}; "
+            # Only fetch/checkout when SKYRL_HOME is a real git working tree. The
+            # standard Dockerfile.gpu-rl `git clone`s /opt/skyrl, but some baked
+            # images (e.g. the megatron variant) ship /opt/skyrl WITHOUT a .git tree,
+            # already pinned at the target commit. There `git checkout` fatals
+            # ("not a git repository") and, under `set -e`, kills rank 0 BEFORE any
+            # app/Ray/megatron code runs — teardown the whole gang (proven 2026-07-16:
+            # megatron-parity-v0m-mcore-east, git exit 128). In that case the baked
+            # tree already IS the intended ref, so no-op with a visible note.
+            f"if git -C {skyrl_home} rev-parse --git-dir >/dev/null 2>&1; then "
+            f"git -C {skyrl_home} fetch --quiet --all || true; "
+            f"git -C {skyrl_home} checkout {ref}; "
             # Purge baked bytecode after the checkout. The gpu-rl image bakes
             # `.pyc` for the editable skyrl-train at its build-time commit; if those
             # were compiled with hash-based (UNCHECKED_HASH) invalidation, Python
@@ -1136,9 +1146,12 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             # 2026-06-25: the norm_topk_prob fix at 518179d checked out, but the pod
             # raised at the pre-fix line numbers). Delete the cache so the live `.py`
             # is recompiled. Best-effort (|| true) — must not block on a read-only fs.
-            f"find {shlex.quote(SKYRL_HOME)}/skyrl-train -name '*.pyc' -delete 2>/dev/null || true; "
-            f"find {shlex.quote(SKYRL_HOME)}/skyrl-train -name __pycache__ -type d -prune -exec rm -rf {{}} + 2>/dev/null || true; "
-            f'echo "[rl-iris] MarinSkyRL now at $(git -C {shlex.quote(SKYRL_HOME)} rev-parse HEAD)"; '
+            f"find {skyrl_home}/skyrl-train -name '*.pyc' -delete 2>/dev/null || true; "
+            f"find {skyrl_home}/skyrl-train -name __pycache__ -type d -prune -exec rm -rf {{}} + 2>/dev/null || true; "
+            f'echo "[rl-iris] MarinSkyRL now at $(git -C {skyrl_home} rev-parse HEAD)"; '
+            f"else "
+            f'echo "[rl-iris] {SKYRL_HOME} is not a git tree (baked image already pinned) — using baked MarinSkyRL; --skyrl-ref not applied"; '
+            f"fi; "
         )
     ctrl = shlex.join(controller_cmd)
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
