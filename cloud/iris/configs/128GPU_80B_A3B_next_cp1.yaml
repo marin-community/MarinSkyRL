@@ -83,7 +83,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   use_sample_packing: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: true
@@ -138,6 +138,19 @@ trainer:
       max_grad_norm: 0.9
       optimizer_kwargs:
         foreach: false
+    # Megatron backend geometry (trainer.strategy=megatron). DERIVED, UNVALIDATED.
+    # Qwen3-Next-80B-A3B (qwen3_next: 48 layers, 16 heads, 2 KV, 512 experts, hidden 2048;
+    # HYBRID linear-attention). 64 training GPUs: TP8 x PP1 x CP1 = 8 MP (intra-node),
+    # DP=8; EP8 over 512 experts. PP=1 chosen deliberately to avoid pipelining the hybrid
+    # linear-attention stack. NOTE: num_key_value_heads=2 < TP=8 -> Megatron replicates KV
+    # heads (TP % KV == 0). logprob_chunk_size caps the vocab-parallel logprob peak at 98k ctx.
+    megatron_config:
+      tensor_model_parallel_size: 8
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      logprob_chunk_size: 1024
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
@@ -151,6 +164,13 @@ trainer:
   ref:
     model:
       path: Qwen/Qwen3-Next-80B-A3B-Thinking
+    megatron_config:
+      tensor_model_parallel_size: 8
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      logprob_chunk_size: 1024
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true

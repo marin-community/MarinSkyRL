@@ -97,7 +97,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   attn_backend: sdpa
   flash_attn: false
   gradient_checkpointing: true
@@ -156,6 +156,14 @@ trainer:
       max_grad_norm: 0.9
       optimizer_kwargs:
         foreach: false
+    # Megatron backend geometry (trainer.strategy=megatron). VALIDATED on east18/east19.
+    # 16 training GPUs: TP4 x PP2 x CP1 = 8 model-parallel, DP=2; EP4 over 128 experts.
+    megatron_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 4
+      expert_tensor_parallel_size: 1
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
@@ -171,6 +179,12 @@ trainer:
   ref:
     model:
       path: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    megatron_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 4
+      expert_tensor_parallel_size: 1
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
