@@ -400,12 +400,6 @@ APP_DIR = "/app"
 # would ModuleNotFoundError in driver init. This dev build is validated against the live
 # marin controller's registration/mint RPC protocol; override via --iris-ref.
 DEFAULT_IRIS_VERSION = "marin-iris==0.2.49.dev202607160749"
-# The frozen known-good RL-env pin set, baked into the image (Dockerfile.gpu-rl
-# `ENV UV_CONSTRAINT=/opt/openthoughts/docker/rl_env_constraints.txt`). The marin-iris
-# install is `--constraint`ed against it so no baked pin (grpcio/protobuf/pyarrow/pydantic/
-# numpy/google-auth/…) can be downgraded. This is the image-baked absolute path (NOT the
-# synced /app workspace, which is MarinSkyRL and does not carry this OT-Agent artifact).
-RL_ENV_CONSTRAINTS = "/opt/openthoughts/docker/rl_env_constraints.txt"
 
 
 def _resolve_cluster_config_default() -> str:
@@ -1481,9 +1475,13 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     #   - NO [controller] extra: the CLIENT registration path (EndpointClient + rpc stubs)
     #     needs neither kubernetes<36 nor Secret-Manager (it loads grpc + connectrpc +
     #     rigging + finelog only), so skipping it avoids the biggest dep-conflict source.
-    #   - --constraint the image-baked frozen RL-env set: iris's deps are all already
-    #     present with satisfied >= bounds, so uv adds only the pure-python leaves and no
-    #     baked pin is downgraded; torch/vllm/flash_attn aren't in iris's tree.
+    #   - No --constraint file: the lock IS the constraint (Dockerfile.gpu-rl builds the
+    #     RL venv via `uv sync --frozen` off skyrl-train/uv.lock; there is no baked
+    #     rl_env_constraints.txt anymore — pointing at it File-not-found'd on newer images).
+    #     `uv pip install` does not upgrade already-satisfying installed deps, and iris's
+    #     deps are all present with satisfied >= bounds, so uv only ADDS pure-python leaves;
+    #     torch/vllm/flash_attn aren't in iris's tree. The one real downgrade vector (boto,
+    #     an upper-bound pin) is separately snapshot+restored below.
     #   - GAP E#2 boto guard: the marin-iris solve DOWNGRADES the (deliberately-unpinned)
     #     botocore cluster (1.43.46 -> 1.43.0), breaking `from botocore.docs.utils import
     #     DocumentModifiedShape` (accelerate imports it transitively -> a MASKED
@@ -1500,8 +1498,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             f"_BOTO_BAKED=$(uv pip freeze --python {shlex.quote(RL_PYTHON)} 2>/dev/null | "
             f"grep -iE '^(botocore|boto3|s3transfer|awscli)==' | tr '\\n' ' ' || true); "
             f'echo "[rl-iris] boto baked pins: $_BOTO_BAKED"; '
-            f"uv pip install --python {shlex.quote(RL_PYTHON)} "
-            f"--constraint {shlex.quote(RL_ENV_CONSTRAINTS)} {shlex.quote(ispec)}; "
+            f"uv pip install --python {shlex.quote(RL_PYTHON)} {shlex.quote(ispec)}; "
             f'if [ -n "$_BOTO_BAKED" ]; then uv pip install --python '
             f"{shlex.quote(RL_PYTHON)} --no-deps $_BOTO_BAKED; fi; "
             f'{RL_PYTHON} -c "import importlib.metadata as m; '
