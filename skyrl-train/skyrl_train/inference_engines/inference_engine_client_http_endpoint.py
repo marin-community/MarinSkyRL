@@ -24,7 +24,7 @@ import fastapi
 import uvicorn
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 
@@ -42,6 +42,8 @@ class CompletionBackend(Protocol):
     model_name: str
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
+
+    async def chat_completion_stream(self, request_payload: Dict[str, Any]): ...
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
@@ -102,14 +104,6 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
         )
-    if request_json.get("stream", False):
-        return ErrorResponse(
-            error=ErrorInfo(
-                message="Streaming is not supported in SkyRL yet, please set stream to False.",
-                type=HTTPStatus.BAD_REQUEST.phrase,
-                code=HTTPStatus.BAD_REQUEST.value,
-            ),
-        )
     if endpoint == "/completions" and "n" in request_json and request_json["n"] > 1:
         # TODO(Charlie): this constraint can be removed when we leave DP routing to
         # inference frameworks. Or we could try to resolve it when needed.
@@ -139,8 +133,12 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
     return None
 
 
-async def handle_openai_request(raw_request: Request, endpoint: str) -> JSONResponse:
-    """Handle /completions or /chat/completions request."""
+async def handle_openai_request(raw_request: Request, endpoint: str):
+    """Handle /completions or /chat/completions request.
+
+    Returns ``StreamingResponse`` for ``stream:true`` chat-completions and
+    ``JSONResponse`` for everything else (byte-identical to pre-streaming behavior).
+    """
     assert endpoint in ["/completions", "/chat/completions"]
     try:
         request_json = await raw_request.json()
@@ -155,6 +153,16 @@ async def handle_openai_request(raw_request: Request, endpoint: str) -> JSONResp
             "json": request_json,
             "headers": dict(raw_request.headers) if hasattr(raw_request, "headers") else {},
         }
+
+        # ── Streaming branch ──────────────────────────────────────────────
+        if request_json.get("stream", False) and endpoint == "/chat/completions":
+            return StreamingResponse(
+                content=_global_inference_engine_client.chat_completion_stream(payload),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        # ── Non-streaming branch (unchanged) ──────────────────────────────
         if endpoint == "/chat/completions":
             response = await _global_inference_engine_client.chat_completion(payload)
         else:

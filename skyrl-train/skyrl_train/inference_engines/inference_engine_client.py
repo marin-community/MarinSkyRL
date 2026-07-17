@@ -591,6 +591,25 @@ class InferenceEngineClient(InferenceEngineInterface):
         finally:
             self._dec_inflight(engine_idx)
 
+    async def chat_completion_stream(self, request_payload: Dict[str, Any]):
+        """Streaming chat completion — yields SSE-formatted strings.
+
+        Uses the same session-based routing as ``chat_completion`` but skips the
+        retry loop (streaming does not support pause/resume for weight updates).
+        """
+        session_id = request_payload["json"].pop("session_id", None)
+        if session_id is None:
+            engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
+        else:
+            engine_idx = self._route_session(session_id)
+
+        self._inc_inflight(engine_idx)
+        try:
+            async for chunk in self.engines[engine_idx].chat_completion_stream(request_payload):
+                yield chunk
+        finally:
+            self._dec_inflight(engine_idx)
+
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Handles an OpenAI /completions request.

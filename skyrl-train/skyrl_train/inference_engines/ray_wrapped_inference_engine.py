@@ -171,6 +171,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.chat_completion.remote(request_payload)
 
+    async def chat_completion_stream(self, request_payload: Dict[str, Any]):
+        """Stream SSE chunks from the Ray actor via ``num_returns="streaming"``."""
+        gen = self.inference_engine_actor.chat_completion_stream.remote(request_payload)
+        async for chunk in gen:
+            yield chunk
+
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)
 

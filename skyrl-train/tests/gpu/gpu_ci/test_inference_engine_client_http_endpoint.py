@@ -640,15 +640,21 @@ def test_http_endpoint_error_handling(ray_init_fixture):
 
         base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
-        # Test 1: Invalid request - streaming not supported, raised by SkyRL
+        # Test 1: Streaming request now returns SSE (was 400-rejected before streaming support)
         response = requests.post(
             f"{base_url}/v1/chat/completions",
             json={"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+            stream=True,
         )
-        assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
-        error_data = response.json()
-        print(f"Error data: {error_data}")
-        assert "Streaming is not supported" in error_data["error"]["message"]
+        assert response.status_code == HTTPStatus.OK  # 200
+        assert "text/event-stream" in response.headers.get("content-type", "")
+        # Consume the stream and verify SSE format
+        chunks = []
+        for line in response.iter_lines(decode_unicode=True):
+            if line and line.startswith("data: "):
+                chunks.append(line[len("data: ") :])
+        assert len(chunks) > 0, "Expected at least one SSE chunk"
+        assert chunks[-1] == "[DONE]", "Last chunk must be [DONE]"
 
         # Test 2: OAI can take fields not listed in the protocol
         response = requests.post(
@@ -705,7 +711,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         # Tests below are for `/completions` endpoint.
         # e.g. session id wrong length, etc.
         # Additional tests for /v1/completions
-        # C1: streaming not supported
+        # C1: streaming on /completions is still rejected (only /chat/completions supports it)
         response = requests.post(
             f"{base_url}/v1/completions",
             json={"model": MODEL, "prompt": "Hello", "stream": True},

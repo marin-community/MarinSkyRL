@@ -1,6 +1,7 @@
+import json
 import os
 import threading
-from typing import List, Any, Dict, Optional, Tuple, Iterator
+from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import dataclass, fields as _dataclass_fields
 from loguru import logger
 from http import HTTPStatus
@@ -58,7 +59,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
-from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
+from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs, ensure_token_ids_in_sse_chunk
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
 from packaging import version
@@ -2025,6 +2026,65 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    @ray.method(num_returns="streaming")
+    async def chat_completion_stream(self, request_payload: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Streaming chat completion yielding SSE-formatted ``data: …`` strings.
+
+        Delegates to vLLM's ``openai_serving_chat.create_chat_completion`` with
+        ``stream=True`` and surfaces each SSE chunk through Ray's streaming-
+        generator transport (``num_returns="streaming"``).  Each ``yield``
+        produces one ``ObjectRef`` that the caller resolves to the SSE string.
+
+        ``_ensure_token_ids_in_sse_chunk`` is applied per-chunk so that
+        ``provider_specific_fields.token_ids`` is present for harbor's literal
+        accumulator.
+        """
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+
+        sp = getattr(self, "_openai_sampling_params", {})
+        body.update(
+            {
+                "temperature": sp.get("temperature", 1.0),
+                "top_p": sp.get("top_p", 1.0),
+                "top_k": sp.get("top_k", -1),
+                "min_p": sp.get("min_p", 0.0),
+            }
+        )
+        body["stream"] = True
+
+        try:
+            request = ChatCompletionRequest(**body)
+            minimal_request = _MinimalRequest(headers)
+            result = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+
+            if isinstance(result, ErrorResponse):
+                err = result.model_dump()
+                yield f"data: {json.dumps(err)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            async for chunk in result:
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8")
+                yield ensure_token_ids_in_sse_chunk(chunk)
+
+        except Exception as e:
+            is_input_overflow = False
+            try:
+                from vllm.exceptions import VLLMValidationError
+
+                if isinstance(e, VLLMValidationError):
+                    param = getattr(e, "parameter", None)
+                    is_input_overflow = param == "input_tokens" or "input tokens" in str(e)
+            except ImportError:
+                is_input_overflow = "input tokens" in str(e) and "context length" in str(e)
+
+            status = HTTPStatus.BAD_REQUEST if is_input_overflow else HTTPStatus.INTERNAL_SERVER_ERROR
+            err = _build_error_response(str(e), status.phrase, status.value)
+            yield f"data: {json.dumps(err)}\n\n"
+            yield "data: [DONE]\n\n"
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get accumulated vLLM engine statistics for the current step.
