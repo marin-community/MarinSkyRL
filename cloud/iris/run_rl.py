@@ -196,9 +196,7 @@ class LocalRLRunner:
             # env — see _ingress_context / __init__). Snapshot cadence matches the
             # existing design (one api_base string baked for the job's lifetime).
             if self._minted_agent_api_base:
-                hydra_args = hydra_args + [
-                    f"++terminal_bench_config.agent_api_base={self._minted_agent_api_base}"
-                ]
+                hydra_args = hydra_args + [f"++terminal_bench_config.agent_api_base={self._minted_agent_api_base}"]
             return self._run_skyrl(parsed.entrypoint, hydra_args)
 
     @contextlib.contextmanager
