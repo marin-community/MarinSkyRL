@@ -103,3 +103,28 @@ jobs:
           name: nightly-run-log
           path: nightly.log
           if-no-files-found: ignore
+
+  # Failure reporting: file or update the [nightly-gsm8k-h100] tracking issue, ask
+  # weaverbot to triage (launches a weaver session), and ping Slack. The trigger
+  # and Slack channels each skip with a notice until the WEAVERBOT_GH_TOKEN /
+  # SLACK_WEBHOOK_URL org secrets are provisioned; the issue trail accrues either way.
+  report-failure:
+    needs: [gsm8k-h100]
+    # cancelled matters: a job that hits its timeout-minutes reports cancelled, not failure
+    if: >-
+      always() && github.event_name == 'schedule' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write    # file/update the tracking issue
+      actions: read    # pull failed-job logs for the excerpt
+      contents: read
+    steps:
+      - uses: marin-community/marin-style/actions/report-failure@4e5736a7054318af49b0245fadee197f534519d7
+        with:
+          lane: gsm8k-h100
+          trigger-token: ${{ secrets.WEAVERBOT_GH_TOKEN }}
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          triage-notes: >-
+            The nightly runs single-H100 GRPO via a WIF-authenticated Iris job on the
+            CoreWeave cluster. Separate Iris/cluster failures from training regressions.
