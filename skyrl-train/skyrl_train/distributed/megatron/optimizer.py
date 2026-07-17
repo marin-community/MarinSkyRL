@@ -24,8 +24,16 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
+    # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
+    # else routes to `_get_megatron_emerging_optimizer`, which raises
+    # `ValueError: Unsupported emerging optimizer: AdamW`). megatron's 'adam' IS
+    # AdamW (decoupled weight decay via weight_decay), so normalize the common
+    # HF-style names to 'adam'.
+    _optim_name = str(optim_config.get("optimizer", "adam")).lower()
+    if _optim_name == "adamw":
+        _optim_name = "adam"
     optim_args = {
-        "optimizer": optim_config.get("optimizer", "adam"),
+        "optimizer": _optim_name,
         "lr": optim_config.get("lr"),
         "min_lr": optim_config.get("min_lr", 0.0),
         "clip_grad": optim_config.get("max_grad_norm", 1.0),
@@ -48,13 +56,24 @@ def get_megatron_optimizer(
     scale_lr_cond=None,
     lr_mult=1.0,
 ):
+    # megatron-core 0.18.x removed the per-param-group knobs
+    # (no_weight_decay_cond / scale_lr_cond / lr_mult) from get_megatron_optimizer
+    # and replaced them with a `config_overrides` mapping; forwarding the old kwargs
+    # raises `TypeError: get_megatron_optimizer() got an unexpected keyword argument
+    # 'no_weight_decay_cond'`. This trainer never requests non-default conditioning
+    # (all callers use the defaults), so forward only the args 0.18.x accepts. If
+    # custom per-group conditioning is ever needed, translate it into
+    # `config_overrides` here.
+    if no_weight_decay_cond is not None or scale_lr_cond is not None or lr_mult != 1.0:
+        raise NotImplementedError(
+            "no_weight_decay_cond / scale_lr_cond / lr_mult are not wired to "
+            "megatron-core 0.18.x's config_overrides mapping; only the defaults "
+            "are supported."
+        )
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
-        no_weight_decay_cond=no_weight_decay_cond,
-        scale_lr_cond=scale_lr_cond,
-        lr_mult=lr_mult,
     )
 
 
