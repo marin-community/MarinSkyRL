@@ -1,0 +1,3 @@
+# Placeholder so docker/wheelhouse/ exists for the Dockerfile COPY.
+# Prebuilt vLLM-fork / flash-attn wheels are fetched here at build time
+# (build_gpu_rl_kaniko.sh step 3.5); *.whl are gitignored.

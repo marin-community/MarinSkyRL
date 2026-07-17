@@ -1,0 +1,370 @@
+# syntax=docker/dockerfile:1
+#
+# gpu-rl — the CoreWeave H100 RL trainer image for MarinSkyRL (skyrl-train).
+#
+# linux/amd64, from-source CUDA. The image installs skyrl-train's dependency
+# closure DIRECTLY FROM skyrl-train's own `uv.lock` (`uv sync --frozen`) — the lock
+# is the single source of truth. On top of that closure it `--no-deps`-swaps the
+# two compiled CUDA wheels this stack needs from source (the vLLM FORK + flash-attn
+# 2.8.3) and adds harbor (agentic rollout). Nothing from the launcher repo is baked
+# in, and there is NO shadow constraint file: the lock, resolved at torch
+# 2.11.0+cu128, is what the image runs.
+#
+# Consumed by the iris RL launcher (digest-pinned). Built in-cluster via kaniko
+# (docker/build_gpu_rl_kaniko.sh) — the Mac cannot build it (arm64 + linux/amd64
+# CUDA). See the build-gpu-rl-image-iris skill in the iris launcher repo.
+#
+# =============================================================================
+# WHEEL-CACHE BUILD (fast rebuilds)
+# =============================================================================
+# The two SLOW steps are the from-source nvcc compiles of the vLLM FORK (cutlass
+# GEMM kernels) and flash-attn 2.8.3 (its flash_attn_2_cuda extension). They are
+# isolated in the `wheel-builder` stage, which emits RELOCATABLE WHEELS. The `rl`
+# stage installs those wheels instead of recompiling. Two sources (WHEEL_SOURCE):
+#   prebuilt-wheelhouse (default): COPY docker/wheelhouse/*.whl (populated on an
+#     x86 host by build_wheels.sh, or fetched into the build context by
+#     build_gpu_rl_kaniko.sh from a public mirror) -> ZERO nvcc.
+#   wheel-builder: compile both wheels inline (~3 h nvcc) -> use when no prebuilt
+#     wheels are available.
+# CACHE KEY (what invalidates a wheel) = { VLLM_FORK_COMMIT, FLASH_ATTN_VERSION,
+#   torch 2.11.0, CUDA 12.8, cp312, x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0" }.
+#
+# =============================================================================
+# Version pins (ground truth = skyrl-train/pyproject.toml + uv.lock):
+#   - torch 2.11.0+cu128 : skyrl-train pins torch to the cu128 index; the fork
+#       vLLM / flash-attn / TransformerEngine wheels are all cu128-built, so the
+#       base is ABI-consistent with them (nvidia-nccl-cu12==2.28.9 from the lock).
+#   - vLLM 0.20.2rc0     : built FROM SOURCE from OUR FORK (no public wheel).
+#       Fork = mlfoundations/vllm @ commit VLLM_FORK_COMMIT. The lock's `vllm`
+#       extra pins vllm==0.20.2 (PyPI) so a general `uv sync` gets stock vLLM; the
+#       image swaps the fork wheel over it via `--no-deps`.
+#   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu128 / cp312 so
+#       flash_attn_2_cuda EXISTS (skyrl-train's lock leaves flash-attn unpinned; a
+#       `--no-deps` wheel swap here is the version that actually runs).
+#   - transformers 5.8.1 : skyrl-train base pin (>=5.8.1,<5.9), required by the
+#       megatron backend (megatron-bridge 0.5.0). vLLM 0.20.2 accepts it.
+#   - python 3.12 / CUDA 12.8 (devel base, for nvcc).
+# Build is GPU-count-agnostic and needs no live GPU (only nvcc). Target = linux/amd64.
+# =============================================================================
+
+ARG BASE_IMAGE=nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+ARG TORCH_VERSION=2.11.0
+ARG TORCHVISION_VERSION=0.26.0
+ARG FLASH_ATTN_VERSION=2.8.3
+ARG VLLM_FORK_REPO=https://github.com/mlfoundations/vllm.git
+ARG VLLM_FORK_COMMIT=76259c63a45e57c0d1cbaca3480aae52ebbfccd1
+# A100 (8.0) + Hopper (9.0): the GPUs that run this image.
+ARG TORCH_CUDA_ARCH_LIST="8.0;9.0"
+ARG MAX_JOBS=8
+ARG NVCC_THREADS=2
+# prebuilt-wheelhouse (default, docker/wheelhouse/ populated) | wheel-builder (compile inline).
+ARG WHEEL_SOURCE=prebuilt-wheelhouse
+# Opt-in Megatron training backend (megatron-bridge/core + TransformerEngine +
+# mamba/causal-conv1d). Off by default so the default image is fsdp2-only; set
+# INSTALL_MEGATRON=1 to build the megatron variant (adds the `megatron` extra to
+# the uv sync). All megatron deps are linux/x86_64-gated in the lock.
+ARG INSTALL_MEGATRON=0
+# Harbor (agentic rollout) — pinned to a commit for a reproducible image. Not in
+# skyrl-train's lock (it is a runtime/rollout dep, not a trainer dep); installed
+# from git here. Harbor is dependency-agnostic (litellm + daytona; no torch/
+# transformers/vllm/ray pins), so a plain install cannot perturb the synced stack.
+ARG HARBOR_COMMIT=22d75039694db5c223797d5eec75b5c1ae975ac6
+
+# =============================================================================
+# STAGE 1: wheel-builder — compile the vLLM FORK + flash-attn into wheels (nvcc)
+# =============================================================================
+FROM ${BASE_IMAGE} AS wheel-builder
+
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG FLASH_ATTN_VERSION
+ARG VLLM_FORK_REPO
+ARG VLLM_FORK_COMMIT
+ARG TORCH_CUDA_ARCH_LIST
+ARG MAX_JOBS
+ARG NVCC_THREADS
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ca-certificates build-essential cmake ninja-build \
+    python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --upgrade pip uv
+
+ENV UV_HTTP_TIMEOUT=600
+ENV UV_RETRIES=5
+ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+ENV MAX_JOBS="${MAX_JOBS}"
+ENV NVCC_THREADS="${NVCC_THREADS}"
+ENV VLLM_TARGET_DEVICE=cuda
+
+# Build venv with EXACTLY the torch the wheels must be ABI-compatible with. Both
+# from-source builds use --no-build-isolation to reuse THIS torch.
+ENV WHEEL_VENV=/opt/wheelbuild/.venv
+RUN uv venv --python 3.12 $WHEEL_VENV
+RUN . $WHEEL_VENV/bin/activate && \
+    uv pip install --extra-index-url https://download.pytorch.org/whl/cu128 \
+        --index-strategy unsafe-best-match \
+        "torch==${TORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "setuptools_scm" "setuptools>=77.0.3,<81.0.0" "wheel" "packaging" \
+        "ninja" "cmake" "psutil" "pip"
+
+WORKDIR /wheels
+
+# (W1) flash-attn -> wheel. FLASH_ATTENTION_FORCE_BUILD=TRUE so it never silently
+# falls back to a (nonexistent) prebuilt torch-2.11 wheel.
+RUN . $WHEEL_VENV/bin/activate && \
+    MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS \
+        TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+        FLASH_ATTENTION_FORCE_BUILD=TRUE \
+        python -m pip wheel "flash-attn==${FLASH_ATTN_VERSION}" \
+            --no-build-isolation --no-cache-dir --no-deps -w /wheels
+
+# (W2) vLLM FORK -> wheel. use_existing_torch.py strips the fork's torch pins so it
+# builds against the torch above; rewrite cutlass-dsl[cu13]->cu128; then pip-wheel
+# the fork extension (FetchContent git-clones cutlass/vllm-flash-attn/etc).
+ENV VLLM_FORK_DIR=/opt/vllm-fork
+RUN git clone $VLLM_FORK_REPO $VLLM_FORK_DIR && \
+    git -C $VLLM_FORK_DIR checkout $VLLM_FORK_COMMIT
+RUN . $WHEEL_VENV/bin/activate && \
+    cd $VLLM_FORK_DIR && \
+    python use_existing_torch.py && \
+    sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' requirements/cuda.txt && \
+    MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+        VLLM_TARGET_DEVICE=cuda \
+        python -m pip wheel . --no-build-isolation --no-deps -w /wheels -v
+
+RUN echo "VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}" >  /wheels/MANIFEST && \
+    echo "FLASH_ATTN_VERSION=${FLASH_ATTN_VERSION}" >> /wheels/MANIFEST && \
+    echo "TORCH_VERSION=${TORCH_VERSION}" >> /wheels/MANIFEST && \
+    echo "TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" >> /wheels/MANIFEST && \
+    echo "CUDA=12.8 PY=cp312 PLATFORM=linux_x86_64" >> /wheels/MANIFEST && \
+    ls -la /wheels
+
+# =============================================================================
+# STAGE 2: wheel source alias — prebuilt-wheelhouse (default) | wheel-builder
+# =============================================================================
+FROM scratch AS prebuilt-wheelhouse
+# docker/wheelhouse/ always exists (committed .keep); when populated it also holds
+# vllm-*.whl / flash_attn-*.whl.
+COPY docker/wheelhouse/ /wheels/
+
+ARG WHEEL_SOURCE
+FROM ${WHEEL_SOURCE} AS wheels
+
+# =============================================================================
+# STAGE 3: rl — the runtime image (installs from the lock + swaps the wheels)
+# =============================================================================
+FROM ${BASE_IMAGE} AS rl
+
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TORCH_CUDA_ARCH_LIST
+ARG INSTALL_MEGATRON
+ARG HARBOR_COMMIT
+
+ENV DEBIAN_FRONTEND=noninteractive
+# InfiniBand / RDMA userspace (rdma-core) — REQUIRED for NCCL's built-in IB
+# transport on CoreWeave (Mellanox mlx5 HCAs). NCCL DLOPENs libibverbs.so.1 +
+# the libmlx5 provider at runtime; absent, it SILENTLY falls back to NET/Socket
+# (TCP). ibverbs-utils adds ibv_devices/ibstat for in-pod IB diagnostics.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    build-essential \
+    cmake \
+    ninja-build \
+    python3 \
+    python3-pip \
+    python3-venv \
+    rdma-core \
+    ibverbs-providers \
+    libibverbs1 \
+    librdmacm1 \
+    ibverbs-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --upgrade pip uv
+
+ENV UV_HTTP_TIMEOUT=600
+ENV UV_RETRIES=5
+ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+
+# =============================================================================
+# skyrl-train + skyrl-gym (the trainer + its gym dep). In the repo,
+# skyrl-train/skyrl-gym is a symlink -> ../skyrl-gym; skyrl-train's uv.lock resolves
+# the member as `editable = "skyrl-gym"` relative to skyrl-train, i.e. at
+# /opt/skyrl/skyrl-train/skyrl-gym. kaniko's COPY does not yield a resolvable
+# skyrl-gym there via the symlink, so `uv sync --frozen` fails to find the
+# distribution. Materialize skyrl-gym as a REAL directory at that nested path:
+# copy skyrl-train first (which brings the dangling symlink), then copy skyrl-gym
+# over it so the real tree replaces the symlink exactly where the frozen lock looks.
+# =============================================================================
+ENV SKYRL_HOME=/opt/skyrl
+COPY skyrl-train ${SKYRL_HOME}/skyrl-train
+COPY skyrl-gym ${SKYRL_HOME}/skyrl-train/skyrl-gym
+
+# =============================================================================
+# RL environment — installed DIRECTLY from skyrl-train's uv.lock (single source of
+# truth). `uv sync --frozen` yields the exact locked closure at torch 2.11.0+cu128
+# (NCCL-cu12 2.28.9), the `vllm` extra (stock vLLM 0.20.2 + flashinfer), the `ep`
+# extra (torchtitan + tyro, for MoE EP>1), and — when INSTALL_MEGATRON=1 — the
+# `megatron` extra (megatron-bridge/core + TransformerEngine + mamba/causal-conv1d,
+# all linux/x86_64-gated with the erictang cu128 wheels honored via [tool.uv.sources]).
+# No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
+# =============================================================================
+# RL venv path MUST match the OT-Agent iris launcher's hardcoded
+# RL_PYTHON=/opt/openthoughts/envs/rl/bin/python (rl/cloud/launch_rl_iris.py) —
+# the same path the standard FSDP2 gpu-rl image uses. Building it under
+# /opt/skyrl/envs/rl made every task die with
+# "/opt/openthoughts/envs/rl/bin/python: No such file or directory".
+ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
+ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
+# =============================================================================
+# RE-LAYERED uv sync (packaging only — SAME lock, SAME closure, SAME versions).
+# A single `uv sync --frozen ... --extra megatron` RUN puts the ENTIRE env
+# (torch + all nvidia CUDA libs + flashinfer-jit-cache + TE + megatron + the uv
+# download cache) into ONE ~17.6 GB layer, which ImagePullBackOffs indefinitely
+# over the CoreWeave->ghcr egress (a single >8 GB blob never completes — ops doc
+# coreweave_gpu_ops.md). kaniko emits ONE layer per RUN, so we split the SAME
+# `uv sync --frozen` into a chain of identical syncs that defer the heavy
+# packages one bucket at a time via `--no-install-package` (each package is
+# installed by the FIRST sync that stops excluding it; the FINAL sync excludes
+# nothing and guarantees the closure is exactly the lock — zero drift). Heavy
+# buckets sized so no single layer exceeds ~4 GB (matches the FSDP2 image shape:
+# many layers). `--no-install-package P` for a P absent from the resolution
+# (e.g. the megatron-only wheels on an fsdp2 build) is a harmless no-op.
+# ⚠ torch is NEVER deferred: flash-attn (and TE) declare a `match-runtime = true`
+# torch build dependency (pyproject [tool.uv.extra-build-dependencies]), so the
+# flash-attn sdist build in the FIRST sync fails ("torch was declared as an extra
+# build dependency ... not found in the resolution") if torch is not installed
+# yet. torch therefore rides layer 0 with the small packages.
+#   L0 small + torch(820) | HB1 flashinfer-jit-cache(1333) | HB2 cudnn(658)
+#   HB3 cublas(594) | HB4 mamba-ssm+causal-conv1d(719) | HB5 nccl+flashinfer-cubin+TE-cu12(880)
+#   HB6 cusparse+cusparselt+cusolver(843) | FINAL vllm+cufft+triton+nvshmem+nvrtc(895)  [wheel MB]
+# =============================================================================
+ENV RL_SYNC="uv sync --frozen --extra vllm --extra ep"
+# layer 0: all small packages + torch (torch required in-resolution for the
+# flash-attn sdist build's match-runtime build dep); defer the 16 heavies.
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package flashinfer-jit-cache \
+      --no-install-package nvidia-cudnn-cu12 \
+      --no-install-package nvidia-cublas-cu12 \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 0 (small pkgs + torch) done (megatron=${INSTALL_MEGATRON})"
+# layer 1: + flashinfer-jit-cache (HB1)
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package nvidia-cudnn-cu12 \
+      --no-install-package nvidia-cublas-cu12 \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 1 (flashinfer-jit-cache) done"
+# layer 2: + nvidia-cudnn-cu12 (HB2)
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package nvidia-cublas-cu12 \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 2 (cudnn) done"
+# layer 3: + nvidia-cublas-cu12 (HB3)
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 3 (cublas) done"
+# layer 4: + mamba-ssm + causal-conv1d (HB4)  [megatron-only]
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 4 (mamba-ssm, causal-conv1d) done"
+# layer 5: + nvidia-nccl-cu12 + flashinfer-cubin + transformer-engine-cu12 (HB5)
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 5 (nccl, flashinfer-cubin, transformer-engine-cu12) done"
+# layer 6: + nvidia-cusparse-cu12 + nvidia-cusparselt-cu12 + nvidia-cusolver-cu12 (HB6)
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 6 (cusparse, cusparselt, cusolver) done"
+# layer 7: FINAL — no exclusions; installs the remaining heavies AND guarantees
+# the closure is EXACTLY the lock (zero drift by construction).
+RUN cd ${SKYRL_HOME}/skyrl-train && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} && \
+    echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done (megatron=${INSTALL_MEGATRON})"
+
+# Bring in the compiled wheels and SWAP them over the stock PyPI vllm/flash-attn
+# from the sync (--no-deps: keep the synced dep closure, replace only the package).
+COPY --from=wheels /wheels /wheels
+RUN uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/flash_attn-*.whl && \
+    ${RL_ENV_DIR}/bin/python -c "import flash_attn, flash_attn_2_cuda; print('flash_attn', flash_attn.__version__, '+ flash_attn_2_cuda OK')"
+RUN uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/vllm-*.whl
+
+# Primary assert: vLLM (fork) + skyrl_train import under transformers 5.8.1.
+RUN ${RL_ENV_DIR}/bin/python -c "import torch, transformers, vllm, skyrl_train, flash_attn, flash_attn_2_cuda; print('torch', torch.__version__, '| transformers', transformers.__version__, '| vllm', vllm.__version__, '| flash_attn', flash_attn.__version__)"
+
+# Megatron backend asserts (only when built with INSTALL_MEGATRON=1).
+RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
+        ${RL_ENV_DIR}/bin/python -c "import megatron.core, megatron.bridge, transformer_engine; print('megatron.core + megatron.bridge + transformer_engine import OK')"; \
+    else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
+
+# torchtitan EP>1 assert (the `ep` extra installed it with tyro from the lock).
+RUN ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel import ExpertParallel; print('torchtitan ExpertParallel import OK (apply_ep EP>1 unblocked)')"
+
+# The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +
+# the S3 rendezvous/checkpoint boto3 path) comes ENTIRELY through the frozen lock:
+# skyrl-train/pyproject.toml declares s3fs==2026.4.0 (→ aiobotocore 3.7.0, raising
+# the botocore cap), smart_open==8.0.0, and boto3, so `uv sync --frozen` above
+# produces the whole stack — NO post-hoc pip (that was the drift vector). Assert it
+# built correctly (imports + a boto3 S3 client ctor, which is exactly where the
+# `compute_endpoint_resolver_builtin_defaults() missing 3 positional args` botocore
+# skew surfaced on the stale lock).
+RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', boto3.__version__, '| smart_open', smart_open.__version__, '| s3fs', s3fs.__version__)" && \
+    ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
+
+# Harbor (agentic rollout). Harbor is dependency-agnostic (litellm/daytona; no
+# torch/transformers/vllm/ray pins), so installing it from git WITH its deps cannot
+# perturb the synced stack. (boto3 is now in the lock above — not installed here.)
+RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
+        "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
+    ${RL_ENV_DIR}/bin/python -c "import harbor, importlib.metadata as m; print('harbor', m.version('harbor'))" && \
+    echo "baked harbor commit: ${HARBOR_COMMIT}"
+
+# =============================================================================
+# Environment configuration
+# =============================================================================
+# The baked editable skyrl-train is importable; the launcher prepends the runtime-
+# synced source so it wins. Only the skyrl-train tree is on the path.
+ENV PYTHONPATH="${SKYRL_HOME}/skyrl-train"
+
+RUN echo "ulimit -n 65535" >> /etc/profile.d/skyrl-ulimit.sh
+
+# rl-env activation helper (source the rl venv, then exec the command).
+RUN printf '#!/bin/bash\nsource %s/bin/activate\nexec "$@"\n' "${RL_ENV_DIR}" > /usr/local/bin/rl-env && \
+    chmod +x /usr/local/bin/rl-env
+
+CMD ["bash"]
