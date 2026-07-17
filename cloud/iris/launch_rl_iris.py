@@ -1415,7 +1415,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # Wrap in a bash bootstrap: cd to the synced workspace and set PYTHONPATH so
     # live /app + skyrl-train win over the image's baked copies. Use the absolute
     # RL venv python (set above) — independent of iris's activated venv.
-    pythonpath = f"{APP_DIR}:{SKYRL_HOME}/skyrl-train"
+    #
+    # ALL MarinSkyRL code resolves from the SYNCED /app (the launcher syncs
+    # PROJECT_ROOT -> /app), retiring the /app-vs-/opt/skyrl shadow split:
+    #   - /app            : cloud.* (cloud/iris/*)  -> synced source
+    #   - /app/skyrl-train: skyrl_train.* + examples.terminal_bench.* -> synced source
+    #   - /opt/skyrl/skyrl-train: baked fallback (kept LAST so a partial /app can't
+    #     ModuleNotFoundError, but /app wins for anything it carries)
+    # The venv/deps still come from the /opt/skyrl editable install; only the SOURCE
+    # that `import skyrl_train`/`examples.*` resolves is moved to /app. This makes the
+    # /app sync the single deploy vector and retires --skyrl-ref (which hot-checks-out
+    # /opt/skyrl) — everything now rides the /app sync off `main`.
+    pythonpath = f"{APP_DIR}:{APP_DIR}/skyrl-train:{SKYRL_HOME}/skyrl-train"
     # Optional: refresh the baked MarinSkyRL editable clone to a newer/pinned commit
     # before running (deps are baked, but skyrl-train is `pip install -e` over a git
     # clone, so a checkout is live without reinstall). Fetch is best-effort but the
