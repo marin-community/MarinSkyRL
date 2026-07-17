@@ -484,6 +484,26 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
     """
     if getattr(args, "ingress_mode", "direct") != "controller":
         return
+    # The opencode-RL generator ingress wiring — terminal_bench_generator.py setting the
+    # agent api_base from HARBOR_MODEL_ENDPOINT, and the literal-bridge S5 correlation — is
+    # NOT baked into the gpu-rl image's /opt/skyrl clone (only cloud.iris.* rides the /app
+    # sync; examples.terminal_bench.* loads from baked /opt/skyrl). Without --skyrl-ref, the
+    # baked generator runs: opencode's base URL resolves to `undefined` (every call fails,
+    # 0 reward) AND rollout_details are never correlated (all-None logprobs) — a SILENT
+    # 4-hour-run-wasting failure (fullgate1, 2026-07-16). Block it before GPU allocation.
+    if not getattr(args, "skyrl_ref", None) and os.environ.get("OTAGENT_ALLOW_UNBAKED_GENERATOR") != "1":
+        raise SystemExit(
+            "[rl-iris] BLOCKED: --ingress-mode controller needs --skyrl-ref <branch with the "
+            "controller-ingress generator wiring> (e.g. feuer/opencode-literal-bridge-s8). The "
+            "HARBOR_MODEL_ENDPOINT->agent api_base + literal-bridge correlation live in "
+            "skyrl-train/examples/terminal_bench/terminal_bench_generator.py, which the pod "
+            "loads from the BAKED /opt/skyrl (NOT the /app sync). Without it opencode's base "
+            "URL is `undefined` (0 reward) and rollout_details are never correlated (all-None "
+            "logprobs).\n"
+            "  Fix: add --skyrl-ref <that branch> (pair it with --harbor-ref for the harbor "
+            "bridge). Override (only once the wiring is baked into the image): "
+            "OTAGENT_ALLOW_UNBAKED_GENERATOR=1."
+        )
     if os.environ.get("OTAGENT_ALLOW_INGRESS_HOST_MISMATCH") == "1":
         print(
             "[rl-iris] WARNING: OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1 — skipping the "
