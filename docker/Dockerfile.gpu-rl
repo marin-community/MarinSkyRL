@@ -163,6 +163,9 @@ ARG TORCHVISION_VERSION
 ARG TORCH_CUDA_ARCH_LIST
 ARG INSTALL_MEGATRON
 ARG HARBOR_COMMIT
+# MarinSkyRL commit this image is built from — recorded in the baked /opt/skyrl
+# git tree (see the git-init step below) for provenance + `--skyrl-ref` support.
+ARG GITSHA=unknown
 
 ENV DEBIAN_FRONTEND=noninteractive
 # InfiniBand / RDMA userspace (rdma-core) — REQUIRED for NCCL's built-in IB
@@ -205,6 +208,23 @@ ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
 ENV SKYRL_HOME=/opt/skyrl
 COPY skyrl-train ${SKYRL_HOME}/skyrl-train
 COPY skyrl-gym ${SKYRL_HOME}/skyrl-train/skyrl-gym
+
+# Make /opt/skyrl a REAL git working tree so the iris launcher's `--skyrl-ref`
+# (git fetch --all && git checkout <ref>) can hot-load a newer/pinned MarinSkyRL
+# commit at launch WITHOUT an image rebuild. The launcher guards on
+# `git -C /opt/skyrl rev-parse --git-dir`; without a .git it no-ops and the pod
+# silently runs the stale baked code (proven on the megatron variant: east16/17
+# ran baked code because this image had no git tree, so a code fix REQUIRED a
+# ~40-min rebuild). This is ADDITIVE: the committed working-tree content is
+# exactly the COPY'd source above (unchanged closure); we only add .git + the
+# origin remote so a runtime fetch+checkout resolves real refs. skyrl-train stays
+# `pip install -e` (uv sync below), so a checkout is live without reinstall.
+RUN cd ${SKYRL_HOME} && \
+    git init -q -b main && \
+    git remote add origin https://github.com/marin-community/MarinSkyRL.git && \
+    git -c user.email=build@openthoughts.ai -c user.name=gpu-rl-build add -A && \
+    git -c user.email=build@openthoughts.ai -c user.name=gpu-rl-build commit -q -m "baked gpu-rl image content @ ${GITSHA}" && \
+    echo "/opt/skyrl git tree baked @ $(git -C ${SKYRL_HOME} rev-parse HEAD) (origin=marin-community/MarinSkyRL, source @ ${GITSHA})"
 
 # =============================================================================
 # RL environment — installed DIRECTLY from skyrl-train's uv.lock (single source of

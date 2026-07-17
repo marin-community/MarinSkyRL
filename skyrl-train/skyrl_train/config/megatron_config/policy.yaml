@@ -48,3 +48,9 @@ transformer_config_kwargs:
 # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
 # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
 empty_cuda_cache: true
+
+# Sequence-dim chunk size for the vocab-parallel logprob computation.
+# null (default) materializes the full [B, S, vocab//TP] fp32 exp at once (can
+# OOM on long sequences); an int activates the numerically-exact chunked path
+# (ChunkedDistributedLogprob), bounding peak memory regardless of seq length.
+logprob_chunk_size: null

@@ -2,6 +2,7 @@ from typing import Optional, Callable, List
 from functools import partial
 import torch
 import torch.nn as nn
+from omegaconf import OmegaConf
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
@@ -33,6 +34,15 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
+        # Optional sequence-dim chunk size for the vocab-parallel logprob
+        # computation. None (default) => the whole [B, S, vocab//TP] fp32 exp is
+        # materialized at once, which OOMs on long sequences. A non-null value
+        # activates the numerically-exact ChunkedDistributedLogprob path
+        # (per-position log-softmax, chunked along seq), bounding peak memory
+        # regardless of sequence length. Byte-identical when unset.
+        self._logprob_chunk_size = OmegaConf.select(
+            self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
+        )
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -86,7 +96,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=True,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=None,
+                chunk_size=self._logprob_chunk_size,
             )
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
@@ -213,7 +223,7 @@ class MegatronModelWrapper:
                 tp_group=tp_grp,
                 inference_only=False,
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=None,
+                chunk_size=self._logprob_chunk_size,
             )
 
             action_log_probs = token_logprobs[:, -num_actions:]

@@ -97,6 +97,7 @@ exec /kaniko/executor \
   --dockerfile "${DOCKERFILE:-docker/Dockerfile.gpu-rl}" \
   --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
   --build-arg INSTALL_MEGATRON="$INSTALL_MEGATRON" \
+  --build-arg GITSHA="$GITSHA" \
   --skip-unused-stages \
   $SNAPSHOT_FLAG \
   --compressed-caching=false \
