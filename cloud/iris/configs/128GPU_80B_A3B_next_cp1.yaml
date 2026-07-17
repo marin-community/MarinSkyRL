@@ -84,7 +84,7 @@ terminal_bench:
 
 trainer:
   strategy: fsdp2
-  use_sample_packing: false
+  use_sample_packing: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: true
   algorithm:
