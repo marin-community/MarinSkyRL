@@ -75,6 +75,10 @@ def test_controller_ingress_sets_harbor_endpoint_and_never_touches_openai_base_u
         assert os.environ["HARBOR_MODEL_ENDPOINT"] == _FAKE_CAP_URL
         # THE GUARD: the harness must NOT overload OPENAI_BASE_URL with the vLLM URL.
         assert os.environ.get("OPENAI_BASE_URL") is None
+        # The minted URL is ALSO captured for Hydra-cfg threading, so run() can inject
+        # ++terminal_bench_config.agent_api_base=<url> — the env var alone never reaches
+        # the pre-existing Ray workers where TerminalBenchGenerator is built.
+        assert runner._minted_agent_api_base == _FAKE_CAP_URL
 
 
 def test_controller_ingress_preserves_a_real_openai_base_url(monkeypatch):

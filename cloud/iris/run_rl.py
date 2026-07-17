@@ -84,6 +84,11 @@ class LocalRLRunner:
         self.config = config
         self._processes: List[subprocess.Popen] = []
         self.rl_env_path: Path | None = None
+        # Set by _ingress_context when ingress_mode=controller mints a capability
+        # URL. Threaded into the SkyRL Hydra cfg (see run()) so it crosses the Ray
+        # .remote() boundary as DATA — os.environ mutations here do NOT reach the
+        # pre-existing Ray workers where TerminalBenchGenerator is constructed.
+        self._minted_agent_api_base: str | None = None
 
     def setup(self) -> None:
         """Validate configuration and set up directories."""
@@ -185,6 +190,15 @@ class LocalRLRunner:
         # opencode at iris.oa.dev/proxy/t/<token>/... and the sandbox traffic flows
         # controller -> RecordProxy -> vLLM. The default (direct) path is a null CM.
         with self._ingress_context():
+            # If controller-ingress minted a capability URL, thread it into the cfg
+            # so it crosses the Ray .remote() boundary as DATA (the generator is built
+            # inside a Ray worker that never inherits this process's HARBOR_MODEL_ENDPOINT
+            # env — see _ingress_context / __init__). Snapshot cadence matches the
+            # existing design (one api_base string baked for the job's lifetime).
+            if self._minted_agent_api_base:
+                hydra_args = hydra_args + [
+                    f"++terminal_bench_config.agent_api_base={self._minted_agent_api_base}"
+                ]
             return self._run_skyrl(parsed.entrypoint, hydra_args)
 
     @contextlib.contextmanager
@@ -276,6 +290,14 @@ class LocalRLRunner:
                 # LLM-judge verifiers on the worker read it), so overloading it with a vLLM
                 # endpoint would silently misroute every judge call to vLLM.
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
+                # Also thread the minted URL through the SkyRL Hydra cfg. run() injects
+                # ``++terminal_bench_config.agent_api_base=<api_base>`` from this, so the
+                # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
+                # where TerminalBenchGenerator is built. The env var alone is insufficient:
+                # this runner ATTACHES to a Ray cluster the controller started BEFORE the
+                # mint, so its workers never inherit HARBOR_MODEL_ENDPOINT from this process
+                # and the generator would fall back to the pod-local (unreachable) vLLM URL.
+                self._minted_agent_api_base = api_base
                 injected = inject_ingress_agent_key()
                 print(
                     f"[run_rl] ingress_mode=controller record_literal="

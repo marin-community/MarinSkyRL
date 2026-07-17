@@ -188,17 +188,31 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
-        # a controller-ingress endpoint it publishes the capability URL as
-        # HARBOR_MODEL_ENDPOINT. The AGENT (opencode, in a Daytona sandbox) must reach vLLM
-        # over the public internet at that URL — NOT the loopback self.base_url, which only
-        # resolves in-cluster. So the per-trial agent api_base prefers the ingress URL when
-        # present; unset (default/direct) => exactly f"{self.base_url}/v1" as before
-        # (byte-identical). The verifier + re-tokenize/TIS paths keep using self.base_url.
-        _ingress_endpoint = os.environ.get("HARBOR_MODEL_ENDPOINT", "").strip()
+        # a controller-ingress endpoint it publishes the minted capability URL. The AGENT
+        # (opencode, in a Daytona sandbox) must reach vLLM over the public internet at that
+        # URL — NOT the loopback self.base_url, which only resolves in-cluster. So the
+        # per-trial agent api_base prefers the ingress URL when present; unset
+        # (default/direct) => exactly f"{self.base_url}/v1" as before (byte-identical).
+        # The verifier + re-tokenize/TIS paths keep using self.base_url.
+        #
+        # SOURCE PRECEDENCE (cfg first, env fallback). This generator is constructed
+        # INSIDE a Ray task/actor (skyrl_entrypoint / RolloutCoordinator) that does NOT
+        # inherit the run_rl driver's late HARBOR_MODEL_ENDPOINT env mutation (the runner
+        # attaches to a Ray cluster started BEFORE the mint). run_rl therefore threads the
+        # URL through the cfg as ``terminal_bench_config.agent_api_base``, which crosses the
+        # .remote() boundary as DATA and reaches every worker. The os.environ fallback keeps
+        # the driver-side / direct-launch paths working unchanged.
+        _cfg_endpoint = ""
+        try:
+            _cfg_endpoint = str(terminal_bench_cfg.get("agent_api_base", "") or "").strip()
+        except Exception:  # pragma: no cover - defensive: cfg may not be a mapping
+            _cfg_endpoint = ""
+        _ingress_endpoint = _cfg_endpoint or os.environ.get("HARBOR_MODEL_ENDPOINT", "").strip()
         self._agent_api_base = _ingress_endpoint or f"{self.base_url}/v1"
         if _ingress_endpoint:
             logging.getLogger("harbor").info(
-                "[terminal_bench] agent api_base <- HARBOR_MODEL_ENDPOINT (controller ingress)"
+                "[terminal_bench] agent api_base <- %s (controller ingress)",
+                "terminal_bench_config.agent_api_base" if _cfg_endpoint else "HARBOR_MODEL_ENDPOINT",
             )
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
