@@ -13,7 +13,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.generators.utils import get_custom_chat_template
+from skyrl_train.generators.utils import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
@@ -199,12 +199,17 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     assert generator_output_str == expected_str
 
     # 4. Check loss mask exact matches
-    system_prompt = tokenizer.apply_chat_template(
-        [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], tokenize=True
+    # normalize_token_ids: on transformers 5.x apply_chat_template(tokenize=True) returns a
+    # BatchEncoding, so bare len()/slicing below would operate on its KEYS (=2-3) instead of
+    # the token ids and deflate the reconstructed loss mask. Coerce to a flat list of ids.
+    system_prompt = normalize_token_ids(
+        tokenizer.apply_chat_template(
+            [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], tokenize=True
+        )
     )
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
-    empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+    empty_user = normalize_token_ids(tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True))
+    empty_user_with_generation_prompt = normalize_token_ids(
+        tokenizer.apply_chat_template([{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True)
     )
     # TODO (erictang000): consider hard coding the full loss mask for each model to avoid copying logic in code
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`

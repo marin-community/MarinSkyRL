@@ -1,14 +1,24 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from datasets import Dataset
 from skyrl_train.dataset import PromptDataset
 
 
+class _StubTokenizer:
+    """Picklable tokenizer stub for DataLoader worker tests.
+
+    MagicMock cannot survive pickling across multiprocessing boundaries
+    (newer dill/datasets versions enforce this), so tests that spin up
+    DataLoader workers need a real picklable object.
+    """
+
+    def apply_chat_template(self, messages, add_generation_prompt):
+        return messages
+
+
 @pytest.fixture
 def mock_tokenizer():
-    tokenizer = MagicMock()
-    tokenizer.apply_chat_template.side_effect = lambda x, add_generation_prompt: x
-    return tokenizer
+    return _StubTokenizer()
 
 
 @pytest.fixture

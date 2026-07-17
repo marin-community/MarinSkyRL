@@ -17,6 +17,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import (
     apply_overlong_filtering,
     get_rollout_metrics,
+    normalize_token_ids,
 )
 
 
@@ -97,11 +98,13 @@ class StepWiseGenerator(SkyRLGymGenerator):
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
 
-        input_ids = self.tokenizer.apply_chat_template(
-            chat_history,
-            add_generation_prompt=True,
-            tokenize=True,
-            **self.generator_cfg.chat_template_kwargs,
+        input_ids = normalize_token_ids(
+            self.tokenizer.apply_chat_template(
+                chat_history,
+                add_generation_prompt=True,
+                tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
+            )
         )
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
@@ -112,12 +115,14 @@ class StepWiseGenerator(SkyRLGymGenerator):
         captured_global_step: Optional[int] = None
         while not done:
             if retokenize_chat_history:
-                input_ids = self.tokenizer.apply_chat_template(
-                    chat_history,
-                    add_generation_prompt=True,
-                    # chat_template=None,
-                    tokenize=True,
-                    **self.generator_cfg.chat_template_kwargs,
+                input_ids = normalize_token_ids(
+                    self.tokenizer.apply_chat_template(
+                        chat_history,
+                        add_generation_prompt=True,
+                        # chat_template=None,
+                        tokenize=True,
+                        **self.generator_cfg.chat_template_kwargs,
+                    )
                 )
 
             current_prompt_length = len(input_ids)
@@ -372,11 +377,13 @@ class StepWiseGenerator(SkyRLGymGenerator):
         if len(new_obs) > 0:
             # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-            observation_ids = self.tokenizer.apply_chat_template(
-                [*self.base_conversation, *new_obs],
-                add_generation_prompt=True,
-                tokenize=True,
-                **self.generator_cfg.chat_template_kwargs,
+            observation_ids = normalize_token_ids(
+                self.tokenizer.apply_chat_template(
+                    [*self.base_conversation, *new_obs],
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    **self.generator_cfg.chat_template_kwargs,
+                )
             )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
