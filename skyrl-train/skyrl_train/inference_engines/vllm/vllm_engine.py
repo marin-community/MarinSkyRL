@@ -1637,6 +1637,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # lazily here; ``None`` on older vLLM where the class doesn't exist, in
         # which case the legacy try/except branches below are taken (byte-
         # identical to the prior behavior on vLLM 0.16 / <0.20.2).
+        #
+        # In vLLM >= 0.20.2rc0 the tool-calling config (``enable_auto_tools``,
+        # ``tool_parser``) lives on the RENDER object, not on ``OpenAIServingChat``.
+        # Pop them from ``openai_kwargs`` here and pass to the render constructor.
+        # On the legacy path (no render API), restore them so ``OpenAIServingChat``
+        # receives them as before.
+        enable_auto_tools = openai_kwargs.pop("enable_auto_tools", False)
+        tool_parser = openai_kwargs.pop("tool_parser", None)
+
         openai_serving_render = None
         try:
             from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -1648,12 +1657,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request_logger=None,
                 chat_template=custom_chat_template_content,
                 chat_template_content_format="auto",
+                enable_auto_tools=enable_auto_tools,
+                tool_parser=tool_parser,
             )
         except ImportError:
             openai_serving_render = None
+            # Legacy path: OpenAIServingChat owns the tool-calling kwargs
+            openai_kwargs["enable_auto_tools"] = enable_auto_tools
+            openai_kwargs["tool_parser"] = tool_parser
 
-        # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
-        # support OAI-style tool calling; and `request_logger` for better debugging.
         # Try the vLLM >= 0.20.2rc0 render API first, then newer (>=0.13, no
         # model_config), then legacy (<0.13, with model_config).
         if openai_serving_render is not None:
