@@ -236,6 +236,19 @@ generator:
     max_model_len: 32768
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     served_model_name: Qwen3-8B
+    # opencode drives the policy as a tool-using agent: it sends
+    # tool_choice:"auto" to /v1/chat/completions. Without tool-calling enabled
+    # the engine returns '"auto" tool choice requires --enable-auto-tool-choice
+    # and --tool-call-parser to be set', opencode exits 1, and every trial is a
+    # NonZeroAgentExitCodeError scoring reward 0. These two keys are consumed by
+    # pop_openai_kwargs() (skyrl_train/inference_engines/vllm/utils.py) — mapped
+    # to OpenAIServingChat's enable_auto_tools / tool_parser — so tool parsing is
+    # wired ONLY into the OpenAI serving layer (harbor rollout path); the raw
+    # token_ids that TIS/TITO literal-recording relies on are unaffected.
+    # hermes = Qwen3-8B's <tool_call>…</tool_call> tool format (Qwen3 dense/
+    # thinking; qwen3_coder is for Qwen3-Coder's distinct XML function-call format).
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
 
 extra_env:
   NCCL_DEBUG: WARN
