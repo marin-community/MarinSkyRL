@@ -1355,8 +1355,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             pass
         n_turns = len(built[0].get("completion_token_ids", []))
         logger.info(
-            f"[literal-bridge] correlated {n_turns} opencode turn(s) for trial "
-            f"{trial_id} from shared proxy log"
+            f"[literal-bridge] correlated {n_turns} opencode turn(s) for trial {trial_id} from shared proxy log"
         )
         return built
 
