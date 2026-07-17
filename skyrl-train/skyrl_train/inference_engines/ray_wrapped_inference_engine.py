@@ -172,10 +172,17 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.chat_completion.remote(request_payload)
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
-        """Stream SSE chunks from the Ray actor via ``num_returns="streaming"``."""
+        """Stream SSE chunks from the Ray actor via ``num_returns="streaming"``.
+
+        ``ObjectRefGenerator.__anext__`` returns a raw ``ObjectRef`` (NOT the
+        resolved value), so each ref must be ``await``-ed to materialise the
+        SSE string the actor yielded.  Without this ``await`` the raw
+        ``ObjectRef`` objects reach ``StreamingResponse`` and the connection
+        dies with ``RemoteProtocolError: incomplete chunked read``.
+        """
         gen = self.inference_engine_actor.chat_completion_stream.remote(request_payload)
-        async for chunk in gen:
-            yield chunk
+        async for ref in gen:
+            yield await ref
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)

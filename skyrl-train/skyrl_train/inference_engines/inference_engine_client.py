@@ -607,6 +607,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         try:
             async for chunk in self.engines[engine_idx].chat_completion_stream(request_payload):
                 yield chunk
+        except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+            self._mark_engine_dead(engine_idx, e)
+            raise
         finally:
             self._dec_inflight(engine_idx)
 

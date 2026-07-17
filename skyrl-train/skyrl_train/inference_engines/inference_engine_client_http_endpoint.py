@@ -133,6 +133,43 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
     return None
 
 
+async def _safe_sse_stream(generator):
+    """Wrap an async generator so the SSE body always completes.
+
+    Guarantees ``data: [DONE]\\n\\n`` is the last chunk even when the
+    underlying generator raises mid-stream (Ray actor death, vLLM error,
+    serialization failure, etc.).  Without this, ``StreamingResponse``
+    closes the connection on any unhandled exception, producing
+    ``RemoteProtocolError: incomplete chunked read`` on the client side.
+    """
+    done_sent = False
+    try:
+        async for chunk in generator:
+            if isinstance(chunk, str) and "[DONE]" in chunk:
+                done_sent = True
+            yield chunk
+    except asyncio.CancelledError:
+        # Client disconnected — re-raise so Starlette stops sending.
+        raise
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Mid-stream SSE error:\n{tb}")
+        if not done_sent:
+            err = ErrorResponse(
+                error=ErrorInfo(
+                    message=f"Streaming error: {str(e)}",
+                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                ),
+            ).model_dump()
+            yield f"data: {json.dumps(err)}\n\n"
+            yield "data: [DONE]\n\n"
+        return
+    # Normal completion — ensure [DONE] if the generator didn't send it.
+    if not done_sent:
+        yield "data: [DONE]\n\n"
+
+
 async def handle_openai_request(raw_request: Request, endpoint: str):
     """Handle /completions or /chat/completions request.
 
@@ -156,8 +193,9 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
 
         # ── Streaming branch ──────────────────────────────────────────────
         if request_json.get("stream", False) and endpoint == "/chat/completions":
+            raw_gen = _global_inference_engine_client.chat_completion_stream(payload)
             return StreamingResponse(
-                content=_global_inference_engine_client.chat_completion_stream(payload),
+                content=_safe_sse_stream(raw_gen),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )

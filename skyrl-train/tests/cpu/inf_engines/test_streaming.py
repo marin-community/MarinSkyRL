@@ -232,3 +232,103 @@ class TestHTTPEndpointStreaming:
         )
         assert resp.status_code == HTTPStatus.BAD_REQUEST
         assert "Model name mismatch" in resp.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# _safe_sse_stream — ensures SSE body always completes
+# ---------------------------------------------------------------------------
+
+
+class ErrorMidStreamBackend:
+    """Backend whose generator raises after the first chunk."""
+
+    model_name = "test-model"
+
+    async def chat_completion(self, request_payload):
+        return {}
+
+    async def chat_completion_stream(self, request_payload):
+        yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+        raise RuntimeError("vLLM engine exploded mid-generation")
+
+    async def completion(self, request_payload):
+        return {}
+
+
+class NoDoneBackend:
+    """Backend whose generator ends without [DONE]."""
+
+    model_name = "test-model"
+
+    async def chat_completion(self, request_payload):
+        return {}
+
+    async def chat_completion_stream(self, request_payload):
+        yield 'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n'
+        # NOTE: no data: [DONE]\n\n
+
+    async def completion(self, request_payload):
+        return {}
+
+
+@pytest.fixture
+def app_with_midstream_error():
+    from starlette.testclient import TestClient
+
+    app = create_app()
+    set_global_state(ErrorMidStreamBackend(), None)
+    yield TestClient(app)
+
+
+@pytest.fixture
+def app_with_no_done():
+    from starlette.testclient import TestClient
+
+    app = create_app()
+    set_global_state(NoDoneBackend(), None)
+    yield TestClient(app)
+
+
+class TestSafeSSEStream:
+    def test_mid_stream_error_yields_error_and_done(self, app_with_midstream_error):
+        """Mid-generation exception must not produce an incomplete body."""
+        resp = app_with_midstream_error.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.text
+        assert "partial" in body  # first chunk was sent
+        assert "Streaming error" in body  # error chunk injected
+        assert "data: [DONE]" in body  # [DONE] appended
+
+    def test_missing_done_appended(self, app_with_no_done):
+        """Generator that ends without [DONE] still gets it appended."""
+        resp = app_with_no_done.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+        assert resp.status_code == 200
+        assert "data: [DONE]" in resp.text
+
+    def test_normal_stream_not_double_done(self, app_with_mock_backend):
+        """Normal stream already containing [DONE] is not duplicated."""
+        client, _ = app_with_mock_backend
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+        body = resp.text
+        assert body.count("[DONE]") == 1
