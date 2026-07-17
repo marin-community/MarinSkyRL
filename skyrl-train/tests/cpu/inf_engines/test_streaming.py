@@ -27,23 +27,36 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 
 
 class TestEnsureTokenIds:
-    def test_remaps_new_token_ids(self):
-        chunk = (
-            'data: {"choices":[{"delta":{"content":"hi","provider_specific_fields":{"new_token_ids":[10,20]}}}]}\n\n'
-        )
+    """Tests for ensure_token_ids_in_sse_chunk.
+
+    vLLM 0.20.2 puts per-chunk token IDs flat at choices[0].token_ids.
+    Harbor reads choices[0].delta.provider_specific_fields.token_ids first.
+    The function bridges this gap.
+    """
+
+    def test_copies_flat_token_ids_to_delta_psf(self):
+        """The canonical case: vLLM emits token_ids on the choice, harbor
+        reads from delta.provider_specific_fields.token_ids."""
+        chunk = 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"token_ids":[10,20]}]}\n\n'
         result = ensure_token_ids_in_sse_chunk(chunk)
         data = json.loads(result[len("data: ") :].strip())
         psf = data["choices"][0]["delta"]["provider_specific_fields"]
         assert psf["token_ids"] == [10, 20]
-        assert "new_token_ids" in psf  # original key preserved
 
-    def test_passes_through_when_token_ids_already_present(self):
-        chunk = 'data: {"choices":[{"delta":{"provider_specific_fields":{"token_ids":[1,2],"new_token_ids":[1,2]}}}]}'
+    def test_copies_control_token_chunk(self):
+        """Empty-delta chunks (control tokens) must still carry token_ids."""
+        chunk = 'data: {"id":"c1","choices":[{"index":0,"delta":{},"token_ids":[151665]}]}\n\n'
         result = ensure_token_ids_in_sse_chunk(chunk)
-        # Should be unchanged — token_ids already present
         data = json.loads(result[len("data: ") :].strip())
         psf = data["choices"][0]["delta"]["provider_specific_fields"]
-        assert psf["token_ids"] == [1, 2]
+        assert psf["token_ids"] == [151665]
+
+    def test_passes_through_when_psf_already_present(self):
+        """If delta.provider_specific_fields.token_ids already exists, don't overwrite."""
+        chunk = 'data: {"choices":[{"delta":{"provider_specific_fields":{"token_ids":[1,2]}},"token_ids":[9,9]}]}\n\n'
+        result = ensure_token_ids_in_sse_chunk(chunk)
+        data = json.loads(result[len("data: ") :].strip())
+        assert data["choices"][0]["delta"]["provider_specific_fields"]["token_ids"] == [1, 2]
 
     def test_passes_through_done(self):
         assert ensure_token_ids_in_sse_chunk("data: [DONE]\n\n") == "data: [DONE]\n\n"
@@ -55,8 +68,9 @@ class TestEnsureTokenIds:
         chunk = 'data: {"id":"x","choices":[]}\n\n'
         assert ensure_token_ids_in_sse_chunk(chunk) == chunk
 
-    def test_passes_through_no_psf(self):
-        chunk = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+    def test_passes_through_no_token_ids(self):
+        """Chunks without token_ids (e.g. first role chunk) pass through."""
+        chunk = 'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
         assert ensure_token_ids_in_sse_chunk(chunk) == chunk
 
     def test_handles_malformed_json(self):
@@ -64,18 +78,22 @@ class TestEnsureTokenIds:
         assert ensure_token_ids_in_sse_chunk(chunk) == chunk
 
     def test_preserves_other_fields(self):
+        """All existing fields survive the remap."""
         chunk = (
             'data: {"id":"abc","object":"chat.completion.chunk",'
-            '"choices":[{"index":0,"delta":{"content":"world",'
-            '"provider_specific_fields":{"new_token_ids":[42]}},'
-            '"finish_reason":null}],"model":"test"}\n\n'
+            '"model":"test","prompt_token_ids":[1,2],'
+            '"choices":[{"index":0,"delta":{"content":"world"},'
+            '"logprobs":{"content":[{"token":"world","logprob":-0.5}]},'
+            '"finish_reason":null,"token_ids":[42]}]}\n\n'
         )
         result = ensure_token_ids_in_sse_chunk(chunk)
         data = json.loads(result[len("data: ") :].strip())
         assert data["id"] == "abc"
-        assert data["object"] == "chat.completion.chunk"
+        assert data["prompt_token_ids"] == [1, 2]
         assert data["choices"][0]["delta"]["content"] == "world"
-        assert data["choices"][0]["delta"]["provider_specific_fields"]["token_ids"] == [42]
+        assert data["choices"][0]["logprobs"]["content"][0]["logprob"] == -0.5
+        assert data["choices"][0]["token_ids"] == [42]  # original preserved
+        assert data["choices"][0]["delta"]["provider_specific_fields"]["token_ids"] == [42]  # copied
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +108,16 @@ class MockStreamingBackend:
 
     def __init__(self, chunks=None, non_stream_response=None):
         self._chunks = chunks or [
-            'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
-            'data: {"choices":[{"delta":{"content":"hello","provider_specific_fields":'
-            '{"token_ids":[1,2,3],"new_token_ids":[1,2,3]}}}]}\n\n',
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            # First chunk: role + prompt_token_ids (vLLM shape)
+            'data: {"id":"c1","model":"test-model","object":"chat.completion.chunk",'
+            '"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],'
+            '"prompt_token_ids":[1,2,3]}\n\n',
+            # Content chunk: token_ids at choice level (vLLM shape)
+            'data: {"id":"c1","model":"test-model","object":"chat.completion.chunk",'
+            '"choices":[{"index":0,"delta":{"content":"hello"},"token_ids":[10,20,30],"finish_reason":null}]}\n\n',
+            # Final chunk: finish_reason + last token_ids
+            'data: {"id":"c1","model":"test-model","object":"chat.completion.chunk",'
+            '"choices":[{"index":0,"delta":{},"token_ids":[40],"finish_reason":"stop"}]}\n\n',
             "data: [DONE]\n\n",
         ]
         self._non_stream_response = non_stream_response or {
@@ -105,8 +129,9 @@ class MockStreamingBackend:
         return self._non_stream_response
 
     async def chat_completion_stream(self, request_payload):
+        # Apply the same enrichment the real vLLM engine applies per-chunk
         for chunk in self._chunks:
-            yield chunk
+            yield ensure_token_ids_in_sse_chunk(chunk)
 
     async def completion(self, request_payload):
         return self._non_stream_response

@@ -2053,6 +2053,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             }
         )
         body["stream"] = True
+        body["return_token_ids"] = True  # force vLLM to emit per-chunk token_ids
 
         try:
             request = ChatCompletionRequest(**body)
