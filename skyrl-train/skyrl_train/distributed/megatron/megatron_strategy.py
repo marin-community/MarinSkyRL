@@ -40,6 +40,17 @@ from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 
+# DistributedOptimizer sharded-checkpoint format. megatron-core's default
+# ('fully_sharded_model_space') emits ShardedTensors carrying a `flattened_range`,
+# which the torch_dist save strategy (+ FullyParallelSaveStrategyWrapper) rejects at
+# validate_metadata_integrity => `CheckpointingException: ShardedTensor.flattened_range
+# is not supported` (crashed megatron-parity east18 at the gs1 checkpoint). The
+# 'dp_zero_gather_scatter' format gathers optimizer state to DP rank 0 and produces
+# standard (non-flattened) ShardedTensors that the torch_dist backend accepts. Save and
+# load MUST use the same sharding_type.
+_MEGATRON_OPTIM_SHARDING_TYPE = "dp_zero_gather_scatter"
+
+
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.
@@ -163,7 +174,9 @@ class MegatronStrategy(DistributedStrategy):
         model_sharded_state_dict = model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
+            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                model_sharded_state_dict, sharding_type=_MEGATRON_OPTIM_SHARDING_TYPE
+            )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -230,7 +243,9 @@ class MegatronStrategy(DistributedStrategy):
         model_sharded_state_dict = unwrapped_model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
+            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                model_sharded_state_dict, is_loading=True, sharding_type=_MEGATRON_OPTIM_SHARDING_TYPE
+            )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
