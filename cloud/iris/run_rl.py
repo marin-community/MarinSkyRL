@@ -269,16 +269,13 @@ class LocalRLRunner:
                 else:
                     api_base = capability_api_base(self.config.ingress_host, endpoint_name)
                     mint_where = "local controller"
-                os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
+                # Publish the capability URL as the harbor-specific HARBOR_MODEL_ENDPOINT.
                 # opencode (harbor agents/installed/opencode.py::_build_register_config_command)
-                # reads the served-model baseURL from OPENAI_BASE_URL — NOT the api_base kwarg
-                # the generator threads (that path serves terminus via harbor Chat; opencode's
-                # CLI bypasses it). Without OPENAI_BASE_URL its opencode.json has no provider
-                # baseURL → every call is `"undefined/chat/completions"` → 0 turns, all-None
-                # logprobs (the fullgate1/2 failure). Publish the capability URL here so the
-                # opencode config-writer picks it up. Controller-ingress only (this whole block
-                # is gated on ingress_mode=controller); direct mode never sets it.
-                os.environ["OPENAI_BASE_URL"] = api_base
+                # reads its served-model baseURL from HARBOR_MODEL_ENDPOINT. We deliberately do
+                # NOT touch OPENAI_BASE_URL: that var is reserved for genuine OpenAI traffic (the
+                # LLM-judge verifiers on the worker read it), so overloading it with a vLLM
+                # endpoint would silently misroute every judge call to vLLM.
+                os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
                 injected = inject_ingress_agent_key()
                 print(
                     f"[run_rl] ingress_mode=controller record_literal="
@@ -286,7 +283,7 @@ class LocalRLRunner:
                     f"{self.config.target_cluster or '(direct)'}: registered "
                     f"{endpoint_name} -> {register_address} "
                     f"(id={registration.endpoint_id}, access=LINK); minted at {mint_where}; "
-                    f"HARBOR_MODEL_ENDPOINT=OPENAI_BASE_URL=/proxy/t/<token>/{endpoint_name}/v1 "
+                    f"HARBOR_MODEL_ENDPOINT=/proxy/t/<token>/{endpoint_name}/v1 "
                     f"(dummy key injected={injected})",
                     flush=True,
                 )
