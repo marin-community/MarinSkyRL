@@ -3407,6 +3407,7 @@ version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "boto3" },
     { name = "datasets" },
     { name = "debugpy" },
     { name = "fastapi" },
@@ -3423,6 +3424,7 @@ dependencies = [
     { name = "ray" },
     { name = "s3fs" },
     { name = "skyrl-gym" },
+    { name = "smart-open" },
     { name = "tensorboard" },
     { name = "tensordict" },
     { name = "torch" },
@@ -3480,6 +3482,7 @@ vllm = [
 requires-dist = [
     { name = "accelerate" },
     { name = "black", marker = "extra == 'dev'", specifier = "==24.10.0" },
+    { name = "boto3" },
     { name = "datasets", specifier = ">=4.0.0" },
     { name = "debugpy", specifier = "==1.8.0" },
     { name = "deep-ep", marker = "platform_machine == 'x86_64' and extra == 'deepep'", url = "https://github.com/PrimeIntellect-ai/prime-rl/releases/download/v0.5.0/deep_ep-1.2.1+29d31c0-cp312-cp312-linux_x86_64.whl" },
@@ -3510,6 +3513,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.11.9" },
     { name = "s3fs" },
     { name = "skyrl-gym", editable = "skyrl-gym" },
+    { name = "smart-open" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=7.0.0" },
     { name = "sphinx-autobuild", marker = "extra == 'docs'", specifier = ">=2021.3.14" },
     { name = "sphinx-autodoc-typehints", marker = "extra == 'docs'", specifier = ">=1.25.0" },
@@ -3530,6 +3534,18 @@ requires-dist = [
     { name = "wandb" },
 ]
 provides-extras = ["deepspeed", "dev", "docs", "sandboxes", "vllm", "miniswe", "ep", "deepep"]
+
+[[package]]
+name = "smart-open"
+version = "8.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/53/9c513747547fd595d5c143259129ea8b9c3ea2f6b7bb9dcea2b1966ded3c/smart_open-8.0.1.tar.gz", hash = "sha256:18b1c4496003c6902be17c15f032b5c319f307c89c6ae9e6b028b508bed8b2cf", size = 61882, upload-time = "2026-07-15T13:56:10.492Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/96/325b8c507ccecc50421fecc0345a502ee6e4a44785af3c4e6ecbadad624a/smart_open-8.0.1-py3-none-any.whl", hash = "sha256:3e97f90e92a952cb57863dfe132082c400a52eeeb27c067692fb51dbcc5b0089", size = 73504, upload-time = "2026-07-15T13:56:09.033Z" },
+]
 
 [[package]]
 name = "smmap"

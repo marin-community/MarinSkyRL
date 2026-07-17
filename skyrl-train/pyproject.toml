@@ -42,6 +42,8 @@ dependencies = [
     "flash-attn",
     "polars",
     "s3fs",
+    "boto3",
+    "smart_open",
     "fastapi",
     "uvicorn",
 ]
