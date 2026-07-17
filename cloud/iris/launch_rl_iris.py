@@ -255,8 +255,16 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts
     # green (kaniko state=succeeded exit 0, ~25m; asserts run inside the build so success == flash_attn_2_cuda /
     # skyrl_train / vllm / torchtitan.ExpertParallel import OK). baked harbor commit f4a6b1a0.
-    "@sha256:e8b48241b548da570a319ff421e72787692ee87dae2408c99a2d0c6794186177"  # noqa: E501  (gpu-rl-e03896b7, PULLABLE; harbor f4a6b1a0 round-6 orjson parse-offload)
-    # (prev: gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5 ctx-limit global-cache + AsyncOpenAI; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4 async tokenize offload; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2 + tilelang 0.1.9 base-build fix; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm)
+    # gpu-rl-f4f25bae (built 2026-07-17, kaniko job gpurl-kaniko-f4f25bae, SINGLE_SNAPSHOT=0 pullable):
+    # HARBOR_COMMIT bump to c872216e (harbor main HEAD = opencode RL literal bridge: HARBOR_MODEL_ENDPOINT
+    # baseURL fix + correlated rollout_details). Baking it lets future RL launches drop --harbor-ref main.
+    # ALSO adds boto3 + smart_open to skyrl-train deps (the Dockerfile build assert required them but they
+    # were only transitives of litellm via harbor, installed after the assert). SKYRL 2861eaef (cu128 lock,
+    # PR #19). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 32 layers, max 6.56 GB.
+    # Build asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 / vllm / skyrl_train / torchtitan
+    # ExpertParallel / boto3 import OK). baked harbor c872216e.
+    "@sha256:7bbc17b63bb89e785658f7b1cad119070d84152898a4b20ded13939218abf3e6"  # noqa: E501  (gpu-rl-f4f25bae, PULLABLE; harbor c872216e opencode literal bridge + boto3/smart_open deps)
+    # (prev: gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
