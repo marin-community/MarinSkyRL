@@ -76,6 +76,31 @@ no-build-isolation-package = [
 override-dependencies = [
     "transformer-engine-cu13 ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
+    # boto/s3 ecosystem (linux gpu-rl image only) — FORCE the runtime-validated combo. Overrides,
+    # not a plain pin, because the combo is METADATA-IMPOSSIBLE but RUNTIME-PROVEN: aiobotocore 3.7.0
+    # declares `botocore<1.43.1`, yet the validated images run botocore 1.43.48 against it. A normal
+    # resolve would walk botocore DOWN to <=1.43.0 to satisfy aiobotocore's bound — but botocore
+    # <1.43.40 LACKS `botocore.docs.utils.DocumentModifiedShape` (added between 1.43.30 and 1.43.40),
+    # so the cloud.iris controller-ingress bring-up sentinel
+    # `from botocore.docs.utils import DocumentModifiedShape` ImportErrors on all ranks (killed the
+    # tasktrove megatron RL launch keep1-v3). Versions are the EMPIRICAL `importlib.metadata` freeze
+    # of the validated images (throwaway iris CPU pods, 2026-07-18):
+    #   - botocore/boto3/s3transfer/aiobotocore = fullgate image `gpu-rl-e03896b7`@sha256:e8b48241 —
+    #     the exact set keep1-v5 force-installed via the --boto-pin band-aid: sentinel PASS + rank-0
+    #     s3 rendezvous PUT succeeded (fixed keep1-v4's `ClientArgsCreator.
+    #     compute_endpoint_resolver_builtin_defaults() missing 3 positional args` aiobotocore<->botocore skew).
+    #   - aiobotocore 3.7.0 + s3fs/fsspec 2026.4.0 also independently validated by the megatron image
+    #     `gpu-rl-megatron-d41bb73d`@sha256:aa0e83c2 that banked gs1 (east18 parity run).
+    # override-dependencies makes uv ignore every declared bound on these (aiobotocore's botocore cap,
+    # s3fs's fsspec cap, datasets' fsspec cap), so the endpoints pin directly WITHOUT walking the
+    # chain — datasets stays put (no datasets-5 / fsspec-2026 cascade). Marked linux because the RL
+    # env is only ever built on the linux/x86_64 gpu-rl image; Mac dev resolves boto normally.
+    "botocore==1.43.48 ; sys_platform == 'linux'",
+    "boto3==1.43.48 ; sys_platform == 'linux'",
+    "s3transfer==0.19.1 ; sys_platform == 'linux'",
+    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
+    "s3fs==2026.4.0 ; sys_platform == 'linux'",
+    "fsspec==2026.4.0 ; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
