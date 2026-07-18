@@ -1373,6 +1373,93 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
         return built
 
+    def _maybe_build_opencode_chat_history(
+        self,
+        result: "TrialResult",
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Reconstruct a CLI agent's (opencode's) chat_history from the shared proxy log.
+
+        ``_process_trial_result`` reads ``chat_history`` from
+        ``agent_result.metadata['all_messages']``, which ONLY the harbor terminus-2
+        agent sets (it drives harbor ``Chat``). opencode is a CLI agent that talks to
+        vLLM over its own transport and bypasses harbor ``Chat``, so it never populates
+        ``all_messages`` → the terminus path ``KeyError``\\ s and every opencode
+        trajectory is dropped with no logprobs (TIS then degrades to non-TIS on 100% of
+        the batch). We instead recover the served conversation from the SAME shared
+        RecordProxy log the sibling :meth:`_maybe_correlate_opencode_rollout_details`
+        uses, filtered by this trial's correlation id.
+
+        The reconstruction: take the LAST (latest-timestamp) matched request's
+        ``messages`` — opencode sends the FULL accumulated conversation as the prompt of
+        each call, so the final call carries every prior system/user/assistant/tool
+        message — and append the final turn's assistant completion (decoded from its
+        exact ``completion_token_ids``). The returned list is a standard
+        ``[{role, content}, ...]`` conversation; the caller feeds it through the same
+        prompt/response tokenization + per-turn logprob alignment as terminus. Alignment
+        is NOT trusted blindly: the exact-id path (``assistant_token_ids``) +
+        LCS-fallback + ``AlignmentStats`` downstream flag any per-turn mismatch as
+        ``tis/lcs_fallback_fraction`` rather than silently corrupting training.
+
+        Returns ``None`` (caller then drops the trajectory honestly, exactly as the
+        pre-existing ``KeyError`` branch did) when: rollout-detail collection is off, no
+        correlation id is present, no proxy-log path is published
+        (``OTAGENT_LITERAL_LOG_PATH``), no matching completion-bearing record exists, or
+        the recovered request carries no usable ``messages``. Never synthesizes content.
+        """
+        if not self._collect_rollout_details:
+            return None
+        agent_result = getattr(result, "agent_result", None)
+        metadata = getattr(agent_result, "metadata", None)
+        trial_id = metadata.get("rollout_correlation_id") if isinstance(metadata, dict) else None
+        if not trial_id:
+            return None
+        log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+        if not log_path:
+            return None
+        entries = self._load_literal_log_entries(log_path)
+        if not entries:
+            return None
+        # Same selection as build_rollout_details_for_trial (trial-scoped, status-200,
+        # completion-bearing) so chat_history and rollout_details are built from the
+        # IDENTICAL turn set — the final turn's completion becomes the last assistant
+        # message, keeping the two views consistent.
+        matched = [
+            e
+            for e in entries
+            if e.get("trial_id") == trial_id
+            and e.get("status_code") == 200
+            and isinstance(e.get("literal"), dict)
+            and e["literal"].get("completion_token_ids")
+        ]
+        if not matched:
+            return None
+        matched.sort(key=lambda e: e.get("timestamp") or 0.0)
+        last = matched[-1]
+        request = last.get("request")
+        base_messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(base_messages, list) or not base_messages:
+            return None
+        # Only keep well-formed {role, content} messages; opencode sends OpenAI-shaped
+        # messages, but guard against a malformed record rather than crash downstream.
+        chat_history: List[Dict[str, Any]] = [m for m in base_messages if isinstance(m, dict) and "role" in m]
+        if not chat_history:
+            return None
+        # Append the final turn's assistant message, decoded from its EXACT served
+        # completion ids (round-trips to the same ids the exact-alignment path consumes).
+        final_completion_ids = last["literal"].get("completion_token_ids") or []
+        final_text = ""
+        if final_completion_ids:
+            try:
+                final_text = self.tokenizer.decode(final_completion_ids, skip_special_tokens=True)
+            except Exception:
+                final_text = ""
+        chat_history.append({"role": "assistant", "content": final_text})
+        logger.info(
+            f"[literal-bridge] reconstructed opencode chat_history for trial {trial_id}: "
+            f"{len(chat_history)} message(s) from the shared proxy log"
+        )
+        return chat_history
+
     def _process_trial_result(
         self,
         result: TrialResult | Exception,
@@ -1526,8 +1613,24 @@ class TerminalBenchGenerator(GeneratorInterface):
         # extracted exactly like a successful trial.
         try:
             original_reward = 0.0 if preserve_timeout else result.verifier_result.rewards["reward"]
-            chat_history = result.agent_result.metadata["all_messages"]
-            summarization_count = result.agent_result.metadata["summarization_count"]
+            metadata = result.agent_result.metadata
+            # terminus (harbor Chat) publishes the conversation on
+            # metadata['all_messages']; opencode (a CLI agent that bypasses harbor Chat)
+            # does not, so for it we recover chat_history from the shared RecordProxy
+            # log by correlation id (the SAME source as the per-turn logprobs below).
+            # Branch on all_messages PRESENCE, not agent name, so the terminus path
+            # stays byte-identical and any future Chat-driven agent keeps working.
+            if isinstance(metadata, dict) and "all_messages" not in metadata:
+                chat_history = self._maybe_build_opencode_chat_history(result)
+                if not chat_history:
+                    # No recoverable conversation → drop the trajectory honestly,
+                    # exactly as the pre-existing KeyError branch did (no silent
+                    # fabrication; TIS flags the trial via the missing-logprobs gate).
+                    raise KeyError("all_messages")
+                summarization_count = metadata.get("summarization_count", 0)
+            else:
+                chat_history = metadata["all_messages"]
+                summarization_count = metadata["summarization_count"]
         except (KeyError, AttributeError, TypeError) as e:
             # Data extraction failure is typically an infrastructure issue
             exception_type = type(e).__name__

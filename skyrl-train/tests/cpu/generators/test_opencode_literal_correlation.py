@@ -148,3 +148,114 @@ def test_load_entries_caches_by_size(tmp_path):
     second = s._load_literal_log_entries(p)
     assert first == second and len(first) == 1
     assert getattr(s, "_literal_log_cache")[0][0] == p
+
+
+# --- opencode chat_history reconstruction (feeds _process_trial_result) ---------
+
+_build_chat = TerminalBenchGenerator._maybe_build_opencode_chat_history
+
+
+class _FakeTokenizer:
+    """Minimal tokenizer: decode ids -> a marker string (content is opaque to the
+    reconstruction; the exact-id alignment path consumes the raw ids, not this text)."""
+
+    def decode(self, ids, skip_special_tokens=True):  # noqa: D401
+        return "assistant-final:" + ",".join(str(i) for i in ids)
+
+
+def _chat_self(collect=True, tokenizer=None):
+    s = types.SimpleNamespace(_collect_rollout_details=collect, tokenizer=tokenizer or _FakeTokenizer())
+    s._load_literal_log_entries = types.MethodType(_load, s)
+    return s
+
+
+def _entry_msgs(trial_id, ts, messages, cids):
+    """A shared-log entry with an explicit request.messages + a completion turn."""
+    return {
+        "timestamp": ts,
+        "status_code": 200,
+        "trial_id": trial_id,
+        "request": {"messages": messages},
+        "literal": {"prompt_token_ids": [1], "completion_token_ids": cids, "logprobs": [-0.1] * len(cids)},
+    }
+
+
+def test_chat_history_uses_last_request_plus_decoded_final_completion(tmp_path, monkeypatch):
+    # Two turns of a growing conversation; the LAST request carries the full prior
+    # context, and we append the final turn's decoded completion as the last assistant.
+    convo_t1 = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "solve X"},
+    ]
+    convo_t2 = convo_t1 + [
+        {"role": "assistant", "content": "turn-1 answer"},
+        {"role": "user", "content": "tool result"},
+    ]
+    entries = [
+        _entry_msgs("A", 1.0, convo_t1, [10, 11]),
+        _entry_msgs("A", 2.0, convo_t2, [20, 21]),
+    ]
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+    ch = _build_chat(_chat_self(), _result("A"))
+    # base = last request's messages (the full convo) + appended final assistant.
+    assert ch[:-1] == convo_t2
+    assert ch[-1] == {"role": "assistant", "content": "assistant-final:20,21"}
+
+
+def test_chat_history_single_turn(tmp_path, monkeypatch):
+    msgs = [{"role": "user", "content": "one-shot task"}]
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [_entry_msgs("A", 1.0, msgs, [7, 8, 9])]))
+    ch = _build_chat(_chat_self(), _result("A"))
+    assert ch == msgs + [{"role": "assistant", "content": "assistant-final:7,8,9"}]
+
+
+def test_chat_history_none_when_flag_off(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OTAGENT_LITERAL_LOG_PATH",
+        _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
+    )
+    assert _build_chat(_chat_self(collect=False), _result("A")) is None
+
+
+def test_chat_history_none_when_no_correlation_id(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OTAGENT_LITERAL_LOG_PATH",
+        _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
+    )
+    assert _build_chat(_chat_self(), _result(None)) is None
+
+
+def test_chat_history_none_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    assert _build_chat(_chat_self(), _result("A")) is None
+
+
+def test_chat_history_none_when_trial_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OTAGENT_LITERAL_LOG_PATH",
+        _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
+    )
+    assert _build_chat(_chat_self(), _result("Z")) is None
+
+
+def test_chat_history_none_when_no_completion_bearing_record(tmp_path, monkeypatch):
+    # status 200 but empty completion -> not a usable turn -> None (honest drop).
+    e = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [])
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
+    assert _build_chat(_chat_self(), _result("A")) is None
+
+
+def test_chat_history_none_when_request_has_no_messages(tmp_path, monkeypatch):
+    e = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])
+    e["request"] = {}  # malformed: no messages
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
+    assert _build_chat(_chat_self(), _result("A")) is None
+
+
+def test_chat_history_picks_latest_timestamp_regardless_of_order(tmp_path, monkeypatch):
+    # Entries out of order in the file; the LATEST timestamp must be the base.
+    early = _entry_msgs("A", 1.0, [{"role": "user", "content": "early"}], [1])
+    late = _entry_msgs("A", 9.0, [{"role": "user", "content": "late"}], [2])
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [late, early]))
+    ch = _build_chat(_chat_self(), _result("A"))
+    assert ch[0] == {"role": "user", "content": "late"}
