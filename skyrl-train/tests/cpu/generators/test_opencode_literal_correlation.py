@@ -36,23 +36,23 @@ except ImportError:
     pytest.skip("harbor without the literal rollout_build bridge", allow_module_level=True)
 
 
+# The incremental reader itself is unit-tested standalone in test_literal_log_store.py
+# (no harbor dependency). Here we only exercise the harbor-facing correlation +
+# chat_history helpers, injecting a real store exactly as TerminalBenchGenerator.__init__
+# does — the reader is a collaborator, not a bound method on the fake self.
+from terminal_bench.literal_log_store import LiteralLogStore  # noqa: E402
+
 _correlate = TerminalBenchGenerator._maybe_correlate_opencode_rollout_details
-_load = TerminalBenchGenerator._load_literal_log_entries
-_load_for_trial = TerminalBenchGenerator._literal_log_entries_for_trial
-_ensure_loaded = TerminalBenchGenerator._ensure_literal_log_loaded
 
 
-def _bind_log_methods(s):
-    """Bind the incremental log reader + per-trial index accessor onto a fake self."""
-    s._ensure_literal_log_loaded = types.MethodType(_ensure_loaded, s)
-    s._load_literal_log_entries = types.MethodType(_load, s)
-    s._literal_log_entries_for_trial = types.MethodType(_load_for_trial, s)
+def _attach_store(s):
+    s._literal_log_store = LiteralLogStore()
     return s
 
 
 def _fake_self(collect=True, literal_log_path=None):
     s = types.SimpleNamespace(_collect_rollout_details=collect, _literal_log_path=literal_log_path)
-    return _bind_log_methods(s)
+    return _attach_store(s)
 
 
 def _result(trial_id, rollout_details=None):
@@ -149,71 +149,6 @@ def test_noop_when_trial_absent_from_log(tmp_path, monkeypatch):
     assert _correlate(_fake_self(), _result("Z"), None) is None
 
 
-def test_load_entries_incremental_appends_without_reparse(tmp_path):
-    """The append-only log is read incrementally: a second call after new lines are
-    appended returns ALL entries, and the byte offset advances (no whole-file re-parse)."""
-    p = _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])])
-    s = _fake_self()
-    first = s._load_literal_log_entries(p)
-    assert len(first) == 1
-    off1 = s._literal_log_state["offset"]
-    assert off1 == os.path.getsize(p)
-    # append a new line, re-read: incremental pickup, offset advances.
-    with open(p, "a") as fh:
-        fh.write(json.dumps(_entry("A", 2.0, [1, 10], [11], [-0.3])) + "\n")
-    second = s._load_literal_log_entries(p)
-    assert len(second) == 2
-    assert s._literal_log_state["offset"] == os.path.getsize(p) > off1
-    # entries accumulate in place (same list object extended, not rebuilt).
-    assert second[0]["literal"]["completion_token_ids"] == [10]
-    assert second[1]["literal"]["completion_token_ids"] == [11]
-
-
-def test_per_trial_index_matches_full_scan(tmp_path):
-    """_literal_log_entries_for_trial returns exactly the trial-scoped subset that a
-    full-scan filter on _load_literal_log_entries would (semantics preserved for #37/#38)."""
-    entries = [
-        _entry("A", 1.0, [1], [10], [-0.1]),
-        _entry("B", 1.1, [1], [20], [-0.2]),
-        _entry("A", 2.0, [1, 10], [11], [-0.3]),
-        _entry("B", 2.1, [1, 20], [21], [-0.4]),
-    ]
-    p = _write_log(tmp_path, entries)
-    s = _fake_self()
-    all_entries = s._load_literal_log_entries(p)
-    for tid in ("A", "B", "Z"):
-        idx = s._literal_log_entries_for_trial(p, tid)
-        full = [e for e in all_entries if e.get("trial_id") == tid]
-        assert idx == full
-    assert [e["literal"]["completion_token_ids"] for e in s._literal_log_entries_for_trial(p, "A")] == [[10], [11]]
-
-
-def test_load_entries_handles_partial_trailing_line(tmp_path):
-    """A line split across reads (append mid-line) is carried as a partial and parsed
-    only once complete — never dropped, never double-counted."""
-    p = tmp_path / "literal.jsonl"
-    full = json.dumps(_entry("A", 1.0, [1], [10], [-0.1]))
-    half = len(full) // 2
-    p.write_text(full[:half])  # incomplete line, no newline
-    s = _fake_self()
-    assert s._load_literal_log_entries(p) == []  # nothing complete yet
-    with open(p, "a") as fh:
-        fh.write(full[half:] + "\n")  # complete the line
-    out = s._load_literal_log_entries(p)
-    assert len(out) == 1 and out[0]["trial_id"] == "A"
-
-
-def test_rotation_resets_offset(tmp_path):
-    """A shrink (preempt-resume writes a fresh token-suffixed log at the same path) resets
-    the reader instead of returning stale/garbled state."""
-    p = _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1]), _entry("A", 2.0, [1], [11], [-0.2])])
-    s = _fake_self()
-    assert len(s._load_literal_log_entries(p)) == 2
-    _write_log(tmp_path, [_entry("A", 9.0, [1], [99], [-0.9])])  # rewrite smaller
-    out = s._load_literal_log_entries(p)
-    assert len(out) == 1 and out[0]["literal"]["completion_token_ids"] == [99]
-
-
 # --- opencode chat_history reconstruction (feeds _process_trial_result) ---------
 
 _build_chat = TerminalBenchGenerator._maybe_build_opencode_chat_history
@@ -233,7 +168,7 @@ def _chat_self(collect=True, tokenizer=None, literal_log_path=None):
         tokenizer=tokenizer or _FakeTokenizer(),
         _literal_log_path=literal_log_path,
     )
-    return _bind_log_methods(s)
+    return _attach_store(s)
 
 
 def test_chat_history_resolves_log_from_cfg_path_when_env_unset(tmp_path, monkeypatch):
