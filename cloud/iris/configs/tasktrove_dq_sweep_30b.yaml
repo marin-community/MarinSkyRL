@@ -68,7 +68,14 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    n_concurrent_trials: 288
+    # TUNED 288 -> 32 (canary v4 throughput fix). At 131k/30B the vLLM engine has only
+    # max_num_seqs=24 KV slots; 288 concurrent multi-turn opencode trials queued ~1000
+    # requests (Running:24 / Waiting:976, flat) so per-turn calls waited behind a
+    # 976-deep queue -> 0 episodes completed in 80 min. 32 (~= KV capacity + a small
+    # margin for trials in sandbox-exec/verify not calling the model) lets trials
+    # actually COMPLETE. ⚠ keep-6 math: 6 x 32 = 192 concurrent Daytona sandboxes — must
+    # fit the RL org cap (288 mostly created OK, so 192 is safe-ish; re-check at fill).
+    n_concurrent_trials: 32
 
     log_level: INFO
 
