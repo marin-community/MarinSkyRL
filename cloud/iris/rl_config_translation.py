@@ -443,7 +443,13 @@ def build_skyrl_hydra_args(
     # Build args for each section. Keys under these patterns may not exist in
     # SkyRL's base config, so use the ++ prefix (add-or-override):
     #   engine_init_kwargs, hf_hub_*, enable_db_registration, optimizer_kwargs,
-    #   rope_scaling, wrap_policy.
+    #   rope_scaling, wrap_policy, transformer_config_kwargs.
+    # transformer_config_kwargs is a passthrough to Megatron's TransformerConfig
+    # (megatron_worker setattr's each subkey), so it may carry keys NOT declared in the
+    # base preset (e.g. gradient_accumulation_fusion). On megatron-bridge 0.5.0 (#33/#34)
+    # that node became a strict struct, so a plain "" override of a new subkey fails
+    # ("Could not override ...transformer_config_kwargs.gradient_accumulation_fusion");
+    # ++ force-adds the leaf while leaving the preset's other subkeys (recompute_*) intact.
     optional_patterns = {
         ".engine_init_kwargs",
         ".hf_hub_",
@@ -451,6 +457,7 @@ def build_skyrl_hydra_args(
         ".optimizer_kwargs",
         ".rope_scaling",
         ".wrap_policy",
+        ".transformer_config_kwargs",
     }
 
     for section, values in [("trainer", trainer), ("generator", generator), ("data", data)]:
