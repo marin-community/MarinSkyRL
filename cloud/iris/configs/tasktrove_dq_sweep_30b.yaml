@@ -27,17 +27,24 @@ terminal_bench:
     # are DROPPED (enable_summarize / strict_json_parser / interleaved_thinking /
     # enable_pane_logging + their companions store_all_messages / trajectory_config /
     # extra_body / record_terminal_session / enable_episode_logging / upload_agent_logs):
-    # opencode bypasses harbor Chat and drives thinking + compaction from its own
-    # config below, so those keys are no-ops (or terminus-only) for it.
+    # opencode bypasses harbor Chat and drives thinking from its own config, so those
+    # keys are no-ops (or terminus-only) for it. (Auto-compaction is intentionally OFF
+    # — see opencode_config below.)
     name: opencode
     # Pin opencode 1.18.2 — the version that forwards the per-trial correlation header
     # the literal bridge needs (older 1.0.x drops provider options; opencode #5674).
     version: "1.18.2"
-    opencode_config:
-      # opencode-internal auto-compaction (distinct from terminus-2 enable_summarize).
-      compaction:
-        auto: true
-        reserved: 16384
+    # opencode_config EMPTY — datagen/train/eval PARITY (matches the successful 131k
+    # datagen campaign hpc/harbor_yaml/datagen/opencode_ctx131k.yaml, which produced the
+    # SFT traces these models were trained on). ⚠ DELIBERATE POLICY §3 DEVIATION: POLICY
+    # mandated compaction {auto:true, reserved:16384}, but auto-compaction is NON-VIABLE
+    # on -Thinking- models — the summary turn emits a tool call and opencode fatally
+    # rejects it (`Tool call not allowed while generating summary`) → NonZeroAgentExit →
+    # reward 0 (~100% of long trajectories; proven on the TACC eval legs). Prompts are
+    # still bounded by opencode's limit.context sliding window (harbor PR #11), so trials
+    # don't overflow. Revert only after an opencode-internal fix allows summary-turn tool
+    # calls. Same fix applied to the eval path (OT-Agent e764bf12).
+    opencode_config: {}
     override_setup_timeout_sec: 600  # opencode installs via nvm + npm at setup
     override_timeout_sec: 1800
 
