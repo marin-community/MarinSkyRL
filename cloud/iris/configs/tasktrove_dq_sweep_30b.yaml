@@ -99,10 +99,12 @@ terminal_bench:
     enabled: false
 
   trace_upload:
-    # DQ probe sweep: the per-dataset signal comes from wandb metrics + the s3 trace_jobs,
-    # not HF-uploaded SFT traces — disabled to avoid 114x HF uploads. Flip to true if the
-    # operator wants last-episode SFT traces banked to DCAgent.
-    enabled: false
+    # RE-ENABLED (2026-07-18): failure-inspectability during bring-up debugging (the
+    # sandbox opencode.txt is the authoritative signal for opencode NonZeroAgentExit),
+    # AND the DQ sweep wants the per-dataset traces for the readout. Uploads last-episode
+    # traces to DCAgent (public). (Was briefly disabled as a DQ-probe economy — reversed
+    # because it blocked the exact debug signal we needed on canary v3.)
+    enabled: true
     repo_org: DCAgent
     episodes: last
     dataset_type: SFT
@@ -288,6 +290,17 @@ generator:
     disable_custom_all_reduce: true
     enable_return_routed_experts: true
     async_scheduling: false
+    # opencode drives the policy as a tool-using agent (tool_choice:"auto"). Without
+    # tool-calling enabled the engine returns '"auto" tool choice requires
+    # --enable-auto-tool-choice and --tool-call-parser', opencode exits 1, and every
+    # rollout is a NonZeroAgentExitCodeError at reward 0 (canary v3 — 133x). The base
+    # terminus-2 30B config omits these (they were only in the 8B opencode smoke); they
+    # map via pop_openai_kwargs() to OpenAIServingChat's enable_auto_tools/tool_parser
+    # (raw token_ids for TIS/TITO literal-recording unaffected). hermes = the Qwen3
+    # <tool_call>…</tool_call> format for the dense/THINKING family (our model is
+    # Qwen3-30B-A3B-Thinking-2507, NOT Qwen3-Coder → hermes, not qwen3_coder).
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
 
 data:
   train_data: []
