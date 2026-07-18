@@ -144,7 +144,15 @@ trainer:
 
   max_prompt_length: 999999
 
-  use_sample_packing: true
+  # ⚠ FORCED FSDP2 DEVIATION (was true, the #32 default): use_sample_packing asserts
+  # flash_attention_2 on the FSDP2 policy worker (FSDPPolicyWorkerBase.init_model:
+  # "Flash attention 2 should be used for use_sample_packing"), which is MUTUALLY
+  # EXCLUSIVE with this config's load-bearing sdpa attn path — attn_backend: sdpa +
+  # flash_attn: false + cp_style: ring_sdpa, mandated for the 131k / DCP=2 long-context
+  # geometry (CP forces sdpa/flex, rejects flash varlen — marinskyrl.md). Sample-packing
+  # is a throughput opt, semantically fine to omit for a DQ probe. (Doesn't affect the
+  # megatron base — the assertion is FSDP2-only; #32's default stands there.)
+  use_sample_packing: false
 
   eval_interval: 999999
   eval_before_train: false
