@@ -21,29 +21,23 @@ terminal_bench:
   trials_dir: s3://marin-us-east-02a/iris/tasktrove-dq-sweep-30b/trace_jobs
 
   harbor:
-    # opencode: harbor's literal-token-capable CLI agent (the literal path validated
-    # GREEN end-to-end on fullgate15). Reaches vLLM via the controller-ingress
-    # capability URL (HARBOR_MODEL_ENDPOINT). Per POLICY §4 the terminus-2-only keys
-    # are DROPPED (enable_summarize / strict_json_parser / interleaved_thinking /
-    # enable_pane_logging + their companions store_all_messages / trajectory_config /
-    # extra_body / record_terminal_session / enable_episode_logging / upload_agent_logs):
-    # opencode bypasses harbor Chat and drives thinking from its own config, so those
-    # keys are no-ops (or terminus-only) for it. (Auto-compaction is intentionally OFF
-    # — see opencode_config below.)
+    # opencode: harbor's literal-token-capable CLI agent (literal path validated GREEN
+    # on fullgate15). Per POLICY §4 the terminus-2-only keys are DROPPED (enable_summarize
+    # / strict_json_parser / interleaved_thinking / enable_pane_logging + companions
+    # store_all_messages / trajectory_config / extra_body / record_terminal_session /
+    # enable_episode_logging / upload_agent_logs): opencode bypasses harbor Chat and
+    # drives thinking from its own config, so those are no-ops (or terminus-only) for it.
     name: opencode
-    # Pin opencode 1.18.2 — the version that forwards the per-trial correlation header
-    # the literal bridge needs (older 1.0.x drops provider options; opencode #5674).
+    # Pin opencode 1.18.2 — forwards the per-trial correlation header the literal bridge
+    # needs (older 1.0.x drops provider options; opencode #5674).
     version: "1.18.2"
-    # opencode_config EMPTY — datagen/train/eval PARITY (matches the successful 131k
-    # datagen campaign hpc/harbor_yaml/datagen/opencode_ctx131k.yaml, which produced the
-    # SFT traces these models were trained on). ⚠ DELIBERATE POLICY §3 DEVIATION: POLICY
-    # mandated compaction {auto:true, reserved:16384}, but auto-compaction is NON-VIABLE
-    # on -Thinking- models — the summary turn emits a tool call and opencode fatally
-    # rejects it (`Tool call not allowed while generating summary`) → NonZeroAgentExit →
-    # reward 0 (~100% of long trajectories; proven on the TACC eval legs). Prompts are
-    # still bounded by opencode's limit.context sliding window (harbor PR #11), so trials
-    # don't overflow. Revert only after an opencode-internal fix allows summary-turn tool
-    # calls. Same fix applied to the eval path (OT-Agent e764bf12).
+    # opencode_config EMPTY — compaction OFF. ⚠ FORCED deviation (POLICY §3 mandated
+    # compaction): auto-compaction crashes -Thinking- models (the summary turn emits a
+    # tool call, opencode fatally rejects it: `Tool call not allowed while generating
+    # summary`) → NonZeroAgentExit → reward 0. This is a MODEL/harness issue independent
+    # of the trainer backend. Matches datagen parity (hpc/harbor_yaml/datagen/
+    # opencode_ctx131k.yaml:66 empty; eval fixed same way, OT-Agent e764bf12). Prompts
+    # stay bounded by opencode's limit.context sliding window (harbor #11).
     opencode_config: {}
     override_setup_timeout_sec: 600  # opencode installs via nvm + npm at setup
     override_timeout_sec: 1800
@@ -68,14 +62,7 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    # TUNED 288 -> 32 (canary v4 throughput fix). At 131k/30B the vLLM engine has only
-    # max_num_seqs=24 KV slots; 288 concurrent multi-turn opencode trials queued ~1000
-    # requests (Running:24 / Waiting:976, flat) so per-turn calls waited behind a
-    # 976-deep queue -> 0 episodes completed in 80 min. 32 (~= KV capacity + a small
-    # margin for trials in sandbox-exec/verify not calling the model) lets trials
-    # actually COMPLETE. ⚠ keep-6 math: 6 x 32 = 192 concurrent Daytona sandboxes — must
-    # fit the RL org cap (288 mostly created OK, so 192 is safe-ish; re-check at fill).
-    n_concurrent_trials: 32
+    n_concurrent_trials: 288
 
     log_level: INFO
 
@@ -106,11 +93,6 @@ terminal_bench:
     enabled: false
 
   trace_upload:
-    # RE-ENABLED (2026-07-18): failure-inspectability during bring-up debugging (the
-    # sandbox opencode.txt is the authoritative signal for opencode NonZeroAgentExit),
-    # AND the DQ sweep wants the per-dataset traces for the readout. Uploads last-episode
-    # traces to DCAgent (public). (Was briefly disabled as a DQ-probe economy — reversed
-    # because it blocked the exact debug signal we needed on canary v3.)
     enabled: true
     repo_org: DCAgent
     episodes: last
@@ -118,12 +100,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
-  # ⚠ POLICY §4: this sweep MUST stay FSDP2. The base is now megatron (#36), but the
-  # opencode literal-rollout path is validated only on FSDP2, and this runs to 80 steps
-  # where megatron hit the gs2 recover_left_padding CUDA-OOM. The fsdp_config EP blocks
-  # below are retained; megatron_config is kept (ignored on fsdp2) for an easy backend
-  # switch once megatron banks gs3 on the opencode-literal path.
-  strategy: fsdp2
+  strategy: megatron
   attn_backend: sdpa
   flash_attn: false
   gradient_checkpointing: true
@@ -153,15 +130,7 @@ trainer:
 
   max_prompt_length: 999999
 
-  # ⚠ FORCED FSDP2 DEVIATION (was true, the #32 default): use_sample_packing asserts
-  # flash_attention_2 on the FSDP2 policy worker (FSDPPolicyWorkerBase.init_model:
-  # "Flash attention 2 should be used for use_sample_packing"), which is MUTUALLY
-  # EXCLUSIVE with this config's load-bearing sdpa attn path — attn_backend: sdpa +
-  # flash_attn: false + cp_style: ring_sdpa, mandated for the 131k / DCP=2 long-context
-  # geometry (CP forces sdpa/flex, rejects flash varlen — marinskyrl.md). Sample-packing
-  # is a throughput opt, semantically fine to omit for a DQ probe. (Doesn't affect the
-  # megatron base — the assertion is FSDP2-only; #32's default stands there.)
-  use_sample_packing: false
+  use_sample_packing: true
 
   eval_interval: 999999
   eval_before_train: false
@@ -297,15 +266,12 @@ generator:
     disable_custom_all_reduce: true
     enable_return_routed_experts: true
     async_scheduling: false
-    # opencode drives the policy as a tool-using agent (tool_choice:"auto"). Without
-    # tool-calling enabled the engine returns '"auto" tool choice requires
-    # --enable-auto-tool-choice and --tool-call-parser', opencode exits 1, and every
-    # rollout is a NonZeroAgentExitCodeError at reward 0 (canary v3 — 133x). The base
-    # terminus-2 30B config omits these (they were only in the 8B opencode smoke); they
-    # map via pop_openai_kwargs() to OpenAIServingChat's enable_auto_tools/tool_parser
-    # (raw token_ids for TIS/TITO literal-recording unaffected). hermes = the Qwen3
-    # <tool_call>…</tool_call> format for the dense/THINKING family (our model is
-    # Qwen3-30B-A3B-Thinking-2507, NOT Qwen3-Coder → hermes, not qwen3_coder).
+    # opencode sends tool_choice:"auto"; without tool-calling enabled the engine returns
+    # '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser',
+    # opencode exits 1, every rollout = NonZeroAgentExit reward 0. The terminus-2 30B base
+    # omits these (added only to the 8B opencode smoke by #29). hermes = the Qwen3
+    # dense/THINKING <tool_call> format (our model is Qwen3-30B-A3B-Thinking-2507, NOT
+    # Qwen3-Coder → hermes, not qwen3_coder). Model/harness issue, backend-independent.
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 
