@@ -214,6 +214,20 @@ class TerminalBenchGenerator(GeneratorInterface):
                 "[terminal_bench] agent api_base <- %s (controller ingress)",
                 "terminal_bench_config.agent_api_base" if _cfg_endpoint else "HARBOR_MODEL_ENDPOINT",
             )
+        # Shared RecordProxy literal-log path, resolved cfg-FIRST then env-fallback for
+        # the SAME Ray process-boundary reason as agent_api_base above: run_rl publishes
+        # it on os.environ['OTAGENT_LITERAL_LOG_PATH'] in the driver, but THIS generator
+        # is constructed inside a Ray worker that never inherits that late env mutation,
+        # so the driver threads it through the cfg as terminal_bench_config.literal_log_path.
+        # None when record_literal is off / direct launch → the opencode correlation +
+        # chat_history recovery no-op exactly as before. Used by
+        # _maybe_correlate_opencode_rollout_details / _maybe_build_opencode_chat_history.
+        _cfg_literal_log = ""
+        try:
+            _cfg_literal_log = str(terminal_bench_cfg.get("literal_log_path", "") or "").strip()
+        except Exception:  # pragma: no cover - defensive: cfg may not be a mapping
+            _cfg_literal_log = ""
+        self._literal_log_path = _cfg_literal_log or os.environ.get("OTAGENT_LITERAL_LOG_PATH") or None
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
@@ -1349,7 +1363,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         trial_id = metadata.get("rollout_correlation_id") if isinstance(metadata, dict) else None
         if not trial_id:
             return rollout_details
-        log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+        # cfg-threaded path (Ray-boundary-safe) with an env fallback for direct launches.
+        log_path = self._literal_log_path or os.environ.get("OTAGENT_LITERAL_LOG_PATH")
         if not log_path:
             return rollout_details
         entries = self._load_literal_log_entries(log_path)
@@ -1413,7 +1428,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         trial_id = metadata.get("rollout_correlation_id") if isinstance(metadata, dict) else None
         if not trial_id:
             return None
-        log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+        # cfg-threaded path (Ray-boundary-safe) with an env fallback for direct launches.
+        log_path = self._literal_log_path or os.environ.get("OTAGENT_LITERAL_LOG_PATH")
         if not log_path:
             return None
         entries = self._load_literal_log_entries(log_path)

@@ -40,8 +40,8 @@ _correlate = TerminalBenchGenerator._maybe_correlate_opencode_rollout_details
 _load = TerminalBenchGenerator._load_literal_log_entries
 
 
-def _fake_self(collect=True):
-    s = types.SimpleNamespace(_collect_rollout_details=collect)
+def _fake_self(collect=True, literal_log_path=None):
+    s = types.SimpleNamespace(_collect_rollout_details=collect, _literal_log_path=literal_log_path)
     # bind the log loader so the correlate helper can call self._load_literal_log_entries
     s._load_literal_log_entries = types.MethodType(_load, s)
     return s
@@ -163,10 +163,31 @@ class _FakeTokenizer:
         return "assistant-final:" + ",".join(str(i) for i in ids)
 
 
-def _chat_self(collect=True, tokenizer=None):
-    s = types.SimpleNamespace(_collect_rollout_details=collect, tokenizer=tokenizer or _FakeTokenizer())
+def _chat_self(collect=True, tokenizer=None, literal_log_path=None):
+    s = types.SimpleNamespace(
+        _collect_rollout_details=collect,
+        tokenizer=tokenizer or _FakeTokenizer(),
+        _literal_log_path=literal_log_path,
+    )
     s._load_literal_log_entries = types.MethodType(_load, s)
     return s
+
+
+def test_chat_history_resolves_log_from_cfg_path_when_env_unset(tmp_path, monkeypatch):
+    """The Ray-boundary fix: the log path is threaded via cfg (self._literal_log_path);
+    the helper must resolve it even when OTAGENT_LITERAL_LOG_PATH is absent from the
+    worker env (which is exactly what broke fullgate14 → tis/skipped_fraction=1.0)."""
+    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    log = _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "task"}], [5, 6])])
+    ch = _build_chat(_chat_self(literal_log_path=log), _result("A"))
+    assert ch == [{"role": "user", "content": "task"}, {"role": "assistant", "content": "assistant-final:5,6"}]
+
+
+def test_correlate_resolves_log_from_cfg_path_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    log = _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])])
+    out = _correlate(_fake_self(literal_log_path=log), _result("A"), None)
+    assert out[0]["completion_token_ids"] == [[10]]
 
 
 def _entry_msgs(trial_id, ts, messages, cids):

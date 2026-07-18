@@ -89,6 +89,15 @@ class LocalRLRunner:
         # .remote() boundary as DATA — os.environ mutations here do NOT reach the
         # pre-existing Ray workers where TerminalBenchGenerator is constructed.
         self._minted_agent_api_base: str | None = None
+        # Set by _ingress_context when record_literal stands up the co-located
+        # RecordProxy. Threaded into the SkyRL Hydra cfg (see run()) for the SAME
+        # process-boundary reason as _minted_agent_api_base: literal_proxy_utils
+        # publishes the log path via os.environ["OTAGENT_LITERAL_LOG_PATH"] in THIS
+        # driver, but the generator (which reads it to correlate opencode rollout
+        # details / rebuild chat_history) runs in a pre-existing Ray worker that never
+        # inherits this env → without the cfg thread every opencode trajectory loses
+        # its logprobs and TIS degrades on 100% of the batch.
+        self._literal_log_path: str | None = None
 
     def setup(self) -> None:
         """Validate configuration and set up directories."""
@@ -197,6 +206,13 @@ class LocalRLRunner:
             # existing design (one api_base string baked for the job's lifetime).
             if self._minted_agent_api_base:
                 hydra_args = hydra_args + [f"++terminal_bench_config.agent_api_base={self._minted_agent_api_base}"]
+            # Thread the RecordProxy log path as cfg DATA too (same Ray boundary): the
+            # generator resolves the shared literal log from
+            # terminal_bench_config.literal_log_path (env fallback) to correlate each
+            # opencode trial's token_ids/logprobs + rebuild its chat_history. Without
+            # this the worker's os.environ lacks the path and TIS skips 100% of the batch.
+            if self._literal_log_path:
+                hydra_args = hydra_args + [f"++terminal_bench_config.literal_log_path={self._literal_log_path}"]
             return self._run_skyrl(parsed.entrypoint, hydra_args)
 
     @contextlib.contextmanager
@@ -296,6 +312,11 @@ class LocalRLRunner:
                 # mint, so its workers never inherit HARBOR_MODEL_ENDPOINT from this process
                 # and the generator would fall back to the pod-local (unreachable) vLLM URL.
                 self._minted_agent_api_base = api_base
+                # Capture the RecordProxy log path that maybe_serve_literal_proxy just
+                # published on os.environ, to thread it into the cfg alongside
+                # agent_api_base (same Ray process-boundary — see run()). None when
+                # record_literal is off (null CM), keeping the direct path byte-identical.
+                self._literal_log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
                 injected = inject_ingress_agent_key()
                 print(
                     f"[run_rl] ingress_mode=controller record_literal="
