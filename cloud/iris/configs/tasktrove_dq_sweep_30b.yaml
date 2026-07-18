@@ -168,6 +168,15 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
+      # ⚠ The fresh megatron image (gpu-rl-megatron-98f4dfe0) lacks APEX's
+      # fused_weight_gradient_mlp_cuda ext (APEX not built --cpp_ext --cuda_ext), so
+      # gradient_accumulation_fusion=True crashes at init_model (keep1-v5:
+      # "fused_weight_gradient_mlp_cuda is not found"). Disable the fusion — the sanctioned
+      # fallback the error names; gradients are IDENTICAL (just unfused, minor perf), fine
+      # for a DQ probe. Deep-merges onto the preset's transformer_config_kwargs (recompute_*
+      # preserved). DURABLE fix: rebuild the image with APEX --cpp_ext --cuda_ext.
+      transformer_config_kwargs:
+        gradient_accumulation_fusion: false
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
@@ -190,6 +199,10 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
+      # Same APEX-fusion fallback as policy (see above) — the ref forward also builds a
+      # Megatron module and hits the missing fused_weight_gradient_mlp_cuda without it.
+      transformer_config_kwargs:
+        gradient_accumulation_fusion: false
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
