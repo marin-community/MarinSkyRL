@@ -1669,6 +1669,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Try the vLLM >= 0.20.2rc0 render API first, then newer (>=0.13, no
         # model_config), then legacy (<0.13, with model_config).
         if openai_serving_render is not None:
+            # ``enable_auto_tools``/``tool_parser`` were popped from ``openai_kwargs``
+            # above and passed to the RENDER object, but the render API's
+            # OpenAIServingChat STILL gates tool-call parsing on its OWN
+            # ``self.enable_auto_tools``/``self.tool_parser`` (see
+            # ``_should_stream_with_auto_tool_parsing``). Without them here they default
+            # to False/None, so an opencode/agentic request with tools has its
+            # well-formed ``<tool_call>`` output returned as plain CONTENT (never parsed
+            # into ``tool_calls``) -> the agent executes nothing (tool_use=0). Pass them
+            # to OpenAIServingChat too so the auto-tool path actually engages.
             self.openai_serving_chat = OpenAIServingChat(
                 engine_client=engine,
                 models=models,
@@ -1677,6 +1686,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request_logger=None,
                 chat_template=custom_chat_template_content,
                 chat_template_content_format="auto",
+                enable_auto_tools=enable_auto_tools,
+                tool_parser=tool_parser,
                 **openai_kwargs,
             )
         else:
