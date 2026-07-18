@@ -1,8 +1,6 @@
 import asyncio
-import json
 import logging
 import os
-import threading
 import re
 import time
 from collections import deque
@@ -46,6 +44,9 @@ from harbor.models.trial.result import TrialResult
 
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder
+
+# Incremental, trial-indexed reader for the shared opencode literal log.
+from examples.terminal_bench.literal_log_store import LiteralLogStore
 
 # Maximum restart attempts for orchestrator recovery
 MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
@@ -229,6 +230,9 @@ class TerminalBenchGenerator(GeneratorInterface):
         except Exception:  # pragma: no cover - defensive: cfg may not be a mapping
             _cfg_literal_log = ""
         self._literal_log_path = _cfg_literal_log or os.environ.get("OTAGENT_LITERAL_LOG_PATH") or None
+        # Incremental, trial-indexed reader over that shared log (owns its own lock +
+        # typed cursor state). Read-only; the writer is the external harbor RecordProxy.
+        self._literal_log_store = LiteralLogStore()
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
@@ -1305,82 +1309,6 @@ class TerminalBenchGenerator(GeneratorInterface):
             return False
         return bool(main.get("logprobs"))
 
-    def _ensure_literal_log_loaded(self, log_path: str) -> None:
-        """Incrementally parse newly-appended lines of the shared RecordProxy literal log.
-
-        The log is append-only and GROWS throughout generation, so the old (path, size)
-        cache missed on almost every call and re-``json.loads``-ed the WHOLE file — and
-        ``_process_trial_result`` reads it TWICE per trial
-        (_maybe_correlate_opencode_rollout_details + _maybe_build_opencode_chat_history)
-        across up to ``n_concurrent_trials`` trials. At scale (a 10s-of-MB growing log ×
-        hundreds of concurrent trials) that O(trials · logsize) re-parse holds the GIL on
-        the RolloutCoordinator's event loop and stalls result draining (the Waiting≫Running
-        backlog). Here we seek to the last byte offset, parse ONLY the newly-appended
-        bytes, and extend a persistent entries list + a ``{trial_id: [entries]}`` index —
-        steady-state cost O(new bytes); per-trial lookup O(that trial's entries).
-        Thread-guarded so concurrent trial-processing can't corrupt the incremental state.
-        """
-        lock = self.__dict__.setdefault("_literal_log_lock", threading.Lock())
-        with lock:
-            st = getattr(self, "_literal_log_state", None)
-            if st is None or st["path"] != log_path:
-                st = {"path": log_path, "offset": 0, "partial": b"", "entries": [], "by_trial": {}}
-                self._literal_log_state = st
-            try:
-                size = os.stat(log_path).st_size
-            except OSError:
-                return
-            # A shrink means the file rotated (a preempt-resume serve writes a new
-            # token-suffixed log); reset and re-read from the start.
-            if size < st["offset"]:
-                st = {"path": log_path, "offset": 0, "partial": b"", "entries": [], "by_trial": {}}
-                self._literal_log_state = st
-            if size <= st["offset"]:
-                return
-            try:
-                with open(log_path, "rb") as fh:
-                    fh.seek(st["offset"])
-                    chunk = fh.read()
-            except OSError:
-                return
-            st["offset"] += len(chunk)
-            data = st["partial"] + chunk
-            parts = data.split(b"\n")
-            # An append can split a line across reads — carry the trailing fragment.
-            st["partial"] = parts.pop()
-            for raw in parts:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    entry = json.loads(raw)  # json.loads accepts utf-8 bytes
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                st["entries"].append(entry)
-                tid = entry.get("trial_id") if isinstance(entry, dict) else None
-                if tid is not None:
-                    st["by_trial"].setdefault(tid, []).append(entry)
-
-    def _load_literal_log_entries(self, log_path: str) -> List[Dict[str, Any]]:
-        """All parsed entries of the shared RecordProxy literal log (incrementally
-        maintained — see _ensure_literal_log_loaded). Returns [] on read failure. Prefer
-        _literal_log_entries_for_trial for a single trial's O(own-entries) lookup."""
-        self._ensure_literal_log_loaded(log_path)
-        st = getattr(self, "_literal_log_state", None)
-        return st["entries"] if st is not None and st["path"] == log_path else []
-
-    def _literal_log_entries_for_trial(self, log_path: str, trial_id: str) -> List[Dict[str, Any]]:
-        """This trial's entries from the incremental ``{trial_id: [entries]}`` index —
-        O(that trial's entries), NOT O(whole log). Callers apply their remaining
-        status/literal filters on the returned (small) list. The subset is exactly the
-        trial-scoped rows, so passing it to build_rollout_details_for_trial (which filters
-        by trial_id) or the chat_history comprehension yields identical results."""
-        self._ensure_literal_log_loaded(log_path)
-        st = getattr(self, "_literal_log_state", None)
-        if st is None or st["path"] != log_path:
-            return []
-        return st["by_trial"].get(trial_id, [])
-
     def _maybe_correlate_opencode_rollout_details(
         self,
         result: "TrialResult",
@@ -1415,7 +1343,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             return rollout_details
         # Per-trial indexed lookup (O(this trial's entries)); build_rollout_details_for_trial
         # re-filters by trial_id, so the result is identical to scanning the whole log.
-        entries = self._literal_log_entries_for_trial(log_path, trial_id)
+        entries = self._literal_log_store.entries_for_trial(log_path, trial_id)
         if not entries:
             return rollout_details
         try:
@@ -1482,7 +1410,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             return None
         # Per-trial indexed lookup (O(this trial's entries)); already trial-scoped, so the
         # comprehension only applies the remaining status-200 / completion-bearing filter.
-        entries = self._literal_log_entries_for_trial(log_path, trial_id)
+        entries = self._literal_log_store.entries_for_trial(log_path, trial_id)
         if not entries:
             return None
         # Same selection as build_rollout_details_for_trial (trial-scoped, status-200,
