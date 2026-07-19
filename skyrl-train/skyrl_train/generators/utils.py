@@ -1661,8 +1661,15 @@ def get_response_ids_and_loss_mask_from_messages(
         # 3. Set loss mask and rollout logprobs.
         # Regardless of the message role, each message is responsible for adding its own generation
         # prompt, and we apply the correct masking.
-        if cur_message["role"] == "user":
-            # 3.1. For user messages, it is simply zeros
+        if cur_message["role"] in ("user", "tool", "system"):
+            # 3.1. For user / tool-result / system messages, the mask is simply
+            # zeros: these are observations the policy CONDITIONS ON but is not
+            # trained on. Agentic (opencode) rollouts interleave role="tool"
+            # tool-result messages between assistant turns; the chat template
+            # renders them, so they occupy real, masked positions in the training
+            # sequence — exactly like user turns. Silently dropping them here
+            # (the old `else: raise`) EXCLUDED every tool-using trajectory from the
+            # batch, starving keep-1: v26 gs1 had avg_num_tokens=3.34, reward=0.0.
             response_ids.extend(cur_token_ids)
             loss_mask.extend([0] * len(cur_token_ids))
             if assistant_logprobs:
@@ -1921,7 +1928,10 @@ def get_response_ids_and_loss_mask_from_messages(
 
             assistant_msg_idx += 1
         else:
-            raise ValueError(f"Expected message role to be 'user' or 'assistant', got {cur_message['role']}")
+            raise ValueError(
+                f"Expected message role to be 'user', 'assistant', 'tool', or 'system', "
+                f"got {cur_message['role']}"
+            )
 
         assert len(loss_mask) == len(response_ids)
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True

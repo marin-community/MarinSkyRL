@@ -569,11 +569,28 @@ class TestGetResponseIdsAndLossMaskFromMessages:
             get_response_ids_and_loss_mask_from_messages([], qwen_tokenizer)
 
     def test_invalid_role_raises(self, qwen_tokenizer):
-        """Test that invalid message role raises ValueError."""
-        messages = [{"role": "system", "content": "You are a helpful assistant."}]
+        """Test that a genuinely-unknown message role raises ValueError.
 
-        with pytest.raises(ValueError, match="Expected message role to be 'user' or 'assistant'"):
+        ('system' and 'tool' are now VALID masked-observation roles — see
+        test_tool_and_system_roles_masked — so the raise only fires for roles
+        outside {user, assistant, tool, system}.)"""
+        messages = [{"role": "function_call", "content": "not a real role"}]
+
+        with pytest.raises(ValueError, match="Expected message role to be"):
             get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer)
+
+    def test_tool_and_system_roles_masked(self, qwen_tokenizer):
+        """tool-result and system messages are OBSERVATIONS: rendered into the
+        sequence (non-empty token ids) but fully masked (loss_mask all zeros),
+        exactly like user turns. Regression guard for the keep-1 agentic starvation
+        bug where role='tool' messages raised → every tool-using trajectory was
+        excluded from the batch (v26 gs1 avg_num_tokens=3.34, reward=0)."""
+        for role in ("tool", "system", "user"):
+            messages = [{"role": role, "content": "observation content"}]
+            response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer)
+            assert len(response_ids) > 0, f"role={role} should render to non-empty token ids"
+            assert len(loss_mask) == len(response_ids)
+            assert all(m == 0 for m in loss_mask), f"role={role} must be fully masked (observation, not trained on)"
 
     def test_missing_logprobs_degrades_and_reports(self, qwen_tokenizer):
         """Missing logprobs for an assistant message must NOT crash the RL job.
