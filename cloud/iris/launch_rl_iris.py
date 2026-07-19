@@ -1728,6 +1728,24 @@ def main() -> int:
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
+    # ── Per-cluster infra-env DEFAULTS (fill-gap belt for cluster-specific footguns) ──────────
+    # Some clusters need a specific network/NCCL interface that a cluster-AGNOSTIC RL config
+    # won't (and shouldn't) carry. Fill it in here, keyed on --target-cluster, ONLY if neither
+    # the flag env nor the config's extra_env already set it (lowest precedence — an explicit
+    # value always wins). cw-rno2a: its host_network:true nodes expose IB/IPoIB (ibs*/ibp*) +
+    # virtual ifaces, so NCCL AND Ray's raylet/GCS mis-detect the bootstrap interface and the
+    # multi-node gang SILENTLY never forms (keep-6 2026-07-19: 6 arms idle-heartbeated 3.4h at
+    # zero progress before this was diagnosed). Pin the bootstrap socket to the host ethernet PF
+    # via the exclude pattern (value = cw-rno2a.yaml:128). No-op on cw-us-east-02a (auto-detect
+    # already lands on the PF). Add a cluster row here rather than editing every RL config.
+    _target_cluster = str(getattr(args, "target_cluster", "") or "")
+    _CLUSTER_ENV_DEFAULTS: dict[str, dict[str, str]] = {
+        "cw-rno2a": {"NCCL_SOCKET_IFNAME": "^ibs,ibp,lo,docker,veth,cilium,lxc"},
+    }
+    for _k, _v in _CLUSTER_ENV_DEFAULTS.get(_target_cluster, {}).items():
+        if _k not in env_vars:
+            env_vars[_k] = _v
+            print(f"[rl-iris] Cluster infra-env default for {_target_cluster}: {_k}={_v}", flush=True)
     # FR-slug fix: a config may hardcode a JOB-SCOPED NCCL flight-recorder dump path
     # (/tmp/fr_dumps/<slug>/nccl_fr_rank) with a STALE slug from the config it was
     # copied from. Re-scope the slug to the live --job-name so a future FR dump lands
