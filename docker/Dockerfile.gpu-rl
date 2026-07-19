@@ -68,7 +68,7 @@ ARG INSTALL_MEGATRON=0
 # skyrl-train's lock (it is a runtime/rollout dep, not a trainer dep); installed
 # from git here. Harbor is dependency-agnostic (litellm + daytona; no torch/
 # transformers/vllm/ray pins), so a plain install cannot perturb the synced stack.
-ARG HARBOR_COMMIT=c872216ef8759d71229b9413184a5067f1e2cbe7
+ARG HARBOR_COMMIT=1228252d
 
 # =============================================================================
 # STAGE 1: wheel-builder — compile the vLLM FORK + flash-attn into wheels (nvcc)
