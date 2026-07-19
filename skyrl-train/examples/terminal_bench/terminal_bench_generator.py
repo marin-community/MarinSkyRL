@@ -41,6 +41,7 @@ from examples.terminal_bench._harbor_compat import (
 )
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
+from harbor.utils.traces_utils import normalize_message
 
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder
@@ -1442,9 +1443,21 @@ class TerminalBenchGenerator(GeneratorInterface):
         base_messages = request.get("messages") if isinstance(request, dict) else None
         if not isinstance(base_messages, list) or not base_messages:
             return None
-        # Only keep well-formed {role, content} messages; opencode sends OpenAI-shaped
-        # messages, but guard against a malformed record rather than crash downstream.
-        chat_history: List[Dict[str, Any]] = [m for m in base_messages if isinstance(m, dict) and "role" in m]
+        # opencode sends OpenAI-shaped messages: ``content`` may be a LIST of parts and
+        # assistant turns may carry structured ``tool_calls`` (plus ``tool``-role results).
+        # The downstream re-tok+splice fallback in
+        # ``get_response_ids_and_loss_mask_from_messages`` runs ``apply_chat_template``,
+        # which can only render plain ``{role, content:str}`` messages — the raw opencode
+        # shape makes it raise ``TypeError: Can only get item pairs from a mapping``, which
+        # the caller classifies as a zero-reward trajectory (silently starved ~87% of the
+        # keep1-v24 batch to ``response_ids=[0]`` / reward 0). Normalize each kept message
+        # via harbor's canonical ``normalize_message`` (flattens list content, serializes
+        # tool_calls; reuses ``normalize_message_content`` so the ShareGPT datagen path is
+        # untouched). Guard against a malformed record (missing/non-str role) rather than
+        # crash.
+        chat_history: List[Dict[str, Any]] = [
+            normalize_message(m) for m in base_messages if isinstance(m, dict) and isinstance(m.get("role"), str)
+        ]
         if not chat_history:
             return None
         # Append the final turn's assistant message, decoded from its EXACT served

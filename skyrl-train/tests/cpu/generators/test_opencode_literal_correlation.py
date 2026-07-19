@@ -278,3 +278,35 @@ def test_chat_history_picks_latest_timestamp_regardless_of_order(tmp_path, monke
     monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [late, early]))
     ch = _build_chat(_chat_self(), _result("A"))
     assert ch[0] == {"role": "user", "content": "late"}
+
+
+def test_chat_history_normalizes_openai_shaped_messages(tmp_path, monkeypatch):
+    # opencode/ai-sdk send OpenAI-shaped messages: list-of-parts content, structured
+    # tool_calls, and tool-role results. That raw shape made the downstream re-tok fallback
+    # in get_response_ids_and_loss_mask_from_messages run apply_chat_template on a non-plain
+    # message -> "TypeError: Can only get item pairs from a mapping" -> the trajectory was
+    # classified zero-reward (this starved ~87% of the keep1-v24 batch). The reconstruction
+    # must normalize every message to a plain {role, content:str} (harbor.normalize_message).
+    raw = [
+        {"role": "system", "content": [{"type": "text", "text": "sys"}]},
+        {"role": "user", "content": [{"type": "text", "text": "solve X"}]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": [{"type": "text", "text": "exit 0"}], "tool_call_id": "c1"},
+    ]
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [_entry_msgs("A", 1.0, raw, [5, 6])]))
+    ch = _build_chat(_chat_self(), _result("A"))
+    assert ch is not None
+    # every kept message is a plain {role, content:str} — no list content, no tool_calls
+    for m in ch:
+        assert set(m.keys()) == {"role", "content"}
+        assert isinstance(m["content"], str)
+    assert ch[0] == {"role": "system", "content": "sys"}
+    assert ch[1] == {"role": "user", "content": "solve X"}
+    assert "bash" in ch[2]["content"]  # tool_calls serialized into text, not dropped
+    assert ch[3] == {"role": "tool", "content": "exit 0"}
+    # + the appended final assistant completion (decoded from the fake tokenizer)
+    assert ch[-1] == {"role": "assistant", "content": "assistant-final:5,6"}
