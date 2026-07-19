@@ -424,21 +424,31 @@ class RolloutDispatcher:
             return None
 
     async def startup(self) -> None:
-        """Create the PlacementGroup + K coordinators and start each generator.
+        """Create the K coordinators (pinned to the proxy's node) and start each generator.
 
-        Uses a SPREAD PlacementGroup so coordinators land on idle CPUs across
-        all allocation nodes (engine nodes have idle cores too). Each bundle
-        requests ``cpus_per_coordinator`` CPUs.
+        All coordinators are pinned via NodeAffinity to THIS (rank-0/head) node — the
+        node where the RecordProxy writes the node-local opencode literal log that
+        ``LiteralLogStore`` reads with a local ``open()``. A SPREAD placement would scatter
+        them and break that read on every off-node coordinator (keep1-v25). Each actor
+        requests ``cpus_per_coordinator`` CPUs on the head node.
         """
-        from ray.util.placement_group import placement_group
-        from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-        bundles = [{"CPU": float(self._cpus_per_coordinator)} for _ in range(self._num_coordinators)]
-        self._pg = placement_group(bundles, strategy="SPREAD")
-        await self._pg.ready()
+        # The RecordProxy writes the opencode literal log to a NODE-LOCAL path on THIS
+        # (rank-0/head) node, and LiteralLogStore reads it with a bare local open(). A
+        # SPREAD placement group scattered the K coordinators across nodes, so ~(K-1)/K of
+        # them could not open the log -> _maybe_build_opencode_chat_history returned None ->
+        # 100% 'all_messages' drops -> empty training batch (keep1-v25; v24 only worked
+        # because its lone reader happened to co-locate with the proxy). Pin every
+        # coordinator to the proxy's node so the local read always resolves. The K-pool's
+        # parallelism is per-PROCESS (K GILs) and is preserved: K actor processes on one
+        # node still run K independent event loops. (Placement-independent alternative for
+        # later: read the proxy's periodic remote mirror via upath -- literal_proxy_utils.)
+        self._proxy_node_id = ray.get_runtime_context().get_node_id()
         _log().info(
-            f"[RolloutDispatcher] PlacementGroup ready: {self._num_coordinators} bundles "
-            f"x {self._cpus_per_coordinator} CPU (SPREAD)"
+            f"[RolloutDispatcher] pinning {self._num_coordinators} coordinators to the "
+            f"proxy/head node {self._proxy_node_id} for the node-local literal log "
+            f"({self._cpus_per_coordinator} CPU each)"
         )
 
         # SEQUENTIAL bring-up: create one coordinator, await its startup to
@@ -455,10 +465,7 @@ class RolloutDispatcher:
         for shard_idx in range(self._num_coordinators):
             actor = RolloutCoordinator.options(
                 num_cpus=self._cpus_per_coordinator,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=self._pg,
-                    placement_group_bundle_index=shard_idx,
-                ),
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=self._proxy_node_id, soft=False),
             ).remote(
                 cfg=self.cfg,
                 generator_cfg=self._generator_cfg,
