@@ -903,3 +903,74 @@ async def test_generate_retry_no_gen_finish():
     # Besides, since we completed in one turn, we return the text response of the first turn returned by
     # the underlying engine instead re-tokenizing the accumulated tokens
     assert out == engines[0].responses[1]
+
+
+# -------------------------------------------
+# tests for InferenceEngineClient.chat_completion_stream weight-sync boundary guard
+# --------------------------------------------
+
+
+class _MockStreamEngine:
+    """Minimal engine whose ``chat_completion_stream`` records when it is entered."""
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+
+    async def chat_completion_stream(self, request_payload):
+        self.entered.set()
+        yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_stream_not_paused_passes_through():
+    """When generation is not paused, the streaming path reaches the engine
+    immediately and forwards its chunks unchanged (the pause barrier is a no-op).
+    This is the flag-off / steady-state behavior."""
+    engines = [_MockStreamEngine()]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
+    chunks = [chunk async for chunk in client.chat_completion_stream(payload)]
+
+    assert engines[0].entered.is_set()
+    assert any("delta" in c for c in chunks)
+    assert any("[DONE]" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_stream_blocks_while_paused_then_resumes():
+    """Regression for the vLLM meta-tensor EngineDeadError at the weight-sync boundary.
+
+    A NEW stream must not reach the engine while generation is paused for a weight
+    sync — otherwise it would register a fresh request in the vLLM scheduler during
+    the pause -> reload -> resume window (after abort_generation drained the engine)
+    and the next engine step would run a forward pass against meta-device params.
+    The streaming path must honor the same ``generation_paused_event`` barrier the
+    non-streaming retry loop uses. Once resumed, the stream proceeds normally.
+    """
+    engines = [_MockStreamEngine()]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    # Simulate a weight-sync pause directly (bypass pause_generation()'s 5s grace +
+    # abort_generation() fan-out, which are not needed to exercise the barrier).
+    client.generation_paused_event.set()
+
+    payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
+
+    async def _consume():
+        return [chunk async for chunk in client.chat_completion_stream(payload)]
+
+    task = asyncio.create_task(_consume())
+
+    # While paused, the stream must block before reaching the engine. Wait past the
+    # 0.5s poll interval in _wait_for_generation_to_resume to be sure.
+    await asyncio.sleep(0.6)
+    assert not engines[0].entered.is_set(), "stream reached the engine while generation was paused"
+    assert not task.done()
+
+    # Resume -> the stream should now proceed to the engine and complete.
+    client.generation_paused_event.clear()
+    chunks = await asyncio.wait_for(task, timeout=5)
+    assert engines[0].entered.is_set()
+    assert any("[DONE]" in c for c in chunks)

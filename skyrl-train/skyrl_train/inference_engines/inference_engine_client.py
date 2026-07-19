@@ -594,9 +594,31 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
         """Streaming chat completion — yields SSE-formatted strings.
 
-        Uses the same session-based routing as ``chat_completion`` but skips the
-        retry loop (streaming does not support pause/resume for weight updates).
+        Uses the same session-based routing as ``chat_completion``. Unlike the
+        non-streaming retry loop, an in-flight stream cannot be paused/resumed
+        mid-generation (there is no per-turn boundary to re-issue from); instead the
+        engine's ``abort_generation`` drains any in-flight stream to idle at the
+        weight-sync boundary.
+
+        We must, however, honor the SAME pause barrier the non-streaming path uses
+        (``_wait_for_generation_to_resume``): a NEW stream must not START while
+        generation is paused for a weight sync. Otherwise it would register a fresh
+        request in the vLLM scheduler during the pause -> reload -> resume window (i.e.
+        AFTER ``abort_generation`` has already drained the engine to idle), and the next
+        engine step would run a forward pass (``reshape_and_cache_flash``) against params
+        that the layerwise weight reload has moved onto the ``meta`` device ->
+        ``EngineDeadError``. This is the streaming analog of the barrier at the top of
+        ``_chat_completion_with_retry``'s loop.
         """
+        # Boundary guard (reused from the non-streaming path): block a new stream from
+        # entering the engine while a weight-sync pause is in effect. Placed before
+        # routing / _inc_inflight so a blocked stream holds no engine slot and does not
+        # touch the engine until resume. Together with pause_generation()'s
+        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + abort_generation()'s
+        # drain-to-idle loop, this keeps the engine request-idle across the reload, so no
+        # forward pass runs against meta-device params.
+        await self._wait_for_generation_to_resume()
+
         session_id = request_payload["json"].pop("session_id", None)
         if session_id is None:
             engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
