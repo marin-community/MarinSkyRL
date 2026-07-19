@@ -1929,8 +1929,7 @@ def get_response_ids_and_loss_mask_from_messages(
             assistant_msg_idx += 1
         else:
             raise ValueError(
-                f"Expected message role to be 'user', 'assistant', 'tool', or 'system', "
-                f"got {cur_message['role']}"
+                f"Expected message role to be 'user', 'assistant', 'tool', or 'system', got {cur_message['role']}"
             )
 
         assert len(loss_mask) == len(response_ids)
