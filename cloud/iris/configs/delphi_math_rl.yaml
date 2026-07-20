@@ -62,13 +62,29 @@ trainer:
       reshard_after_forward: true
 
   placement:
-    colocate_all: true
+    # DISAGGREGATED (not colocated). colocate_all:true is fatal on a multi-node H100
+    # gang here: the hybrid path SKIPS the per-engine STRICT_PACK placement group
+    # (ray_wrapped_inference_engine.py:375 `if not use_hybrid_engine`; utils.py:220),
+    # so a multi-GPU vLLM engine's TP ranks scatter across two physical nodes and gloo
+    # advertises loopback 127.0.0.1 → cross-node `connectFullMesh Connection refused`,
+    # every engine dies at init before training. colocate_all:false takes the
+    # `not use_hybrid_engine` branch → each TP=2 engine is node-atomic. Split the 4-node
+    # gang 16 policy (2 nodes, FSDP2) + 16 inference (2 nodes, 8×TP2), mirroring the
+    # proven 32GPU_qwen3_coder shape (which only differs by TP=8, illegal for 42 heads).
+    colocate_all: false
+    policy_num_nodes: 2          # 2 × 8 = 16 GPUs for the FSDP2 policy
+    policy_num_gpus_per_node: 8
+    policy_strict_spread_pg: true   # reserve the policy nodes BEFORE engine PGs (anti-starvation)
+    policy_per_gpu_bundles: true    # per-GPU {GPU:1} bundles; reliable device pinning
 
 generator:
   backend: vllm
   model_dtype: bfloat16
 
   inference_engine_tensor_parallel_size: 2  # MUST divide 42; 1 or 2 for the pilot. NEVER 8.
+  num_inference_engines: 8  # 8 × TP2 = 16 inference GPUs (2 nodes). Set EXPLICITLY: else the
+                            # launcher derives 32//2 = 16 engines (rl_config_translation.py:425),
+                            # which under colocate_all:false demands 32+16 = 48 GPUs and fails placement.
   n_samples_per_prompt: 8
 
   gpu_memory_utilization: 0.85
