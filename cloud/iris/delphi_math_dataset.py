@@ -113,7 +113,9 @@ def main() -> None:
     train.to_parquet(train_path)
     val.to_parquet(val_path)
 
-    print(f"[rlvr_math] train rows (subsampled to <= {args.subsample_n}, seed {args.seed}): {len(train)} -> {train_path}")
+    print(
+        f"[rlvr_math] train rows (subsampled to <= {args.subsample_n}, seed {args.seed}): {len(train)} -> {train_path}"
+    )
     print(f"[rlvr_math] val rows (MATH-500 test): {len(val)} -> {val_path}")
     print("sample train prompt:", train[0]["prompt"][0]["content"][:200])
     print("sample train gt:", repr(train[0]["reward_model"]["ground_truth"]))
