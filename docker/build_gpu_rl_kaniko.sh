@@ -30,6 +30,9 @@ set -euo pipefail
 WHEEL_SOURCE="${WHEEL_SOURCE:-prebuilt-wheelhouse}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
+# harbor is baked non-editably into the image (no runtime --harbor-ref); bump this to
+# bake a new harbor commit. Default matches the Dockerfile ARG default.
+HARBOR_COMMIT="${HARBOR_COMMIT:-1319eb29}"
 
 # SINGLE_SNAPSHOT=0 (default) => per-instruction layers (each small enough to pull
 # + retry over the CoreWeave->ghcr egress). =1 collapses to ONE ~16 GB layer that
@@ -98,6 +101,7 @@ exec /kaniko/executor \
   --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
   --build-arg INSTALL_MEGATRON="$INSTALL_MEGATRON" \
   --build-arg GITSHA="$GITSHA" \
+  --build-arg HARBOR_COMMIT="$HARBOR_COMMIT" \
   --skip-unused-stages \
   $SNAPSHOT_FLAG \
   --compressed-caching=false \
