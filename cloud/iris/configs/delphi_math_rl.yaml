@@ -93,6 +93,15 @@ extra_env:
   # Offline HF so every node reads the warm, template-rewritten node-local cache
   # (the launcher forwards --prestage-model + --policy-chat-template to the controller).
   HF_HUB_OFFLINE: "1"
+  # ⚠ REQUIRED on cw-rno2a (no-op on cw-us-east-02a): an EXCLUDE pattern that skips IB/IPoIB
+  # + virtual ifaces so NCCL's bootstrap socket AND Ray's raylet/GCS (all ifaces visible under
+  # host_network:true) bind the host ethernet PF carrying the node IP. Omitting it on rno2a
+  # lets both mis-detect → raylets "Failed to establish connection" → the multi-node gang never
+  # forms → silent 0-progress wedge (marin #6940; observed keep-6 idle 3.4h). Value verbatim
+  # from cw-rno2a.yaml:128 / 128GPU_80B_A3B_next_cp1.yaml. An exact enpXsYnpZ pin is fragile
+  # per-node — do NOT carry over cw-us-east-02a's interface.
+  NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
+  NCCL_DEBUG: "INFO"  # bring-up observability (expect NET/IB : Using mlx5_0:1/IB + GPU Direct RDMA)
 
 data:
   kind: parquet  # route --train_data PAST the terminal_bench task extractor (launcher-only)
