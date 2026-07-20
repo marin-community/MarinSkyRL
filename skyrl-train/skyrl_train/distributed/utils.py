@@ -49,19 +49,24 @@ def init_worker_process_group_with_device(timeout_seconds: int, backend: str = "
     ``LOCAL_RANK`` is resolved upstream by ``resolve_pinned_local_rank`` (workers/worker.py) for
     all three CUDA_VISIBLE_DEVICES regimes, so it is the correct ``set_device`` index in each.
 
-    Why ``device_id`` matters: torch's fallback device guess (== global rank) is only correct
-    when Ray masks CVD to a single device (device 0 within the masked view). When Ray does NOT
-    mask CVD — every actor sees all GPUs, e.g. the megatron+vLLM image on cw-rno2a — the guess is
-    wrong and the FIRST collective (the weight-init barrier) DEADLOCKS: rank 0 races ahead into
-    weight-loading while the other ranks stall at a barrier on the wrong device (observed on
-    keep-6 / cw-rno2a, 2026-07-20). Pinning ``set_device`` AND passing ``device_id`` makes the
-    device explicit and correct in every regime.
+    Why ``device_id`` matters: without it, ProcessGroupNCCL falls back to guessing the device
+    from the global rank at first-collective time. That guess is not reliably correct across our
+    clusters — on cw-rno2a the FIRST collective (the weight-init barrier) DEADLOCKED: rank 0 raced
+    ahead into weight-loading while the other ranks stalled at the barrier (observed on
+    keep-6 / cw-rno2a, 2026-07-20). NOTE — an earlier hypothesis blamed a masked-vs-unmasked CVD
+    difference between clusters (rno2a supposedly leaving all GPUs visible); the live ``[pg-init]``
+    logs DISPROVED it: Ray masks CVD to a single device on BOTH cw-us-east-02a AND cw-rno2a
+    (``visible_device_count=1``, ``LOCAL_RANK=0``). The surviving explanation is init ordering — the
+    barrier firing before an explicit ``set_device`` on rno2a's bring-up. Pinning ``set_device`` AND
+    passing ``device_id`` makes the device explicit and correct regardless of CVD masking or init
+    ordering, which is what unblocked both clusters (validated 2026-07-20: both progress past the
+    weight-init collective into vLLM engine bring-up).
 
     Idempotent: always pins the device; only creates the process group if not already initialized.
     """
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
-    # Surface the resolved rank/device + the CVD regime (masked=single-device vs unmasked=all)
+    # Surface the resolved rank/device + the observed CVD masking (visible_device_count)
     # so the pinning can be validated per cluster from the logs.
     logger.info(
         "[pg-init] RANK={} LOCAL_RANK={} CUDA_VISIBLE_DEVICES={} visible_device_count={} -> set_device(cuda:{})",

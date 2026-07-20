@@ -2,11 +2,14 @@
 device-pinned NCCL process-group init).
 
 The bug it prevents: creating the NCCL PG without a device_id lets torch's ProcessGroupNCCL
-"guess device ID based on global rank". That guess is only correct when Ray masks
-CUDA_VISIBLE_DEVICES to a single device (device 0); when Ray does NOT mask CVD (every actor
-sees all GPUs, e.g. the megatron+vLLM image on cw-rno2a), the guess is wrong and the first
-collective (the weight-init barrier) DEADLOCKS (keep-6 / cw-rno2a, 2026-07-20). The helper must
-therefore always torch.cuda.set_device(LOCAL_RANK) AND pass device_id=cuda:LOCAL_RANK.
+"guess device ID based on global rank" at first-collective time. That guess is not reliably
+correct across clusters — on cw-rno2a the first collective (the weight-init barrier) DEADLOCKED
+(keep-6 / cw-rno2a, 2026-07-20). NOTE: the live [pg-init] logs show Ray masks CVD to a single
+device on BOTH cw-us-east-02a and cw-rno2a (visible_device_count=1), so this was NOT a
+masked-vs-unmasked-CVD difference between clusters (an earlier hypothesis the logs disproved) —
+the surviving explanation is init ordering (barrier before an explicit set_device). The helper
+must therefore always torch.cuda.set_device(LOCAL_RANK) AND pass device_id=cuda:LOCAL_RANK, which
+is correct regardless of CVD masking or ordering.
 """
 
 import torch
