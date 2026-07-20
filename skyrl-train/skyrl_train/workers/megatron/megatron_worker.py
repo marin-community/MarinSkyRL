@@ -7,7 +7,6 @@ from huggingface_hub import snapshot_download
 
 import asyncio
 import os
-from datetime import timedelta
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from skyrl_train.utils.progress import tqdm
@@ -24,6 +23,7 @@ from skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
 )
 from skyrl_train.distributed.dispatch import MeshRank
+from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
@@ -332,11 +332,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
-        if not torch.distributed.is_initialized():
-            # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
-            )
+        # Device-pinned NCCL PG init via the shared helper — pins set_device(LOCAL_RANK) and
+        # passes device_id so ProcessGroupNCCL never "guesses device ID based on global rank".
+        # The guess deadlocks the first collective (weight-init barrier) on unmasked-CVD clusters
+        # where every actor sees all GPUs (cw-rno2a); see init_worker_process_group_with_device.
+        init_worker_process_group_with_device(timeout_seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
         # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
@@ -719,11 +719,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
-        if not torch.distributed.is_initialized():
-            # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
-            )
+        # Device-pinned NCCL PG init via the shared helper (see init_worker_process_group_with_device) —
+        # avoids the ProcessGroupNCCL device-guess collective deadlock on unmasked-CVD clusters (cw-rno2a).
+        init_worker_process_group_with_device(timeout_seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.ref.megatron_config,

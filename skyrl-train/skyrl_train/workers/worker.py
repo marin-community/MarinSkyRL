@@ -3,7 +3,6 @@ import contextlib
 import logging
 import os
 import socket
-from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import tqdm
 from collections import defaultdict
@@ -31,7 +30,7 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
-from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     ppo_critic_loss,
@@ -149,11 +148,10 @@ class DistributedTorchRayActor:
         return self._local_rank
 
     def init_worker_process_group(self):
-        if not torch.distributed.is_initialized():
-            # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            torch.distributed.init_process_group(
-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
-            )
+        # Device-pinned NCCL PG init via the shared helper — pins set_device(LOCAL_RANK) and
+        # passes device_id so ProcessGroupNCCL never guesses the device (fixes the cw-rno2a
+        # unmasked-CVD collective deadlock; see init_worker_process_group_with_device).
+        init_worker_process_group_with_device(timeout_seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed
