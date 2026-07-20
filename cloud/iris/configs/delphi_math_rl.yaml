@@ -101,7 +101,6 @@ extra_env:
   # from cw-rno2a.yaml:128 / 128GPU_80B_A3B_next_cp1.yaml. An exact enpXsYnpZ pin is fragile
   # per-node — do NOT carry over cw-us-east-02a's interface.
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
-  NCCL_DEBUG: "INFO"  # bring-up observability (expect NET/IB : Using mlx5_0:1/IB + GPU Direct RDMA)
 
 data:
   kind: parquet  # route --train_data PAST the terminal_bench task extractor (launcher-only)
