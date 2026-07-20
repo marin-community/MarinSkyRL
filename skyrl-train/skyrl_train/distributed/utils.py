@@ -23,6 +23,7 @@ from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
     Store,
+    _get_default_group,
     _new_process_group_helper,
     _world,
     default_pg_timeout,
@@ -152,16 +153,59 @@ def init_custom_process_group(
             "_new_process_group_helper accepts neither 'backend_options' nor "
             f"'pg_options' (torch {torch.__version__}); signature: {_inspect.signature(_new_process_group_helper)}"
         )
-    pg, _ = _new_process_group_helper(
-        world_size,
-        rank,
-        [],
-        backend,
-        store,
-        group_name=group_name,
-        **{pg_options_param_name: pg_options},
-        timeout=timeout,
-    )
+    # Force the standalone store-based ncclUniqueId rendezvous path for THIS group, by
+    # temporarily un-binding the caller's default process group's device across the helper call.
+    #
+    # This process group spans processes that live in SEPARATE torch.distributed worlds — the
+    # trainer's world plus each inference engine's world — so it is NOT a subgroup of any existing
+    # world. We create it by calling ``_new_process_group_helper`` directly with an empty
+    # ``global_ranks_in_group`` ([]) so torch treats it as a "default-style" standalone group.
+    #
+    # ``_new_process_group_helper`` auto-enables an ``ncclCommSplit`` optimization whenever the
+    # CALLER's own default process group is eager/device-bound (its ``bound_device_id`` is set):
+    #
+    #     if is_initialized() and _get_default_group().bound_device_id:
+    #         split_from = _get_split_source(_get_default_group())
+    #     ...
+    #     if split_from:  # -> ProcessGroupNCCL created via ncclCommSplit(parent=default_comm)
+    #
+    # The megatron policy worker pins its default PG with an explicit ``device_id``
+    # (``init_worker_process_group_with_device``). So on the TRAINER (rank 0) this makes the
+    # weight-sync comm get built by SPLITTING from the trainer's default group — which contains
+    # only the trainer's ranks, NOT the engines. The inference engines' default PG is not
+    # device-bound, so THEY build the same weight-sync comm the plain way: a fresh
+    # ``ncclCommInitRank`` whose ncclUniqueId is exchanged through the c10d store. The two
+    # comm-creation paths are mutually incompatible for this cross-world group: rank 0 never
+    # publishes (``store->set``) the uniqueId the engine ranks block on (``store->get('0')``), so
+    # every rank deadlocks in ``broadcastUniqueNCCLID`` until the 30-minute store timeout fires and
+    # the group dies before the first rollout (reproduced on cw-us-east-02a AND cw-rno2a,
+    # 2026-07-20). Binding a ``device_id`` to THIS group did not help because the split is triggered
+    # by the DEFAULT group's ``bound_device_id``, not this group's.
+    #
+    # Un-binding the default group's device for the duration of the helper call forces
+    # ``split_from = None`` on every rank, so trainer and engines take the IDENTICAL fresh
+    # store-uniqueId ``ncclCommInitRank`` path and rank 0 reliably ``store->set``s the uniqueId
+    # before the engines ``store->get`` it. The default group is restored immediately afterward and
+    # is otherwise unchanged; the new group is created device-unbound (as before), so no other path
+    # is affected.
+    default_pg = _get_default_group() if torch.distributed.is_initialized() else None
+    saved_bound_device_id = default_pg.bound_device_id if default_pg is not None else None
+    if default_pg is not None and saved_bound_device_id is not None:
+        default_pg.bound_device_id = None
+    try:
+        pg, _ = _new_process_group_helper(
+            world_size,
+            rank,
+            [],
+            backend,
+            store,
+            group_name=group_name,
+            **{pg_options_param_name: pg_options},
+            timeout=timeout,
+        )
+    finally:
+        if default_pg is not None and saved_bound_device_id is not None:
+            default_pg.bound_device_id = saved_bound_device_id
 
     _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
 
