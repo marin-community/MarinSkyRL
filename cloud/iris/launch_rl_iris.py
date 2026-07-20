@@ -63,6 +63,8 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+import yaml
+
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 
@@ -402,9 +404,14 @@ APP_DIR = "/app"
 DEFAULT_IRIS_VERSION = "marin-iris==0.2.49.dev202607160749"
 
 
-def _resolve_cluster_config_default() -> str:
-    """Find the marin repo's cw-us-east-02a cluster YAML."""
-    rel = f"lib/iris/config/{DEFAULT_CLUSTER}.yaml"
+def _resolve_cluster_config_default(cluster: str = DEFAULT_CLUSTER) -> str:
+    """Find the marin repo's ``<cluster>.yaml`` iris cluster config.
+
+    ``cluster`` selects the CoreWeave cluster (e.g. ``cw-us-east-02a`` = 256×H100 default,
+    ``cw-rno2a`` = the 512×H100 RNO2A cluster for the delphi pilot). Falls back to the
+    bare relative path if no marin checkout is found (the caller can still pass an explicit
+    ``--cluster-config``)."""
+    rel = f"lib/iris/config/{cluster}.yaml"
     candidates = [
         Path.home() / "Documents/marin" / rel,
         Path("/Users/benjaminfeuer/Documents/marin") / rel,
@@ -729,8 +736,10 @@ def create_parser() -> argparse.ArgumentParser:
         "--cluster-config",
         "--cluster_config",
         dest="cluster_config",
-        default=_resolve_cluster_config_default(),
-        help="Path to the iris cluster YAML (default: cw-us-east-02a in the marin repo).",
+        default=None,
+        help="Path to the iris cluster YAML. Default: auto-resolve lib/iris/config/"
+        "<--cluster>.yaml in the marin repo (so --cluster cw-rno2a targets the 512xH100 "
+        "RNO2A cluster without a manual --cluster-config).",
     )
     parser.add_argument(
         "--task-image",
@@ -1127,6 +1136,16 @@ def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
     return env
 
 
+def _load_rl_config_yaml(rl_config_path: str) -> dict:
+    """Resolve an RL config path (repo-relative, else as given) and parse its YAML to a dict.
+
+    Raises on an unreadable/invalid file; callers that want a soft default wrap this."""
+    full = PROJECT_ROOT / rl_config_path
+    path = full if full.exists() else Path(rl_config_path)
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
 def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
     """Read a top-level ``extra_env:`` mapping from the RL config YAML.
 
@@ -1143,12 +1162,7 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
     existing extra_env-less iris configs).
     """
     try:
-        full = PROJECT_ROOT / rl_config_path
-        path = full if full.exists() else Path(rl_config_path)
-        import yaml
-
-        with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+        raw = _load_rl_config_yaml(rl_config_path)
     except Exception as exc:  # noqa: BLE001
         print(f"[rl-iris] WARNING: could not read extra_env from {rl_config_path}: {exc}", file=sys.stderr)
         return {}
@@ -1166,6 +1180,17 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
     return out
 
 
+def load_config_policy_chat_template(rl_config_path: str) -> Optional[str]:
+    """The config's top-level ``policy_chat_template`` (repo-relative jinja path), or None.
+
+    None when the key is unset (existing configs have no such key). Set only by single-turn
+    RLVR configs that must force a chat template onto the policy tokenizer cache because the
+    SFT repo ships none. Read errors propagate: this drives fail-loud template machinery, so
+    an unreadable config must abort rather than silently skip the override."""
+    value = _load_rl_config_yaml(rl_config_path).get("policy_chat_template")
+    return str(value) if value else None
+
+
 def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
     """Return an EXPLICIT ``trainer.ckpt_path`` from the RL config YAML, else None.
 
@@ -1176,12 +1201,7 @@ def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
     ``trainer.ckpt_path``, or the value is null/empty (byte-identical to today for
     every existing iris config, which all leave it null)."""
     try:
-        full = PROJECT_ROOT / rl_config_path
-        path = full if full.exists() else Path(rl_config_path)
-        import yaml
-
-        with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+        raw = _load_rl_config_yaml(rl_config_path)
     except Exception as exc:  # noqa: BLE001
         print(f"[rl-iris] WARNING: could not read ckpt_path from {rl_config_path}: {exc}", file=sys.stderr)
         return None
@@ -1388,7 +1408,11 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # the node-local HF cache before Ray — off the collective critical path. Online
     # configs are byte-identical (no flag forwarded).
     _cfg_env = load_config_extra_env(args.rl_config)
-    if str(_cfg_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"):
+    _policy_chat_template = load_config_policy_chat_template(args.rl_config)
+    _offline = str(_cfg_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
+    # A policy_chat_template override rewrites the node-local tokenizer cache, so it REQUIRES
+    # a prestage even when the config is not offline (nothing to rewrite otherwise).
+    if _offline or _policy_chat_template:
         if args.model_path and not args.model_path.startswith(("s3://", "gs://", "gcs://")):
             controller_cmd.extend(["--prestage-model", args.model_path])
             # In-region warm source. Default = auto-derive the CW-S3 convention path from
@@ -1403,6 +1427,11 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
                 warm = None
             if warm:
                 controller_cmd.extend(["--model-warm-source", warm])
+    # Force the delphi chat template onto every node's tokenizer cache (single-turn RLVR).
+    # Repo-relative path (resolved in-pod against /app by the controller). No-op for configs
+    # without policy_chat_template.
+    if _policy_chat_template:
+        controller_cmd.extend(["--policy-chat-template", _policy_chat_template])
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
@@ -1585,6 +1614,12 @@ def main() -> int:
     parser = create_parser()
     args = parser.parse_args()
     normalize(args)
+
+    # Resolve the cluster YAML from --cluster when not explicitly given, so
+    # `--cluster cw-rno2a` targets the 512xH100 RNO2A cluster (the delphi pilot's
+    # 512-node target) without a manual --cluster-config.
+    if not args.cluster_config:
+        args.cluster_config = _resolve_cluster_config_default(args.cluster)
 
     # Fail loud (before any submit / GPU allocation) when controller-ingress would
     # produce a capability URL the Daytona sandbox cannot reach — the Exp2 blocker

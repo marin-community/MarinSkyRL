@@ -118,9 +118,42 @@ class ParsedRLConfig:
     trainer: Dict[str, Any] = field(default_factory=dict)
     generator: Dict[str, Any] = field(default_factory=dict)
     data: Dict[str, Any] = field(default_factory=dict)
+    environment: Dict[str, Any] = field(default_factory=dict)
     terminal_bench: Optional[Dict[str, Any]] = None
     teacher: Optional[Dict[str, Any]] = None
     tensor_parallel_size: int = 1
+    # "tasks" (default; terminal_bench task-dir extraction) or "parquet" (single-turn
+    # RLVR: an HF id / .parquet is passed through to PromptDataset, NOT task-extracted).
+    # Launcher-only (popped out of the `data` section so it never reaches Hydra).
+    data_kind: str = "tasks"
+
+
+def validate_tp_divides_heads(
+    tensor_parallel_size: int,
+    num_attention_heads: Optional[int],
+    config_path: Optional[Path] = None,
+) -> None:
+    """Fail fast if the inference TP size does not divide the model's attention-head count.
+
+    vLLM requires ``num_attention_heads % tensor_parallel_size == 0``; a bad value (e.g.
+    TP=8 against the dense delphi arch's 42 heads) wedges vLLM at engine init with no
+    launcher-side signal. Skipped when ``num_attention_heads`` is unset (existing configs).
+
+    Raises:
+        ValueError: If ``num_attention_heads`` is set and not divisible by TP.
+    """
+    if not num_attention_heads:
+        return
+    if num_attention_heads % tensor_parallel_size != 0:
+        valid = [t for t in range(1, num_attention_heads + 1) if num_attention_heads % t == 0]
+        config_context = f" in {config_path}" if config_path else ""
+        raise ValueError(
+            f"generator.inference_engine_tensor_parallel_size={tensor_parallel_size} does not "
+            f"divide model_num_attention_heads={num_attention_heads}{config_context}.\n"
+            f"vLLM requires num_attention_heads % tensor_parallel_size == 0, or the engine "
+            f"wedges at init with no launcher signal.\n"
+            f"Valid TP values for {num_attention_heads} heads: {valid} (NEVER 8 for delphi's 42)."
+        )
 
 
 def resolve_rl_config_path(raw_path: str) -> Path:
@@ -168,9 +201,14 @@ def parse_rl_config(
     config_groups = raw.get("config_groups", {})
     trainer = raw.get("trainer", {})
     generator = raw.get("generator", {})
-    data = raw.get("data", {})
+    data = dict(raw.get("data", {}))
+    environment = raw.get("environment", {})
     terminal_bench = raw.get("terminal_bench")
     teacher = raw.get("teacher")
+
+    # data.kind is a launcher-only routing key (parquet vs. terminal_bench tasks); pop it
+    # so it never leaks into the flattened Hydra args (SkyRL's `data` has no `kind` field).
+    data_kind = data.pop("kind", "tasks")
 
     # Validate engine_init_kwargs doesn't contain SkyRL-internal keys.
     engine_init_kwargs = generator.get("engine_init_kwargs", {})
@@ -187,6 +225,10 @@ def parse_rl_config(
 
     tensor_parallel_size = generator.get("inference_engine_tensor_parallel_size", 1)
 
+    # TP-divides-heads guard (delphi's 42-head arch forbids TP=8). No-op unless the config
+    # declares model_num_attention_heads.
+    validate_tp_divides_heads(tensor_parallel_size, raw.get("model_num_attention_heads"), config_path=path)
+
     return ParsedRLConfig(
         config_path=path,
         raw=raw,
@@ -195,9 +237,11 @@ def parse_rl_config(
         trainer=trainer,
         generator=generator,
         data=data,
+        environment=environment,
         terminal_bench=terminal_bench,
         teacher=teacher,
         tensor_parallel_size=tensor_parallel_size,
+        data_kind=data_kind,
     )
 
 
@@ -332,6 +376,7 @@ def build_skyrl_hydra_args(
     trainer = dict(parsed.trainer)
     generator = dict(parsed.generator)
     data = dict(parsed.data)
+    environment = dict(parsed.environment)
 
     # Derive paths if null.
     experiments_dir = exp_args.get("experiments_dir", "")
@@ -460,7 +505,12 @@ def build_skyrl_hydra_args(
         ".transformer_config_kwargs",
     }
 
-    for section, values in [("trainer", trainer), ("generator", generator), ("data", data)]:
+    for section, values in [
+        ("trainer", trainer),
+        ("generator", generator),
+        ("data", data),
+        ("environment", environment),
+    ]:
         for key, val in _flatten_dict(values, section).items():
             prefix = "++" if any(pattern in key for pattern in optional_patterns) else ""
             args.append(_format_hydra_arg(key, val, prefix=prefix))

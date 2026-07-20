@@ -23,17 +23,30 @@ def resolve_rl_train_data(
     scratch_dir: Optional[str] = None,
     on_exist: str = "skip",
     verbose: bool = True,
+    kind: str = "tasks",
 ) -> List[str]:
-    """Resolve train_data paths, extracting HF datasets to local task directories.
+    """Resolve train_data paths for the configured data kind.
 
-    SkyRL's TerminalBenchTaskDataset expects local directory paths where each
-    subdirectory is a task containing an ``instruction.md`` file. This function
-    detects HuggingFace dataset identifiers, extracts them to
-    ``$SCRATCH/tasks/<repo-name>/`` via ``cloud.iris.extract_tasks_from_parquet``,
-    fixes permissions, and returns local filesystem paths for all datasets.
+    ``kind="tasks"`` (default, terminal_bench agentic RL): SkyRL's
+    TerminalBenchTaskDataset expects local directory paths where each subdirectory is a
+    task containing an ``instruction.md`` file. HuggingFace dataset identifiers are
+    extracted to ``$SCRATCH/tasks/<repo-name>/`` via
+    ``cloud.iris.extract_tasks_from_parquet``, permissions fixed, and local paths returned.
+
+    ``kind="parquet"`` (single-turn RLVR, e.g. main_base + aime): the entries are
+    SkyRL-shaped parquet URIs / paths (or a pre-shaped HF id) that ``PromptDataset`` loads
+    directly, so they are passed through UNCHANGED — never task-extracted. The parquet is
+    read once by the rank-0 driver, so no per-node staging is needed.
     """
     if not train_data:
         return []
+
+    if kind == "parquet":
+        if verbose:
+            print(
+                f"[rl_data] data.kind=parquet: passing {len(train_data)} path(s) through to PromptDataset (no task extraction)"
+            )
+        return list(train_data)
 
     # Determine the scratch directory for extracted tasks. It MUST be a shared
     # filesystem visible to all compute nodes; /tmp is node-local (last resort).

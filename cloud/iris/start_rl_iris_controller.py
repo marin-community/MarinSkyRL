@@ -35,6 +35,8 @@ import tempfile
 import threading
 import time
 
+from cloud.iris.paths import resolve_repo_path
+
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
 
@@ -336,6 +338,93 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
         _log(f"model prestage attempt {attempt}/6 failed (rc={proc.returncode}): {last_err}")
         time.sleep(min(30, 2**attempt))
     raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
+
+
+# Special tokens the delphi_v0 reasoning protocol depends on; asserted present in the
+# tokenizer's vocab after the override so a lossy SFT export (fragmented-to-bytes tokens)
+# fails loud here instead of silently collapsing reward at the first rollout.
+_REQUIRED_CHAT_TEMPLATE_TOKENS = ("<|start_think|>", "<|end_think|>")
+
+
+def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
+    """Force the policy tokenizer's cached chat template to ``template_repo_rel`` on THIS node.
+
+    The delphi SFT repos ship no chat_template, so the policy tokenizer must be forced to the
+    delphi_v0 template the rollouts + held-out eval use, else reward silently collapses on a
+    train/rollout/eval mismatch. Must run on EVERY node (the ``skyrl_entrypoint`` actor may
+    load its tokenizer on any node), after the model is staged into the node-local cache and
+    before Ray bootstrap.
+
+    Args:
+        model_path: HF repo-id already staged into the node-local cache (see ``stage_model``).
+        template_repo_rel: chat-template jinja path, resolved against the in-pod repo root.
+
+    Raises:
+        RuntimeError: if the override does not take, or a required think-protocol token
+            (``<|start_think|>`` / ``<|end_think|>``) is not a single registered token.
+    """
+    if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")):
+        _log(f"apply_policy_chat_template: skip (model_path={model_path!r} is empty/cloud)")
+        return
+
+    template_path = resolve_repo_path(template_repo_rel)
+    delphi = template_path.read_text()
+
+    # Import transformers/hf lazily (matches wait_for_nodes' local `import ray` and
+    # stage_model): the controller bootstraps Ray on every node and must not pull these
+    # heavy ML deps into the fast bootstrap path for configs that set no chat-template.
+    from huggingface_hub import snapshot_download
+    from transformers import AutoTokenizer
+
+    snap = model_path if os.path.isdir(model_path) else snapshot_download(model_path)
+    tc_path = os.path.join(snap, "tokenizer_config.json")
+    jinja_path = os.path.join(snap, "chat_template.jinja")
+
+    # Back up originals once (copy resolved content, not the cache symlink).
+    for p in (tc_path, jinja_path):
+        if os.path.exists(p):
+            bak = p + ".plainbak"
+            if not os.path.exists(bak):
+                with open(p, "rb") as s, open(bak, "wb") as d:
+                    d.write(s.read())
+
+    # Write delphi_v0 as a real chat_template.jinja (break the cache symlink; keep the blob).
+    if os.path.islink(jinja_path):
+        os.remove(jinja_path)
+    with open(jinja_path, "w") as f:
+        f.write(delphi)
+
+    # And as the chat_template key in tokenizer_config.json (break symlink).
+    tc = {}
+    if os.path.exists(tc_path):
+        with open(tc_path) as f:
+            tc = json.load(f)
+    tc["chat_template"] = delphi
+    if os.path.islink(tc_path):
+        os.remove(tc_path)
+    with open(tc_path, "w") as f:
+        json.dump(tc, f, ensure_ascii=False, indent=2)
+
+    # Verify the loaded tokenizer now renders delphi_v0 and keeps the think protocol tokens.
+    tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True)
+    ct = tok.chat_template
+    if not ct or ct.strip() != delphi.strip():
+        raise RuntimeError(
+            f"chat_template override did NOT take for {model_path} "
+            f"(loaded len={len(ct) if ct else None}, expected {len(delphi)})"
+        )
+    vocab = tok.get_vocab()
+    missing = [t for t in _REQUIRED_CHAT_TEMPLATE_TOKENS if t not in vocab]
+    if missing:
+        raise RuntimeError(
+            f"delphi_v0 think-protocol tokens {missing} are NOT single registered tokens in "
+            f"{model_path}'s tokenizer (lossy SFT export?) — they would fragment to bytes and "
+            f"break the reward/parse contract. Aborting before a silent reward-zero run."
+        )
+    _log(
+        f"apply_policy_chat_template: delphi_v0 applied + verified for {model_path} "
+        f"(chat_template len={len(ct)}, tokens OK) on rank {_rank()}/{_num_tasks()} (snapshot={snap})"
+    )
 
 
 def _rank() -> int:
@@ -1242,6 +1331,14 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "source -> clean fallback to the HF snapshot_download prestage. Set by the "
         "launcher (auto-derived from the repo id).",
     )
+    parser.add_argument(
+        "--policy-chat-template",
+        default=os.environ.get("OT_AGENT_IRIS_POLICY_CHAT_TEMPLATE", ""),
+        help="Repo-relative path to a chat-template jinja to FORCE onto the policy "
+        "tokenizer's cached tokenizer_config.json + chat_template.jinja on EVERY node "
+        "before Ray (delphi single-turn RLVR: the SFT repo ships no template). Requires "
+        "--prestage-model. Empty = no override (byte-identical to today).",
+    )
     args, train_argv = parser.parse_known_args()
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
@@ -1287,6 +1384,15 @@ def main() -> None:
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
         stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
+    # Force the policy chat template onto the (now warm) node-local tokenizer cache on
+    # EVERY node, before Ray — the training driver's tokenizer may load on any node.
+    if args.policy_chat_template:
+        if not args.prestage_model:
+            raise ValueError(
+                "--policy-chat-template requires --prestage-model (the template override "
+                "rewrites the node-local HF cache the prestage populated)."
+            )
+        apply_policy_chat_template(args.prestage_model, args.policy_chat_template)
     rank = _rank()
     if rank == 0:
         exit_code = run_head(args, train_argv)

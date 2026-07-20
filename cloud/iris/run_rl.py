@@ -170,8 +170,8 @@ class LocalRLRunner:
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
 
         if self.config.train_data:
-            print(f"\nResolving train_data: {self.config.train_data}")
-            resolved_train = resolve_rl_train_data(self.config.train_data)
+            print(f"\nResolving train_data (kind={parsed.data_kind}): {self.config.train_data}")
+            resolved_train = resolve_rl_train_data(self.config.train_data, kind=parsed.data_kind)
             self.config.train_data = resolved_train
             print(f"Resolved train_data: {resolved_train}")
 
