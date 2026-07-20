@@ -144,8 +144,8 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # 39faff7d baked, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128).
     # gpu-rl-722fec34 (built 2026-07-04, kaniko gpurl-kaniko-722fec34): harbor 2e42d312 (cheap reaper
     # DEFAULT-ON — fixes the n=384 O(N) coordinator-reaper bottleneck py-spy found; opt out via
-    # HARBOR_CHEAP_REAPER=0) + skyrl 3caeb79f (TIS served-id splice, now baked-default — no --skyrl-ref
-    # needed for 35B). Same PULLABLE recipe; vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
+    # HARBOR_CHEAP_REAPER=0) + skyrl 3caeb79f (TIS served-id splice, now baked-default — no runtime source
+    # override needed for 35B). Same PULLABLE recipe; vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
     # gpu-rl-dc56d265 (built 2026-07-05, kaniko gpurl-kaniko-dc56d265): harbor 2e42d312 (unchanged, cheap
     # reaper DEFAULT-ON) + skyrl 7b7d627b (load-aware power-of-two-choices inference-engine routing — fixes
     # the sticky hash-at-birth session routing that pinned agentic-RL rollout load onto one vLLM engine
@@ -179,7 +179,7 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # layers, max 3.5 GB, pull-verified) with IDENTICAL contents (SKYRL b2ff8bf2 drain fix).
     # gpu-rl-cf1ecea6 (built 2026-07-07, kaniko gpurl-kaniko-cf1ecea6, SINGLE_SNAPSHOT=0 pullable):
     # SKYRL_COMMIT bump 613e225d->822221a0 = engine-readiness gate in ray_wrapped_inference_engine.py
-    # (already-validated; previously runtime-only via --skyrl-ref, now baked-default). Parent is exactly
+    # (already-validated; previously runtime-only via a source override, now baked-default). Parent is exactly
     # 613e225d, so this ADDS one commit and preserves everything baked in gpu-rl-1a32669c. wheels + harbor
     # + rl_env_constraints UNCHANGED (skyrl-only, prebuilt-wheelhouse). Pull-verified: 48 layers, max 3.46
     # GB, 22.6 GB total. Build asserts green (skyrl_train/vllm/flash_attn/torchtitan.ExpertParallel import).
@@ -191,7 +191,7 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # CoreWeave exposes the RDMA devices (/dev/infiniband/{uverbs0..8,rdma_cm}, 9x mlx5 ports ACTIVE @ 100Gb/s
     # EDR) but the image shipped NO verbs userspace (`find / -name libibverbs*` empty, `ibv_devices` not found).
     # NO external libnccl-net.so/OFI plugin is needed on Mellanox IB. Also SKYRL_COMMIT 822221a0->272bf011
-    # (penfever/working HEAD, direct child: CP>1 _C::rms_norm Meta-kernel fix) so --skyrl-ref 272bf011 is a
+    # (penfever/working HEAD, direct child: CP>1 _C::rms_norm Meta-kernel fix) so a runtime 272bf011 pin is a
     # no-op safety belt. wheels + harbor d58043c3 + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse,
     # NO nvcc). Pull-verified: 48 layers, max 3.46 GB, 22.66 GB total. Build asserts green (flash_attn_2_cuda /
     # skyrl_train / vllm / torchtitan.ExpertParallel; baked MarinSkyRL HEAD == 272bf011; harbor 0.8.0). Expected
@@ -493,26 +493,6 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
     """
     if getattr(args, "ingress_mode", "direct") != "controller":
         return
-    # The opencode-RL generator ingress wiring — terminal_bench_generator.py setting the
-    # agent api_base from HARBOR_MODEL_ENDPOINT, and the literal-bridge S5 correlation — is
-    # NOT baked into the gpu-rl image's /opt/skyrl clone (only cloud.iris.* rides the /app
-    # sync; examples.terminal_bench.* loads from baked /opt/skyrl). Without --skyrl-ref, the
-    # baked generator runs: opencode's base URL resolves to `undefined` (every call fails,
-    # 0 reward) AND rollout_details are never correlated (all-None logprobs) — a SILENT
-    # 4-hour-run-wasting failure (fullgate1, 2026-07-16). Block it before GPU allocation.
-    if not getattr(args, "skyrl_ref", None) and os.environ.get("OTAGENT_ALLOW_UNBAKED_GENERATOR") != "1":
-        raise SystemExit(
-            "[rl-iris] BLOCKED: --ingress-mode controller needs --skyrl-ref <branch with the "
-            "controller-ingress generator wiring> (e.g. feuer/opencode-literal-bridge-s8). The "
-            "HARBOR_MODEL_ENDPOINT->agent api_base + literal-bridge correlation live in "
-            "skyrl-train/examples/terminal_bench/terminal_bench_generator.py, which the pod "
-            "loads from the BAKED /opt/skyrl (NOT the /app sync). Without it opencode's base "
-            "URL is `undefined` (0 reward) and rollout_details are never correlated (all-None "
-            "logprobs).\n"
-            "  Fix: add --skyrl-ref <that branch> (pair it with --harbor-ref for the harbor "
-            "bridge). Override (only once the wiring is baked into the image): "
-            "OTAGENT_ALLOW_UNBAKED_GENERATOR=1."
-        )
     if os.environ.get("OTAGENT_ALLOW_INGRESS_HOST_MISMATCH") == "1":
         print(
             "[rl-iris] WARNING: OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1 — skipping the "
@@ -911,18 +891,6 @@ def create_parser() -> argparse.ArgumentParser:
         "Defaults to $DAYTONA_KEY_OVERRIDE.",
     )
     parser.add_argument(
-        "--skyrl-ref",
-        "--skyrl_ref",
-        dest="skyrl_ref",
-        default=None,
-        help="If set, `git fetch && git checkout <ref>` the baked MarinSkyRL clone at "
-        "/opt/skyrl BEFORE running, so the live editable install picks up a newer "
-        "(or pinned) commit than the one baked into the image. Use to apply a "
-        "MarinSkyRL fix that landed AFTER the image was built without waiting for an "
-        "image rebuild (deps are baked, but skyrl-train is an editable git clone, so "
-        "a checkout is live). Default: unset = use whatever commit the image baked.",
-    )
-    parser.add_argument(
         "--iris-ref",
         "--iris_ref",
         dest="iris_ref",
@@ -939,7 +907,8 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="If set, `uv pip install --no-deps --force-reinstall` harbor at this git ref "
         "into the RL venv at pod bootstrap (pure-python, ~1 min, no image rebuild) BEFORE "
-        "running — the analog of --skyrl-ref for the NON-editable baked harbor. Use to "
+        "running — the harbor analog of the /app source sync for the NON-editable baked "
+        "harbor. Use to "
         "apply the opencode literal BRIDGE (harbor branch feuer/opencode-literal-rollout-"
         "details: the x-ot-trial-id header + rollout_build correlator + hosted_vllm gate) "
         "without waiting for it to land in the baked image. Under set -e + a hard "
@@ -1447,46 +1416,12 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     #     ModuleNotFoundError, but /app wins for anything it carries)
     # The venv/deps still come from the /opt/skyrl editable install; only the SOURCE
     # that `import skyrl_train`/`examples.*` resolves is moved to /app. This makes the
-    # /app sync the single deploy vector and retires --skyrl-ref (which hot-checks-out
-    # /opt/skyrl) — everything now rides the /app sync off `main`.
+    # /app sync the single deploy vector — everything now rides the /app sync off `main`;
+    # /opt/skyrl stays at its baked HEAD purely as a last-resort import fallback.
     pythonpath = f"{APP_DIR}:{APP_DIR}/skyrl-train:{SKYRL_HOME}/skyrl-train"
-    # Optional: refresh the baked MarinSkyRL editable clone to a newer/pinned commit
-    # before running (deps are baked, but skyrl-train is `pip install -e` over a git
-    # clone, so a checkout is live without reinstall). Fetch is best-effort but the
-    # checkout MUST succeed (the ref is the whole point), so it's under `set -e`.
-    skyrl_refresh = ""
-    if args.skyrl_ref:
-        ref = shlex.quote(args.skyrl_ref)
-        skyrl_home = shlex.quote(SKYRL_HOME)
-        skyrl_refresh = (
-            # Only fetch/checkout when SKYRL_HOME is a real git working tree. The
-            # standard Dockerfile.gpu-rl `git clone`s /opt/skyrl, but some baked
-            # images (e.g. the megatron variant) ship /opt/skyrl WITHOUT a .git tree,
-            # already pinned at the target commit. There `git checkout` fatals
-            # ("not a git repository") and, under `set -e`, kills rank 0 BEFORE any
-            # app/Ray/megatron code runs — teardown the whole gang (proven 2026-07-16:
-            # megatron-parity-v0m-mcore-east, git exit 128). In that case the baked
-            # tree already IS the intended ref, so no-op with a visible note.
-            f"if git -C {skyrl_home} rev-parse --git-dir >/dev/null 2>&1; then "
-            f"git -C {skyrl_home} fetch --quiet --all || true; "
-            f"git -C {skyrl_home} checkout {ref}; "
-            # Purge baked bytecode after the checkout. The gpu-rl image bakes
-            # `.pyc` for the editable skyrl-train at its build-time commit; if those
-            # were compiled with hash-based (UNCHECKED_HASH) invalidation, Python
-            # does NOT recompile when `git checkout` swaps the `.py` underneath, so
-            # a `--skyrl-ref` checkout SILENTLY runs the stale baked bytecode (proven
-            # 2026-06-25: the norm_topk_prob fix at 518179d checked out, but the pod
-            # raised at the pre-fix line numbers). Delete the cache so the live `.py`
-            # is recompiled. Best-effort (|| true) — must not block on a read-only fs.
-            f"find {skyrl_home}/skyrl-train -name '*.pyc' -delete 2>/dev/null || true; "
-            f"find {skyrl_home}/skyrl-train -name __pycache__ -type d -prune -exec rm -rf {{}} + 2>/dev/null || true; "
-            f'echo "[rl-iris] MarinSkyRL now at $(git -C {skyrl_home} rev-parse HEAD)"; '
-            f"else "
-            f'echo "[rl-iris] {SKYRL_HOME} is not a git tree (baked image already pinned) — using baked MarinSkyRL; --skyrl-ref not applied"; '
-            f"fi; "
-        )
     # Optional: reinstall harbor at a newer/pinned commit BEFORE running. Harbor is baked
-    # NON-editable into the RL venv, so unlike --skyrl-ref there is no editable clone to
+    # NON-editable into the RL venv, so (unlike skyrl-train, whose source rides the /app
+    # sync) there is no editable clone to
     # `git checkout`; the analog is a `--force-reinstall --no-deps` from git (pure-python,
     # ~1 min, no image rebuild). --no-deps so only the harbor source swaps (its resolved
     # deps stay the baked known-good set). Under `set -e` + a hard
@@ -1508,7 +1443,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # ingress registration/mint path. cloud.iris.ingress_utils hard-imports
     # iris.cluster.client.* / iris.rpc.*, but the gpu-rl image bakes ONLY MarinSkyRL +
     # harbor (never iris, a marin-monorepo pkg) -> `ModuleNotFoundError: No module named
-    # 'iris'` in driver init. This is the lightweight analog of --skyrl-ref (no ~40-min
+    # 'iris'` in driver init. This is a lightweight live install (no ~40-min
     # kaniko rebuild): marin-iris is a pure-python wheel, installed live. Only needed in
     # controller mode (direct mode never imports iris), so gate on ingress_mode ==
     # controller -> the default direct path is byte-identical (no install, no env change).
@@ -1599,7 +1534,6 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     )
     bash = (
         f"set -e; cd {APP_DIR}; "
-        f"{skyrl_refresh}"
         f"{harbor_refresh}"
         f"{iris_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "

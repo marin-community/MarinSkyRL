@@ -970,7 +970,7 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     bracket; see ``vllm_engine.py`` ``skyrl_begin/finish_weight_reload`` and
     ``fsdp_worker.broadcast_to_inference_engines``). This gather function is NOT that cause:
     committed (ac44079) as the *suspected* fix, but the +30-min canary (CoreWeave r8, fix LIVE
-    via ``--skyrl-ref ac44079``) STILL saladded; the EP=8 on-GPU gather was later proven
+    at ac44079) STILL saladded; the EP=8 on-GPU gather was later proven
     BIT-EXACT vs the disk checkpoint (gather is correct). The torch warning quoted below is a
     red herring for the salad (CPU ``full_tensor()`` never mis-orders; working Jupiter MoE used
     plain ``full_tensor()``). This function REMAINS a real, separate correctness improvement for

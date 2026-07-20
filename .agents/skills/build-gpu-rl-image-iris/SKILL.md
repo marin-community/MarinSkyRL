@@ -10,8 +10,8 @@ description: >-
   settings (512GB node, per-instruction layers not `--single-snapshot`, `--cache`, ghcr GitHub-PAT creds), the
   Dockerfile gotchas baked into the build (uv `--index-strategy unsafe-best-match`, `python -m pip wheel`,
   torchtitan+tyro via the `ep` extra), the build-asserts-as-validation, capturing the digest + bumping
-  `DEFAULT_RL_DOCKER_IMAGE`, monitoring the build job, and WHEN a rebuild is actually required vs a runtime
-  `--skyrl-ref` checkout. Use when asked to build / rebuild / push the gpu-rl image, after bumping the vLLM-fork
+  `DEFAULT_RL_DOCKER_IMAGE`, monitoring the build job, and WHEN a rebuild is actually required vs a live
+  `/app` source sync. Use when asked to build / rebuild / push the gpu-rl image, after bumping the vLLM-fork
   commit / flash-attn / torch-CUDA / a baked dep. The Mac CANNOT build it (arm64 + needs linux/amd64 + ~512GB).
   Reference (this repo): docker/Dockerfile.gpu-rl + docker/build_gpu_rl_kaniko.sh (canonical build),
   cloud/iris/launch_rl_iris.py (canonical launcher, `DEFAULT_RL_DOCKER_IMAGE` digest pin).
@@ -285,8 +285,9 @@ Rebuild the image ONLY for a change to something the image **BAKES / COMPILES**:
   --frozen` reproduces the new set by construction), the torchtitan/tyro/`ep` extra, harbor (`HARBOR_COMMIT`),
   or the rl-stage apt set.
 
-Do **NOT** rebuild for a **MarinSkyRL source** change — that's editable at `/opt/skyrl` and picked up live at
-launch via **`--skyrl-ref <commit>`** (a `git fetch && checkout`), no image rebuild. The compiled vLLM-fork is
+Do **NOT** rebuild for a **MarinSkyRL source** change — the launcher syncs the local workspace to `/app`
+(first on `PYTHONPATH`), so `skyrl_train.*` + `examples.terminal_bench.*` are picked up live from `/app` at
+launch, no image rebuild. The compiled vLLM-fork is
 the only thing that genuinely forces a rebuild for a code change.
 
 > If the build host WERE a real x86 box (not the cluster), the documented fast path is the wheel-cache:

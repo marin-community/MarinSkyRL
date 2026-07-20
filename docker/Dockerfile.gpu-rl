@@ -164,7 +164,7 @@ ARG TORCH_CUDA_ARCH_LIST
 ARG INSTALL_MEGATRON
 ARG HARBOR_COMMIT
 # MarinSkyRL commit this image is built from — recorded in the baked /opt/skyrl
-# git tree (see the git-init step below) for provenance + `--skyrl-ref` support.
+# git tree (see the git-init step below) for provenance.
 ARG GITSHA=unknown
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -209,16 +209,13 @@ ENV SKYRL_HOME=/opt/skyrl
 COPY skyrl-train ${SKYRL_HOME}/skyrl-train
 COPY skyrl-gym ${SKYRL_HOME}/skyrl-train/skyrl-gym
 
-# Make /opt/skyrl a REAL git working tree so the iris launcher's `--skyrl-ref`
-# (git fetch --all && git checkout <ref>) can hot-load a newer/pinned MarinSkyRL
-# commit at launch WITHOUT an image rebuild. The launcher guards on
-# `git -C /opt/skyrl rev-parse --git-dir`; without a .git it no-ops and the pod
-# silently runs the stale baked code (proven on the megatron variant: east16/17
-# ran baked code because this image had no git tree, so a code fix REQUIRED a
-# ~40-min rebuild). This is ADDITIVE: the committed working-tree content is
-# exactly the COPY'd source above (unchanged closure); we only add .git + the
-# origin remote so a runtime fetch+checkout resolves real refs. skyrl-train stays
-# `pip install -e` (uv sync below), so a checkout is live without reinstall.
+# Make /opt/skyrl a REAL git working tree so the baked MarinSkyRL commit is
+# recorded (provenance) and /opt/skyrl serves as a clean baked-HEAD import
+# fallback behind the launcher's live /app source sync (which shadows it on
+# PYTHONPATH — the single deploy vector for skyrl-train + examples source).
+# skyrl-train stays `pip install -e` (uv sync below). This is ADDITIVE: the
+# committed working-tree content is exactly the COPY'd source above (unchanged
+# closure); we only add .git + the origin remote.
 RUN cd ${SKYRL_HOME} && \
     git init -q -b main && \
     git remote add origin https://github.com/marin-community/MarinSkyRL.git && \

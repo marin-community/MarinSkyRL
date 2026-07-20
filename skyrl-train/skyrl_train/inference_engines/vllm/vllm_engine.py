@@ -132,7 +132,7 @@ def ensure_norm_meta_fakes_registered() -> None:
     ``None`` (identical shape to vLLM's own ``_C::scaled_fp4_quant.out`` fake).
     This ONLY fires under meta-tensor tracing (the CP>1 sync path); real CUDA
     execution keeps using the registered CUDA kernel, so numerics/MoE routing are
-    UNCHANGED. Ships via ``--skyrl-ref`` (no gpu-rl image rebuild).
+    UNCHANGED. Ships via the /app source sync (no gpu-rl image rebuild).
 
     Called from the weight-reload bracket rather than at import time because the
     ``_C`` custom-op library is only guaranteed loaded once the vLLM model is
