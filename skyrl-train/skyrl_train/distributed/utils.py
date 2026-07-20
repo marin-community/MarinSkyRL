@@ -31,6 +31,7 @@ from torch.distributed.distributed_c10d import (
 from torch.multiprocessing.reductions import rebuild_cuda_tensor
 import torch.nn as nn
 from torch.optim import Optimizer
+from loguru import logger
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
 ModelOrModelOptimPair = Union[nn.Module, ModelOptimPair]
@@ -60,6 +61,16 @@ def init_worker_process_group_with_device(timeout_seconds: int, backend: str = "
     """
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
+    # Surface the resolved rank/device + the CVD regime (masked=single-device vs unmasked=all)
+    # so the pinning can be validated per cluster from the logs.
+    logger.info(
+        "[pg-init] RANK={} LOCAL_RANK={} CUDA_VISIBLE_DEVICES={} visible_device_count={} -> set_device(cuda:{})",
+        os.environ.get("RANK", "?"),
+        local_rank,
+        os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
+        torch.cuda.device_count(),
+        local_rank,
+    )
     if not torch.distributed.is_initialized():
         # Default torch dist pg init timeout is 10 minutes (600 s); callers pass
         # SKYRL_WORKER_NCCL_TIMEOUT_IN_S.
