@@ -28,6 +28,34 @@ from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 
 
+def _hf_hub_online():
+    """Context manager: temporarily disable HF offline mode for a Hub network call.
+
+    ``HF_HUB_OFFLINE=1`` is commonly set so the model prestage reads a warm node-local cache, but it
+    makes ``create_repo`` / ``upload_folder`` raise ``offline mode is enabled``. huggingface_hub caches
+    the flag as a module constant at import time, so both the env var AND
+    ``huggingface_hub.constants.HF_HUB_OFFLINE`` must be cleared for the call, then restored.
+    """
+    import contextlib
+    import os
+
+    import huggingface_hub.constants as hc
+
+    @contextlib.contextmanager
+    def _cm():
+        prev_env = os.environ.pop("HF_HUB_OFFLINE", None)
+        prev_const = getattr(hc, "HF_HUB_OFFLINE", False)
+        hc.HF_HUB_OFFLINE = False
+        try:
+            yield
+        finally:
+            hc.HF_HUB_OFFLINE = prev_const
+            if prev_env is not None:
+                os.environ["HF_HUB_OFFLINE"] = prev_env
+
+    return _cm()
+
+
 # Registry mapping callback type names to classes
 # This enables YAML-based callback configuration
 CALLBACK_REGISTRY: Dict[str, Type[TrainerCallback]] = {}
@@ -249,12 +277,13 @@ class HFHubUploadCallback(TrainerCallback):
 
         try:
             api = self._get_api()
-            api.create_repo(
-                repo_id=self.repo_id,
-                repo_type="model",
-                private=self.private,
-                exist_ok=True,
-            )
+            with _hf_hub_online():
+                api.create_repo(
+                    repo_id=self.repo_id,
+                    repo_type="model",
+                    private=self.private,
+                    exist_ok=True,
+                )
             return True
         except Exception as e:
             logger.error(f"HFHubUploadCallback: Failed to create/access repo {self.repo_id}: {e}")
@@ -339,14 +368,15 @@ class HFHubUploadCallback(TrainerCallback):
                 dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
                 try:
                     logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
-                    api.upload_folder(
-                        folder_path=str(model_path),
-                        repo_id=self.repo_id,
-                        path_in_repo=path_in_repo,
-                        repo_type="model",
-                        revision=self.revision,
-                        commit_message=commit_message,
-                    )
+                    with _hf_hub_online():
+                        api.upload_folder(
+                            folder_path=str(model_path),
+                            repo_id=self.repo_id,
+                            path_in_repo=path_in_repo,
+                            repo_type="model",
+                            revision=self.revision,
+                            commit_message=commit_message,
+                        )
                     logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
                 except Exception as e:
                     logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
