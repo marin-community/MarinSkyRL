@@ -265,8 +265,15 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # PR #19). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 32 layers, max 6.56 GB.
     # Build asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 / vllm / skyrl_train / torchtitan
     # ExpertParallel / boto3 import OK). baked harbor c872216e.
-    "@sha256:7bbc17b63bb89e785658f7b1cad119070d84152898a4b20ded13939218abf3e6"  # noqa: E501  (gpu-rl-f4f25bae, PULLABLE; harbor c872216e opencode literal bridge + boto3/smart_open deps)
-    # (prev: gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2; gpu-rl-19bd8c5e @sha256:98adaa38 log-capture-safe tqdm)
+    # gpu-rl-megatron-a1e7a363 (built 2026-07-20, kaniko job gpurl-kaniko-a1e7a363, INSTALL_MEGATRON=1,
+    # SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT bump to 5efac6fa (harbor main HEAD = the Daytona keepalive,
+    # PR #19 — background refresh_activity() so opencode trials don't idle-reap at auto_stop=30). Baking it
+    # lets ALL RL launches drop --harbor-ref entirely (no-refs policy: a merged branch auto-deletes, and the
+    # runtime uv reinstall then dies state-5 at bring-up — this happened to the keep6 -e1 pair). Megatron
+    # variant = the weight-sync het-bootstrap fix (PR #71, 79432f4a) + all d0016149 contents. HARBOR_COMMIT
+    # plumbed through build_gpu_rl_kaniko.sh via MarinSkyRL PR #74. Pull-verified: 35 layers, max 7.48 GB.
+    "@sha256:570e9cc1e8db9b23eed54c491257c51f41017bb73711e02655afd893c1dfd35c"  # noqa: E501  (gpu-rl-megatron-a1e7a363, PULLABLE; harbor 5efac6fa keepalive + weight-sync fix baked)
+    # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
 )
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
@@ -461,6 +468,65 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
         return urlparse(url).hostname if url else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _rl_config_is_agentic(rl_config: Optional[str]) -> bool:
+    """True when the rl_config drives an in-sandbox agent (opencode/harbor/terminal_bench)
+    that must call BACK to the served model — i.e. it needs controller-ingress. Best-effort
+    text scan; a false negative just means the operator still passes --ingress-mode by hand."""
+    try:
+        if not rl_config or not os.path.isfile(rl_config):
+            return False
+        with open(rl_config, "r") as f:
+            text = f.read().lower()
+        return any(k in text for k in ("terminal_bench", "harbor", "opencode"))
+    except OSError:
+        return False
+
+
+def autoconfigure_ingress(args: argparse.Namespace) -> None:
+    """Derive the controller-ingress config from the target cluster so an agentic CoreWeave
+    launch JUST WORKS from ``--target-cluster`` alone — no manual ``--ingress-mode`` /
+    ``--ingress-host``.
+
+    Rationale (why this is a DERIVATION, not a choice): on a CoreWeave cluster the ONLY
+    reachable serving topology is federated controller-ingress through the marin parent, so
+    the ingress host is fully determined by the cluster (``iris.oa.dev``) — there is exactly
+    one correct value. Deriving it here (a) removes the ``--ingress-host`` mismatch error
+    class entirely, and (b) makes the single source of truth the *cluster*, not a flag the
+    caller might get wrong or an env var. Prefer this default > flag > env var. The
+    downstream in-pod runner then mints ONE capability URL and threads it as the SkyRL cfg
+    ``agent_api_base`` (the value opencode actually reads); ``HARBOR_MODEL_ENDPOINT`` is only
+    a legacy mirror of the same minted value, never an independent knob."""
+    target = str(getattr(args, "target_cluster", "") or "")
+    cluster = str(getattr(args, "cluster", "") or "")
+    if not (target.startswith("cw-") or cluster.startswith("cw-")):
+        return  # non-CoreWeave: leave the caller's explicit choice untouched
+    # (1) Auto-enable controller mode for an agentic rl_config (opencode must reach vLLM).
+    if getattr(args, "ingress_mode", "direct") == "direct" and _rl_config_is_agentic(
+        getattr(args, "rl_config", None)
+    ):
+        args.ingress_mode = "controller"
+        print(
+            "[rl-iris] auto: --ingress-mode=controller (agentic rl_config on a CoreWeave target)",
+            flush=True,
+        )
+    # (2) The ingress host is cluster-determined on CoreWeave: the marin parent iris.oa.dev.
+    if getattr(args, "ingress_mode", "direct") == "controller":
+        prev = getattr(args, "ingress_host", None)
+        if prev not in (None, "", "iris.oa.dev"):
+            print(
+                f"[rl-iris] auto: overriding --ingress-host {prev} -> iris.oa.dev "
+                "(CoreWeave federated parent; the host is cluster-determined, not a free choice)",
+                flush=True,
+            )
+        elif prev is None:
+            print(
+                "[rl-iris] auto: --ingress-host=iris.oa.dev (derived from --target-cluster; "
+                "CoreWeave federated parent)",
+                flush=True,
+            )
+        args.ingress_host = "iris.oa.dev"
 
 
 def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
@@ -1554,6 +1620,12 @@ def main() -> int:
     # 512-node target) without a manual --cluster-config.
     if not args.cluster_config:
         args.cluster_config = _resolve_cluster_config_default(args.cluster)
+
+    # Derive the controller-ingress config from the target cluster so an agentic
+    # CoreWeave launch works from --target-cluster alone (no manual --ingress-mode/
+    # --ingress-host). Runs BEFORE the reachability guard, which then only sees the
+    # single correct cluster-determined config.
+    autoconfigure_ingress(args)
 
     # Fail loud (before any submit / GPU allocation) when controller-ingress would
     # produce a capability URL the Daytona sandbox cannot reach — the Exp2 blocker
