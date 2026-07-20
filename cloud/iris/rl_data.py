@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -34,19 +35,37 @@ def resolve_rl_train_data(
     ``cloud.iris.extract_tasks_from_parquet``, permissions fixed, and local paths returned.
 
     ``kind="parquet"`` (single-turn RLVR, e.g. main_base + aime): the entries are
-    SkyRL-shaped parquet URIs / paths (or a pre-shaped HF id) that ``PromptDataset`` loads
-    directly, so they are passed through UNCHANGED — never task-extracted. The parquet is
-    read once by the rank-0 driver, so no per-node staging is needed.
+    SkyRL-shaped parquet paths that ``PromptDataset`` loads via ``datasets.load_dataset``.
+    Never task-extracted. Local paths and HF ids pass through UNCHANGED; an object-store URI
+    (``s3://`` / ``gs://`` / http(s)) is STAGED to node-local disk and the local path returned —
+    ``datasets.load_dataset`` refuses a remote URI under ``HF_HUB_OFFLINE=1`` (the mode set so
+    the prestaged, template-rewritten model reads its warm cache), raising
+    ``OfflineModeIsEnabled`` before training. Staging pulls it via fsspec (the pod's object-store
+    creds + endpoint) so the offline flag only gates weights, not the dataset read.
     """
     if not train_data:
         return []
 
     if kind == "parquet":
-        if verbose:
-            print(
-                f"[rl_data] data.kind=parquet: passing {len(train_data)} path(s) through to PromptDataset (no task extraction)"
-            )
-        return list(train_data)
+        resolved: List[str] = []
+        stage_root = Path(scratch_dir) / "rl_parquet" if scratch_dir else Path("/tmp/skyrl_rl_parquet")
+        for entry in train_data:
+            # A local path or a bare HF dataset id is read directly by PromptDataset.
+            if "://" not in entry or entry.startswith("file://"):
+                resolved.append(entry)
+                continue
+            # Object-store URI: pull to node-local disk (offline mode blocks the remote read).
+            import fsspec
+
+            stage_root.mkdir(parents=True, exist_ok=True)
+            local = stage_root / Path(entry.split("?", 1)[0]).name
+            if not local.exists() or on_exist == "overwrite":
+                with fsspec.open(entry, "rb") as src, open(local, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            if verbose:
+                print(f"[rl_data] data.kind=parquet: staged {entry} -> {local}")
+            resolved.append(str(local))
+        return resolved
 
     # Determine the scratch directory for extracted tasks. It MUST be a shared
     # filesystem visible to all compute nodes; /tmp is node-local (last resort).
