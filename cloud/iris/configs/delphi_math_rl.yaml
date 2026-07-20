@@ -83,7 +83,16 @@ generator:
     max_generate_length: 3584  # 4096 - 512 prompt
     temperature: 0.7
     top_p: 1.0
-    skip_special_tokens: false  # keep <|start_think|>/<|end_think|> in the rollout decode
+    # NOTE: do NOT set skip_special_tokens here — it is not a SkyRL sampling_params
+    # struct key (ppo_base_config allows only max_generate_length/repetition_penalty/
+    # temperature/top_p/min_p/top_k/logprobs/stop; a hard override struct-rejects at
+    # Hydra parse → driver crash before training). It is also unnecessary: SkyRL is
+    # token-in-token-out — it trains on response_token_ids (the <|start_think|>/<|end_think|>
+    # tokens are preserved by construction), and only uses skip_special_tokens=True for the
+    # string view the aime verifier reads (which extracts \boxed{...}, unaffected). The
+    # delphi template + think tokens are already forced onto the policy tokenizer by the
+    # launcher's apply_policy_chat_template preflight; the eval-context skip_special_tokens
+    # flag does not apply to the RL rollout path.
 
   engine_init_kwargs:
     max_model_len: 4096  # HARD 4k cap
