@@ -215,7 +215,14 @@ def sync_trace_jobs(s3, slug, dest, gzip=True):
     """
     pfx = f"iris/{slug}/trace_jobs/"
     keys = _list_all(s3, pfx)
-    print(f"[trace] {len(keys)} objects under {pfx}")
+    # Skip tmux pane captures (terminus_2.pane / opencode .pane): huge full-terminal scrollback
+    # dumps, useless for rollout analysis (config/result/trajectory/verifier are the signal). Also
+    # dodges a NoSuchKey race when a LIVE job rotates/removes a .pane between listing and fetch.
+    _n0 = len(keys)
+    keys = [item for item in keys if not item[0].endswith(".pane")]
+    _skipped = _n0 - len(keys)
+    print(f"[trace] {len(keys)} objects under {pfx}"
+          + (f"  (skipped {_skipped} .pane captures)" if _skipped else ""))
     if not keys:
         print("[trace] (none yet — trace_jobs is written as trials complete; re-run once rollouts start)")
         return 0
