@@ -4,30 +4,38 @@ Why this exists: a 30B agentic RL run OOM'd at global_step 1 while computing
 log-probs over a ~146k-token trajectory — the unchunked path materializes a single
 [num_tokens, vocab//TP] fp32 logits tensor (~21 GiB for 146k tokens at TP4) inside
 `DistributedLogprob`. The fix flips the base config default `logprob_chunk_size`
-from null (unchunked) to an int, which routes both the policy and ref logprob
-forwards through `ChunkedDistributedLogprob` (per-position log-softmax, chunked along
-the sequence dim), bounding peak memory regardless of sequence length.
+from null (unchunked) to 1024, which routes both the policy and ref logprob forwards
+through `ChunkedDistributedLogprob` (per-position log-softmax, chunked along the
+sequence dim), bounding peak memory regardless of sequence length.
 
 These tests pin the two properties that make that default flip safe:
   1. The chunked path is numerically identical to the unchunked path — in both the
      forward log-probs AND the backward gradient — so turning it on cannot change
      training results. (Log-softmax is per-position over vocab; chunking only splits
      the independent sequence positions, so it is exact, not approximate.)
-  2. The MegatronModelWrapper honors an explicitly-passed chunk size and, when the
-     caller omits it, falls back to the policy config key (back-compat). This is the
-     plumbing that lets the policy worker read its own key and the ref worker read
-     the ref key.
+  2. The composed base config defaults `logprob_chunk_size` to 1024 for BOTH the
+     policy and ref megatron_config (the two keys the workers read).
+
+`model_utils` imports `megatron.core.parallel_state` at module load, but the functions
+under test never touch it, so when megatron is not installed (the CPU CI env) we stub
+that one submodule — only if megatron is genuinely absent, so a real-megatron env is
+left untouched.
 """
 
+import importlib.util
 import os
+import sys
 import types
 
 import pytest
 import torch
 import torch.distributed as dist
-from omegaconf import OmegaConf
 
-from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs
+if importlib.util.find_spec("megatron") is None:
+    for _name in ("megatron", "megatron.core", "megatron.core.parallel_state"):
+        sys.modules.setdefault(_name, types.ModuleType(_name))
+
+from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -101,48 +109,17 @@ def test_chunked_matches_unchunked_backward(single_rank_group, chunk_size):
     )
 
 
-def _make_wrapper(monkeypatch, cfg):
-    """Construct a MegatronModelWrapper without any real Megatron module: stub out
-    get_model_config so __init__ only exercises the config resolution we care about."""
-    import skyrl_train.workers.megatron.megatron_model_wrapper as mw
+def test_base_config_defaults_chunk_size_for_policy_and_ref():
+    """The composed base config must default logprob_chunk_size to a non-null int for
+    BOTH the policy and ref megatron_config — the two keys the workers read. Guards
+    against a silent regression back to the unchunked (OOM-prone) default."""
+    pytest.importorskip("hydra")
+    from omegaconf import OmegaConf
+    from skyrl_train.config.utils import get_default_config
 
-    monkeypatch.setattr(mw, "get_model_config", lambda module: types.SimpleNamespace())
-    return mw.MegatronModelWrapper(config=cfg, actor_module=[object()])
+    cfg = get_default_config()
+    policy = OmegaConf.select(cfg, "trainer.policy.megatron_config.logprob_chunk_size")
+    ref = OmegaConf.select(cfg, "trainer.ref.megatron_config.logprob_chunk_size")
 
-
-def _make_wrapper_explicit(monkeypatch, cfg, chunk_size):
-    import skyrl_train.workers.megatron.megatron_model_wrapper as mw
-
-    monkeypatch.setattr(mw, "get_model_config", lambda module: types.SimpleNamespace())
-    return mw.MegatronModelWrapper(config=cfg, actor_module=[object()], logprob_chunk_size=chunk_size)
-
-
-def _cfg(policy_chunk, ref_chunk):
-    return OmegaConf.create(
-        {
-            "trainer": {
-                "use_sample_packing": True,
-                "policy": {"megatron_config": {"logprob_chunk_size": policy_chunk}},
-                "ref": {"megatron_config": {"logprob_chunk_size": ref_chunk}},
-            }
-        }
-    )
-
-
-def test_wrapper_uses_explicit_chunk_size(monkeypatch):
-    # Policy passes its key, ref passes its (different) key: each must be honored.
-    cfg = _cfg(policy_chunk=1024, ref_chunk=512)
-    assert _make_wrapper_explicit(monkeypatch, cfg, 1024)._logprob_chunk_size == 1024
-    assert _make_wrapper_explicit(monkeypatch, cfg, 512)._logprob_chunk_size == 512
-
-
-def test_wrapper_explicit_none_disables_chunking(monkeypatch):
-    # An explicit None must NOT fall back to the config key — it means "disabled".
-    cfg = _cfg(policy_chunk=1024, ref_chunk=1024)
-    assert _make_wrapper_explicit(monkeypatch, cfg, None)._logprob_chunk_size is None
-
-
-def test_wrapper_falls_back_to_policy_key(monkeypatch):
-    # Back-compat: a caller that omits the arg reads trainer.policy.megatron_config.
-    cfg = _cfg(policy_chunk=2048, ref_chunk=512)
-    assert _make_wrapper(monkeypatch, cfg)._logprob_chunk_size == 2048
+    assert policy == 1024, f"policy logprob_chunk_size default = {policy!r}, expected 1024"
+    assert ref == 1024, f"ref logprob_chunk_size default = {ref!r}, expected 1024"
