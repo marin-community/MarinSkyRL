@@ -51,6 +51,28 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 _MEGATRON_OPTIM_SHARDING_TYPE = "dp_zero_gather_scatter"
 
 
+# Checkpoint-save OOM fix. megatron-core's `sharded_param_state_dp_zero` (reached from the
+# `dp_zero_gather_scatter` save above) hardcodes `get_parameter_state_dp_zero(use_gloo_comm=False)`,
+# which gathers the DP-rank-0 optimizer state ONTO the GPU (`send_tensor.cuda()`). Right after a
+# training step the policy model + fp32 grad buffer + optimizer state are all GPU-resident, so that
+# multi-GiB gather OOMs on an 80 GB H100 (observed: 30B-A3B TP4xPP2xEP4 died at save_checkpoint gs1 —
+# tried to alloc 6.75 GiB with 5.95 GiB free). Forcing `use_gloo_comm=True` gathers over the gloo DP
+# group with `device="cpu"` — no GPU alloc, so checkpoint save needs ZERO GPU headroom. The gloo DP
+# group exists (`create_gloo_process_groups` defaults True in `initialize_model_parallel`); gloo
+# changes only the transport, not the serialized ShardedTensor format, so checkpoints stay
+# load-compatible. The save caller passes `use_gloo_comm=False` EXPLICITLY, so we override the value
+# (not just the default). Matches the established runtime-patch idiom (see megatron_worker.py).
+if not getattr(DistributedOptimizer, "_skyrl_gps_force_gloo_patched", False):
+    _orig_get_parameter_state_dp_zero = DistributedOptimizer.get_parameter_state_dp_zero
+
+    def _get_parameter_state_dp_zero_force_gloo(self, use_gloo_comm=False, *args, **kwargs):
+        # Ignore the caller's use_gloo_comm; force the gather onto gloo/CPU.
+        return _orig_get_parameter_state_dp_zero(self, True, *args, **kwargs)
+
+    DistributedOptimizer.get_parameter_state_dp_zero = _get_parameter_state_dp_zero_force_gloo
+    DistributedOptimizer._skyrl_gps_force_gloo_patched = True
+
+
 class MegatronStrategy(DistributedStrategy):
     """
     The strategy for training with Megatron.
