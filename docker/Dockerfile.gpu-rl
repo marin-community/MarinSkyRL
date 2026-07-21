@@ -242,8 +242,8 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # =============================================================================
 # RE-LAYERED uv sync (packaging only — SAME lock, SAME closure, SAME versions).
 # A single `uv sync --frozen ... --extra megatron` RUN puts the ENTIRE env
-# (torch + all nvidia CUDA libs + flashinfer-jit-cache + TE + megatron + the uv
-# download cache) into ONE ~17.6 GB layer, which ImagePullBackOffs indefinitely
+# (torch + all nvidia CUDA libs + flashinfer-jit-cache + TE + megatron) into
+# ONE ~17.6 GB layer, which ImagePullBackOffs indefinitely
 # over the CoreWeave->ghcr egress (a single >8 GB blob never completes — ops doc
 # coreweave_gpu_ops.md). kaniko emits ONE layer per RUN, so we split the SAME
 # `uv sync --frozen` into a chain of identical syncs that defer the heavy
@@ -262,7 +262,11 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 #   HB3 cublas(594) | HB4 mamba-ssm+causal-conv1d(719) | HB5 nccl+flashinfer-cubin+TE-cu12(880)
 #   HB6 cusparse+cusparselt+cusolver(843) | FINAL vllm+cufft+triton+nvshmem+nvrtc(895)  [wheel MB]
 # =============================================================================
-ENV RL_SYNC="uv sync --frozen --extra vllm --extra ep"
+# `--no-cache` is essential here: otherwise uv's download cache is copied into
+# each Kaniko RUN layer. In particular, the initial split layer reached 6.96 GiB
+# even though its installed closure was much smaller, reintroducing the RNO
+# ImagePullBackOff failure mode. The temporary cache leaves no pull payload.
+ENV RL_SYNC="uv sync --frozen --no-cache --extra vllm --extra ep"
 # layer 0: all small packages + torch (torch required in-resolution for the
 # flash-attn sdist build's match-runtime build dep); defer the 16 heavies.
 RUN cd ${SKYRL_HOME}/skyrl-train && \
