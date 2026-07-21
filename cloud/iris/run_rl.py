@@ -235,6 +235,20 @@ class LocalRLRunner:
         Default ``ingress_mode=direct`` yields immediately (no proxy, no register, no
         env mutation) — byte-identical to today.
         """
+        # Agent auth is DECOUPLED from ingress mode. Installed OpenAI-compatible agents
+        # (opencode) refuse to start without a non-empty api_key; for the inert-capability
+        # model that key is just a dummy placeholder. That is a per-AGENT requirement, NOT a
+        # controller-ingress one — the served endpoint may be reached DIRECTLY (the agent's
+        # api_base kwarg) with no controller/proxy at all. So publish the dummy key here,
+        # regardless of ingress_mode. It never clobbers a real host OPENAI_API_KEY (see
+        # inject_ingress_agent_key: OPENCODE_DUMMY_KEY set unconditionally, real keys only
+        # setdefault'd). Previously this lived inside the controller branch only, so opencode
+        # on ingress_mode=direct got NO key -> refused to start -> zero requests -> silent
+        # empty rollouts (engine idle, "Sandbox not found" symptom).
+        from cloud.iris.ingress_utils import inject_ingress_agent_key
+
+        inject_ingress_agent_key()
+
         if self.config.ingress_mode != "controller":
             yield
             return
@@ -245,7 +259,6 @@ class LocalRLRunner:
             capability_api_base,
             controller_registration_plan,
             federated_capability_api_base,
-            inject_ingress_agent_key,
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
@@ -317,7 +330,7 @@ class LocalRLRunner:
                 # agent_api_base (same Ray process-boundary — see run()). None when
                 # record_literal is off (null CM), keeping the direct path byte-identical.
                 self._literal_log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
-                injected = inject_ingress_agent_key()
+                injected = True  # dummy key already published above (decoupled from ingress)
                 print(
                     f"[run_rl] ingress_mode=controller record_literal="
                     f"{self.config.record_literal} target_cluster="

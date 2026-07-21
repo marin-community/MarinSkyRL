@@ -90,3 +90,35 @@ def test_controller_ingress_preserves_a_real_openai_base_url(monkeypatch):
         # A real OpenAI base url (the LLM-judge verifiers' endpoint) survives untouched —
         # it is NOT clobbered to the vLLM capability URL.
         assert os.environ["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+
+
+def test_direct_ingress_still_publishes_agent_dummy_key(monkeypatch):
+    """Agent auth is DECOUPLED from controller-ingress: an installed agent (opencode) on
+    ingress_mode=direct must still get the inert dummy key, or it refuses to start (zero
+    requests -> silent empty rollouts). The dummy key is published BEFORE the direct-mode
+    early-return, so it lands regardless of ingress_mode — no live controller stubbing
+    needed here since the direct path calls no ingress helpers."""
+    monkeypatch.delenv(ingress_utils.AGENT_DUMMY_KEY_VAR, raising=False)
+    cfg = LocalRLConfig(
+        rl_config_path="x.yaml",
+        job_name="test-job",
+        model_path="Qwen/Qwen3-8B",
+        ingress_mode="direct",
+    )
+    runner = LocalRLRunner(cfg)
+    with runner._ingress_context():
+        assert os.environ[ingress_utils.AGENT_DUMMY_KEY_VAR] == ingress_utils.DUMMY_API_KEY
+
+
+def test_direct_ingress_never_clobbers_a_real_openai_api_key(monkeypatch):
+    """The dummy-key injection only setdefaults OPENAI_API_KEY (real host key preserved)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-host-key")
+    cfg = LocalRLConfig(
+        rl_config_path="x.yaml",
+        job_name="test-job",
+        model_path="Qwen/Qwen3-8B",
+        ingress_mode="direct",
+    )
+    runner = LocalRLRunner(cfg)
+    with runner._ingress_context():
+        assert os.environ["OPENAI_API_KEY"] == "sk-real-host-key"
