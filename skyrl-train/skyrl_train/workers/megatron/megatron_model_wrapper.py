@@ -1,4 +1,4 @@
-from typing import Optional, Callable, List
+from typing import Any, Optional, Callable, List
 from functools import partial
 import torch
 import torch.nn as nn
@@ -21,6 +21,12 @@ from skyrl_train.distributed.megatron.megatron_utils import (
 )
 
 
+# Sentinel: distinguishes "caller did not pass logprob_chunk_size" (=> fall back to
+# the policy config key, preserving prior behavior) from an explicit None (=> chunking
+# disabled). A plain None default could not tell these apart.
+_UNSET = object()
+
+
 class MegatronModelWrapper:
     def __init__(
         self,
@@ -28,6 +34,7 @@ class MegatronModelWrapper:
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
+        logprob_chunk_size: Any = _UNSET,
     ):
         self.cfg = config
         self.actor_module = actor_module
@@ -35,14 +42,22 @@ class MegatronModelWrapper:
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
         # Optional sequence-dim chunk size for the vocab-parallel logprob
-        # computation. None (default) => the whole [B, S, vocab//TP] fp32 exp is
+        # computation. None => the whole [B, S, vocab//TP] fp32 exp is
         # materialized at once, which OOMs on long sequences. A non-null value
         # activates the numerically-exact ChunkedDistributedLogprob path
         # (per-position log-softmax, chunked along seq), bounding peak memory
         # regardless of sequence length. Byte-identical when unset.
-        self._logprob_chunk_size = OmegaConf.select(
-            self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
-        )
+        #
+        # Callers pass this EXPLICITLY (the policy worker its own
+        # trainer.policy.megatron_config.logprob_chunk_size, the ref worker its own
+        # trainer.ref.megatron_config.logprob_chunk_size) so each model honors its
+        # own config key. If left unset we fall back to reading the policy key, so
+        # any external caller that doesn't pass it keeps the prior behavior.
+        if logprob_chunk_size is _UNSET:
+            logprob_chunk_size = OmegaConf.select(
+                self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
+            )
+        self._logprob_chunk_size = logprob_chunk_size
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95

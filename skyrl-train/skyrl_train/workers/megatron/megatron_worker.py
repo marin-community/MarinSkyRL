@@ -428,6 +428,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
+            logprob_chunk_size=OmegaConf.select(
+                self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
+            ),
         )
 
         # Initialize weight extractor
@@ -775,8 +778,14 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
-        # create worker model
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+        # create worker model — ref honors its OWN logprob_chunk_size key
+        self.model = MegatronModelWrapper(
+            config=self.cfg,
+            actor_module=self.actor_module,
+            logprob_chunk_size=OmegaConf.select(
+                self.cfg, "trainer.ref.megatron_config.logprob_chunk_size", default=None
+            ),
+        )
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
