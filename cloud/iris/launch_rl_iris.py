@@ -503,9 +503,7 @@ def autoconfigure_ingress(args: argparse.Namespace) -> None:
     if not (target.startswith("cw-") or cluster.startswith("cw-")):
         return  # non-CoreWeave: leave the caller's explicit choice untouched
     # (1) Auto-enable controller mode for an agentic rl_config (opencode must reach vLLM).
-    if getattr(args, "ingress_mode", "direct") == "direct" and _rl_config_is_agentic(
-        getattr(args, "rl_config", None)
-    ):
+    if getattr(args, "ingress_mode", "direct") == "direct" and _rl_config_is_agentic(getattr(args, "rl_config", None)):
         args.ingress_mode = "controller"
         print(
             "[rl-iris] auto: --ingress-mode=controller (agentic rl_config on a CoreWeave target)",
