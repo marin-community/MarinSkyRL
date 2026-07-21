@@ -31,6 +31,19 @@ jobs:
       - name: Secret scan
         run: uv run --with pre-commit pre-commit run gitleaks --all-files --config .pre-commit-config.yaml
 
+  infra_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Run infra tests
+        # sync_rl_logs.py imports boto3 lazily (inside s3client), so its resolution logic is
+        # importable and testable without any cloud deps; --no-project keeps this off the
+        # unregenerable skyrl-train lockfile.
+        run: uv run --no-project --with pytest pytest infra/tests/ -q
+
   skyrl_train_tests:
     runs-on: ubuntu-latest
     defaults:
