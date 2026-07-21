@@ -472,8 +472,7 @@ def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]
 
 def _rl_config_is_agentic(rl_config: Optional[str]) -> bool:
     """True when the rl_config drives an in-sandbox agent (opencode/harbor/terminal_bench)
-    that must call BACK to the served model — i.e. it needs controller-ingress. Best-effort
-    text scan; a false negative just means the operator still passes --ingress-mode by hand."""
+    that must call BACK to the served model. Best-effort text scan."""
     try:
         if not rl_config or not os.path.isfile(rl_config):
             return False
@@ -484,31 +483,60 @@ def _rl_config_is_agentic(rl_config: Optional[str]) -> bool:
         return False
 
 
+def _rl_config_needs_controller_ingress(rl_config: Optional[str]) -> bool:
+    """True ONLY for the OPENCODE harness, which needs the co-located RecordProxy literal
+    bridge (token-id/logprob capture for TIS) + the cross-cluster ``/proxy/t`` capability
+    URL. Other agentic harnesses (terminus-2) do NOT: they call the served model over the
+    DIRECT marinskyrl HTTP endpoint (``ingress_mode=direct``), the historical path, and
+    must NOT be force-routed through controller-ingress (the federated ``/proxy/t`` path
+    breaks non-streaming terminus-2 -> upstream/stream timeout). Detect the ACTIVE harbor
+    harness (``name: opencode``), not mere presence of harbor/terminal_bench blocks."""
+    try:
+        if not rl_config or not os.path.isfile(rl_config):
+            return False
+        with open(rl_config, "r") as f:
+            text = f.read().lower()
+        # Active harness declared as `name: opencode` in the harbor block (ignore comments).
+        return any(
+            line.strip().startswith("name:") and "opencode" in line
+            for line in text.splitlines()
+        )
+    except OSError:
+        return False
+
+
 def autoconfigure_ingress(args: argparse.Namespace) -> None:
     """Derive the controller-ingress config from the target cluster so an agentic CoreWeave
     launch JUST WORKS from ``--target-cluster`` alone — no manual ``--ingress-mode`` /
     ``--ingress-host``.
 
-    Rationale (why this is a DERIVATION, not a choice): on a CoreWeave cluster the ONLY
-    reachable serving topology is federated controller-ingress through the marin parent, so
-    the ingress host is fully determined by the cluster (``iris.oa.dev``) — there is exactly
-    one correct value. Deriving it here (a) removes the ``--ingress-host`` mismatch error
-    class entirely, and (b) makes the single source of truth the *cluster*, not a flag the
-    caller might get wrong or an env var. Prefer this default > flag > env var. The
-    downstream in-pod runner then mints ONE capability URL and threads it as the SkyRL cfg
-    ``agent_api_base`` (the value opencode actually reads); ``HARBOR_MODEL_ENDPOINT`` is only
-    a legacy mirror of the same minted value, never an independent knob."""
+    Rationale: controller-ingress is required ONLY for the OPENCODE harness (the co-located
+    RecordProxy literal bridge + the cross-cluster ``/proxy/t`` capability URL). It is NOT
+    the only reachable topology on CoreWeave — the terminus-2 harness reaches the served
+    model over the DIRECT marinskyrl HTTP endpoint (``ingress_mode=direct``, the historical
+    path) and MUST NOT be force-routed through controller-ingress (federated ``/proxy/t``
+    breaks non-streaming terminus-2). So we auto-enable controller ONLY for opencode; for
+    that case the ingress host is cluster-determined (``iris.oa.dev``), removing the
+    ``--ingress-host`` mismatch error class. Prefer default > flag > env var."""
     target = str(getattr(args, "target_cluster", "") or "")
     cluster = str(getattr(args, "cluster", "") or "")
-    if not (target.startswith("cw-") or cluster.startswith("cw-")):
-        return  # non-CoreWeave: leave the caller's explicit choice untouched
-    # (1) Auto-enable controller mode for an agentic rl_config (opencode must reach vLLM).
-    if getattr(args, "ingress_mode", "direct") == "direct" and _rl_config_is_agentic(getattr(args, "rl_config", None)):
-        args.ingress_mode = "controller"
-        print(
-            "[rl-iris] auto: --ingress-mode=controller (agentic rl_config on a CoreWeave target)",
-            flush=True,
-        )
+    is_cw = target.startswith("cw-") or cluster.startswith("cw-")
+    # Resolve the "auto" sentinel (the default). An EXPLICIT --ingress-mode direct|controller
+    # is ALWAYS honored (explicit flag beats derivation); only "auto" is derived here.
+    mode = getattr(args, "ingress_mode", "auto")
+    if mode == "auto":
+        # Auto-enable controller ONLY for an opencode rl_config on CoreWeave (needs the
+        # literal bridge + /proxy/t). terminus-2 & everything else -> direct (marinskyrl HTTP).
+        if is_cw and _rl_config_needs_controller_ingress(getattr(args, "rl_config", None)):
+            args.ingress_mode = "controller"
+            print(
+                "[rl-iris] auto: --ingress-mode=controller (opencode rl_config on a CoreWeave target)",
+                flush=True,
+            )
+        else:
+            args.ingress_mode = "direct"
+    if not is_cw:
+        return  # non-CoreWeave: host derivation below is controller/CoreWeave-only
     # (2) The ingress host is cluster-determined on CoreWeave: the marin parent iris.oa.dev.
     if getattr(args, "ingress_mode", "direct") == "controller":
         prev = getattr(args, "ingress_host", None)
@@ -860,10 +888,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--ingress-mode",
         "--ingress_mode",
         dest="ingress_mode",
-        default="direct",
-        choices=["direct", "controller"],
+        default="auto",
+        choices=["auto", "direct", "controller"],
         help="How the co-located served model (RecordProxy/vLLM) is exposed to a "
-        "Daytona sandbox. 'direct' (default) = legacy path, no controller-ingress "
+        "Daytona sandbox. 'auto' (default) = derive per harness (opencode->controller on "
+        "CoreWeave, everything else->direct); an EXPLICIT 'direct'/'controller' always wins. "
+        "'direct' = legacy path, no controller-ingress "
         "wiring (byte-identical). 'controller' = register the endpoint with the iris "
         "controller and serve it through the /proxy/t/<token>/... capability URL; on a "
         "CoreWeave cluster this REQUIRES --target-cluster (federated submission) so the "
