@@ -272,7 +272,12 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # runtime uv reinstall then dies state-5 at bring-up — this happened to the keep6 -e1 pair). Megatron
     # variant = the weight-sync het-bootstrap fix (PR #71, 79432f4a) + all d0016149 contents. HARBOR_COMMIT
     # plumbed through build_gpu_rl_kaniko.sh via MarinSkyRL PR #74. Pull-verified: 35 layers, max 7.48 GB.
-    "@sha256:570e9cc1e8db9b23eed54c491257c51f41017bb73711e02655afd893c1dfd35c"  # noqa: E501  (gpu-rl-megatron-a1e7a363, PULLABLE; harbor 5efac6fa keepalive + weight-sync fix baked)
+    # gpu-rl-megatron-cc408e74 (built 2026-07-21, kaniko job gpurl-kaniko-cc408e74,
+    # INSTALL_MEGATRON=1, SINGLE_SNAPSHOT=0 pullable): baked MarinSkyRL cc408e74
+    # (Megatron checkpoint CPU/Gloo gather + terminus-2 mfb=1) and Harbor 394c58fe
+    # (canonical Harbor main). Registry-verified: 35 layers, max 7.48 GB (<8 GB).
+    "@sha256:6743893099d55baee0312d1e52825ddb137e6a379d2cb625a585785703124474"  # noqa: E501
+    # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
     # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
 )
 _SUPERSEDED_RL_IMAGES = (
