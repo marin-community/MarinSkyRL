@@ -40,37 +40,33 @@ from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 
-# DistributedOptimizer sharded-checkpoint format. megatron-core's default
-# ('fully_sharded_model_space') emits ShardedTensors carrying a `flattened_range`,
-# which the torch_dist save strategy (+ FullyParallelSaveStrategyWrapper) rejects at
-# validate_metadata_integrity => `CheckpointingException: ShardedTensor.flattened_range
-# is not supported` (crashed megatron-parity east18 at the gs1 checkpoint). The
-# 'dp_zero_gather_scatter' format gathers optimizer state to DP rank 0 and produces
-# standard (non-flattened) ShardedTensors that the torch_dist backend accepts. Save and
-# load MUST use the same sharding_type.
-_MEGATRON_OPTIM_SHARDING_TYPE = "dp_zero_gather_scatter"
-
-
-# Checkpoint-save OOM fix. megatron-core's `sharded_param_state_dp_zero` (reached from the
-# `dp_zero_gather_scatter` save above) hardcodes `get_parameter_state_dp_zero(use_gloo_comm=False)`,
-# which gathers the DP-rank-0 optimizer state ONTO the GPU (`send_tensor.cuda()`). Right after a
-# training step the policy model + fp32 grad buffer + optimizer state are all GPU-resident, so that
-# multi-GiB gather OOMs on an 80 GB H100 (observed: 30B-A3B TP4xPP2xEP4 died at save_checkpoint gs1 —
-# tried to alloc 6.75 GiB with 5.95 GiB free). Forcing `use_gloo_comm=True` gathers over the gloo DP
-# group with `device="cpu"` — no GPU alloc, so checkpoint save needs ZERO GPU headroom. The gloo DP
-# group exists (`create_gloo_process_groups` defaults True in `initialize_model_parallel`); gloo
-# changes only the transport, not the serialized ShardedTensor format, so checkpoints stay
-# load-compatible. The save caller passes `use_gloo_comm=False` EXPLICITLY, so we override the value
-# (not just the default). Matches the established runtime-patch idiom (see megatron_worker.py).
-if not getattr(DistributedOptimizer, "_skyrl_gps_force_gloo_patched", False):
-    _orig_get_parameter_state_dp_zero = DistributedOptimizer.get_parameter_state_dp_zero
-
-    def _get_parameter_state_dp_zero_force_gloo(self, use_gloo_comm=False, *args, **kwargs):
-        # Ignore the caller's use_gloo_comm; force the gather onto gloo/CPU.
-        return _orig_get_parameter_state_dp_zero(self, True, *args, **kwargs)
-
-    DistributedOptimizer.get_parameter_state_dp_zero = _get_parameter_state_dp_zero_force_gloo
-    DistributedOptimizer._skyrl_gps_force_gloo_patched = True
+# Optimizer checkpoint format and gather transport.
+#
+# Save and load the optimizer state with megatron's 'fully_reshardable' format in its
+# memory-efficient mode (`distrib_optim_fully_reshardable_mem_efficient=True`). This mode does
+# two things:
+#   * It makes standard (non-flattened) ShardedTensors. The torch_dist save strategy accepts
+#     these. Megatron's default format, 'fully_sharded_model_space', makes `flattened_range`
+#     tensors instead. torch_dist rejects those (`ShardedTensor.flattened_range is not
+#     supported`), which crashed the east18 run at the gs1 checkpoint.
+#   * It gathers the DP-rank-0 optimizer state over gloo (`device="cpu"`), not CUDA.
+#
+# We used 'dp_zero_gather_scatter' before. torch_dist accepts its tensors too. But its
+# `sharded_param_state_dp_zero` always calls `get_parameter_state_dp_zero(use_gloo_comm=False)`,
+# which stages the gather on the GPU (`send_tensor.cuda()`). Right after a training step the model,
+# the fp32 grad buffer, and the optimizer state all sit on the GPU. So that gather runs out of
+# memory at save: a 30B-A3B run died at gs1 when it asked for 6.75 GiB with 5.95 GiB free. Upstream
+# also marks that format "will be deprecated". 'fully_reshardable' + mem_efficient is megatron's own
+# knob for this problem: the gloo gather needs no GPU memory, so we do not patch megatron internals.
+#
+# Pass this through `metadata=`. The positional `sharding_type=` argument is deprecated in
+# megatron-core 0.18. Save and load must use the same format. Megatron writes the format into the
+# checkpoint (`param_state_sharding_type`) and reads it back on load. We still pass it on load so the
+# load template matches.
+_MEGATRON_OPTIM_CKPT_METADATA = {
+    "distrib_optim_sharding_type": "fully_reshardable",
+    "distrib_optim_fully_reshardable_mem_efficient": True,
+}
 
 
 class MegatronStrategy(DistributedStrategy):
@@ -197,7 +193,7 @@ class MegatronStrategy(DistributedStrategy):
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict, sharding_type=_MEGATRON_OPTIM_SHARDING_TYPE
+                model_sharded_state_dict, metadata=_MEGATRON_OPTIM_CKPT_METADATA
             )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
@@ -266,7 +262,7 @@ class MegatronStrategy(DistributedStrategy):
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict, is_loading=True, sharding_type=_MEGATRON_OPTIM_SHARDING_TYPE
+                model_sharded_state_dict, is_loading=True, metadata=_MEGATRON_OPTIM_CKPT_METADATA
             )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
