@@ -497,10 +497,7 @@ def _rl_config_needs_controller_ingress(rl_config: Optional[str]) -> bool:
         with open(rl_config, "r") as f:
             text = f.read().lower()
         # Active harness declared as `name: opencode` in the harbor block (ignore comments).
-        return any(
-            line.strip().startswith("name:") and "opencode" in line
-            for line in text.splitlines()
-        )
+        return any(line.strip().startswith("name:") and "opencode" in line for line in text.splitlines())
     except OSError:
         return False
 
