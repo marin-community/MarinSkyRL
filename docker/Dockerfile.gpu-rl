@@ -85,7 +85,10 @@ ARG MAX_JOBS
 ARG NVCC_THREADS
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The in-cluster Kaniko builder occasionally lands on a slow/stalled Ubuntu
+# mirror.  Bound each request and retry transient fetch failures instead of
+# leaving a 48-core build job alive indefinitely with no log output.
+RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 install -y --no-install-recommends \
     git curl ca-certificates build-essential cmake ninja-build \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -172,7 +175,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # transport on CoreWeave (Mellanox mlx5 HCAs). NCCL DLOPENs libibverbs.so.1 +
 # the libmlx5 provider at runtime; absent, it SILENTLY falls back to NET/Socket
 # (TCP). ibverbs-utils adds ibv_devices/ibstat for in-pod IB diagnostics.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
