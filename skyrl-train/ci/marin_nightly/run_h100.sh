@@ -139,3 +139,6 @@ ELAPSED=$(( $(date +%s) - START ))
 echo "::: gating (run took ${ELAPSED}s)"
 uv run --frozen --no-sync python -m ci.marin_nightly.gate \
   --log "$LOG" --spec "$SPEC" --wall-clock-seconds "$ELAPSED"
+
+echo "::: checking Grug PyTorch parity against the committed Levanter fixture"
+uv run --frozen --no-sync pytest -q tests/gpu/test_grug_levanter_parity.py

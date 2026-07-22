@@ -74,11 +74,12 @@ jobs:
           uv tool install --prerelease allow "marin-core>=0.2.46.dev202607131620"
           echo "$(uv tool dir)/marin-core/bin" >> "$GITHUB_PATH"
 
-      - name: Train and gate on one H100
+      - name: Train, gate, and check Grug parity on one H100
         # --gpu is gated behind --enable-extra-resources by iris. --no-sync stops iris from
         # syncing the repo root (a metadata-only package); run_h100.sh syncs skyrl-train
-        # itself. `iris job run` blocks, streams the job's logs, and exits non-zero unless the
-        # job succeeded -- so the gate's exit code inside the job is this step's exit code.
+        # itself, runs the learning gate, then checks the committed Grug oracle.
+        # `iris job run` blocks, streams the job's logs, and exits non-zero unless
+        # the job succeeded.
         #
         # pipefail is load-bearing: without it the `| tee nightly.log` tail masks iris's exit
         # code with tee's, turning every failed job into a green step.
