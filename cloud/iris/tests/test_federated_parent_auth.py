@@ -30,9 +30,12 @@ def _record() -> dict[str, str]:
 
 
 def test_federated_parent_auth_is_not_needed_for_direct_ingress():
-    assert launcher.prepare_federated_parent_credentials(
-        argparse.Namespace(target_cluster="cw-rno2a", ingress_mode="direct")
-    ) is None
+    assert (
+        launcher.prepare_federated_parent_credentials(
+            argparse.Namespace(target_cluster="cw-rno2a", ingress_mode="direct")
+        )
+        is None
+    )
 
 
 def test_federated_parent_auth_requires_the_marin_login_record(tmp_path, monkeypatch):
