@@ -55,6 +55,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
+      - name: Check the macOS CPU environment resolves
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: uv sync --frozen --dry-run --extra dev --python-platform aarch64-apple-darwin
       - name: Install skyrl-train
         run: uv sync --frozen --extra dev
       - name: Check the lockfile is current
