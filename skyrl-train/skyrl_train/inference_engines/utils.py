@@ -1,6 +1,8 @@
+from collections.abc import Collection
 from typing import Dict, Any, Optional, Union
 import random
 import hashlib
+import socket
 from omegaconf import DictConfig, ListConfig
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from typing import List
@@ -215,38 +217,40 @@ def aggregate_completion_usage_info(
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def get_rendezvous_addr_port(placement_group, pg_index: int) -> Tuple[str, int]:
+_RENDEZVOUS_PORT_START = 20_000
+_RENDEZVOUS_PORT_STOP = 30_000
+
+
+def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int:
+    """Choose a listener port outside Linux's default ephemeral client range."""
+
+    excluded = set(excluded_ports)
+    candidates = list(range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP))
+    random.shuffle(candidates)
+    for port in candidates:
+        if port in excluded:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("", port))
+            except OSError:
+                continue
+        return port
+    raise RuntimeError(f"No free rendezvous port in [{_RENDEZVOUS_PORT_START}, {_RENDEZVOUS_PORT_STOP})")
+
+
+def get_rendezvous_addr_port(placement_group, pg_index: int, excluded_ports: Collection[int] = ()) -> Tuple[str, int]:
     """
     Minimal helper to get a rendezvous addr:port in `placement_group`'s bundle at index `pg_index`.
     """
 
     @ray.remote(num_cpus=0, num_gpus=0)
     def get_addr_port():
-        # Version-safe import for get_address_and_port across Ray versions
-        try:
-            # Ray 2.50+ (ray.train internal utils)
-            from ray.train._internal.utils import get_address_and_port
-        except (ImportError, ModuleNotFoundError):
-            try:
-                # Ray 3.x (experimental)
-                from ray.experimental.collective.util import get_address_and_port
-            except (ImportError, ModuleNotFoundError):
-                try:
-                    # Older Ray 2.x (collective)
-                    from ray.util.collective.collective import get_address_and_port
-                except (ImportError, ModuleNotFoundError):
-                    # Fallback implementation
-                    import socket
-
-                    def get_address_and_port():
-                        hostname = socket.gethostname()
-                        addr = socket.gethostbyname(hostname)
-                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                            s.bind(("", 0))
-                            port = s.getsockname()[1]
-                        return addr, port
-
-        return get_address_and_port()
+        # Binding port 0 returns a port from the ephemeral client range. Under
+        # high actor startup concurrency, an outbound connection can acquire it
+        # between this probe and vLLM's TCPStore bind. Use a dedicated range and
+        # exclude ports already assigned to other logical engines in this job.
+        return ray.util.get_node_ip_address(), _find_available_rendezvous_port(excluded_ports)
 
     master_sched = PlacementGroupSchedulingStrategy(
         placement_group=placement_group,

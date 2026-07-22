@@ -778,18 +778,25 @@ class InferenceEngineClient(InferenceEngineInterface):
         for i, engine in enumerate(self.engines):
             if i in self._dead_engines:
                 continue
+            relative_rank_offset = engine.weight_sync_relative_rank_offset
+            engine_rank_offset = (
+                rank_offset + relative_rank_offset if relative_rank_offset is not None else rank_offset_count
+            )
             tasks.append(
                 engine.init_weight_update_communicator(
                     master_addr=master_addr,
                     master_port=master_port,
-                    rank_offset=rank_offset_count,
+                    rank_offset=engine_rank_offset,
                     world_size=world_size,
                     group_name=group_name,
                     backend=backend,
                     override_existing=override_existing,
                 )
             )
-            rank_offset_count += engine.tp_size() * engine.pp_size()
+            if relative_rank_offset is None:
+                # Remote/legacy engines expose one endpoint per logical engine.
+                # Keep their existing sequential TP*PP offset behavior.
+                rank_offset_count += engine.tp_size() * engine.pp_size()
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

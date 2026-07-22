@@ -18,12 +18,6 @@ def weight_sync_dtype(model_type: str, name: str, default: torch.dtype) -> torch
     return default
 
 
-def weight_sync_requires_cuda(model_type: str, name: str) -> bool:
-    """Return whether a replicated state entry must be staged on CUDA."""
-
-    return is_grug_router_bias(model_type, name)
-
-
 def prepare_weight_sync_tensor(
     model_type: str,
     name: str,
@@ -32,7 +26,7 @@ def prepare_weight_sync_tensor(
 ) -> torch.Tensor:
     """Cast an extracted tensor and stage replicated CUDA-only state."""
 
-    if weight_sync_requires_cuda(model_type, name):
+    if is_grug_router_bias(model_type, name):
         return tensor.to(
             device=torch.cuda.current_device(),
             dtype=target_dtype,

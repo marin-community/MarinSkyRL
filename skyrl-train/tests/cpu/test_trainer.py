@@ -2,6 +2,10 @@
 uv  run --isolated --extra dev pytest tests/cpu/test_trainer.py
 """
 
+import gc
+import weakref
+from types import SimpleNamespace
+
 import torch
 import pytest
 from jaxtyping import Float, Integer
@@ -14,6 +18,8 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.models.grug_moe import GrugMoeForCausalLM
+from skyrl_train.models.grug_query_bias import next_query_bias
 import numpy as np
 from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
@@ -63,6 +69,60 @@ def dummy_tokenizer():
 @pytest.fixture
 def dummy_generator():
     return MagicMock()
+
+
+class _ObservableGrugCausalLM(GrugMoeForCausalLM):
+    def __init__(self):
+        self.config = SimpleNamespace(
+            num_experts_per_tok=2,
+            num_local_experts=4,
+            num_hidden_layers=1,
+        )
+        self.query_bias = torch.tensor([[3.0, -3.0]])
+
+    def set_query_bias(self, query_bias):
+        self.query_bias = query_bias.clone()
+
+
+class _FixedQueryBiasAccumulator:
+    def __init__(self, betas):
+        self.betas = betas
+
+    def finalize_betas(self):
+        return self.betas
+
+
+def _worker_with_grug_query_bias_accumulator(accumulator):
+    worker = object.__new__(PolicyWorkerBase)
+    causal_lm = _ObservableGrugCausalLM()
+    worker.model = SimpleNamespace(model=causal_lm)
+    worker._grug_query_bias_accumulator = accumulator
+    return worker, causal_lm
+
+
+def test_failed_optimizer_step_discards_grug_query_bias_window():
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
+    previous_bias = causal_lm.query_bias.clone()
+
+    worker._finish_grug_query_bias_window(optimizer_step_succeeded=False)
+    worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
+
+    # A later successful completion cannot apply the discarded window.
+    torch.testing.assert_close(causal_lm.query_bias, previous_bias)
+
+
+def test_successful_optimizer_step_applies_grug_query_bias_once():
+    betas = torch.tensor([[1.0, -2.0]])
+    accumulator = _FixedQueryBiasAccumulator(betas)
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
+
+    worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
+
+    torch.testing.assert_close(causal_lm.query_bias, next_query_bias(betas))
+    causal_lm.query_bias.fill_(17)
+    worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
+    torch.testing.assert_close(causal_lm.query_bias, torch.full_like(causal_lm.query_bias, 17))
 
 
 def _get_test_data(trainer: RayPPOTrainer):
@@ -528,8 +588,10 @@ def test_ppo_train_batch_calculations():
             "trainer": {
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
+                "policy": {"optimizer_config": {"max_grad_norm": 1.0}},
                 "algorithm": {
                     "policy_loss_type": "regular",
+                    "loss_reduction": "token_mean",
                 },
             },
             "generator": {
@@ -684,6 +746,74 @@ def test_ppo_train_batch_calculations():
     train_status = result.metadata["train_status"]
     assert "critic_update_steps" in train_status
     assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
+
+
+def test_grug_ppo_train_releases_consumed_microbatches():
+    """Grug query-bias look-ahead must not retain every consumed Experience."""
+
+    cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "micro_train_batch_size_per_gpu": 1,
+                "update_epochs_per_batch": 1,
+                "policy": {"optimizer_config": {"max_grad_norm": 1.0}},
+                "algorithm": {"policy_loss_type": "regular", "loss_reduction": "token_mean"},
+            },
+            "generator": {"sampling_params": {"temperature": 1.0}},
+        }
+    )
+    batch_size = 4
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.ones(batch_size, 4, dtype=torch.long),
+            "attention_mask": torch.ones(batch_size, 4, dtype=torch.long),
+            "action_log_probs": torch.zeros(batch_size, 2),
+            "base_action_log_probs": torch.zeros(batch_size, 2),
+            "values": torch.zeros(batch_size, 2),
+            "returns": torch.zeros(batch_size, 2),
+            "advantages": torch.ones(batch_size, 2),
+            "loss_mask": torch.ones(batch_size, 2),
+            "response_mask": torch.ones(batch_size, 2),
+            "rollout_logprobs": None,
+        }
+    )
+    batch.metadata = {"global_step": 0, "response_length": 2}
+
+    worker = PolicyWorkerBase(
+        cfg=cfg,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
+    worker.policy_mini_batch_size_per_gpu = 2
+    worker.strategy = MagicMock(fsdp_strategy="fsdp2")
+    worker.strategy.is_rank_0.return_value = False
+    worker.strategy.all_reduce.side_effect = lambda status: status
+    worker.model = SimpleNamespace(model=_ObservableGrugCausalLM())
+
+    previous_experience = None
+    prior_microbatch_was_released = []
+
+    def training_step(experience, _global_step, _local_step, _accumulation_steps):
+        nonlocal previous_experience
+        if previous_experience is not None:
+            gc.collect()
+            prior_microbatch_was_released.append(previous_experience() is None)
+        previous_experience = weakref.ref(experience)
+        return {"policy_loss": 0.5, "policy_lr": 1e-4, "policy_entropy": 0.1, "response_length": 2}
+
+    worker.training_step = training_step
+    with (
+        patch("torch.cuda.empty_cache"),
+        patch("torch.distributed.barrier"),
+        patch("tqdm.tqdm", side_effect=lambda iterator, **kwargs: iterator),
+    ):
+        worker.ppo_train(batch)
+
+    assert prior_microbatch_was_released == [True, True, True]
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

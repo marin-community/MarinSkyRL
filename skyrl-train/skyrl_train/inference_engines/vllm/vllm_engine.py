@@ -59,8 +59,9 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.models.grug_moe import is_grug_router_bias
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs, ensure_token_ids_in_sse_chunk
-from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
+from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
 from packaging import version
 
@@ -688,8 +689,8 @@ class WorkerWrap:
         fused/sharded params; here we read those internal params back and rebuild
         the HF view so the trainer's post-step HF tensors can be compared
         tensor-by-tensor). Returns, per requested HF name, this worker's
-        contribution as a CPU fp32 tensor plus the rank coordinates so the caller
-        can assemble across TP/EP shards.
+        contribution as a CPU fp32 tensor plus the live engine dtype and rank
+        coordinates so the caller can assemble across TP/EP shards.
 
         Supported HF name forms (Qwen1.5-MoE / Qwen2MoE vLLM layout):
           * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
@@ -740,7 +741,13 @@ class WorkerWrap:
             try:
                 # 1. Direct (replicated) match: router gate, norms, etc.
                 if name in all_params:
-                    entry = {"found": True, "mode": "direct", "tensor": _cpu(all_params[name])}
+                    tensor = all_params[name]
+                    entry = {
+                        "found": True,
+                        "mode": "direct",
+                        "dtype": torch_dtype_to_str(tensor.dtype),
+                        "tensor": _cpu(tensor),
+                    }
                     out[name] = entry
                     continue
 
@@ -780,6 +787,7 @@ class WorkerWrap:
                         "mode": "expert",
                         "owner_ep": owner_ep,
                         "local_e": local_e,
+                        "dtype": torch_dtype_to_str(t.dtype),
                         "tensor": _cpu(t),
                     }
                     out[name] = entry
@@ -2252,6 +2260,12 @@ class VLLMWeightTransferReceiver:
         self.model_config = model_config
         self.device = device
 
+    def _is_fp32_grug_router_bias(self, name: str, dtype: torch.dtype) -> bool:
+        hf_config = getattr(self.model_config, "hf_text_config", None)
+        if hf_config is None:
+            hf_config = getattr(self.model_config, "hf_config", None)
+        return is_grug_router_bias(getattr(hf_config, "model_type", None), name) and dtype == torch.float32
+
     def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights and yield (name, tensor) tuples.
 
@@ -2273,7 +2287,7 @@ class VLLMWeightTransferReceiver:
         _fuse = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
-            if not _fuse:
+            if not _fuse and not self._is_fp32_grug_router_bias(name, dtype):
                 assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
             # Always receive in sender's dtype, load_weights handles conversion
             weight = torch.empty(shape, dtype=dtype, device="cuda")
@@ -2319,7 +2333,10 @@ class VLLMWeightTransferReceiver:
             physical_gpu_id = str(props.uuid)
             for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
                 dtype = str_to_torch_dtype(dtype_str)
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                if not self._is_fp32_grug_router_bias(name, dtype):
+                    assert dtype == self.model_config.dtype, (
+                        f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                    )
 
                 handle = ipc_handle[physical_gpu_id]
                 device_id = self.device.index

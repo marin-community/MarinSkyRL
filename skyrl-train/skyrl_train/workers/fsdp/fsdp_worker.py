@@ -18,8 +18,9 @@ except ImportError:
     from torch.distributed._tensor import DTensor
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype
+from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_count_diag as _ccdiag
@@ -29,6 +30,11 @@ from skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync.weight_extractor import (
+    prepare_weight_sync_tensor,
+    validate_weight_sync_mode,
+    weight_sync_dtype,
+)
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 
 
@@ -37,13 +43,16 @@ class FSDPWeightExtractor(WeightExtractor):
 
     Args:
         model: FSDP model to extract weights from
-        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
+        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion).
+            Grug always uses separate chunks to preserve its FP32 router-bias buffers.
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
         moe_grouped_gemm: If True, the model was grouped-swapped (Stage 3b) so its MoE
             blocks are ``GroupedMoEShim`` instances holding grouped ``experts.w1/w2/w3``
             tensors. The extracted state dict is then name/shape-remapped back to the
             per-expert HF layout the inference engine expects (Stage 4b). Default False
             keeps the path byte-identical to the non-grouped (a3-production) extractor.
+        fuse_weights: Whether the inference engine expects fused FP8 weight transfer.
+            Unsupported model types fail during extractor initialization.
     """
 
     def __init__(
@@ -52,9 +61,9 @@ class FSDPWeightExtractor(WeightExtractor):
         group_by_module: bool = False,
         batch_size_threshold_gb: float = 0.0,
         moe_grouped_gemm: bool = False,
+        fuse_weights: bool = False,
     ):
         self.model = model
-        self.group_by_module = group_by_module
         self.batch_size_threshold_gb = batch_size_threshold_gb
         self.moe_grouped_gemm = moe_grouped_gemm
         # Per-arch inference-engine (vLLM) weight-NAME translation. Most grouped-MoE
@@ -64,6 +73,11 @@ class FSDPWeightExtractor(WeightExtractor):
         # ``translate_moe_name_to_vllm`` renames ONLY Mixtral keys (see moe_weight_remap).
         _cfg = getattr(model, "config", None)
         self._model_type = getattr(_cfg, "model_type", "") or "" if _cfg is not None else ""
+        validate_weight_sync_mode(self._model_type, fuse_weights=fuse_weights)
+        # Grug's persistent query bias is intentionally FP32. Keep it as a
+        # separate IPC chunk so mixed-dtype sync does not pack/cast it with the
+        # surrounding BF16 MLP weights.
+        self.group_by_module = group_by_module and self._model_type != GRUG_MOE_MODEL_TYPE
         # Qwen3.5/3.6 VLM-shell weight-sync (tmax Stage 2): the RL policy is the
         # unwrapped TEXT tower (``Qwen3_5MoeForCausalLM``, names ``model.*``) but the
         # vLLM rollout engine instantiates the multimodal SHELL
@@ -75,6 +89,9 @@ class FSDPWeightExtractor(WeightExtractor):
         from skyrl_train.models.qwen3_5_vlm import is_qwen3_5_text_tower
 
         self._is_qwen3_5_text_tower = is_qwen3_5_text_tower(_cfg)
+
+    def _target_dtype(self, name: str, default: torch.dtype) -> torch.dtype:
+        return weight_sync_dtype(self._model_type, name, default)
 
     def _translate_name(self, name: str) -> str:
         """Apply the per-arch inference-engine name translation (identity for all
@@ -134,11 +151,14 @@ class FSDPWeightExtractor(WeightExtractor):
         if not self.group_by_module:
             # Simple path: yield one chunk per parameter
             for name, param in params.items():
-                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
+                target_dtype = self._target_dtype(name, dtype)
+                tensor = self._gather_tensor(param)
+                tensor = prepare_weight_sync_tensor(self._model_type, name, tensor, target_dtype)
+                tensor = tensor.detach().contiguous()
                 name = self._translate_name(name)
                 yield WeightChunk(
                     names=[name],
-                    dtypes=[str(dtype)],
+                    dtypes=[torch_dtype_to_str(target_dtype)],
                     shapes=[list(tensor.shape)],
                     tensors=[tensor],
                 )
@@ -375,6 +395,30 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 if is_rank0 and name in wanted:
                     collected[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
         return collected
+
+    def grug_validation_snapshot(self, names=()):
+        """Return requested Grug weights on rank 0.
+
+        Every rank must call this with the same names because DTensor
+        materialization is collective.
+        """
+        config = getattr(self.model.model, "config", None)
+        if getattr(config, "model_type", None) != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("grug_validation_snapshot is only valid for Grug models")
+        state = self.model.model.state_dict()
+        missing = set(names).difference(state)
+        if missing:
+            raise KeyError(f"missing Grug state entries: {sorted(missing)}")
+        is_rank0 = torch.distributed.get_rank() == 0
+        weights = {}
+        for name in names:
+            tensor = self.weight_extractor._gather_tensor(state[name])
+            if is_rank0:
+                weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
+        return {
+            "rank": torch.distributed.get_rank(),
+            "weights": weights,
+        }
 
     def diag_ep8_geometry(self):
         """TEST-ONLY (EP=8 cross-node diag): return this rank's mesh geometry +
@@ -633,6 +677,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._normalize_mini_batch_size()
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        if getattr(model_config, "model_type", None) == GRUG_MOE_MODEL_TYPE:
+            if getattr(strategy, "ep_size", 1) != 1:
+                raise ValueError("Grug FSDP2 policy training requires expert_model_parallel_size=1")
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -662,6 +709,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 # enters torch-native context_parallel (ring SDPA). None at cp=1.
                 cp_mesh=self.cp_mesh,
                 cp_rotate_method=str(self.cfg.trainer.policy.fsdp_config.get("cp_rotate_method", "allgather")),
+                training_strategy=self.cfg.trainer.strategy,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -691,6 +739,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
             ),
             moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
+            fuse_weights=(bool(self.cfg.generator.fuse_weights) or os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"),
         )
 
         self._maybe_start_host_ram_monitor()
@@ -829,7 +878,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         inference_engine_client.update_named_weights(
                             {
                                 "names": [name],
-                                "dtypes": [self.cfg.generator.model_dtype],
+                                "dtypes": chunk.dtypes,
                                 "shapes": [list(tensor.shape)],
                             }
                         )
@@ -867,7 +916,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 # Process all parameters in this batch
                 # TODO(haochen): Pack tensors into contiguous buffer before creating IPC handle
                 # (like Megatron does) to reduce number of IPC handles and file descriptors
-                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
+                for name, dtype_str, tensor, shape in zip(
+                    chunk.names, chunk.dtypes, chunk.tensors, chunk.shapes, strict=True
+                ):
                     # Create IPC handle for tensor
                     ipc_handle = reduce_tensor(tensor)
                     ipc_handle = {get_physical_gpu_id(): ipc_handle}
@@ -880,7 +931,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                             ipc_handles.update(d)
 
                         weights_update_request["names"].append(name)
-                        weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                        weights_update_request["dtypes"].append(dtype_str)
                         weights_update_request["shapes"].append(shape)
                         weights_update_request["extras"].append({"ipc_handles": ipc_handles})
 
@@ -1147,6 +1198,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 # policy so KL aligns post-unshard (G3). None at cp=1.
                 cp_mesh=self.cp_mesh,
                 cp_rotate_method=str(self.cfg.trainer.ref.fsdp_config.get("cp_rotate_method", "allgather")),
+                training_strategy=self.cfg.trainer.strategy,
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

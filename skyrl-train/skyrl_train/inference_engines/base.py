@@ -42,6 +42,8 @@ class NamedWeightsUpdateRequest(TypedDict):
 
 
 class InferenceEngineInterface(ABC):
+    weight_sync_relative_rank_offset: int | None = None
+
     @abstractmethod
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         raise NotImplementedError()

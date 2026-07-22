@@ -28,6 +28,8 @@ from torch.distributed.distributed_c10d import _set_pg_timeout
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
+from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
 from torch.distributed.device_mesh import init_device_mesh
 from collections import OrderedDict
@@ -272,7 +274,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             DEFAULT False keeps the a3 (non-EP) production path byte-identical.
     """
     import torch.distributed as dist
-    from torch.distributed.tensor import distribute_tensor
 
     if ep_enabled:
         # Documented, robust FSDP2 full-state-dict loader (torchtitan-style). It broadcasts the
@@ -319,8 +320,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # _split_tensor extraction is purely local). No submesh-scoped collective
         # is interleaved, so the historical global-vs-submesh desync cannot recur.
         # ------------------------------------------------------------------
-        from torch.distributed.tensor import DTensor
-
         rank = dist.get_rank()
         device = torch.device("cuda", torch.cuda.current_device())
 
@@ -499,9 +498,13 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
     if dist.get_rank() == 0:
         for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
             full_param = full_param.detach().cuda()
-            mesh = sharded_param.device_mesh
             dist.broadcast(full_param, src=0)
-            sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
+            if isinstance(sharded_param, DTensor):
+                sharded_tensor = distribute_tensor(full_param, sharded_param.device_mesh, sharded_param.placements)
+            else:
+                # Persistent buffers (Grug's router bias) remain replicated plain
+                # tensors under FSDP2 and therefore have no device_mesh.
+                sharded_tensor = full_param
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
                 param_name,
@@ -513,9 +516,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
     else:
         for param_name, sharded_param in meta_sharded_sd.items():
             full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
-            mesh = sharded_param.device_mesh
             dist.broadcast(full_tensor, src=0)
-            sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
+            if isinstance(sharded_param, DTensor):
+                sharded_tensor = distribute_tensor(full_tensor, sharded_param.device_mesh, sharded_param.placements)
+            else:
+                sharded_tensor = full_tensor
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
                 param_name,
@@ -1016,9 +1021,6 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     1-D-Shard paths) this returns ``dt.full_tensor()`` unchanged — byte-identical
     to before, so the non-EP path is untouched.
     """
-    from torch.distributed.tensor import DTensor
-    from torch.distributed.tensor.placement_types import Shard, _StridedShard
-
     if not isinstance(dt, DTensor):
         return dt
     placements = dt.placements

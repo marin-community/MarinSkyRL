@@ -41,6 +41,12 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.models.grug_query_bias import (
+    GrugQueryBiasAccumulator,
+    next_query_bias,
+    query_bias_candidate_count,
+)
+from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
 from omegaconf import DictConfig
 from pathlib import Path
@@ -943,6 +949,39 @@ class PolicyWorkerBase(Worker):
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
 
+    def _grug_causal_lm(self) -> GrugMoeForCausalLM | None:
+        """Return the local Grug CausalLM through the HF wrapper, if present."""
+
+        causal_lm = getattr(self.model, "model", self.model)
+        return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
+
+    def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
+        config = causal_lm.config
+        candidate_count = query_bias_candidate_count(
+            valid_tokens,
+            config.num_experts_per_tok,
+            config.num_local_experts,
+        )
+        self._grug_query_bias_accumulator = GrugQueryBiasAccumulator(
+            candidate_count=candidate_count,
+            num_layers=config.num_hidden_layers,
+            num_experts=config.num_local_experts,
+        )
+        self._grug_query_bias_candidate_count = candidate_count
+
+    def _finish_grug_query_bias_window(self, *, optimizer_step_succeeded: bool) -> None:
+        """Apply one completed Grug bias window, or discard it after a skipped step."""
+
+        accumulator = getattr(self, "_grug_query_bias_accumulator", None)
+        if accumulator is None:
+            return
+        if optimizer_step_succeeded:
+            causal_lm = self._grug_causal_lm()
+            if causal_lm is None:
+                raise RuntimeError("Grug query-bias accumulator exists without a Grug policy model")
+            causal_lm.set_query_bias(next_query_bias(accumulator.finalize_betas()))
+        self._grug_query_bias_accumulator = None
+
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
         # Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
@@ -1088,6 +1127,19 @@ class PolicyWorkerBase(Worker):
         status_list = []
         all_metrics = defaultdict(list)
         policy_update_steps = 0
+        grug_causal_lm = self._grug_causal_lm()
+        grug_microbatch_valid_tokens = None
+        if grug_causal_lm is not None:
+            micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+            grug_microbatch_valid_tokens = [
+                int(mask.sum().item()) for mask in train_data["attention_mask"].split(micro_batch_size)
+            ]
+            remainder = len(grug_microbatch_valid_tokens) % accumulation_steps
+            if remainder:
+                raise RuntimeError(
+                    "the final policy optimizer window is incomplete: "
+                    f"expected {accumulation_steps} microbatches, got {remainder}"
+                )
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
@@ -1096,6 +1148,11 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
+                if grug_causal_lm is not None and local_step % accumulation_steps == 0:
+                    assert grug_microbatch_valid_tokens is not None
+                    window_end = local_step + accumulation_steps
+                    valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])
+                    self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
                 status = self.training_step(
                     experience,
                     global_step,
@@ -1175,6 +1232,14 @@ class PolicyWorkerBase(Worker):
         rollout_routed_experts = experience.rollout_routed_experts
         response_span_tags = experience.response_span_tags
 
+        grug_causal_lm = self._grug_causal_lm()
+        grug_query_bias_accumulator = getattr(self, "_grug_query_bias_accumulator", None)
+        if grug_causal_lm is not None and grug_query_bias_accumulator is not None:
+            grug_causal_lm.begin_query_bias_capture(
+                self._grug_query_bias_candidate_count,
+                attention_mask,
+            )
+
         # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
         # per-token weighted loss mask (THINK positions scaled by think_token_weight,
         # everything else == loss_mask). At think_token_weight==1.0 (default) or when
@@ -1199,6 +1264,12 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
                 rollout_routed_experts=rollout_routed_experts,
             )
+            if grug_causal_lm is not None and grug_query_bias_accumulator is not None:
+                grug_query_bias_accumulator.observe(
+                    grug_causal_lm.take_query_bias_observation(
+                        candidate_count=self._grug_query_bias_candidate_count,
+                    )
+                )
             # loss function
             # TODO: recompute advantages
             policy_loss, clip_ratio = self.policy_loss_fn(
@@ -1330,6 +1401,7 @@ class PolicyWorkerBase(Worker):
         grad_norm = None
         ratio_diag = {}
         spike_diag = {}
+        optimizer_step_succeeded = False
         if (local_step + 1) % accumulation_steps == 0:
             # StaleClip: read rolling entropy from prior steps' history; decide LR scale
             # for THIS step's optimizer.step(). The current micro-batch entropy is pushed
@@ -1348,8 +1420,13 @@ class PolicyWorkerBase(Worker):
                 z_clip=z_clip,
                 stale_clip_lr_scale=lr_scale,
             )
+            optimizer_step_succeeded = (
+                bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
+            )
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
+
+            self._finish_grug_query_bias_window(optimizer_step_succeeded=optimizer_step_succeeded)
 
             # Now push this step's entropy to the rolling window for next step.
             if stale_clip is not None:
@@ -1411,6 +1488,8 @@ class PolicyWorkerBase(Worker):
 
         if grad_norm is not None:
             status["raw_grad_norm"] = grad_norm
+        if grug_causal_lm is not None and (local_step + 1) % accumulation_steps == 0:
+            status["optimizer_step_succeeded"] = float(optimizer_step_succeeded)
 
         for k, v in experience.info.items():
             if k == "kl":

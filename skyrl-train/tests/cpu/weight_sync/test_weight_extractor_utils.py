@@ -2,6 +2,17 @@ import pytest
 import torch
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 from skyrl_train.weight_sync import WeightChunk
+from skyrl_train.utils import str_to_torch_dtype
+
+
+@pytest.mark.parametrize("value", ["bfloat16", "torch.bfloat16"])
+def test_str_to_torch_dtype_accepts_weight_metadata(value):
+    assert str_to_torch_dtype(value) is torch.bfloat16
+
+
+def test_str_to_torch_dtype_rejects_unknown_name():
+    with pytest.raises(ValueError, match="unsupported torch dtype"):
+        str_to_torch_dtype("torch.not_a_dtype")
 
 
 class TestModuleGrouping:
