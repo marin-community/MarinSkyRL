@@ -1,8 +1,7 @@
 """Stage 2 (FSDP2 CP) CPU tests for the configurable attention backend.
 
-Run (avoiding the conftest session-autouse ray_init() hang on login nodes):
-    python -m pytest -p no:cacheprovider --confcutdir tests/cpu/models \
-        tests/cpu/models/test_attn_backend.py
+Run from `skyrl-train/`:
+    uv run --frozen pytest tests/cpu/models/test_attn_backend.py
 
 Covers the three Stage-2 invariants:
   1. attn_backend="auto" resolves EXACTLY as the pre-Stage-2 logic (G1).
