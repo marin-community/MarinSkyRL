@@ -25,6 +25,7 @@ if _EXAMPLES not in sys.path:
 
 # The generator pulls in the harbor agentic-RL stack (absent under the CPU extra).
 try:
+    import terminal_bench.terminal_bench_generator as terminal_bench_generator  # noqa: E402
     from terminal_bench.terminal_bench_generator import TerminalBenchGenerator  # noqa: E402
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
@@ -43,6 +44,7 @@ except ImportError:
 from terminal_bench.literal_log_store import LiteralLogStore  # noqa: E402
 
 _correlate = TerminalBenchGenerator._maybe_correlate_opencode_rollout_details
+_select_chain = terminal_bench_generator._select_opencode_literal_chain
 
 
 def _attach_store(s):
@@ -104,6 +106,48 @@ def test_correlates_per_trial_no_bleed_for_identical_seed_group(tmp_path, monkey
     # No bleed.
     assert 20 not in [t for turn in a[0]["completion_token_ids"] for t in turn]
     assert 10 not in [t for turn in b[0]["completion_token_ids"] for t in turn]
+
+
+def test_selects_final_continuous_chain_around_auxiliary_call():
+    """An auxiliary OpenCode request must not displace agent turns from TITO."""
+    entries = [
+        _entry("A", 1.0, [1], [10], [-0.1]),
+        _entry("A", 1.5, [99], [90], [-0.2]),
+        _entry("A", 2.0, [1, 10, 2], [11], [-0.3]),
+        _entry("A", 3.0, [1, 10, 2, 11, 3], [12], [-0.4]),
+    ]
+
+    selected = _select_chain(entries, "A")
+
+    assert [entry["literal"]["completion_token_ids"] for entry in selected] == [[10], [11], [12]]
+
+
+def test_selects_only_final_session_after_context_reset():
+    """A compacted session starts a new causal sequence and excludes its prefix."""
+    entries = [
+        _entry("A", 1.0, [1], [10], [-0.1]),
+        _entry("A", 2.0, [1, 10, 2], [11], [-0.2]),
+        _entry("A", 3.0, [50], [60], [-0.3]),
+        _entry("A", 4.0, [50, 60, 3], [61], [-0.4]),
+    ]
+
+    selected = _select_chain(entries, "A")
+
+    assert [entry["literal"]["completion_token_ids"] for entry in selected] == [[60], [61]]
+
+
+def test_correlation_excludes_auxiliary_call_from_tito_stream(tmp_path, monkeypatch):
+    entries = [
+        _entry("A", 1.0, [1], [10], [-0.1]),
+        _entry("A", 1.5, [99], [90], [-0.2]),
+        _entry("A", 2.0, [1, 10, 2], [11], [-0.3]),
+    ]
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+
+    rollout_details = _correlate(_fake_self(), _result("A"), None)
+
+    assert rollout_details[0]["completion_token_ids"] == [[10], [11]]
+    assert rollout_details[0]["prompt_token_ids"] == [[1], [1, 10, 2]]
 
 
 def test_noop_when_flag_off(tmp_path, monkeypatch):

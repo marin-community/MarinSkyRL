@@ -62,6 +62,63 @@ MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
 _normalize_prompt_token_ids = normalize_token_ids
 
 
+def _select_opencode_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> List[Dict[str, Any]]:
+    """Return the final continuous agent-call chain for one opencode trial.
+
+    The controller RecordProxy captures every request carrying the trial header.
+    OpenCode also makes auxiliary requests, and a context reset begins a fresh,
+    summary-seeded conversation. Neither belongs in the causal sequence assembled
+    from the final request's chat history. A real next agent turn has the previous
+    served prompt and completion as an exact prefix of its prompt, so retain the
+    longest such route ending at the final captured call.
+
+    Entries without complete token-id streams keep the existing all-entry fallback:
+    they can still support the re-tokenized TIS path but cannot prove a TITO route.
+    """
+    candidates = [
+        entry
+        for entry in entries
+        if entry.get("trial_id") == trial_id
+        and entry.get("status_code") == 200
+        and isinstance(entry.get("literal"), dict)
+        and entry["literal"].get("completion_token_ids")
+    ]
+    candidates.sort(key=lambda entry: entry.get("timestamp") or 0.0)
+    if len(candidates) < 2:
+        return candidates
+
+    def has_complete_ids(entry: Dict[str, Any]) -> bool:
+        literal = entry["literal"]
+        return isinstance(literal.get("prompt_token_ids"), list) and isinstance(
+            literal.get("completion_token_ids"), list
+        )
+
+    if not all(has_complete_ids(entry) for entry in candidates):
+        return candidates
+
+    parents: List[Optional[int]] = [None] * len(candidates)
+    lengths = [1] * len(candidates)
+    for current_idx, current in enumerate(candidates):
+        current_prompt = current["literal"]["prompt_token_ids"]
+        for previous_idx, previous in enumerate(candidates[:current_idx]):
+            previous_literal = previous["literal"]
+            expected_prefix = previous_literal["prompt_token_ids"] + previous_literal["completion_token_ids"]
+            if current_prompt[: len(expected_prefix)] != expected_prefix:
+                continue
+            candidate_length = lengths[previous_idx] + 1
+            if candidate_length > lengths[current_idx]:
+                lengths[current_idx] = candidate_length
+                parents[current_idx] = previous_idx
+
+    route_indices = []
+    current_idx: Optional[int] = len(candidates) - 1
+    while current_idx is not None:
+        route_indices.append(current_idx)
+        current_idx = parents[current_idx]
+    route_indices.reverse()
+    return [candidates[index] for index in route_indices]
+
+
 # Markers indicating the agent confirmed task completion (terminus-2 family).
 # The agent's raw assistant response carries the completion marker in-band:
 #   - XML parser: ``<task_complete>true</task_complete>``
@@ -1342,8 +1399,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         log_path = self._literal_log_path or os.environ.get("OTAGENT_LITERAL_LOG_PATH")
         if not log_path:
             return rollout_details
-        # Per-trial indexed lookup (O(this trial's entries)); build_rollout_details_for_trial
-        # re-filters by trial_id, so the result is identical to scanning the whole log.
+        # Per-trial indexed lookup (O(this trial's entries)). The RecordProxy also
+        # sees auxiliary OpenCode calls and context-reset sessions under the same
+        # trial header, so retain only the final continuous agent-call route before
+        # constructing the rollout detail used by TIS/TITO.
         entries = self._literal_log_store.entries_for_trial(log_path, trial_id)
         # This is the SECOND (last) opencode literal consumer for the trial —
         # _maybe_build_opencode_chat_history already ran earlier in _process_trial_result.
@@ -1355,12 +1414,18 @@ class TerminalBenchGenerator(GeneratorInterface):
             if not entries:
                 return rollout_details
             try:
-                from harbor.literal.rollout_build import build_rollout_details_for_trial
+                from harbor.literal.rollout_build import build_rollout_details_from_pairs
             except Exception:  # harbor without the bridge → no-op
                 return rollout_details
-            built = build_rollout_details_for_trial(entries, trial_id)
+            selected_entries = _select_opencode_literal_chain(entries, trial_id)
+            built = build_rollout_details_from_pairs([entry["literal"] for entry in selected_entries])
             if not built:
                 return rollout_details
+            if len(selected_entries) != len(entries):
+                logger.info(
+                    f"[literal-bridge] selected {len(selected_entries)}/{len(entries)} continuous opencode "
+                    f"turn(s) for trial {trial_id}"
+                )
             # Persist onto the result so downstream consumers see a consistent view.
             try:
                 result.agent_result.rollout_details = built
@@ -1437,7 +1502,9 @@ class TerminalBenchGenerator(GeneratorInterface):
         ]
         if not matched:
             return None
-        matched.sort(key=lambda e: e.get("timestamp") or 0.0)
+        matched = _select_opencode_literal_chain(matched, trial_id)
+        if not matched:
+            return None
         last = matched[-1]
         request = last.get("request")
         base_messages = request.get("messages") if isinstance(request, dict) else None
