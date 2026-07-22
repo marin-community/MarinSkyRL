@@ -328,7 +328,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,
     cu_seqlens_padded: torch.Tensor,
-    unpacked_seqlen: int,
+    attention_mask: torch.Tensor,
     vocab_start_index: int,
     vocab_end_index: int,
     group: torch.distributed.ProcessGroup,
@@ -345,7 +345,8 @@ def from_parallel_logits_to_logprobs_packed_sequences(
             NOTE: Must be the unmodified targets as this function will shift them internally.
         cu_seqlens (torch.Tensor): Cumulative sequence lengths tensor with shape [batch_size + 1].
             cu_seqlens[i] indicates the start position of sequence i in the packed format.
-        unpacked_seqlen (int): The length of the unpacked sequence tensor.
+        attention_mask (torch.Tensor): Original padded token positions. Values are
+            scattered back to these positions after vocab reduction.
         vocab_start_index (int): Starting vocabulary index for this worker's partition.
         vocab_end_index (int): Ending vocabulary index for this worker's partition.
         group (torch.distributed.ProcessGroup): Process group for distributed communication.
@@ -354,8 +355,8 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         chunk_size (int, optional): Sequence dimension chunk size for computing the log probabilities.
 
     Returns:
-        torch.Tensor: Unpacked log probabilities tensor with shape [batch_size, unpacked_seqlen-1].
-            The total length is reduced by batch_size due to target shifting (one token per sequence).
+        torch.Tensor: Log probabilities in original padded positions with shape
+            [batch_size, sequence_length - 1].
     """
     # Remove batch dimension to work with [T, vocab_size] and [T]
     vocab_parallel_logits = vocab_parallel_logits.squeeze(0)
@@ -424,7 +425,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
             )
         probs = final_probs
 
-    out_logprobs = torch.zeros((batch_size, unpacked_seqlen - 1), dtype=probs.dtype, device=probs.device)
+    out_logprobs = torch.zeros((batch_size, attention_mask.shape[1] - 1), dtype=probs.dtype, device=probs.device)
     # Filter out the last token of each sequence
     for i in range(batch_size):
         start_idx = cu_seqlens_padded[i].item()
@@ -437,10 +438,9 @@ def from_parallel_logits_to_logprobs_packed_sequences(
             if seq_probs.dim() > 1:
                 seq_probs = seq_probs.squeeze()
 
-            # Ensure we don't exceed the unpacked sequence length
-            seq_len = min(seq_probs.shape[0], unpacked_seqlen - 1)
-            if seq_len > 0:
-                out_logprobs[i, :seq_len] = seq_probs[:seq_len]
+            positions = attention_mask[i].nonzero(as_tuple=False).flatten()[:-1]
+            if positions.numel() > 0:
+                out_logprobs[i, positions] = seq_probs[: positions.numel()]
 
     return out_logprobs
 

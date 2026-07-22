@@ -35,7 +35,10 @@ if importlib.util.find_spec("megatron") is None:
     for _name in ("megatron", "megatron.core", "megatron.core.parallel_state"):
         sys.modules.setdefault(_name, types.ModuleType(_name))
 
-from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs  # noqa: E402
+from skyrl_train.distributed.megatron.model_utils import (  # noqa: E402
+    from_parallel_logits_to_logprobs,
+    from_parallel_logits_to_logprobs_packed_sequences,
+)
 
 
 @pytest.fixture(scope="module")
@@ -67,6 +70,16 @@ def _logprobs(logits, targets, group, chunk_size, inference_only):
         cp_group=None,
         chunk_size=chunk_size,
     )
+
+
+def _packed_batch(logits, tokens, attention_mask):
+    """Pack valid token/logit rows and record each sequence's packed offset."""
+    packed_logits = torch.cat([row[mask] for row, mask in zip(logits, attention_mask, strict=True)]).unsqueeze(0)
+    packed_tokens = torch.cat([row[mask] for row, mask in zip(tokens, attention_mask, strict=True)]).unsqueeze(0)
+    lengths = attention_mask.sum(dim=1, dtype=torch.int32)
+    offsets = torch.zeros(lengths.numel() + 1, dtype=torch.int32)
+    offsets[1:] = torch.cumsum(lengths, dim=0)
+    return packed_logits, packed_tokens, offsets
 
 
 # chunk sizes that exercise: divides the seq exactly, does NOT divide (ragged last
@@ -106,6 +119,45 @@ def test_chunked_matches_unchunked_backward(single_rank_group, chunk_size):
 
     assert torch.allclose(g_chunked, g_unchunked, atol=1e-6, rtol=1e-6), (
         f"chunk_size={chunk_size} grad max|diff|={(g_chunked - g_unchunked).abs().max().item()}"
+    )
+
+
+def test_packed_logprobs_preserve_left_padded_action_positions(single_rank_group):
+    """Packed logprobs must land at the original action positions, not at column zero."""
+    torch.manual_seed(2)
+    batch, seq, vocab, num_actions = 2, 9, 32, 3
+    base_logits = torch.randn(batch, seq, vocab, dtype=torch.float32)
+    padded_logits = base_logits.clone().requires_grad_(True)
+    packed_source_logits = base_logits.clone().requires_grad_(True)
+    tokens = torch.randint(0, vocab, (batch, seq))
+    attention_mask = torch.tensor(
+        [
+            [False, False, True, True, True, True, True, True, True],
+            [False, False, False, True, True, True, True, True, True],
+        ]
+    )
+    packed_logits, packed_tokens, offsets = _packed_batch(packed_source_logits, tokens, attention_mask)
+
+    padded = _logprobs(padded_logits, tokens, single_rank_group, chunk_size=3, inference_only=False)
+    packed = from_parallel_logits_to_logprobs_packed_sequences(
+        packed_logits,
+        packed_tokens,
+        offsets,
+        attention_mask=attention_mask,
+        vocab_start_index=0,
+        vocab_end_index=vocab,
+        group=single_rank_group,
+        inference_only=False,
+        cp_group=None,
+        chunk_size=3,
+    )
+
+    assert torch.allclose(packed[:, -num_actions:], padded[:, -num_actions:], atol=1e-6, rtol=1e-6)
+
+    padded[:, -num_actions:].sum().backward()
+    packed[:, -num_actions:].sum().backward()
+    assert torch.allclose(
+        packed_source_logits.grad[attention_mask], padded_logits.grad[attention_mask], atol=1e-6, rtol=1e-6
     )
 
 

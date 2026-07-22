@@ -399,19 +399,51 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def postprocess_packed_seqs(
+def pack_padded_tokens(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    packed_seq_params: PackedSeqParams,
+) -> torch.Tensor:
+    """Pack unsharded token IDs using the offsets consumed by packed logits."""
+    cu_padded = packed_seq_params.cu_seqlens_q_padded.tolist()
+    packed = torch.zeros((1, cu_padded[-1]), dtype=input_ids.dtype, device=input_ids.device)
+    for i, (start, end) in enumerate(zip(cu_padded[:-1], cu_padded[1:], strict=True)):
+        tokens = input_ids[i, attention_mask[i]]
+        if tokens.numel() > end - start:
+            raise ValueError("Packed token offsets are shorter than the unpadded sequence.")
+        packed[0, start : start + tokens.numel()] = tokens
+    return packed
+
+
+def scatter_token_values(
+    values: torch.Tensor,
+    attention_mask: torch.Tensor,
+    *,
+    drop_last: bool,
+) -> torch.Tensor:
+    """Restore compact per-token values to their original padded positions."""
+    output_len = attention_mask.shape[1] - int(drop_last)
+    output = torch.zeros((attention_mask.shape[0], output_len), dtype=values.dtype, device=values.device)
+    for i in range(attention_mask.shape[0]):
+        positions = attention_mask[i].nonzero(as_tuple=False).flatten()
+        if drop_last:
+            positions = positions[:-1]
+        if positions.numel() > 0:
+            output[i, positions] = values[i, : positions.numel()]
+    return output
+
+
+def unpack_packed_token_values(
     output: torch.Tensor,
     packed_seq_params: PackedSeqParams,
     attention_mask: torch.Tensor,
-    batch_size: int,
-    seq_len: int,
     post_process: bool = True,
 ) -> torch.Tensor:
-    """
-    Postprocess packed sequences
-    """
+    """Restore packed scalar values without materializing padded vocab logits."""
     if not post_process:
         return output
+    if output.ndim != 2 or output.shape[0] != 1:
+        raise ValueError(f"Expected packed scalar values with shape [1, T], got {tuple(output.shape)}.")
 
     # -------------------------------------------------------------------------
     # Move the lengths and offsets needed for subsequent Python-level indexing to the CPU in advance,
@@ -420,14 +452,13 @@ def postprocess_packed_seqs(
     cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
     seq_lens_cpu: list[int] = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
 
-    shape = [batch_size, seq_len] + list(output.shape[2:])  # 1,packed, dim -> batch_size, seq_len, dim
+    batch_size, seq_len = attention_mask.shape
+    shape = [batch_size, seq_len]
     output_new = torch.zeros(shape, dtype=output.dtype, device=output.device)
 
     cp_size = mpu.get_context_parallel_world_size()
-    # all gather output across context parallel group
+    # All-gather scalar values across context-parallel ranks.
     if cp_size > 1:
-        # output shape: [1, packed_len, hidden_dim]
-        # need to gather across cp group and concatenate in sequence dimension
         output_list = [torch.empty_like(output) for _ in range(cp_size)]
         torch.distributed.all_gather(output_list, output.detach(), group=mpu.get_context_parallel_group())
         output_list[mpu.get_context_parallel_rank()] = output
@@ -443,7 +474,7 @@ def postprocess_packed_seqs(
         half_seqlen = s_len_padded_chunk // 2
         s_len = seq_lens_cpu[i]
         s_len_padded = s_len_padded_chunk * cp_size
-        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device)
+        tmp = torch.empty(s_len_padded, device=output.device, dtype=output.dtype)
         for j in range(cp_size):
             o = output_list[j][0]
             # split to 2 chunks
@@ -457,6 +488,18 @@ def postprocess_packed_seqs(
         output_new[i, attention_mask[i]] = tmp[:s_len]
 
     return output_new
+
+
+def compact_left_padded_tokens(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    """Remove left padding from token IDs for a vocab-reduced logprob computation."""
+    seq_lens = attention_mask.sum(dim=1, dtype=torch.int32)
+    compact_len = int(seq_lens.max().item())
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    compact_len += (tp_size - compact_len % tp_size) % tp_size
+    compact = torch.zeros((input_ids.shape[0], compact_len), dtype=input_ids.dtype, device=input_ids.device)
+    for i, seq_len in enumerate(seq_lens.tolist()):
+        compact[i, :seq_len] = input_ids[i, attention_mask[i]]
+    return compact
 
 
 def remove_left_padding(
@@ -497,28 +540,6 @@ def remove_left_padding(
         return new_input_ids, new_attention_mask, new_position_ids
     else:
         return input_ids, new_attention_mask, new_position_ids
-
-
-def recover_left_padding(
-    result,
-    attention_mask: torch.Tensor,
-    original_attention_mask: torch.Tensor,
-    origin_seqlen: int,
-    post_process: bool = True,
-):
-    """
-    Recover left padding from result
-    return result
-    """
-    if not post_process:
-        return result
-    shape = list(result.shape)
-    batch_size = shape[0]
-    shape[1] = origin_seqlen
-    new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
-    for i in range(batch_size):
-        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
-    return new_result
 
 
 def get_model_config(model):
