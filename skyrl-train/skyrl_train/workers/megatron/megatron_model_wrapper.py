@@ -187,6 +187,7 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                fp32_output=False,
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
@@ -329,6 +330,7 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                fp32_output=False,
             )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)

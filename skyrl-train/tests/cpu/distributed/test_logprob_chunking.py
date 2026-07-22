@@ -122,6 +122,32 @@ def test_chunked_matches_unchunked_backward(single_rank_group, chunk_size):
     )
 
 
+def test_chunked_bf16_model_output_matches_lossless_fp32_output(single_rank_group):
+    """Keeping MCore logits in bf16 must preserve the fp32 logprob result and model gradient.
+
+    MCore's ``Float16Module`` otherwise expands the entire last-pipeline-stage vocab
+    tensor to fp32. The chunked logprob path casts each chunk itself, so it must agree
+    with the old lossless bf16-to-fp32 output conversion without allocating the full
+    fp32 tensor first.
+    """
+    torch.manual_seed(3)
+    batch, seq, vocab = 2, 11, 32
+    model_precision_logits = torch.randn(batch, seq, vocab, dtype=torch.bfloat16)
+    targets = torch.randint(0, vocab, (batch, seq))
+
+    direct_bf16 = model_precision_logits.clone().requires_grad_(True)
+    old_fp32_input = model_precision_logits.clone().requires_grad_(True)
+
+    direct_logprobs = _logprobs(direct_bf16, targets, single_rank_group, chunk_size=3, inference_only=False)
+    old_logprobs = _logprobs(old_fp32_input.float(), targets, single_rank_group, chunk_size=3, inference_only=False)
+
+    assert torch.equal(direct_logprobs, old_logprobs)
+
+    direct_logprobs.sum().backward()
+    old_logprobs.sum().backward()
+    assert torch.equal(direct_bf16.grad, old_fp32_input.grad)
+
+
 def test_packed_logprobs_preserve_left_padded_action_positions(single_rank_group):
     """Packed logprobs must land at the original action positions, not at column zero."""
     torch.manual_seed(2)
