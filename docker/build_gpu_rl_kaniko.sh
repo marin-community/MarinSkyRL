@@ -7,7 +7,8 @@
 # /kaniko/executor. Context = the iris-synced /app bundle (this repo).
 # See .claude/skills/build-gpu-rl-image-iris/SKILL.md (in OpenThoughts-Agent).
 #
-# Required env (passed by the iris launch as -e):
+# Required env (passed by the iris launch as `-e KEY VALUE`; this Iris CLI rejects
+# `-e KEY=VALUE` before submission):
 #   DOCKER_USER_ID  ghcr user (penfever)
 #   DOCKER_TOKEN    a GitHub PAT with write:packages (NOT the Docker Hub dckr_pat_)
 #   GITSHA          MarinSkyRL commit sha for the immutable pinned tag
