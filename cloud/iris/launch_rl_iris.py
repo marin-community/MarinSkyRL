@@ -272,12 +272,13 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # runtime uv reinstall then dies state-5 at bring-up — this happened to the keep6 -e1 pair). Megatron
     # variant = the weight-sync het-bootstrap fix (PR #71, 79432f4a) + all d0016149 contents. HARBOR_COMMIT
     # plumbed through build_gpu_rl_kaniko.sh via MarinSkyRL PR #74. Pull-verified: 35 layers, max 7.48 GB.
-    # gpu-rl-megatron-b063514b (built 2026-07-21, kaniko job gpurl-kaniko-b063514b,
-    # INSTALL_MEGATRON=1): baked MarinSkyRL b063514b (terminus-2 mfb=1 and cache-free
-    # split layers) + canonical Harbor 394c58fe. Registry-verified: 37 layers, max
-    # 2.80 GiB, 18.43 GiB total. This replaces cc408e74/67438930, whose 7.48-GiB
-    # cache-containing layer repeatedly EOFed while RNO pulled from GHCR.
-    "@sha256:6c2c00410f2c5a12536fc19deecff79269ddda238aa3748ab7c158e124992860"  # noqa: E501
+    # gpu-rl-megatron-9c17f8a4 (built 2026-07-22, kaniko job gpurl-kaniko-9c17f8a4,
+    # INSTALL_MEGATRON=1): baked MarinSkyRL main 9c17f8a4, including the
+    # ChunkedDistributedLogprob preallocated-backward fix for packed-token OOMs, plus
+    # canonical Harbor 394c58fe. Registry-verified: 37 layers, max 2.80 GiB, 18.43 GiB
+    # total; it retains the proven cache-free split-layer pullability profile for RNO.
+    "@sha256:3ed8480f725579d6ce88086ec56838f6f39b169bab19245ccc42a09d5b61d93e"  # noqa: E501
+    # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041, same Harbor)
     # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
     # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
 )
