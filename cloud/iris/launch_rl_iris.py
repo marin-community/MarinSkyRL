@@ -413,8 +413,9 @@ APP_DIR = "/app"
 # registration path (GAP D). The gpu-rl image bakes ONLY MarinSkyRL + harbor, never iris (a
 # marin-monorepo pkg), so cloud.iris.ingress_utils' `import iris.cluster.client.* / iris.rpc.*`
 # would ModuleNotFoundError in driver init. This dev build is validated against the live
-# marin controller's registration/mint RPC protocol; override via --iris-ref.
-DEFAULT_IRIS_VERSION = "marin-iris==0.2.49.dev202607160749"
+# marin controller's registration/mint RPC protocol and parses the current parent marin.yaml
+# `platform.gcp.registry_mirrors` field; override via --iris-ref.
+DEFAULT_IRIS_VERSION = "marin-iris==0.2.54.dev202607210800"
 
 
 def _resolve_cluster_config_default(cluster: str = DEFAULT_CLUSTER) -> str:
