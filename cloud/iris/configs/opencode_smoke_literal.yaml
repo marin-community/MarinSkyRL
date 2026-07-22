@@ -43,7 +43,7 @@
 #     --train-data '["DCAgent/exp_rpt_pymethods2test-large"]' \
 #     --num-nodes 1 --gpus_per_node 8 \
 #     --ingress-mode controller --ingress-host iris.oa.dev \
-#     --target-cluster cw-us-east-02a --record-literal --forward-marin-login \
+#     --target-cluster cw-us-east-02a --record-literal \
 #     --daytona-api-key-env DAYTONA_RL_API_KEY \
 #     --job-name <UNIQUE> --no-wait
 # =============================================================================

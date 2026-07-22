@@ -56,12 +56,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shlex
 import sys
 import time
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import yaml
 
@@ -418,6 +420,8 @@ APP_DIR = "/app"
 # `platform.gcp.registry_mirrors` field; override via --iris-ref.
 DEFAULT_IRIS_VERSION = "marin-iris==0.2.54.dev202607210800"
 
+MARIN_LOGIN_RECORD_PATH = Path.home() / ".config" / "marin" / "credentials" / "marin.json"
+
 
 def _resolve_cluster_config_default(cluster: str = DEFAULT_CLUSTER) -> str:
     """Find the marin repo's ``<cluster>.yaml`` iris cluster config.
@@ -638,6 +642,70 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
             f"cluster's controller host {dash_host} (--cluster={cluster}). Override with "
             "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
         )
+
+
+def prepare_federated_parent_credentials(args: argparse.Namespace) -> str | None:
+    """Validate and return the cached Marin IAP login needed by a federated pod.
+
+    A CoreWeave task has neither a cached human login nor a Marin-allowlisted service
+    account. Controller ingress therefore cannot mint a parent capability token unless
+    the launcher forwards the operator's cached Marin IAP login record. Mint an IAP
+    token here, before submitting or allocating GPUs, so a stale or absent record fails
+    locally instead of after the endpoint-registration wait in the task.
+    """
+    if not getattr(args, "target_cluster", None) or getattr(args, "ingress_mode", "direct") != "controller":
+        return None
+    if not MARIN_LOGIN_RECORD_PATH.is_file():
+        raise SystemExit(
+            "[rl-iris] BLOCKED: federated CoreWeave controller ingress requires the cached "
+            f"Marin IAP login record at {MARIN_LOGIN_RECORD_PATH}. "
+            "Run `iris --cluster=marin login` and relaunch."
+        )
+    try:
+        record = json.loads(MARIN_LOGIN_RECORD_PATH.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"[rl-iris] BLOCKED: {MARIN_LOGIN_RECORD_PATH} is not valid JSON. "
+            "Run `iris --cluster=marin login` and relaunch."
+        ) from exc
+
+    if record.get("cluster") != "marin" or urlparse(str(record.get("endpoint", ""))).hostname != "iris.oa.dev":
+        raise SystemExit(
+            f"[rl-iris] BLOCKED: {MARIN_LOGIN_RECORD_PATH} is not a Marin iris.oa.dev login record. "
+            "Run `iris --cluster=marin login` and relaunch."
+        )
+    refresh_token = record.get("edge_refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise SystemExit(
+            f"[rl-iris] BLOCKED: {MARIN_LOGIN_RECORD_PATH} has no edge_refresh_token. "
+            "Run `iris --cluster=marin login` and relaunch."
+        )
+
+    from rigging.auth import IapRefreshTokenProvider, MARIN_DESKTOP_OAUTH_CLIENT
+
+    provider = IapRefreshTokenProvider(
+        MARIN_DESKTOP_OAUTH_CLIENT.client_id,
+        MARIN_DESKTOP_OAUTH_CLIENT.client_secret,
+        refresh_token,
+        login_hint="log in to cluster 'marin' to authenticate",
+    )
+    try:
+        token = provider.get_token()
+    except Exception as exc:
+        raise SystemExit(
+            "[rl-iris] BLOCKED: unable to mint an IAP token from the cached Marin login record. "
+            "Run `iris --cluster=marin login` and relaunch."
+        ) from exc
+    if not token:
+        raise SystemExit(
+            "[rl-iris] BLOCKED: cached Marin login did not mint an IAP token. "
+            "Run `iris --cluster=marin login` and relaunch."
+        )
+    print(
+        "[rl-iris] Federated parent-IAP preflight passed; forwarding the cached Marin login record to the peer task.",
+        flush=True,
+    )
+    return json.dumps(record)
 
 
 def _default_secrets_env() -> Optional[str]:
@@ -955,18 +1023,6 @@ def create_parser() -> argparse.ArgumentParser:
         "against, if it differs from the launch-host --parent-cluster-config path. "
         "Defaults to the launch-host resolved marin.yaml path (must be materialized "
         "in-pod — see the OTAGENT_PARENT_CONTROLLER_CONFIG forwarding NOTE).",
-    )
-    parser.add_argument(
-        "--forward-marin-login",
-        "--forward_marin_login",
-        dest="forward_marin_login",
-        action="store_true",
-        default=False,
-        help="Federated in-pod mint credential: forward the operator's cached marin "
-        "`iris login` record (~/.config/marin/credentials/marin.json, carrying a "
-        "long-lived edge_refresh_token) into the pod env so the in-pod worker can mint "
-        "at iris.oa.dev. SECRET rides in the job env spec — explicit opt-in. Omit to "
-        "instead provision an allowlisted service-account credential in-pod.",
     )
     parser.add_argument(
         "--secrets-env",
@@ -1665,6 +1721,7 @@ def main() -> int:
     # (opencode never reaches vLLM on CoreWeave via a directly-submitted job). The
     # default direct path returns immediately (byte-identical).
     validate_controller_ingress_reachability(args)
+    parent_credentials_json = prepare_federated_parent_credentials(args)
 
     if not args.job_name:
         args.job_name = f"rl-iris-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -1895,14 +1952,10 @@ def main() -> int:
     # authenticate to iris.oa.dev. We forward the config path + any launch-host IAP cred
     # env so the in-pod _ParentControllerClient can re-mint the IAP OIDC token.
     #
-    # ⚠ POST-LOGIN VALIDATION ITEM (cannot be exercised until `iris login` succeeds): the
-    # parent config FILE and a usable IAP credential must actually be PRESENT in the pod.
-    # The marin.yaml is not baked into the gpu-rl image, and forwarding a user refresh
-    # token into a pod is a secret-handling decision. Today we forward the path + known
-    # IAP-cred env vars; materializing marin.yaml in-pod (bake / workspace-sync / write
-    # from a forwarded value) and choosing the IAP cred mechanism (allowlisted SA vs.
-    # forwarded refresh token) are the remaining operator/deploy steps. Direct submission
-    # (no --target-cluster) forwards none of this.
+    # The parent config file is not baked into the gpu-rl image, so forward its contents
+    # for in-pod materialization. Federated controller ingress always forwards the cached
+    # Marin login record after prepare_federated_parent_credentials() has minted a token
+    # from it locally. Direct submission (no --target-cluster) forwards none of this.
     if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
         from cloud.iris.ingress_utils import (
             PARENT_CONTROLLER_CONFIG_ENV,
@@ -1919,7 +1972,7 @@ def main() -> int:
             env_vars[PARENT_CONTROLLER_CONFIG_ENV] = parent_cfg
             # marin.yaml is not baked into the gpu-rl image and is not part of the
             # synced workspace, so the path above won't resolve in-pod. Forward the
-            # file CONTENT (write-from-env, mirroring --forward-marin-login) so the
+            # file CONTENT (write-from-env, mirroring the cached login record) so the
             # in-pod worker (materialize_parent_controller_config) writes it to a real
             # path and repoints the env. marin.yaml carries no secrets (signing_key is
             # a gcp-secret:// ref resolved server-side). When parent_cfg is an explicit
@@ -1936,33 +1989,12 @@ def main() -> int:
             v = os.environ.get(k)
             if v:
                 env_vars[k] = v
-        # In-pod parent-mint IAP credential. The cw pod has no cached `iris login` and no
-        # marin-allowlisted ambient SA, so the in-pod mint at iris.oa.dev fails
-        # UNAUTHENTICATED unless we supply a credential. --forward-marin-login opts INTO
-        # forwarding the operator's cached login record (`~/.config/marin/credentials/
-        # <cluster>.json`, carrying a long-lived edge_refresh_token) into the pod env; the
-        # in-pod worker materializes it (ingress_utils.materialize_parent_credentials) so
-        # rigging's load_credentials mints under the operator's identity. This is a SECRET
-        # exposure (the token rides in the job's env spec) — hence explicit opt-in. The
-        # deploy-choice alternative is to provision an allowlisted GCP service-account
-        # credential into the pod (ADC/key) instead and NOT forward the token.
-        if getattr(args, "forward_marin_login", False):
-            login_path = os.path.expanduser("~/.config/marin/credentials/marin.json")
-            if os.path.isfile(login_path):
-                with open(login_path) as _f:
-                    env_vars[PARENT_CREDENTIALS_JSON_ENV] = _f.read()
-                print(
-                    "[rl-iris] --forward-marin-login: forwarding the cached marin login "
-                    "record into the pod env (edge_refresh_token) for the in-pod parent "
-                    "mint. SECRET rides in the job env spec.",
-                    flush=True,
-                )
-            else:
-                raise SystemExit(
-                    "[rl-iris] --forward-marin-login set but no cached login at "
-                    f"{login_path}. Run `iris --cluster=marin login` first, or drop the "
-                    "flag and provision an allowlisted service-account credential in-pod."
-                )
+        # A CoreWeave pod has no cached `iris login` and no Marin-allowlisted ambient
+        # service account. Forwarding this validated record is therefore mandatory for
+        # the in-pod parent mint; it remains a secret in the submitted job environment.
+        if parent_credentials_json is None:
+            raise AssertionError("federated controller ingress must have validated parent credentials")
+        env_vars[PARENT_CREDENTIALS_JSON_ENV] = parent_credentials_json
 
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin
