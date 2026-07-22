@@ -26,9 +26,10 @@ from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
 
-# The pre-CP golden was snapshotted from `get_default_config()` on the commit
-# immediately before the CP keys were added (resolve=False, so interpolations are
-# preserved verbatim and the comparison is HOME-/env-independent).
+# The baseline snapshots `get_default_config()` without the intentionally additive
+# CP, grouped-mm, attention-backend, and DCP fields. Keeping the remaining defaults
+# current makes this a CP no-op regression test rather than a stale whole-config lock.
+# `resolve=False` preserves interpolations, so the comparison is HOME-/env-independent.
 GOLDEN = Path(__file__).parent.parent / "data" / "ppo_base_pre_cp.yaml"
 
 CP_FIELDS = {
@@ -86,8 +87,8 @@ def test_default_config_validates_noop():
 
 
 # ----------------------------------------------------------------------------- G1
-def test_all_defaults_is_structurally_identical_to_pre_cp():
-    """Removing the new CP keys must reproduce the exact pre-CP config tree.
+def test_all_defaults_is_structurally_identical_to_baseline():
+    """Removing the additive fields must reproduce the current no-CP baseline.
 
     Proves the default (production) path is byte-identical post-change.
     """
@@ -101,7 +102,7 @@ def test_all_defaults_is_structurally_identical_to_pre_cp():
     for k in STAGE0_DCP_GENERATOR_FIELDS:  # strip DCP Stage-0 additive generator key
         container["generator"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
-    assert container == golden, "default config drifted from the pre-CP golden baseline"
+    assert container == golden, "default config drifted from the no-CP baseline"
 
 
 def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():

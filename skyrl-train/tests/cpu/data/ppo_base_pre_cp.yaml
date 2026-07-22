@@ -84,6 +84,7 @@ trainer:
         recompute_method: uniform
         recompute_num_layers: 1
       empty_cuda_cache: true
+      logprob_chunk_size: 1024
   ref:
     model:
       path: ${trainer.policy.model.path}
@@ -109,6 +110,7 @@ trainer:
       expert_tensor_parallel_size: 1
       model_config_kwargs: {}
       transformer_config_kwargs: {}
+      logprob_chunk_size: 1024
   critic:
     model:
       path: null
@@ -173,6 +175,11 @@ trainer:
     clip_ratio_c: 3.0
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    tito_full: null
+    enable_token_reward_channel: false
+    think_token_weight: 1.0
+    think_token_cost: 0.0
+    think_max_cost_per_turn: 0.05
     sapo:
       tau_pos: 1.0
       tau_neg: 1.05
@@ -217,7 +224,7 @@ trainer:
   ckpt_path: ${oc.env:HOME}/ckpts/
   max_ckpts_to_keep: -1
   ckpt_interval: 10
-  hf_save_interval: -1
+  hf_save_interval: 5
   hf_upload_mode: latest
   export_path: ${oc.env:HOME}/exports/
   bf16: true
@@ -329,6 +336,13 @@ environment:
   env_class: gsm8k
   skyrl_gym:
     max_env_workers: 32
+    aime:
+      length_penalty_weight: 0.0
+      target_length: 768
+      truncated_penalty: -2.0
+      min_response_length: 16
+      end_think_token: <|end_think|>
+      max_gen_length: 0
     text2sql:
       db_path: /home/ray/default/sql_data
     llm_as_a_judge:
