@@ -542,6 +542,7 @@ def test_policy_loss_registry_specific():
     PolicyLossRegistry.unregister("test_policy_decorator")
 
 
+@pytest.mark.usefixtures("ray_module")
 def test_registry_cross_ray_process():
     """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
     try:
@@ -608,6 +609,7 @@ def test_registry_cross_ray_process():
         AdvantageEstimatorRegistry.reset()
 
 
+@pytest.mark.usefixtures("ray_module")
 def test_registry_named_actor_creation():
     """Test that the registry creates named Ray actors and properly serializes functions."""
     try:
@@ -657,6 +659,7 @@ def test_registry_named_actor_creation():
         AdvantageEstimatorRegistry.reset()
 
 
+@pytest.mark.usefixtures("ray_module")
 def test_registry_reset_after_ray_shutdown():
     """
     Test that the registry resets properly after ray is shutdown.
@@ -685,7 +688,9 @@ def test_registry_reset_after_ray_shutdown():
             ray.init()
         _register_func_and_verify()
 
-        # 2. Shutdown ray
+        # 2. Force-kill the named actor before shutting down Ray. Waiting for
+        # owner-death cleanup can take Ray's full graceful actor timeout.
+        ray.kill(ray.get_actor("advantage_estimator_registry"))
         ray.shutdown()
 
         # 3. Initialize ray, reset registry, and register function
@@ -694,4 +699,5 @@ def test_registry_reset_after_ray_shutdown():
         _register_func_and_verify()
 
     finally:
+        AdvantageEstimatorRegistry.reset()
         ray.shutdown()

@@ -36,6 +36,7 @@ def dummy_config():
     return example_dummy_config()
 
 
+@pytest.mark.usefixtures("ray_init")
 def test_run_on_node_local_rank_0():
     def fn(x):
         return x + 1

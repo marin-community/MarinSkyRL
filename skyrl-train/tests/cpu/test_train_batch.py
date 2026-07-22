@@ -209,6 +209,7 @@ def test_train_batch_setitem():
         data["sequences"] = np.zeros((batch_size, seq_len))
 
 
+@pytest.mark.usefixtures("ray_init")
 def test_train_batch_ray_serialization():
     data = TensorBatch(
         **{"a": torch.tensor([1.2, 2.4, 3.6, 4.8]), "b": torch.tensor([4, 5, 6, 7])},
@@ -218,8 +219,8 @@ def test_train_batch_ray_serialization():
     def _task(inp: TensorBatch):
         assert inp == data
 
-    _inp_ray = ray.put(data)
-    ray.remote(_task).remote(_inp_ray)
+    input_ref = ray.put(data)
+    ray.get(ray.remote(_task).remote(input_ref))
 
 
 def test_train_batch_repeat():
