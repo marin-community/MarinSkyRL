@@ -12,23 +12,12 @@ os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 import ray  # noqa: E402
 
 
-REGISTRY_CLASS_NAMES = ("AdvantageEstimatorRegistry", "PolicyLossRegistry")
-
-
 def _kill_registry_actors() -> None:
     registry_module = sys.modules.get("skyrl_train.utils.ppo_utils")
     if registry_module is None:
         return
-    for registry_name in REGISTRY_CLASS_NAMES:
-        registry = getattr(registry_module, registry_name)
-        try:
-            actor = ray.get_actor(registry._actor_name)
-        except ValueError:
-            pass
-        else:
-            ray.kill(actor)
-        registry._ray_actor = None
-        registry._synced_to_actor = False
+    for registry in registry_module.BaseFunctionRegistry.__subclasses__():
+        registry.shutdown_actor()
 
 
 @contextmanager

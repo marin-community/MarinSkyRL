@@ -406,17 +406,22 @@ class BaseFunctionRegistry:
             raise ValueError(f"{cls._function_type} '{name}' not registered")
 
     @classmethod
-    def reset(cls):
-        """Resets the registry (useful for testing purposes)."""
-        if ray.is_initialized() and cls._ray_actor is not None:
+    def shutdown_actor(cls):
+        """Force-stop the registry actor without clearing local functions."""
+        if ray.is_initialized():
             try:
                 actor = ray.get_actor(cls._actor_name)  # this raises exception if the actor is stale
                 ray.kill(actor)
             except ValueError:
                 pass  # Actor may already be gone
-        cls._functions.clear()
         cls._ray_actor = None
         cls._synced_to_actor = False
+
+    @classmethod
+    def reset(cls):
+        """Resets the registry (useful for testing purposes)."""
+        cls.shutdown_actor()
+        cls._functions.clear()
 
     @classmethod
     def repopulate(cls):
