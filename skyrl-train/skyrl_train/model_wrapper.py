@@ -27,6 +27,7 @@ from skyrl_train.distributed.cp_utils import (
     cp_load_balance_indices,
 )
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from packaging.version import Version
 
 # --- Stage 2 (FSDP2 CP): guarded flash-attn import ---------------------------
@@ -107,6 +108,40 @@ def resolve_attn_implementation(
             "supported under context parallel (G2)."
         )
     return impl
+
+
+def validate_grug_training_options(
+    *,
+    model_type: str | None,
+    attn_implementation: str,
+    use_sample_packing: bool,
+    lora_rank: int,
+    load_in_4bit: bool,
+    sequence_parallel_size: int,
+    context_parallel_size: int,
+    moe_router_replay: bool,
+    moe_grouped_gemm: bool,
+    use_grouped_mm: bool,
+    use_liger_kernel: bool,
+) -> None:
+    """Validate the deliberately narrow supported Grug training surface."""
+
+    if model_type != GRUG_MOE_MODEL_TYPE:
+        return
+    unsupported = {
+        "attention backend": attn_implementation != "eager",
+        "sample packing": use_sample_packing,
+        "LoRA": lora_rank > 0,
+        "4-bit loading": load_in_4bit,
+        "sequence parallelism": sequence_parallel_size > 1,
+        "context parallelism": context_parallel_size > 1,
+        "router replay/R3": moe_router_replay,
+        "grouped MoE": moe_grouped_gemm or use_grouped_mm,
+        "Liger kernels": use_liger_kernel,
+    }
+    enabled = [name for name, is_enabled in unsupported.items() if is_enabled]
+    if enabled:
+        raise ValueError("Grug FSDP2 training does not support: " + ", ".join(enabled))
 
 
 def _cp_mask_dict_supported(model) -> bool:
@@ -368,6 +403,7 @@ class HFModelWrapper(nn.Module):
         context_parallel_size: int = 1,
         cp_mesh=None,
         cp_rotate_method: str = "allgather",
+        training_strategy: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -399,6 +435,23 @@ class HFModelWrapper(nn.Module):
             )
 
         if isinstance(pretrain_or_model, str):
+            local_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            model_type = getattr(local_config, "model_type", None)
+            validate_grug_training_strategy(model_type, training_strategy)
+            validate_grug_training_options(
+                model_type=model_type,
+                attn_implementation=self.attn_implementation,
+                use_sample_packing=use_sample_packing,
+                lora_rank=lora_rank,
+                load_in_4bit=load_in_4bit,
+                sequence_parallel_size=sequence_parallel_size,
+                context_parallel_size=context_parallel_size,
+                moe_router_replay=moe_router_replay,
+                moe_grouped_gemm=moe_grouped_gemm,
+                use_grouped_mm=use_grouped_mm,
+                use_liger_kernel=use_liger_kernel,
+            )
+
             # Qwen3-Next GatedDeltaNet kernel routing (Stage 7/8): when the fla
             # overlay is mounted, the broken fla-0.5.0 wheel would crash the
             # qwen3_next modeling import — mask fla off BEFORE from_pretrained so

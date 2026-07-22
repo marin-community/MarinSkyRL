@@ -1439,14 +1439,11 @@ def torch_dtype_to_str(dtype: torch.dtype) -> str:
 
 
 def str_to_torch_dtype(dtype: str) -> torch.dtype:
-    if dtype == "bfloat16":
-        return torch.bfloat16
-    elif dtype == "float16":
-        return torch.float16
-    elif dtype == "float32":
-        return torch.float32
-    else:
-        return torch.dtype(dtype)
+    name = dtype.removeprefix("torch.")
+    value = getattr(torch, name, None)
+    if not isinstance(value, torch.dtype):
+        raise ValueError(f"unsupported torch dtype: {dtype!r}")
+    return value
 
 
 def format_gib(mem_bytes: int) -> str:

@@ -32,7 +32,10 @@ dependencies = [
     # the fsdp2 and megatron backends train under an identical transformers.
     "transformers>=5.8.1,<5.9",
     "hydra-core==1.3.2",
-    "accelerate",
+    # accelerate 1.11 forwards Transformers 5's `_is_hf_initialized` marker to
+    # torch.nn.Parameter while loading under init_empty_weights, crashing the
+    # FSDP2 meta load. 1.14 strips and restores that non-constructor attribute.
+    "accelerate>=1.14,<2",
     "torch>=2.10.0",
     "torchdata",
     "omegaconf",

@@ -91,6 +91,7 @@ class FSDPStrategy(DistributedStrategy):
         self.is_lora = self.model_config.lora.rank > 0 if self.model_config is not None else False
 
         self.time_steps = defaultdict(int)
+        self.last_optimizer_step_succeeded = False
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -203,6 +204,7 @@ class FSDPStrategy(DistributedStrategy):
             param_group's lr for this single ``optimizer.step()`` call, then
             restored. Used by StaleClip for predictive LR damping.
         """
+        self.last_optimizer_step_succeeded = False
         z_clip = kwargs.get("z_clip", None)
         stale_clip_lr_scale = float(kwargs.get("stale_clip_lr_scale", 1.0))
 
@@ -265,6 +267,7 @@ class FSDPStrategy(DistributedStrategy):
         if scheduler is not None:
             scheduler.step()
         optimizer.zero_grad()
+        self.last_optimizer_step_succeeded = True
         return grad_norm
 
     def prepare(
