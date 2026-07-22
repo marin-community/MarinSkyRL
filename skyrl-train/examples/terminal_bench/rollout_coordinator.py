@@ -59,6 +59,7 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl_train.worker_setup import force_stock_asyncio_in_worker
 
 
 def _log():
@@ -158,16 +159,16 @@ class RolloutCoordinator:
     ):
         # --- libuv 1.48 io_uring SIGABRT fix for the fan-out actor loop ---
         # DEFENSE IN DEPTH (secondary). The PRIMARY fix is the Ray
-        # worker_process_setup_hook `_force_stock_asyncio_in_worker`
-        # (skyrl_train.utils.utils, wired in initialize_ray), which runs at
+        # worker_process_setup_hook `force_stock_asyncio_in_worker`
+        # (skyrl_train.worker_setup, wired in initialize_ray), which runs at
         # WORKER-PROCESS BOOT -- strictly before the C++ CoreWorker builds this
         # actor's concurrency-group event loop. That ordering is what matters:
         # job 927538 SIGABRT'd in a RolloutCoordinator under uvloop DESPITE this
         # __init__ reset (backtrace: uv__epoll_ctl_prep -> uvloop Loop._run ->
         # CoreWorker.initialize_eventloops_for_actor_concurrency_group), proving
         # the concurrency-group loop is NOT reliably created after __init__ -- so
-        # an __init__-time policy reset alone is insufficient. We keep this as a
-        # harmless, idempotent backstop. (It must NOT move to module top: this
+        # an __init__-time policy reset alone is insufficient. We keep this as an
+        # idempotent backstop. (The call must NOT move to module top: this
         # class is exported to workers BY VALUE via cloudpickle (see _log()
         # note), so the module's top-level code never runs in the actor process.)
         #
@@ -178,10 +179,8 @@ class RolloutCoordinator:
         # directly. So this backstop now calls the SAME hardened hook used at
         # worker boot, which additionally exports UV_USE_IO_URING=0 (kills the
         # libuv 1.48.0 io_uring path) AND neutralizes uvloop in-process so no
-        # uvloop loop can be created at all. Idempotent + best-effort.
-        from skyrl_train.utils.utils import _force_stock_asyncio_in_worker
-
-        _force_stock_asyncio_in_worker()
+        # uvloop loop can be created at all. The hook is idempotent.
+        force_stock_asyncio_in_worker()
         # Import here so the heavy Harbor/terminal-bench import only happens in
         # the actor process, not on the dispatcher when fan-out is off.
         from examples.terminal_bench.terminal_bench_generator import (
