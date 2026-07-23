@@ -55,12 +55,12 @@ Usage
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import secrets
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -263,7 +263,7 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # skyrl_train / vllm / torchtitan.ExpertParallel import OK). baked harbor commit f4a6b1a0.
     # gpu-rl-f4f25bae (built 2026-07-17, kaniko job gpurl-kaniko-f4f25bae, SINGLE_SNAPSHOT=0 pullable):
     # HARBOR_COMMIT bump to c872216e (harbor main HEAD = opencode RL literal bridge: HARBOR_MODEL_ENDPOINT
-    # baseURL fix + correlated rollout_details). Baking it lets future RL launches drop --harbor-ref main.
+    # baseURL fix + correlated rollout_details). Baking it eliminates the former runtime Harbor override.
     # ALSO adds boto3 + smart_open to skyrl-train deps (the Dockerfile build assert required them but they
     # were only transitives of litellm via harbor, installed after the assert). SKYRL 2861eaef (cu128 lock,
     # PR #19). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 32 layers, max 6.56 GB.
@@ -272,16 +272,13 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # gpu-rl-megatron-a1e7a363 (built 2026-07-20, kaniko job gpurl-kaniko-a1e7a363, INSTALL_MEGATRON=1,
     # SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT bump to 5efac6fa (harbor main HEAD = the Daytona keepalive,
     # PR #19 — background refresh_activity() so opencode trials don't idle-reap at auto_stop=30). Baking it
-    # lets ALL RL launches drop --harbor-ref entirely (no-refs policy: a merged branch auto-deletes, and the
+    # lets ALL RL launches use the baked Harbor (a merged branch auto-deletes, and the
     # runtime uv reinstall then dies state-5 at bring-up — this happened to the keep6 -e1 pair). Megatron
     # variant = the weight-sync het-bootstrap fix (PR #71, 79432f4a) + all d0016149 contents. HARBOR_COMMIT
     # plumbed through build_gpu_rl_kaniko.sh via MarinSkyRL PR #74. Pull-verified: 35 layers, max 7.48 GB.
-    # gpu-rl-megatron-9c17f8a4 (built 2026-07-22, kaniko job gpurl-kaniko-9c17f8a4,
-    # INSTALL_MEGATRON=1): baked MarinSkyRL main 9c17f8a4, including the
-    # ChunkedDistributedLogprob preallocated-backward fix for packed-token OOMs, plus
-    # canonical Harbor 394c58fe. Registry-verified: 37 layers, max 2.80 GiB, 18.43 GiB
-    # total; it retains the proven cache-free split-layer pullability profile for RNO.
-    "@sha256:3ed8480f725579d6ce88086ec56838f6f39b169bab19245ccc42a09d5b61d93e"  # noqa: E501
+    # gpu-rl-0dda3d68 (verified 2026-07-23): canonical result of successful
+    # gpurl-kaniko-0dda3d68. Harbor is baked, never replaced at pod bootstrap.
+    "@sha256:bb1b01bad52e4c952f29e7c97854367e4ae1950c0723b4e89f895a999a6fc3c0"  # noqa: E501
     # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041, same Harbor)
     # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
     # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
@@ -337,6 +334,9 @@ DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
 # unplaceable, so use the cluster's advertised capacity only to reduce this
 # safe ceiling for smaller future node types.
 MAX_DEFAULT_CPU_PER_NODE = 48.0
+DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
+DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
+DAYTONA_RL_SECRET_VERSION = "1"
 DEFAULT_MEMORY_PER_NODE = "1700GB"
 # --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
 # (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
@@ -365,8 +365,6 @@ def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
     512GB default evicted long MoE steps once Ray's object store spilled to the metered /tmp).
     Queries kubectl for the MIN allocatable across 8-GPU nodes (never over-request a smaller node);
     falls back to FALLBACK_DISK_GIB if kubectl is unavailable (requires KUBECONFIG)."""
-    import subprocess
-
     try:
         out = subprocess.run(
             [
@@ -517,8 +515,79 @@ def _cluster_gpu_cpu_capacity(cluster_config: dict[str, Any], *, gpu_variant: st
             if isinstance(cpu, (int, float)) and cpu > 0:
                 return float(cpu)
     raise SystemExit(
-        f"The selected Iris cluster config has no {gpus_per_node}x{gpu_variant} GPU scale group; pass --cpu explicitly."
+        f"The selected Iris cluster config has no {gpus_per_node}x{gpu_variant} GPU scale group. "
+        "Choose a topology that the selected cluster advertises."
     )
+
+
+def _resolve_daytona_rl_api_key() -> str:
+    """Read the pinned RL Daytona key from Secret Manager on the launch host.
+
+    Iris task environments currently carry literal values, not secret references; the
+    ``gcp-secret://`` resolver applies to Iris controller config only.  Resolve the
+    canonical pinned secret here, retain it only in process memory, and let the existing
+    Iris job-secret path inject it.  Do not include the value in diagnostics.
+    """
+    command = [
+        "gcloud",
+        "secrets",
+        "versions",
+        "access",
+        DAYTONA_RL_SECRET_VERSION,
+        f"--secret={DAYTONA_RL_SECRET_NAME}",
+        f"--project={DAYTONA_RL_SECRET_PROJECT}",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(
+            "[rl-iris] could not resolve the canonical DAYTONA_RL_API_KEY from Google Secret Manager; "
+            "authenticate gcloud for the Marin project and retry."
+        ) from exc
+    value = result.stdout.strip()
+    if not value:
+        raise SystemExit(
+            "[rl-iris] canonical DAYTONA_RL_API_KEY resolved empty from Google Secret Manager; "
+            "check the pinned secret version."
+        )
+    return value
+
+
+def _validate_rl_config_topology(args: argparse.Namespace) -> None:
+    """Reject a gang size incompatible with explicit trainer placement metadata.
+
+    SkyRL placement is intentionally optional because colocated and legacy configs
+    derive topology at runtime.  When both policy and reference node counts are
+    declared, however, their disaggregated gang is a stable public contract.
+    """
+    try:
+        with open(args.rl_config) as f:
+            config = yaml.safe_load(f) or {}
+    except OSError:
+        return
+    trainer = config.get("trainer") if isinstance(config, dict) else None
+    placement = trainer.get("placement") if isinstance(trainer, dict) else None
+    if not isinstance(placement, dict) or placement.get("colocate_all") is True:
+        return
+
+    policy_nodes = placement.get("policy_num_nodes")
+    ref_nodes = placement.get("ref_num_nodes")
+    policy_gpus = placement.get("policy_num_gpus_per_node")
+    ref_gpus = placement.get("ref_num_gpus_per_node")
+    if not all(isinstance(value, int) and value > 0 for value in (policy_nodes, ref_nodes)):
+        return
+    expected_nodes = policy_nodes + ref_nodes
+    if args.num_nodes != expected_nodes:
+        raise SystemExit(
+            f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s disaggregated placement "
+            f"(policy_num_nodes + ref_num_nodes = {expected_nodes})."
+        )
+    declared_gpus = {value for value in (policy_gpus, ref_gpus) if isinstance(value, int) and value > 0}
+    if declared_gpus and (len(declared_gpus) != 1 or args.gpus_per_node not in declared_gpus):
+        raise SystemExit(
+            f"--gpus-per-node={args.gpus_per_node} conflicts with {args.rl_config}'s placement "
+            f"GPU count(s): {sorted(declared_gpus)}."
+        )
 
 
 def _rl_config_harness_name(rl_config: str) -> Optional[str]:
@@ -577,20 +646,18 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     if not args.job_name:
         args.job_name = derive_default_job_name(args)
 
-    needs_cluster_config = args.cpu is None or (args.num_nodes > 1 and not args.rendezvous_dir)
-    cluster_config = _load_cluster_config(args.cluster_config) if needs_cluster_config else None
+    _validate_rl_config_topology(args)
+    cluster_config = _load_cluster_config(args.cluster_config)
+    capacity = _cluster_gpu_cpu_capacity(
+        cluster_config,
+        gpu_variant=args.gpu_variant,
+        gpus_per_node=args.gpus_per_node,
+    )
 
     if args.cpu is None:
-        assert cluster_config is not None
-        capacity = _cluster_gpu_cpu_capacity(
-            cluster_config,
-            gpu_variant=args.gpu_variant,
-            gpus_per_node=args.gpus_per_node,
-        )
         args.cpu = min(capacity, MAX_DEFAULT_CPU_PER_NODE)
 
     if args.num_nodes > 1 and not args.rendezvous_dir:
-        assert cluster_config is not None
         storage_root = _cluster_storage_root(cluster_config)
         args.rendezvous_dir = f"{storage_root}/rendezvous/{args.job_name}"
 
@@ -1048,7 +1115,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--max_retries",
         dest="max_retries",
         type=int,
-        default=0,
+        default=6,
         help="Max retries on failure (iris auto-retries preemptions separately).",
     )
     parser.add_argument(
@@ -1168,19 +1235,6 @@ def create_parser() -> argparse.ArgumentParser:
         "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
     )
     parser.add_argument(
-        "--daytona-api-key-env",
-        "--daytona_api_key_env",
-        dest="daytona_api_key_env",
-        default=os.environ.get("DAYTONA_KEY_OVERRIDE"),
-        help="Name of an env var whose VALUE is forwarded to the pod as DAYTONA_API_KEY "
-        "(routes agentic RL onto a dedicated Daytona org, e.g. "
-        "--daytona-api-key-env DAYTONA_RL_API_KEY). Applied AFTER --secrets-env is "
-        "re-sourced (which does 'file overrides shell'), so the override actually STICKS "
-        "where a plain shell `export DAYTONA_API_KEY=...` is silently clobbered. "
-        "Referenced by NAME only; no key value on the command line. "
-        "Defaults to $DAYTONA_KEY_OVERRIDE.",
-    )
-    parser.add_argument(
         "--iris-ref",
         "--iris_ref",
         dest="iris_ref",
@@ -1189,21 +1243,6 @@ def create_parser() -> argparse.ArgumentParser:
         "controller-ingress registration/mint path (GAP D: iris is NOT baked into the "
         "gpu-rl image). Only installed under --ingress-mode controller (direct mode is "
         f"byte-identical, no install). Default: {DEFAULT_IRIS_VERSION}.",
-    )
-    parser.add_argument(
-        "--harbor-ref",
-        "--harbor_ref",
-        dest="harbor_ref",
-        default=None,
-        help="If set, `uv pip install --no-deps --force-reinstall` harbor at this git ref "
-        "into the RL venv at pod bootstrap (pure-python, ~1 min, no image rebuild) BEFORE "
-        "running — the harbor analog of the /app source sync for the NON-editable baked "
-        "harbor. Use to "
-        "apply the opencode literal BRIDGE (harbor branch feuer/opencode-literal-rollout-"
-        "details: the x-ot-trial-id header + rollout_build correlator + hosted_vllm gate) "
-        "without waiting for it to land in the baked image. Under set -e + a hard "
-        "`import harbor.literal.rollout_build` check so a stale/missing bridge fails loud. "
-        "Default: unset = use the baked harbor.",
     )
     # ----------------------------------------------------------------------- #
     # MarinSkyRL runtime-knob flags (deslop stage 3). Each promotes a live      #
@@ -1524,6 +1563,8 @@ def normalize(args: argparse.Namespace) -> None:
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
+    if args.gpus_per_node < 1:
+        raise SystemExit("--gpus-per-node must be >= 1.")
 
 
 def build_task_command(args: argparse.Namespace) -> List[str]:
@@ -1704,26 +1745,6 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # /app sync the single deploy vector — everything now rides the /app sync off `main`;
     # /opt/skyrl stays at its baked HEAD purely as a last-resort import fallback.
     pythonpath = f"{APP_DIR}:{APP_DIR}/skyrl-train:{SKYRL_HOME}/skyrl-train"
-    # Optional: reinstall harbor at a newer/pinned commit BEFORE running. Harbor is baked
-    # NON-editable into the RL venv, so (unlike skyrl-train, whose source rides the /app
-    # sync) there is no editable clone to
-    # `git checkout`; the analog is a `--force-reinstall --no-deps` from git (pure-python,
-    # ~1 min, no image rebuild). --no-deps so only the harbor source swaps (its resolved
-    # deps stay the baked known-good set). Under `set -e` + a hard
-    # `import harbor.literal.rollout_build` check so a failed reinstall or a stale baked
-    # harbor (missing the opencode literal-bridge module) KILLS the job loud rather than
-    # silently no-ops (the false-negative the generator's lazy-import would otherwise hide).
-    harbor_refresh = ""
-    if getattr(args, "harbor_ref", None):
-        hspec = "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@" + args.harbor_ref
-        harbor_refresh = (
-            f"uv pip install --python {shlex.quote(RL_PYTHON)} --no-deps "
-            f"--force-reinstall {shlex.quote(hspec)}; "
-            f'{RL_PYTHON} -c "import harbor, importlib.metadata as m; '
-            f"print('[rl-iris] harbor now', m.version('harbor'))\"; "
-            f'{RL_PYTHON} -c "import harbor.literal.rollout_build; '
-            f"print('[rl-iris] harbor.literal.rollout_build import OK')\"; "
-        )
     # GAP D fix: install marin-iris into the RL venv at bootstrap for the controller-
     # ingress registration/mint path. cloud.iris.ingress_utils hard-imports
     # iris.cluster.client.* / iris.rpc.*, but the gpu-rl image bakes ONLY MarinSkyRL +
@@ -1819,7 +1840,6 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     )
     bash = (
         f"set -e; cd {APP_DIR}; "
-        f"{harbor_refresh}"
         f"{iris_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
@@ -1862,24 +1882,11 @@ def main() -> int:
     # (file overrides shell; same semantics as the OT-Agent iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
-    # Daytona org re-route (robust). load_secrets_env_into_os_environ() above does
-    # "file overrides shell" (hpc/iris/env.py) — so a pre-launch `export
-    # DAYTONA_API_KEY="$DAYTONA_RL_API_KEY"` is CLOBBERED by secrets.env's main-org
-    # value, which is then what the passthrough (below) forwards to the pod. To route
-    # onto the dedicated RL Daytona org we must remap DAYTONA_API_KEY *after* the
-    # re-source, referencing the source var by NAME only (no key value in code/CLI).
-    override_src = getattr(args, "daytona_api_key_env", None)
-    if override_src:
-        override_val = os.environ.get(override_src)
-        if not override_val:
-            raise SystemExit(
-                f"[rl-iris] --daytona-api-key-env={override_src} but that env var is "
-                f"empty/unset. `source {args.secrets_env}` first; it must define {override_src}."
-            )
-        os.environ["DAYTONA_API_KEY"] = override_val
-        _fp = hashlib.sha1(override_val.encode()).hexdigest()[:12]
+    if _rl_config_is_agentic(args.rl_config):
+        os.environ["DAYTONA_API_KEY"] = _resolve_daytona_rl_api_key()
         print(
-            f"[rl-iris] Daytona re-route: DAYTONA_API_KEY <- ${override_src} (sha1={_fp})",
+            "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
+            f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
             flush=True,
         )
 

@@ -10,11 +10,18 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.launch_rl_iris import create_parser, derive_default_job_name, resolve_launch_defaults  # noqa: E402
+from cloud.iris.launch_rl_iris import (  # noqa: E402
+    DEFAULT_RL_DOCKER_IMAGE,
+    create_parser,
+    derive_default_job_name,
+    resolve_launch_defaults,
+)
 
 
 def _cluster_config(tmp_path: Path, cpu: int = 36) -> Path:
@@ -114,3 +121,52 @@ def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
     assert first != second
     assert len(first) <= 63
     assert re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", first)
+
+
+def test_parser_uses_canonical_image_and_recovery_retries():
+    args = create_parser().parse_args(["--rl_config", "x", "--model_path", "y"])
+
+    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+    assert args.max_retries == 6
+
+
+def test_parser_rejects_removed_harbor_source_override():
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(["--rl_config", "x", "--model_path", "y", "--harbor-ref", "main"])
+
+
+def test_resolve_launch_defaults_rejects_cluster_gpu_shape_even_with_explicit_cpu(tmp_path):
+    args = _args(tmp_path, "opencode", ["--gpus-per-node", "4", "--cpu", "12"])
+
+    with pytest.raises(SystemExit, match="no 4xH100 GPU scale group"):
+        resolve_launch_defaults(args)
+
+
+def test_resolve_launch_defaults_rejects_declared_disaggregated_placement_mismatch(tmp_path):
+    rl_config = tmp_path / "placed.yaml"
+    rl_config.write_text(
+        """\
+trainer:
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+"""
+    )
+    args = create_parser().parse_args(
+        [
+            "--rl_config",
+            str(rl_config),
+            "--model_path",
+            "model",
+            "--cluster-config",
+            str(_cluster_config(tmp_path)),
+            "--num-nodes",
+            "2",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match=r"policy_num_nodes \+ ref_num_nodes = 4"):
+        resolve_launch_defaults(args)

@@ -42,7 +42,7 @@ terminal_bench:
       chat_template_kwargs:
         enable_thinking: true
     override_setup_timeout_sec: 600  # opencode installs via nvm + npm at setup
-    override_timeout_sec: 1800  # 30min: ABOVE the healthy-trial p90 (~19min) so real trials finish; the harbor kill-path fix (--harbor-ref, server-side `timeout`) now FORCIBLY reaps a runaway at this deadline (was a no-op before → 0 completions). A shorter ceiling would murder healthy trials mid-task.
+    override_timeout_sec: 1800  # 30min: ABOVE the healthy-trial p90 (~19min) so real trials finish; baked Harbor's server-side timeout forcibly reaps a runaway at this deadline. A shorter ceiling would murder healthy trials mid-task.
 
     override_cpus: 1
     override_memory_mb: 2048
@@ -67,7 +67,7 @@ terminal_bench:
     # Prod concurrency (demand target). Paired IN LOCKSTEP with the decode-capacity
     # supply lever below (max_num_seqs x num_inference_engines) per marinskyrl.md — never
     # permute this alone. The old Daytona idle-reap that made 288 fail (keep1-v8) is fixed
-    # at the harbor layer (auto_stop_interval_mins 5->0, ride via --harbor-ref), so
+    # in baked Harbor (auto_stop_interval_mins 5->0), so
     # sandboxes now survive the queue depth; decode capacity (raised below) sets throughput.
     n_concurrent_trials: 288
 
