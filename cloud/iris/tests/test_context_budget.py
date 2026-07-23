@@ -52,7 +52,9 @@ def test_all_iris_configs_materialize_one_coherent_context_budget():
         assert parsed.context_budget.request_window_tokens == window
         assert parsed.context_budget.max_new_tokens_per_turn == output
         assert parsed.context_budget.max_turns == turns
-        assert parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
+        assert (
+            parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
+        )
         assert parsed.generator["max_input_length"] == parsed.context_budget.max_input_tokens
         assert parsed.generator["engine_init_kwargs"]["max_model_len"] == window
         assert parsed.generator["max_turns"] == turns
@@ -129,7 +131,9 @@ def test_context_budget_override_rederives_lengths_and_rejects_low_level_fields(
 
 def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
-    artifact = write_resolved_context_budget(parsed.context_budget, tmp_path / "resolved-context-budget.json", parsed.config_path)
+    artifact = write_resolved_context_budget(
+        parsed.context_budget, tmp_path / "resolved-context-budget.json", parsed.config_path
+    )
 
     assert json.loads(artifact.read_text()) == {
         "config_path": str(parsed.config_path),
