@@ -429,6 +429,10 @@ RUN ${RL_ENV_DIR}/bin/python -c "import torch, transformers, vllm, skyrl_train, 
 # Verify the source metadata accepts the CUDA 12 runtime selected by the lock.
 RUN ${RL_ENV_DIR}/bin/python -c "from importlib.metadata import distribution, version; from packaging.requirements import Requirement; requirements = [Requirement(value) for value in distribution('vllm').requires or []]; cutlass = next(value for value in requirements if value.name == 'nvidia-cutlass-dsl'); humming = next(value for value in requirements if value.name == 'humming-kernels'); assert cutlass.specifier.contains(version(cutlass.name)); assert humming.extras == {'cu12'}; assert humming.specifier.contains(version(humming.name)); print('vLLM CUDA 12 dependency metadata OK:', cutlass, humming)"
 
+# Grug weight sync requires both model implementations to be discoverable
+# without checkpoint-supplied remote code.
+RUN ${RL_ENV_DIR}/bin/python -c "from transformers import AutoConfig; import skyrl_train.models; from skyrl_train.models import GrugMoeConfig; from vllm.model_executor.models.registry import ModelRegistry; assert isinstance(AutoConfig.for_model('grug_moe'), GrugMoeConfig); assert 'GrugMoeForCausalLM' in ModelRegistry.get_supported_archs(); print('Grug trainer config + vLLM model registry OK')"
+
 # Megatron backend asserts (only when built with INSTALL_MEGATRON=1).
 RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
         ${RL_ENV_DIR}/bin/python -c "import megatron.core, megatron.bridge, transformer_engine; print('megatron.core + megatron.bridge + transformer_engine import OK')"; \
