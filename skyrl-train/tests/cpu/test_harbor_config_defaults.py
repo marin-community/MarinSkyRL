@@ -55,3 +55,9 @@ def test_yaml_false_is_honored_no_falsy_bug():
     # The r5 case: explicit `false` must NOT be swallowed by the default.
     kwargs = _agent_kwargs({"name": "terminus-2", "record_terminal_session": False})
     assert kwargs["record_terminal_session"] is False
+
+
+def test_max_turns_reaches_the_agent_without_deprecated_max_episodes():
+    kwargs = _agent_kwargs({"name": "terminus-2", "max_turns": 30})
+    assert kwargs["max_turns"] == 30
+    assert "max_episodes" not in kwargs

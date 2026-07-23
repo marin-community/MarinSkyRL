@@ -89,6 +89,10 @@ def test_parse_rejects_bad_tp_against_declared_heads(tmp_path):
     bad.write_text(
         "entrypoint: skyrl_train.entrypoints.main_base\n"
         "model_num_attention_heads: 42\n"
+        "context_budget:\n"
+        "  request_window_tokens: 4096\n"
+        "  max_new_tokens_per_turn: 3584\n"
+        "  max_turns: 1\n"
         "generator:\n"
         "  inference_engine_tensor_parallel_size: 8\n"
     )

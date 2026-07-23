@@ -52,6 +52,11 @@ entrypoint: examples.terminal_bench.entrypoints.main_tbench
 config_groups:
   terminal_bench_config: terminal_bench
 
+context_budget:
+  request_window_tokens: 32768
+  max_new_tokens_per_turn: 4096
+  max_turns: 30
+
 terminal_bench:
   trials_dir: s3://marin-us-east-02a/iris/rl-opencode-lit-smoke/trace_jobs
 
@@ -113,8 +118,6 @@ terminal_bench:
     zero_exceptions: []
 
   model_info:
-    max_input_tokens: 32000
-    max_output_tokens: 4096
 
   archiving:
     enabled: false
@@ -151,7 +154,6 @@ trainer:
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
-  max_prompt_length: 999999
 
   use_sample_packing: true
 
@@ -225,16 +227,13 @@ generator:
   enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
-  max_turns: 30
 
   sampling_params:
-    max_generate_length: 4096
     temperature: 0.7
     top_p: 0.95
     top_k: 20
 
   engine_init_kwargs:
-    max_model_len: 32768
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     served_model_name: Qwen3-8B
     # opencode drives the policy as a tool-using agent: it sends

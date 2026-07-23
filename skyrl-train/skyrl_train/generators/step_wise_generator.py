@@ -19,6 +19,36 @@ from skyrl_train.generators.utils import (
     get_rollout_metrics,
     normalize_token_ids,
 )
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+
+
+def clamp_generation_tokens(
+    prompt_tokens: int,
+    request_window_tokens: int,
+    requested_output_tokens: int,
+) -> int:
+    """Return the output allowance that fits one tokenized vLLM request.
+
+    The prompt is already tokenized at this boundary, so tool observations and
+    chat-template tokens are included in the remaining-window calculation.
+    """
+    return max(0, min(requested_output_tokens, request_window_tokens - prompt_tokens))
+
+
+def _sampling_params_with_generation_limit(
+    sampling_params: Optional[Dict[str, Any]],
+    generator_cfg: DictConfig,
+    max_tokens: int,
+) -> Dict[str, Any]:
+    """Return backend sampling parameters constrained to one request budget."""
+    params = (
+        dict(sampling_params)
+        if sampling_params is not None
+        else get_sampling_params_for_backend(generator_cfg.backend, generator_cfg.sampling_params)
+    )
+    max_key = "max_tokens" if generator_cfg.backend == "vllm" else "max_new_tokens"
+    params[max_key] = max_tokens
+    return params
 
 
 class StepWiseGeneratorOutput(GeneratorOutput):
@@ -113,6 +143,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
         per_step_outputs: List[AgentLoopOutput] = []
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
+        max_model_len = self.generator_cfg.get("engine_init_kwargs", {}).get("max_model_len")
         while not done:
             if retokenize_chat_history:
                 input_ids = normalize_token_ids(
@@ -126,8 +157,25 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 )
 
             current_prompt_length = len(input_ids)
+            if max_model_len is None:
+                if current_prompt_length > max_input_length:
+                    if per_step_outputs:
+                        per_step_outputs[-1].stop_reason = "length"
+                    break
+                request_sampling_params = sampling_params
+            else:
+                request_max_tokens = clamp_generation_tokens(current_prompt_length, max_model_len, max_tokens)
+                if request_max_tokens == 0:
+                    if per_step_outputs:
+                        per_step_outputs[-1].stop_reason = "length"
+                    break
+                request_sampling_params = _sampling_params_with_generation_limit(
+                    sampling_params,
+                    self.generator_cfg,
+                    request_max_tokens,
+                )
             engine_input = InferenceEngineInput(
-                prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
+                prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=request_sampling_params
             )
             engine_output = await self.inference_engine_client.generate(engine_input)
             # Capture global_step after first inference returns — at this point the vLLM
@@ -195,13 +243,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 assert len(per_step_output.rollout_logprobs) == len(per_step_output.response_ids), (
                     f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
                 )
-
-            if len(input_ids) > max_input_length:
-                stop_reason = "length"
-                step_id += 1
-                per_step_output.stop_reason = stop_reason
-                per_step_outputs.append(per_step_output)
-                break
 
             per_step_outputs.append(per_step_output)
             step_id += 1

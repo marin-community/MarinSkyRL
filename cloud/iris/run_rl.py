@@ -32,9 +32,11 @@ from typing import Any, Dict, Iterator, List
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.rl_config_translation import (
+    apply_context_budget_overrides,
     build_skyrl_hydra_args,
     get_skyrl_command_preview,
     parse_rl_config,
+    write_resolved_context_budget,
 )
 from cloud.iris.rl_data import (
     check_rl_environment,
@@ -158,6 +160,29 @@ class LocalRLRunner:
         print(f"  Experiments Dir: {self.config.experiments_dir}")
         print("=======================================")
 
+    def _context_budget_artifact_destination(self, parsed, skyrl_overrides: List[str]) -> Path | str:
+        """Choose the durable Harbor bundle when this run writes one."""
+        trials_dir = (parsed.terminal_bench or {}).get("trials_dir")
+        for override in skyrl_overrides:
+            if override.lstrip("+").startswith("terminal_bench_config.trials_dir="):
+                trials_dir = override.partition("=")[2]
+        if trials_dir and str(trials_dir).startswith(("s3://", "gs://")) and not self.config.dry_run:
+            return f"{str(trials_dir).rstrip('/')}/resolved-context-budget.json"
+        return Path(self.config.experiments_dir) / self.config.job_name / "resolved-context-budget.json"
+
+    def _record_context_budget(self, parsed, skyrl_overrides: List[str]) -> Path | str:
+        """Print and persist the token contract resolved for this training run."""
+        budget = parsed.context_budget
+        artifact = self._context_budget_artifact_destination(parsed, skyrl_overrides)
+        write_resolved_context_budget(budget, artifact, parsed.config_path)
+        print("Resolved context budget:")
+        print(f"  request window: {budget.request_window_tokens}")
+        print(f"  client input:   {budget.max_input_tokens}")
+        print(f"  turn output:    {budget.max_new_tokens_per_turn}")
+        print(f"  max turns:      {budget.max_turns}")
+        print(f"  artifact:       {artifact}")
+        return artifact
+
     def run(self) -> int:
         """Execute the RL training job. Returns an exit code (0 for success)."""
         self.print_banner()
@@ -166,6 +191,7 @@ class LocalRLRunner:
             self.config.rl_config_path,
             model_override=self.config.model_path,
         )
+        parsed, skyrl_overrides = apply_context_budget_overrides(parsed, self.config.skyrl_overrides)
         print(f"Loaded RL config: {parsed.config_path}")
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
 
@@ -183,8 +209,10 @@ class LocalRLRunner:
         )
         hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc_stub)
 
-        if self.config.skyrl_overrides:
-            hydra_args.extend(self.config.skyrl_overrides)
+        self._record_context_budget(parsed, skyrl_overrides)
+
+        if skyrl_overrides:
+            hydra_args.extend(skyrl_overrides)
 
         if self.config.dry_run:
             print("\n[DRY RUN] Would execute SkyRL with:")

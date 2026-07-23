@@ -94,7 +94,7 @@ AGENT_SCHEMA = SectionSchema(
         "override_setup_timeout_sec": FieldMapping("override_setup_timeout_sec"),
         "max_timeout_sec": FieldMapping("max_timeout_sec"),
         # Kwargs fields (passed to agent.kwargs)
-        "max_episodes": FieldMapping("max_episodes", field_type="kwargs", default=16),
+        "max_turns": FieldMapping("max_turns", field_type="kwargs", default=16),
         "enable_summarize": FieldMapping("enable_summarize", field_type="kwargs", default=True),
         "store_all_messages": FieldMapping("store_all_messages", field_type="kwargs", default=True),
         # Thinking/reasoning settings

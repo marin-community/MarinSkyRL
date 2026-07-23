@@ -16,6 +16,11 @@ entrypoint: examples.terminal_bench.entrypoints.main_tbench
 config_groups:
   terminal_bench_config: terminal_bench
 
+context_budget:
+  request_window_tokens: 32768
+  max_new_tokens_per_turn: 4096
+  max_turns: 30
+
 terminal_bench:
   # Overridden per-run by the launcher (++terminal_bench_config.trials_dir=...<job>...).
   trials_dir: s3://marin-us-east-02a/iris/tasktrove-dq-sweep-30b/trace_jobs
@@ -27,7 +32,6 @@ terminal_bench:
     # so this reuses the working keep-6 policy-init path (no Megatron/geometry change).
     # Purpose: isolate whether the #7448 block is opencode-specific vs harness-agnostic.
     name: terminus-2
-    max_episodes: 999999
     enable_summarize: false
     store_all_messages: true
     trajectory_config:
@@ -93,8 +97,6 @@ terminal_bench:
       - ContextLengthExceededError
 
   model_info:
-    max_input_tokens: 130000
-    max_output_tokens: 16384
 
   archiving:
     enabled: false
@@ -135,7 +137,6 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
-  max_prompt_length: 999999
 
   use_sample_packing: true
 
@@ -305,16 +306,13 @@ generator:
   # -Thinking-/compaction-off opencode agent loop without self-terminating until the
   # override_timeout_sec wall -> verifier never ran -> 0 result.json -> 0 completions.
   # Reference healthy trial = ~8 sequential calls; 30 is a generous safety net.
-  max_turns: 30
 
   sampling_params:
-    max_generate_length: 16384
     temperature: 1.2
     top_p: 0.95
     top_k: 20
 
   engine_init_kwargs:
-    max_model_len: 131072
     # NO custom chat template: Qwen/Qwen3-Coder-30B-A3B-Instruct's NATIVE HF chat_template
     # emits the Qwen3-Coder XML function-call format the qwen3_coder parser expects. Omitting
     # custom_chat_template_chat_completion_path makes the vLLM chat endpoint pass chat_template=None
