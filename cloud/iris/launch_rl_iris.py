@@ -58,11 +58,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import secrets
 import shlex
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import yaml
@@ -330,7 +332,11 @@ DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
 #     to >1.6 TB and EVICTING the pod (2026-06-28). Whole-node-exclusive gangs have NO co-tenants,
 #     so reserving disk is pure waste — claim ~80%. (R2 object-spilling, the durable fix, is also
 #     on; this headroom is belt-and-suspenders.) Pass --disk explicitly to override.
-DEFAULT_CPU_PER_NODE = 48.0
+# A whole H100 node exposes 128 CPUs in the Iris cluster configuration, but the
+# CoreWeave scheduler leaves daemonset headroom. Requests above 48 have proven
+# unplaceable, so use the cluster's advertised capacity only to reduce this
+# safe ceiling for smaller future node types.
+MAX_DEFAULT_CPU_PER_NODE = 48.0
 DEFAULT_MEMORY_PER_NODE = "1700GB"
 # --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
 # (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
@@ -421,6 +427,7 @@ APP_DIR = "/app"
 DEFAULT_IRIS_VERSION = "marin-iris==0.2.54.dev202607210800"
 
 MARIN_LOGIN_RECORD_PATH = Path.home() / ".config" / "marin" / "credentials" / "marin.json"
+_JOB_NAME_MAX_LENGTH = 63
 
 
 def _resolve_cluster_config_default(cluster: str = DEFAULT_CLUSTER) -> str:
@@ -463,6 +470,133 @@ def _resolve_parent_cluster_config(cluster_config: Optional[str]) -> Optional[st
         if c.exists():
             return str(c)
     return None
+
+
+def _load_cluster_config(cluster_config: str) -> dict[str, Any]:
+    """Load the selected Iris cluster configuration for launch-time defaults."""
+    try:
+        with open(cluster_config) as f:
+            loaded = yaml.safe_load(f)
+    except OSError as exc:
+        raise SystemExit(
+            f"Could not load --cluster-config {cluster_config!r} to resolve RL launch defaults: {exc}. "
+            "Pass an existing cluster config or explicit --cpu and --rendezvous-dir values."
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise SystemExit(f"--cluster-config {cluster_config!r} must contain a YAML mapping.")
+    return loaded
+
+
+def _cluster_storage_root(cluster_config: dict[str, Any]) -> str:
+    """Return the durable object-store root containing the Iris controller state."""
+    storage = cluster_config.get("storage")
+    remote_state_dir = storage.get("remote_state_dir") if isinstance(storage, dict) else None
+    if not isinstance(remote_state_dir, str) or not remote_state_dir.startswith(("s3://", "gs://")):
+        raise SystemExit(
+            "The selected Iris cluster config needs storage.remote_state_dir set to an s3:// or gs:// URI "
+            "to derive --rendezvous-dir; pass --rendezvous-dir explicitly."
+        )
+    return remote_state_dir.rstrip("/").rsplit("/", 1)[0]
+
+
+def _cluster_gpu_cpu_capacity(cluster_config: dict[str, Any], *, gpu_variant: str, gpus_per_node: int) -> float:
+    """Return CPU capacity for the matching GPU scale group in an Iris config."""
+    scale_groups = cluster_config.get("scale_groups")
+    if not isinstance(scale_groups, dict):
+        raise SystemExit("The selected Iris cluster config has no scale_groups mapping; pass --cpu explicitly.")
+    for scale_group in scale_groups.values():
+        resources = scale_group.get("resources") if isinstance(scale_group, dict) else None
+        if not isinstance(resources, dict):
+            continue
+        if (
+            resources.get("device_type") == "gpu"
+            and str(resources.get("device_variant", "")).lower() == gpu_variant.lower()
+            and resources.get("device_count") == gpus_per_node
+        ):
+            cpu = resources.get("cpu")
+            if isinstance(cpu, (int, float)) and cpu > 0:
+                return float(cpu)
+    raise SystemExit(
+        f"The selected Iris cluster config has no {gpus_per_node}x{gpu_variant} GPU scale group; pass --cpu explicitly."
+    )
+
+
+def _rl_config_harness_name(rl_config: str) -> Optional[str]:
+    """Read the configured Harbor harness name without constructing trainer state."""
+    try:
+        with open(rl_config) as f:
+            config = yaml.safe_load(f) or {}
+    except OSError:
+        return None
+    if not isinstance(config, dict):
+        return None
+
+    candidate_paths = (
+        ("terminal_bench_config", "harbor", "name"),
+        ("terminal_bench", "harbor", "name"),
+        ("generator", "harbor", "harness", "name"),
+        ("generator", "harbor", "name"),
+    )
+    for path in candidate_paths:
+        current: Any = config
+        for key in path:
+            if not isinstance(current, dict):
+                break
+            current = current.get(key)
+        else:
+            if isinstance(current, str) and current.strip():
+                return current.strip().lower()
+    return None
+
+
+def _sanitize_job_name_component(value: str) -> str:
+    """Make one human-readable Kubernetes job-name component."""
+    value = value.strip().rstrip("/").split("/")[-1]
+    value = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return value or "run"
+
+
+def derive_default_job_name(
+    args: argparse.Namespace,
+    *,
+    timestamp: Optional[str] = None,
+    nonce: Optional[str] = None,
+) -> str:
+    """Build a unique, valid Iris job name from the selected RL config and model."""
+    config_name = _sanitize_job_name_component(Path(args.rl_config).stem)
+    model_name = _sanitize_job_name_component(args.model_path)
+    timestamp = timestamp or time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    nonce = nonce or secrets.token_hex(3)
+    suffix = f"-{timestamp}-{nonce}"
+    prefix = f"rl-{config_name}-{model_name}"
+    return f"{prefix[: _JOB_NAME_MAX_LENGTH - len(suffix)].rstrip('-')}{suffix}"
+
+
+def resolve_launch_defaults(args: argparse.Namespace) -> None:
+    """Resolve cluster-dependent and harness-dependent defaults before validation."""
+    if not args.job_name:
+        args.job_name = derive_default_job_name(args)
+
+    needs_cluster_config = args.cpu is None or (args.num_nodes > 1 and not args.rendezvous_dir)
+    cluster_config = _load_cluster_config(args.cluster_config) if needs_cluster_config else None
+
+    if args.cpu is None:
+        assert cluster_config is not None
+        capacity = _cluster_gpu_cpu_capacity(
+            cluster_config,
+            gpu_variant=args.gpu_variant,
+            gpus_per_node=args.gpus_per_node,
+        )
+        args.cpu = min(capacity, MAX_DEFAULT_CPU_PER_NODE)
+
+    if args.num_nodes > 1 and not args.rendezvous_dir:
+        assert cluster_config is not None
+        storage_root = _cluster_storage_root(cluster_config)
+        args.rendezvous_dir = f"{storage_root}/rendezvous/{args.job_name}"
+
+    if args.record_literal is None:
+        harness = _rl_config_harness_name(args.rl_config)
+        args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
 
 
 def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
@@ -807,8 +941,9 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu",
         type=float,
-        default=DEFAULT_CPU_PER_NODE,
-        help="CPU cores per node.",
+        default=None,
+        help="CPU cores per node. Default: derive from the selected GPU cluster's scale group "
+        f"with a scheduling-safe cap of {MAX_DEFAULT_CPU_PER_NODE:g}.",
     )
     parser.add_argument(
         "--memory",
@@ -1008,11 +1143,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--record-literal",
         "--record_literal",
         dest="record_literal",
-        action="store_true",
-        default=False,
-        help="Co-locate harbor's RecordProxy in front of vLLM in the pod so agent "
-        "completions are captured to literal.jsonl (opencode-RL literal interceptor). "
-        "Forwarded to the in-pod runner; requires --ingress-mode controller.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Co-locate Harbor's RecordProxy in front of vLLM to capture literal.jsonl. "
+        "Default: enabled for every harness except terminus-2. Pass --record-literal to force "
+        "it on or --no-record-literal to opt out. It is forwarded when controller ingress is used.",
     )
     parser.add_argument(
         "--parent-controller-config-in-pod",
@@ -1389,11 +1524,6 @@ def normalize(args: argparse.Namespace) -> None:
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
-    if args.num_nodes > 1 and not args.rendezvous_dir:
-        raise SystemExit(
-            "--num-nodes>1 requires --rendezvous-dir (a shared gs://, s3://, or path URI "
-            "both head and worker nodes can reach) for the multi-node Ray rendezvous."
-        )
 
 
 def build_task_command(args: argparse.Namespace) -> List[str]:
@@ -1452,8 +1582,6 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         train_cmd.extend(["--ingress_mode", "controller"])
         if getattr(args, "ingress_host", None):
             train_cmd.extend(["--ingress_host", args.ingress_host])
-        if getattr(args, "record_literal", False):
-            train_cmd.append("--record_literal")
         if getattr(args, "target_cluster", None):
             train_cmd.extend(["--target_cluster", args.target_cluster])
             # Parent (marin) config the in-pod worker mints against. Prefer an explicit
@@ -1464,6 +1592,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             )
             if parent_cfg_in_pod:
                 train_cmd.extend(["--parent_controller_config", parent_cfg_in_pod])
+    if getattr(args, "record_literal", False):
+        train_cmd.append("--record_literal")
 
     # Durable Harbor rollout artifacts. The config default (trials_dir: null) resolves to a
     # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); point
@@ -1702,13 +1832,14 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
 def main() -> int:
     parser = create_parser()
     args = parser.parse_args()
-    normalize(args)
 
     # Resolve the cluster YAML from --cluster when not explicitly given, so
     # `--cluster cw-rno2a` targets the 512xH100 RNO2A cluster (the delphi pilot's
     # 512-node target) without a manual --cluster-config.
     if not args.cluster_config:
         args.cluster_config = _resolve_cluster_config_default(args.cluster)
+    normalize(args)
+    resolve_launch_defaults(args)
 
     # Derive the controller-ingress config from the target cluster so an agentic
     # CoreWeave launch works from --target-cluster alone (no manual --ingress-mode/
