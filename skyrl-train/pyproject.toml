@@ -25,8 +25,8 @@ dependencies = [
     "tensorboard",
     "func_timeout",
     # transformers 5.8.x: required by the modern Megatron backend (megatron-bridge 0.5.0 pins
-    # transformers>=5.8.1,<5.9.0), and co-resolvable with the whole stack — vLLM 0.20.2 allows it
-    # (its constraint excludes only 5.0-5.5), and peft floats to 0.19.x. The trainer's import surface
+    # transformers>=5.8.1,<5.9.0), and co-resolvable with the whole stack — vLLM 0.23.0 requires
+    # transformers>=5.5.3, and peft floats to 0.19.x. The trainer's import surface
     # is unchanged 4.57->5.8 (it already targets the 4.56/4.57 tail that adopted the 5.x-style API:
     # AttentionInterface, masking_utils, the per-model modeling refactors). Pinned to one 5.8.x line so
     # the fsdp2 and megatron backends train under an identical transformers.
@@ -101,6 +101,21 @@ override-dependencies = [
     "aiobotocore==3.7.0 ; sys_platform == 'linux'",
     "s3fs==2026.4.0 ; sys_platform == 'linux'",
     "fsspec==2026.4.0 ; sys_platform == 'linux'",
+    # The Marin vLLM fork accepts the already-validated 4.5.3 runtime. Stock vLLM
+    # 0.23.0 is the resolver anchor but pins 4.5.2 exactly, so replace that one
+    # requirement on the linux CUDA image without crossing the unvalidated 4.6
+    # packaging boundary or activating the cu13 extra.
+    "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
+    # The stock CUDA 13 wheel metadata activates humming-kernels[cu13]. The Marin
+    # image is CUDA 12.8; the fork's setup.py performs the same cu13 -> cu12
+    # translation when it builds its own wheel metadata.
+    "humming-kernels[cu12]==0.1.4 ; sys_platform == 'linux'",
+    # megatron-bridge 0.5.0 pins the older 0.6.8.post1 line, while the current
+    # Marin vLLM fork requires 0.6.12. Both backends share one GPU-RL environment,
+    # so the vLLM-compatible family is the environment-wide authority.
+    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -156,11 +171,12 @@ sandboxes = [
     "litellm[proxy]>=1.67.5",
 ]
 vllm = [
-    "vllm==0.20.2",
-    "flash-attn==2.6.3",
+    "vllm==0.23.0",
+    "flash-attn==2.8.3",
     "torch==2.11.0",
-    "flashinfer-python==0.6.8.post1",
-    "flashinfer-jit-cache==0.6.8.post1",
+    "flashinfer-python==0.6.12",
+    "flashinfer-cubin==0.6.12",
+    "flashinfer-jit-cache==0.6.12",
     "torchvision==0.26.0"
 ]
 miniswe = [
