@@ -7,11 +7,12 @@ replay, grouped MoE, LoRA/4-bit loading, and PKO are intentionally rejected.
 
 ## Runtime image
 
-Grug serving requires the Marin vLLM fork at commit `4b55591306c9`. The shared
-`DEFAULT_RL_DOCKER_IMAGE` does not yet include that fork and must not be used for
-Grug. Until a Grug-capable image is published and pinned by immutable digest,
-launches must pass an explicit verified image. Check the launcher constant when
-this release constraint changes.
+Grug serving requires the Marin vLLM fork. The scratch image installs an exact
+fork source commit and records it separately from the `4b55591306c9` native
+donor wheel. The shared `DEFAULT_RL_DOCKER_IMAGE` does not yet include that
+source and must not be used for Grug. Until a Grug-capable image is published
+and pinned by immutable digest, launches must pass an explicit verified image.
+Check the launcher constant when this release constraint changes.
 
 ## Query bias
 
