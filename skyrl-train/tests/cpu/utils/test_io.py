@@ -4,6 +4,7 @@ Unit tests for cloud storage I/O utilities.
 
 import os
 import tempfile
+from pathlib import Path
 import pytest
 from unittest.mock import patch, Mock
 import torch
@@ -377,6 +378,26 @@ class TestContextManagers:
         with pytest.raises(FileNotFoundError, match="Path does not exist"):
             with local_read_dir(non_existent_path):
                 pass
+
+    @patch("skyrl_train.utils.io.io._get_filesystem")
+    def test_local_read_dir_cloud_directory_preserves_root_contents(self, mock_get_filesystem):
+        """Cloud directory reads expose checkpoint metadata at the returned directory root."""
+
+        class DirectoryFilesystem:
+            def _strip_protocol(self, path):
+                return path.removeprefix("s3://")
+
+            def get(self, source, destination, recursive):
+                destination_root = Path(destination)
+                if not source.endswith("/"):
+                    destination_root /= Path(source).name
+                destination_root.mkdir(parents=True, exist_ok=True)
+                (destination_root / ".metadata").write_text("checkpoint metadata")
+
+        mock_get_filesystem.return_value = DirectoryFilesystem()
+
+        with local_read_dir("s3://bucket/checkpoints/global_step_12/policy") as read_dir:
+            assert (Path(read_dir) / ".metadata").is_file()
 
 
 class TestUploadDownload:

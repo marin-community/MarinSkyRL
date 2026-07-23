@@ -119,10 +119,11 @@ def download_directory(cloud_path: str, local_path: str) -> None:
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
 
     fs = _get_filesystem(cloud_path)
+    source_path = cloud_path.rstrip("/") + "/"
     if cloud_path.startswith("s3://"):
-        call_with_s3_retry(fs, fs.get, fs._strip_protocol(cloud_path), local_path, recursive=True)
+        call_with_s3_retry(fs, fs.get, fs._strip_protocol(source_path), local_path, recursive=True)
     else:
-        fs.get(cloud_path, local_path, recursive=True)
+        fs.get(source_path, local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
 
 
