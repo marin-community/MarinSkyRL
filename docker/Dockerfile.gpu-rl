@@ -4,11 +4,9 @@
 #
 # linux/amd64, from-source CUDA. The image installs skyrl-train's dependency
 # closure DIRECTLY FROM skyrl-train's own `uv.lock` (`uv sync --frozen`) — the lock
-# is the single source of truth. On top of that closure it `--no-deps`-swaps the
-# two compiled CUDA wheels this stack needs from source (the vLLM FORK + flash-attn
-# 2.8.3) and adds harbor (agentic rollout). Nothing from the launcher repo is baked
-# in, and there is NO shadow constraint file: the lock, resolved at torch
-# 2.11.0+cu128, is what the image runs.
+# is the single source of truth. On top of that closure it installs flash-attn
+# from its validated wheel and the exact vLLM fork source with validated
+# precompiled native extensions. Nothing from the launcher repo is baked in.
 #
 # Consumed by the iris RL launcher (digest-pinned). Built in-cluster via kaniko
 # (docker/build_gpu_rl_kaniko.sh) — the Mac cannot build it (arm64 + linux/amd64
@@ -21,28 +19,26 @@
 # GEMM kernels) and flash-attn 2.8.3 (its flash_attn_2_cuda extension). They are
 # isolated in the `wheel-builder` stage, which emits RELOCATABLE WHEELS. The `rl`
 # stage installs those wheels instead of recompiling. Two sources (WHEEL_SOURCE):
-#   prebuilt-wheelhouse (default): COPY docker/wheelhouse/*.whl (populated on an
-#     x86 host by build_wheels.sh, or fetched into the build context by
-#     build_gpu_rl_kaniko.sh from a public mirror) -> ZERO nvcc.
+#   prebuilt-wheelhouse (default): COPY a validated artifact staged by
+#     build_gpu_rl_kaniko.sh into docker/wheelhouse/ -> ZERO nvcc.
 #   wheel-builder: compile both wheels inline (~3 h nvcc) -> use when no prebuilt
 #     wheels are available.
-# CACHE KEY (what invalidates a wheel) = { VLLM_FORK_COMMIT, FLASH_ATTN_VERSION,
-#   torch 2.11.0, CUDA 12.8, cp312, x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0" }.
+# NATIVE CACHE KEY = { VLLM_NATIVE_DONOR_COMMIT, FLASH_ATTN_VERSION, torch
+#   2.11.0, CUDA 12.8, cp312, x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0" }.
 #
 # =============================================================================
 # Version pins (ground truth = skyrl-train/pyproject.toml + uv.lock):
 #   - torch 2.11.0+cu128 : skyrl-train pins torch to the cu128 index; the fork
 #       vLLM / flash-attn / TransformerEngine wheels are all cu128-built, so the
 #       base is ABI-consistent with them (nvidia-nccl-cu12==2.28.9 from the lock).
-#   - vLLM 0.20.2rc0     : built FROM SOURCE from OUR FORK (no public wheel).
-#       Fork = mlfoundations/vllm @ commit VLLM_FORK_COMMIT. The lock's `vllm`
-#       extra pins vllm==0.20.2 (PyPI) so a general `uv sync` gets stock vLLM; the
-#       image swaps the fork wheel over it via `--no-deps`.
+#   - vLLM fork          : Python source and metadata come from
+#       marin-community/vllm @ VLLM_FORK_COMMIT. The lock uses stock vLLM 0.23.0
+#       as its dependency anchor; native files come from the validated donor.
 #   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu128 / cp312 so
 #       flash_attn_2_cuda EXISTS (skyrl-train's lock leaves flash-attn unpinned; a
 #       `--no-deps` wheel swap here is the version that actually runs).
 #   - transformers 5.8.1 : skyrl-train base pin (>=5.8.1,<5.9), required by the
-#       megatron backend (megatron-bridge 0.5.0). vLLM 0.20.2 accepts it.
+#       megatron backend (megatron-bridge 0.5.0). vLLM 0.23.0 accepts it.
 #   - python 3.12 / CUDA 12.8 (devel base, for nvcc).
 # Build is GPU-count-agnostic and needs no live GPU (only nvcc). Target = linux/amd64.
 # =============================================================================
@@ -51,8 +47,10 @@ ARG BASE_IMAGE=nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 ARG TORCH_VERSION=2.11.0
 ARG TORCHVISION_VERSION=0.26.0
 ARG FLASH_ATTN_VERSION=2.8.3
-ARG VLLM_FORK_REPO=https://github.com/mlfoundations/vllm.git
-ARG VLLM_FORK_COMMIT=76259c63a45e57c0d1cbaca3480aae52ebbfccd1
+ARG VLLM_FORK_REPO=https://github.com/marin-community/vllm.git
+ARG VLLM_FORK_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
+ARG VLLM_NATIVE_DONOR_COMMIT=4b55591306c934cdc21461f091c9ea22ad008007
+ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256=not-applicable
 # A100 (8.0) + Hopper (9.0): the GPUs that run this image.
 ARG TORCH_CUDA_ARCH_LIST="8.0;9.0"
 ARG MAX_JOBS=8
@@ -64,11 +62,10 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 # INSTALL_MEGATRON=1 to build the megatron variant (adds the `megatron` extra to
 # the uv sync). All megatron deps are linux/x86_64-gated in the lock.
 ARG INSTALL_MEGATRON=0
-# Harbor (agentic rollout) — pinned to a commit for a reproducible image. Not in
-# skyrl-train's lock (it is a runtime/rollout dep, not a trainer dep); installed
-# from git here. Harbor is dependency-agnostic (litellm + daytona; no torch/
-# transformers/vllm/ray pins), so a plain install cannot perturb the synced stack.
+# Harbor (agentic rollout) is installed after the trainer lock.
 ARG HARBOR_COMMIT=1319eb29
+ARG FASTAPI_VERSION=0.136.1
+ARG OTEL_EXPORTER_VERSION=1.44.0
 
 # =============================================================================
 # STAGE 1: wheel-builder — compile the vLLM FORK + flash-attn into wheels (nvcc)
@@ -110,7 +107,8 @@ RUN . $WHEEL_VENV/bin/activate && \
         --index-strategy unsafe-best-match \
         "torch==${TORCH_VERSION}" \
         "torchvision==${TORCHVISION_VERSION}" \
-        "setuptools_scm" "setuptools>=77.0.3,<81.0.0" "wheel" "packaging" \
+        "setuptools_scm" "setuptools-rust>=1.9.0" \
+        "setuptools>=77.0.3,<81.0.0" "wheel" "packaging" \
         "ninja" "cmake" "psutil" "pip"
 
 WORKDIR /wheels
@@ -124,16 +122,15 @@ RUN . $WHEEL_VENV/bin/activate && \
         python -m pip wheel "flash-attn==${FLASH_ATTN_VERSION}" \
             --no-build-isolation --no-cache-dir --no-deps -w /wheels
 
-# (W2) vLLM FORK -> wheel. use_existing_torch.py strips the fork's torch pins so it
-# builds against the torch above; rewrite cutlass-dsl[cu13]->cu128; then pip-wheel
-# the fork extension (FetchContent git-clones cutlass/vllm-flash-attn/etc).
+# (W2) vLLM FORK -> wheel. use_existing_torch.py strips the fork's torch pins so
+# it builds against the torch above.
 ENV VLLM_FORK_DIR=/opt/vllm-fork
 RUN git clone $VLLM_FORK_REPO $VLLM_FORK_DIR && \
-    git -C $VLLM_FORK_DIR checkout $VLLM_FORK_COMMIT
+    git -C $VLLM_FORK_DIR checkout $VLLM_FORK_COMMIT && \
+    test "$(git -C $VLLM_FORK_DIR rev-parse HEAD)" = "$VLLM_FORK_COMMIT"
 RUN . $WHEEL_VENV/bin/activate && \
     cd $VLLM_FORK_DIR && \
     python use_existing_torch.py && \
-    sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' requirements/cuda.txt && \
     MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
         VLLM_TARGET_DEVICE=cuda \
         python -m pip wheel . --no-build-isolation --no-deps -w /wheels -v
@@ -163,9 +160,17 @@ FROM ${BASE_IMAGE} AS rl
 
 ARG TORCH_VERSION
 ARG TORCHVISION_VERSION
+ARG FLASH_ATTN_VERSION
+ARG VLLM_FORK_REPO
+ARG VLLM_FORK_COMMIT
+ARG VLLM_NATIVE_DONOR_COMMIT
+ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256
 ARG TORCH_CUDA_ARCH_LIST
+ARG WHEEL_SOURCE
 ARG INSTALL_MEGATRON
 ARG HARBOR_COMMIT
+ARG FASTAPI_VERSION
+ARG OTEL_EXPORTER_VERSION
 # MarinSkyRL commit this image is built from — recorded in the baked /opt/skyrl
 # git tree (see the git-init step below) for provenance.
 ARG GITSHA=unknown
@@ -358,15 +363,72 @@ RUN cd ${SKYRL_HOME}/skyrl-train && \
     ${RL_SYNC} ${MEG} && \
     echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done (megatron=${INSTALL_MEGATRON})"
 
-# Bring in the compiled wheels and SWAP them over the stock PyPI vllm/flash-attn
-# from the sync (--no-deps: keep the synced dep closure, replace only the package).
+# Validate and record the native donor before installing its artifacts.
 COPY --from=wheels /wheels /wheels
+RUN if [ "${WHEEL_SOURCE}" = "wheel-builder" ]; then \
+      NATIVE_COMMIT="${VLLM_FORK_COMMIT}"; \
+    else \
+      NATIVE_COMMIT="${VLLM_NATIVE_DONOR_COMMIT}"; \
+    fi && \
+    printf '%s\n' \
+      "VLLM_FORK_COMMIT=${NATIVE_COMMIT}" \
+      "FLASH_ATTN_VERSION=${FLASH_ATTN_VERSION}" \
+      "TORCH_VERSION=${TORCH_VERSION}" \
+      "TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" \
+      "CUDA=12.8 PY=cp312 PLATFORM=linux_x86_64" \
+      > /tmp/expected-wheel-manifest && \
+    cmp /tmp/expected-wheel-manifest /wheels/MANIFEST && \
+    mkdir -p /opt/skyrl/provenance && \
+    printf '%s\n' "${VLLM_FORK_COMMIT}" \
+      > /opt/skyrl/provenance/vllm-source-commit && \
+    printf '%s\n' "${NATIVE_COMMIT}" \
+      > /opt/skyrl/provenance/vllm-native-donor-commit && \
+    printf '%s\n' "${VLLM_NATIVE_DONOR_ARCHIVE_SHA256}" \
+      > /opt/skyrl/provenance/vllm-native-donor-archive.sha256 && \
+    sha256sum /wheels/vllm-*.whl \
+      > /opt/skyrl/provenance/vllm-native-donor-wheel.sha256 && \
+    sha256sum /wheels/flash_attn-*.whl \
+      > /opt/skyrl/provenance/flash-attn-wheel.sha256
+
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/flash_attn-*.whl && \
     ${RL_ENV_DIR}/bin/python -c "import flash_attn, flash_attn_2_cuda; print('flash_attn', flash_attn.__version__, '+ flash_attn_2_cuda OK')"
-RUN uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/vllm-*.whl
 
-# Primary assert: vLLM (fork) + skyrl_train import under transformers 5.8.1.
+# Install the exact fork source while extracting native files from the local
+# donor wheel through vLLM's supported precompiled path.
+ENV VLLM_FORK_DIR=/opt/vllm-fork
+RUN git init -q "${VLLM_FORK_DIR}" && \
+    git -C "${VLLM_FORK_DIR}" remote add origin "${VLLM_FORK_REPO}" && \
+    git -C "${VLLM_FORK_DIR}" fetch --depth=1 origin "${VLLM_FORK_COMMIT}" && \
+    git -C "${VLLM_FORK_DIR}" checkout -q --detach FETCH_HEAD && \
+    test "$(git -C "${VLLM_FORK_DIR}" rev-parse HEAD)" = "${VLLM_FORK_COMMIT}"
+RUN uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps \
+      "semantic-version==2.10.0" "setuptools-scm==9.2.2" \
+      "setuptools-rust==1.12.0" "wheel==0.45.1" && \
+    VLLM_NATIVE_WHEEL="$(find /wheels -maxdepth 1 -type f -name 'vllm-*.whl')" && \
+    if ! VLLM_TARGET_DEVICE=cuda VLLM_USE_PRECOMPILED=1 \
+      VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_NATIVE_WHEEL}" \
+      uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps \
+        --no-build-isolation "${VLLM_FORK_DIR}" -v \
+        > /tmp/vllm-precompiled-install.log 2>&1; then \
+      cat /tmp/vllm-precompiled-install.log; \
+      exit 1; \
+    fi && \
+    grep -F "Using user-specified precompiled wheel location: ${VLLM_NATIVE_WHEEL}" \
+      /tmp/vllm-precompiled-install.log && \
+    grep -F "Using existing wheel at ${VLLM_NATIVE_WHEEL}" \
+      /tmp/vllm-precompiled-install.log && \
+    uv pip uninstall --python ${RL_ENV_DIR}/bin/python \
+      setuptools-scm setuptools-rust wheel && \
+    if [ "${INSTALL_MEGATRON}" != "1" ]; then \
+      uv pip uninstall --python ${RL_ENV_DIR}/bin/python semantic-version; \
+    fi && \
+    rm /tmp/vllm-precompiled-install.log
+
+# Primary assert: exact vLLM source + skyrl_train under the locked environment.
 RUN ${RL_ENV_DIR}/bin/python -c "import torch, transformers, vllm, skyrl_train, flash_attn, flash_attn_2_cuda; print('torch', torch.__version__, '| transformers', transformers.__version__, '| vllm', vllm.__version__, '| flash_attn', flash_attn.__version__)"
+
+# Verify the source metadata accepts the CUDA 12 runtime selected by the lock.
+RUN ${RL_ENV_DIR}/bin/python -c "from importlib.metadata import distribution, version; from packaging.requirements import Requirement; requirements = [Requirement(value) for value in distribution('vllm').requires or []]; cutlass = next(value for value in requirements if value.name == 'nvidia-cutlass-dsl'); humming = next(value for value in requirements if value.name == 'humming-kernels'); assert cutlass.specifier.contains(version(cutlass.name)); assert humming.extras == {'cu12'}; assert humming.specifier.contains(version(humming.name)); print('vLLM CUDA 12 dependency metadata OK:', cutlass, humming)"
 
 # Megatron backend asserts (only when built with INSTALL_MEGATRON=1).
 RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
@@ -387,12 +449,20 @@ RUN ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel imp
 RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', boto3.__version__, '| smart_open', smart_open.__version__, '| s3fs', s3fs.__version__)" && \
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
-# Harbor (agentic rollout). Harbor is dependency-agnostic (litellm/daytona; no
-# torch/transformers/vllm/ray pins), so installing it from git WITH its deps cannot
-# perturb the synced stack. (boto3 is now in the lock above — not installed here.)
+# Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
+        "fastapi==${FASTAPI_VERSION}" \
+        "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
         "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
-    ${RL_ENV_DIR}/bin/python -c "import harbor, importlib.metadata as m; print('harbor', m.version('harbor'))" && \
+    ${RL_ENV_DIR}/bin/python -c "import harbor, importlib.metadata as m; assert m.version('fastapi') == '${FASTAPI_VERSION}'; assert m.version('opentelemetry-exporter-otlp') == '${OTEL_EXPORTER_VERSION}'; print('harbor', m.version('harbor'))" && \
+    if uv pip check --python ${RL_ENV_DIR}/bin/python > /tmp/rl-pip-check 2>&1; then \
+      echo "expected the known aiobotocore/botocore metadata conflict"; \
+      exit 1; \
+    fi && \
+    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1" && \
+    grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
+      /tmp/rl-pip-check && \
+    rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 
 # =============================================================================

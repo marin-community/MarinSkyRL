@@ -1,111 +1,140 @@
 #!/usr/bin/env bash
-# build_gpu_rl_kaniko.sh — in-cluster kaniko build of the MarinSkyRL gpu-rl image.
-#
-# Runs INSIDE an iris job whose task-image is docker.io/library/ubuntu:22.04
-# (kaniko's executor image is distroless / has no bash, so it cannot be the task
-# image directly). We crane-export the kaniko executor rootfs over / and run
-# /kaniko/executor. Context = the iris-synced /app bundle (this repo).
-# See .claude/skills/build-gpu-rl-image-iris/SKILL.md (in OpenThoughts-Agent).
-#
-# Required env (passed by the iris launch as `-e KEY VALUE`; this Iris CLI rejects
-# `-e KEY=VALUE` before submission):
-#   DOCKER_USER_ID  ghcr user (penfever)
-#   DOCKER_TOKEN    a GitHub PAT with write:packages (NOT the Docker Hub dckr_pat_)
-#   GITSHA          MarinSkyRL commit sha for the immutable pinned tag
-# Optional:
-#   WHEEL_SOURCE       prebuilt-wheelhouse (default) | wheel-builder
-#   INSTALL_MEGATRON   0 (default) | 1  -> builds the megatron variant
-#   TAG_PREFIX         gpu-rl (default) | gpu-rl-megatron  -> the pinned tag prefix
-#   SINGLE_SNAPSHOT    0 (default here) | 1
-#   PUSH_FLOATING      0 (default here — experimental; leave :gpu-rl untouched) | 1
-#   KANIKO_CACHE       1 (default) | 0
-# SECURITY: NO `set -x` before the ghcr token is consumed (would echo DOCKER_TOKEN
-# / the base64 AUTH into the R2-persisted finelog). Tracing is enabled AFTER the
-# config.json write, so build steps are traced but the secret never is.
+# Build the linux/amd64 GPU-RL image inside a disposable Iris Ubuntu task.
 set -euo pipefail
 
-: "${DOCKER_USER_ID:?}"
-: "${DOCKER_TOKEN:?}"
 : "${GITSHA:?}"
+: "${GHCR_IMAGE_REPOSITORY:?}"
+: "${DOCKER_USER_ID:?}"
+: "${GHCR_TOKEN:?}"
 
 WHEEL_SOURCE="${WHEEL_SOURCE:-prebuilt-wheelhouse}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
-# harbor is baked non-editably into the image (no runtime --harbor-ref); bump this to
-# bake a new harbor commit. Default matches the Dockerfile ARG default.
 HARBOR_COMMIT="${HARBOR_COMMIT:-1319eb29}"
+DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.gpu-rl}"
+DOCKER_CONTEXT=/app
+DOCKERFILE_PATH="${DOCKER_CONTEXT}/${DOCKERFILE}"
+WHEELHOUSE="${DOCKER_CONTEXT}/docker/wheelhouse"
 
-# SINGLE_SNAPSHOT=0 (default) => per-instruction layers (each small enough to pull
-# + retry over the CoreWeave->ghcr egress). =1 collapses to ONE ~16 GB layer that
-# CANNOT be pulled (containerd EOFs the single-blob GET) — the build looks green
-# but every pod ImagePullBackOffs. --compressed-caching=false keeps multi-layer
-# snapshotting within the memory budget.
-SINGLE_SNAPSHOT="${SINGLE_SNAPSHOT:-0}"
-if [ "$SINGLE_SNAPSHOT" = "1" ]; then SNAPSHOT_FLAG="--single-snapshot"; else SNAPSHOT_FLAG=""; fi
-
-CACHE_REPO=ghcr.io/open-thoughts/openthoughts-agent/cache
-if [ "${KANIKO_CACHE:-1}" = "0" ]; then CACHE_FLAGS="--cache=false"; else CACHE_FLAGS="--cache=true --cache-repo=${CACHE_REPO}"; fi
-
-# Consumers pin the DIGEST; the floating :gpu-rl tag is only moved when PUSH_FLOATING=1.
-DEST_FLOATING=ghcr.io/open-thoughts/openthoughts-agent:gpu-rl
-DEST_PINNED=ghcr.io/open-thoughts/openthoughts-agent:${TAG_PREFIX}-${GITSHA}
-FLOATING_DEST_FLAG="--destination ${DEST_FLOATING}"
-if [ "${PUSH_FLOATING:-0}" != "1" ]; then FLOATING_DEST_FLAG=""; fi
-
-# --- 1. fetch crane (static binary) ---
-apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl tar
-cd /tmp
-CRANE_VER=v0.20.2
-curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VER}/go-containerregistry_Linux_x86_64.tar.gz" -o crane.tgz
-tar -xzf crane.tgz crane
-install -m 0755 crane /usr/local/bin/crane
-
-# --- 2. crane-export the kaniko executor rootfs over / ---
-crane export gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
-
-# --- 3. write the ghcr auth config AFTER the overlay (kaniko clobbers /kaniko otherwise) ---
-export DOCKER_CONFIG=/kaniko/.docker
-mkdir -p "$DOCKER_CONFIG"
-AUTH=$(printf '%s:%s' "$DOCKER_USER_ID" "$DOCKER_TOKEN" | base64 | tr -d '\n')
-cat > "$DOCKER_CONFIG/config.json" <<EOF
-{"auths":{"ghcr.io":{"auth":"${AUTH}"}}}
-EOF
-unset AUTH
-set -x  # ghcr PAT consumed — safe to trace the build steps (token never traced)
-
-# --- 3.5. populate docker/wheelhouse/ for the prebuilt-wheelhouse (no-nvcc) path ---
-# The iris /app bundle has a 25 MB cap, so the ~900 MB prebuilt wheels cannot ride
-# it; fetch them from the public HF mirror into the build context so kaniko's
-# `COPY docker/wheelhouse/` (rl stage) finds them => ZERO nvcc. Fail fast if a wheel
-# is missing (never silently fall through to a compile).
-if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ]; then
-  WH=/app/docker/wheelhouse
-  mkdir -p "$WH"
-  HF_BASE="https://huggingface.co/datasets/laion/gpu-rl-build-wheels/resolve/main"
-  FLASH_WHL=flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl
-  VLLM_WHL=vllm-0.1.dev16611+g76259c63a.d20260625.cu128-cp312-cp312-linux_x86_64.whl
-  for f in "$FLASH_WHL" "$VLLM_WHL" MANIFEST; do
-    if [ ! -s "$WH/$f" ]; then
-      echo "fetching wheelhouse artifact: $f"
-      curl -fSL --retry 5 --retry-delay 5 "$HF_BASE/$(printf '%s' "$f" | sed 's/+/%2B/g')" -o "$WH/$f"
-    fi
-  done
-  echo "=== wheelhouse contents ==="; ls -la "$WH"
-  test -s "$WH/$FLASH_WHL" && test -s "$WH/$VLLM_WHL" || { echo "FATAL: wheelhouse not populated"; exit 1; }
+if [ -z "${IRIS_TASK_ID:-}" ] || [ ! -f "$DOCKERFILE_PATH" ]; then
+  echo "build_gpu_rl_kaniko.sh must run inside a disposable Iris task" >&2
+  exit 2
 fi
 
-# --- 4. run kaniko ---
-# --skip-unused-stages prunes the wheel-builder (nvcc) stage on the prebuilt path.
+dockerfile_arg() {
+  sed -n "s/^ARG $1=//p" "$DOCKERFILE_PATH" | head -n 1 | tr -d '"'
+}
+
+SNAPSHOT_FLAGS=()
+if [ "${SINGLE_SNAPSHOT:-0}" = "1" ]; then
+  SNAPSHOT_FLAGS=(--single-snapshot)
+fi
+
+if [ "${KANIKO_CACHE:-1}" = "0" ]; then
+  CACHE_FLAGS=(--cache=false)
+else
+  : "${KANIKO_CACHE_REPOSITORY:?Required when KANIKO_CACHE=1}"
+  CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
+fi
+
+DESTINATIONS=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}-${GITSHA}")
+if [ "${PUSH_FLOATING:-0}" = "1" ]; then
+  DESTINATIONS+=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}")
+fi
+
+APT_PACKAGES=(ca-certificates curl tar)
+if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ]; then
+  : "${PREBUILT_WHEEL_ARTIFACT_URI:?}"
+  : "${PREBUILT_WHEEL_ARTIFACT_SHA256:?}"
+  [[ "$PREBUILT_WHEEL_ARTIFACT_URI" == s3://* ]] || {
+    echo "PREBUILT_WHEEL_ARTIFACT_URI must use s3://" >&2
+    exit 2
+  }
+  [[ "$PREBUILT_WHEEL_ARTIFACT_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || {
+    echo "PREBUILT_WHEEL_ARTIFACT_SHA256 must be a SHA-256 digest" >&2
+    exit 2
+  }
+  APT_PACKAGES+=(python3-pip)
+elif [ "$WHEEL_SOURCE" != "wheel-builder" ]; then
+  echo "unsupported WHEEL_SOURCE: $WHEEL_SOURCE" >&2
+  exit 2
+fi
+
+apt-get update -y
+apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+
+NATIVE_ARCHIVE_SHA256=not-applicable
+if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ]; then
+  python3 -m pip install --no-cache-dir fsspec==2026.4.0 s3fs==2026.4.0
+  python3 - "$PREBUILT_WHEEL_ARTIFACT_URI" /tmp/vllm-wheels.tar.gz <<'PY'
+import shutil
+import sys
+
+import fsspec
+
+with fsspec.open(sys.argv[1], "rb") as source, open(sys.argv[2], "wb") as output:
+    shutil.copyfileobj(source, output)
+PY
+  NATIVE_ARCHIVE_SHA256=$(sha256sum /tmp/vllm-wheels.tar.gz | cut -d ' ' -f 1)
+  if [ "${NATIVE_ARCHIVE_SHA256,,}" != "${PREBUILT_WHEEL_ARTIFACT_SHA256,,}" ]; then
+    echo "wheel artifact SHA-256 mismatch" >&2
+    exit 1
+  fi
+
+  ARTIFACT_DIR=$(mktemp -d /tmp/vllm-wheel-artifact.XXXXXX)
+  tar -xzf /tmp/vllm-wheels.tar.gz -C "$ARTIFACT_DIR"
+  ARTIFACT_WHEELS="${ARTIFACT_DIR}/wheels"
+
+  printf '%s\n' \
+    "VLLM_FORK_COMMIT=$(dockerfile_arg VLLM_NATIVE_DONOR_COMMIT)" \
+    "FLASH_ATTN_VERSION=$(dockerfile_arg FLASH_ATTN_VERSION)" \
+    "TORCH_VERSION=$(dockerfile_arg TORCH_VERSION)" \
+    "TORCH_CUDA_ARCH_LIST=$(dockerfile_arg TORCH_CUDA_ARCH_LIST)" \
+    "CUDA=12.8 PY=cp312 PLATFORM=linux_x86_64" \
+    > /tmp/expected-wheel-manifest
+  cmp /tmp/expected-wheel-manifest "$ARTIFACT_WHEELS/MANIFEST"
+  test "$(find "$ARTIFACT_WHEELS" -maxdepth 1 -type f -name 'vllm-*.whl' | wc -l)" -eq 1
+  test "$(find "$ARTIFACT_WHEELS" -maxdepth 1 -type f -name 'flash_attn-*.whl' | wc -l)" -eq 1
+
+  mkdir -p "$WHEELHOUSE"
+  find "$WHEELHOUSE" -maxdepth 1 -type f \
+    \( -name '*.whl' -o -name MANIFEST \) -delete
+  install -m 0644 "$ARTIFACT_WHEELS"/MANIFEST \
+    "$ARTIFACT_WHEELS"/vllm-*.whl \
+    "$ARTIFACT_WHEELS"/flash_attn-*.whl \
+    "$WHEELHOUSE/"
+  echo "validated and staged prebuilt vLLM wheelhouse"
+fi
+unset PREBUILT_WHEEL_ARTIFACT_URI PREBUILT_WHEEL_ARTIFACT_SHA256
+
+cd /tmp
+CRANE_VERSION=v0.20.2
+curl -fsSL \
+  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+  -o crane.tgz
+tar -xzf crane.tgz crane
+install -m 0755 crane /usr/local/bin/crane
+crane export gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
+
+export DOCKER_CONFIG=/kaniko/.docker
+install -d -m 0700 "$DOCKER_CONFIG"
+AUTH=$(printf '%s:%s' "$DOCKER_USER_ID" "$GHCR_TOKEN" | base64 | tr -d '\n')
+printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH" \
+  > "$DOCKER_CONFIG/config.json"
+chmod 0600 "$DOCKER_CONFIG/config.json"
+unset AUTH GHCR_TOKEN
+set -x
+
 exec /kaniko/executor \
-  --context dir:///app \
-  --dockerfile "${DOCKERFILE:-docker/Dockerfile.gpu-rl}" \
+  --context "dir://${DOCKER_CONTEXT}" \
+  --dockerfile "$DOCKERFILE" \
   --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
   --build-arg INSTALL_MEGATRON="$INSTALL_MEGATRON" \
   --build-arg GITSHA="$GITSHA" \
   --build-arg HARBOR_COMMIT="$HARBOR_COMMIT" \
+  --build-arg VLLM_NATIVE_DONOR_ARCHIVE_SHA256="$NATIVE_ARCHIVE_SHA256" \
   --skip-unused-stages \
-  $SNAPSHOT_FLAG \
+  "${SNAPSHOT_FLAGS[@]}" \
   --compressed-caching=false \
-  $CACHE_FLAGS \
-  $FLOATING_DEST_FLAG \
-  --destination "${DEST_PINNED}"
+  "${CACHE_FLAGS[@]}" \
+  "${DESTINATIONS[@]}"
