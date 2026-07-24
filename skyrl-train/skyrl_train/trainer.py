@@ -1857,12 +1857,12 @@ class RayPPOTrainer:
             )
         else:
             # Get and validate resume path
-            checkpoint_path = Path(self.cfg.trainer.resume_path)
+            checkpoint_path = self.cfg.trainer.resume_path
             if not checkpoint_path:
                 raise ValueError("`trainer.resume_path` must be specified when resume_mode is 'from_path'")
 
             # Validate that it's a global_step directory
-            if GLOBAL_STEP_PREFIX not in checkpoint_path.name:
+            if GLOBAL_STEP_PREFIX not in os.path.basename(checkpoint_path):
                 raise ValueError(
                     f"`trainer.resume_path` must point to a directory whose name starting with {GLOBAL_STEP_PREFIX}, got: {checkpoint_path}"
                 )
@@ -1874,7 +1874,7 @@ class RayPPOTrainer:
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
-        global_step = extract_step_from_path(Path(checkpoint_path))
+        global_step = extract_step_from_path(checkpoint_path)
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
         logger.info(f"Resuming from global_step: {global_step}")
