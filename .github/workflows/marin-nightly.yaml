@@ -80,9 +80,8 @@ jobs:
         # itself. `iris job run` blocks, streams the job's logs, and exits non-zero unless the
         # job succeeded -- so the gate's exit code inside the job is this step's exit code.
         #
-        # pipefail is load-bearing: the `| tee nightly.log` tail would otherwise mask iris's
-        # exit code with tee's, turning every job failure into a green step. That silently
-        # reported nine days of federation-admission rejections as passing runs.
+        # pipefail is load-bearing: without it the `| tee nightly.log` tail masks iris's exit
+        # code with tee's, turning every failed job into a green step.
         run: |
           set -o pipefail
           iris --cluster marin job run \
