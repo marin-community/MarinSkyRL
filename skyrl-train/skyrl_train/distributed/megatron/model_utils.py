@@ -214,9 +214,16 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         seq_size = int(vocab_parallel_logits.shape[1])
         num_chunks = (seq_size + chunk_size - 1) // chunk_size
 
-        # Keep exactly one full gradient buffer. Retaining every chunk and then
-        # concatenating them doubles the [B, S, V_local] peak on long packed RL batches.
-        grad_input = torch.zeros_like(vocab_parallel_logits, dtype=torch.float32)
+        # Autograd must receive one [B, S, V_local] gradient, but it need not be
+        # fp32: the model activation is bf16/fp16 and PyTorch accumulates its
+        # gradient in that dtype.  Every sequence chunk below overwrites its
+        # destination exactly once, so ``empty_like`` is safe and avoids the
+        # extra full fp32 buffer (12.9 GiB in the failing 30B RL batch).
+        #
+        # The temporary log-softmax and chosen-token mask remain fp32 *inside*
+        # the bounded chunk loop; only the returned activation gradient uses
+        # the model's native dtype.
+        grad_input = torch.empty_like(vocab_parallel_logits)
 
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size

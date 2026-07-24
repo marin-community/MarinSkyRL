@@ -145,7 +145,38 @@ def test_chunked_bf16_model_output_matches_lossless_fp32_output(single_rank_grou
 
     direct_logprobs.sum().backward()
     old_logprobs.sum().backward()
+    # The custom backward must return the model activation dtype. Returning a
+    # full fp32 [B, S, V_local] buffer is the late-step RL OOM this test guards.
+    assert direct_bf16.grad.dtype is torch.bfloat16
     assert torch.equal(direct_bf16.grad, old_fp32_input.grad)
+
+
+def test_chunked_backward_does_not_allocate_a_full_fp32_gradient(single_rank_group, monkeypatch):
+    """Chunked backward may only allocate full-vocab storage in model dtype.
+
+    ``torch.zeros_like(..., dtype=float32)`` was an overlooked second full
+    vocab-parallel reconstruction: its 12.9 GiB allocation killed the r6
+    Pymethods and r9 OpenCode arms after several healthy steps.  The output
+    gradient is filled chunk-by-chunk, so a zeroed fp32 destination is neither
+    necessary nor safe at this sequence length.
+    """
+    import skyrl_train.distributed.megatron.model_utils as model_utils
+
+    torch.manual_seed(4)
+    logits = torch.randn(1, 9, 16, dtype=torch.bfloat16).requires_grad_(True)
+    targets = torch.randint(0, 16, (1, 9))
+
+    def reject_full_fp32_zeros_like(*args, **kwargs):
+        if kwargs.get("dtype") is torch.float32:
+            raise AssertionError("chunked backward allocated a full fp32 gradient")
+        return original_zeros_like(*args, **kwargs)
+
+    original_zeros_like = model_utils.torch.zeros_like
+    monkeypatch.setattr(model_utils.torch, "zeros_like", reject_full_fp32_zeros_like)
+
+    _logprobs(logits, targets, single_rank_group, chunk_size=3, inference_only=False).sum().backward()
+    assert logits.grad is not None
+    assert logits.grad.dtype is torch.bfloat16
 
 
 def test_packed_logprobs_preserve_left_padded_action_positions(single_rank_group):
