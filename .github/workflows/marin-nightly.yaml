@@ -79,7 +79,12 @@ jobs:
         # syncing the repo root (a metadata-only package); run_h100.sh syncs skyrl-train
         # itself. `iris job run` blocks, streams the job's logs, and exits non-zero unless the
         # job succeeded -- so the gate's exit code inside the job is this step's exit code.
+        #
+        # pipefail is load-bearing: the `| tee nightly.log` tail would otherwise mask iris's
+        # exit code with tee's, turning every job failure into a green step. That silently
+        # reported nine days of federation-admission rejections as passing runs.
         run: |
+          set -o pipefail
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
             --job-name "$JOB_NAME" \
@@ -95,7 +100,9 @@ jobs:
         if: always()
         # `iris job run` stops its job when it exits, and --timeout is a server-side backstop,
         # so this only matters if the runner was hard-killed. --cluster is a top-level flag.
-        run: iris --cluster marin job stop "$JOB_NAME" || true
+        # `job stop` requires the canonical `/<user>/<job>` name that `job run` prints, not the
+        # bare --job-name it accepts; iris namespaces runner submissions under /runner.
+        run: iris --cluster marin job stop "/runner/$JOB_NAME" || true
 
       - uses: actions/upload-artifact@v4
         if: always()
