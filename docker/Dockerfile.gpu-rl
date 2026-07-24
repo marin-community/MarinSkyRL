@@ -261,11 +261,11 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # buckets sized so no single layer exceeds ~4 GB (matches the FSDP2 image shape:
 # many layers). `--no-install-package P` for a P absent from the resolution
 # (e.g. the megatron-only wheels on an fsdp2 build) is a harmless no-op.
-# ⚠ torch is NEVER deferred: flash-attn (and TE) declare a `match-runtime = true`
-# torch build dependency (pyproject [tool.uv.extra-build-dependencies]), so the
-# flash-attn sdist build in the FIRST sync fails ("torch was declared as an extra
-# build dependency ... not found in the resolution") if torch is not installed
-# yet. torch therefore rides layer 0 with the small packages.
+# FlashAttention is excluded from every sync layer and installed from the validated
+# wheel below. Building the locked source distribution here would waste the
+# prebuilt-wheel path and leave a redundant native-extension layer in the image.
+# Torch still rides layer 0 because TransformerEngine declares it as a
+# `match-runtime = true` build dependency.
 #   L0 small + torch(820) | HB1 flashinfer-jit-cache(1333) | HB2 cudnn(658)
 #   HB3 cublas(594) | HB4 mamba-ssm+causal-conv1d(719) | HB5 nccl+flashinfer-cubin+TE-cu12(880)
 #   HB6 cusparse+cusparselt+cusolver(843) | FINAL vllm+cufft+triton+nvshmem+nvrtc(895)  [wheel MB]
@@ -274,9 +274,8 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # each Kaniko RUN layer. In particular, the initial split layer reached 6.96 GiB
 # even though its installed closure was much smaller, reintroducing the RNO
 # ImagePullBackOff failure mode. The temporary cache leaves no pull payload.
-ENV RL_SYNC="uv sync --frozen --no-cache --extra vllm --extra ep"
-# layer 0: all small packages + torch (torch required in-resolution for the
-# flash-attn sdist build's match-runtime build dep); defer the 16 heavies.
+ENV RL_SYNC="uv sync --frozen --no-cache --extra vllm --extra ep --no-install-package flash-attn"
+# layer 0: all small packages + torch; defer the 16 heavies.
 RUN cd ${SKYRL_HOME}/skyrl-train && \
     if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
     ${RL_SYNC} ${MEG} \
@@ -356,8 +355,8 @@ RUN cd ${SKYRL_HOME}/skyrl-train && \
     ${RL_SYNC} ${MEG} \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 8 (cusolver) done"
-# layer 9: FINAL — no exclusions; installs the remaining heavies AND guarantees
-# the closure is EXACTLY the lock (zero drift by construction).
+# layer 9: FINAL — installs the remaining heavies. FlashAttention remains
+# excluded because the validated wheel below supplies the locked version.
 RUN cd ${SKYRL_HOME}/skyrl-train && \
     if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra megatron"; else MEG=""; fi && \
     ${RL_SYNC} ${MEG} && \
