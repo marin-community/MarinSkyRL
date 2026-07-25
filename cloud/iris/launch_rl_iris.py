@@ -284,7 +284,19 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # URI preservation, #127 upload nesting + trailing-slash resume_path). vLLM fork 8672c71e,
     # FlashAttention 2.8.3, and Harbor 1319eb29 unchanged (fast prebuilt-wheelhouse, full kaniko
     # cache hit, ~3 min). Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
-    "@sha256:eb85412833b04a889159e455999dc7c3a7c32089e4d643aa294bf3f543b9cf63"  # noqa: E501
+    # gpu-rl-0acfe947 (built 2026-07-25, kaniko job gpurl-kaniko-0acfe947): HARBOR_COMMIT bump
+    # 1319eb29 -> 01c736a6 (harbor#36: bounded background artifact writer — routes hot-path
+    # trajectory/exception/config writes off the shared executor with local spool +
+    # flush-on-finalize; per-trial dump cadence default; fixes the trajectory-dump S3 backlog
+    # that collapsed rollout throughput ~6.7x). SKYRL 0acfe947 also carries #131 (download
+    # separator applied after _strip_protocol — the fix that made from_path s3 resume actually
+    # work; validated live on rl-tasktrove-dq-sweep-30b-terminus2-qwen-20260725-121011-d6637e,
+    # global_step_23 resume clean) and #132 (megatron pip-check build gate, fixes #130).
+    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total. Megatron sibling from the same
+    # harbor bump: gpu-rl-megatron-87ff3f6b @sha256:e1e62927 (39 layers, max 3.61 GB) — use it
+    # for trainer.strategy=megatron configs; the plain image has no megatron package.
+    "@sha256:625d75770ce8503c6634fb1ce8ea5d4cef7d7ef26b101ed0d68a9cc92ef270b1"  # noqa: E501
+    # (prev: gpu-rl-d48445f7 @sha256:eb854128, Harbor 1319eb29 + resume-fix chain)
     # (prev: gpu-rl-4d289ed3 @sha256:fd8792ef, vllm 8672c71e + Harbor 1319eb29)
     # (prev: gpu-rl-0dda3d68 @sha256:bb1b01ba, Harbor baked)
     # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041, same Harbor)
