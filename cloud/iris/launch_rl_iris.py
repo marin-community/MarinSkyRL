@@ -279,7 +279,13 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # gpu-rl-4d289ed3 (verified 2026-07-24): canonical result of successful
     # gpurl-kaniko-4d289ed3. It bakes marin-community/vllm 8672c71e with
     # FlashAttention 2.8.3; Harbor remains baked at 1319eb29.
-    "@sha256:fd8792ef7f286d5461b98fe727e09b31e04b3ef822e5a7c465d740f99235ddc7"  # noqa: E501
+    # gpu-rl-d48445f7 (built 2026-07-25, kaniko job gpurl-kaniko-d48445f7): SKYRL source bump to
+    # d48445f7 — bakes the checkpoint-resume fix chain (#118 download nesting, #122 resume-path
+    # URI preservation, #127 upload nesting + trailing-slash resume_path). vLLM fork 8672c71e,
+    # FlashAttention 2.8.3, and Harbor 1319eb29 unchanged (fast prebuilt-wheelhouse, full kaniko
+    # cache hit, ~3 min). Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
+    "@sha256:eb85412833b04a889159e455999dc7c3a7c32089e4d643aa294bf3f543b9cf63"  # noqa: E501
+    # (prev: gpu-rl-4d289ed3 @sha256:fd8792ef, vllm 8672c71e + Harbor 1319eb29)
     # (prev: gpu-rl-0dda3d68 @sha256:bb1b01ba, Harbor baked)
     # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041, same Harbor)
     # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
