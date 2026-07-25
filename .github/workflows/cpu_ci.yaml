@@ -44,6 +44,21 @@ jobs:
         # unregenerable skyrl-train lockfile.
         run: uv run --no-project --with pytest pytest infra/tests/ -q
 
+  iris_launcher_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Run iris launcher tests
+        # universal-pathlib backs the lazy gs:// UPath import in literal_proxy_utils.py; it is
+        # the only cloud dep these tests need. rigging (private, Marin-monorepo-only) is not
+        # installed here, so test_federated_parent_auth.py self-skips via importorskip and only
+        # runs on hosts where rigging is present. --no-project keeps this off the unregenerable
+        # skyrl-train lockfile.
+        run: uv run --no-project --with pytest --with universal-pathlib pytest cloud/iris/tests/ -q
+
   skyrl_train_tests:
     runs-on: ubuntu-latest
     defaults:
