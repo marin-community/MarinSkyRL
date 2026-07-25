@@ -87,6 +87,14 @@ uv run infra/pre-commit.py --review
 This is required, not optional (see `.agents/marin-style/AGENTS-core.md`). The first run
 bootstraps `marin-style` from git and can take several minutes; let it finish.
 
+## Agent skill policy
+
+Skills under `.agents/skills/` are durable procedures, not operational state. They must not contain run
+identifiers, mutable image or source revisions, current capacity, user-specific paths, campaign status,
+credential values, or historical narrative. Resolve those facts at execution time from the selected
+configuration, current launcher interface, Marin's Iris configuration, and inspected job state. Describe
+required outcomes, evidence, decision gates, and safety constraints rather than preserving a past launch recipe.
+
 ## CI
 
 - `cpu_ci.yaml` — lint + `skyrl-train`/`skyrl-gym` CPU tests on every PR.
