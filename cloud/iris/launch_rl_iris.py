@@ -55,6 +55,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -357,6 +358,15 @@ MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
 DAYTONA_RL_SECRET_VERSION = "1"
+# The RL Daytona org enforces a 40-snapshot quota. Harbor mints one "harbor__*" env
+# snapshot per trial (auto_snapshot=true); once the org is over quota, snapshot creation
+# fails and harbor's fallthrough attempts a declarative sandbox build, which this org
+# forbids, so every trial then dies unscored with DaytonaValidationError and the job trains
+# on all-zero rewards. Purging harbor-minted snapshots idle past this age before every
+# launch keeps quota headroom so harbor's worker-side minting can self-heal.
+DAYTONA_RL_SNAPSHOT_QUOTA = 40
+HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
+STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 DEFAULT_MEMORY_PER_NODE = "1700GB"
 # --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
 # (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
@@ -571,6 +581,54 @@ def _resolve_daytona_rl_api_key() -> str:
             "check the pinned secret version."
         )
     return value
+
+
+def _daytona_client(api_key: str) -> Any:
+    """Construct a Daytona SDK client for the RL org.
+
+    The daytona SDK is an optional launch-host dependency, so it is imported lazily here
+    rather than at module scope.
+    """
+    from daytona import Daytona, DaytonaConfig
+
+    return Daytona(DaytonaConfig(api_key=api_key))
+
+
+def _purge_stale_daytona_snapshots(api_key: str) -> None:
+    """Delete stale harbor-minted Daytona snapshots on the RL org before a launch.
+
+    A snapshot is a purge candidate iff its name starts with ``HARBOR_SNAPSHOT_NAME_PREFIX``
+    and it has been idle (no use since ``last_used_at``, or since ``created_at`` if never
+    used) for longer than ``STALE_SNAPSHOT_MAX_AGE``. Non-harbor (system) snapshots are
+    never touched. See ``DAYTONA_RL_SNAPSHOT_QUOTA`` above for why this runs before every
+    launch.
+    """
+    d = _daytona_client(api_key)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    total = 0
+    harbor_count = 0
+    purged_count = 0
+    page = 1
+    while True:
+        result = d.snapshot.list(page=page, limit=100)
+        total = result.total
+        for snapshot in result.items:
+            if not snapshot.name.startswith(HARBOR_SNAPSHOT_NAME_PREFIX):
+                continue
+            harbor_count += 1
+            last_active = snapshot.last_used_at or snapshot.created_at
+            if now - last_active > STALE_SNAPSHOT_MAX_AGE:
+                d.snapshot.delete(snapshot)
+                purged_count += 1
+        if page >= result.total_pages or not result.items:
+            break
+        page += 1
+    kept_count = harbor_count - purged_count
+    print(
+        f"[rl-iris] Daytona snapshot purge: total={total} harbor={harbor_count} "
+        f"purged={purged_count} kept={kept_count}",
+        flush=True,
+    )
 
 
 def _validate_rl_config_topology(args: argparse.Namespace) -> None:
@@ -1903,12 +1961,14 @@ def main() -> int:
     load_secrets_env_into_os_environ(args.secrets_env)
 
     if _rl_config_is_agentic(args.rl_config):
-        os.environ["DAYTONA_API_KEY"] = _resolve_daytona_rl_api_key()
+        daytona_api_key = _resolve_daytona_rl_api_key()
+        os.environ["DAYTONA_API_KEY"] = daytona_api_key
         print(
             "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
             f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
             flush=True,
         )
+        _purge_stale_daytona_snapshots(daytona_api_key)
 
     command = build_task_command(args)
 
