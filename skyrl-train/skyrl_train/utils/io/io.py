@@ -120,11 +120,14 @@ def download_directory(cloud_path: str, local_path: str) -> None:
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
 
     fs = _get_filesystem(cloud_path)
-    source_path = cloud_path.rstrip("/") + "/"
+    # The trailing separator makes fsspec copy the directory CONTENTS instead of
+    # nesting the directory under the destination. It must be appended AFTER
+    # _strip_protocol, which rstrips separators and would silently undo it.
     if cloud_path.startswith("s3://"):
-        call_with_s3_retry(fs, fs.get, fs._strip_protocol(source_path), local_path, recursive=True)
+        source_path = fs._strip_protocol(cloud_path) + "/"
+        call_with_s3_retry(fs, fs.get, source_path, local_path, recursive=True)
     else:
-        fs.get(source_path, local_path, recursive=True)
+        fs.get(cloud_path.rstrip("/") + "/", local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
 
 

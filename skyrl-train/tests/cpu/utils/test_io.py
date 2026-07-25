@@ -385,7 +385,8 @@ class TestContextManagers:
 
         class DirectoryFilesystem:
             def _strip_protocol(self, path):
-                return path.removeprefix("s3://")
+                # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
+                return path.removeprefix("s3://").rstrip("/")
 
             def get(self, source, destination, recursive):
                 destination_root = Path(destination)
@@ -417,7 +418,8 @@ class TestUploadDownload:
                 self.destination_roots = []
 
             def _strip_protocol(self, path):
-                return path.removeprefix("s3://")
+                # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
+                return path.removeprefix("s3://").rstrip("/")
 
             def put(self, source, destination, recursive):
                 destination_root = destination
