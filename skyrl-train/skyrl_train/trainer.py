@@ -1860,6 +1860,7 @@ class RayPPOTrainer:
             checkpoint_path = self.cfg.trainer.resume_path
             if not checkpoint_path:
                 raise ValueError("`trainer.resume_path` must be specified when resume_mode is 'from_path'")
+            checkpoint_path = checkpoint_path.rstrip("/")
 
             # Validate that it's a global_step directory
             if GLOBAL_STEP_PREFIX not in os.path.basename(checkpoint_path):

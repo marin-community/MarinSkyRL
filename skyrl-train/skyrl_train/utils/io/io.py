@@ -106,10 +106,11 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
 
     fs = _get_filesystem(cloud_path)
+    source_path = local_path.rstrip("/") + "/"
     if cloud_path.startswith("s3://"):
-        call_with_s3_retry(fs, fs.put, local_path, fs._strip_protocol(cloud_path), recursive=True)
+        call_with_s3_retry(fs, fs.put, source_path, fs._strip_protocol(cloud_path), recursive=True)
     else:
-        fs.put(local_path, cloud_path, recursive=True)
+        fs.put(source_path, cloud_path, recursive=True)
     logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 

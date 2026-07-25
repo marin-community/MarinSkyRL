@@ -408,6 +408,32 @@ class TestUploadDownload:
         with pytest.raises(ValueError, match="Destination must be a cloud path"):
             upload_directory("/local/src", "/local/dst")
 
+    @patch("skyrl_train.utils.io.io._get_filesystem")
+    def test_upload_directory_preserves_destination_contents(self, mock_get_filesystem):
+        """Cloud directory uploads land at the destination root even when the prefix already exists."""
+
+        class DirectoryFilesystem:
+            def __init__(self):
+                self.destination_roots = []
+
+            def _strip_protocol(self, path):
+                return path.removeprefix("s3://")
+
+            def put(self, source, destination, recursive):
+                destination_root = destination
+                if not source.endswith("/"):
+                    destination_root = f"{destination}/{Path(source).name}"
+                self.destination_roots.append(destination_root)
+
+        filesystem = DirectoryFilesystem()
+        mock_get_filesystem.return_value = filesystem
+
+        with tempfile.TemporaryDirectory() as source_dir:
+            (Path(source_dir) / ".metadata").write_text("checkpoint metadata")
+            upload_directory(source_dir, "s3://bucket/checkpoints/global_step_12/policy")
+
+        assert filesystem.destination_roots == ["bucket/checkpoints/global_step_12/policy"]
+
     def test_download_directory_validates_cloud_path(self):
         """Test that download_directory validates source is a cloud path."""
         with pytest.raises(ValueError, match="Source must be a cloud path"):
