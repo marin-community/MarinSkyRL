@@ -63,7 +63,7 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 # the uv sync). All megatron deps are linux/x86_64-gated in the lock.
 ARG INSTALL_MEGATRON=0
 # Harbor (agentic rollout) is installed after the trainer lock.
-ARG HARBOR_COMMIT=1319eb29
+ARG HARBOR_COMMIT=01c736a6
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
