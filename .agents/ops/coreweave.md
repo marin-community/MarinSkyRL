@@ -181,10 +181,10 @@ a reconciled timeline before calling wedge.
 ## Standing guardrails
 
 - Never kill a RUNNING job or restart/bounce a cluster without explicit permission.
-- `iris job kill/stop <id>` is a prefix kill and defaults to `--include-children`: killing
-  `/u/rl-foo` also kills `/u/rl-foo-v2`. Pass `--no-include-children` to kill exactly one
-  job (`--dry-run` first when the name could prefix a live sibling), and never name a
-  relaunch `<live-job-name>-<suffix>`.
+- `iris job kill|stop <id>...` matches **exactly** by default and accepts several ids at
+  once. `--prefix` opts into prefix matching, which also terminates every job whose id
+  extends the one you named (`abb-qwen35-35b` takes `-v2` … `-v5` with it) — run `--dry-run`
+  first on any `--prefix` kill, and never name a relaunch as an extension of a live job's id.
 - Keep at most 6 running RL jobs total (Daytona capacity, not per-cluster).
 - `--max-retries ≥ 1` on gangs (transient HF weight-resolution flakes SIGKILL a gang at
   `max_retries=0`).
