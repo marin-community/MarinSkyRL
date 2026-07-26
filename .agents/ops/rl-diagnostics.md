@@ -113,8 +113,8 @@ rewards are noisy and long-episode arms bank slowly.
   tool-exec combined), `verifier`. `agent_result.metadata.api_request_times_msec` is the
   LLM-gen-only per-call list. Derived: tool-exec = `agent_execution` − LLM-gen; teardown gap
   = trial `finished_at` − max(phase `finished_at`), sub-second when healthy.
-- Aggregate bounded samples (newest ~200 for steady state, ~500 for error tails) and report
-  medians/percentiles only.
+- Report medians and percentiles over a bounded sample only; sample bounds and the fetch
+  itself are in `coreweave.md` §Trial artifacts.
 - LLM-gen ≫ sandbox (e.g. ~89% vs <1%) = LLM-turn-bound; the lever is trial concurrency /
   buffer depth, not sandbox optimization. Sandbox create/teardown above ~10% of wall, or an
   `environment_setup` tail over 10 s, is real re-provision churn.

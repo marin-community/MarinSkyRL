@@ -51,7 +51,16 @@ $IRIS --cluster=<cluster> job summary <job_id>           # per-task state/exit/d
   "still running": if the row is gone AND `kubectl -n iris get pods | grep <job>` shows 0 pods,
   the job is over. Absence proves the job ended, not that it succeeded — for pass/fail read
   the state inside the retention window or check the job's durable artifact (checkpoint dir,
-  HF repo, s3 prefix).
+  HF repo, s3 prefix). This rule applies only to a job **previously observed** in the table.
+- A job submitted through the marin meta-scheduler does not appear in the target cluster's
+  `jobs` table until it is **delegated** to that cluster. `submitted_at_ms` records the
+  delegation time; the job name carries the launcher's mint timestamp, so the two can differ
+  by hours (a job named `…-20260726-101418-bb6bff` at 10:14 UTC was absent from the table at
+  10:47 and appeared with `submitted_at_ms` 14:33 UTC when capacity freed). Absence for a
+  never-observed job therefore means "not yet delegated, or pruned, or never launched" — it
+  does not prove the launch failed. Read the resolved job id from the launcher's own output
+  and poll by name across the delegation window; resubmitting on absence alone risks a
+  double-run against one checkpoint lineage.
 - On a retried or preempted attempt `IRIS_TASK_ID` gains a `:N` suffix (`/user/job/0:2`);
   rank parsing must strip it (`.rsplit('/', 1)[-1].split(':', 1)[0]`) or it crashes the
   moment any rank is retried.
@@ -133,11 +142,14 @@ a reconciled timeline before calling wedge.
 - RL always runs on the dedicated RL org: launch with `--daytona-api-key-env DAYTONA_RL_API_KEY`
   (a pre-launch `export DAYTONA_API_KEY=…` is clobbered — the launcher re-sources `secrets.env`,
   file overrides shell). Verify in-pod: `printenv DAYTONA_API_KEY | sha1sum`.
-- The RL org has a **40-sandbox quota**. An over-quota org fails sandbox creation with a
-  declarative-build error, so every trial errors and rewards read all-zero — an infra
+- The RL org enforces a **40-snapshot quota**, and harbor mints one `harbor__*` env snapshot
+  per trial (`auto_snapshot=true`). Over quota, snapshot creation fails and harbor falls
+  through to a declarative sandbox build that this org forbids: every trial dies unscored
+  with `DaytonaValidationError` and the job trains on all-zero rewards — an infra
   fingerprint, not a model or dataset problem.
-- The launcher purges stale (>2 h idle) `harbor__*` snapshots in the RL org before every
-  launch; no manual purge is needed on the launch path.
+- The launcher purges `harbor__*` snapshots idle past 2 h before every launch
+  (`_purge_stale_daytona_snapshots`), which keeps enough headroom for harbor's worker-side
+  minting to self-heal; no manual purge is needed on the launch path.
 - A hard job kill orphans in-flight sandboxes (the coordinator dies before teardown). After a
   kill, reap idle sandboxes once they cross the idle threshold (~1–2 h later), never immediately
   — an aggressive reap kills other jobs' active trials.
