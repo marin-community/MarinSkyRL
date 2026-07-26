@@ -97,6 +97,21 @@ rewards are noisy and long-episode arms bank slowly.
 - Both backends emit the `tis/imp_ratio_*` family from main @ `d7ba00ff` onward. A run
   launched from an older bundle lacks them on the Megatron backend — judge those runs by
   the `generate/tis/*` fractions plus the `policy_loss` / `raw_grad_norm` magnitudes.
+- **The ratio family is emitted under TWO prefixes, one per sink. Grep the wrong one and
+  you will conclude the metrics are missing when they are present.** Measured on a single
+  run's own log, same steps, both forms present:
+
+  | sink | key form | example |
+  |---|---|---|
+  | `WANDB_MIRROR kind=train … metrics={…}` JSON | **`policy/tis/…`** | `"policy/tis/imp_ratio_mean"` |
+  | trainer status dict (plain log lines) | **bare `tis/…`** | `'tis/imp_ratio_mean'` |
+
+  On one probed run the WANDB_MIRROR lines carried 8 `policy/tis/imp_ratio_mean` and **zero**
+  bare occurrences, while the non-WANDB lines carried 9 bare and zero qualified. `generate/tis/*`
+  and `tis/skipped_fraction` use their literal names in both. Anchor your grep to the sink you
+  are reading, or match `tis/imp_ratio_mean` unanchored so it catches both — an anchored
+  `^tis/` against WANDB_MIRROR returns nothing and reads as "diagnostics absent", which is the
+  documented cause of at least one false alarm on this fleet.
 - `policy/rollout_train_prob_diff_mean` in the millions is a benign scale artifact
   (linear-space mean of exponentials; any fat tail dominates) — never read it as a fault.
 - **Step time:** `timing/wait_for_generation_buffer` ≈ 0 means generation is off the
