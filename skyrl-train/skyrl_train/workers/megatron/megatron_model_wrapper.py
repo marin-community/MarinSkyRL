@@ -14,7 +14,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.utils.ppo_utils import compute_approx_kl, masked_mean
+from skyrl_train.utils.ppo_utils import compute_approx_kl, compute_tis_diagnostics, masked_mean
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -299,6 +299,19 @@ class MegatronModelWrapper:
                 "ppo_clip_ratio": clip_ratio,
                 "policy_kl": kl_loss.detach().item(),
             }
+            # TIS importance-ratio diagnostics — same helper as the FSDP path
+            # (PolicyWorkerBase.training_step), so both backends emit identical
+            # keys with identical semantics. The helper's fallback branch keeps
+            # the keyset identical when rollout logprobs are absent.
+            if self.cfg.trainer.algorithm.use_tis:
+                metrics.update(
+                    compute_tis_diagnostics(
+                        old_action_log_probs,
+                        rollout_action_logprobs,
+                        loss_mask,
+                        cap=self.cfg.trainer.algorithm.tis_imp_ratio_cap,
+                    )
+                )
             return loss, metrics
 
         def forward_step(batch_iter, model):

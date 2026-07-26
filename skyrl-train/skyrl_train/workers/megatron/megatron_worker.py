@@ -30,6 +30,7 @@ from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
+from skyrl_train.utils.ppo_utils import TIS_DIAG_KEYS
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -532,6 +533,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         }
                         if self.cfg.trainer.algorithm.use_kl_loss:
                             status["policy_kl"] = metrics["policy_kl"]
+
+                        # TIS importance-ratio diagnostics, computed per micro-batch in
+                        # MegatronModelWrapper.forward_backward_mini_batch with the same
+                        # shared helper as the FSDP path. use_tis is uniform across ranks,
+                        # so every rank contributes the same key set to all_reduce(status).
+                        if self.cfg.trainer.algorithm.use_tis:
+                            for key in TIS_DIAG_KEYS:
+                                status[key] = metrics[key]
 
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1 and grad_norm is not None:
