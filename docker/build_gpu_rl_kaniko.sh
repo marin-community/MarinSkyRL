@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Build the linux/amd64 GPU-RL image inside a disposable Iris Ubuntu task.
+# SHELLOPTS can carry xtrace across bash processes; credentials are read below.
+set +x
 set -euo pipefail
 
 : "${GITSHA:?}"

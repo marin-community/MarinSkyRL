@@ -58,7 +58,7 @@ Everything the build steps below rely on, inlined so this skill stands alone:
   `--cpu 48` — not 64 — for daemonset gang-fit).
 - **Node hardware context:** each node is 8×H100-80GB + InfiniBand; the build uses no GPU.
 - **ghcr push creds:** `GHCR_TOKEN=$(gh auth token)` — a **GitHub PAT** (user `penfever`, scope
-  `write:packages`). This is passed to the job as `DOCKER_TOKEN`. **It is NOT the Docker-Hub `DOCKER_TOKEN`
+  `write:packages`). This is passed to the job as `GHCR_TOKEN`. **It is NOT the Docker-Hub `DOCKER_TOKEN`
   (`dckr_pat_…`) in secrets.env — that one is WRONG for ghcr.io.** Any other secrets are sourced via
   `source "$DC_AGENT_SECRET_ENV"`; never paste a token VALUE (or a base64 of one) into a doc or command line.
 
@@ -110,12 +110,13 @@ The build job uses **kaniko** (`gcr.io/kaniko-project/executor`), NOT buildkit/`
   (`PUSH_FLOATING=0`); consumers pin the digest of the `:gpu-rl-<gitsha>` tag.
 
 ### ghcr push creds (the load-bearing gotcha)
-- **`GHCR_TOKEN=$(gh auth token)` (GitHub PAT, `write:packages`)** — passed as `-e DOCKER_TOKEN`. The Docker Hub
+- **`GHCR_TOKEN=$(gh auth token)` (GitHub PAT, `write:packages`)** — passed as `-e GHCR_TOKEN`. The Docker Hub
   `dckr_pat_…` is WRONG for ghcr.io.
-- kaniko reads `$DOCKER_CONFIG/config.json`. `build_gpu_rl_kaniko.sh` **writes that config AFTER the
+- kaniko reads `$DOCKER_CONFIG/config.json`. `build_gpu_rl_kaniko.sh` starts with explicit **`set +x`**
+  before inspecting the environment, then **writes that config AFTER the
   crane-export overlay** (kaniko's image ships its own `/kaniko` dir and would clobber a config written before
   the overlay) and sets `export DOCKER_CONFIG=/kaniko/.docker`, contents
-  `{"auths":{"ghcr.io":{"auth":"<base64 of penfever:$DOCKER_TOKEN>"}}}`. The script disables shell tracing
+  `{"auths":{"ghcr.io":{"auth":"<base64 of penfever:$GHCR_TOKEN>"}}}`. The script disables shell tracing
   until AFTER the token is consumed, so the PAT never lands in the R2-persisted finelog.
 
 ## 3. The launch command (verbatim shape)
@@ -134,7 +135,7 @@ $IRIS --cluster=cw-us-east-02a job run \
   --cpu 48 --memory 512GB --disk 400GB \
   --job-name gpurl-kaniko-$GITSHA \
   --max-retries 0 --timeout 18000 \
-  -e DOCKER_USER_ID penfever -e DOCKER_TOKEN "$GHCR_TOKEN" -e BUILD_B64 "$B64" \
+  -e DOCKER_USER_ID penfever -e GHCR_TOKEN "$GHCR_TOKEN" -e BUILD_B64 "$B64" \
   -e GITSHA "$GITSHA" --no-wait \
   -- bash -lc 'echo "$BUILD_B64" | base64 -d > /tmp/build.sh && exec bash /tmp/build.sh'
 ```
@@ -153,7 +154,7 @@ $IRIS --cluster=cw-us-east-02a job run \
 > inspect …:gpu-rl-<gitsha> --raw` → max layer <8 GB, layers >20.
 
 `build_gpu_rl_kaniko.sh` does, in order: fetch crane → `crane export` the kaniko executor over `/` → write
-`$DOCKER_CONFIG/config.json` with the ghcr `penfever:$DOCKER_TOKEN` auth → (prebuilt path) curl the wheels from
+`$DOCKER_CONFIG/config.json` with the ghcr `penfever:$GHCR_TOKEN` auth → (prebuilt path) curl the wheels from
 `laion/gpu-rl-build-wheels` into `/app/docker/wheelhouse/` → run `/kaniko/executor --context dir:///app
 --dockerfile docker/Dockerfile.gpu-rl --build-arg WHEEL_SOURCE=… --skip-unused-stages --compressed-caching=false
 --cache=true --cache-repo=ghcr.io/open-thoughts/openthoughts-agent/cache --destination
