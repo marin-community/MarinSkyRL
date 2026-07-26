@@ -49,7 +49,12 @@ $IRIS --cluster=<cluster> job summary <job_id>           # per-task state/exit/d
 - The `jobs` table is pruned (terminal rows deleted after retention; federated mirror rows can
   vanish as soon as the peer tombstones them). **Absence-after-existence is terminal**, not
   "still running": if the row is gone AND `kubectl -n iris get pods | grep <job>` shows 0 pods,
-  the job is over.
+  the job is over. Absence proves the job ended, not that it succeeded — for pass/fail read
+  the state inside the retention window or check the job's durable artifact (checkpoint dir,
+  HF repo, s3 prefix).
+- On a retried or preempted attempt `IRIS_TASK_ID` gains a `:N` suffix (`/user/job/0:2`);
+  rank parsing must strip it (`.rsplit('/', 1)[-1].split(':', 1)[0]`) or it crashes the
+  moment any rank is retried.
 - `RUNNING ≠ stepping.` A post-bring-up trainer wedge stays state 3 with a benign heartbeat as
   the last log line. Liveness for a trainer is forward advancement (a fresh training step /
   advancing phase timers), never engine bring-up completion.
@@ -128,9 +133,28 @@ a reconciled timeline before calling wedge.
 - RL always runs on the dedicated RL org: launch with `--daytona-api-key-env DAYTONA_RL_API_KEY`
   (a pre-launch `export DAYTONA_API_KEY=…` is clobbered — the launcher re-sources `secrets.env`,
   file overrides shell). Verify in-pod: `printenv DAYTONA_API_KEY | sha1sum`.
+- The RL org has a **40-sandbox quota**. An over-quota org fails sandbox creation with a
+  declarative-build error, so every trial errors and rewards read all-zero — an infra
+  fingerprint, not a model or dataset problem.
+- The launcher purges stale (>2 h idle) `harbor__*` snapshots in the RL org before every
+  launch; no manual purge is needed on the launch path.
 - A hard job kill orphans in-flight sandboxes (the coordinator dies before teardown). After a
   kill, reap idle sandboxes once they cross the idle threshold (~1–2 h later), never immediately
   — an aggressive reap kills other jobs' active trials.
+
+## Trial artifacts (trace_jobs)
+
+- Trials live at `s3://marin-us-east-02a/iris/<run-name>/trace_jobs/<trial>/` with
+  `config.json` (written at trial start), `result.json` (written at finalize; carries the
+  reward and `TimingInfo`), `agent/`, `verifier/`, and `exception.txt` on error.
+  `<run-name>` comes from `trainer.run_name`, not the config's literal `trials_dir` (the
+  coordinator rewrites it) — discover it by listing `iris/` and matching the job name.
+- Aggregate in-pod and transfer aggregates only — never sync raw trials to the Mac
+  (hundreds of thousands of small objects). In-pod access: boto3 with
+  `endpoint_url="http://cwlota.com"` and `Config(s3={"addressing_style": "virtual"})`; one
+  paginated `list_objects_v2` over `.../trace_jobs/`, newest ~200 (steady state) / ~500
+  (error tails) by `LastModified`. What the fields mean: `rl-diagnostics.md` §Per-trial
+  duty cycle.
 
 ## Images
 
@@ -145,6 +169,10 @@ a reconciled timeline before calling wedge.
 ## Standing guardrails
 
 - Never kill a RUNNING job or restart/bounce a cluster without explicit permission.
+- `iris job kill/stop <id>` is a prefix kill and defaults to `--include-children`: killing
+  `/u/rl-foo` also kills `/u/rl-foo-v2`. Pass `--no-include-children` to kill exactly one
+  job (`--dry-run` first when the name could prefix a live sibling), and never name a
+  relaunch `<live-job-name>-<suffix>`.
 - Keep at most 6 running RL jobs total (Daytona capacity, not per-cluster).
 - `--max-retries ≥ 1` on gangs (transient HF weight-resolution flakes SIGKILL a gang at
   `max_retries=0`).

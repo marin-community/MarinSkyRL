@@ -70,16 +70,56 @@ not mean only rank 0 ran X. The one deliberately ungated per-rank marker is
   comes from a rollout dependency under the image's pins (an image/env issue), not first-party
   code — unless a verbatim traceback points at first-party files.
 
-## Metrics — benign vs alarming
+## Training dynamics
 
-- `policy/rollout_train_prob_diff_mean` in the millions is a benign scale artifact (linear-space
-  mean of exponentials; any fat tail dominates). The actual correctness read is the TIS family:
-  `tis/imp_ratio_mean` near 1, `imp_ratio_capped_fraction` near 0, `log_ratio_abs_mean` a few
-  hundredths of a nat, `generate/tis/exact_match_fraction` near 1, and a stable small
-  `raw_grad_norm`. A broken router-replay instead shows `log_ratio_abs_max` in the tens,
-  `policy_loss` ~1e4, `raw_grad_norm` ~1e5.
-- Collapsing `policy_entropy` is a real warning sign; a missing metric on a fully-async path may
-  just be a merge/reporting gap — check the source before alarming.
+Per-step training metrics stream into the job's finelog (and wandb when the run has a
+tracker). Judge every trend over a window of ≥10 steps from the synced files — agentic RL
+rewards are noisy and long-episode arms bank slowly.
+
+- **Reward curve:** all-zero from step 1 is an infra fingerprint (over-quota Daytona org,
+  sandbox reap, broken weight sync, missing task data), not "the model is bad" — cross-check
+  the rollout signatures above. A collapse from a previously-positive plateau is a regression
+  event: find the step and correlate with a weight-sync / resume / config event.
+  Noisy-but-drifting-up is healthy.
+- **Entropy:** `policy_entropy` collapsing toward 0 early (rewards not improving) or an
+  abrupt mid-run cliff is a real warning sign; slow decline alongside improving reward is
+  expected. A missing metric on a fully-async path may just be a merge/reporting gap — check
+  the source before alarming.
+- **TIS family, healthy on-policy references:** `tis/imp_ratio_mean` ≈ 0.79–1.02,
+  `tis/log_ratio_abs_mean` ≈ 0.06–0.094 nats (the inherent vLLM↔trainer bf16 precision gap —
+  what TIS corrects, not misalignment), `tis/imp_ratio_capped_fraction` ≈ 0–1e-4,
+  `generate/tis/exact_match_fraction` ≈ 0.99, and a stable small `raw_grad_norm`.
+- **Broken router-replay fingerprint:** `log_ratio_abs_max` ~19, `policy_loss` ~1e4,
+  `raw_grad_norm` ~1e5. Sustained ratio drift far from 1, a growing capped fraction, or a
+  log-ratio step change right after a weight sync means the engines are serving stale or
+  wrong weights — cross-check the w13 reload bracket (§Rollout quality signatures) and
+  `generate/tis/lcs_fallback_fraction` (a spike = target corruption).
+- Both backends emit the `tis/imp_ratio_*` family from main @ `d7ba00ff` onward. A run
+  launched from an older bundle lacks them on the Megatron backend — judge those runs by
+  the `generate/tis/*` fractions plus the `policy_loss` / `raw_grad_norm` magnitudes.
+- `policy/rollout_train_prob_diff_mean` in the millions is a benign scale artifact
+  (linear-space mean of exponentials; any fat tail dominates) — never read it as a fault.
+- **Step time:** `timing/wait_for_generation_buffer` ≈ 0 means generation is off the
+  critical path (§Engine saturation). Tabulate the per-phase Timer lines across the window;
+  one phase inflating step-over-step while its mesh's GPUs sit low is a pipeline bubble —
+  attribute it with the gen→dispatch→train measurements in §Engine saturation, not a guess.
+
+## Per-trial duty cycle (TimingInfo)
+
+- `result.json` count = trials actually finished; `config.json`-only dirs are
+  started/unfinished. Access pattern and layout: `coreweave.md` §Trial artifacts.
+- Each trial's `result.json` carries per-phase `TimingInfo {started_at, finished_at}`:
+  `environment_setup` (sandbox create), `agent_setup`, `agent_execution` (LLM-gen +
+  tool-exec combined), `verifier`. `agent_result.metadata.api_request_times_msec` is the
+  LLM-gen-only per-call list. Derived: tool-exec = `agent_execution` − LLM-gen; teardown gap
+  = trial `finished_at` − max(phase `finished_at`), sub-second when healthy.
+- Aggregate bounded samples (newest ~200 for steady state, ~500 for error tails) and report
+  medians/percentiles only.
+- LLM-gen ≫ sandbox (e.g. ~89% vs <1%) = LLM-turn-bound; the lever is trial concurrency /
+  buffer depth, not sandbox optimization. Sandbox create/teardown above ~10% of wall, or an
+  `environment_setup` tail over 10 s, is real re-provision churn.
+- Burst ≠ churn: a wave of `environment_setup` time at job start or right after a
+  preempt/relaunch is initial provisioning, not churn.
 
 ## Config-parse and resume signatures
 

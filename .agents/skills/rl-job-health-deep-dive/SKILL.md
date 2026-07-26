@@ -43,6 +43,7 @@ default to NO-KILL as a hedge.
 | A liveness | the authoritative state-poll line and the newest phase-timer/step line with its timestamp | ERROR |
 | B resources | per-rank GPU util with policy ranks separated from engine ranks, and the engine subscription line (Running vs Waiting vs cap) | ERROR |
 | C rollouts | actual reward values / trial exception files you opened, not counts you assumed | ERROR |
+| D dynamics | the per-step metric series (reward, entropy, TIS, phase timers) you extracted from the synced finelog over a ≥10-step window | ERROR |
 
 ## Probe order
 
@@ -60,10 +61,23 @@ default to NO-KILL as a hedge.
 4. **Gate C — rollout quality.** Open actual trial artifacts: rewards, turns, coherence,
    verifier behavior. Match against the known signatures in `rl-diagnostics.md` before
    inventing a new theory.
-5. **Optional deep probe — per-trial duty cycle.** Only when you must decide whether trial
+5. **Gate D — training dynamics.** State, GPUs, and rollouts can all be green while the run
+   quietly stops learning or bleeds throughput. Judge every trend over a ≥10-step window from
+   the synced finelog (and wandb when configured) — never a single step: the reward-curve
+   trend (flat-at-zero after bring-up → cross-check Gate C; a collapse from a plateau →
+   find the step and correlate with a weight-sync/resume/config event); entropy collapse;
+   off-policyness via `tis/imp_ratio_mean`, `tis/imp_ratio_capped_fraction`,
+   `tis/log_ratio_abs_mean`, and `generate/tis/{exact_match_fraction,lcs_fallback_fraction}`
+   (runs launched from pre-`d7ba00ff` bundles lack `tis/imp_ratio_*` on the Megatron
+   backend — use the proxies named in `rl-diagnostics.md` §Training dynamics); and a
+   per-phase Timer table across the window
+   for pipeline bubbles — report the table, not an impression. Healthy references and broken
+   fingerprints: `rl-diagnostics.md` §Training dynamics. A drifting step time with no
+   pathology is a tuning note, not a KILL.
+6. **Optional deep probe — per-trial duty cycle.** Only when you must decide whether trial
    throughput is capped by generation vs sandbox lifecycle vs tool exec: aggregate per-trial
-   timing from trial artifacts in bounded samples, and never assert "sandbox churn" without
-   those numbers.
+   timing from trial artifacts in bounded samples (`rl-diagnostics.md` §Per-trial duty
+   cycle), and never assert "sandbox churn" without those numbers.
 
 ## Deliver one recommendation
 
@@ -72,12 +86,15 @@ RL-JOB-HEALTH — <job_id>  (<model>, <geometry>, <stage>)   captured: <dir>
 
 VERDICT: KILL | NO-KILL | ERROR          confidence: high|medium|low
 Evidence I actually read: <quoted state-poll line; policy-vs-engine util split; engine
-  subscription counts; reward values / exception files. A blank row means that gate is ERROR.>
+  subscription counts; reward values / exception files; the metric window. A blank row means
+  that gate is ERROR.>
 Restarts: <burned/max — none | same failure each attempt | transient, recovered>
 
 Gate A (liveness):  PASS|FAIL|ERROR — <evidence>
 Gate B (resources): PASS|FAIL|ERROR — <evidence>
 Gate C (rollouts):  PASS|FAIL|ERROR — <evidence>
+Gate D (dynamics):  PASS|FAIL|ERROR — <reward trend over the window; entropy; TIS reads;
+                    per-phase Timer table and any bubble>
 
 REASONING: <2–4 sentences; the load-bearing evidence, especially for whatever is new/untested>
 NEXT STEPS: <KILL: root cause + concrete fix + relaunch-or-hold.
