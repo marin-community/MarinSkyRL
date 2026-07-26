@@ -271,11 +271,21 @@ Then **bump the matching pin in `cloud/iris/launch_rl_iris.py`** to the new
 silently cross a harbor-version boundary. **Pin the DIGEST, never the floating `:gpu-rl` tag** (it
 stale-caches under `imagePullPolicy: IfNotPresent`). Commit the launcher bump locally.
 
-**Last known-good digest (currently pinned on main):**
-`sha256:e8b48241b548da570a319ff421e72787692ee87dae2408c99a2d0c6794186177` (gpu-rl-e03896b7 — baked harbor
-`f4a6b1a0`; PULLABLE, 48 layers max 3.46 GB; build asserts green). This pin **predates the merged harbor-bridge
-change** — harbor is baked into the image, so an image bump is the durable follow-up before dropping the runtime
-`--harbor-ref` override.
+**To read the digests currently pinned on main**, read the constants themselves — do not trust a digest
+quoted in prose, here or in an experiment policy:
+
+```bash
+python -c "
+import sys; sys.path.insert(0, '.')
+from cloud.iris.launch_rl_iris import DEFAULT_RL_DOCKER_IMAGE as plain, DEFAULT_RL_MEGATRON_DOCKER_IMAGE as mega
+print('plain   ', plain)
+print('megatron', mega)"
+```
+
+The provenance comment above each constant records what that build bakes and why it was cut. Per the skill
+policy in `AGENTS.md`, a mutable revision is resolved at execution time, never copied into a skill: this
+document previously asserted a "currently pinned" digest that had gone several builds stale and still
+described itself as predating a merged change.
 
 ## 9. WHEN a rebuild is actually required (vs a runtime checkout)
 
