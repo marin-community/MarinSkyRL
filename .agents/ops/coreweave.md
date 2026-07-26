@@ -170,8 +170,14 @@ a reconciled timeline before calling wedge.
 
 ## Images
 
-- The RL image is pinned by immutable digest in `cloud/iris/launch_rl_iris.py:DEFAULT_RL_DOCKER_IMAGE`
-  (never the floating tag — it stale-caches under `imagePullPolicy: IfNotPresent`).
+- The RL image is pinned by immutable digest in `cloud/iris/launch_rl_iris.py` (never the floating
+  tag — it stale-caches under `imagePullPolicy: IfNotPresent`). There are TWO pins, and the
+  launcher picks between them from the config's `trainer.strategy`:
+  `DEFAULT_RL_MEGATRON_DOCKER_IMAGE` for `megatron`, `DEFAULT_RL_DOCKER_IMAGE` otherwise. The
+  plain image has no megatron package, so a megatron config on it dies at import. Pass
+  `--task-image` only to override that choice; the launch banner echoes the resolved digest, and
+  `kubectl -n iris get pod <pod> -o jsonpath='{.status.containerStatuses[*].imageID}'` confirms
+  what the pods actually run.
 - First-party source ships via the `/app` workspace bundle at launch; only baked/compiled
   contents (vLLM fork, flash-attn, torch/CUDA, locked deps, harbor) require an image rebuild —
   see the `build-gpu-rl-image-iris` skill.

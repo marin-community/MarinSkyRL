@@ -263,10 +263,13 @@ After the build SUCCEEDS (state SUCCEEDED, push done), capture the immutable dig
 docker buildx imagetools inspect ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>
 crane manifest --platform linux/amd64 ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>   # then digest it
 ```
-Then **bump `DEFAULT_RL_DOCKER_IMAGE` in `cloud/iris/launch_rl_iris.py`** to the new
-`ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment. **Pin the DIGEST,
-never the floating `:gpu-rl` tag** (it stale-caches under `imagePullPolicy: IfNotPresent`). Commit the launcher
-bump locally.
+Then **bump the matching pin in `cloud/iris/launch_rl_iris.py`** to the new
+`ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment: a
+`gpu-rl-<gitsha>` digest goes in `DEFAULT_RL_DOCKER_IMAGE`, a `gpu-rl-megatron-<gitsha>` digest in
+`DEFAULT_RL_MEGATRON_DOCKER_IMAGE`. The launcher selects between them from the config's
+`trainer.strategy`, so **bump BOTH in the same commit** — leaving one behind makes a strategy switch
+silently cross a harbor-version boundary. **Pin the DIGEST, never the floating `:gpu-rl` tag** (it
+stale-caches under `imagePullPolicy: IfNotPresent`). Commit the launcher bump locally.
 
 **Last known-good digest (currently pinned on main):**
 `sha256:e8b48241b548da570a319ff421e72787692ee87dae2408c99a2d0c6794186177` (gpu-rl-e03896b7 — baked harbor

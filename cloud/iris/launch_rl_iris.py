@@ -293,10 +293,16 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # separator applied after _strip_protocol — the fix that made from_path s3 resume actually
     # work; validated live on rl-tasktrove-dq-sweep-30b-terminus2-qwen-20260725-121011-d6637e,
     # global_step_23 resume clean) and #132 (megatron pip-check build gate, fixes #130).
-    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total. Megatron sibling from the same
-    # harbor bump: gpu-rl-megatron-87ff3f6b @sha256:e1e62927 (39 layers, max 3.61 GB) — use it
-    # for trainer.strategy=megatron configs; the plain image has no megatron package.
-    "@sha256:625d75770ce8503c6634fb1ce8ea5d4cef7d7ef26b101ed0d68a9cc92ef270b1"  # noqa: E501
+    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
+    # gpu-rl-d7ba00ff (built 2026-07-26): HARBOR_COMMIT bump 01c736a6 -> 772e20f7, which carries
+    # harbor#39 (a 300 s ENVIRONMENT_STOP_TIMEOUT_SEC deadline on verifier teardown, and
+    # CancelledError classified non-retryable) and harbor#40. Before #39 a hung verifier exec had
+    # no deadline: durations reached 5,050-34,832 s with exception_info=None, and the rollout was
+    # lost. The deadline now fires, the trial survives at reward 0, and its logprobs stay
+    # TIS-valid. SKYRL d7ba00ff also carries #137 (literal-log byte-span indexing, which fixed the
+    # ~85 GiB/h RolloutCoordinator growth) and #138 (TIS diagnostics on both backends).
+    "@sha256:1879c8010ebfbe4d27b217ca695b26b1f425fe969f65e2c4a66e5eb58007e13e"  # noqa: E501
+    # (prev: gpu-rl-0acfe947 @sha256:625d7577, Harbor 01c736a6 + background artifact writer)
     # (prev: gpu-rl-d48445f7 @sha256:eb854128, Harbor 1319eb29 + resume-fix chain)
     # (prev: gpu-rl-4d289ed3 @sha256:fd8792ef, vllm 8672c71e + Harbor 1319eb29)
     # (prev: gpu-rl-0dda3d68 @sha256:bb1b01ba, Harbor baked)
@@ -304,6 +310,25 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
     # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
 )
+
+# The Megatron sibling of DEFAULT_RL_DOCKER_IMAGE, built from the same source and the same baked
+# harbor with INSTALL_MEGATRON=1. A `trainer.strategy: megatron` config CANNOT run on the plain
+# image, which has no megatron package, so `resolve_launch_defaults` selects this one from the
+# config. Rebuild BOTH images together and bump BOTH digests, or a strategy switch silently
+# crosses a harbor-version boundary.
+DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
+    "ghcr.io/open-thoughts/openthoughts-agent"
+    # gpu-rl-megatron-d7ba00ff (built 2026-07-26): the megatron variant of gpu-rl-d7ba00ff, so it
+    # carries the same harbor 772e20f7 (#39 verifier-teardown deadline, #40) and the same SKYRL
+    # d7ba00ff (#137 coordinator-growth fix, #138 TIS diagnostics on both backends). Verified live
+    # on all four tasktrove-dq-sweep arms relaunched 2026-07-26 14:40 UTC.
+    "@sha256:107e49332cf9c162d3d0659c86719521a142049fe1e75ba45d725f7d83491fff"  # noqa: E501
+    # (prev: gpu-rl-megatron-87ff3f6b @sha256:e1e62927, Harbor 01c736a6)
+    # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041; gpu-rl-megatron-a1e7a363 @sha256:570e9cc1)
+)
+
+_MEGATRON_STRATEGY = "megatron"
+
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
     # of the prior gpu-rl-1af0ae2d (@sha256:d77b34dd…) — baked harbor f7f51f13 → 0729a3e9, which sits
@@ -696,6 +721,27 @@ def _rl_config_harness_name(rl_config: str) -> Optional[str]:
     return None
 
 
+def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
+    """Read the effective ``trainer.strategy`` the job will run under.
+
+    A ``--skyrl_override trainer.strategy=...`` wins over the config file, because Hydra applies
+    it later. Returns None when neither source declares one.
+    """
+    for override in reversed(getattr(args, "skyrl_override", None) or []):
+        key, separator, value = str(override).partition("=")
+        if separator and key.strip().lstrip("+~") == "trainer.strategy":
+            return value.strip().strip("'\"").lower() or None
+
+    try:
+        with open(args.rl_config) as f:
+            config = yaml.safe_load(f) or {}
+    except OSError:
+        return None
+    trainer = config.get("trainer") if isinstance(config, dict) else None
+    strategy = trainer.get("strategy") if isinstance(trainer, dict) else None
+    return strategy.strip().lower() if isinstance(strategy, str) and strategy.strip() else None
+
+
 def _sanitize_job_name_component(value: str) -> str:
     """Make one human-readable Kubernetes job-name component."""
     value = value.strip().rstrip("/").split("/")[-1]
@@ -742,6 +788,12 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     if args.record_literal is None:
         harness = _rl_config_harness_name(args.rl_config)
         args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
+
+    if args.task_image is None:
+        strategy = _rl_training_strategy(args)
+        args.task_image = (
+            DEFAULT_RL_MEGATRON_DOCKER_IMAGE if strategy == _MEGATRON_STRATEGY else DEFAULT_RL_DOCKER_IMAGE
+        )
 
 
 def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
@@ -1172,8 +1224,9 @@ def create_parser() -> argparse.ArgumentParser:
         "--docker_image",
         "--docker-image",
         dest="task_image",
-        default=DEFAULT_RL_DOCKER_IMAGE,
-        help=f"Container image (default {DEFAULT_RL_DOCKER_IMAGE}).",
+        default=None,
+        help="Container image. Default: selected from the config's trainer.strategy — "
+        f"{DEFAULT_RL_MEGATRON_DOCKER_IMAGE} for megatron, {DEFAULT_RL_DOCKER_IMAGE} otherwise.",
     )
     parser.add_argument(
         "--job-name",
