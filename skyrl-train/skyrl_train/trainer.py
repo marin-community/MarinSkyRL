@@ -1970,7 +1970,7 @@ class RayPPOTrainer:
         """
         from skyrl_train.callbacks.builtin import HFHubUploadCallback
 
-        for cb in self.callback_handler.callbacks:
+        for cb in getattr(self.callback_handler, "callbacks", []):
             if isinstance(cb, HFHubUploadCallback):
                 cb.post_save_flush(self.global_step)
 
