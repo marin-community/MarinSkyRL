@@ -37,7 +37,7 @@ _CONFIGS = {
     "delphi_math_rl.yaml": (4096, 3584, 1),
     "delphi_math_rl_ifeval.yaml": (4096, 3584, 1),
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
-    "tasktrove_dq_sweep_30b.yaml": (32768, 4096, 30),
+    "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_ncclnet.yaml": (32768, 4096, 30),
     "tasktrove_dq_sweep_30b_terminus2.yaml": (32768, 4096, 30),
 }
@@ -70,14 +70,14 @@ def test_context_budget_derives_all_hydra_length_arguments():
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
     args = build_skyrl_hydra_args(parsed, {"job_name": "context-test", "num_nodes": 4}, _HPCStub())
 
-    assert "trainer.max_prompt_length=28672" in args
-    assert "generator.max_input_length=28672" in args
-    assert "generator.max_turns=30" in args
-    assert "generator.sampling_params.max_generate_length=4096" in args
-    assert any(arg.endswith("generator.engine_init_kwargs.max_model_len=32768") for arg in args)
-    assert "+terminal_bench_config.model_info.max_input_tokens=28672" in args
-    assert "+terminal_bench_config.model_info.max_output_tokens=4096" in args
-    assert "+terminal_bench_config.harbor.max_turns=30" in args
+    assert "trainer.max_prompt_length=114688" in args
+    assert "generator.max_input_length=114688" in args
+    assert "generator.max_turns=90" in args
+    assert "generator.sampling_params.max_generate_length=16384" in args
+    assert any(arg.endswith("generator.engine_init_kwargs.max_model_len=131072") for arg in args)
+    assert "+terminal_bench_config.model_info.max_input_tokens=114688" in args
+    assert "+terminal_bench_config.model_info.max_output_tokens=16384" in args
+    assert "+terminal_bench_config.harbor.max_turns=90" in args
 
 
 def test_context_budget_rejects_impossible_and_legacy_config_fields(tmp_path):
@@ -120,7 +120,7 @@ def test_context_budget_override_rederives_lengths_and_rejects_low_level_fields(
         ["context_budget.max_new_tokens_per_turn=2048", "trainer.logger=console"],
     )
 
-    assert overridden.context_budget.max_input_tokens == 30720
+    assert overridden.context_budget.max_input_tokens == 129024
     assert overridden.generator["sampling_params"]["max_generate_length"] == 2048
     assert overridden.terminal_bench["model_info"]["max_output_tokens"] == 2048
     assert passthrough == ["trainer.logger=console"]
@@ -138,10 +138,10 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     assert json.loads(artifact.read_text()) == {
         "config_path": str(parsed.config_path),
         "context_budget": {
-            "max_input_tokens": 28672,
-            "max_new_tokens_per_turn": 4096,
-            "max_turns": 30,
-            "request_window_tokens": 32768,
+            "max_input_tokens": 114688,
+            "max_new_tokens_per_turn": 16384,
+            "max_turns": 90,
+            "request_window_tokens": 131072,
         },
     }
 
@@ -152,4 +152,4 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     )
     assert remote_artifact == "memory://context-budget/resolved-context-budget.json"
     with fsspec.open(remote_artifact) as artifact_file:
-        assert json.load(artifact_file)["context_budget"]["request_window_tokens"] == 32768
+        assert json.load(artifact_file)["context_budget"]["request_window_tokens"] == 131072
