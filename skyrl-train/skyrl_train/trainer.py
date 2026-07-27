@@ -378,6 +378,7 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final HF model (resume-at-max finalize).")
+                self._flush_hf_uploads()
         logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _train_loop(self):
@@ -688,6 +689,7 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+                self._flush_hf_uploads()
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
@@ -1958,6 +1960,19 @@ class RayPPOTrainer:
                 )
             )
         logger.info("Successfully saved model weights.")
+
+    def _flush_hf_uploads(self) -> None:
+        """Re-process HF Hub uploads after the final model export is on disk.
+
+        ``on_train_end`` fires before ``save_models()``, so the final step's
+        upload was skipped on the first pass.  This retries it now that the
+        export exists.  No-op when no HFHubUploadCallback is registered.
+        """
+        from skyrl_train.callbacks.builtin import HFHubUploadCallback
+
+        for cb in self.callback_handler.callbacks:
+            if isinstance(cb, HFHubUploadCallback):
+                cb.post_save_flush(self.global_step)
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""

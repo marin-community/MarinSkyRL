@@ -18,12 +18,14 @@ Supports two configuration styles:
    ```
 """
 
+import os
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.utils.io import io
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 
@@ -256,6 +258,7 @@ class HFHubUploadCallback(TrainerCallback):
         self._pending_uploads: List[int] = []  # Steps that need uploading
         self._export_path: Optional[str] = None
         self._api = None
+        self._final_step: Optional[int] = None
 
     def _get_api(self):
         """Lazy-load HuggingFace Hub API."""
@@ -328,7 +331,11 @@ class HFHubUploadCallback(TrainerCallback):
             if state.global_step not in self._pending_uploads:
                 self._pending_uploads.append(state.global_step)
 
-        # Process all pending uploads
+        self._final_step = state.global_step
+
+        # Process all pending uploads.  The final step's export may not exist
+        # yet — on_train_end fires BEFORE save_models() in the training loop.
+        # The trainer calls post_save_flush() after the export lands.
         self._process_pending_uploads()
         return control
 
@@ -344,46 +351,41 @@ class HFHubUploadCallback(TrainerCallback):
         if not self._ensure_repo_exists():
             return
 
-        from pathlib import Path
-
         api = self._get_api()
 
         requested = list(self._pending_uploads)
         missing: list[int] = []
 
         for step in requested:
-            model_path = Path(self._export_path) / f"global_step_{step}" / "policy"
+            model_path = os.path.join(self._export_path, f"global_step_{step}", "policy")
 
-            if not model_path.exists():
+            if not io.exists(model_path):
                 missing.append(step)
                 logger.warning(f"HFHubUploadCallback: Model path not found: {model_path}")
                 continue
 
-            # Always upload the step to the repo ROOT (path_in_repo="" => repo root in
-            # huggingface_hub), overwriting prior root weights. Whichever step uploads
-            # last naturally wins root, keeping the repo from_pretrained-able. In "all"
-            # mode we additionally archive each step under "{prefix}/step_{N}/".
-            upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
-            if self.upload_mode == "all":
-                archive_path = f"{self.path_in_repo_prefix}/step_{step}"
-                upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
+            with io.local_read_dir(model_path) as local_dir:
+                upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
+                if self.upload_mode == "all":
+                    archive_path = f"{self.path_in_repo_prefix}/step_{step}"
+                    upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
 
-            for path_in_repo, commit_message in upload_targets:
-                dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
-                try:
-                    logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
-                    with _hf_hub_online():
-                        api.upload_folder(
-                            folder_path=str(model_path),
-                            repo_id=self.repo_id,
-                            path_in_repo=path_in_repo,
-                            repo_type="model",
-                            revision=self.revision,
-                            commit_message=commit_message,
-                        )
-                    logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
-                except Exception as e:
-                    logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
+                for path_in_repo, commit_message in upload_targets:
+                    dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
+                    try:
+                        logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
+                        with _hf_hub_online():
+                            api.upload_folder(
+                                folder_path=str(local_dir),
+                                repo_id=self.repo_id,
+                                path_in_repo=path_in_repo,
+                                repo_type="model",
+                                revision=self.revision,
+                                commit_message=commit_message,
+                            )
+                        logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
+                    except Exception as e:
+                        logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
 
         if requested and len(missing) == len(requested):
             # Every export the run asked to publish was absent. The per-step warnings above scroll
@@ -418,11 +420,24 @@ class HFHubUploadCallback(TrainerCallback):
             if state.global_step not in self._pending_uploads:
                 self._pending_uploads.append(state.global_step)
 
+        self._final_step = state.global_step
+
         # Run uploads in thread pool to not block
         if self._pending_uploads:
             await asyncio.to_thread(self._process_pending_uploads)
 
         return control
+
+    def post_save_flush(self, final_step: int) -> None:
+        """Re-process the final step's upload after ``save_models()`` has written it.
+
+        ``on_train_end`` fires *before* ``save_models()`` in the training loop, so
+        the final step's export is missing during the first upload pass.  The
+        trainer calls this method after the export is on disk to retry it.
+        """
+        if self.upload_on_train_end and self.upload_steps > 0:
+            self._pending_uploads.append(final_step)
+            self._process_pending_uploads()
 
 
 @register_callback("database_registration")
