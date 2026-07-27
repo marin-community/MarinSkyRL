@@ -104,5 +104,41 @@ Verdict rules:
   early-bring-up explanation. Say what you are waiting on.
 - **ERROR** — required evidence unobtainable. Never launder it into NO-KILL.
 
+## The asymmetry on learning-quality verdicts
+
+The costs here are not symmetric, and the recommendation should reflect that. A wrongly killed
+healthy run forfeits every banked step and costs a full bring-up to replace. A wrongly kept
+unhealthy run costs one sweep of one arm, and the next probe catches it. **On anything that turns
+on training dynamics rather than a hard fault, be permissive: when the evidence is mixed, the
+answer is NO-KILL with a sharpened watch, not KILL.**
+
+A hard fault — a wedge, a dead rank, a crash loop, a job producing nothing — is different. Those
+are cheap to establish and expensive to leave running. This section is about the other kind.
+
+**Do not recommend KILL for "it does not look like it is learning" unless all of these hold:**
+
+1. **The window clears the ≥10-step bar.** Reward and entropy on these runs are noisy enough that
+   short windows routinely show trends that reverse. Runs have recovered after a five-step decline
+   and after an entropy trough that looked like the start of a collapse.
+2. **A trial-level measurement agrees with the trainer-side one.** They disagree in both
+   directions: the trainer lags live generation by roughly `staleness_mean` × cycle, and a
+   trial-level window can be dominated by a burst. One source alone is not enough to end a run.
+3. **The mechanism is named.** "Reward is falling" is an observation. "Reward is falling because
+   the policy is doing X, evidenced by Y" is a finding. Without the mechanism you cannot tell
+   degradation from a hard patch of the curriculum.
+4. **It is not recovering.** Check whether the metric has already turned before recommending
+   anything.
+
+If some but not all hold, say exactly which, recommend NO-KILL, and propose the specific
+measurement that would settle it next tick. A verdict of "NO-KILL, and here is the one number that
+would change my mind" is more useful to the supervisor than a confident KILL on four steps.
+
+**Flat is not dying.** A run whose reward has stopped improving is not the same as one that is
+collapsing, and a plateau alone is never sufficient grounds. Plateaus resolve in both directions.
+
+**Say so when you are near the line.** If you would have recommended KILL on marginally different
+numbers, state that plainly along with the numbers. The supervisor holds the kill authority and can
+weigh cost against confidence; a probe that hides its uncertainty removes that choice.
+
 The supervisor executes any teardown and relaunch. Diagnosis fixes go through the normal
 worktree → PR flow; never hand-patch a cluster.
