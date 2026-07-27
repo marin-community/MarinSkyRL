@@ -125,6 +125,11 @@ The resolved config the run actually used, so the artifact is reproducible witho
 
 ## 5. Scan for secrets before uploading
 
+The campaign's own artifacts carry a known live credential; match its shape explicitly rather than
+relying on a scan assembled from provider key prefixes, which does not catch it. The pattern and
+where it appears are in [`.agents/ops/coreweave.md`](../../ops/coreweave.md). When no scanner binary
+is installed, say so in the report and state which patterns you did match.
+
 The Hub scans after upload; catch it first. Run a secrets scanner over the staged directory and
 over any logs or traces being published, or fall back to a pattern grep for provider key shapes
 and JWTs. Remove or redact anything found before proceeding.

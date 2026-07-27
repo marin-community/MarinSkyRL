@@ -154,6 +154,22 @@ a reconciled timeline before calling wedge.
   kill, reap idle sandboxes once they cross the idle threshold (~1–2 h later), never immediately
   — an aggressive reap kills other jobs' active trials.
 
+## Known secret in run artifacts: the ingress capability JWT
+
+`terminal_bench_config.agent_api_base` is a minted ingress URL that **embeds a live iris
+capability JWT**. Nothing redacts it. It reaches at least two artifacts a cleanup stages:
+
+- the run's resolved config, and
+- the trainer log (the endpoint is echoed at harbor spawn).
+
+Any secret scan run before publishing MUST match a JWT shape (`eyJ...\.eyJ...`) inside a URL, not
+only bare `TOKEN=` assignments — this one is neither a named-credential assignment nor a
+provider-prefixed key, so a scan built only from those patterns misses it. It has been found in
+staged material once already.
+
+The token is 24h-lived, so an old artifact is usually inert, but treat it as live: expiry is not a
+control we own, and a published repo outlives any reasoning about it. Redact before staging.
+
 ## Trial artifacts (trace_jobs)
 
 - Trials live at `s3://marin-us-east-02a/iris/<run-name>/trace_jobs/<trial>/` with

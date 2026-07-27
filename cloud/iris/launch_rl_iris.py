@@ -314,7 +314,20 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # ppo_base_config.yaml. Three sweep jobs on the previous image died with
     # `Key 'preflight_gate' is not in struct` for exactly this reason.
     # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
-    "@sha256:96848c50a95fcdc50b7d5f4d2b24185394c79ad8c83300c00fcf8452cfbc24e1"  # noqa: E501
+    # gpu-rl-f2b44d4a (built 2026-07-27, kaniko job gpurl-kaniko-f2b44d4a): no baked dependency
+    # moved. The build echoed every pin it read from docker/Dockerfile.gpu-rl -- harbor 772e20f7,
+    # vLLM fork 8672c71e with the 4b555913 native donor, flash-attn 2.8.3, torch 2.11.0+cu128 --
+    # and the same skyrl-train/uv.lock resolved. The image now bakes cloudpickle 3.1.2, py-spy
+    # 0.4.2 and memray (#167), which iris used to install during its setup phase. That is the
+    # prerequisite for setup_scripts=[]: with the packages baked, turning the setup phase off no
+    # longer removes the profiler from every task, and the /app/.venv shadow venv it created goes
+    # away. Also baked: the 131k/16k/90 context budget (#164), the OpenCode context budget with
+    # YAML/TOML comment stripping (#165), and the truncation penalty keyed on the per-turn cap
+    # rather than trajectory-level stop_reason (#166). Those live under skyrl-train/, so they are
+    # inert until the image ships them.
+    # Pull-verified: 38 layers, max 3.61 GB, 19.35 GB total.
+    "@sha256:c7e05af3e85851cf841f1089df5e152cf43092f53bd28b9bb6ce6973bf5ac850"  # noqa: E501
+    # (prev: gpu-rl-ac5a9c65 @sha256:96848c50, Harbor 772e20f7 + the three reward signals)
     # (prev: gpu-rl-d7ba00ff @sha256:1879c801, Harbor 772e20f7 + verifier-teardown deadline)
     # (prev: gpu-rl-0acfe947 @sha256:625d7577, Harbor 01c736a6 + background artifact writer)
     # (prev: gpu-rl-d48445f7 @sha256:eb854128, Harbor 1319eb29 + resume-fix chain)
@@ -340,7 +353,13 @@ DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
     # from the same source in the same pass with the same harbor 772e20f7. This is the image the
     # tasktrove-dq sweep actually uses, because its config sets trainer.strategy=megatron.
     # Pull-verified: 39 layers, max 3.61 GB, 22.02 GB total.
-    "@sha256:0a6cea7ddf877e52c0d06c9a1bab308a23f3a6f8c0ec28452a6ce3de81b2582c"  # noqa: E501
+    # gpu-rl-megatron-f2b44d4a (built 2026-07-27, kaniko job gpurl-kaniko-mega-f2b44d4a): the
+    # megatron variant of gpu-rl-f2b44d4a, built from the same source in the same pass with the
+    # same pins. Its build asserts add megatron.core + megatron.bridge + transformer_engine. This
+    # is the image the tasktrove-dq sweep uses, because its config sets trainer.strategy=megatron.
+    # Pull-verified: 40 layers, max 3.61 GB, 22.05 GB total.
+    "@sha256:a374dd0401bb14c111a4a65c15bd1f5e5c97294795e93ee3e0daabf2e5b018e9"  # noqa: E501
+    # (prev: gpu-rl-megatron-ac5a9c65 @sha256:0a6cea7d, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-d7ba00ff @sha256:107e4933, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-87ff3f6b @sha256:e1e62927, Harbor 01c736a6)
     # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041; gpu-rl-megatron-a1e7a363 @sha256:570e9cc1)
