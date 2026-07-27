@@ -147,7 +147,7 @@ class TestCallbackIntegration:
         control = TrainerControl()
 
         # Should NOT raise
-        result = cb.on_step_end(state, control, trainer=trainer)
+        cb.on_step_end(state, control, trainer=trainer)
         assert cb._checked is True
 
     def test_callback_passes_on_healthy(self):
@@ -162,7 +162,7 @@ class TestCallbackIntegration:
         state = TrainerState(global_step=1, epoch=0, total_steps=80, num_steps_per_epoch=80)
         control = TrainerControl()
 
-        result = cb.on_step_end(state, control, trainer=trainer)
+        cb.on_step_end(state, control, trainer=trainer)
         assert cb._checked is True
 
     def test_callback_checks_only_once(self):
