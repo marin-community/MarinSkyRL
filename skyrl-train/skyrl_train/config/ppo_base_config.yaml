@@ -209,7 +209,7 @@ trainer:
   resume_path: null
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
-  ckpt_interval: 10
+  ckpt_interval: 5
   hf_save_interval: 5
   hf_upload_mode: latest
   export_path: "${oc.env:HOME}/exports/"

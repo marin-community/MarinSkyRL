@@ -136,14 +136,20 @@ and JWTs. Remove or redact anything found before proceeding.
 
 ## 6. Upload the weights
 
-Append **both** the selected step and the model size to the repo name. The size suffix is
-required, and must be **derived from the exported weights** — sum the tensor shapes or read the
-safetensors index — never parsed from the run or base-model name, which are frequently misleading.
+The canonical sequence — export, verify, stage flat, scan, upload, verify — together with the
+destination namespace and the exact commands, lives in
+[`.agents/ops/checkpoint-consolidation.md`](../../ops/checkpoint-consolidation.md). Follow it there
+rather than reconstructing it; the upload flags in particular have sharp edges that have bitten
+before.
 
-> Some trainers additionally auto-push intermediates to a canonical repo with weights nested under
-> a step directory rather than at the root. That layout is not `from_pretrained`-able. This
-> checklist deliberately publishes the manually flattened export; treat any auto-pushed repo as a
-> duplicate to reconcile in §7, not as the deliverable.
+Two rules that are methodology, not recipe, and hold wherever this runs:
+
+- **Derive the model size from the exported weights**, by summing tensor shapes or reading the
+  safetensors index — never from the run name or the base-model name, which are frequently
+  misleading about what was actually trained.
+- **An auto-pushed repo is not the deliverable.** Some trainers push intermediates with weights
+  nested under a step directory, which is not `from_pretrained`-able. Publish the manually
+  flattened export and treat anything auto-pushed as a duplicate to reconcile, not as done.
 
 ## 7. Register in the campaign's registry — OPTIONAL
 

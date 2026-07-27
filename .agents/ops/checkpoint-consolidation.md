@@ -92,3 +92,51 @@ downgraded to warnings.
 `config.json` and the tokenizer files must be present in `--dst`; the script warns when
 `config.json` is missing but still writes the weights. Confirm the parameter count in the final
 report matches the `--inspect` count, and load the directory once before uploading.
+
+
+## Publishing a checkpoint by hand
+
+The canonical route, in order. Steps 1-2 are the only supported way to turn a training checkpoint
+into weights; there is no offline converter for megatron.
+
+**1. Export the chosen step.** Not the newest — the one trailing-EMA selection picked.
+
+```bash
+python -m cloud.iris.export_hf_checkpoint \
+  --ckpt_path s3://marin-us-east-02a/iris/<job>/checkpoints --step <N> \
+  --rl_config cloud/iris/configs/<the config the run trained with>.yaml \
+  --model_path <base model, as at training time> \
+  --num-nodes 4 --gpus-per-node 8
+```
+
+The geometry MUST match training. `--dry-run` prints the launch command without submitting. The
+export lands at `s3://marin-us-east-02a/iris/<job>/exports/global_step_<N>/policy/`.
+
+**2. Confirm it exists before promising anything.** List that prefix and check for
+`model-*.safetensors` plus `config.json`. An export job that exits 0 having written nothing is the
+failure mode this whole path exists to fix.
+
+**3. Stage flat.** Hub model files sit at the ROOT of the uploaded directory, never under
+`policy/`. Copy the export's contents to the root of a clean staging dir, then add the resolved
+launch config and `training_logs/` beside them.
+
+**4. Scan for secrets.** The capability JWT above is present in run artifacts and no scanner binary
+is installed on the launch host — match a JWT-inside-URL shape explicitly.
+
+**5. Upload.**
+
+```bash
+hf upload <namespace>/<repo> <staging_dir> --repo-type model
+```
+
+`hf upload`, never `hf upload-large-folder` (a deprecated stub that deadlocks on Hub LFS 429s).
+Never `huggingface_hub.upload_folder()` without `delete_patterns=[]`. `--private` takes no value.
+Wrap a long upload in `tmux`, not `nohup`.
+
+**Namespace: `laion`** is the default for model repos in this campaign. Note the asymmetry —
+`trace_upload.repo_org` is `DCAgent` for trace datasets, so the two do not match and neither is
+wrong. Repo naming: `<run-slug>-step<N>-<size>`, with the size taken from the checkpoint's own
+tensor shapes rather than from the job or base-model name.
+
+**6. Verify the published repo lists both the weights and `training_logs/`** before deleting any
+staging directory or reclaiming any checkpoint.
