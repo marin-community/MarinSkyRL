@@ -502,8 +502,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             if isinstance(sharded_param, DTensor):
                 sharded_tensor = distribute_tensor(full_param, sharded_param.device_mesh, sharded_param.placements)
             else:
-                # Persistent buffers (Grug's router bias) remain replicated plain
-                # tensors under FSDP2 and therefore have no device_mesh.
                 sharded_tensor = full_param
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,

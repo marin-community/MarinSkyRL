@@ -1,16 +1,5 @@
-# Copyright 2026 NovaSkyAI
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 NovaSkyAI
+# SPDX-License-Identifier: Apache-2.0
 
 """Query-bias observations and optimizer-window reduction for Grug MoE."""
 
@@ -38,9 +27,9 @@ class GrugQueryBiasLayerObservation:
     value across a gradient-accumulation window.
     """
 
-    candidates: torch.Tensor  # [num_experts, <= q]
-    selected_experts: torch.Tensor  # [valid_tokens, top_k]
-    combine_weights: torch.Tensor  # [valid_tokens, top_k]
+    candidates: torch.Tensor
+    selected_experts: torch.Tensor
+    combine_weights: torch.Tensor
 
 
 @dataclass(frozen=True)

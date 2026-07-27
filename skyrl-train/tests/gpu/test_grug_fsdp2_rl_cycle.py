@@ -108,8 +108,6 @@ def _config(
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.fsdp_config.moe_grouped_gemm = False
     cfg.trainer.policy.fsdp_config.use_grouped_mm = False
-    # A single validation update must survive the BF16 sync boundary. This is
-    # intentionally larger than a production RL learning rate.
     cfg.trainer.policy.optimizer_config.lr = 1.0e-3
     cfg.generator.backend = "vllm"
     cfg.generator.async_engine = True

@@ -108,7 +108,6 @@ def test_failed_optimizer_step_discards_grug_query_bias_window():
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=False)
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
 
-    # A later successful completion cannot apply the discarded window.
     torch.testing.assert_close(causal_lm.query_bias, previous_bias)
 
 

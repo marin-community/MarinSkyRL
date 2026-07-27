@@ -1,16 +1,5 @@
-# Copyright 2026 NovaSkyAI
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 NovaSkyAI
+# SPDX-License-Identifier: Apache-2.0
 
 """Canonical, correctness-first PyTorch implementation of Grug MoE.
 
@@ -246,9 +235,6 @@ class GrugMoeConfig(PretrainedConfig):
 class GrugMoeRMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float) -> None:
         super().__init__()
-        # Storage follows the checkpoint/model dtype so each FSDP2 shard group
-        # has uniform parameters. The normalization and multiply stay FP32 in
-        # forward, matching Levanter's reference arithmetic.
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
 
@@ -363,13 +349,8 @@ class GrugMoeRouter(nn.Module):
         return observation
 
     def forward(self, hidden_states: torch.Tensor) -> GrugMoeRouterOutput:
-        # The trainer encloses the whole model in BF16 CUDA autocast. Routing
-        # remains FP32 so threshold-adjacent routes and QB statistics do not
-        # silently depend on that outer context.
         with torch.autocast(device_type=hidden_states.device.type, enabled=False):
             router_logits = F.linear(hidden_states.float(), self.weight.float())
-            # FSDP2 CPU offload does not manage ordinary buffers, so the persistent
-            # QB bias may remain on CPU while the unsharded router runs on CUDA.
             bias = self.bias.detach().to(device=router_logits.device, dtype=torch.float32)
             biased_logits = router_logits + bias
             topk_logits, topk_indices = _jax_top_k(biased_logits, self.top_k + 1)
@@ -385,10 +366,6 @@ class GrugMoeRouter(nn.Module):
                 mask = self._capture_mask
                 if mask is None or mask.numel() != router_logits.shape[0]:
                     raise RuntimeError("query-bias token mask does not match the router token dimension")
-                # QB statistics never contribute to the training loss. Keeping the
-                # capture branch outside autograd also makes a checkpointed layer's
-                # original forward match recomputation after the observation has
-                # deliberately been consumed and capture disarmed.
                 with torch.no_grad():
                     valid_scores = (router_logits.detach() - alpha.detach())[mask]
                     if valid_scores.shape[0] == 0:

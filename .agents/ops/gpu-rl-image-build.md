@@ -69,6 +69,25 @@ prior launch or an unmerged branch, which has already cost one build cycle.
 - Rebuild is also required for: vLLM fork commit, flash-attn version, torch/CUDA base,
   `skyrl-train/uv.lock`, the torchtitan `ep` extra, the rl-stage apt set.
 
+## Grug FSDP2 constraints
+
+- Keep `accelerate>=1.14,<2`. Accelerate 1.11 forwards Transformers 5's
+  `_is_hf_initialized` marker into `torch.nn.Parameter` construction under
+  `init_empty_weights`, which breaks FSDP2 meta loading. Accelerate 1.14 strips and
+  restores the marker.
+- Ray imports `skyrl_train.worker_setup` before assigning actor CUDA masks. Keep it and
+  `skyrl_train.__init__` free of Torch, Transformers, and Ray imports so CUDA cannot
+  initialize against the driver's device view. Jobs 927538 and 930208 showed that an
+  actor-constructor policy reset does not prevent uvloop from creating the concurrency
+  loop first. `RolloutCoordinator` repeats the idempotent hook because Ray cloudpickles
+  the class by value; keep its Terminal Bench import inside the actor constructor.
+- Weight-sync rank offsets are per logical engine, not per vLLM data-parallel actor.
+  Rendezvous ports use 20000–29999 rather than the Linux ephemeral client range and
+  must be unique across logical engines in a job.
+- Grug router logits and query-bias observations remain FP32. The persistent query-bias
+  buffer is replicated by FSDP2 and transferred as its own mixed-dtype weight-sync
+  chunk; fused weight sync is unsupported.
+
 ## Known gaps
 
 - A fuller rewrite of the build skill sits on the unmerged branch

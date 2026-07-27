@@ -964,8 +964,6 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    # Since finish_reason != abort on the second call and no accumulation
-    # occurred, preserve its response and the output schema's optional field.
     assert out == {**engines[0].responses[1], "prompt_logprobs": None}
 
 

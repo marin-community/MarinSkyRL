@@ -139,11 +139,6 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
 
     def __init__(self, inference_engine_actor: ActorHandle, *, weight_sync_relative_rank_offset: int | None = None):
         self.inference_engine_actor = inference_engine_actor
-        # Relative to the first inference rank. vLLM creates one top-level Ray
-        # actor per DP rank, but every actor in the same logical engine already
-        # reports a distinct global rank through torch.distributed. They must
-        # therefore receive the same logical-engine offset during weight-sync
-        # communicator initialization.
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
 
     def tp_size(self):

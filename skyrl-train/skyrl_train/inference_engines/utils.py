@@ -246,10 +246,6 @@ def get_rendezvous_addr_port(placement_group, pg_index: int, excluded_ports: Col
 
     @ray.remote(num_cpus=0, num_gpus=0)
     def get_addr_port():
-        # Binding port 0 returns a port from the ephemeral client range. Under
-        # high actor startup concurrency, an outbound connection can acquire it
-        # between this probe and vLLM's TCPStore bind. Use a dedicated range and
-        # exclude ports already assigned to other logical engines in this job.
         return ray.util.get_node_ip_address(), _find_available_rendezvous_port(excluded_ports)
 
     master_sched = PlacementGroupSchedulingStrategy(

@@ -794,8 +794,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 )
             )
             if relative_rank_offset is None:
-                # Remote/legacy engines expose one endpoint per logical engine.
-                # Keep their existing sequential TP*PP offset behavior.
                 rank_offset_count += engine.tp_size() * engine.pp_size()
         await asyncio.gather(*tasks)
 

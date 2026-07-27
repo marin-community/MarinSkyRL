@@ -18,7 +18,4 @@ def register_local_models() -> None:
     AutoModelForCausalLM.register(GrugMoeConfig, GrugMoeForCausalLM, exist_ok=True)
 
 
-# Every Grug-aware loading path imports this package before calling a Transformers
-# auto class. Keep the top-level skyrl_train package dependency-free for Ray's
-# pre-CUDA worker setup hook.
 register_local_models()

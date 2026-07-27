@@ -42,7 +42,6 @@ def test_grug_training_options_reject_each_unsupported_feature(option, value, la
 
 
 def test_grug_training_options_accept_supported_defaults_and_ignore_other_models():
-    # Validators signal supported configurations by completing without an exception.
     validate_grug_training_options(**_SUPPORTED_OPTIONS)
     validate_grug_training_options(
         **{
@@ -61,6 +60,5 @@ def test_grug_training_strategy_rejects_non_fsdp2_backends(strategy):
 
 
 def test_grug_training_strategy_accepts_fsdp2_and_ignores_other_models():
-    # Validators signal supported configurations by completing without an exception.
     validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, "fsdp2")
     validate_grug_training_strategy("qwen3", "deepspeed")

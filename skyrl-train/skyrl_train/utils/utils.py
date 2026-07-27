@@ -1359,8 +1359,6 @@ def initialize_ray(cfg: DictConfig):
     ray.init(
         runtime_env={
             "env_vars": env_vars,
-            # Keep this hook and skyrl_train.__init__ dependency-light: Ray
-            # imports them before applying each actor's CUDA mask.
             "worker_process_setup_hook": "skyrl_train.worker_setup.force_stock_asyncio_in_worker",
         }
     )

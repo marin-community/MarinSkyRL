@@ -74,9 +74,6 @@ class FSDPWeightExtractor(WeightExtractor):
         _cfg = getattr(model, "config", None)
         self._model_type = getattr(_cfg, "model_type", "") or "" if _cfg is not None else ""
         validate_weight_sync_mode(self._model_type, fuse_weights=fuse_weights)
-        # Grug's persistent query bias is intentionally FP32. Keep it as a
-        # separate IPC chunk so mixed-dtype sync does not pack/cast it with the
-        # surrounding BF16 MLP weights.
         self.group_by_module = group_by_module and self._model_type != GRUG_MOE_MODEL_TYPE
         # Qwen3.5/3.6 VLM-shell weight-sync (tmax Stage 2): the RL policy is the
         # unwrapped TEXT tower (``Qwen3_5MoeForCausalLM``, names ``model.*``) but the
