@@ -8,7 +8,6 @@ and cleaned incrementally).
 
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -37,11 +36,7 @@ def _changed_py_files() -> list[Path]:
             cwd=_REPO_ROOT,
             timeout=10,
         )
-        return [
-            (_REPO_ROOT / line.strip())
-            for line in result.stdout.splitlines()
-            if line.strip().endswith(".py")
-        ]
+        return [(_REPO_ROOT / line.strip()) for line in result.stdout.splitlines() if line.strip().endswith(".py")]
     except Exception:
         return []
 
@@ -108,9 +103,7 @@ def _find_long_comment_blocks(text: str, max_consecutive: int = 2) -> list[str]:
                 )
             consecutive = 0
     if consecutive > max_consecutive:
-        violations.append(
-            f"  L{block_start}-{block_start + consecutive - 1}: {consecutive} consecutive comment lines"
-        )
+        violations.append(f"  L{block_start}-{block_start + consecutive - 1}: {consecutive} consecutive comment lines")
     return violations
 
 

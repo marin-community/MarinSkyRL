@@ -51,6 +51,35 @@ setting changes.
   overrides the file's 288 to **96** for this sweep. Never permute one side alone.
 - On a KV-bound OOM, lower `gpu_memory_utilization` (0.80) or `max_num_seqs` first. Never TP.
 
+## Context budget
+
+`context_budget` is the ONLY public declaration. Every length field below is derived from it, and
+the config is forbidden from setting them directly (`_validate_no_derived_context_fields` raises).
+
+| declared | value |
+|---|---|
+| `request_window_tokens` | 131,072 |
+| `max_new_tokens_per_turn` | 16,384 |
+| `max_turns` | 90 |
+| derived `max_input_tokens` | **114,688** (= window − per-turn) |
+
+Materialized into: `engine_init_kwargs.max_model_len` 131,072; `generator.max_input_length` and
+`trainer.max_prompt_length` 114,688; `sampling_params.max_generate_length` 16,384;
+`generator.max_turns` and `harbor.max_turns` 90; `model_info.max_input_tokens` / `max_output_tokens`
+114,688 / 16,384.
+
+Prompt cap plus one full response equals `max_model_len` exactly, by construction — the derivation
+reserves one complete response and no more, so there is no slack.
+
+A second, DIFFERENT cap lives in the generator: `max_response_tokens = max_generate_length +
+max_input_length − initial_prompt_length`, applied to the whole trajectory. `stop_reason ==
+"length"` — the condition `truncation_penalty` fires on — is set against THAT, not against the
+per-turn cap. The per-turn cap severs tool-call JSON without setting it.
+
+Raised from 32,768 / 4,096 / 30 on 2026-07-27. At 4,096 per turn, 28% of turns on one arm ended
+exactly at the cap and 6.1% of all tool calls were rejected as malformed JSON — the model writes a
+whole file in one call and the cap severs it, 3× more often on zero-reward trials.
+
 ## Budget
 
 - `max_steps: 80` or 2 epochs, whichever comes first.
