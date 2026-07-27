@@ -735,6 +735,71 @@ class LoggingCallback(TrainerCallback):
         return control
 
 
+class PreflightGateError(Exception):
+    """Raised when the pre-flight reward gate fails with on_failure='abort'."""
+
+
+@register_callback("preflight_gate")
+class PreflightGateCallback(TrainerCallback):
+    """Pre-flight reward gate: abort training when the reward distribution is
+    outside the band where RLOO has usable within-group variance.
+
+    DEFAULT-OFF. When enabled, checks mean per-sample reward after the first
+    training step's rollouts are scored (before the second step).  On failure
+    with ``on_failure="abort"`` raises ``PreflightGateError``; with
+    ``on_failure="warn"`` logs and continues.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = False,
+        min_reward: float = 0.25,
+        max_reward: float = 0.75,
+        on_failure: str = "abort",
+    ):
+        self.enabled = enabled
+        self.min_reward = min_reward
+        self.max_reward = max_reward
+        self.on_failure = on_failure
+        self._checked = False
+
+    def on_step_end(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        if self._checked or not self.enabled:
+            return control
+        self._checked = True
+
+        trainer = kwargs.get("trainer")
+        if trainer is None:
+            return control
+
+        rewards = self._extract_step_rewards(trainer)
+        if not rewards:
+            logger.warning("[preflight] No rewards available from step 1; gate skipped.")
+            return control
+
+        from skyrl_train.utils.preflight_gate import check_preflight_gate
+
+        result = check_preflight_gate(rewards, self.min_reward, self.max_reward)
+        if not result.passed and self.on_failure == "abort":
+            raise PreflightGateError(result.message)
+
+        return control
+
+    @staticmethod
+    def _extract_step_rewards(trainer) -> List[float]:
+        """Extract per-sample scalar rewards from the trainer's current batch."""
+        for attr in ("_current_step_rewards", "step_rewards"):
+            val = getattr(trainer, attr, None)
+            if val is not None:
+                return [float(r) for r in val]
+        return []
+
+
 @register_callback("vllm_stats")
 class VLLMStatsCallback(TrainerCallback):
     """
@@ -1085,6 +1150,19 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
             if harbor:
                 agent_name = getattr(harbor, "name", None)
         callbacks.append(DatabaseRegistrationCallback(agent_name=agent_name))
+
+    # Pre-flight reward gate (default-off)
+    gate_cfg = getattr(cfg.trainer, "preflight_gate", None)
+    gate_enabled = getattr(gate_cfg, "enabled", False) if gate_cfg else False
+    if gate_enabled:
+        callbacks.append(
+            PreflightGateCallback(
+                enabled=True,
+                min_reward=getattr(gate_cfg, "min_reward", 0.25),
+                max_reward=getattr(gate_cfg, "max_reward", 0.75),
+                on_failure=getattr(gate_cfg, "on_failure", "abort"),
+            )
+        )
 
     # vLLM stats callback (enabled when using vLLM backend)
     # This collects engine stats directly, bypassing unreliable Ray log-to-driver

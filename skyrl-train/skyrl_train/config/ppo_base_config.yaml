@@ -355,6 +355,23 @@ trainer:
   eval_batch_size: 1024
   eval_before_train: true
   eval_interval: 5 # Set to -1 to disable evaluation.
+  # Pre-flight reward gate: probe the dataset before training and refuse to
+  # start when the reward distribution leaves the band where RLOO has usable
+  # within-group variance. DEFAULT-OFF: when enabled=false nothing below is
+  # read and the training path is byte-identical.
+  preflight_gate:
+    enabled: false
+    # Mean per-sample reward must land inside [min, max]. RLOO learns from
+    # variance WITHIN each group, which is maximal near 0.5; both extremes
+    # starve it. NOT pass@8 — an arm at pass@8 1.0 with per-sample reward 0.55
+    # is healthy.
+    min_reward: 0.25
+    max_reward: 0.75
+    # Trials to probe. Must cover several full groups to estimate variance.
+    num_trials: 256
+    # What to do when the gate fails: "abort" refuses to train; "warn" logs
+    # loudly and continues.
+    on_failure: "abort"
   # max prompt length in training dataset
   max_prompt_length: 512
   flash_attn: true
