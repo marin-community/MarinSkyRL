@@ -48,9 +48,11 @@ The script is the authority — read its top rather than trusting this table.
   `DEFAULT_RL_MEGATRON_DOCKER_IMAGE`). Single source of truth; do not copy a digest elsewhere.
 - The launcher picks the variant from `trainer.strategy`. `strategy: megatron` needs the megatron
   variant; a plain `gpu-rl-*` image dies at driver init with `No module named 'megatron'`.
-- `HARBOR_COMMIT` defaults in `docker/Dockerfile.gpu-rl` and `docker/build_gpu_rl_kaniko.sh` must
-  match what production bakes. They are `772e20f7` as of 2026-07-27. A stale default reverts
-  harbor while the build log reports no change.
+- **Baked pins are declared in `docker/Dockerfile.gpu-rl` and nowhere else.**
+  `build_gpu_rl_kaniko.sh` reads `HARBOR_COMMIT`, `VLLM_FORK_COMMIT`,
+  `VLLM_NATIVE_DONOR_COMMIT`, `FLASH_ATTN_VERSION` and `TORCH_VERSION` from it and echoes each as
+  `[pin] NAME=value`. An env override that disagrees with the Dockerfile is a **hard error**, and a
+  missing declaration is a hard error. To change a pin, edit the Dockerfile and commit it.
 - Rebuild is also required for: vLLM fork commit, flash-attn version, torch/CUDA base,
   `skyrl-train/uv.lock`, the torchtitan `ep` extra, the rl-stage apt set.
 

@@ -46,10 +46,14 @@ These are properties of the campaign, not of this repo, and must come from the e
   absent locally and will clobber the weights already pushed.
 - **`--private` is a no-value flag.** Never pass `--private false`; default is public, so omit it.
 - Wrap long uploads in `tmux`, not `nohup`.
-- **A training checkpoint is not a publishable model.** Confirm the export actually produced
-  safetensors before promising an upload — a run can exit zero having written only sharded
-  checkpoint state, in which case the correct report is "nothing to publish", not a completed
-  publication.
+- **A training checkpoint is not a publishable model, but it is convertible.** Confirm the export
+  actually produced safetensors before promising an upload — a run can exit zero having written
+  only sharded per-rank checkpoint state. When it has, consolidate it rather than reporting
+  "nothing to publish"; see step 2.5. Report "nothing to publish" only when the conversion itself
+  cannot proceed, and say which check stopped it.
+- **A blocked step does not block the others.** Steps that need no upload — checkpoint selection,
+  config capture, secret scan, metrics, trace dataset — run regardless. Finish every step that can
+  finish and name the ones that could not, rather than reporting the whole cleanup as blocked.
 
 ## 0. Cancel pending retries first
 
@@ -97,6 +101,17 @@ largest saved multiple and record that the selection rule did not apply.
 
 Note the tracker run URL if the campaign uses one, so the published model traces back to its
 curve. Not every run has one; omit rather than guess.
+
+## 2.5. Consolidate, when the run left only sharded checkpoint state
+
+If the selected step has no safetensors export — only per-rank sharded checkpoint files — convert
+it before going further. Inspect the on-disk layout first and read the report, then convert; a
+checkpoint whose sharding cannot be reassembled must fail loudly rather than produce a partial
+model. Commands and the failure conditions are in
+[`.agents/ops/checkpoint-consolidation.md`](../../ops/checkpoint-consolidation.md).
+
+Record in the completion report which artifact was published: an export the run wrote itself, or
+one consolidated afterwards. They are not interchangeable provenance.
 
 ## 3. Flatten the model files to the upload directory ROOT
 
