@@ -17,7 +17,7 @@ The exported model, when it exists, is written by `save_hf_model` (gated on `hf_
 as HF safetensors plus `config.json` and tokenizer files. A run can finish its full step budget
 with only checkpoints and no export.
 
-### megatron runs have no offline route yet
+### megatron runs: use the export job, not an offline converter
 
 `MegatronStrategy.save_hf_model` converts through `bridge.save_hf_weights` (mbridge), which needs
 the Megatron runtime and a live process group — it cannot run on a laptop. A megatron checkpoint
@@ -27,7 +27,25 @@ tensors (`decoder.layers.mlp.experts.experts.linear_fc1.weight`, `(48, 128, 1536
 per-expert HF layout. `--defuse-moe` handles only the second, and only for `.moe.experts.` /
 `.experts.w1` key shapes, which these do not match.
 
-When you meet one: report it as blocked, name the strategy, and stop. Do not attempt a hand remap.
+**Use `cloud/iris/export_hf_checkpoint.py`.** It does not reimplement the conversion. It re-runs
+the trainer's own export as a short iris job: resume the chosen step with `max_steps` set to that
+same step, which takes `_handle_resume_at_max_steps`, fires `on_train_end`, and runs
+`save_models` → `save_hf_model` → `bridge.save_hf_weights` before exiting 0. No training step runs.
+
+```bash
+python -m cloud.iris.export_hf_checkpoint \
+  --ckpt_path s3://.../<job>/checkpoints --step 75 \
+  --rl_config cloud/iris/configs/<the config the run trained with>.yaml \
+  --model_path <base model, as at training time> \
+  --num-nodes 4 --gpus-per-node 8      # MUST match the training geometry
+```
+
+The geometry must match: the checkpoint is sharded to the parallel layout the run used, and
+`bridge.save_hf_weights` gathers across that same mesh. `--dry-run` prints the launch command
+without submitting. The export lands in `export_path` on durable storage; publishing to the Hub
+stays a separate, owner-authorized step.
+
+Do not attempt a hand remap of Megatron-native tensors.
 
 ## Tool (FSDP only)
 
