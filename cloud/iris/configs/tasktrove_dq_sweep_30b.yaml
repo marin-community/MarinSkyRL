@@ -102,16 +102,16 @@ terminal_bench:
     # scoring an unparseable-but-real result as zero.
     reward_shaping_fallback: true
 
-    # 2. TRUNCATION PENALTY. Subtracted from the shaped reward when a
-    #    generation terminated at the length cap and the trial failed its
-    #    verifier, so a truncated trial ranks below its untruncated
-    #    equivalent and RLOO sees a negative advantage. 0.0 would be a no-op.
-    #    0.25 is chosen to separate clearly without swamping the outcome
-    #    term: a truncated trial passing no tests lands at -0.25, well below
-    #    an honest 0.0 failure, while one passing 8/10 still lands at +0.55.
-    #    FIRST VALUE, expected to need tuning against the measured
+    # 2. TRUNCATION PENALTY — WITHHELD until the image carrying MarinSkyRL #154
+    #    is deployed. See the WHICH TREE ACTUALLY RUNS note below. Restore as:
+    #      truncation_penalty: 0.25
+    #    Subtracted from the shaped reward when a generation terminated at the
+    #    length cap and the trial failed its verifier, so a truncated trial
+    #    ranks below its untruncated equivalent. 0.25 separates clearly without
+    #    swamping the outcome term: a truncated trial passing no tests lands at
+    #    -0.25, below an honest 0.0 failure, while one passing 8/10 still lands
+    #    at +0.55. A FIRST VALUE, to be tuned against the measured
     #    generate/out_tok_p90_p25_ratio.
-    truncation_penalty: 0.25
 
     collect_rollout_details: true
 
@@ -177,24 +177,44 @@ trainer:
   eval_interval: 999999
   eval_before_train: false
 
-  # Pre-flight reward gate: check the reward distribution at step 1 and stop a
-  # dataset that sits outside the band where RLOO has usable within-group
-  # variance, instead of spending ~3h on 32 H100s to learn the same thing.
-  # Keys on mean PER-SAMPLE reward, not pass@8 — an arm at pass@8 1.0 with
-  # per-sample reward 0.55 had the healthiest advantage signal in the fleet.
-  preflight_gate:
-    enabled: true
-    min_reward: 0.25
-    max_reward: 0.75
-    num_trials: 256
-    # WARN, not abort, for the first sweep under the new reward definition.
-    # The band was calibrated on BINARY rewards from the six labelled arms;
-    # pass_ratio partial credit shifts the whole distribution upward, so the
-    # same dataset measures higher now and the old bounds no longer mean what
-    # they meant. Warning first collects the recalibration data at no risk of
-    # aborting a healthy run on a stale threshold. Flip to "abort" once a
-    # sweep's worth of pass_ratio openings has been measured.
-    on_failure: "warn"
+  # ===================================================================
+  # WHICH TREE ACTUALLY RUNS — read before adding a key here that was
+  # introduced by a recent PR.
+  #
+  # cloud/iris/run_rl.py launches the SkyRL entrypoint with
+  # cwd=/opt/skyrl/skyrl-train, and `python -m` puts the CWD first on
+  # sys.path, ahead of every PYTHONPATH entry. So `skyrl_train` and
+  # `examples.terminal_bench` import from the BAKED IMAGE tree, not from
+  # the /app workspace bundle — and Hydra's config_dir, derived in
+  # skyrl_train/entrypoints/main_base.py as
+  # Path(__file__).parent.parent/"config", resolves to the BAKED
+  # ppo_base_config.yaml.
+  #
+  # Consequence: anything under skyrl-train/ needs an IMAGE REBUILD to
+  # reach the cluster. Only cloud/iris/* rides the /app bundle. Setting a
+  # trainer.* key that exists only in a newer ppo_base_config.yaml fails
+  # the job at Hydra override time with
+  #   Key '<name>' is not in struct / Could not override 'trainer.<name>'
+  # about eight minutes in. Three arms were lost to exactly this on
+  # 2026-07-27.
+  # ===================================================================
+
+  # PRE-FLIGHT REWARD GATE — WITHHELD until the image carrying MarinSkyRL #155
+  # and #156 is deployed, for the reason above. Restore as:
+  #   preflight_gate:
+  #     enabled: true
+  #     min_reward: 0.25
+  #     max_reward: 0.75
+  #     num_trials: 256
+  #     on_failure: "warn"
+  # It checks the reward distribution at step 1 and reports a dataset sitting
+  # outside the band where RLOO has usable within-group variance, instead of
+  # spending ~3h on 32 H100s to learn the same thing. Keys on mean PER-SAMPLE
+  # reward, not pass@8 — an arm at pass@8 1.0 with per-sample reward 0.55 had
+  # the healthiest advantage signal in the fleet. Restore it in WARN mode: the
+  # band was calibrated on BINARY rewards, and pass_ratio partial credit shifts
+  # the distribution upward, so the bounds need one sweep of recalibration
+  # before they are allowed to abort a run.
   ckpt_interval: 1
   resume_mode: latest
   hf_save_interval: 5

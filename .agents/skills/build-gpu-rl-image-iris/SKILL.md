@@ -298,10 +298,26 @@ Rebuild the image ONLY for a change to something the image **BAKES / COMPILES**:
   --frozen` reproduces the new set by construction), the torchtitan/tyro/`ep` extra, harbor (`HARBOR_COMMIT`),
   or the rl-stage apt set.
 
-Do **NOT** rebuild for a **MarinSkyRL source** change — the launcher syncs the local workspace to `/app`
-(first on `PYTHONPATH`), so `skyrl_train.*` + `examples.terminal_bench.*` are picked up live from `/app` at
-launch, no image rebuild. The compiled vLLM-fork is
-the only thing that genuinely forces a rebuild for a code change.
+**ALSO rebuild for any source change under `skyrl-train/`** — that tree is BAKED, not synced. This
+contradicts the obvious reading of the launcher and it has cost production jobs, so here is the
+mechanism:
+
+- `cloud/iris/run_rl.py` runs the SkyRL entrypoint as a subprocess with **`cwd=/opt/skyrl/skyrl-train`**.
+- `python -m <module>` puts the **CWD first on `sys.path`**, ahead of every `PYTHONPATH` entry. `/app`
+  being on `PYTHONPATH` does not help: it is second.
+- So `skyrl_train.*` and `examples.terminal_bench.*` both import from the **baked image tree**.
+- Hydra follows the same path: `config_dir` in `skyrl_train/entrypoints/main_base.py` is
+  `Path(__file__).parent.parent / "config"`, so the **baked `ppo_base_config.yaml`** is what loads.
+
+The failure is loud but late — a config key that exists only in the newer base config dies at Hydra
+override time, roughly eight minutes in, with `Key '<name>' is not in struct`. On 2026-07-27 three RL
+arms were lost this way after three merged PRs were assumed to have shipped via `/app`.
+
+What genuinely rides the `/app` bundle is **`cloud/iris/*`** — the launcher, `run_rl.py`, and the YAML
+configs under `cloud/iris/configs/`. Those need no rebuild.
+
+Quick check before assuming a change is live: if the edited path starts with `skyrl-train/`, it needs a
+rebuild. If it starts with `cloud/iris/`, it does not.
 
 > If the build host WERE a real x86 box (not the cluster), the documented fast path is the wheel-cache:
 > `docker/build_wheels.sh` (compile the wheels once → `docker/wheelhouse/`) then a `docker buildx` build with
