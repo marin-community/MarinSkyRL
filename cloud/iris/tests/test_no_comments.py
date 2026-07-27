@@ -58,7 +58,7 @@ def _has_yaml_comment(text: str) -> list[str]:
                 in_block_scalar = False
             else:
                 continue
-        if stripped.startswith("#"):
+        if stripped.startswith("#") and not stripped.startswith("# @package"):
             violations.append(f"  L{i}: {line.strip()}")
     return violations
 

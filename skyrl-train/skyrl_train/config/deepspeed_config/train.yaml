@@ -1,3 +1,4 @@
+# @package deepspeed_config.train
 zero_optimization:
   stage: 3
   offload_param:

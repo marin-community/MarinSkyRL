@@ -1,3 +1,4 @@
+# @package deepspeed_config.eval
 zero_optimization:
   stage: 3
   stage3_param_persistence_threshold: "auto"

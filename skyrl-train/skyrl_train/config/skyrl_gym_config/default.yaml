@@ -1,3 +1,4 @@
+# @package environment.skyrl_gym
 max_env_workers: 32
 
 text2sql:
