@@ -2,17 +2,34 @@
 
 Facts and commands. Skills point here.
 
-## What the two artifacts are
+## Identify the format FIRST — there are two, and they need different tools
 
-| written by | layout | publishable |
+`trainer.strategy` decides which one a run wrote. Check it before anything else.
+
+| strategy | checkpoint layout | consolidation route |
 |---|---|---|
-| `FSDPStrategy.save_checkpoint` (every `ckpt_interval`) | `model_world_size_{W}_rank_{R}.pt` — FSDP **sharded** DTensors, one file per rank, plus `optim_*` and `extra_state_*` | no |
-| `FSDPStrategy.save_hf_model` (gated on `hf_save_interval`) | HF safetensors + `config.json` + tokenizer | yes |
+| `fsdp` / `fsdp2` | `model_world_size_{W}_rank_{R}.pt` — per-rank DTensor shards | `consolidate_sharded_checkpoint.py` (below) |
+| `megatron` | `__{N}_0.distcp` shards + `.metadata` + `metadata.json` saying `{"sharded_backend": "torch_dist"}` | **not yet available offline** — see below |
 
-A run can finish its full step budget with only the first. That is not a failure to detect and
-report — it is a conversion to perform.
+Both layouts sit under `global_step_N/policy/`, not directly under `global_step_N`.
 
-## Tool
+The exported model, when it exists, is written by `save_hf_model` (gated on `hf_save_interval`)
+as HF safetensors plus `config.json` and tokenizer files. A run can finish its full step budget
+with only checkpoints and no export.
+
+### megatron runs have no offline route yet
+
+`MegatronStrategy.save_hf_model` converts through `bridge.save_hf_weights` (mbridge), which needs
+the Megatron runtime and a live process group — it cannot run on a laptop. A megatron checkpoint
+also needs **two** remaps, not one: Megatron-native layer-stacked keys to HF
+(`decoder.layers.self_attention.linear_qkv.weight` is `(48, 5120, 2048)`), and the grouped expert
+tensors (`decoder.layers.mlp.experts.experts.linear_fc1.weight`, `(48, 128, 1536, 2048)`) to
+per-expert HF layout. `--defuse-moe` handles only the second, and only for `.moe.experts.` /
+`.experts.w1` key shapes, which these do not match.
+
+When you meet one: report it as blocked, name the strategy, and stop. Do not attempt a hand remap.
+
+## Tool (FSDP only)
 
 `skyrl-train/scripts/consolidate_sharded_checkpoint.py` — reassembles the per-rank shards into
 full tensors and writes an HF safetensors directory. CPU only, no process group, no GPUs.
@@ -23,14 +40,14 @@ report before converting.
 
 ```bash
 cd skyrl-train
-uv run python scripts/consolidate_sharded_checkpoint.py --src <ckpt>/global_step_N --inspect
+uv run python scripts/consolidate_sharded_checkpoint.py --src <ckpt>/global_step_N/policy --inspect
 ```
 
 Then convert:
 
 ```bash
 uv run python scripts/consolidate_sharded_checkpoint.py \
-  --src <ckpt>/global_step_N \
+  --src <ckpt>/global_step_N/policy \
   --dst <staging>/model \
   --aux-from <dir or HF repo id with config.json + tokenizer>
 ```

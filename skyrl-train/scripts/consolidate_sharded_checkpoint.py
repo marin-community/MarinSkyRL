@@ -1,5 +1,10 @@
 #!/usr/bin/env python
-"""Consolidate a sharded RL training checkpoint into a single HF safetensors model.
+"""Consolidate an FSDP-sharded RL training checkpoint into a single HF safetensors model.
+
+SCOPE: ``trainer.strategy`` fsdp/fsdp2 only. A megatron run writes a torch-DCP set
+(``__N_0.distcp`` + ``.metadata``) that this tool cannot read and will refuse; its
+conversion needs mbridge and a live process group. See
+``.agents/ops/checkpoint-consolidation.md``.
 
 WHY THIS EXISTS
 ---------------

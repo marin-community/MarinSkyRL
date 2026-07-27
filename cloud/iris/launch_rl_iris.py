@@ -1659,6 +1659,22 @@ def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
     return str(val)
 
 
+def load_config_trainer_export_path(rl_config_path: str) -> Optional[str]:
+    """Return an EXPLICIT ``trainer.export_path`` from the RL config YAML, else None.
+
+    Same contract as ``load_config_trainer_ckpt_path``: an explicitly set value wins over
+    the launcher's durable default, and ``null``/empty means "derive one"."""
+    try:
+        raw = _load_rl_config_yaml(rl_config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rl-iris] WARNING: could not read export_path from {rl_config_path}: {exc}", file=sys.stderr)
+        return None
+    val = (raw.get("trainer") or {}).get("export_path")
+    if val is None or (isinstance(val, str) and not val.strip()):
+        return None
+    return str(val)
+
+
 def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
     """Rewrite a JOB-SCOPED NCCL flight-recorder dump path so its slug segment is the
     ACTUAL job name, e.g. ``/tmp/fr_dumps/<slug>/nccl_fr_rank`` -> ``/tmp/fr_dumps/
@@ -1818,6 +1834,23 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         ckpt_path = f"s3://marin-us-east-02a/iris/{args.job_name}/checkpoints"
         train_cmd.extend(["--skyrl_override", f"++trainer.ckpt_path={ckpt_path}"])
         print(f"[rl-iris] Durable resumable ckpt_path: {ckpt_path}")
+
+    # export_path needs the SAME durable treatment as ckpt_path, and for a sharper reason.
+    # Left unset it is auto-derived to a node-local <experiments_dir>/<job>/exports
+    # (rl_config_translation.py). save_hf_model then writes the HF export on a POLICY WORKER
+    # while HFHubUploadCallback runs on the DRIVER, so the callback finds nothing, every
+    # upload fails, and the run ends with an empty repo — after which both nodes are reclaimed
+    # and the export is gone for good. Every completed run in the 2026-07 sweep lost its
+    # published model exactly this way; the training checkpoints survived only because
+    # ckpt_path was already durable. The callback reads through skyrl's fsspec io layer, so an
+    # s3:// export_path is visible from any node. Respect an explicit value from the YAML or a
+    # --skyrl_override (either wins).
+    user_set_export = any("trainer.export_path=" in o for o in (args.skyrl_override or []))
+    yaml_export = load_config_trainer_export_path(args.rl_config)
+    if not user_set_export and not yaml_export:
+        export_path = f"s3://marin-us-east-02a/iris/{args.job_name}/exports"
+        train_cmd.extend(["--skyrl_override", f"++trainer.export_path={export_path}"])
+        print(f"[rl-iris] Durable export_path: {export_path}")
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
