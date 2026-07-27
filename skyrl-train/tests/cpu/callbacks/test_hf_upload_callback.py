@@ -15,8 +15,6 @@ import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from skyrl_train.callbacks.builtin import HFHubUploadCallback
 
 
@@ -110,9 +108,7 @@ class TestCloudAwareUpload:
 
         with patch("skyrl_train.callbacks.builtin.io.exists", return_value=True) as mock_exists:
             with patch("skyrl_train.callbacks.builtin.io.local_read_dir") as mock_lrd:
-                mock_lrd.return_value.__enter__ = lambda self: os.path.join(
-                    export, "global_step_10", "policy"
-                )
+                mock_lrd.return_value.__enter__ = lambda self: os.path.join(export, "global_step_10", "policy")
                 mock_lrd.return_value.__exit__ = lambda self, *a: None
                 cb._process_pending_uploads()
 
