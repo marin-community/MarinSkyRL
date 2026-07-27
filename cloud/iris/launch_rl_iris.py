@@ -301,7 +301,21 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # lost. The deadline now fires, the trial survives at reward 0, and its logprobs stay
     # TIS-valid. SKYRL d7ba00ff also carries #137 (literal-log byte-span indexing, which fixed the
     # ~85 GiB/h RolloutCoordinator growth) and #138 (TIS diagnostics on both backends).
-    "@sha256:1879c8010ebfbe4d27b217ca695b26b1f425fe969f65e2c4a66e5eb58007e13e"  # noqa: E501
+    # gpu-rl-ac5a9c65 (built 2026-07-27): a SKYRL-source-only bump, d7ba00ff -> ac5a9c65. No baked
+    # dependency moved: same harbor 772e20f7, same vLLM source 8672c71e with the 4b555913 native
+    # donor, flash-attn 2.8.3, torch 2.11.0+cu128, and the same skyrl-train/uv.lock. It bakes the
+    # reward-signal work merged as #154 (truncation penalty for cap-truncated trials), #155
+    # (default-off pre-flight reward gate) and #156 (the three reward signals combined, enabled for
+    # the sweep). The rebuild is REQUIRED for those PRs to take effect: cloud/iris/run_rl.py runs
+    # the SkyRL entrypoint with cwd=/opt/skyrl/skyrl-train, and `python -m` puts the cwd ahead of
+    # PYTHONPATH, so skyrl_train and examples.terminal_bench import from the BAKED tree, not the
+    # synced /app workspace. Hydra follows the same path: config_dir in
+    # skyrl_train/entrypoints/main_base.py is derived from __file__, so it loads the baked
+    # ppo_base_config.yaml. Three sweep jobs on the previous image died with
+    # `Key 'preflight_gate' is not in struct` for exactly this reason.
+    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
+    "@sha256:96848c50a95fcdc50b7d5f4d2b24185394c79ad8c83300c00fcf8452cfbc24e1"  # noqa: E501
+    # (prev: gpu-rl-d7ba00ff @sha256:1879c801, Harbor 772e20f7 + verifier-teardown deadline)
     # (prev: gpu-rl-0acfe947 @sha256:625d7577, Harbor 01c736a6 + background artifact writer)
     # (prev: gpu-rl-d48445f7 @sha256:eb854128, Harbor 1319eb29 + resume-fix chain)
     # (prev: gpu-rl-4d289ed3 @sha256:fd8792ef, vllm 8672c71e + Harbor 1319eb29)
@@ -322,7 +336,12 @@ DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
     # carries the same harbor 772e20f7 (#39 verifier-teardown deadline, #40) and the same SKYRL
     # d7ba00ff (#137 coordinator-growth fix, #138 TIS diagnostics on both backends). Verified live
     # on all four tasktrove-dq-sweep arms relaunched 2026-07-26 14:40 UTC.
-    "@sha256:107e49332cf9c162d3d0659c86719521a142049fe1e75ba45d725f7d83491fff"  # noqa: E501
+    # gpu-rl-megatron-ac5a9c65 (built 2026-07-27): the megatron variant of gpu-rl-ac5a9c65, built
+    # from the same source in the same pass with the same harbor 772e20f7. This is the image the
+    # tasktrove-dq sweep actually uses, because its config sets trainer.strategy=megatron.
+    # Pull-verified: 39 layers, max 3.61 GB, 22.02 GB total.
+    "@sha256:0a6cea7ddf877e52c0d06c9a1bab308a23f3a6f8c0ec28452a6ce3de81b2582c"  # noqa: E501
+    # (prev: gpu-rl-megatron-d7ba00ff @sha256:107e4933, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-87ff3f6b @sha256:e1e62927, Harbor 01c736a6)
     # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041; gpu-rl-megatron-a1e7a363 @sha256:570e9cc1)
 )
