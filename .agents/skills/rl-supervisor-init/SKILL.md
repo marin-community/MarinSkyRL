@@ -62,7 +62,19 @@ trusting an exit code.
 **Verify publishability before promising it.** A cleanup can only upload an artifact that exists.
 Confirm the finished run actually wrote the format the destination needs; a training checkpoint and
 a publishable model are not the same object, and a run can exit zero having produced only the
-former. Report "nothing to publish" as a finding, not as a completed publication.
+former. Report "nothing to publish" as a finding, not as a completed publication — and check
+whether the campaign has a conversion path before concluding it, since a checkpoint that is not
+publishable as written is often publishable after consolidation.
+
+**Cleanup is triggered by work banked, not by how a run ended.** The trigger is a minimum step
+count set by the campaign's policy, applied to every terminal run — completed, killed, or failed
+alike. A run stopped at a third of its budget has still bought real compute, and cleanup is what
+converts it into a retained artifact. Reserving cleanup for runs that reached their full budget
+throws away most of what a sweep produces, and it silently penalises exactly the runs a supervisor
+chose to stop.
+
+Read the threshold from the policy rather than assuming one, and when a terminal run falls below
+it, record the outcome in the tracker and say that cleanup was not due — do not leave it ambiguous.
 
 ## 5. Drafting a cron prompt for sweep monitoring
 
@@ -82,8 +94,9 @@ Include, in order:
    numeric states. Warn about query forms that return an empty set on malformed input, so an agent
    does not read "no rows" as "no jobs".
 4. **Terminal jobs before live ones.** A finished or dead run is evidence that decays; a live one
-   can be probed next tick. Say which cleanup skill applies to which run type, and require the
-   outcome be written to the tracker.
+   can be probed next tick. Say which cleanup skill applies to which run type, state the campaign's
+   minimum-step threshold for cleanup and that it applies to killed and failed runs as well as
+   completed ones, and require the outcome be written to the tracker.
 5. **Per-job probes**, dispatched to the health skill, carrying **each job's prespecified flip
    rule from the previous tick** — the threshold, the window, and the metric — with an instruction
    to apply it literally rather than re-derive it. A rule invented fresh each tick is not a rule.

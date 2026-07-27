@@ -136,6 +136,26 @@ would change my mind" is more useful to the supervisor than a confident KILL on 
 **Flat is not dying.** A run whose reward has stopped improving is not the same as one that is
 collapsing, and a plateau alone is never sufficient grounds. Plateaus resolve in both directions.
 
+**Collapsing is not dying either — check the learning signal, not the symptom.** A degenerate
+output mode has a visible signature: reward falling, outputs pinning to a length cap, a narrowing
+length-spread ratio. Every one of those is an observation about behaviour. None of them is
+evidence that the optimiser has stopped working. The verdict turns on the advantage magnitude and
+whether the gradient norm is decaying — while those stay in their healthy range the run is still
+learning and still banking a checkpoint worth keeping, however ugly its transcripts look.
+
+This distinction has been paid for. Two runs were killed on collapse signatures while their
+advantage magnitudes sat at the top of the healthy band, and both were stopped early enough to
+leave no publishable artifact behind. The run where a kill was right looked different in the place
+that matters: advantages an order of magnitude below the floor, gradient norm halving, and every
+trial scoring zero.
+
+**A run near the campaign's cleanup floor is worth more alive.** Most campaigns only produce a
+usable artifact once a run has banked some minimum number of steps. Below that line a kill forfeits
+everything spent; above it the compute is already banked. When a kill is otherwise justified but
+the run is a few steps short, say so and recommend letting it reach the floor — unless it is
+failing hard, in which case the floor is irrelevant. Read the floor from the campaign's policy;
+never assume one.
+
 **Say so when you are near the line.** If you would have recommended KILL on marginally different
 numbers, state that plainly along with the numbers. The supervisor holds the kill authority and can
 weigh cost against confidence; a probe that hides its uncertainty removes that choice.
