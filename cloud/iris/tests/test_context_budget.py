@@ -142,6 +142,8 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
             "max_new_tokens_per_turn": 4096,
             "max_turns": 30,
             "request_window_tokens": 32768,
+            "opencode_limit_context": 23552,
+            "opencode_limit_output": 4096,
         },
     }
 
@@ -153,3 +155,42 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     assert remote_artifact == "memory://context-budget/resolved-context-budget.json"
     with fsspec.open(remote_artifact) as artifact_file:
         assert json.load(artifact_file)["context_budget"]["request_window_tokens"] == 32768
+
+
+def test_opencode_limit_context_mirrors_harbor_formula():
+    """The opencode_limit_context property mirrors harbor's _resolve_model_limit.
+
+    For a 32768-window / 4096-output budget:
+      max_input_tokens = 28672
+      output = min(4096, 28671) = 4096
+      margin = min(1024, 24575) = 1024
+      context = 28672 - 4096 - 1024 = 23552
+    """
+    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
+    budget = parsed.context_budget
+
+    assert budget.max_input_tokens == 28672
+    assert budget.opencode_limit_output == 4096
+    assert budget.opencode_limit_context == 23552
+    # context + output must be strictly below max_input_tokens (safety margin)
+    assert budget.opencode_limit_context + budget.opencode_limit_output < budget.max_input_tokens
+
+
+def test_opencode_limit_at_131k_budget():
+    """At 131k window / 16384 output (the current sweep budget)."""
+    budget_window = 131072
+    output_per_turn = 16384
+    max_input = budget_window - output_per_turn  # 114688
+    expected_output = min(output_per_turn, max(1, max_input - 1))  # 16384
+    expected_margin = min(1024, max(0, max_input - expected_output - 1))  # 1024
+    expected_context = max(1, max_input - expected_output - expected_margin)  # 97380
+
+    from cloud.iris.rl_config_translation import ContextBudget
+
+    budget = ContextBudget(
+        request_window_tokens=budget_window,
+        max_new_tokens_per_turn=output_per_turn,
+        max_turns=90,
+    )
+    assert budget.opencode_limit_output == expected_output
+    assert budget.opencode_limit_context == expected_context

@@ -8,10 +8,9 @@ on:
   pull_request:
 
 permissions:
-  checks: write   # for status checks to appear
+  checks: write
   contents: read
 
-# Cancel runs for previous commits on the same branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,9 +38,6 @@ jobs:
         with:
           activate-environment: true
       - name: Run infra tests
-        # sync_rl_logs.py imports boto3 lazily (inside s3client), so its resolution logic is
-        # importable and testable without any cloud deps; --no-project keeps this off the
-        # unregenerable skyrl-train lockfile.
         run: uv run --no-project --with pytest pytest infra/tests/ -q
 
   iris_launcher_tests:
@@ -52,12 +48,6 @@ jobs:
         with:
           activate-environment: true
       - name: Run iris launcher tests
-        # pyyaml, fsspec, and huggingface_hub are plain module-level imports in the launcher
-        # code under test; universal-pathlib backs the lazy gs:// UPath import in
-        # literal_proxy_utils.py. rigging (private, Marin-monorepo-only) is not installed here,
-        # so test_federated_parent_auth.py self-skips via importorskip and only runs on hosts
-        # where rigging is present. --no-project keeps this off the unregenerable skyrl-train
-        # lockfile.
         run: |
           uv run --no-project \
             --with pytest --with pyyaml --with fsspec --with huggingface_hub --with universal-pathlib \
@@ -81,17 +71,8 @@ jobs:
       - name: Install skyrl-train
         run: uv sync --frozen --extra dev
       - name: Check the lockfile is current
-        # The lock went stale for months because it could not be regenerated at all. Now that it
-        # can, this keeps pyproject.toml and uv.lock from drifting apart again.
         run: uv lock --check
       - name: Run cpu tests
-        # These five fail on main today and are test-vs-code drift, not regressions, so the suite
-        # would report them on every PR. Each needs a judgement call this CI change should not make:
-        #   test_cp_config / test_ep_config_noop  golden "defaults have not drifted" baselines that
-        #                                         the defaults have in fact drifted from
-        #   test_generator_output_concatenation   GeneratorOutput grew fields the test does not know
-        #   test_generate_retry_no_gen_finish     expected-payload drift
-        #   test_ppo_train_batch_calculations     the test's config predates a config-schema change
         run: |
           uv run --frozen pytest tests/cpu/ \
             --deselect tests/cpu/distributed/test_cp_config.py::test_all_defaults_is_structurally_identical_to_pre_cp \
@@ -112,8 +93,6 @@ jobs:
         with:
           activate-environment: true
       - name: Install skyrl-gym
-        # Pinned to 3.12: on 3.13 the searchcode tests assert on a traceback whose formatting
-        # changed.
         run: uv sync --frozen --extra dev --python 3.12
       - name: Run cpu tests
         run: uv run --frozen --python 3.12 pytest tests/

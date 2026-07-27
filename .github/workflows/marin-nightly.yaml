@@ -1,20 +1,9 @@
 name: Marin Nightly E2E
 
-# The real end-to-end gate: a single-H100 GRPO run on GSM8K, submitted to the Marin/Iris
-# cluster and scored against a checked-in spec. skyrl-train/ci/marin_nightly/run_h100.sh is
-# what actually runs on the GPU; this workflow provisions it and tears it down.
-#
-# Runs on a hosted runner and reaches the cluster over GCP. Auth is keyless via Workload
-# Identity Federation: the job's GitHub OIDC token (permissions.id-token: write) is
-# exchanged to impersonate github-iris@hai-gcp-models -- no stored service-account key.
-#
-# CoreWeave's Iris controllers are IP-locked to the Marin egress, so a hosted runner cannot
-# reach them directly. The job is submitted to the `marin` cluster and federated to
-# CoreWeave with --target-cluster, which is the supported route from CI.
 
 on:
   schedule:
-    - cron: "0 9 * * *"   # 09:00 UTC, staggered off the other Marin nightlies
+    - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
       model:
@@ -29,7 +18,7 @@ on:
 
 concurrency:
   group: marin-nightly
-  cancel-in-progress: false   # never interrupt a run holding an H100
+  cancel-in-progress: false
 
 jobs:
   gsm8k-h100:
@@ -37,7 +26,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
-      id-token: write   # mint the OIDC token that WIF exchanges for github-iris
+      id-token: write
     env:
       JOB_NAME: marinskyrl-nightly-gsm8k
       TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
@@ -45,11 +34,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Trim the Iris bundle
-        # iris bundles the working directory by enumerating `git ls-files`, and caps the zip
-        # at 25MB. The tracked tree is ~25MB raw, most of it docs images (two 5.5MB SVGs) and
-        # the dormant skyrl-agent package -- none of which the training job reads. Dropping
-        # them from the index keeps the bundle comfortably under the cap. The checkout is
-        # throwaway, so this never touches anything real.
         run: git rm -r --cached --quiet skyrl-train/docs skyrl-agent
 
       - uses: astral-sh/setup-uv@v6
@@ -67,21 +51,11 @@ jobs:
           project_id: hai-gcp-models
 
       - name: Install the iris client
-        # marin-core depends on marin-iris but uv only symlinks the named package's own
-        # scripts, so the tool's bin dir goes on PATH to make `iris` resolve. The floor is the
-        # first build carrying the WIF/IAP auth fix (marin#7144).
         run: |
           uv tool install --prerelease allow "marin-core>=0.2.46.dev202607131620"
           echo "$(uv tool dir)/marin-core/bin" >> "$GITHUB_PATH"
 
       - name: Train and gate on one H100
-        # --gpu is gated behind --enable-extra-resources by iris. --no-sync stops iris from
-        # syncing the repo root (a metadata-only package); run_h100.sh syncs skyrl-train
-        # itself. `iris job run` blocks, streams the job's logs, and exits non-zero unless the
-        # job succeeded -- so the gate's exit code inside the job is this step's exit code.
-        #
-        # pipefail is load-bearing: without it the `| tee nightly.log` tail masks iris's exit
-        # code with tee's, turning every failed job into a green step.
         run: |
           set -o pipefail
           iris --cluster marin job run \
@@ -97,10 +71,6 @@ jobs:
 
       - name: Stop any Iris job the run left behind
         if: always()
-        # `iris job run` stops its job when it exits, and --timeout is a server-side backstop,
-        # so this only matters if the runner was hard-killed. --cluster is a top-level flag.
-        # `job stop` requires the canonical `/<user>/<job>` name that `job run` prints, not the
-        # bare --job-name it accepts; iris namespaces runner submissions under /runner.
         run: iris --cluster marin job stop "/runner/$JOB_NAME" || true
 
       - uses: actions/upload-artifact@v4
@@ -110,23 +80,18 @@ jobs:
           path: nightly.log
           if-no-files-found: ignore
 
-  # Failure reporting: file or update the [nightly-gsm8k-h100] tracking issue, ask
-  # weaverbot to triage (launches a weaver session), and ping Slack. The trigger
-  # and Slack channels each skip with a notice until the LOOM_TRIGGER_GH_TOKEN /
-  # SLACK_WEBHOOK_URL org secrets are provisioned; the issue trail accrues either way.
   report-failure:
     needs: [gsm8k-h100]
-    # cancelled matters: a job that hits its timeout-minutes reports cancelled, not failure
     if: >-
       always() && github.event_name == 'schedule' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     permissions:
-      issues: write    # file/update the tracking issue
-      actions: read    # pull failed-job logs for the excerpt
+      issues: write
+      actions: read
       contents: read
     steps:
-      - uses: marin-community/marin-style/actions/report-failure@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4  # v0.3.0
+      - uses: marin-community/marin-style/actions/report-failure@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4
         with:
           lane: gsm8k-h100
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}

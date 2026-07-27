@@ -112,8 +112,19 @@ AGENT_SCHEMA = SectionSchema(
         # opencode drifts on @latest and the correlation header can silently stop forwarding.
         "version": FieldMapping("version", field_type="kwargs"),
         # opencode-specific extra config deep-merged into opencode.json (OpenCode.__init__
-        # opencode_config kwarg). No default: absent -> {} in the ctor (byte-identical). Carries
-        # e.g. compaction:{auto,reserved} for the RL smoke's compaction-crossing observable.
+        # opencode_config kwarg). No default: absent -> {} in the ctor (byte-identical).
+        # Carries e.g. compaction:{auto,reserved} for the RL smoke's compaction-crossing
+        # observable.
+        #
+        # Compaction: OpenCode auto-compacts when the prompt approaches limit.context.
+        # DEFAULT OFF (opencode_config: {} or absent). Historically disabled because the
+        # summary turn could emit a tool call that OpenCode rejects fatally ("Tool call
+        # not allowed while generating summary"), ending the trial at reward 0. Observed
+        # on -Thinking- models; NOT re-tested on Coder-Instruct. To enable:
+        #   opencode_config:
+        #     compaction:
+        #       auto: true
+        #       reserved: 16384
         "opencode_config": FieldMapping("opencode_config", field_type="kwargs"),
         # Strict JSON parser mode (for RL training)
         # When true, treats parser warnings as errors and disables auto-correction.

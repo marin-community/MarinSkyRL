@@ -14,7 +14,8 @@ terminal_bench:
   harbor:
     name: opencode
     version: "1.18.2"
-    opencode_config: {}
+    opencode_config:
+      compaction: false
     override_setup_timeout_sec: 600
     override_timeout_sec: 1800
 

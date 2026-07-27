@@ -61,6 +61,24 @@ class ContextBudget:
         """Return the input allowance after reserving one complete response."""
         return self.request_window_tokens - self.max_new_tokens_per_turn
 
+    @property
+    def opencode_limit_output(self) -> int:
+        """OpenCode's per-request output cap (mirrors harbor ``_resolve_model_limit``)."""
+        return min(self.max_new_tokens_per_turn, max(1, self.max_input_tokens - 1))
+
+    @property
+    def opencode_limit_context(self) -> int:
+        """OpenCode's sliding-window / compaction-trigger size.
+
+        Mirrors the formula in ``harbor/src/harbor/agents/installed/opencode.py``
+        ``_resolve_model_limit``: ``context = window - output - margin`` where
+        ``margin`` reserves a small safety band so ``context + output`` stays
+        strictly below the engine's prompt cap.
+        """
+        output = self.opencode_limit_output
+        margin = min(1024, max(0, self.max_input_tokens - output - 1))
+        return max(1, self.max_input_tokens - output - margin)
+
     def as_dict(self) -> Dict[str, int]:
         """Return the persisted representation, including derived client input."""
         return {
@@ -68,6 +86,8 @@ class ContextBudget:
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
             "max_input_tokens": self.max_input_tokens,
+            "opencode_limit_context": self.opencode_limit_context,
+            "opencode_limit_output": self.opencode_limit_output,
         }
 
 
