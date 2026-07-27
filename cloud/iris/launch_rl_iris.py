@@ -326,7 +326,19 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # rather than trajectory-level stop_reason (#166). Those live under skyrl-train/, so they are
     # inert until the image ships them.
     # Pull-verified: 38 layers, max 3.61 GB, 19.35 GB total.
-    "@sha256:c7e05af3e85851cf841f1089df5e152cf43092f53bd28b9bb6ce6973bf5ac850"  # noqa: E501
+    # gpu-rl-90072ada (built 2026-07-27, kaniko job gpurl-kaniko-90072ada): no baked pin moved. The
+    # build echoed each one it read from docker/Dockerfile.gpu-rl -- harbor 772e20f7, vLLM fork
+    # 8672c71e with the 4b555913 native donor, flash-attn 2.8.3, torch 2.11.0+cu128. Two baked
+    # changes under skyrl-train/ make the rebuild necessary. First, ppo_base_config.yaml sets
+    # ckpt_interval 5 (#173); the per-config restatements were removed from cloud/iris/configs, so
+    # every config inherits the base value, and the previous image still baked 10. The pushed image
+    # was checked directly: ckpt_interval is 5. Second, uv.lock moves accelerate 1.11.0 -> 1.14.0,
+    # which is what makes FSDP2 meta loading work under Transformers 5 (#110). Build asserts green,
+    # including cloudpickle 3.1.2, py-spy 0.4.2 and memray -- the launcher runs with
+    # setup_scripts=[], so the image is the only source of the profiler.
+    # Pull-verified: 38 layers, max 3.61 GB, 19.35 GB total.
+    "@sha256:433726335f6bd62373ce75c0178a12a9e36ec7c8cf364f443ca1a0b742b3ea5e"  # noqa: E501
+    # (prev: gpu-rl-f2b44d4a @sha256:c7e05af3, Harbor 772e20f7 + the baked profiler)
     # (prev: gpu-rl-ac5a9c65 @sha256:96848c50, Harbor 772e20f7 + the three reward signals)
     # (prev: gpu-rl-d7ba00ff @sha256:1879c801, Harbor 772e20f7 + verifier-teardown deadline)
     # (prev: gpu-rl-0acfe947 @sha256:625d7577, Harbor 01c736a6 + background artifact writer)
@@ -358,7 +370,14 @@ DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
     # same pins. Its build asserts add megatron.core + megatron.bridge + transformer_engine. This
     # is the image the tasktrove-dq sweep uses, because its config sets trainer.strategy=megatron.
     # Pull-verified: 40 layers, max 3.61 GB, 22.05 GB total.
-    "@sha256:a374dd0401bb14c111a4a65c15bd1f5e5c97294795e93ee3e0daabf2e5b018e9"  # noqa: E501
+    # gpu-rl-megatron-90072ada (built 2026-07-27, kaniko job gpurl-kaniko-mega-90072ada): the
+    # megatron variant of gpu-rl-90072ada, built from the same source in the same pass with the same
+    # pins, so it carries the same baked ckpt_interval 5 and the same accelerate 1.14.0. Its build
+    # asserts add megatron.core + megatron.bridge + transformer_engine. This is the image the
+    # tasktrove-dq sweep uses, because its config sets trainer.strategy=megatron.
+    # Pull-verified: 40 layers, max 3.61 GB, 22.05 GB total.
+    "@sha256:27a94ceb622828bdadaeabe1774b0f9adcaf6bbed2d8aff719d4685a230e2e2a"  # noqa: E501
+    # (prev: gpu-rl-megatron-f2b44d4a @sha256:a374dd04, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-ac5a9c65 @sha256:0a6cea7d, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-d7ba00ff @sha256:107e4933, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-87ff3f6b @sha256:e1e62927, Harbor 01c736a6)

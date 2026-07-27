@@ -43,12 +43,15 @@ allocation is ~5× the time to failure.
 The script is the authority — read its top rather than trusting this table.
 
 `PREBUILT_WHEEL_ARTIFACT_URI` / `_SHA256` are the one pair with no home in the repo, so record them
-here. Current values, used by the `ac9c5f39`/`f2b44d4a` builds:
+here. Current values, used by the `ac9c5f39`/`f2b44d4a`/`90072ada` builds:
 
 ```
 PREBUILT_WHEEL_ARTIFACT_URI=s3://marin-us-east-02a/iris/grug-vllm-wheels/4b55591306c9-torch211-cu128-cp312-fb6ff59.tar.gz
-PREBUILT_WHEEL_ARTIFACT_SHA256=d247a886...   # full value in the build script invocation history
+PREBUILT_WHEEL_ARTIFACT_SHA256=d247a8865c56ea2756512fcb0b102f8127b2020bdfbfb92d76dbd1386d514417
 ```
+
+The digest is written out in full here on purpose. It was recorded truncated once, and the next
+rebuild had to recover the remaining characters from an earlier launch before it could start.
 
 The wheel tarball is keyed on the vLLM native-donor commit (`4b55591306c9`) plus the torch/CUDA/py
 triple, so it changes only when one of those baked pins moves — at which point a new tarball must be
