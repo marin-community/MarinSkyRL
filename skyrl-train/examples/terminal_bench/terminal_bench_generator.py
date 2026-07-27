@@ -6,6 +6,8 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, List, Optional, Dict, Any, Tuple
+
+import numpy as np
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
@@ -45,6 +47,7 @@ from harbor.utils.traces_utils import normalize_message
 
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder
+from examples.terminal_bench.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
 # Incremental, trial-indexed reader for the shared opencode literal log.
 from examples.terminal_bench.literal_log_store import LiteralLogStore
@@ -216,6 +219,9 @@ class TerminalBenchAgentOutput:
     # unless enable_token_reward_channel is on.
     token_level_shaping: Optional[List[float]] = None
     response_span_tags: Optional[List[int]] = None
+    # True when the truncation penalty was applied (stop_reason=="length" +
+    # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
+    truncation_penalized: bool = False
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -338,6 +344,12 @@ class TerminalBenchGenerator(GeneratorInterface):
         self._pbs_gamma = float(self._reward_shaping_config.get("pbs_gamma", 1.0))
         self._pbs_max_total_shaping = float(self._reward_shaping_config.get("pbs_max_total_shaping", 0.3))
         self._pbs_potential_shape = str(self._reward_shaping_config.get("pbs_potential_shape", "linear"))
+
+        # Truncation penalty: penalize cap-truncated trials so they are
+        # distinguishable from honest failures in the advantage signal. Default
+        # 0.0 -> no-op (byte-identical). Applied post-shaping to trials with
+        # stop_reason == "length" and original_reward == 0.
+        self._truncation_penalty = float(self._reward_shaping_config.get("truncation_penalty", 0.0))
 
         # Error handling config (for RLOO-N advantage estimator)
         self._error_handling_config = self._harbor_config_builder.get_error_handling_config()
@@ -1053,6 +1065,26 @@ class TerminalBenchGenerator(GeneratorInterface):
             rollout_metrics["generate/trajectories_truncated"] = sum(
                 1 for output in successful_outputs if output.stop_reason == "length"
             )
+            num_successful = len(successful_outputs)
+            num_truncated = sum(1 for o in successful_outputs if o.stop_reason == "length")
+            rollout_metrics["generate/truncated_fraction"] = (
+                num_truncated / num_successful if num_successful > 0 else 0.0
+            )
+            rollout_metrics["generate/truncation_penalty_applied"] = sum(
+                1 for o in successful_outputs if o.truncation_penalized
+            )
+            # Output-length percentiles and their ratio: a healthy arm's
+            # p90/p25 widens as it lengthens; a collapsing arm's narrows
+            # toward the cap. Moves before the distribution finishes
+            # collapsing, so it flags the failure earlier than a cap-hit count.
+            tok_lengths = [len(o.response_ids) for o in successful_outputs]
+            if tok_lengths:
+                tok_arr = np.array(tok_lengths)
+                p25 = float(np.percentile(tok_arr, 25))
+                p90 = float(np.percentile(tok_arr, 90))
+                rollout_metrics["generate/out_tok_p25"] = p25
+                rollout_metrics["generate/out_tok_p90"] = p90
+                rollout_metrics["generate/out_tok_p90_p25_ratio"] = p90 / p25 if p25 > 0 else 0.0
         else:
             rollout_metrics = {}
         rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
@@ -1911,6 +1943,20 @@ class TerminalBenchGenerator(GeneratorInterface):
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
 
+        max_gen_len = self.generator_cfg.sampling_params.max_generate_length
+        per_turn_counts = [len(t) for t in assistant_token_ids] if assistant_token_ids else None
+        turn_truncated = detect_turn_truncation(per_turn_counts, max_gen_len)
+
+        truncation_penalized = False
+        reward, truncation_penalized = apply_truncation_penalty(
+            reward, original_reward, turn_truncated, self._truncation_penalty
+        )
+        if truncation_penalized:
+            logger.debug(
+                f"Trajectory {trajectory_id}: truncation penalty applied "
+                f"({self._truncation_penalty}), reward {original_reward:.3f} -> {reward:.3f}"
+            )
+
         # Loop-behavior reward shaping (Stage B / F5 + F4): when the channel is
         # enabled, emit a per-token shaping vector (ZEROS in Stage B — no-op) and,
         # optionally, the F4 span tags. Both are computed on the SAME response_ids
@@ -2017,6 +2063,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             alignment_stats=alignment_stats,
             token_level_shaping=token_level_shaping,
             response_span_tags=response_span_tags,
+            truncation_penalized=truncation_penalized,
             exclude_from_baseline=preserve_exclude_from_baseline if preserve_timeout else False,
             exception_type=preserve_exception_type if preserve_timeout else None,
         )

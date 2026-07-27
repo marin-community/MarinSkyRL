@@ -378,6 +378,7 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final HF model (resume-at-max finalize).")
+                self._flush_hf_uploads()
         logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _train_loop(self):
@@ -688,6 +689,7 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+                self._flush_hf_uploads()
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
@@ -1164,6 +1166,16 @@ class RayPPOTrainer:
         mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
             generator_output_for_metrics,
             uids_for_metrics,
+        )
+
+        # Per-sample scalar rewards for this step, kept for callbacks that need the
+        # distribution rather than its mean (PreflightGateCallback reads this). Captured
+        # here because rewards are converted to per-token form a few lines below and the
+        # scalar form is not recoverable afterwards. Token-level rewards are skipped: the
+        # gate is defined on a per-sample scalar.
+        step_rewards = generator_output_for_metrics["rewards"]
+        self._current_step_rewards = (
+            [float(r) for r in step_rewards] if step_rewards and not isinstance(step_rewards[0], list) else []
         )
 
         # these use the full generator output
@@ -1860,6 +1872,7 @@ class RayPPOTrainer:
             checkpoint_path = self.cfg.trainer.resume_path
             if not checkpoint_path:
                 raise ValueError("`trainer.resume_path` must be specified when resume_mode is 'from_path'")
+            checkpoint_path = checkpoint_path.rstrip("/")
 
             # Validate that it's a global_step directory
             if GLOBAL_STEP_PREFIX not in os.path.basename(checkpoint_path):
@@ -1957,6 +1970,19 @@ class RayPPOTrainer:
                 )
             )
         logger.info("Successfully saved model weights.")
+
+    def _flush_hf_uploads(self) -> None:
+        """Re-process HF Hub uploads after the final model export is on disk.
+
+        ``on_train_end`` fires before ``save_models()``, so the final step's
+        upload was skipped on the first pass.  This retries it now that the
+        export exists.  No-op when no HFHubUploadCallback is registered.
+        """
+        from skyrl_train.callbacks.builtin import HFHubUploadCallback
+
+        for cb in getattr(self.callback_handler, "callbacks", []):
+            if isinstance(cb, HFHubUploadCallback):
+                cb.post_save_flush(self.global_step)
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""

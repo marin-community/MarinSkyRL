@@ -18,45 +18,21 @@ These tests pin the two properties that make that default flip safe:
 
 `model_utils` imports `megatron.core.parallel_state` at module load, but the functions
 under test never touch it, so when megatron is not installed (the CPU CI env) we stub
-that one submodule — only if megatron is genuinely absent, so a real-megatron env is
-left untouched.
+it via the shared tests/cpu/util.py helper — only if megatron is genuinely absent, so a
+real-megatron env is left untouched.
 """
-
-import importlib.util
-import os
-import sys
-import types
 
 import pytest
 import torch
-import torch.distributed as dist
 
-if importlib.util.find_spec("megatron") is None:
-    for _name in ("megatron", "megatron.core", "megatron.core.parallel_state"):
-        sys.modules.setdefault(_name, types.ModuleType(_name))
+from tests.cpu.util import stub_megatron_modules
+
+stub_megatron_modules()
 
 from skyrl_train.distributed.megatron.model_utils import (  # noqa: E402
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
 )
-
-
-@pytest.fixture(scope="module")
-def single_rank_group():
-    """A world-size-1 gloo process group so the TP all-reduces inside the logprob
-    kernels are no-ops (vocab_start=0, vocab_end=full vocab) and the computation runs
-    on a single CPU process."""
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29591")
-    created = False
-    if not dist.is_initialized():
-        dist.init_process_group("gloo", rank=0, world_size=1)
-        created = True
-    try:
-        yield dist.group.WORLD
-    finally:
-        if created:
-            dist.destroy_process_group()
 
 
 def _logprobs(logits, targets, group, chunk_size, inference_only):

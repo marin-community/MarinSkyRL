@@ -43,6 +43,15 @@ CP_FIELDS = {
 # behavior (G1).
 STAGE2_TRAINER_FIELDS = {
     "attn_backend": "auto",
+    # preflight_gate is a default-off reward gate unrelated to CP; stripped here
+    # because it is additive and must not appear in the pre-CP golden diff.
+    "preflight_gate": {
+        "enabled": False,
+        "min_reward": 0.25,
+        "max_reward": 0.75,
+        "num_trials": 256,
+        "on_failure": "abort",
+    },
 }
 # Additive generator key from the vLLM DCP port Stage 0 (flag-off no-op, default == 1).
 # Like the CP fields, it is purely additive and must be stripped before the structural

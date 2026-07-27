@@ -55,6 +55,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -279,12 +280,74 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # gpu-rl-4d289ed3 (verified 2026-07-24): canonical result of successful
     # gpurl-kaniko-4d289ed3. It bakes marin-community/vllm 8672c71e with
     # FlashAttention 2.8.3; Harbor remains baked at 1319eb29.
-    "@sha256:fd8792ef7f286d5461b98fe727e09b31e04b3ef822e5a7c465d740f99235ddc7"  # noqa: E501
+    # gpu-rl-d48445f7 (built 2026-07-25, kaniko job gpurl-kaniko-d48445f7): SKYRL source bump to
+    # d48445f7 — bakes the checkpoint-resume fix chain (#118 download nesting, #122 resume-path
+    # URI preservation, #127 upload nesting + trailing-slash resume_path). vLLM fork 8672c71e,
+    # FlashAttention 2.8.3, and Harbor 1319eb29 unchanged (fast prebuilt-wheelhouse, full kaniko
+    # cache hit, ~3 min). Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
+    # gpu-rl-0acfe947 (built 2026-07-25, kaniko job gpurl-kaniko-0acfe947): HARBOR_COMMIT bump
+    # 1319eb29 -> 01c736a6 (harbor#36: bounded background artifact writer — routes hot-path
+    # trajectory/exception/config writes off the shared executor with local spool +
+    # flush-on-finalize; per-trial dump cadence default; fixes the trajectory-dump S3 backlog
+    # that collapsed rollout throughput ~6.7x). SKYRL 0acfe947 also carries #131 (download
+    # separator applied after _strip_protocol — the fix that made from_path s3 resume actually
+    # work; validated live on rl-tasktrove-dq-sweep-30b-terminus2-qwen-20260725-121011-d6637e,
+    # global_step_23 resume clean) and #132 (megatron pip-check build gate, fixes #130).
+    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
+    # gpu-rl-d7ba00ff (built 2026-07-26): HARBOR_COMMIT bump 01c736a6 -> 772e20f7, which carries
+    # harbor#39 (a 300 s ENVIRONMENT_STOP_TIMEOUT_SEC deadline on verifier teardown, and
+    # CancelledError classified non-retryable) and harbor#40. Before #39 a hung verifier exec had
+    # no deadline: durations reached 5,050-34,832 s with exception_info=None, and the rollout was
+    # lost. The deadline now fires, the trial survives at reward 0, and its logprobs stay
+    # TIS-valid. SKYRL d7ba00ff also carries #137 (literal-log byte-span indexing, which fixed the
+    # ~85 GiB/h RolloutCoordinator growth) and #138 (TIS diagnostics on both backends).
+    # gpu-rl-ac5a9c65 (built 2026-07-27): a SKYRL-source-only bump, d7ba00ff -> ac5a9c65. No baked
+    # dependency moved: same harbor 772e20f7, same vLLM source 8672c71e with the 4b555913 native
+    # donor, flash-attn 2.8.3, torch 2.11.0+cu128, and the same skyrl-train/uv.lock. It bakes the
+    # reward-signal work merged as #154 (truncation penalty for cap-truncated trials), #155
+    # (default-off pre-flight reward gate) and #156 (the three reward signals combined, enabled for
+    # the sweep). The rebuild is REQUIRED for those PRs to take effect: cloud/iris/run_rl.py runs
+    # the SkyRL entrypoint with cwd=/opt/skyrl/skyrl-train, and `python -m` puts the cwd ahead of
+    # PYTHONPATH, so skyrl_train and examples.terminal_bench import from the BAKED tree, not the
+    # synced /app workspace. Hydra follows the same path: config_dir in
+    # skyrl_train/entrypoints/main_base.py is derived from __file__, so it loads the baked
+    # ppo_base_config.yaml. Three sweep jobs on the previous image died with
+    # `Key 'preflight_gate' is not in struct` for exactly this reason.
+    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
+    "@sha256:96848c50a95fcdc50b7d5f4d2b24185394c79ad8c83300c00fcf8452cfbc24e1"  # noqa: E501
+    # (prev: gpu-rl-d7ba00ff @sha256:1879c801, Harbor 772e20f7 + verifier-teardown deadline)
+    # (prev: gpu-rl-0acfe947 @sha256:625d7577, Harbor 01c736a6 + background artifact writer)
+    # (prev: gpu-rl-d48445f7 @sha256:eb854128, Harbor 1319eb29 + resume-fix chain)
+    # (prev: gpu-rl-4d289ed3 @sha256:fd8792ef, vllm 8672c71e + Harbor 1319eb29)
     # (prev: gpu-rl-0dda3d68 @sha256:bb1b01ba, Harbor baked)
     # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041, same Harbor)
     # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
     # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
 )
+
+# The Megatron sibling of DEFAULT_RL_DOCKER_IMAGE, built from the same source and the same baked
+# harbor with INSTALL_MEGATRON=1. A `trainer.strategy: megatron` config CANNOT run on the plain
+# image, which has no megatron package, so `resolve_launch_defaults` selects this one from the
+# config. Rebuild BOTH images together and bump BOTH digests, or a strategy switch silently
+# crosses a harbor-version boundary.
+DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
+    "ghcr.io/open-thoughts/openthoughts-agent"
+    # gpu-rl-megatron-d7ba00ff (built 2026-07-26): the megatron variant of gpu-rl-d7ba00ff, so it
+    # carries the same harbor 772e20f7 (#39 verifier-teardown deadline, #40) and the same SKYRL
+    # d7ba00ff (#137 coordinator-growth fix, #138 TIS diagnostics on both backends). Verified live
+    # on all four tasktrove-dq-sweep arms relaunched 2026-07-26 14:40 UTC.
+    # gpu-rl-megatron-ac5a9c65 (built 2026-07-27): the megatron variant of gpu-rl-ac5a9c65, built
+    # from the same source in the same pass with the same harbor 772e20f7. This is the image the
+    # tasktrove-dq sweep actually uses, because its config sets trainer.strategy=megatron.
+    # Pull-verified: 39 layers, max 3.61 GB, 22.02 GB total.
+    "@sha256:0a6cea7ddf877e52c0d06c9a1bab308a23f3a6f8c0ec28452a6ce3de81b2582c"  # noqa: E501
+    # (prev: gpu-rl-megatron-d7ba00ff @sha256:107e4933, Harbor 772e20f7)
+    # (prev: gpu-rl-megatron-87ff3f6b @sha256:e1e62927, Harbor 01c736a6)
+    # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041; gpu-rl-megatron-a1e7a363 @sha256:570e9cc1)
+)
+
+_MEGATRON_STRATEGY = "megatron"
+
 _SUPERSEDED_RL_IMAGES = (
     # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
     # of the prior gpu-rl-1af0ae2d (@sha256:d77b34dd…) — baked harbor f7f51f13 → 0729a3e9, which sits
@@ -339,6 +402,15 @@ MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
 DAYTONA_RL_SECRET_VERSION = "1"
+# The RL Daytona org enforces a 40-snapshot quota. Harbor mints one "harbor__*" env
+# snapshot per trial (auto_snapshot=true); once the org is over quota, snapshot creation
+# fails and harbor's fallthrough attempts a declarative sandbox build, which this org
+# forbids, so every trial then dies unscored with DaytonaValidationError and the job trains
+# on all-zero rewards. Purging harbor-minted snapshots idle past this age before every
+# launch keeps quota headroom so harbor's worker-side minting can self-heal.
+DAYTONA_RL_SNAPSHOT_QUOTA = 40
+HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
+STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 DEFAULT_MEMORY_PER_NODE = "1700GB"
 # --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
 # (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
@@ -555,6 +627,54 @@ def _resolve_daytona_rl_api_key() -> str:
     return value
 
 
+def _daytona_client(api_key: str) -> Any:
+    """Construct a Daytona SDK client for the RL org.
+
+    The daytona SDK is an optional launch-host dependency, so it is imported lazily here
+    rather than at module scope.
+    """
+    from daytona import Daytona, DaytonaConfig
+
+    return Daytona(DaytonaConfig(api_key=api_key))
+
+
+def _purge_stale_daytona_snapshots(api_key: str) -> None:
+    """Delete stale harbor-minted Daytona snapshots on the RL org before a launch.
+
+    A snapshot is a purge candidate iff its name starts with ``HARBOR_SNAPSHOT_NAME_PREFIX``
+    and it has been idle (no use since ``last_used_at``, or since ``created_at`` if never
+    used) for longer than ``STALE_SNAPSHOT_MAX_AGE``. Non-harbor (system) snapshots are
+    never touched. See ``DAYTONA_RL_SNAPSHOT_QUOTA`` above for why this runs before every
+    launch.
+    """
+    d = _daytona_client(api_key)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    total = 0
+    harbor_count = 0
+    purged_count = 0
+    page = 1
+    while True:
+        result = d.snapshot.list(page=page, limit=100)
+        total = result.total
+        for snapshot in result.items:
+            if not snapshot.name.startswith(HARBOR_SNAPSHOT_NAME_PREFIX):
+                continue
+            harbor_count += 1
+            last_active = snapshot.last_used_at or snapshot.created_at
+            if now - last_active > STALE_SNAPSHOT_MAX_AGE:
+                d.snapshot.delete(snapshot)
+                purged_count += 1
+        if page >= result.total_pages or not result.items:
+            break
+        page += 1
+    kept_count = harbor_count - purged_count
+    print(
+        f"[rl-iris] Daytona snapshot purge: total={total} harbor={harbor_count} "
+        f"purged={purged_count} kept={kept_count}",
+        flush=True,
+    )
+
+
 def _validate_rl_config_topology(args: argparse.Namespace) -> None:
     """Reject a gang size incompatible with explicit trainer placement metadata.
 
@@ -620,6 +740,27 @@ def _rl_config_harness_name(rl_config: str) -> Optional[str]:
     return None
 
 
+def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
+    """Read the effective ``trainer.strategy`` the job will run under.
+
+    A ``--skyrl_override trainer.strategy=...`` wins over the config file, because Hydra applies
+    it later. Returns None when neither source declares one.
+    """
+    for override in reversed(getattr(args, "skyrl_override", None) or []):
+        key, separator, value = str(override).partition("=")
+        if separator and key.strip().lstrip("+~") == "trainer.strategy":
+            return value.strip().strip("'\"").lower() or None
+
+    try:
+        with open(args.rl_config) as f:
+            config = yaml.safe_load(f) or {}
+    except OSError:
+        return None
+    trainer = config.get("trainer") if isinstance(config, dict) else None
+    strategy = trainer.get("strategy") if isinstance(trainer, dict) else None
+    return strategy.strip().lower() if isinstance(strategy, str) and strategy.strip() else None
+
+
 def _sanitize_job_name_component(value: str) -> str:
     """Make one human-readable Kubernetes job-name component."""
     value = value.strip().rstrip("/").split("/")[-1]
@@ -666,6 +807,12 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     if args.record_literal is None:
         harness = _rl_config_harness_name(args.rl_config)
         args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
+
+    if args.task_image is None:
+        strategy = _rl_training_strategy(args)
+        args.task_image = (
+            DEFAULT_RL_MEGATRON_DOCKER_IMAGE if strategy == _MEGATRON_STRATEGY else DEFAULT_RL_DOCKER_IMAGE
+        )
 
 
 def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
@@ -1096,8 +1243,9 @@ def create_parser() -> argparse.ArgumentParser:
         "--docker_image",
         "--docker-image",
         dest="task_image",
-        default=DEFAULT_RL_DOCKER_IMAGE,
-        help=f"Container image (default {DEFAULT_RL_DOCKER_IMAGE}).",
+        default=None,
+        help="Container image. Default: selected from the config's trainer.strategy — "
+        f"{DEFAULT_RL_MEGATRON_DOCKER_IMAGE} for megatron, {DEFAULT_RL_DOCKER_IMAGE} otherwise.",
     )
     parser.add_argument(
         "--job-name",
@@ -1511,6 +1659,22 @@ def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
     return str(val)
 
 
+def load_config_trainer_export_path(rl_config_path: str) -> Optional[str]:
+    """Return an EXPLICIT ``trainer.export_path`` from the RL config YAML, else None.
+
+    Same contract as ``load_config_trainer_ckpt_path``: an explicitly set value wins over
+    the launcher's durable default, and ``null``/empty means "derive one"."""
+    try:
+        raw = _load_rl_config_yaml(rl_config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rl-iris] WARNING: could not read export_path from {rl_config_path}: {exc}", file=sys.stderr)
+        return None
+    val = (raw.get("trainer") or {}).get("export_path")
+    if val is None or (isinstance(val, str) and not val.strip()):
+        return None
+    return str(val)
+
+
 def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
     """Rewrite a JOB-SCOPED NCCL flight-recorder dump path so its slug segment is the
     ACTUAL job name, e.g. ``/tmp/fr_dumps/<slug>/nccl_fr_rank`` -> ``/tmp/fr_dumps/
@@ -1670,6 +1834,23 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         ckpt_path = f"s3://marin-us-east-02a/iris/{args.job_name}/checkpoints"
         train_cmd.extend(["--skyrl_override", f"++trainer.ckpt_path={ckpt_path}"])
         print(f"[rl-iris] Durable resumable ckpt_path: {ckpt_path}")
+
+    # export_path needs the SAME durable treatment as ckpt_path, and for a sharper reason.
+    # Left unset it is auto-derived to a node-local <experiments_dir>/<job>/exports
+    # (rl_config_translation.py). save_hf_model then writes the HF export on a POLICY WORKER
+    # while HFHubUploadCallback runs on the DRIVER, so the callback finds nothing, every
+    # upload fails, and the run ends with an empty repo — after which both nodes are reclaimed
+    # and the export is gone for good. Every completed run in the 2026-07 sweep lost its
+    # published model exactly this way; the training checkpoints survived only because
+    # ckpt_path was already durable. The callback reads through skyrl's fsspec io layer, so an
+    # s3:// export_path is visible from any node. Respect an explicit value from the YAML or a
+    # --skyrl_override (either wins).
+    user_set_export = any("trainer.export_path=" in o for o in (args.skyrl_override or []))
+    yaml_export = load_config_trainer_export_path(args.rl_config)
+    if not user_set_export and not yaml_export:
+        export_path = f"s3://marin-us-east-02a/iris/{args.job_name}/exports"
+        train_cmd.extend(["--skyrl_override", f"++trainer.export_path={export_path}"])
+        print(f"[rl-iris] Durable export_path: {export_path}")
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
@@ -1885,12 +2066,14 @@ def main() -> int:
     load_secrets_env_into_os_environ(args.secrets_env)
 
     if _rl_config_is_agentic(args.rl_config):
-        os.environ["DAYTONA_API_KEY"] = _resolve_daytona_rl_api_key()
+        daytona_api_key = _resolve_daytona_rl_api_key()
+        os.environ["DAYTONA_API_KEY"] = daytona_api_key
         print(
             "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
             f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
             flush=True,
         )
+        _purge_stale_daytona_snapshots(daytona_api_key)
 
     command = build_task_command(args)
 

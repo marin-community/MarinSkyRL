@@ -118,6 +118,20 @@ The build job uses **kaniko** (`gcr.io/kaniko-project/executor`), NOT buildkit/`
   `{"auths":{"ghcr.io":{"auth":"<base64 of penfever:$DOCKER_TOKEN>"}}}`. The script disables shell tracing
   until AFTER the token is consumed, so the PAT never lands in the R2-persisted finelog.
 
+### Before you build: reconcile the recipe against the script
+
+The build script enforces a required-variable contract and hard-fails before attempting anything
+when one is missing, so a stale recipe dies with no build and a confusing error. The script is the
+authority: **read the top of `docker/build_gpu_rl_kaniko.sh` first** and take the contract from
+there. Docs have lagged it before.
+
+Then confirm the baked dependency pins still match what production runs, rather than trusting
+their defaults — a default that has drifted below production reverts that dependency while the
+build log reports nothing changed.
+
+The current contract, the pins that have drifted, and the deploy boundary are recorded in
+**`.agents/ops/gpu-rl-image-build.md`**.
+
 ## 3. The launch command (verbatim shape)
 
 ```bash
@@ -263,16 +277,29 @@ After the build SUCCEEDS (state SUCCEEDED, push done), capture the immutable dig
 docker buildx imagetools inspect ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>
 crane manifest --platform linux/amd64 ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>   # then digest it
 ```
-Then **bump `DEFAULT_RL_DOCKER_IMAGE` in `cloud/iris/launch_rl_iris.py`** to the new
-`ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment. **Pin the DIGEST,
-never the floating `:gpu-rl` tag** (it stale-caches under `imagePullPolicy: IfNotPresent`). Commit the launcher
-bump locally.
+Then **bump the matching pin in `cloud/iris/launch_rl_iris.py`** to the new
+`ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment: a
+`gpu-rl-<gitsha>` digest goes in `DEFAULT_RL_DOCKER_IMAGE`, a `gpu-rl-megatron-<gitsha>` digest in
+`DEFAULT_RL_MEGATRON_DOCKER_IMAGE`. The launcher selects between them from the config's
+`trainer.strategy`, so **bump BOTH in the same commit** — leaving one behind makes a strategy switch
+silently cross a harbor-version boundary. **Pin the DIGEST, never the floating `:gpu-rl` tag** (it
+stale-caches under `imagePullPolicy: IfNotPresent`). Commit the launcher bump locally.
 
-**Last known-good digest (currently pinned on main):**
-`sha256:e8b48241b548da570a319ff421e72787692ee87dae2408c99a2d0c6794186177` (gpu-rl-e03896b7 — baked harbor
-`f4a6b1a0`; PULLABLE, 48 layers max 3.46 GB; build asserts green). This pin **predates the merged harbor-bridge
-change** — harbor is baked into the image, so an image bump is the durable follow-up before dropping the runtime
-`--harbor-ref` override.
+**To read the digests currently pinned on main**, read the constants themselves — do not trust a digest
+quoted in prose, here or in an experiment policy:
+
+```bash
+python -c "
+import sys; sys.path.insert(0, '.')
+from cloud.iris.launch_rl_iris import DEFAULT_RL_DOCKER_IMAGE as plain, DEFAULT_RL_MEGATRON_DOCKER_IMAGE as mega
+print('plain   ', plain)
+print('megatron', mega)"
+```
+
+The provenance comment above each constant records what that build bakes and why it was cut. Per the skill
+policy in `AGENTS.md`, a mutable revision is resolved at execution time, never copied into a skill: this
+document previously asserted a "currently pinned" digest that had gone several builds stale and still
+described itself as predating a merged change.
 
 ## 9. WHEN a rebuild is actually required (vs a runtime checkout)
 
@@ -285,10 +312,13 @@ Rebuild the image ONLY for a change to something the image **BAKES / COMPILES**:
   --frozen` reproduces the new set by construction), the torchtitan/tyro/`ep` extra, harbor (`HARBOR_COMMIT`),
   or the rl-stage apt set.
 
-Do **NOT** rebuild for a **MarinSkyRL source** change — the launcher syncs the local workspace to `/app`
-(first on `PYTHONPATH`), so `skyrl_train.*` + `examples.terminal_bench.*` are picked up live from `/app` at
-launch, no image rebuild. The compiled vLLM-fork is
-the only thing that genuinely forces a rebuild for a code change.
+**ALSO rebuild for a source change to the tree the image bakes.** Only part of the repo rides the
+`/app` workspace bundle; the rest is baked, so a merged PR touching it is inert on the cluster until
+the image is rebuilt. This contradicts the obvious reading of the launcher and it has cost production
+jobs, so never assume a change is live from the fact that it merged.
+
+Do not carry the boundary in your head — check it. Which paths are baked, why, and the exact failure
+signature when a config key outruns the image are in **`.agents/ops/gpu-rl-image-build.md`**.
 
 > If the build host WERE a real x86 box (not the cluster), the documented fast path is the wheel-cache:
 > `docker/build_wheels.sh` (compile the wheels once → `docker/wheelhouse/`) then a `docker buildx` build with

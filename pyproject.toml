@@ -14,10 +14,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 [tool.setuptools]
-# Root package is metadata-only - actual code is in subdirectories:
-# - skyrl-train/  (install with: pip install ./skyrl-train[vllm])
-# - skyrl-gym/    (install with: pip install ./skyrl-gym)
-# - skyagent/     (install with: pip install ./skyagent)
 packages = []
 
 [dependency-groups]
@@ -26,19 +22,8 @@ dev = [
 ]
 
 [tool.marin-style]
-# ruff-format is switched on by the reformat PR stacked on top of this one, together with
-# the tree-wide reformat it demands. Enabling it here would just make this PR's lint job
-# fail on 157 files of dialect drift that have nothing to do with the changes in it.
 checks = ["ruff-check", "ruff-format"]
-# Pinned rather than inherited from the kit's default, so that bumping marin-style cannot
-# silently reformat the tree: a ruff release that changes the format dialect has to be
-# adopted here, deliberately, as its own commit. This is the only formatter that runs --
-# skyrl-train's dev extra still lists ruff 0.11.9 and black, but nothing invokes them
-# (lint goes through infra/pre-commit.py), and they cannot be dropped while the lockfile
-# is unregenerable.
 ruff_version = "0.14.3"
-# skyrl-agent is a dormant snapshot that nothing in CI builds or tests; reformatting it
-# would be pure churn. The three live packages are linted.
 include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**"]
 
 [tool.ruff]
@@ -46,5 +31,5 @@ line-length = 120
 
 [tool.ruff.lint]
 ignore = [
-    "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
+    "F722"
 ]

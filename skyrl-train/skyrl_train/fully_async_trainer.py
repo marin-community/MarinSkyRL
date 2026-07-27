@@ -561,6 +561,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final HF model (resume-at-max finalize).")
+                await asyncio.to_thread(self._flush_hf_uploads)
         logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _train_loop(self):
@@ -935,6 +936,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
+                await asyncio.to_thread(self._flush_hf_uploads)
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):

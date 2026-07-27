@@ -177,6 +177,34 @@ def resolve_ray_prefix(s3, slug, run, rendezvous_dir, finelog_path):
     return None, None
 
 
+RAY_SOURCE_MARKER = ".synced_from"
+
+
+def _guard_ray_dest(outdir, prefix):
+    """Refuse to mirror a second job's Ray logs into a dest that already holds another job's.
+
+    Unlike the finelog, which is rewritten each run, the Ray mirror is ADDITIVE — it copies objects
+    in and never removes what is already there. Reusing one ``--dest`` for two jobs therefore MERGES
+    their ``rank*-<node>`` directories, and the result looks like one job that ran on twice the nodes.
+    That has repeatedly misled readers into diagnosing the wrong job. A stamp of the source prefix
+    makes the collision loud instead of silent.
+    """
+    marker = os.path.join(outdir, RAY_SOURCE_MARKER)
+    if os.path.exists(marker):
+        with open(marker) as f:
+            previous = f.read().strip()
+        if previous and previous != prefix:
+            raise SystemExit(
+                f"[ray] REFUSING to mirror into {outdir}: it already holds Ray logs from a different "
+                f"job.\n      existing: {previous}\n      requested: {prefix}\n"
+                "      The Ray mirror is additive, so this would merge two jobs' rank dirs into one "
+                "tree and make the capture unreadable. Use a per-job --dest."
+            )
+    os.makedirs(outdir, exist_ok=True)
+    with open(marker, "w") as f:
+        f.write(prefix + "\n")
+
+
 def sync_ray(s3, prefix, dest):
     """Mirror every object under the resolved ray_session_logs prefix into <dest>/ray_session_logs/."""
     keys = _list_all(s3, prefix)
@@ -185,6 +213,7 @@ def sync_ray(s3, prefix, dest):
         print("[ray] (none yet — the s3 upload lags for a fresh/live job; re-run shortly)")
         return 0
     outdir = os.path.join(dest, RAY_SUBDIR)
+    _guard_ray_dest(outdir, prefix)
 
     def dl(item):
         k, sz = item
@@ -221,8 +250,7 @@ def sync_trace_jobs(s3, slug, dest, gzip=True):
     _n0 = len(keys)
     keys = [item for item in keys if not item[0].endswith(".pane")]
     _skipped = _n0 - len(keys)
-    print(f"[trace] {len(keys)} objects under {pfx}"
-          + (f"  (skipped {_skipped} .pane captures)" if _skipped else ""))
+    print(f"[trace] {len(keys)} objects under {pfx}" + (f"  (skipped {_skipped} .pane captures)" if _skipped else ""))
     if not keys:
         print("[trace] (none yet — trace_jobs is written as trials complete; re-run once rollouts start)")
         return 0

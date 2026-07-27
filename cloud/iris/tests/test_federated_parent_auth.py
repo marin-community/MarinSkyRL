@@ -9,12 +9,14 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("rigging", reason="rigging is a private Marin-monorepo package, not installable in CI")
+import rigging.auth  # noqa: E402
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import cloud.iris.launch_rl_iris as launcher  # noqa: E402
-import rigging.auth  # noqa: E402
 
 
 def _args() -> argparse.Namespace:

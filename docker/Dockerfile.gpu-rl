@@ -63,7 +63,10 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 # the uv sync). All megatron deps are linux/x86_64-gated in the lock.
 ARG INSTALL_MEGATRON=0
 # Harbor (agentic rollout) is installed after the trainer lock.
-ARG HARBOR_COMMIT=1319eb29
+# Keep this in step with what production actually bakes. It lagged at 01c736a6 while every
+# shipped image carried 772e20f7 (harbor#39, the verifier-teardown deadline), so a build that
+# did not pass an explicit override would have silently reverted harbor by one release.
+ARG HARBOR_COMMIT=772e20f7
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
@@ -449,6 +452,10 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
+# The pip-check gate below always prints the full conflict report. The plain
+# image must have exactly the one known aiobotocore/botocore conflict; the
+# megatron install adds further conflicts of its own, so INSTALL_MEGATRON=1
+# only requires the known conflict and leaves the printed report for review.
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
@@ -458,11 +465,25 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
       echo "expected the known aiobotocore/botocore metadata conflict"; \
       exit 1; \
     fi && \
-    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1" && \
+    cat /tmp/rl-pip-check && \
     grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
       /tmp/rl-pip-check && \
+    if [ "${INSTALL_MEGATRON}" != "1" ]; then \
+      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1"; \
+    fi && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
+
+# Profiler and callable-entrypoint support, baked so the task does not need iris's
+# setup phase to supply them. iris normally installs cloudpickle/py-spy/memray into
+# the venv it creates at $IRIS_WORKDIR/.venv; with EnvironmentSpec(setup_scripts=[])
+# that phase is skipped entirely and the image is used as-is, so these have to be
+# here. py-spy is what a wedge diagnosis attaches with, and losing it silently would
+# cost the capability exactly when it is needed.
+RUN uv pip install --python ${RL_ENV_DIR}/bin/python cloudpickle py-spy memray && \
+    ${RL_ENV_DIR}/bin/python -c "import cloudpickle; print('cloudpickle', cloudpickle.__version__)" && \
+    ${RL_ENV_DIR}/bin/py-spy --version && \
+    ${RL_ENV_DIR}/bin/python -c "import memray; print('memray OK')"
 
 # =============================================================================
 # Environment configuration

@@ -10,7 +10,6 @@ set -euo pipefail
 WHEEL_SOURCE="${WHEEL_SOURCE:-prebuilt-wheelhouse}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
-HARBOR_COMMIT="${HARBOR_COMMIT:-1319eb29}"
 DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.gpu-rl}"
 DOCKER_CONTEXT=/app
 DOCKERFILE_PATH="${DOCKER_CONTEXT}/${DOCKERFILE}"
@@ -24,6 +23,35 @@ fi
 dockerfile_arg() {
   sed -n "s/^ARG $1=//p" "$DOCKERFILE_PATH" | head -n 1 | tr -d '"'
 }
+
+# Baked pins are DECLARED in the Dockerfile and read from there — the build never
+# carries a second copy of a version it might bake. A duplicate default in this
+# script once drifted a full harbor release behind the Dockerfile, and every build
+# stayed correct only because operators happened to pass an override; a build run
+# without it would have silently shipped older harbor while reporting no change.
+#
+# An env override is now a hard error rather than a silent divergence. To change a
+# pin, edit the Dockerfile and commit it, so the image always matches the source
+# that claims to describe it.
+PINNED_ARGS=(HARBOR_COMMIT VLLM_FORK_COMMIT VLLM_NATIVE_DONOR_COMMIT FLASH_ATTN_VERSION TORCH_VERSION)
+for _arg in "${PINNED_ARGS[@]}"; do
+  _declared="$(dockerfile_arg "$_arg")"
+  if [ -z "$_declared" ]; then
+    echo "ERROR: $DOCKERFILE declares no default for $_arg." >&2
+    echo "Every baked pin must be declared in the Dockerfile so the build is reproducible from source." >&2
+    exit 2
+  fi
+  _supplied="$(eval "printf '%s' \"\${$_arg:-}\"")"
+  if [ -n "$_supplied" ] && [ "$_supplied" != "$_declared" ]; then
+    echo "ERROR: $_arg was overridden to '$_supplied' but $DOCKERFILE declares '$_declared'." >&2
+    echo "Baked pins are changed by editing and committing the Dockerfile, never by an env override," >&2
+    echo "so that a built image always matches the committed source. Refusing to build." >&2
+    exit 2
+  fi
+  eval "$_arg=\$_declared"
+  echo "[pin] $_arg=$_declared (from $DOCKERFILE)"
+done
+unset _arg _declared _supplied
 
 SNAPSHOT_FLAGS=()
 if [ "${SINGLE_SNAPSHOT:-0}" = "1" ]; then

@@ -136,8 +136,6 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
-    # Megatron backend geometry (trainer.strategy=megatron). DERIVED, UNVALIDATED.
-    # Qwen3-8B DENSE: EP1/ETP1 (no experts). 8 training GPUs: TP2 x PP1 x CP1 = 2 MP, DP=4.
     megatron_config:
       tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 1

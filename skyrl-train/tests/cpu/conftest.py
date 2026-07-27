@@ -10,6 +10,7 @@ import pytest
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 
 import ray  # noqa: E402
+import torch.distributed as dist  # noqa: E402
 
 
 def _kill_registry_actors() -> None:
@@ -44,3 +45,20 @@ def ray_module() -> Iterator[None]:
     """Share a local Ray session across an actor-heavy test module."""
     with _local_ray_session():
         yield
+
+
+@pytest.fixture(scope="module")
+def single_rank_group():
+    """A world-size-1 gloo process group so distributed collectives (TP
+    all-reduces, broadcast_object_list) run as no-ops on one CPU process."""
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29591")
+    created = False
+    if not dist.is_initialized():
+        dist.init_process_group("gloo", rank=0, world_size=1)
+        created = True
+    try:
+        yield dist.group.WORLD
+    finally:
+        if created:
+            dist.destroy_process_group()

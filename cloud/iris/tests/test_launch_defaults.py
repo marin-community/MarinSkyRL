@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cloud.iris.launch_rl_iris import (  # noqa: E402
     DEFAULT_RL_DOCKER_IMAGE,
+    DEFAULT_RL_MEGATRON_DOCKER_IMAGE,
     create_parser,
     derive_default_job_name,
     resolve_launch_defaults,
@@ -123,11 +124,71 @@ def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
     assert re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", first)
 
 
-def test_parser_uses_canonical_image_and_recovery_retries():
+def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
     args = create_parser().parse_args(["--rl_config", "x", "--model_path", "y"])
 
-    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+    assert args.task_image is None
     assert args.max_retries == 6
+
+
+def _strategy_config(tmp_path: Path, strategy: str) -> Path:
+    path = tmp_path / f"{strategy}.yaml"
+    path.write_text(f"trainer:\n  strategy: {strategy}\n")
+    return path
+
+
+def _strategy_args(tmp_path: Path, strategy: str, extra: list[str] | None = None):
+    args = [
+        "--rl_config",
+        str(_strategy_config(tmp_path, strategy)),
+        "--model_path",
+        "Qwen/Model-30B",
+        "--cluster-config",
+        str(_cluster_config(tmp_path)),
+        "--num-nodes",
+        "2",
+    ]
+    return create_parser().parse_args(args + (extra or []))
+
+
+def test_megatron_config_selects_the_megatron_image(tmp_path):
+    args = _strategy_args(tmp_path, "megatron")
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == DEFAULT_RL_MEGATRON_DOCKER_IMAGE
+
+
+def test_non_megatron_config_selects_the_plain_image(tmp_path):
+    args = _strategy_args(tmp_path, "fsdp2")
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+
+
+def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
+    args = _args(tmp_path, "opencode")
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+
+
+def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
+    args = _strategy_args(tmp_path, "fsdp2", ["--skyrl_override", "trainer.strategy=megatron"])
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == DEFAULT_RL_MEGATRON_DOCKER_IMAGE
+
+
+def test_explicit_task_image_overrides_strategy_selection(tmp_path):
+    args = _strategy_args(tmp_path, "megatron", ["--task-image", "ghcr.io/example/custom@sha256:abc"])
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == "ghcr.io/example/custom@sha256:abc"
 
 
 def test_parser_rejects_removed_harbor_source_override():

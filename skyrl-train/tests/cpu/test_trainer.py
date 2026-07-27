@@ -192,6 +192,21 @@ def test_load_checkpoints_preserves_cloud_resume_uri(dummy_config):
     exists.assert_called_once_with(resume_path)
 
 
+def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
+    resume_path = "s3://marin-us-east-02a/iris/test/checkpoints/global_step_12/"
+    dummy_config.trainer.resume_path = resume_path
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+
+    with patch("skyrl_train.trainer.io.exists", return_value=False) as exists:
+        with pytest.raises(FileNotFoundError, match="Checkpoint path not found"):
+            trainer.load_checkpoints()
+
+    exists.assert_called_once_with(resume_path.rstrip("/"))
+
+
 def test_calculate_kl_create_experience_batched(dummy_config):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
