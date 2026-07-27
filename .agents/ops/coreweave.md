@@ -162,7 +162,9 @@ a reconciled timeline before calling wedge.
   `<run-name>` comes from `trainer.run_name`, not the config's literal `trials_dir` (the
   coordinator rewrites it) — discover it by listing `iris/` and matching the job name.
 - Aggregate in-pod and transfer aggregates only — never sync raw trials to the Mac
-  (hundreds of thousands of small objects). In-pod access: boto3 with
+  (hundreds of thousands of small objects). In-pod access: run the aggregation with
+  **`/opt/openthoughts/envs/rl/bin/python`** — the `/app/.venv` bundle python has no boto3, so a
+  script run with it fails on import rather than on credentials. Use boto3 with
   `endpoint_url="http://cwlota.com"` and `Config(s3={"addressing_style": "virtual"})`; one
   paginated `list_objects_v2` over `.../trace_jobs/`, newest ~200 (steady state) / ~500
   (error tails) by `LastModified`. What the fields mean: `rl-diagnostics.md` §Per-trial
