@@ -97,9 +97,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt_path", required=True, help="s3:// checkpoint root holding global_step_N/")
     ap.add_argument("--step", required=True, type=int, help="checkpoint step to export")
     ap.add_argument("--rl_config", required=True, help="the RL config the run was trained with")
