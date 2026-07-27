@@ -204,6 +204,44 @@ Rules that keep the cell honest:
 - **Two points are not a trend.** Render the value alone until there are enough samples to justify
   a line, and say how many there are.
 
+## A run is usually several jobs — plot the whole lineage, not the last leg
+
+A long run gets resumed. Each resume is a **new job id**, and the later job routinely writes into the
+*earlier* job's checkpoint directory, so the job that owns the artifacts and the job that produced
+them are different. A trend drawn from whichever job id you were handed shows the tail of the run and
+silently misrepresents it: a plateau looks like the whole story, and an early peak is invisible.
+
+This is not hypothetical. On one campaign, plotting only the named job would have shown a run
+starting mid-curve; recovering a missing middle link **changed which checkpoint the selection rule
+picked**.
+
+**Reconstruct the chain before plotting.** Four independent signals, in decreasing order of
+reliability:
+
+1. **The `ckpt_path` / `resume_path` overrides in each job's launch command.** A job whose `ckpt_path`
+   points at another job's directory is a later link. This is the definitive edge.
+2. **The step directories present in that checkpoint prefix**, plus whatever file records the latest
+   step. Gaps and overlaps tell you which links are missing.
+3. **Per-step checkpoint mtimes.** A discontinuity in write time — or a size change in the trainer
+   state — marks a handover between processes.
+4. **The tracker's per-run records**, which give you the run URLs to confirm against.
+
+Cross-check with the dataset each job trained on; sibling jobs in a sweep share long name prefixes
+and are easy to confuse. Match full job ids, never prefixes.
+
+**Then stitch the series in step order, not job order**, and de-duplicate overlapping steps with
+first-seen-wins. Resumes replay a step or two, so a naive concatenation produces a sawtooth that is an
+artifact of stitching rather than anything the run did.
+
+**Say in the footer how many jobs a plotted run spans.** A reader comparing two rows deserves to know
+that one is a single job and the other is four. Where a lineage genuinely has a hole — a link whose
+logs are gone — render the gap rather than interpolating across it, and mark it. An honest missing
+segment is worth more than a smooth line that implies data you do not have.
+
+**A resumed lineage often has no step 1**, so it has no opening value to gauge. Leave that cell empty
+rather than gauging the first step you happen to have; a run resumed at step 22 did not open at
+step 22, and a tick placed there is simply wrong.
+
 ## Supporting components
 
 ```css
