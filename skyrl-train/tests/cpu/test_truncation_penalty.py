@@ -65,12 +65,37 @@ class TestApplyTruncationPenalty:
 
     def test_penalizes_even_when_shaped_reward_is_nonzero(self):
         """The penalty fires on original_reward==0 (verifier failure), even if
-        the shaper produced a nonzero reward from partial credit."""
+        the shaper produced a nonzero reward from partial credit. It SUBTRACTS
+        from the shaped reward rather than overwriting it."""
         reward, penalized = apply_truncation_penalty(
             reward=0.3, original_reward=0.0, stop_reason="length", truncation_penalty=0.5
         )
         assert penalized is True
-        assert reward == -0.5
+        assert reward == pytest.approx(-0.2)
+
+    def test_preserves_partial_credit_ordering(self):
+        """Two truncated trials that passed different fractions of their tests must
+        stay ordered by that fraction. Overwriting both with -penalty would flatten
+        them together and recreate the indistinguishable-outcome defect the penalty
+        exists to fix."""
+        better, _ = apply_truncation_penalty(
+            reward=0.8, original_reward=0.0, stop_reason="length", truncation_penalty=0.25
+        )
+        worse, _ = apply_truncation_penalty(
+            reward=0.1, original_reward=0.0, stop_reason="length", truncation_penalty=0.25
+        )
+        assert better > worse
+
+    def test_truncated_ranks_below_untruncated_at_equal_pass_ratio(self):
+        """The penalty's whole purpose: at the same pass ratio, the trial that ran
+        into the length cap must score below the one that finished."""
+        truncated, _ = apply_truncation_penalty(
+            reward=0.4, original_reward=0.0, stop_reason="length", truncation_penalty=0.25
+        )
+        finished, _ = apply_truncation_penalty(
+            reward=0.4, original_reward=0.0, stop_reason="complete", truncation_penalty=0.25
+        )
+        assert truncated < finished
 
 
 @pytest.mark.skipif(REWARD_SHAPING_SCHEMA is None, reason="harbor deps unavailable")

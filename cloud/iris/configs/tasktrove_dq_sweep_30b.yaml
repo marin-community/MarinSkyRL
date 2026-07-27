@@ -76,7 +76,42 @@ terminal_bench:
 
     log_level: INFO
 
-    enable_reward_shaping: false
+    # ===================================================================
+    # REWARD DEFINITION — changed mid-sweep (2026-07-27) to attack the
+    # cap-truncation collapse that ended four arms. See STATE.md.
+    #
+    # The mechanism: a trial whose generation hit max_generate_length was
+    # truncated mid-structure, became unparseable, and ended at reward 0 —
+    # scored identically to an honest wrong answer. Nothing in the objective
+    # opposed the drift, so each update made it likelier until the whole
+    # output-length distribution collapsed onto the 4096 wall. Two levers,
+    # both needed:
+    # ===================================================================
+
+    # 1. PARTIAL CREDIT. Score the fraction of tests that actually passed
+    #    instead of overall pass/fail. Binary scoring put nearly every trial
+    #    at exactly 0.0, which is both the sparse regime RLOO cannot learn
+    #    from (uniform groups get dropped) and the reason truncation was
+    #    invisible. pass_ratio spreads failures out, so a trial that got most
+    #    of the way is no longer indistinguishable from one that did nothing.
+    enable_reward_shaping: true
+    reward_shaper: pass_ratio
+    # null -> auto-detect the test framework from verifier stdout.
+    reward_parser: null
+    # Fall back to the binary reward when stdout will not parse, rather than
+    # scoring an unparseable-but-real result as zero.
+    reward_shaping_fallback: true
+
+    # 2. TRUNCATION PENALTY. Subtracted from the shaped reward when a
+    #    generation terminated at the length cap and the trial failed its
+    #    verifier, so a truncated trial ranks below its untruncated
+    #    equivalent and RLOO sees a negative advantage. 0.0 would be a no-op.
+    #    0.25 is chosen to separate clearly without swamping the outcome
+    #    term: a truncated trial passing no tests lands at -0.25, well below
+    #    an honest 0.0 failure, while one passing 8/10 still lands at +0.55.
+    #    FIRST VALUE, expected to need tuning against the measured
+    #    generate/out_tok_p90_p25_ratio.
+    truncation_penalty: 0.25
 
     collect_rollout_details: true
 
@@ -141,6 +176,25 @@ trainer:
 
   eval_interval: 999999
   eval_before_train: false
+
+  # Pre-flight reward gate: check the reward distribution at step 1 and stop a
+  # dataset that sits outside the band where RLOO has usable within-group
+  # variance, instead of spending ~3h on 32 H100s to learn the same thing.
+  # Keys on mean PER-SAMPLE reward, not pass@8 — an arm at pass@8 1.0 with
+  # per-sample reward 0.55 had the healthiest advantage signal in the fleet.
+  preflight_gate:
+    enabled: true
+    min_reward: 0.25
+    max_reward: 0.75
+    num_trials: 256
+    # WARN, not abort, for the first sweep under the new reward definition.
+    # The band was calibrated on BINARY rewards from the six labelled arms;
+    # pass_ratio partial credit shifts the whole distribution upward, so the
+    # same dataset measures higher now and the old bounds no longer mean what
+    # they meant. Warning first collects the recalibration data at no risk of
+    # aborting a healthy run on a stale threshold. Flip to "abort" once a
+    # sweep's worth of pass_ratio openings has been measured.
+    on_failure: "warn"
   ckpt_interval: 1
   resume_mode: latest
   hf_save_interval: 5

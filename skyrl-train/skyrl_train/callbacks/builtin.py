@@ -756,11 +756,13 @@ class PreflightGateCallback(TrainerCallback):
         min_reward: float = 0.25,
         max_reward: float = 0.75,
         on_failure: str = "abort",
+        num_trials: int = 256,
     ):
         self.enabled = enabled
         self.min_reward = min_reward
         self.max_reward = max_reward
         self.on_failure = on_failure
+        self.num_trials = num_trials
         self._checked = False
 
     def on_step_end(
@@ -779,8 +781,24 @@ class PreflightGateCallback(TrainerCallback):
 
         rewards = self._extract_step_rewards(trainer)
         if not rewards:
-            logger.warning("[preflight] No rewards available from step 1; gate skipped.")
+            # An enabled gate that quietly does nothing is the failure this whole
+            # mechanism exists to prevent, so say so at error level rather than
+            # letting the run proceed looking gated.
+            logger.error(
+                "[preflight] Gate is ENABLED but step 1 exposed no per-sample rewards, "
+                "so nothing was checked and this run is UNGATED. Expected the trainer to "
+                "set _current_step_rewards during reward post-processing."
+            )
             return control
+
+        if len(rewards) < self.num_trials:
+            # Not a failure: the sample count is set by train_batch_size x
+            # n_samples_per_prompt, not by the dataset. Report it so a verdict drawn
+            # from a thin sample is not read as a firm one.
+            logger.warning(
+                f"[preflight] Checking {len(rewards)} samples, fewer than the requested "
+                f"num_trials={self.num_trials}; the estimate is correspondingly noisier."
+            )
 
         from skyrl_train.utils.preflight_gate import check_preflight_gate
 
@@ -1161,6 +1179,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
                 min_reward=getattr(gate_cfg, "min_reward", 0.25),
                 max_reward=getattr(gate_cfg, "max_reward", 0.75),
                 on_failure=getattr(gate_cfg, "on_failure", "abort"),
+                num_trials=getattr(gate_cfg, "num_trials", 256),
             )
         )
 

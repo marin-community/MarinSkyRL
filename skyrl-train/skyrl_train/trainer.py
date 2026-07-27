@@ -1168,6 +1168,16 @@ class RayPPOTrainer:
             uids_for_metrics,
         )
 
+        # Per-sample scalar rewards for this step, kept for callbacks that need the
+        # distribution rather than its mean (PreflightGateCallback reads this). Captured
+        # here because rewards are converted to per-token form a few lines below and the
+        # scalar form is not recoverable afterwards. Token-level rewards are skipped: the
+        # gate is defined on a per-sample scalar.
+        step_rewards = generator_output_for_metrics["rewards"]
+        self._current_step_rewards = (
+            [float(r) for r in step_rewards] if step_rewards and not isinstance(step_rewards[0], list) else []
+        )
+
         # these use the full generator output
         rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]

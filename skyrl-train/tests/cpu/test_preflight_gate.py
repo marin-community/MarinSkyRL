@@ -11,6 +11,7 @@ and is a pure function — no trainer, no Ray, no GPU.
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger as loguru_logger
 
 from skyrl_train.utils.preflight_gate import check_preflight_gate
 
@@ -182,3 +183,50 @@ class TestCallbackIntegration:
         # Second call should be a no-op even if rewards change
         trainer._current_step_rewards = [0.0] * 256
         cb.on_step_end(state, control, trainer=trainer)  # should not raise
+
+    def test_reports_loudly_when_trainer_exposes_no_rewards(self):
+        """An enabled gate that finds nothing to check must say so at error level.
+        Silently skipping leaves the run ungated while looking gated, which is the
+        failure this gate exists to prevent."""
+        from skyrl_train.callbacks.builtin import PreflightGateCallback
+        from skyrl_train.callbacks.base import TrainerState, TrainerControl
+
+        class TrainerWithoutRewards:
+            """A plain object, not a MagicMock: auto-created Mock attributes would
+            hide exactly the missing-attribute case under test."""
+
+        cb = PreflightGateCallback(enabled=True, on_failure="abort")
+        state = TrainerState(global_step=1, epoch=0, total_steps=80, num_steps_per_epoch=80)
+
+        # The gate logs through loguru, which does not reach pytest's caplog.
+        messages: list = []
+        sink_id = loguru_logger.add(messages.append, level="ERROR")
+        try:
+            cb.on_step_end(state, TrainerControl(), trainer=TrainerWithoutRewards())
+        finally:
+            loguru_logger.remove(sink_id)
+
+        assert any("UNGATED" in m for m in messages)
+
+
+def test_trainer_populates_the_attribute_the_gate_reads():
+    """The gate reads ``trainer._current_step_rewards``; the trainer must write it.
+
+    This pairing is invisible to every other test here, which supplies the attribute
+    by hand. It shipped broken once: the callback read an attribute no trainer set,
+    so the gate reported "no rewards" and passed everything through.
+    """
+    import ast
+    import pathlib
+
+    import skyrl_train
+
+    # Parsed from source rather than imported: skyrl_train.trainer pulls in skyrl_gym,
+    # which is not installed in the CPU test environment.
+    trainer_src = (pathlib.Path(skyrl_train.__file__).parent / "trainer.py").read_text()
+    fn = next(
+        node
+        for node in ast.walk(ast.parse(trainer_src))
+        if isinstance(node, ast.FunctionDef) and node.name == "postprocess_generator_output"
+    )
+    assert "_current_step_rewards" in ast.get_source_segment(trainer_src, fn)
