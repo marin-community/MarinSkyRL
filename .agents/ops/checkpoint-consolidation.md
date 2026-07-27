@@ -133,10 +133,27 @@ hf upload <namespace>/<repo> <staging_dir> --repo-type model
 Never `huggingface_hub.upload_folder()` without `delete_patterns=[]`. `--private` takes no value.
 Wrap a long upload in `tmux`, not `nohup`.
 
-**Namespace: `laion`** is the default for model repos in this campaign. Note the asymmetry —
+**Namespace: `laion`** is the default for model repos in this campaign. This is a STANDING default,
+not a per-run question — do not ask; publish there unless the owner says otherwise. Note the asymmetry —
 `trace_upload.repo_org` is `DCAgent` for trace datasets, so the two do not match and neither is
 wrong. Repo naming: `<run-slug>-step<N>-<size>`, with the size taken from the checkpoint's own
 tensor shapes rather than from the job or base-model name.
 
 **6. Verify the published repo lists both the weights and `training_logs/`** before deleting any
 staging directory or reclaiming any checkpoint.
+
+
+## Registration is ON by default
+
+`trainer.enable_db_registration: true`. Every published model is registered in Supabase via
+`DatabaseRegistrationCallback`, which records the training window, the resolved hyperparameters, the
+tracker link, and the dataset and base-model references.
+
+**This is a standing default and stays on until the owner says otherwise.** Do not treat a cleanup's
+registration step as optional, and do not ask per run.
+
+Credentials come from `SUPABASE_URL` + `SUPABASE_ANON_KEY` + `SUPABASE_SERVICE_ROLE_KEY` (or a `KEYS`
+file pointing at them), sourced from the secrets env. The callback **auto-disables itself when it
+finds no credentials**, so a run can silently skip registration — confirm the credentials are present
+in the environment the job actually runs in rather than assuming, and check the registration
+happened rather than trusting the exit code.

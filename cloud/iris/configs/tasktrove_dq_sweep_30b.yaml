@@ -123,7 +123,7 @@ trainer:
   hf_hub_private: false
   hf_hub_revision: main
 
-  enable_db_registration: false
+  enable_db_registration: true
 
   project_name: OpenThoughts-Agent
   log_level: INFO
