@@ -2407,7 +2407,20 @@ def main() -> int:
             entrypoint=entrypoint,
             name=args.job_name,
             resources=resources,
-            environment=EnvironmentSpec(env_vars=env_vars, extras=[]),
+            # setup_scripts=[] means "no setup at all; the image is used as-is"
+            # (iris EnvironmentSpec docstring). Leaving it unset makes iris build its
+            # default script, which runs `uv sync` over the synced workspace and creates
+            # a venv at $IRIS_WORKDIR/.venv. That venv is a plain PyPI resolve -- no CUDA
+            # stack, no ray, no boto3 -- and iris puts it FIRST on $PATH, so a bare
+            # `python` or `ray` in a task pod resolves to it instead of the image's real
+            # env at /opt/openthoughts/envs/rl. Everything here already uses absolute
+            # interpreter paths to route around that; the sync itself is pure cost on a
+            # fully baked image, and the shadow venv has repeatedly cost debugging time.
+            #
+            # REQUIRES an image that bakes cloudpickle/py-spy/memray, since [] also skips
+            # iris's own runtime setup that would otherwise install them. Landed in the
+            # Dockerfile before this flip; py-spy is what a wedge diagnosis attaches with.
+            environment=EnvironmentSpec(env_vars=env_vars, extras=[], setup_scripts=[]),
             constraints=constraints or None,
             coscheduling=coscheduling,
             replicas=replicas,
