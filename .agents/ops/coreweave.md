@@ -167,6 +167,20 @@ a reconciled timeline before calling wedge.
   paginated `list_objects_v2` over `.../trace_jobs/`, newest ~200 (steady state) / ~500
   (error tails) by `LastModified`. What the fields mean: `rl-diagnostics.md` §Per-trial
   duty cycle.
+- **`LastModified` is UTC in boto3 and LOCAL time in `aws s3 ls`.** The AWS CLI renders the
+  timestamp in the machine's timezone; boto3 returns a tz-aware UTC datetime. The same object
+  read both ways at one instant:
+
+  ```
+  aws s3 ls  ->  2026-07-27 04:25:23              (local, EDT)
+  boto3      ->  2026-07-27T08:25:37+00:00        (UTC)
+  ```
+
+  This is a client-side rendering difference, NOT a property of the endpoint. Both directions
+  have already caused errors on this fleet: reading `aws s3 ls` output as UTC makes a live job
+  look four hours dead, and "correcting" a boto3 timestamp by +4 h puts objects in the future.
+  Prefer boto3 and compare against `datetime.now(timezone.utc)`; if you use the CLI, compare
+  against local `date`, not `date -u`.
 
 ## Images
 
