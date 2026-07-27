@@ -291,6 +291,15 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         "pbs_gamma": FieldMapping("pbs_gamma", default=1.0),
         "pbs_max_total_shaping": FieldMapping("pbs_max_total_shaping", default=0.3),
         "pbs_potential_shape": FieldMapping("pbs_potential_shape", default="linear"),
+        # Truncation penalty: penalize generations that terminate at
+        # max_generate_length rather than emitting a stop token. 0.0 == no-op
+        # (byte-identical). A cap-truncated trial is otherwise scored
+        # identically to an honest wrong answer, so nothing opposes the policy
+        # drifting longer until every generation hits the wall. When >0, a
+        # truncated trial with zero original reward is scored at
+        # -truncation_penalty (below the zero floor) so it is distinguishable
+        # from an honest failure in the advantage signal.
+        "truncation_penalty": FieldMapping("truncation_penalty", default=0.0),
     }
 )
 
