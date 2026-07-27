@@ -47,7 +47,7 @@ from harbor.utils.traces_utils import normalize_message
 
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder
-from examples.terminal_bench.truncation_penalty import apply_truncation_penalty
+from examples.terminal_bench.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
 # Incremental, trial-indexed reader for the shared opencode literal log.
 from examples.terminal_bench.literal_log_store import LiteralLogStore
@@ -1943,16 +1943,13 @@ class TerminalBenchGenerator(GeneratorInterface):
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
 
-        # Truncation penalty (Stage 1): a cap-truncated trial scoring zero is
-        # indistinguishable from an honest wrong answer, so nothing opposes the
-        # policy drifting longer. Penalize it below the zero floor so RLOO
-        # assigns it a negative advantage. Default truncation_penalty=0.0 is a
-        # no-op (byte-identical). Only fires on stop_reason=="length" and when
-        # the trial did not pass its verifier (original_reward==0); a
-        # truncated-but-correct trial is left untouched.
+        max_gen_len = self.generator_cfg.sampling_params.max_generate_length
+        per_turn_counts = [len(t) for t in assistant_token_ids] if assistant_token_ids else None
+        turn_truncated = detect_turn_truncation(per_turn_counts, max_gen_len)
+
         truncation_penalized = False
         reward, truncation_penalized = apply_truncation_penalty(
-            reward, original_reward, stop_reason, self._truncation_penalty
+            reward, original_reward, turn_truncated, self._truncation_penalty
         )
         if truncation_penalized:
             logger.debug(
