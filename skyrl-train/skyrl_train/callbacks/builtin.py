@@ -348,10 +348,14 @@ class HFHubUploadCallback(TrainerCallback):
 
         api = self._get_api()
 
-        for step in self._pending_uploads:
+        requested = list(self._pending_uploads)
+        missing: list[int] = []
+
+        for step in requested:
             model_path = Path(self._export_path) / f"global_step_{step}" / "policy"
 
             if not model_path.exists():
+                missing.append(step)
                 logger.warning(f"HFHubUploadCallback: Model path not found: {model_path}")
                 continue
 
@@ -380,6 +384,24 @@ class HFHubUploadCallback(TrainerCallback):
                     logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
                 except Exception as e:
                     logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
+
+        if requested and len(missing) == len(requested):
+            # Every export the run asked to publish was absent. The per-step warnings above scroll
+            # past in a long training log, so a run can finish, exit 0, and leave an empty repo —
+            # which is how two completed 80-step runs produced no publishable model before anyone
+            # noticed. Say it once, loudly, with the reason most likely to apply.
+            logger.error(
+                "HFHubUploadCallback: PUBLISHED NOTHING — all %d requested export(s) %s were "
+                "missing under export_path=%s, so repo %s is empty. On a multi-node job this is "
+                "expected when export_path is node-local: the exports are written by the policy "
+                "worker while this callback runs on the head node, and the existence check and "
+                "upload are both local-filesystem operations. Point export_path at storage "
+                "visible to the uploading process.",
+                len(missing),
+                missing,
+                self._export_path,
+                self.repo_id,
+            )
 
         self._pending_uploads.clear()
 
