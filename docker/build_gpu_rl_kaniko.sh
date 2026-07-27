@@ -10,7 +10,9 @@ set -euo pipefail
 WHEEL_SOURCE="${WHEEL_SOURCE:-prebuilt-wheelhouse}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
-HARBOR_COMMIT="${HARBOR_COMMIT:-01c736a6}"
+# Must match the ARG default in Dockerfile.gpu-rl. Both lagged production at 01c736a6 while
+# every shipped image baked 772e20f7; a build without an explicit override reverted harbor.
+HARBOR_COMMIT="${HARBOR_COMMIT:-772e20f7}"
 DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.gpu-rl}"
 DOCKER_CONTEXT=/app
 DOCKERFILE_PATH="${DOCKER_CONTEXT}/${DOCKERFILE}"

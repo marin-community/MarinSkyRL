@@ -118,6 +118,20 @@ The build job uses **kaniko** (`gcr.io/kaniko-project/executor`), NOT buildkit/`
   `{"auths":{"ghcr.io":{"auth":"<base64 of penfever:$DOCKER_TOKEN>"}}}`. The script disables shell tracing
   until AFTER the token is consumed, so the PAT never lands in the R2-persisted finelog.
 
+### Before you build: reconcile the recipe against the script
+
+The build script enforces a required-variable contract and hard-fails before attempting anything
+when one is missing, so a stale recipe dies with no build and a confusing error. The script is the
+authority: **read the top of `docker/build_gpu_rl_kaniko.sh` first** and take the contract from
+there. Docs have lagged it before.
+
+Then confirm the baked dependency pins still match what production runs, rather than trusting
+their defaults — a default that has drifted below production reverts that dependency while the
+build log reports nothing changed.
+
+The current contract, the pins that have drifted, and the deploy boundary are recorded in
+**`.agents/ops/gpu-rl-image-build.md`**.
+
 ## 3. The launch command (verbatim shape)
 
 ```bash
@@ -298,26 +312,13 @@ Rebuild the image ONLY for a change to something the image **BAKES / COMPILES**:
   --frozen` reproduces the new set by construction), the torchtitan/tyro/`ep` extra, harbor (`HARBOR_COMMIT`),
   or the rl-stage apt set.
 
-**ALSO rebuild for any source change under `skyrl-train/`** — that tree is BAKED, not synced. This
-contradicts the obvious reading of the launcher and it has cost production jobs, so here is the
-mechanism:
+**ALSO rebuild for a source change to the tree the image bakes.** Only part of the repo rides the
+`/app` workspace bundle; the rest is baked, so a merged PR touching it is inert on the cluster until
+the image is rebuilt. This contradicts the obvious reading of the launcher and it has cost production
+jobs, so never assume a change is live from the fact that it merged.
 
-- `cloud/iris/run_rl.py` runs the SkyRL entrypoint as a subprocess with **`cwd=/opt/skyrl/skyrl-train`**.
-- `python -m <module>` puts the **CWD first on `sys.path`**, ahead of every `PYTHONPATH` entry. `/app`
-  being on `PYTHONPATH` does not help: it is second.
-- So `skyrl_train.*` and `examples.terminal_bench.*` both import from the **baked image tree**.
-- Hydra follows the same path: `config_dir` in `skyrl_train/entrypoints/main_base.py` is
-  `Path(__file__).parent.parent / "config"`, so the **baked `ppo_base_config.yaml`** is what loads.
-
-The failure is loud but late — a config key that exists only in the newer base config dies at Hydra
-override time, roughly eight minutes in, with `Key '<name>' is not in struct`. On 2026-07-27 three RL
-arms were lost this way after three merged PRs were assumed to have shipped via `/app`.
-
-What genuinely rides the `/app` bundle is **`cloud/iris/*`** — the launcher, `run_rl.py`, and the YAML
-configs under `cloud/iris/configs/`. Those need no rebuild.
-
-Quick check before assuming a change is live: if the edited path starts with `skyrl-train/`, it needs a
-rebuild. If it starts with `cloud/iris/`, it does not.
+Do not carry the boundary in your head — check it. Which paths are baked, why, and the exact failure
+signature when a config key outruns the image are in **`.agents/ops/gpu-rl-image-build.md`**.
 
 > If the build host WERE a real x86 box (not the cluster), the documented fast path is the wheel-cache:
 > `docker/build_wheels.sh` (compile the wheels once → `docker/wheelhouse/`) then a `docker buildx` build with
