@@ -102,6 +102,12 @@ Include, in order:
    branch with no residue — probes sometimes sync logs into a repo root.
 10. **A termination condition**, so the schedule ends itself when the campaign is done rather than
     firing indefinitely.
+11. **A rendered status board every tick.** Require the tick to publish the campaign's fleet status
+    as an Artifact via `experiment-status-artifact`, in addition to the written log. A recurring
+    supervision schedule produces a long tail of prose reports that nobody reads end to end; a
+    board is scanned in seconds and makes divergence between arms visible at a glance. Publish it
+    to the **same file path** each tick so the URL is stable and the owner can keep one tab open —
+    a new URL per tick defeats the purpose.
 
 Two failure modes worth designing against: a prompt that names no authority forces the agent to
 ask permission every tick and the schedule stops being autonomous; a prompt that carries campaign

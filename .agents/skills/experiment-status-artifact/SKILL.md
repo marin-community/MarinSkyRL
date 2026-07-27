@@ -43,12 +43,23 @@ metric.
    early. Not alphabetical, not chronological. Each heading carries a count and a qualifier
    that says something true about the group.
 4. **The decisive-quantity column**, in every section where it applies.
-5. **Legend**, only if a gauge is drawn. Explain what the shaded region *means*, not what the
+5. **Trend columns — direction, not just level.** A gauge answers "where is this run now"; it
+   cannot answer "which way is it going", and for a running experiment that is usually the more
+   decision-relevant question. Two runs at the same value, one climbing and one collapsing, need
+   opposite actions. Carry at least:
+   - **the outcome trend** (reward, accuracy, whatever the campaign optimises), and
+   - **the cost trend** (step time, throughput, or whatever governs whether it finishes).
+
+   Render each as a sparkline plus an arrow and a delta, so the direction reads without arithmetic.
+   Sample at a fixed cadence and say what it is — trends over differently-spaced points mislead.
+   Cost trend earns its place because a run can be learning well and still be doomed: a step time
+   that doubles between ticks changes the completion estimate more than any quality metric does.
+6. **Legend**, only if a gauge is drawn. Explain what the shaded region *means*, not what the
    colors are.
-6. **Callout** — two or three short paragraphs of what the data establishes. Every claim tied
+7. **Callout** — two or three short paragraphs of what the data establishes. Every claim tied
    to a number already in the tables above. This is where a reader who scrolled looks for the
    conclusion.
-7. **Footer** — reconciliation notes: why the run count differs from the subject count, what is
+8. **Footer** — reconciliation notes: why the run count differs from the subject count, what is
    retired, anything a careful reader would otherwise flag as inconsistent.
 
 ## Content rules
@@ -135,6 +146,64 @@ quantity is not already 0–1.
 Set `.safe`'s `left` and `width` from the actual bounds the owning policy screens on, and pick
 each tick's class by comparing to those same bounds in code. Never place a tick by eye.
 
+## The trend cell — sparkline, arrow, delta
+
+Canvas rather than hand-authored SVG paths, per `artifact-design`. One tiny chart per row, drawn
+from the same sampled series the table reports, with the final point emphasised so the current
+value reads first.
+
+```html
+<div class="trend">
+  <canvas class="spark" width="120" height="26" data-series="0.64,0.71,0.77,0.81,0.84"></canvas>
+  <span class="delta up">▲ +0.20</span>
+</div>
+```
+
+```css
+.trend{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.spark{width:120px;height:26px;display:block}
+.delta{font-size:12px;font-variant-numeric:tabular-nums}
+.delta.up{color:var(--live)}      /* improving on this metric   */
+.delta.down{color:var(--warn)}    /* degrading                  */
+.delta.flat{color:var(--muted)}   /* inside noise — say so       */
+```
+
+```js
+// Direction is semantic, not visual: for reward, up is good; for step time, up is bad.
+// Pass the polarity in rather than inferring it from the slope.
+document.querySelectorAll(".spark").forEach((c) => {
+  const pts = c.dataset.series.split(",").map(Number).filter((n) => !Number.isNaN(n));
+  if (pts.length < 2) return;
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--accent").trim() || "#2D7D8A";
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.width, h = c.height;
+  c.width = w * dpr; c.height = h * dpr;
+  const ctx = c.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const lo = Math.min(...pts), hi = Math.max(...pts), span = hi - lo || 1;
+  const x = (i) => (i / (pts.length - 1)) * (w - 4) + 2;
+  const y = (v) => h - 3 - ((v - lo) / span) * (h - 6);
+  ctx.beginPath();
+  pts.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+  ctx.strokeStyle = ink; ctx.lineWidth = 1.5; ctx.lineJoin = "round"; ctx.stroke();
+  ctx.beginPath();                                   // emphasise the current value
+  ctx.arc(x(pts.length - 1), y(pts.at(-1)), 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = ink; ctx.fill();
+});
+```
+
+Rules that keep the cell honest:
+
+- **Polarity is per metric.** Rising reward is good; rising step time is not. Colour the delta by
+  whether the metric improved, never by the sign of the slope.
+- **Call a flat trend flat.** If the change is inside the metric's own step-to-step noise, label it
+  flat rather than drawing an arrow. A confident arrow on noise is worse than no arrow.
+- **Redraw on theme change** if the page has a toggle, since the stroke colour is read from a token
+  at draw time.
+- **Two points are not a trend.** Render the value alone until there are enough samples to justify
+  a line, and say how many there are.
+
 ## Supporting components
 
 ```css
@@ -176,3 +245,7 @@ different conversation, pass the previous URL as `url` or a new one is minted.
 - **A summary strip of only flattering counts.** That is a poster, not an instrument.
 - **A gauge on a quantity the campaign does not actually gate on.** The axis has to be the one
   a decision turns on, or it is decoration with tick marks.
+- **A trend drawn from two points, or from unevenly spaced ones.** Both manufacture a direction
+  the data does not support. Render the bare value until there are enough samples.
+- **Colouring a delta by the sign of the slope.** Rising step time is not good news. Polarity is a
+  property of the metric and has to be passed in.
