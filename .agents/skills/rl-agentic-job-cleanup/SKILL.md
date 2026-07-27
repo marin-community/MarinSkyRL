@@ -97,6 +97,30 @@ step.
 If nothing is eligible — an early stop before the second save — the tool says so. Fall back to the
 largest saved multiple and record that the selection rule did not apply.
 
+### The EMA is blind to how the run died — bound it by the mechanism
+
+Trailing-EMA maximises one metric. It does not know why the run ended, and on a run that died of a
+policy pathology the two can point at different checkpoints.
+
+Measured case: a run killed on entropy runaway had its EMA peak **twelve steps before** the last
+healthy checkpoint. The EMA rule picked the earlier step by a 3.2% margin; the later one was the last
+checkpoint written *before* the generation break, carried twelve more steps of learning, and was the
+one worth keeping.
+
+So when a run died of a named mechanism rather than simply running out of budget:
+
+1. **Find the boundary in the TRIAL data**, not the trainer series — the wall-clock bin where live
+   generation quality broke.
+2. **Map checkpoint save times to that boundary.** The last checkpoint written *before* it is the
+   newest one whose own rollouts are verified good; the first written after it is already
+   contaminated, however good its trainer-side reward looks.
+3. **Run the EMA anyway and report both**, with the margin between them. If they disagree, say so
+   explicitly and give the reasoning for the one you chose — never silently follow either.
+
+A checkpoint saved after the break can carry the run's best trainer-side reward and still be the
+wrong artifact. Trainer metrics lag live generation, so a peak recorded after a break is often
+scoring rollouts produced before it.
+
 ## 2. Locate the run's metric record
 
 Note the tracker run URL if the campaign uses one, so the published model traces back to its

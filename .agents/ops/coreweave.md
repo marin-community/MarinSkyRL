@@ -162,6 +162,11 @@ capability JWT**. Nothing redacts it. It reaches at least two artifacts a cleanu
 - the run's resolved config, and
 - the trainer log (the endpoint is echoed at harbor spawn).
 
+It is also in **every trial artifact** — measured at 21,619 of 21,619 `result.json` files in one run,
+at `config.agent.kwargs.api_base`. Anything derived from raw trials must be scanned before it leaves
+the cluster. The trace exporter keeps it under `raw_metadata` and does not appear to emit it, but
+scan the built dataset before publishing rather than relying on that.
+
 Any secret scan run before publishing MUST match a JWT shape (`eyJ...\.eyJ...`) inside a URL, not
 only bare `TOKEN=` assignments — this one is neither a named-credential assignment nor a
 provider-prefixed key, so a scan built only from those patterns misses it. It has been found in
