@@ -162,9 +162,25 @@ source build. That was wrong, and the correction matters because it removes the 
 | mamba-ssm, causal-conv1d | `cp312-linux_aarch64` in the erictang000 releases |
 | deep-ep | x86_64 only, and not in either image — see below |
 
-No source build is required for any of it. The lock records only the x86_64 files for most of that
-subtree because those packages are reachable only under an `x86_64` marker, so reading the lock
-understates what exists; check PyPI and the release assets directly.
+No source build is required for any of it.
+
+**Survey the pinned version, never the latest one.** This is what produced the wrong conclusion, and
+it will produce another one otherwise. TransformerEngine's latest release at the time of the survey
+was 2.17.0, which publishes x86_64 only; the version this image pins is 2.11.0, which publishes
+both arches. A package's newest release says nothing about the platform coverage of the release you
+actually install, and the direction of the error is not predictable — a project can add an
+architecture later or drop one, so "latest has it" is no safer an inference than "latest lacks it".
+Resolve the pin first, then query that exact version:
+`curl -s https://pypi.org/pypi/<name>/<pinned-version>/json | jq -r '.urls[].filename'`, and for a
+GitHub-hosted wheel list the release assets rather than assuming the tag matches upstream's matrix.
+
+Two further reasons the obvious sources understate what exists. The lock records only the x86_64
+files for most of this subtree, because those packages are reachable only under an `x86_64` marker
+and uv prunes wheels to the platforms where a package is reachable — so the lock is evidence about
+the amd64 resolution, not about what the index holds. And some of these wheels are not on an index
+at all: `transformer-engine-torch`, `mamba-ssm` and `causal-conv1d` come from erictang000 GitHub
+releases, which exist precisely because upstream does not build against torch 2.11, so upstream's
+platform matrix is the wrong thing to check for them.
 
 **deep-ep is not a gap.** It is declared only in skyrl-train's `deepep` extra, and the Dockerfiles
 sync `--extra vllm --extra ep` (plus `megatron`) — never `deepep`. The amd64 megatron image in
