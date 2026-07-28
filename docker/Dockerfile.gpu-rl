@@ -28,18 +28,16 @@
 #
 # =============================================================================
 # Version pins (ground truth = skyrl-train/pyproject.toml + uv.lock):
-#   - torch 2.11.0+cu128 : skyrl-train pins torch to the cu128 index; the fork
-#       vLLM / flash-attn / TransformerEngine wheels are all cu128-built
-#       (nvidia-nccl-cu12==2.28.9 from the lock). NOTE the deliberate mix: the
-#       toolkit below is 12.9 while torch stays cu128, because the lock pins the
-#       cu128 index and moving it is a whole-closure change. CUDA 12.x is minor
-#       version compatible, so a 12.9 nvcc against cu128 torch headers is
-#       expected to work, but it is a mix and this is where to look first if a
-#       native extension misbehaves at runtime.
+#   - torch 2.11.0+cu129 : skyrl-train pins torch to the cu129 index, matching
+#       the 12.9 toolkit below. The two move together on purpose. An earlier
+#       attempt raised only the toolkit and left torch on cu128; a split
+#       toolchain builds but leaves a native extension linked against one CUDA
+#       minor and loaded against another, which fails at runtime rather than at
+#       build time. Keep this index and BASE_IMAGE in step.
 #   - vLLM fork          : Python source and metadata come from
 #       marin-community/vllm @ VLLM_FORK_COMMIT. The lock uses stock vLLM 0.23.0
 #       as its dependency anchor; native files come from the validated donor.
-#   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu128 / cp312 so
+#   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu129 / cp312 so
 #       flash_attn_2_cuda EXISTS (skyrl-train's lock leaves flash-attn unpinned; a
 #       `--no-deps` wheel swap here is the version that actually runs).
 #   - transformers 5.8.1 : skyrl-train base pin (>=5.8.1,<5.9), required by the
@@ -119,7 +117,7 @@ ENV VLLM_TARGET_DEVICE=cuda
 ENV WHEEL_VENV=/opt/wheelbuild/.venv
 RUN uv venv --python 3.12 $WHEEL_VENV
 RUN . $WHEEL_VENV/bin/activate && \
-    uv pip install --extra-index-url https://download.pytorch.org/whl/cu128 \
+    uv pip install --extra-index-url https://download.pytorch.org/whl/cu129 \
         --index-strategy unsafe-best-match \
         "torch==${TORCH_VERSION}" \
         "torchvision==${TORCHVISION_VERSION}" \
@@ -249,11 +247,11 @@ RUN cd ${SKYRL_HOME} && \
 
 # =============================================================================
 # RL environment — installed DIRECTLY from skyrl-train's uv.lock (single source of
-# truth). `uv sync --frozen` yields the exact locked closure at torch 2.11.0+cu128
+# truth). `uv sync --frozen` yields the exact locked closure at torch 2.11.0+cu129
 # (NCCL-cu12 2.28.9), the `vllm` extra (stock vLLM 0.20.2 + flashinfer), the `ep`
 # extra (torchtitan + tyro, for MoE EP>1), and — when INSTALL_MEGATRON=1 — the
 # `megatron` extra (megatron-bridge/core + TransformerEngine + mamba/causal-conv1d,
-# all linux/x86_64-gated with the erictang cu128 wheels honored via [tool.uv.sources]).
+# all linux/x86_64-gated with the erictang wheels honored via [tool.uv.sources]).
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the OT-Agent iris launcher's hardcoded
