@@ -108,8 +108,7 @@ it cannot run there at all. `sm_100` kernels are necessary but not sufficient â€
 binding constraint, and there is no amd64 GPU capacity to fall back to.
 
 A build host is available: an iris job with `--gpu GB200x4` on `cw-us-east-08a` lands on aarch64 with
-144 cores, versus 48 on the amd64 builder. Use `KUBECONFIG=~/.kube/coreweave-iris`; the older
-`coreweave-iris-gpu` file has no east-08a context and fails with `context ... does not exist`.
+144 cores, versus 48 on the amd64 builder. Use `KUBECONFIG=~/.kube/coreweave-iris`, which is now the only CoreWeave kubeconfig.
 
 What an arm64 image still needs, surveyed against PyPI:
 

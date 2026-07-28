@@ -50,7 +50,7 @@ Everything the build steps below rely on, inlined so this skill stands alone:
   - python: `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python` (ships iris + a WORKING `kubernetes`).
   - iris: `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris` (the cw-capable binary). **Do NOT use the
     marin `.venv/bin/iris`** — its `kubernetes` import is broken and it cannot drive CoreWeave.
-- **`export KUBECONFIG=~/.kube/coreweave-iris-gpu`** — HARD prereq in the SAME shell for every CoreWeave call.
+- **`export KUBECONFIG=~/.kube/coreweave-iris`** — HARD prereq in the SAME shell for every CoreWeave call.
   The Mac's default kubeconfig points at a different cluster, so without this export you get misleading
   "0 pods / not found". **All `iris`/`kubectl` calls SYNCHRONOUS — never backgrounded.**
 - **Cluster `cw-us-east-02a`.** No ssh / no login node — the iris SDK drives it over the controller tunnel.
@@ -137,7 +137,7 @@ The current contract, the pins that have drifted, and the deploy boundary are re
 ```bash
 cd /Users/benjaminfeuer/Documents/MarinSkyRL
 source "${DC_AGENT_SECRET_ENV:?set DC_AGENT_SECRET_ENV to the secrets file first}"
-export KUBECONFIG=~/.kube/coreweave-iris-gpu                       # HARD prereq (§0.5)
+export KUBECONFIG=~/.kube/coreweave-iris                       # HARD prereq (§0.5)
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris        # the cw-capable (otagent-env) iris binary
 GHCR_TOKEN=$(gh auth token)                                       # GitHub PAT, NOT the Docker Hub DOCKER_TOKEN
 GITSHA=$(git rev-parse --short HEAD)                              # REQUIRED — build_gpu_rl_kaniko.sh has `: "${GITSHA:?}"` (the immutable :gpu-rl-<gitsha> tag)
@@ -259,7 +259,7 @@ You do NOT need a separate post-build smoke for these — they're inside the bui
 ```bash
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python   # otagent env: ships iris + a WORKING kubernetes
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris
-export KUBECONFIG=~/.kube/coreweave-iris-gpu                 # HARD prereq for every cw call (§0.5)
+export KUBECONFIG=~/.kube/coreweave-iris                 # HARD prereq for every cw call (§0.5)
 $PY scripts/iris/iris_ops.py /benjaminfeuer/gpurl-kaniko-<gitsha> --cluster cw-us-east-02a --interval 60   # watch until terminal
 # richest single call (state + error + exit + finished_at):
 $IRIS --cluster=cw-us-east-02a job summary /benjaminfeuer/gpurl-kaniko-<gitsha> --json

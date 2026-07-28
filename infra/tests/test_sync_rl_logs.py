@@ -147,6 +147,6 @@ def test_unresolvable_returns_none(tmp_path):
 def test_store_and_kubeconfig_defaults_unchanged():
     assert srl.BUCKET == "marin-us-east-02a"
     assert srl.ENDPOINT == "https://cwobject.com"
-    assert srl.EAST_KUBECONFIG.endswith("coreweave-iris-gpu")
+    assert srl.EAST_KUBECONFIG.endswith("coreweave-iris")
     assert srl.RAY_SUBDIR == "ray_session_logs"
-    assert srl.KCFG == {"cw-us-east-02a": "~/.kube/coreweave-iris-gpu", "cw-rno2a": "~/.kube/coreweave-iris"}
+    assert srl.KCFG == {"cw-us-east-02a": "~/.kube/coreweave-iris", "cw-rno2a": "~/.kube/coreweave-iris"}

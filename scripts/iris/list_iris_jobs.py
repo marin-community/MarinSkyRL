@@ -27,7 +27,7 @@ USER_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 STATE_LABELS = {"killed": "terminated", "worker_failed": "worker failed"}
 COREWEAVE_KUBECONFIGS = {
     "cw-rno2a": Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-    "cw-us-east-02a": Path("/Users/benjaminfeuer/.kube/coreweave-iris-gpu"),
+    "cw-us-east-02a": Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
 }
 DEFAULT_CLUSTERS = ("cw-rno2a", "cw-us-east-02a", "marin")
 

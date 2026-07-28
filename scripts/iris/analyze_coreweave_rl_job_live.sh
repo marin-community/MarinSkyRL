@@ -49,7 +49,7 @@
 # NOTE: <substr> matches the POD name (iris-benjaminfeuer-<name>-<rank>-<hash>-0), which can differ
 # from the iris job_id display name. With no match the script lists candidate rl pods.
 #
-# ENV: PEEK_KUBECONFIG (default ~/.kube/coreweave-iris-gpu), NS (default iris), CONTAINER (default task),
+# ENV: PEEK_KUBECONFIG (default ~/.kube/coreweave-iris), NS (default iris), CONTAINER (default task),
 #      PEEK_CLUSTER (default cw-us-east-02a), IRIS_BIN (default the otagent cw-capable iris),
 #      PEEK_OUT (default shared Iris evidence-bundle root),
 #      PEEK_TRIALS_S3 (override the remote trials_dir; default s3://marin-us-east-02a/iris/<jobname>/trace_jobs),
@@ -63,7 +63,7 @@ JOB="${1:-}"
 ACTION="${2:-ls}"
 # Force the CoreWeave kubeconfig. Do NOT honor an inherited $KUBECONFIG — the login shell's default
 # points at a different cluster (→ 'no pods'); override only via PEEK_KUBECONFIG.
-export KUBECONFIG="${PEEK_KUBECONFIG:-$HOME/.kube/coreweave-iris-gpu}"
+export KUBECONFIG="${PEEK_KUBECONFIG:-$HOME/.kube/coreweave-iris}"
 NS="${NS:-iris}"
 CONTAINER="${CONTAINER:-task}"
 CLUSTER="${PEEK_CLUSTER:-cw-us-east-02a}"

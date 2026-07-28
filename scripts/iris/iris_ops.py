@@ -616,7 +616,7 @@ def get_job_state_via_query(job_id: str, cluster: str) -> JobStateSnapshot | Non
 def count_live_pods(job_id: str) -> int | None:
     """Count cluster pods whose name carries the job's short name.
 
-    Requires KUBECONFIG to point at the cluster (e.g. ~/.kube/coreweave-iris-gpu).
+    Requires KUBECONFIG to point at the cluster (e.g. ~/.kube/coreweave-iris).
     Returns the pod count, or None if kubectl is unavailable / errors. iris job
     pods are named after the job's short id (last path segment); a vanished job
     has 0.

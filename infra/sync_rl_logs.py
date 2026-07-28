@@ -48,8 +48,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 BUCKET = "marin-us-east-02a"  # ray logs + trace_jobs land here for BOTH east + rno2a (east LOTA store)
 ENDPOINT = "https://cwobject.com"
-EAST_KUBECONFIG = os.path.expanduser("~/.kube/coreweave-iris-gpu")  # holds iris-task-env + the bucket
-KCFG = {"cw-us-east-02a": "~/.kube/coreweave-iris-gpu", "cw-rno2a": "~/.kube/coreweave-iris"}
+EAST_KUBECONFIG = os.path.expanduser("~/.kube/coreweave-iris")  # holds iris-task-env + the bucket
+KCFG = {"cw-us-east-02a": "~/.kube/coreweave-iris", "cw-rno2a": "~/.kube/coreweave-iris"}
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 IRIS_CANDIDATES = [
     "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",

@@ -78,7 +78,7 @@ CLUSTERS = {
         object_endpoint="https://cwobject.com",
     ),
     "cw-us-east-02a": ClusterConfig(
-        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris-gpu"),
+        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
         context=None,
         object_endpoint="https://cwobject.com",
     ),

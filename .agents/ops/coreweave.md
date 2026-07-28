@@ -9,8 +9,8 @@ do not copy its contents into skills.
 | | `cw-us-east-02a` (East) | `cw-rno2a` (Reno) |
 |---|---|---|
 | Fleet | ~32 usable 8×H100-80GB IB nodes (~256 GPU) | 64× 8×H100-80GB IB nodes (512 GPU), pool pinned warm |
-| KUBECONFIG | `~/.kube/coreweave-iris-gpu` | `~/.kube/coreweave-iris` (no `-gpu` suffix) |
-| kube context | (default in that file) | `marin-rn02a_RNO2A` |
+| KUBECONFIG | `~/.kube/coreweave-iris` | `~/.kube/coreweave-iris` |
+| kube context | `marin-gpu_US-EAST-02A` | `marin-rn02a_RNO2A` |
 | Iris cluster config | `marin/lib/iris/config/cw-us-east-02a.yaml` | `marin/lib/iris/config/cw-rno2a.yaml` |
 | Object store | `s3://marin-us-east-02a` via `https://cwobject.com` (external) / `http://cwlota.com` (in-cluster) | same bucket, same endpoints |
 
