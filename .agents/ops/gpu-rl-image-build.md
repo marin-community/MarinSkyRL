@@ -42,6 +42,25 @@ allocation is ~5× the time to failure.
 
 The script is the authority — read its top rather than trusting this table.
 
+`--no-sync` is required on the `iris job run` line. The task image is `ubuntu:22.04`, which has no
+`uv`, so without it iris runs its own setup phase and the job dies at `[iris setup] step 1/2` with
+`uv: command not found`. It does not suppress the workspace bundle: `/app` still receives the repo,
+which is what `DOCKER_CONTEXT=/app` needs.
+
+Blackwell (`TORCH_CUDA_ARCH_LIST` including `10.0`, for the GB200 nodes on cw-us-east-08a) requires
+`WHEEL_SOURCE=wheel-builder`. The published prebuilt wheels are compiled at `8.0;9.0`, and the
+script folds the Dockerfile's arch list into the expected wheel MANIFEST and `cmp`s it against the
+artifact, so a prebuilt-wheelhouse build fails the comparison instead of shipping wheels with no
+`sm_100` kernels. That path pays the full nvcc compile.
+
+`KANIKO_CACHE_REPOSITORY` is shared and required whenever `KANIKO_CACHE=1`, which is the default:
+
+```
+KANIKO_CACHE_REPOSITORY=ghcr.io/open-thoughts/openthoughts-agent/cache
+```
+
+Do not repoint or delete it. A build that omits it dies at `build.sh` line 64 before any layer runs.
+
 `PREBUILT_WHEEL_ARTIFACT_URI` / `_SHA256` are the one pair with no home in the repo, so record them
 here. Current values, used by the `ac9c5f39`/`f2b44d4a`/`90072ada` builds:
 
