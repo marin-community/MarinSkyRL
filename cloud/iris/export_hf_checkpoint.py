@@ -42,6 +42,10 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Any reachable dataset satisfies the trainer's construction-time size assert. This one
+# is small (514 rows) and is already part of the sweep, so an export pulls nothing new.
+DEFAULT_EXPORT_TRAIN_DATA = '["DCAgent/exp_rpt_curriculum-easy"]'
+
 
 def build_command(args: argparse.Namespace) -> list[str]:
     """Return the launch_rl_iris command that performs an export-only run."""
@@ -78,6 +82,15 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.num_nodes),
         "--gpus-per-node",
         str(args.gpus_per_node),
+        # The trainer builds its prompts dataset before it can reach the
+        # resume-at-max-steps branch, and asserts the dataset is at least
+        # train_batch_size. The sweep configs carry data.train_data: [], so an
+        # export that passes no data dies at
+        # "dataset should be atleast as large as train_batch_size 64, got size 0"
+        # roughly eight minutes in, after the Ray head is already up. The rows are
+        # never consumed: max_steps is already reached, so zero steps run.
+        "--train_data",
+        args.train_data,
         "--cluster",
         args.cluster,
         "--target-cluster",
@@ -106,6 +119,14 @@ def main() -> None:
     ap.add_argument("--num-nodes", type=int, default=4)
     ap.add_argument("--gpus-per-node", type=int, default=8)
     ap.add_argument("--priority", default="batch")
+    ap.add_argument(
+        "--train_data",
+        default=DEFAULT_EXPORT_TRAIN_DATA,
+        help=(
+            "JSON list of dataset paths. Never trained on — it only has to be large enough "
+            "for the trainer to construct. Override only if the default is unreachable."
+        ),
+    )
     ap.add_argument("--export_path", help="defaults to <ckpt_path parent>/exports")
     ap.add_argument("--job-name", dest="job_name")
     ap.add_argument("--dry-run", action="store_true", help="print the command and exit")
