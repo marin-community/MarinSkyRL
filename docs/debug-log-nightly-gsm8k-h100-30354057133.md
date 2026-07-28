@@ -72,8 +72,14 @@ nightly gate tests. The H100 parity test collected and skipped on the CPU host. 
 lint-review command could not start its reviewer lanes because the reviewer account had
 reached its monthly spend limit.
 
+The full branch workflow
+[30398993649](https://github.com/marin-community/MarinSkyRL/actions/runs/30398993649)
+then passed on cw-rno2a. It completed all 30 training steps in 717 seconds, the metric gate
+accepted the final step, and the H100 Grug parity check matched the committed fixture. Iris
+reported one succeeded task with exit 0, zero failures, and zero preemptions.
+
 ## Future work
 
-- [ ] Confirm the fixed workflow on cw-rno2a with a short manual dispatch or the next schedule.
+- [x] Confirm the fixed workflow on cw-rno2a with a full manual dispatch.
 - [ ] Fix Iris federation so a reused canonical job path cannot replay a previous task's logs
       or wait forever after that task is already terminal (marin-community/marin#7654).
