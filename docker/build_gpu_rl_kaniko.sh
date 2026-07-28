@@ -3,9 +3,12 @@
 set -euo pipefail
 
 : "${GITSHA:?}"
-: "${GHCR_IMAGE_REPOSITORY:?}"
 : "${DOCKER_USER_ID:?}"
 : "${GHCR_TOKEN:?}"
+
+# Registry home is this repo's org, marin-community/MarinSkyRL. Declared here so a
+# build pushes where it says it pushes without an ad-hoc env var at every call site.
+GHCR_IMAGE_REPOSITORY="${GHCR_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl}"
 
 WHEEL_SOURCE="${WHEEL_SOURCE:-prebuilt-wheelhouse}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
@@ -61,7 +64,7 @@ fi
 if [ "${KANIKO_CACHE:-1}" = "0" ]; then
   CACHE_FLAGS=(--cache=false)
 else
-  : "${KANIKO_CACHE_REPOSITORY:?Required when KANIKO_CACHE=1}"
+  KANIKO_CACHE_REPOSITORY="${KANIKO_CACHE_REPOSITORY:-${GHCR_IMAGE_REPOSITORY}/cache}"
   CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
 fi
 
@@ -152,6 +155,28 @@ printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH" \
 chmod 0600 "$DOCKER_CONFIG/config.json"
 unset AUTH GHCR_TOKEN
 set -x
+
+# When we pay the nvcc compile, keep the wheels. The wheel-builder stage is pushed as
+# its own tag first, so the compiled vLLM-fork + flash-attn wheels survive as an image
+# and can be turned into a prebuilt-wheelhouse artifact later without recompiling. The
+# full build that follows reuses these layers from the cache, so this is one compile,
+# not two. Skipped on the prebuilt path, where there is nothing new to preserve.
+if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; then
+  /kaniko/executor \
+    --context "dir://${DOCKER_CONTEXT}" \
+    --dockerfile "$DOCKERFILE" \
+    --target wheel-builder \
+    --build-arg WHEEL_SOURCE="$WHEEL_SOURCE" \
+    --build-arg INSTALL_MEGATRON="$INSTALL_MEGATRON" \
+    --build-arg GITSHA="$GITSHA" \
+    --build-arg HARBOR_COMMIT="$HARBOR_COMMIT" \
+    --build-arg VLLM_NATIVE_DONOR_ARCHIVE_SHA256="$NATIVE_ARCHIVE_SHA256" \
+    --skip-unused-stages \
+    --compressed-caching=false \
+    "${CACHE_FLAGS[@]}" \
+    --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}"
+  echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}"
+fi
 
 exec /kaniko/executor \
   --context "dir://${DOCKER_CONTEXT}" \
