@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
-# Build the linux/amd64 GPU-RL image inside a disposable Iris Ubuntu task.
+# Build the GPU-RL image inside a disposable Iris Ubuntu task.
+#
+# kaniko builds for the architecture it runs on, so the image architecture is
+# decided by where the Iris job lands, not by a flag. An amd64 build host on
+# cw-us-east-02a with docker/Dockerfile.gpu-rl produces the linux/amd64 image; an
+# aarch64 GB200 host on cw-us-east-08a with docker/Dockerfile.gpu-rl-arm64
+# produces the linux/arm64 one. Everything below that depends on the host
+# architecture — the crane release asset, the platform crane selects out of the
+# multi-arch kaniko manifest, and the wheel MANIFEST platform tag — is derived
+# from `uname -m` rather than hardcoded.
 set -euo pipefail
 
 : "${GITSHA:?}"
 : "${DOCKER_USER_ID:?}"
 : "${GHCR_TOKEN:?}"
+
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64)  CRANE_ASSET_ARCH=x86_64; KANIKO_PLATFORM=linux/amd64; WHEEL_PLATFORM_TAG=linux_x86_64 ;;
+  aarch64) CRANE_ASSET_ARCH=arm64;  KANIKO_PLATFORM=linux/arm64; WHEEL_PLATFORM_TAG=linux_aarch64 ;;
+  *) echo "unsupported build host architecture: $BUILD_ARCH" >&2; exit 2 ;;
+esac
+echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFORM_TAG"
 
 # Registry home is this repo's org, marin-community/MarinSkyRL. Declared here so a
 # build pushes where it says it pushes without an ad-hoc env var at every call site.
@@ -68,9 +85,15 @@ else
   CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
 fi
 
-DESTINATIONS=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}-${GITSHA}")
+# TAG_SUFFIX keeps architectures apart. The tag is derived from the git sha, and
+# the same commit builds both images, so without a suffix an arm64 build would
+# overwrite the amd64 tag of the identical sha — including the wheels tag, whose
+# wheels are not interchangeable.
+TAG_SUFFIX="${TAG_SUFFIX:-}"
+IMAGE_TAG="${TAG_PREFIX}-${GITSHA}${TAG_SUFFIX}"
+DESTINATIONS=(--destination "${GHCR_IMAGE_REPOSITORY}:${IMAGE_TAG}")
 if [ "${PUSH_FLOATING:-0}" = "1" ]; then
-  DESTINATIONS+=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}")
+  DESTINATIONS+=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}${TAG_SUFFIX}")
 fi
 
 APT_PACKAGES=(ca-certificates curl tar)
@@ -121,7 +144,7 @@ PY
     "FLASH_ATTN_VERSION=$(dockerfile_arg FLASH_ATTN_VERSION)" \
     "TORCH_VERSION=$(dockerfile_arg TORCH_VERSION)" \
     "TORCH_CUDA_ARCH_LIST=$(dockerfile_arg TORCH_CUDA_ARCH_LIST)" \
-    "CUDA=12.9 PY=cp312 PLATFORM=linux_x86_64" \
+    "CUDA=12.9 PY=cp312 PLATFORM=${WHEEL_PLATFORM_TAG}" \
     > /tmp/expected-wheel-manifest
   cmp /tmp/expected-wheel-manifest "$ARTIFACT_WHEELS/MANIFEST"
   test "$(find "$ARTIFACT_WHEELS" -maxdepth 1 -type f -name 'vllm-*.whl' | wc -l)" -eq 1
@@ -141,11 +164,15 @@ unset PREBUILT_WHEEL_ARTIFACT_URI PREBUILT_WHEEL_ARTIFACT_SHA256
 cd /tmp
 CRANE_VERSION=v0.20.2
 curl -fsSL \
-  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ASSET_ARCH}.tar.gz" \
   -o crane.tgz
 tar -xzf crane.tgz crane
 install -m 0755 crane /usr/local/bin/crane
-crane export gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
+# The kaniko executor tag is a multi-arch manifest, and crane defaults to
+# linux/amd64 regardless of the host, so the platform has to be explicit or an
+# aarch64 builder unpacks amd64 binaries it cannot run.
+crane export --platform "$KANIKO_PLATFORM" gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
+test -x /kaniko/executor
 
 export DOCKER_CONFIG=/kaniko/.docker
 install -d -m 0700 "$DOCKER_CONFIG"
@@ -174,8 +201,8 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; t
     --skip-unused-stages \
     --compressed-caching=false \
     "${CACHE_FLAGS[@]}" \
-    --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}"
-  echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}"
+    --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${TAG_SUFFIX}"
+  echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${TAG_SUFFIX}"
 fi
 
 exec /kaniko/executor \
