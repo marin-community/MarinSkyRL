@@ -24,7 +24,7 @@
 #   wheel-builder: compile both wheels inline (~3 h nvcc) -> use when no prebuilt
 #     wheels are available.
 # NATIVE CACHE KEY = { VLLM_NATIVE_DONOR_COMMIT, FLASH_ATTN_VERSION, torch
-#   2.11.0, CUDA 12.8, cp312, x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0" }.
+#   2.11.0, CUDA 12.8, cp312, x86_64, TORCH_CUDA_ARCH_LIST "8.0;9.0;10.0" }.
 #
 # =============================================================================
 # Version pins (ground truth = skyrl-train/pyproject.toml + uv.lock):
@@ -51,8 +51,13 @@ ARG VLLM_FORK_REPO=https://github.com/marin-community/vllm.git
 ARG VLLM_FORK_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
 ARG VLLM_NATIVE_DONOR_COMMIT=4b55591306c934cdc21461f091c9ea22ad008007
 ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256=not-applicable
-# A100 (8.0) + Hopper (9.0): the GPUs that run this image.
-ARG TORCH_CUDA_ARCH_LIST="8.0;9.0"
+# A100 (8.0) + Hopper (9.0) + Blackwell (10.0): the GPUs that run this image.
+# 10.0 is GB200/B200 (cw-us-east-08a, 4 GPUs per node). Adding it REQUIRES
+# WHEEL_SOURCE=wheel-builder: the published prebuilt wheels are compiled at
+# "8.0;9.0", and build_gpu_rl_kaniko.sh compares this value into the wheel
+# MANIFEST, so a prebuilt-wheelhouse build fails fast rather than shipping
+# wheels without sm_100 kernels.
+ARG TORCH_CUDA_ARCH_LIST="8.0;9.0;10.0"
 ARG MAX_JOBS=8
 ARG NVCC_THREADS=2
 # prebuilt-wheelhouse (default, docker/wheelhouse/ populated) | wheel-builder (compile inline).
