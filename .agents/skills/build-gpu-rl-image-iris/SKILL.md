@@ -1,7 +1,7 @@
 ---
 name: build-gpu-rl-image-iris
 description: >-
-  Build + push the gpu-rl Docker image (`ghcr.io/open-thoughts/openthoughts-agent:gpu-rl`) — the RL runtime for
+  Build + push the gpu-rl Docker image — the RL runtime for
   CoreWeave H100 (torch 2.11.0+cu128 + the from-source vLLM fork + flash-attn 2.8.3 + skyrl-train/torchtitan EP) —
   IN the CoreWeave `cw-us-east-02a` cluster, AS AN IRIS JOB USING KANIKO. Self-contained to THIS repo
   (MarinSkyRL): the RL env is `uv sync --frozen` against `skyrl-train/{pyproject.toml,uv.lock}` (the lock is the
@@ -170,7 +170,7 @@ $IRIS --cluster=cw-us-east-02a job run \
 `$DOCKER_CONFIG/config.json` with the ghcr `penfever:$DOCKER_TOKEN` auth → (prebuilt path) curl the wheels from
 `laion/gpu-rl-build-wheels` into `/app/docker/wheelhouse/` → run `/kaniko/executor --context dir:///app
 --dockerfile docker/Dockerfile.gpu-rl --build-arg WHEEL_SOURCE=… --skip-unused-stages --compressed-caching=false
---cache=true --cache-repo=ghcr.io/open-thoughts/openthoughts-agent/cache --destination
+--cache=true --cache-repo=<cache repo> --destination
 …:gpu-rl-<gitsha>` (plus `--destination …:gpu-rl` only if `PUSH_FLOATING=1`). `--no-sync` here means only the
 *kaniko* job's own sync; the context is still the iris-synced repo.
 
@@ -185,7 +185,7 @@ $IRIS --cluster=cw-us-east-02a job run \
   excludes nothing → the closure is EXACTLY the lock, zero drift). This keeps every layer under ~4 GB so the
   image is pullable. kaniko runs with `--compressed-caching=false` to keep multi-layer snapshotting within the
   memory budget.
-- **`--cache=true --cache-repo=ghcr.io/open-thoughts/openthoughts-agent/cache`** — reuses layers across
+- **`--cache=true --cache-repo=<cache repo>`** — reuses layers across
   rebuilds. On the prebuilt-wheelhouse path there is no nvcc RUN to cache, so the win is small; on the
   `wheel-builder` path note that per-layer cache reuse and `--single-snapshot` are mutually defeating — prefer
   the prebuilt fast path over relying on a cache HIT to save the 3 h.
@@ -274,11 +274,11 @@ After the build SUCCEEDS (state SUCCEEDED, push done), capture the immutable dig
 
 ```bash
 # resolve the :gpu-rl-<gitsha> tag's sha256 (use the immutable tag, NEVER the floating :gpu-rl):
-docker buildx imagetools inspect ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>
-crane manifest --platform linux/amd64 ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>   # then digest it
+docker buildx imagetools inspect <repository>:gpu-rl-<gitsha>
+crane manifest --platform linux/amd64 <repository>:gpu-rl-<gitsha>   # then digest it
 ```
 Then **bump the matching pin in `cloud/iris/launch_rl_iris.py`** to the new
-`ghcr.io/open-thoughts/openthoughts-agent@sha256:<digest>` and update the provenance comment: a
+`<repository>@sha256:<digest>` and update the provenance comment: a
 `gpu-rl-<gitsha>` digest goes in `DEFAULT_RL_DOCKER_IMAGE`, a `gpu-rl-megatron-<gitsha>` digest in
 `DEFAULT_RL_MEGATRON_DOCKER_IMAGE`. The launcher selects between them from the config's
 `trainer.strategy`, so **bump BOTH in the same commit** — leaving one behind makes a strategy switch
@@ -340,5 +340,3 @@ signature when a config key outruns the image are in **`.agents/ops/gpu-rl-image
 - **Dockerfile internals + the wheel cache (for a real x86 host):** `docker/README.gpu-rl-wheelcache.md`,
   `docker/Dockerfile.gpu-rl` (header comments), `docker/build_wheels.sh`.
 - **Build primitive:** `scripts/iris/watch_job_state.py` (the state-poll monitor).
-- (If you also have OT-Agent access, cross-ref `.claude/ops/iris/coreweave_gpu_ops.md` — NOT a dependency;
-  everything needed is inlined above.)

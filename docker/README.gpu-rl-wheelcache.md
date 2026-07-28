@@ -1,6 +1,6 @@
 # gpu-rl image — wheel cache for fast rebuilds
 
-The `gpu-rl` image (`ghcr.io/open-thoughts/openthoughts-agent:gpu-rl`) compiles
+The `gpu-rl` image (`ghcr.io/marin-community/marinskyrl:gpu-rl`) compiles
 two things FROM SOURCE with `nvcc` against torch 2.11 / CUDA 12.8 / cp312 /
 x86_64 — and those are the only slow parts of the build:
 
@@ -49,7 +49,7 @@ source ~/secrets.env
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u <user> --password-stdin
 ./docker/build_and_push.sh gpu-rl
 # capture the pushed @sha256 digest from the immutable :gpu-rl-<gitsha> tag:
-docker buildx imagetools inspect ghcr.io/open-thoughts/openthoughts-agent:gpu-rl-<gitsha>
+docker buildx imagetools inspect ghcr.io/marin-community/marinskyrl:gpu-rl-<gitsha>
 ```
 
 The `rl` stage's default `WHEEL_SOURCE=prebuilt-wheelhouse` COPYs
@@ -62,7 +62,7 @@ first** so the wheelhouse is populated.
 docker buildx build -f docker/Dockerfile.gpu-rl \
   --platform linux/amd64 --target rl \
   --build-arg WHEEL_SOURCE=wheel-builder \
-  -t ghcr.io/open-thoughts/openthoughts-agent:gpu-rl --push .
+  -t ghcr.io/marin-community/marinskyrl:gpu-rl --push .
 ```
 
 `WHEEL_SOURCE=wheel-builder` makes the `rl` stage take its `/wheels` from the

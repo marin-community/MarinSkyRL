@@ -1,6 +1,6 @@
 # GPU-RL image — deploy boundary, build contract, pins
 
-Facts for building and deploying `ghcr.io/open-thoughts/openthoughts-agent`. The
+Facts for building and deploying `ghcr.io/marin-community/marinskyrl`. The
 `build-gpu-rl-image-iris` skill points here; this file owns the constants.
 
 ## Deploy boundary
@@ -33,12 +33,14 @@ allocation is ~5× the time to failure.
 | variable | required when |
 |---|---|
 | `GITSHA` | always |
-| `GHCR_IMAGE_REPOSITORY` | always |
 | `DOCKER_USER_ID` | always |
 | `GHCR_TOKEN` | always — GitHub PAT with `write:packages`, not a Docker Hub `dckr_pat_…` |
-| `KANIKO_CACHE_REPOSITORY` | `KANIKO_CACHE=1`; shared, do not repoint or delete |
 | `PREBUILT_WHEEL_ARTIFACT_URI` | prebuilt-wheelhouse path; SHA-verified `s3://` artifact |
 | `PREBUILT_WHEEL_ARTIFACT_SHA256` | prebuilt-wheelhouse path |
+
+`GHCR_IMAGE_REPOSITORY` defaults to `ghcr.io/marin-community/marinskyrl` in the script, and
+`KANIKO_CACHE_REPOSITORY` derives from it as `<repository>/cache`. Neither needs an env var. Set
+them only to push somewhere else on purpose.
 
 The script is the authority — read its top rather than trusting this table.
 
@@ -53,13 +55,12 @@ script folds the Dockerfile's arch list into the expected wheel MANIFEST and `cm
 artifact, so a prebuilt-wheelhouse build fails the comparison instead of shipping wheels with no
 `sm_100` kernels. That path pays the full nvcc compile.
 
-`KANIKO_CACHE_REPOSITORY` is shared and required whenever `KANIKO_CACHE=1`, which is the default:
-
-```
-KANIKO_CACHE_REPOSITORY=ghcr.io/open-thoughts/openthoughts-agent/cache
-```
-
-Do not repoint or delete it. A build that omits it dies at `build.sh` line 64 before any layer runs.
+A `wheel-builder` build also pushes the wheel stage as `<repository>:wheels-<gitsha>`, so the
+compiled vLLM-fork and flash-attn wheels survive the job. Cut a new prebuilt-wheelhouse artifact
+from that tag rather than repeating the compile: `crane export <repository>:wheels-<gitsha> - |
+tar -x wheels/`, then tar `wheels/` (containing both `.whl` files and `MANIFEST`), upload to the
+`s3://` path below, and record the new URI and SHA-256 here. The `MANIFEST` inside already carries
+the `TORCH_CUDA_ARCH_LIST` the wheels were built for, which is what the prebuilt path compares.
 
 `PREBUILT_WHEEL_ARTIFACT_URI` / `_SHA256` are the one pair with no home in the repo, so record them
 here. Current values, used by the `ac9c5f39`/`f2b44d4a`/`90072ada` builds:
