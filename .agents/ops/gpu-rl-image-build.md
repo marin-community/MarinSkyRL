@@ -119,33 +119,89 @@ The shipped gpu-rl image is a single-platform `linux/amd64` manifest with `linux
 it cannot run there at all. `sm_100` kernels are necessary but not sufficient — the host CPU is the
 binding constraint, and there is no amd64 GPU capacity to fall back to.
 
-A build host is available: an iris job with `--gpu GB200x4` on `cw-us-east-08a` lands on aarch64 with
-144 cores, versus 48 on the amd64 builder. Use `KUBECONFIG=~/.kube/coreweave-iris`, which is now the only CoreWeave kubeconfig.
+`docker/Dockerfile.gpu-rl-arm64` is the counterpart, built by the same
+`docker/build_gpu_rl_kaniko.sh`. kaniko builds for the architecture it runs on, so the image
+architecture follows the build host and there is no cross-compilation: an iris job on
+`cw-us-east-08a` lands on aarch64 with 144 cores and 955 GB, against 48 cores and 512 GB on the
+amd64 builder. Use `KUBECONFIG=~/.kube/coreweave-iris`, the only CoreWeave kubeconfig.
 
-What an arm64 image still needs, surveyed against PyPI:
+Launch shape that worked. `--gpu` is what forces an arm64 node — the build needs no GPU, and a
+CPU-only request lands on one of the four amd64 nodes instead. Ask for one GPU, not four: the
+cluster runs near full, and a whole-node request is both harder to schedule and preempted sooner.
 
-| dependency | aarch64 status |
+```
+--task-image docker.io/library/ubuntu:22.04 --no-sync --enable-extra-resources
+--gpu GB200x1 --cpu 96 --memory 640GB --disk 500GB --priority batch --max-retries 3 --timeout 28800
+-e DOCKERFILE docker/Dockerfile.gpu-rl-arm64  -e WHEEL_SOURCE wheel-builder
+-e INSTALL_MEGATRON 1  -e TAG_PREFIX gpu-rl-megatron  -e TAG_SUFFIX -arm64
+-e KANIKO_CACHE_REPOSITORY ghcr.io/marin-community/marinskyrl/cache-arm64
+```
+
+`TAG_SUFFIX` exists because the tag is derived from the git sha and the same commit builds both
+images; without it an arm64 build overwrites the amd64 tag, including the `wheels-<gitsha>` tag whose
+wheels are not interchangeable. Give arm64 its own kaniko cache repo for the same reason.
+`--max-retries 3` is preemption insurance, not a blind retry: at batch priority on a full cluster a
+build is preempted within minutes, and kaniko resumes from the cache repo rather than from zero.
+A first probe run was preempted 88 seconds in by a production job and reported only `Pod not found`;
+the real reason is in `kubectl get events`, as `EvictedDueToPreempted`.
+
+### What the aarch64 dependency survey actually found
+
+The earlier survey in this file said TransformerEngine had no aarch64 wheel anywhere and needed a
+source build. That was wrong, and the correction matters because it removes the only hard compile:
+
+| dependency | aarch64 status (checked 2026-07-28) |
 |---|---|
-| torch, torchvision | published for aarch64 at cu129 |
-| megatron-core, nvidia-*-cu12 | published for aarch64 |
-| megatron-bridge, flashinfer-python, apex | pure Python or sdist |
-| vLLM fork, flash-attn | already source-built; recompile for aarch64 + sm_100 |
-| **TransformerEngine** | **no aarch64 wheel anywhere**, upstream included. Must build from source. |
-| deep-ep, mamba-ssm, causal-conv1d | pinned to x86_64 URLs and marker-gated, so absent on aarch64 |
+| torch, torchvision | `manylinux_2_28_aarch64` at cu129 |
+| triton, ray, tensordict, flashinfer-jit-cache, vLLM 0.23.0 | aarch64 wheels in the lock |
+| megatron-core 0.18.0 | `cp312-manylinux_2_28_aarch64` on PyPI |
+| megatron-bridge 0.5.0, nvidia-modelopt, flash-linear-attention | `py3-none-any` |
+| transformer_engine 2.11.0 | `py3-none-any` (pure-Python framework layer) |
+| **transformer_engine_cu12 2.11.0** | **`py3-none-manylinux_2_28_aarch64` on PyPI** — the CUDA core library |
+| **transformer_engine_torch 2.11.0** | **`cp312-linux_aarch64` in the erictang000 release**, beside the x86_64 one |
+| mamba-ssm, causal-conv1d | `cp312-linux_aarch64` in the erictang000 releases |
+| deep-ep | x86_64 only, and not in either image — see below |
 
-TransformerEngine is the one genuinely new compile. The megatron extra requires
-`transformer-engine-torch` only under `platform_machine == 'x86_64'`, so `uv sync --extra megatron`
-SUCCEEDS on aarch64 without it and the failure surfaces later at
-`import transformer_engine` in the build assert. Add an explicit source build rather than trusting
-the sync.
+No source build is required for any of it. The lock records only the x86_64 files for most of that
+subtree because those packages are reachable only under an `x86_64` marker, so reading the lock
+understates what exists; check PyPI and the release assets directly.
 
-The absent trio is probably tolerable for an export-only image: mamba-ssm and causal-conv1d serve
-Mamba models, and Qwen3-Coder is not one. deep-ep is MoE dispatch and Qwen3-Coder-30B-A3B is an MoE,
-so confirm whether `bridge.save_hf_weights` touches it before assuming.
+**deep-ep is not a gap.** It is declared only in skyrl-train's `deepep` extra, and the Dockerfiles
+sync `--extra vllm --extra ep` (plus `megatron`) — never `deepep`. The amd64 megatron image in
+production therefore does not contain deep-ep either. `deep_ep` is imported only by
+`skyrl_train/distributed/deepep.py`, lazily from the FSDP2 strategy; `megatron_strategy.py`, which
+owns the `bridge.save_hf_weights` call, does not reference it. Its absence on aarch64 is not a
+regression.
 
-Also change for an arm64 build: the wheel MANIFEST hardcodes `PLATFORM=linux_x86_64` in both
-`docker/Dockerfile.gpu-rl` and the expected copy in `build_gpu_rl_kaniko.sh`, and
-`TORCH_CUDA_ARCH_LIST` can drop to `10.0` since GB200 is the only arm64 target.
+### How Megatron is installed on aarch64
+
+Every requirement in the `megatron` extra is gated on `platform_machine == 'x86_64'`, and
+`[tool.uv.sources]` pins transformer-engine-torch, mamba-ssm and causal-conv1d to x86_64 wheel URLs.
+So `uv sync --extra megatron` SUCCEEDS on aarch64 and installs nothing; the failure surfaces much
+later at `import transformer_engine`. Measured: the frozen lock resolves to 236 packages on
+aarch64 against 332 on x86_64, and the 96-package difference is exactly the Megatron subtree.
+
+Relaxing those markers means regenerating `skyrl-train/uv.lock`, which is an input to the amd64
+image that production is pinned to. `Dockerfile.gpu-rl-arm64` therefore installs the stack
+explicitly with `uv pip install` from the aarch64 artifacts above, and asserts afterwards that torch
+and torchvision are still `2.11.0+cu129` / `0.26.0+cu129`. On the probe run that install left torch,
+transformers 5.8.1, vllm 0.23.0, ray 2.51.1 and accelerate 1.14.0 untouched.
+
+The Megatron subtree is consequently not lock-pinned on the arm64 image. The versions that matter
+are ARGs in the Dockerfile.
+
+### Two ordering traps
+
+`import transformer_engine` dlopens its core library at import time and fails with
+`OSError: libcudart.so.12: cannot open shared object file` unless the CUDA runtime is already
+loaded. `import megatron.core, megatron.bridge, transformer_engine` passes because megatron imports
+torch first. A standalone `import transformer_engine.pytorch` in a non-CUDA image does not. The
+arm64 build assert imports torch first for this reason.
+
+`crane export` defaults to `linux/amd64` whatever the host, so the kaniko executor has to be
+exported with an explicit `--platform`, and the crane release asset itself is
+`go-containerregistry_Linux_arm64.tar.gz`. Both are now derived from `uname -m` in
+`build_gpu_rl_kaniko.sh`.
 
 ## The image must be PUBLIC on ghcr, because two of three clusters cannot authenticate
 

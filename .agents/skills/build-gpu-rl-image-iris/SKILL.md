@@ -335,6 +335,12 @@ signature when a config key outruns the image are in **`.agents/ops/gpu-rl-image
 ---
 
 ## Cross-reference
+- **arm64 / GB200 (`cw-us-east-08a`):** this whole document describes the `linux/amd64` build on
+  `cw-us-east-02a`. That image cannot run on `cw-us-east-08a`, whose GPUs all sit behind Grace
+  hosts. The counterpart is `docker/Dockerfile.gpu-rl-arm64`, built by the same script on an
+  aarch64 iris job — the architecture follows the build host. The launch shape, the aarch64
+  dependency survey and the Megatron install it needs are in the **arm64 / GB200** section of
+  `.agents/ops/gpu-rl-image-build.md`.
 - **Consumes this image:** the iris RL launcher (`cloud/iris/launch_rl_iris.py`; bump its
   `DEFAULT_RL_DOCKER_IMAGE` digest after a build).
 - **Dockerfile internals + the wheel cache (for a real x86 host):** `docker/README.gpu-rl-wheelcache.md`,
