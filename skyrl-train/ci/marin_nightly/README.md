@@ -8,7 +8,7 @@ policy over 16 prompts carries no signal about how good the model is.
 
 | file | role |
 | --- | --- |
-| `run_h100.sh` | what runs on the GPU: sync, slice GSM8K down to a handful of prompts, train, gate |
+| `run_h100.sh` | what runs on the GPU: validate the image, slice GSM8K, train, gate |
 | `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
 | `specs/gsm8k-qwen3-0.6b.json` | the thresholds, with provenance for why each one is what it is |
 | `../../../.github/workflows/marin-nightly.yaml` | provisions the H100 through Iris and tears it down |
@@ -39,11 +39,11 @@ uv run --frozen python -m ci.marin_nightly.gate \
     --wall-clock-seconds 900
 ```
 
-The training run needs a GPU, and takes its knobs from the environment
-(`MODEL`, `MAX_STEPS`, `DATA_DIR`):
+The training run needs the digest-pinned GPU-RL task image and takes its knobs from the
+environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside that image:
 
 ```bash
-MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
+NIGHTLY_RL_ENV=/opt/openthoughts/envs/rl MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
 
 To exercise the whole path — provision, train, gate, tear down — trigger the workflow:
