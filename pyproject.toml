@@ -24,7 +24,7 @@ dev = [
 [tool.marin-style]
 checks = ["ruff-check", "ruff-format"]
 ruff_version = "0.14.3"
-include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**"]
+include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**", "scripts/**"]
 
 [tool.ruff]
 line-length = 120

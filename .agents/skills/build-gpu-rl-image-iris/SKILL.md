@@ -260,7 +260,7 @@ You do NOT need a separate post-build smoke for these — they're inside the bui
 PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python   # otagent env: ships iris + a WORKING kubernetes
 IRIS=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris
 export KUBECONFIG=~/.kube/coreweave-iris-gpu                 # HARD prereq for every cw call (§0.5)
-$PY scripts/iris/watch_job_state.py /benjaminfeuer/gpurl-kaniko-<gitsha> --interval 60      # watch until terminal
+$PY scripts/iris/iris_ops.py /benjaminfeuer/gpurl-kaniko-<gitsha> --cluster cw-us-east-02a --interval 60   # watch until terminal
 # richest single call (state + error + exit + finished_at):
 $IRIS --cluster=cw-us-east-02a job summary /benjaminfeuer/gpurl-kaniko-<gitsha> --json
 # full log by time-window (NOT --tail, which under-samples): --since-ms <submitted_at_ms> --no-tail
@@ -339,4 +339,5 @@ signature when a config key outruns the image are in **`.agents/ops/gpu-rl-image
   `DEFAULT_RL_DOCKER_IMAGE` digest after a build).
 - **Dockerfile internals + the wheel cache (for a real x86 host):** `docker/README.gpu-rl-wheelcache.md`,
   `docker/Dockerfile.gpu-rl` (header comments), `docker/build_wheels.sh`.
-- **Build primitive:** `scripts/iris/watch_job_state.py` (the state-poll monitor).
+- **Build primitive:** `scripts/iris/iris_ops.py` (the state-poll monitor); see
+  `.agents/ops/iris-operator-scripts.md`.
