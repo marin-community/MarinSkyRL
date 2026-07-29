@@ -1249,9 +1249,17 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # actually reach the policy/vLLM workers. Pure passthrough: a no-op unless
     # the var is set in the launcher environment, so the production/default path
     # is unchanged.
+    #
+    # GLOO_SOCKET_IFNAME is deliberately NOT in this list. runtime_env is
+    # job-level, so it pushes one value to every node, and gloo reads the value as
+    # a literal interface name with no `^exclude` form. NIC names are not uniform
+    # across a gang: job 20260729-102429-52af30 broadcast the head's `enp90s0np0`
+    # to a node naming its NIC `enp90s0f0np0` and megatron's gloo group creation
+    # there died with `Unable to find address for: enp90s0np0`. Set it per node
+    # instead (the iris controller derives it from each pod's own IP before that
+    # node's `ray start`, which the node's Ray workers inherit).
     for _net_env in (
         "NCCL_SOCKET_IFNAME",
-        "GLOO_SOCKET_IFNAME",
         "NCCL_IB_HCA",
         "NCCL_IB_DISABLE",
         "NCCL_NET",
