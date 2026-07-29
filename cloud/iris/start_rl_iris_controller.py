@@ -455,6 +455,72 @@ def _own_ip() -> str:
         s.close()
 
 
+def _iface_for_ip(ip: str) -> str | None:
+    """Name of the interface holding ``ip``, or None if it cannot be determined.
+
+    Reads /proc/net/fib_trie-free: uses the socket interface table directly so no
+    external binary (`ip`, `ifconfig`) and no third-party import is required.
+    """
+    try:
+        import fcntl
+        import struct
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for _, name in socket.if_nameindex():
+                try:
+                    packed = fcntl.ioctl(
+                        sock.fileno(),
+                        0x8915,  # SIOCGIFADDR
+                        struct.pack("256s", name[:15].encode()),
+                    )
+                    if socket.inet_ntoa(packed[20:24]) == ip:
+                        return name
+                except OSError:
+                    continue  # interface has no IPv4 address
+        finally:
+            sock.close()
+    except Exception as exc:  # noqa: BLE001
+        _log(f"[fabric] interface lookup failed: {exc}")
+    return None
+
+
+def pin_socket_ifname() -> None:
+    """Derive GLOO_SOCKET_IFNAME from the address iris advertises for this task.
+
+    Gloo carries the DP-rank-0 optimizer gather at checkpoint save (the megatron
+    strategy picks ``fully_reshardable`` + mem_efficient precisely so that gather
+    runs on CPU and needs no GPU memory). With no interface pin gloo applies its
+    own heuristic; on this cluster it picked loopback, every rank advertised
+    127.0.0.1, and the mesh never formed.
+
+    NCCL's ``^a,b,c`` exclude syntax cannot be reused here — gloo reads the value
+    as a literal interface name and dies with ``Unable to find address for: ^ibs``.
+    A static name cannot be used either: the PF differs per node and region.
+
+    So derive it. ``IRIS_ADVERTISE_HOST`` is the pod IP, injected per pod by iris
+    through the Kubernetes downward API (``status.podIP``), which is exactly the
+    address whose interface the collectives must bind. Whatever interface holds
+    it is correct on this node by construction.
+
+    Fail-safe by design: an existing value is never overridden, and any failure to
+    resolve leaves the environment untouched and the previous behaviour intact.
+    """
+    if os.environ.get("GLOO_SOCKET_IFNAME"):
+        _log("[fabric] GLOO_SOCKET_IFNAME already set; leaving it alone")
+        return
+    ip = _own_ip()
+    if not ip or ip == "127.0.0.1":
+        _log("[fabric] no routable IP; not pinning GLOO_SOCKET_IFNAME")
+        return
+    iface = _iface_for_ip(ip)
+    if not iface:
+        _log(f"[fabric] no interface holds {ip}; not pinning GLOO_SOCKET_IFNAME")
+        return
+    os.environ["GLOO_SOCKET_IFNAME"] = iface
+    _log(f"[fabric] GLOO_SOCKET_IFNAME={iface} (derived from {ip})")
+
+
 # ---------------------------------------------------------------------------
 # Rendezvous — head publishes its IP, workers poll for it. Backend-agnostic via
 # fsspec so the URI scheme (gs://, s3://, file://, plain path) selects storage.
@@ -1372,6 +1438,10 @@ def main() -> None:
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
     # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.
     _pin_boto3_s3_addressing_style()
+    # Derive GLOO_SOCKET_IFNAME from the pod IP BEFORE any torch/gloo init, on head
+    # and every worker. Must precede `ray start`: Ray actors inherit this env, and
+    # the gloo mesh is built long after, at the first checkpoint save.
+    pin_socket_ifname()
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
