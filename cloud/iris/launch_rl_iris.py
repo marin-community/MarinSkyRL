@@ -2518,6 +2518,15 @@ def main() -> int:
 
         if args.no_wait:
             return 0
+        print(
+            f"[rl-iris] Now streaming logs for {full_job_id}. This process runs until the job ends.\n"
+            "[rl-iris] Ctrl-C or SIGINT TERMINATES the job. It does not detach from it.\n"
+            "[rl-iris] Use --no-wait to submit and return instead.\n"
+            "[rl-iris] To stop a backgrounded launcher and keep the job alive, use kill or kill -9. "
+            "Never use kill -2.",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             status = job.wait(stream_logs=True, timeout=float("inf"))
             exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1
