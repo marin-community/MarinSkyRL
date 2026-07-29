@@ -154,7 +154,7 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
       expert_model_parallel_size: 4
-      context_parallel_size: 2
+      context_parallel_size: 1
       cp_style: ring_sdpa
       cp_rotate_method: allgather
       moe_router_replay: true
@@ -177,7 +177,7 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
       expert_model_parallel_size: 4
-      context_parallel_size: 2
+      context_parallel_size: 1
       cp_style: ring_sdpa
       cp_rotate_method: allgather
       moe_router_replay: true
