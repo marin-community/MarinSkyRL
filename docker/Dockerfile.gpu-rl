@@ -470,10 +470,19 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # image must have exactly the one known aiobotocore/botocore conflict; the
 # megatron install adds further conflicts of its own, so INSTALL_MEGATRON=1
 # only requires the known conflict and leaves the printed report for review.
+#
+# `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
+# them into extras, so every image up to that pin already carried them. Naming
+# them keeps the closure the same rather than dropping two packages as a side
+# effect of a verifier change. `datasets` also decides the gate: the lock pins
+# datasets 4.0.0, which caps `fsspec[http]` at 2025.3.0 while the lock resolves
+# fsspec 2026.4.0, so without the extra a second conflict appears and the plain
+# build fails. The extra's `datasets>=4.4.1` resolves to a release whose cap
+# clears 2026.4.0.
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
-        "harbor[daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
+        "harbor[analysis,datasets,daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
     ${RL_ENV_DIR}/bin/python -c "import harbor, importlib.metadata as m; assert m.version('fastapi') == '${FASTAPI_VERSION}'; assert m.version('opentelemetry-exporter-otlp') == '${OTEL_EXPORTER_VERSION}'; print('harbor', m.version('harbor'))" && \
     if uv pip check --python ${RL_ENV_DIR}/bin/python > /tmp/rl-pip-check 2>&1; then \
       echo "expected the known aiobotocore/botocore metadata conflict"; \

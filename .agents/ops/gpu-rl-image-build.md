@@ -59,22 +59,34 @@ A `wheel-builder` build also pushes the wheel stage as `<repository>:wheels-<git
 compiled vLLM-fork and flash-attn wheels survive the job. Cut a new prebuilt-wheelhouse artifact
 from that tag rather than repeating the compile: `crane export <repository>:wheels-<gitsha> - |
 tar -x wheels/`, then tar `wheels/` (containing both `.whl` files and `MANIFEST`), upload to the
-`s3://` path below, and record the new URI and SHA-256 here. The `MANIFEST` inside already carries
-the `TORCH_CUDA_ARCH_LIST` the wheels were built for, which is what the prebuilt path compares.
+`s3://` path below, and record the new URI and SHA-256 here.
+
+**Rewrite line 1 of the MANIFEST before uploading.** The wheel-builder stage writes
+`VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}` — the fork commit it compiled. The prebuilt path expects that
+line to carry `VLLM_NATIVE_DONOR_COMMIT` instead, in both `docker/Dockerfile.gpu-rl` and the expected
+copy in `build_gpu_rl_kaniko.sh`. A MANIFEST copied out verbatim therefore fails every prebuilt build
+about 35 s in with `/tmp/expected-wheel-manifest … MANIFEST differ: char 18, line 1`. The artifact
+recorded below has the unrewritten line and cannot be used until it is re-cut. Every other line is
+correct as written, including the `TORCH_CUDA_ARCH_LIST` the wheels were built for.
+
+While the cache repo still holds the wheel layers, `WHEEL_SOURCE=wheel-builder` is the working
+fallback and costs no nvcc time — the whole stage is a cache hit and the build reaches the rl stage
+in about seven minutes.
 
 `PREBUILT_WHEEL_ARTIFACT_URI` / `_SHA256` are the one pair with no home in the repo, so record them
-here. Current values, cut from `wheels-2b14abd3` on 2026-07-28 (951,075,128 bytes):
+here. The recorded artifact, cut from `wheels-2b14abd3` on 2026-07-28 (951,075,128 bytes), is the
+one carrying the unrewritten MANIFEST line above, so **no prebuilt build can currently use it**:
 
 ```
 PREBUILT_WHEEL_ARTIFACT_URI=s3://marin-us-east-02a/iris/grug-vllm-wheels/4b55591306c9-torch211-cu129-cp312-2b14abd3.tar.gz
 PREBUILT_WHEEL_ARTIFACT_SHA256=0147c62621c92d60d7407255bec9790fcddbb311edb99a209b0ee33fa037a6bb
 ```
 
-These wheels carry `sm_100`, so they are the first set that can build a Blackwell image without
-paying the nvcc compile. The superseded cu128 pair
-(`...cu128-cp312-fb6ff59.tar.gz`, sha `d247a886...d514417`) can no longer satisfy the Dockerfile:
-its MANIFEST reads `CUDA=12.8` and `TORCH_CUDA_ARCH_LIST=8.0;9.0`, both of which the expected-manifest
-comparison now rejects.
+Its wheels are otherwise the right ones — they carry `sm_100`, so once the MANIFEST is re-cut this
+is the first set that can build a Blackwell image without paying the nvcc compile. The superseded
+cu128 pair (`...cu128-cp312-fb6ff59.tar.gz`, sha `d247a886...d514417`) cannot satisfy the Dockerfile
+at all: its MANIFEST reads `CUDA=12.8` and `TORCH_CUDA_ARCH_LIST=8.0;9.0`, both of which the
+expected-manifest comparison now rejects.
 
 Cut the artifact with an **iris job on cw-us-east-02a**, never from a laptop. The wheel-builder image
 is ~20 GB and the bucket is in that region, so a local `crane export` pulls tens of GB down and pushes
@@ -189,6 +201,15 @@ person's credential across clusters and leaves the next new package broken in th
   missing declaration is a hard error. To change a pin, edit the Dockerfile and commit it.
 - Rebuild is also required for: vLLM fork commit, flash-attn version, torch/CUDA base,
   `skyrl-train/uv.lock`, the torchtitan `ep` extra, the rl-stage apt set.
+- **A harbor bump can move the rl closure, because the harbor install is a post-hoc `uv pip
+  install` over the frozen lock.** Whatever harbor requires wins over what the lock resolved. Read
+  the dependency diff between the old and new harbor pin before building. At `74d76ecb`, harbor
+  moved `datasets` and `claude-agent-sdk` from core dependencies into `datasets` and `analysis`
+  extras; the Dockerfile names both extras so the closure stays where it was. Dropping `datasets`
+  would silently downgrade it from the release harbor used to pull to the lock's 4.0.0, whose
+  `fsspec[http]<=2025.3.0` cap the lock's fsspec 2026.4.0 violates. The plain image's
+  exactly-one-conflict gate catches that; `INSTALL_MEGATRON=1` does not, so a megatron-only build
+  would have shipped it.
 
 ## Grug FSDP2 constraints
 
