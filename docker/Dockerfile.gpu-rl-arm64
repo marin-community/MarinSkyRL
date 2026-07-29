@@ -102,12 +102,6 @@ ARG TORCHVISION_VERSION=0.26.0
 ARG FLASH_ATTN_VERSION=2.8.3
 ARG VLLM_FORK_REPO=https://github.com/marin-community/vllm.git
 ARG VLLM_FORK_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
-# The native donor is the amd64 file's prebuilt-wheelhouse provenance. This image
-# has no prebuilt path, so nothing here consumes it; build_gpu_rl_kaniko.sh reads
-# the pin out of whichever Dockerfile it builds and hard-fails on a missing
-# declaration, so it stays declared and stays in step with the amd64 file.
-ARG VLLM_NATIVE_DONOR_COMMIT=4b55591306c934cdc21461f091c9ea22ad008007
-ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256=not-applicable
 # Blackwell (10.0) only. GB200 is the sole aarch64 target — there is no aarch64
 # A100 or Hopper fleet to serve — so this compiles one arch instead of three.
 ARG TORCH_CUDA_ARCH_LIST="10.0"
@@ -245,7 +239,6 @@ ARG TORCHVISION_VERSION
 ARG FLASH_ATTN_VERSION
 ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
-ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256
 ARG TORCH_CUDA_ARCH_LIST
 ARG INSTALL_MEGATRON
 ARG TRANSFORMER_ENGINE_VERSION
@@ -476,7 +469,9 @@ actual = {name: m.version(name) for name in expected}; \
 assert actual == expected, f'megatron install moved the locked core: {actual} != {expected}'; \
 print('locked core intact after megatron install:', actual)"
 
-# Validate and record the native donor before installing its artifacts.
+# Validate the wheels against the pins that produced them, then record provenance.
+# There is no native donor on this image — the wheels are compiled in-tree from
+# VLLM_FORK_COMMIT — so there is no donor commit or donor archive to record.
 COPY --from=wheels /wheels /wheels
 RUN printf '%s\n' \
       "VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}" \
@@ -489,10 +484,6 @@ RUN printf '%s\n' \
     mkdir -p /opt/skyrl/provenance && \
     printf '%s\n' "${VLLM_FORK_COMMIT}" \
       > /opt/skyrl/provenance/vllm-source-commit && \
-    printf '%s\n' "${VLLM_FORK_COMMIT}" \
-      > /opt/skyrl/provenance/vllm-native-donor-commit && \
-    printf '%s\n' "${VLLM_NATIVE_DONOR_ARCHIVE_SHA256}" \
-      > /opt/skyrl/provenance/vllm-native-donor-archive.sha256 && \
     sha256sum /wheels/vllm-*.whl \
       > /opt/skyrl/provenance/vllm-native-donor-wheel.sha256 && \
     sha256sum /wheels/flash_attn-*.whl \

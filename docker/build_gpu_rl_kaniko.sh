@@ -23,15 +23,19 @@ set -euo pipefail
 # env var, because a forgotten suffix is silent and destroys a shipped tag.
 #
 # The published prebuilt wheelhouse artifact holds linux_x86_64 wheels, so aarch64
-# has no wheel source but the wheel-builder stage.
+# has no wheel source but the wheel-builder stage. The Dockerfile follows the host
+# too: an aarch64 job that built Dockerfile.gpu-rl would bake a linux_x86_64 wheel
+# MANIFEST and push it under the -arm64 tag.
 BUILD_ARCH=$(uname -m)
 case "$BUILD_ARCH" in
   x86_64)
     CRANE_ASSET_ARCH=x86_64; KANIKO_PLATFORM=linux/amd64; WHEEL_PLATFORM_TAG=linux_x86_64
-    ARCH_TAG_SUFFIX=""; DEFAULT_WHEEL_SOURCE=prebuilt-wheelhouse ;;
+    ARCH_TAG_SUFFIX=""; DEFAULT_WHEEL_SOURCE=prebuilt-wheelhouse
+    DEFAULT_DOCKERFILE=docker/Dockerfile.gpu-rl ;;
   aarch64)
     CRANE_ASSET_ARCH=arm64;  KANIKO_PLATFORM=linux/arm64; WHEEL_PLATFORM_TAG=linux_aarch64
-    ARCH_TAG_SUFFIX="-arm64"; DEFAULT_WHEEL_SOURCE=wheel-builder ;;
+    ARCH_TAG_SUFFIX="-arm64"; DEFAULT_WHEEL_SOURCE=wheel-builder
+    DEFAULT_DOCKERFILE=docker/Dockerfile.gpu-rl-arm64 ;;
   *) echo "unsupported build host architecture: $BUILD_ARCH" >&2; exit 2 ;;
 esac
 echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFORM_TAG tag-suffix=${ARCH_TAG_SUFFIX:-none}"
@@ -43,7 +47,7 @@ GHCR_IMAGE_REPOSITORY="${GHCR_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinsky
 WHEEL_SOURCE="${WHEEL_SOURCE:-$DEFAULT_WHEEL_SOURCE}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
-DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.gpu-rl}"
+DOCKERFILE="${DOCKERFILE:-$DEFAULT_DOCKERFILE}"
 DOCKER_CONTEXT=/app
 DOCKERFILE_PATH="${DOCKER_CONTEXT}/${DOCKERFILE}"
 WHEELHOUSE="${DOCKER_CONTEXT}/docker/wheelhouse"
@@ -66,7 +70,12 @@ dockerfile_arg() {
 # An env override is now a hard error rather than a silent divergence. To change a
 # pin, edit the Dockerfile and commit it, so the image always matches the source
 # that claims to describe it.
-PINNED_ARGS=(HARBOR_COMMIT VLLM_FORK_COMMIT VLLM_NATIVE_DONOR_COMMIT FLASH_ATTN_VERSION TORCH_VERSION)
+PINNED_ARGS=(HARBOR_COMMIT VLLM_FORK_COMMIT FLASH_ATTN_VERSION TORCH_VERSION)
+# The native donor names whose compiled extensions a prebuilt wheelhouse carries.
+# Only that path has one, so only that path requires the declaration.
+if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ]; then
+  PINNED_ARGS+=(VLLM_NATIVE_DONOR_COMMIT)
+fi
 for _arg in "${PINNED_ARGS[@]}"; do
   _declared="$(dockerfile_arg "$_arg")"
   if [ -z "$_declared" ]; then
