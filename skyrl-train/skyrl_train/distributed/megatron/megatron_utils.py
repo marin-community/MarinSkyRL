@@ -371,20 +371,19 @@ def preprocess_packed_seqs(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i, attention_mask[i]]
-            first_start = half_seqlen * cp_rank
-            first_end = min(half_seqlen * (cp_rank + 1), d.shape[0])
-            first_len = first_end - first_start
-            if first_len > 0:
-                input_ids_rmpad[start_idx : start_idx + first_len] = d[first_start:first_end]
-
-            remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
-            remain_end = seqlen_padded_i - half_seqlen * cp_rank
-            remain_end = min(remain_end, d.shape[0])
-            remain_len = remain_end - remain_start
-            if remain_len > 0:
-                input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
-                    remain_start:remain_end
-                ]
+            chunks = (
+                (half_seqlen * cp_rank, half_seqlen * (cp_rank + 1), start_idx),
+                (
+                    seqlen_padded_i - half_seqlen * (cp_rank + 1),
+                    seqlen_padded_i - half_seqlen * cp_rank,
+                    start_idx + half_seqlen,
+                ),
+            )
+            for source_start, source_end, destination_start in chunks:
+                source_end = min(source_end, d.shape[0])
+                chunk_len = source_end - source_start
+                if chunk_len > 0:
+                    input_ids_rmpad[destination_start : destination_start + chunk_len] = d[source_start:source_end]
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
