@@ -43,12 +43,20 @@ setting changes.
 - Inference: 4 engines × TP4, EP4, DCP1, 16 GPUs. TP4 splits the model's 4 KV heads exactly one
   per GPU, so no KV replication and no DCP is needed.
 - Total footprint 4 nodes × 8 H100 = 32 GPUs, with `colocate_all: false`.
+- `micro_forward_batch_size_per_gpu: 1`. The log-prob forward chunks the mini-batch into groups of
+  this many sequences (`TensorBatch.chunk` takes a chunk *size*, not a chunk count), and with
+  `use_sample_packing: true` a group of N is packed into one N× longer forward. At a 131,072-token
+  window that multiplies the activation and vocab-parallel logit peak by N. Policy ranks already
+  sit near the card limit, so anything above 1 leaves no headroom for the training backward.
 
 ## Concurrency
 
 - `max_num_seqs: 24` × 4 engines = 96 decode slots. This is the supply lever.
-- `n_concurrent_trials` is the demand lever and must be moved in lockstep with it. The launcher
-  overrides the file's 288 to **96** for this sweep. Never permute one side alone.
+- `n_concurrent_trials: 96` is the demand lever and must be moved in lockstep with it. Never
+  permute one side alone.
+- The rollout dispatcher fans out over `num_coordinators: 4` actors and divides
+  `n_concurrent_trials` by that count, so each coordinator admits 24 trials and the cluster-wide
+  ceiling stays at 96.
 - On a KV-bound OOM, lower `gpu_memory_utilization` (0.80) or `max_num_seqs` first. Never TP.
 
 ## Context budget
