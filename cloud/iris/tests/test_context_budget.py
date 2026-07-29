@@ -38,6 +38,7 @@ _CONFIGS = {
     "delphi_math_rl_ifeval.yaml": (4096, 3584, 1),
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
     "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
+    "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_ncclnet.yaml": (32768, 4096, 30),
     "tasktrove_dq_sweep_30b_terminus2.yaml": (32768, 4096, 30),
 }
