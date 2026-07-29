@@ -43,9 +43,9 @@
 # x86_64 marker.
 #
 # The Megatron subtree is therefore NOT lock-pinned on this image. The versions
-# that matter are pinned exactly below, and the layer asserts that torch,
-# transformers and the rest of the locked core came through the Megatron install
-# unchanged.
+# that matter are pinned exactly below, and the layer asserts afterwards that
+# torch and torchvision are still the locked +cu129 builds — the resolution that
+# would break every compiled extension in the image if it moved.
 #
 # The image installs skyrl-train's dependency closure DIRECTLY FROM skyrl-train's
 # own `uv.lock` (`uv sync --frozen`) — the lock is the single source of truth. On
@@ -64,11 +64,11 @@
 # The two SLOW steps are the from-source nvcc compiles of the vLLM FORK (cutlass
 # GEMM kernels) and flash-attn 2.8.3 (its flash_attn_2_cuda extension). They are
 # isolated in the `wheel-builder` stage, which emits RELOCATABLE WHEELS.
-# WHEEL_SOURCE defaults to `wheel-builder` here, unlike the amd64 file: the
-# published prebuilt wheelhouse artifact holds linux_x86_64 wheels and cannot
-# satisfy an aarch64 build. Compiling for a single arch (10.0) instead of three
-# roughly thirds the nvcc work relative to the amd64 wheel-builder path.
-# NATIVE CACHE KEY = { VLLM_NATIVE_DONOR_COMMIT, FLASH_ATTN_VERSION, torch
+# There is no prebuilt alternative, unlike the amd64 file: the published wheelhouse
+# artifact holds linux_x86_64 wheels and cannot satisfy an aarch64 build, so this
+# image always compiles. Doing it for a single arch (10.0) instead of three roughly
+# thirds the nvcc work relative to the amd64 wheel-builder path.
+# NATIVE CACHE KEY = { VLLM_FORK_COMMIT, FLASH_ATTN_VERSION, torch
 #   2.11.0, CUDA 12.9, cp312, aarch64, TORCH_CUDA_ARCH_LIST "10.0" }.
 #
 # =============================================================================
@@ -102,6 +102,10 @@ ARG TORCHVISION_VERSION=0.26.0
 ARG FLASH_ATTN_VERSION=2.8.3
 ARG VLLM_FORK_REPO=https://github.com/marin-community/vllm.git
 ARG VLLM_FORK_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
+# The native donor is the amd64 file's prebuilt-wheelhouse provenance. This image
+# has no prebuilt path, so nothing here consumes it; build_gpu_rl_kaniko.sh reads
+# the pin out of whichever Dockerfile it builds and hard-fails on a missing
+# declaration, so it stays declared and stays in step with the amd64 file.
 ARG VLLM_NATIVE_DONOR_COMMIT=4b55591306c934cdc21461f091c9ea22ad008007
 ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256=not-applicable
 # Blackwell (10.0) only. GB200 is the sole aarch64 target — there is no aarch64
@@ -114,9 +118,6 @@ ARG TORCH_CUDA_ARCH_LIST="10.0"
 # than cores is what bounds this.
 ARG MAX_JOBS=24
 ARG NVCC_THREADS=2
-# wheel-builder is the only supported source here: the published prebuilt
-# wheelhouse artifact holds linux_x86_64 wheels.
-ARG WHEEL_SOURCE=wheel-builder
 # Opt-in Megatron training backend. Off by default so the default image is
 # fsdp2-only; set INSTALL_MEGATRON=1 to build the megatron variant. On aarch64
 # this does NOT go through the lock's `megatron` extra — see the header.
@@ -165,7 +166,7 @@ ARG NVCC_THREADS
 ENV DEBIAN_FRONTEND=noninteractive
 # The in-cluster Kaniko builder occasionally lands on a slow/stalled Ubuntu
 # mirror.  Bound each request and retry transient fetch failures instead of
-# leaving a 48-core build job alive indefinitely with no log output.
+# leaving the build alive indefinitely with no log output.
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 install -y --no-install-recommends \
     git curl ca-certificates build-essential cmake ninja-build \
     python3 python3-pip python3-venv \
@@ -224,15 +225,13 @@ RUN echo "VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}" >  /wheels/MANIFEST && \
     ls -la /wheels
 
 # =============================================================================
-# STAGE 2: wheel source alias — prebuilt-wheelhouse (default) | wheel-builder
+# STAGE 2: wheels — always the wheel-builder stage
 # =============================================================================
-FROM scratch AS prebuilt-wheelhouse
-# docker/wheelhouse/ always exists (committed .keep); when populated it also holds
-# vllm-*.whl / flash_attn-*.whl.
-COPY docker/wheelhouse/ /wheels/
-
-ARG WHEEL_SOURCE
-FROM ${WHEEL_SOURCE} AS wheels
+# The amd64 file selects between a prebuilt wheelhouse and a source compile. There
+# is no such choice here: the published wheelhouse artifact holds linux_x86_64
+# wheels, so aarch64 always pays the compile. build_gpu_rl_kaniko.sh defaults
+# WHEEL_SOURCE to wheel-builder on an aarch64 host for the same reason.
+FROM wheel-builder AS wheels
 
 # =============================================================================
 # STAGE 3: rl — the runtime image (installs from the lock + swaps the wheels)
@@ -246,10 +245,8 @@ ARG TORCHVISION_VERSION
 ARG FLASH_ATTN_VERSION
 ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
-ARG VLLM_NATIVE_DONOR_COMMIT
 ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256
 ARG TORCH_CUDA_ARCH_LIST
-ARG WHEEL_SOURCE
 ARG INSTALL_MEGATRON
 ARG TRANSFORMER_ENGINE_VERSION
 ARG MEGATRON_CORE_VERSION
@@ -325,10 +322,10 @@ RUN cd ${SKYRL_HOME} && \
 # =============================================================================
 # RL environment — installed DIRECTLY from skyrl-train's uv.lock (single source of
 # truth). `uv sync --frozen` yields the exact locked closure at torch 2.11.0+cu129
-# (NCCL-cu12 2.28.9), the `vllm` extra (stock vLLM 0.20.2 + flashinfer), the `ep`
-# extra (torchtitan + tyro, for MoE EP>1), and — when INSTALL_MEGATRON=1 — the
-# `megatron` extra (megatron-bridge/core + TransformerEngine + mamba/causal-conv1d,
-# all linux/x86_64-gated with the erictang wheels honored via [tool.uv.sources]).
+# (NCCL-cu12 2.28.9), the `vllm` extra (stock vLLM 0.23.0 + flashinfer) and the
+# `ep` extra (torchtitan + tyro, for MoE EP>1). The `megatron` extra is NOT synced
+# here — every requirement in it is x86_64-gated, so on aarch64 it would install
+# nothing; INSTALL_MEGATRON=1 installs that subtree explicitly further down.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the OT-Agent iris launcher's hardcoded
@@ -481,13 +478,8 @@ print('locked core intact after megatron install:', actual)"
 
 # Validate and record the native donor before installing its artifacts.
 COPY --from=wheels /wheels /wheels
-RUN if [ "${WHEEL_SOURCE}" = "wheel-builder" ]; then \
-      NATIVE_COMMIT="${VLLM_FORK_COMMIT}"; \
-    else \
-      NATIVE_COMMIT="${VLLM_NATIVE_DONOR_COMMIT}"; \
-    fi && \
-    printf '%s\n' \
-      "VLLM_FORK_COMMIT=${NATIVE_COMMIT}" \
+RUN printf '%s\n' \
+      "VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}" \
       "FLASH_ATTN_VERSION=${FLASH_ATTN_VERSION}" \
       "TORCH_VERSION=${TORCH_VERSION}" \
       "TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" \
@@ -497,7 +489,7 @@ RUN if [ "${WHEEL_SOURCE}" = "wheel-builder" ]; then \
     mkdir -p /opt/skyrl/provenance && \
     printf '%s\n' "${VLLM_FORK_COMMIT}" \
       > /opt/skyrl/provenance/vllm-source-commit && \
-    printf '%s\n' "${NATIVE_COMMIT}" \
+    printf '%s\n' "${VLLM_FORK_COMMIT}" \
       > /opt/skyrl/provenance/vllm-native-donor-commit && \
     printf '%s\n' "${VLLM_NATIVE_DONOR_ARCHIVE_SHA256}" \
       > /opt/skyrl/provenance/vllm-native-donor-archive.sha256 && \
@@ -582,9 +574,9 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # them keeps the closure the same rather than dropping two packages as a side
 # effect of a verifier change. `datasets` also decides the gate: the lock pins
 # datasets 4.0.0, which caps `fsspec[http]` at 2025.3.0 while the lock resolves
-# fsspec 2026.4.0, so without the extra a second conflict appears. This image
-# always builds with INSTALL_MEGATRON=1, which skips the exactly-one-conflict
-# check, so nothing here would catch the violation — name the extras.
+# fsspec 2026.4.0, so without the extra a second conflict appears. The gate below
+# catches that only when INSTALL_MEGATRON=0, and the megatron variant is the one
+# this image exists to ship, so nothing would catch it there — name the extras.
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \

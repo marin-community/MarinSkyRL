@@ -15,19 +15,32 @@ set -euo pipefail
 : "${DOCKER_USER_ID:?}"
 : "${GHCR_TOKEN:?}"
 
+# ARCH_TAG_SUFFIX keeps the two architectures apart in the registry. Every tag is
+# derived from the git sha and the same commit builds both images, so without a
+# suffix an arm64 build overwrites the amd64 tag of the identical sha — including
+# the wheels tag, whose wheels are not interchangeable. The kaniko cache repo is
+# split for the same reason. Both follow the build host rather than an operator
+# env var, because a forgotten suffix is silent and destroys a shipped tag.
+#
+# The published prebuilt wheelhouse artifact holds linux_x86_64 wheels, so aarch64
+# has no wheel source but the wheel-builder stage.
 BUILD_ARCH=$(uname -m)
 case "$BUILD_ARCH" in
-  x86_64)  CRANE_ASSET_ARCH=x86_64; KANIKO_PLATFORM=linux/amd64; WHEEL_PLATFORM_TAG=linux_x86_64 ;;
-  aarch64) CRANE_ASSET_ARCH=arm64;  KANIKO_PLATFORM=linux/arm64; WHEEL_PLATFORM_TAG=linux_aarch64 ;;
+  x86_64)
+    CRANE_ASSET_ARCH=x86_64; KANIKO_PLATFORM=linux/amd64; WHEEL_PLATFORM_TAG=linux_x86_64
+    ARCH_TAG_SUFFIX=""; DEFAULT_WHEEL_SOURCE=prebuilt-wheelhouse ;;
+  aarch64)
+    CRANE_ASSET_ARCH=arm64;  KANIKO_PLATFORM=linux/arm64; WHEEL_PLATFORM_TAG=linux_aarch64
+    ARCH_TAG_SUFFIX="-arm64"; DEFAULT_WHEEL_SOURCE=wheel-builder ;;
   *) echo "unsupported build host architecture: $BUILD_ARCH" >&2; exit 2 ;;
 esac
-echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFORM_TAG"
+echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFORM_TAG tag-suffix=${ARCH_TAG_SUFFIX:-none}"
 
 # Registry home is this repo's org, marin-community/MarinSkyRL. Declared here so a
 # build pushes where it says it pushes without an ad-hoc env var at every call site.
 GHCR_IMAGE_REPOSITORY="${GHCR_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl}"
 
-WHEEL_SOURCE="${WHEEL_SOURCE:-prebuilt-wheelhouse}"
+WHEEL_SOURCE="${WHEEL_SOURCE:-$DEFAULT_WHEEL_SOURCE}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
 DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.gpu-rl}"
@@ -81,19 +94,14 @@ fi
 if [ "${KANIKO_CACHE:-1}" = "0" ]; then
   CACHE_FLAGS=(--cache=false)
 else
-  KANIKO_CACHE_REPOSITORY="${KANIKO_CACHE_REPOSITORY:-${GHCR_IMAGE_REPOSITORY}/cache}"
+  KANIKO_CACHE_REPOSITORY="${KANIKO_CACHE_REPOSITORY:-${GHCR_IMAGE_REPOSITORY}/cache${ARCH_TAG_SUFFIX}}"
   CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
 fi
 
-# TAG_SUFFIX keeps architectures apart. The tag is derived from the git sha, and
-# the same commit builds both images, so without a suffix an arm64 build would
-# overwrite the amd64 tag of the identical sha — including the wheels tag, whose
-# wheels are not interchangeable.
-TAG_SUFFIX="${TAG_SUFFIX:-}"
-IMAGE_TAG="${TAG_PREFIX}-${GITSHA}${TAG_SUFFIX}"
+IMAGE_TAG="${TAG_PREFIX}-${GITSHA}${ARCH_TAG_SUFFIX}"
 DESTINATIONS=(--destination "${GHCR_IMAGE_REPOSITORY}:${IMAGE_TAG}")
 if [ "${PUSH_FLOATING:-0}" = "1" ]; then
-  DESTINATIONS+=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}${TAG_SUFFIX}")
+  DESTINATIONS+=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}${ARCH_TAG_SUFFIX}")
 fi
 
 APT_PACKAGES=(ca-certificates curl tar)
@@ -201,8 +209,8 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; t
     --skip-unused-stages \
     --compressed-caching=false \
     "${CACHE_FLAGS[@]}" \
-    --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${TAG_SUFFIX}"
-  echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${TAG_SUFFIX}"
+    --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
+  echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
 fi
 
 exec /kaniko/executor \

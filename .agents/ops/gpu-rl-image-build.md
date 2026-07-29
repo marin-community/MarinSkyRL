@@ -132,14 +132,16 @@ cluster runs near full, and a whole-node request is both harder to schedule and 
 ```
 --task-image docker.io/library/ubuntu:22.04 --no-sync --enable-extra-resources
 --gpu GB200x1 --cpu 96 --memory 640GB --disk 500GB --priority batch --max-retries 3 --timeout 28800
--e DOCKERFILE docker/Dockerfile.gpu-rl-arm64  -e WHEEL_SOURCE wheel-builder
--e INSTALL_MEGATRON 1  -e TAG_PREFIX gpu-rl-megatron  -e TAG_SUFFIX -arm64
--e KANIKO_CACHE_REPOSITORY ghcr.io/marin-community/marinskyrl/cache-arm64
+-e DOCKERFILE docker/Dockerfile.gpu-rl-arm64  -e INSTALL_MEGATRON 1
+-e TAG_PREFIX gpu-rl-megatron
 ```
 
-`TAG_SUFFIX` exists because the tag is derived from the git sha and the same commit builds both
-images; without it an arm64 build overwrites the amd64 tag, including the `wheels-<gitsha>` tag whose
-wheels are not interchangeable. Give arm64 its own kaniko cache repo for the same reason.
+The arm64 tag suffix, the arm64 kaniko cache repo and `WHEEL_SOURCE=wheel-builder` are all derived
+from `uname -m` in the script, so none of them is an env var. The suffix exists because every tag is
+derived from the git sha and the same commit builds both images; without it an arm64 build overwrites
+the amd64 tag, including the `wheels-<gitsha>` tag whose wheels are not interchangeable. It follows
+the build host rather than an operator flag precisely because forgetting it is silent and destroys a
+shipped tag.
 `--max-retries 3` is preemption insurance, not a blind retry: at batch priority on a full cluster a
 build is preempted within minutes, and kaniko resumes from the cache repo rather than from zero.
 A first probe run was preempted 88 seconds in by a production job and reported only `Pod not found`;
