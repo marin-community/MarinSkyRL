@@ -144,7 +144,7 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
-      context_parallel_size: 2
+      context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
       transformer_config_kwargs:
@@ -167,7 +167,7 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
-      context_parallel_size: 2
+      context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
       transformer_config_kwargs:
@@ -187,7 +187,7 @@ trainer:
 
   placement:
     colocate_all: false
-    policy_num_nodes: 4
+    policy_num_nodes: 2
     ref_num_nodes: 2
     policy_num_gpus_per_node: 8
     ref_num_gpus_per_node: 8
