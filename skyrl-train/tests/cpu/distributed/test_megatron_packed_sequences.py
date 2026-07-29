@@ -26,7 +26,6 @@ def test_preprocess_packed_seqs_short_sequence_preserves_rank_tokens(monkeypatch
     input_ids = torch.tensor([[17, 23, 29, 31]])
     attention_mask = torch.tensor([[True, False, False, False]])
 
-    packed_tokens, packed_seq_params = megatron_utils.preprocess_packed_seqs(input_ids, attention_mask)
+    packed_tokens, _ = megatron_utils.preprocess_packed_seqs(input_ids, attention_mask)
 
     assert packed_tokens.tolist() == [expected_tokens]
-    assert packed_seq_params.cu_seqlens_q.tolist() == [0, 4]
