@@ -549,9 +549,18 @@ RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
 # In-container source sync target. iris syncs the launcher's `workspace`
 # (this MarinSkyRL repo, PROJECT_ROOT — see IrisClient.remote(..., workspace=PROJECT_ROOT))
-# to /app and sets IRIS_WORKDIR=/app; putting /app first on PYTHONPATH makes the live
-# synced cloud.iris + skyrl-train code win over the image's baked copies. The runtime is
-# self-contained here (cloud.iris.*) — no OpenThoughts-Agent workspace is required in-pod.
+# to /app and sets IRIS_WORKDIR=/app. The runtime is self-contained here (cloud.iris.*) —
+# no OpenThoughts-Agent workspace is required in-pod.
+#
+# The bundle wins for `cloud.iris.*` ONLY. It does NOT win for `skyrl_train.*`, even though
+# PYTHONPATH lists /app/skyrl-train ahead of /opt/skyrl/skyrl-train: run_rl.py launches the
+# trainer with `subprocess.Popen(cmd, cwd=$SKYRL_HOME/skyrl-train)`, and `python -m` puts the
+# CWD first on sys.path, ahead of PYTHONPATH. So `skyrl_train.*` and `examples.terminal_bench.*`
+# always resolve to the BAKED image tree.
+#
+# Path test: edited skyrl-train/ -> image rebuild required. Edited cloud/iris/ -> no rebuild.
+# See .agents/ops/gpu-rl-image-build.md. An earlier version of this comment claimed the bundle
+# also won for skyrl-train, and that cost a wasted 48-GPU launch.
 APP_DIR = "/app"
 
 # marin-iris wheel installed into the RL venv at pod bootstrap for the controller-ingress
