@@ -144,7 +144,7 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
-      context_parallel_size: 1
+      context_parallel_size: 2
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
       transformer_config_kwargs:
@@ -154,7 +154,7 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
       expert_model_parallel_size: 4
-      context_parallel_size: 1
+      context_parallel_size: 2
       cp_style: ring_sdpa
       cp_rotate_method: allgather
       moe_router_replay: true
@@ -167,7 +167,7 @@ trainer:
     megatron_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
-      context_parallel_size: 1
+      context_parallel_size: 2
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
       transformer_config_kwargs:
@@ -177,7 +177,7 @@ trainer:
       reshard_after_forward: true
       fsdp_size: 4
       expert_model_parallel_size: 4
-      context_parallel_size: 1
+      context_parallel_size: 2
       cp_style: ring_sdpa
       cp_rotate_method: allgather
       moe_router_replay: true
@@ -187,7 +187,7 @@ trainer:
 
   placement:
     colocate_all: false
-    policy_num_nodes: 2
+    policy_num_nodes: 4
     ref_num_nodes: 2
     policy_num_gpus_per_node: 8
     ref_num_gpus_per_node: 8
@@ -209,7 +209,7 @@ generator:
   inference_engine_tensor_parallel_size: 4
   num_inference_engines: 4
   inference_engine_expert_parallel_size: 4
-  inference_engine_decode_context_parallel_size: 1
+  inference_engine_decode_context_parallel_size: 2
   inference_engine_mp_backend: false
 
   n_samples_per_prompt: 8
