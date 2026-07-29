@@ -209,7 +209,7 @@ generator:
   inference_engine_tensor_parallel_size: 4
   num_inference_engines: 4
   inference_engine_expert_parallel_size: 4
-  inference_engine_decode_context_parallel_size: 2
+  inference_engine_decode_context_parallel_size: 1
   inference_engine_mp_backend: false
 
   n_samples_per_prompt: 8
