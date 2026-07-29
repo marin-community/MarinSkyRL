@@ -350,7 +350,11 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # ALSO the first plain image in the marin-community registry — the repository string above
     # changed with this entry, so every (prev: ...) digest below lives under the old org.
     # Pull-verified: 41 layers, max 4.07 GB, 21.63 GB total.
-    "@sha256:0f4f916a92de4d2ba2ffc6943f5ced75182e3c97cb433ea3c85426eacabb30fa"  # noqa: E501
+    # gpu-rl-ff9affef (built 2026-07-29, kaniko job gpurl-kaniko-plain-ff9affef): the fsdp2 variant
+    # of gpu-rl-megatron-ff9affef, built from the same source and the same pins in the same pass.
+    # Pull-verified anonymously: 41 layers, max 4.07 GB, 21.60 GB total.
+    "@sha256:619938bac770c5ea378c916933730c916752883a6043b5d34fff70f920e5eadb"  # noqa: E501
+    # (prev: gpu-rl-7f97d057 @sha256:0f4f916a, Harbor 772e20f7, no verifier stdout)
     # (prev: gpu-rl-90072ada @sha256:43372633, old org, CUDA 12.8, no Blackwell)
     # (prev: gpu-rl-f2b44d4a @sha256:c7e05af3, Harbor 772e20f7 + the baked profiler)
     # (prev: gpu-rl-ac5a9c65 @sha256:96848c50, Harbor 772e20f7 + the three reward signals)
@@ -401,7 +405,24 @@ DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
     # with this entry, so every earlier (prev: ...) digest below lives under the old org.
     # Build asserts passed including megatron.core + megatron.bridge + transformer_engine import OK.
     # Pull-verified: 43 layers, max 4.07 GB, 24.33 GB total.
-    "@sha256:283cf2af3fc1e29865f42f0a8102d5c2c7bc3ddaa9e72c36366ea36001bf75fd"  # noqa: E501
+    # gpu-rl-megatron-ff9affef (built 2026-07-29, kaniko job gpurl-kaniko-mega-ff9affef): the first
+    # image on which reward shaping can execute. HARBOR_COMMIT moves 772e20f7 -> 74d76ecb (#198),
+    # which is harbor#47: VerifierResult now carries the test script's stdout and stderr. The shaper
+    # reads `verifier_result.stdout`; on 772e20f7 the attribute does not exist, so it returned the
+    # raw pass/fail and logged nothing, and more than 24,000 TaskTrove sweep trials trained on
+    # binary reward while the config said shaping was on. The same pin bump moved harbor's
+    # `datasets` and `claude-agent-sdk` into extras, so the install names them (#200) and the plain
+    # image's one-conflict pip-check gate stays green.
+    # Three baked skyrl-train changes ride this build and reach the cluster no other way: #197
+    # (megatron short packed sequences under context parallelism, which unblocks the 6-node cp6
+    # config), #199 (the sweep configs' safe memory operating point) and #201 (GLOO_SOCKET_IFNAME
+    # left out of runtime_env, so a node whose NIC is not named like the head's can still create
+    # its gloo group). vLLM fork 8672c71e with the 4b555913 native donor, flash-attn 2.8.3, torch
+    # 2.11.0+cu129 and the skyrl-train lock are all unchanged. Build asserts green, including
+    # megatron.core + megatron.bridge + transformer_engine.
+    # Pull-verified anonymously: 43 layers, max 4.07 GB, 24.30 GB total.
+    "@sha256:db3f1890ce530378d440b5b4fc3a27b98e89e58716ffc91759c7e6d9b2dc8dab"  # noqa: E501
+    # (prev: gpu-rl-megatron-2b14abd3 @sha256:283cf2af, Harbor 772e20f7, no verifier stdout)
     # (prev: gpu-rl-megatron-90072ada @sha256:27a94ceb, old org, CUDA 12.8, no Blackwell)
     # (prev: gpu-rl-megatron-f2b44d4a @sha256:a374dd04, Harbor 772e20f7)
     # (prev: gpu-rl-megatron-ac5a9c65 @sha256:0a6cea7d, Harbor 772e20f7)
