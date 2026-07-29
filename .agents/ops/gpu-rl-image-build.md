@@ -209,6 +209,25 @@ transformers 5.8.1, vllm 0.23.0, ray 2.51.1 and accelerate 1.14.0 untouched.
 The Megatron subtree is consequently not lock-pinned on the arm64 image. The versions that matter
 are ARGs in the Dockerfile.
 
+**`uv pip install` applies no project configuration, including
+`[tool.uv] override-dependencies`.** `uv sync` gives the amd64 image that list for free; the explicit
+aarch64 install does not get it, and the whole list goes missing at once, not just the entry you
+notice. The one that fails the build is `nvidia-resiliency-ext ; sys_platform == 'never'` — without
+it, megatron-bridge's `megatron-core[dev]` requires nvidia-resiliency-ext 0.6.0, which publishes
+`manylinux_2_39` wheels only and cannot install on this glibc 2.35 base:
+
+```
+Because nvidia-resiliency-ext==0.6.0 has no wheels with a matching platform tag
+(e.g., `manylinux_2_35_aarch64`) ... your requirements are unsatisfiable
+hint: Wheels are available on: `manylinux_2_39_aarch64`, `manylinux_2_39_x86_64`
+```
+
+Note the hint names an aarch64 wheel, so this reads as an architecture gap and is not one — both
+architectures are published, and both are too new for the base image. The Dockerfile extracts the
+override list out of `skyrl-train/pyproject.toml` at build time and passes it as `--overrides` rather
+than restating it, so the two cannot drift; the rest of the list is what stops the megatron install
+from moving the boto3/fsspec/flashinfer versions the lock resolved.
+
 ### Two ordering traps
 
 `import transformer_engine` dlopens its core library at import time and fails with

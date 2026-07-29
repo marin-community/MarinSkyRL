@@ -428,7 +428,25 @@ RUN cd ${SKYRL_HOME}/skyrl-train && \
 # transformer_engine_cu12 alone unpacks to roughly 800 MB, and the megatron-bridge
 # subtree pulls in another ~90 distributions.
 # =============================================================================
-ENV MEGATRON_PIP="uv pip install --python ${RL_ENV_DIR}/bin/python --no-cache --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match"
+# `uv pip install` reads no project configuration, so it does NOT apply
+# skyrl-train's `[tool.uv] override-dependencies`. The amd64 image gets those
+# overrides for free through `uv sync`; without them megatron-bridge's
+# `megatron-core[dev]` pulls nvidia-resiliency-ext, which publishes only
+# `manylinux_2_39` wheels and so cannot install on this glibc 2.35 base:
+#
+#   Because nvidia-resiliency-ext==0.6.0 has no wheels with a matching platform
+#   tag (e.g. `manylinux_2_35_aarch64`) ... your requirements are unsatisfiable
+#
+# The same override list also holds the boto3/fsspec/flashinfer pins that the
+# lock resolved, which this install would otherwise be free to move. Extract it
+# from pyproject rather than restating it here, so the two cannot drift.
+RUN ${RL_ENV_DIR}/bin/python -c "\
+import pathlib, tomllib; \
+overrides = tomllib.loads(pathlib.Path('${SKYRL_HOME}/skyrl-train/pyproject.toml').read_text())['tool']['uv']['override-dependencies']; \
+assert any(o.startswith('nvidia-resiliency-ext') for o in overrides), overrides; \
+pathlib.Path('/opt/skyrl/megatron-overrides.txt').write_text('\n'.join(overrides) + '\n'); \
+print('megatron overrides from pyproject:', len(overrides))"
+ENV MEGATRON_PIP="uv pip install --python ${RL_ENV_DIR}/bin/python --no-cache --overrides /opt/skyrl/megatron-overrides.txt --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match"
 # TransformerEngine: the pure-Python framework wheel, the CUDA core library and
 # the torch extension. transformer_engine_torch is the aarch64 sibling of the
 # x86_64 URL pinned in skyrl-train/pyproject.toml [tool.uv.sources]; both come
