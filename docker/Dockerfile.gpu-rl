@@ -77,7 +77,10 @@ ARG INSTALL_MEGATRON=0
 # Keep this in step with what production actually bakes. It lagged at 01c736a6 while every
 # shipped image carried 772e20f7 (harbor#39, the verifier-teardown deadline), so a build that
 # did not pass an explicit override would have silently reverted harbor by one release.
-ARG HARBOR_COMMIT=772e20f7
+# 74d76ecb is harbor#47: VerifierResult now carries the test script's stdout and stderr.
+# Reward shapers read `verifier_result.stdout`; on 772e20f7 the attribute does not exist, so
+# every shaped run fell back to binary reward without logging anything.
+ARG HARBOR_COMMIT=74d76ecb
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
