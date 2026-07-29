@@ -2257,8 +2257,18 @@ def main() -> int:
     # via the exclude pattern (value = cw-rno2a.yaml:128). No-op on cw-us-east-02a (auto-detect
     # already lands on the PF). Add a cluster row here rather than editing every RL config.
     _target_cluster = str(getattr(args, "target_cluster", "") or "")
+    # GLOO_SOCKET_IFNAME carries the SAME exclusion. Gloo does not read the NCCL
+    # variable, and it is not optional here: the megatron checkpoint path gathers
+    # DP-rank-0 optimizer state over gloo on CPU (megatron_strategy.py picks
+    # fully_reshardable + mem_efficient precisely so that gather needs no GPU
+    # memory). With no interface pin gloo applied its own heuristic, chose
+    # loopback, and every rank advertised 127.0.0.1 — `Gloo connectFullMesh ...
+    # remote=[127.0.0.1]` on three separate arms, none of which reached training.
     _CLUSTER_ENV_DEFAULTS: dict[str, dict[str, str]] = {
-        "cw-rno2a": {"NCCL_SOCKET_IFNAME": "^ibs,ibp,lo,docker,veth,cilium,lxc"},
+        "cw-rno2a": {
+            "NCCL_SOCKET_IFNAME": "^ibs,ibp,lo,docker,veth,cilium,lxc",
+            "GLOO_SOCKET_IFNAME": "^ibs,ibp,lo,docker,veth,cilium,lxc",
+        },
     }
     for _k, _v in _CLUSTER_ENV_DEFAULTS.get(_target_cluster, {}).items():
         if _k not in env_vars:
