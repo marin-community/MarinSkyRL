@@ -490,8 +490,7 @@ def pin_socket_ifname() -> str | None:
 
     Returns the interface name derived on THIS node, or None when nothing was
     derived (an operator already set the variable, or no interface holds the
-    node's IP). ``training_driver_env`` uses the return value to keep a derived
-    name out of the training driver's environment.
+    node's IP).
 
     Gloo carries the DP-rank-0 optimizer gather at checkpoint save (the megatron
     strategy picks ``fully_reshardable`` + mem_efficient precisely so that gather
