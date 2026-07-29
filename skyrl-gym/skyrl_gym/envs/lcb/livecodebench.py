@@ -600,6 +600,12 @@ def postprocess_lcb_sample(sample):
     return sample
 
 
+def _run_test_in_subprocess(sample, generation, debug, result, metadata_list, timeout):
+    res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
+    result.append(res)
+    metadata_list.append(metadata)
+
+
 def lcb_check_correctness(sample, generation, timeout=6, debug=False):
     """Check correctness of code generation with a global timeout.
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
@@ -611,13 +617,11 @@ def lcb_check_correctness(sample, generation, timeout=6, debug=False):
     result = manager.list()
     metadata_list = manager.list()
 
-    def _temp_run(sample, generation, debug, result, metadata_list, timeout):
-        res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
-        result.append(res)
-        metadata_list.append(metadata)
-
+    # The target must be picklable: under the `spawn` start method the child re-imports it by
+    # qualified name. The trainer forces `spawn` in `skyrl_train.entrypoints.main_base`, and it is
+    # the default on macOS.
     p = multiprocessing.Process(
-        target=_temp_run,
+        target=_run_test_in_subprocess,
         args=(sample, generation, debug, result, metadata_list, timeout),
     )
     p.start()
