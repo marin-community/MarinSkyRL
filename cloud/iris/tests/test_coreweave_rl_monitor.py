@@ -11,11 +11,12 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 
-from scripts.iris import coreweave_ops, iris_ops, watch_coreweave_rl
+from scripts.iris import coreweave_ops, watch_coreweave_rl
 from scripts.iris.iris_ops import (
     MonitorError,
     StyledCell,
     box_table,
+    default_bundle_root,
     filter_records,
     format_duration,
     job_bundle,
@@ -29,12 +30,11 @@ from scripts.iris.iris_ops import (
 )
 
 
-def test_monitor_defaults_to_the_shared_document_bundle_root():
-    assert iris_ops.DEFAULT_BUNDLE_ROOT == Path.home() / "Documents" / "iris-job-bundles"
+def test_monitor_defaults_to_the_shared_document_bundle_root(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["watch_coreweave_rl.py"])
 
-    live_script = (Path(__file__).parents[3] / "scripts/iris/analyze_coreweave_rl_job_live.sh").read_text()
-    assert 'PEEK_OUT="${PEEK_OUT:-$HOME/Documents/iris-job-bundles}"' in live_script
-    assert "experiments/active/iris-job-bundles" not in live_script
+    assert default_bundle_root(Path("/tmp/operator")) == Path("/tmp/operator/Documents/iris-job-bundles")
+    assert watch_coreweave_rl.parse_args().bundle_root == default_bundle_root()
 
 
 def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path):

@@ -550,26 +550,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         logger.info("Training already complete on resume — exiting cleanly.")
 
-    async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
-        """Run train-end callbacks and saves at the last completed optimizer step."""
-        self.global_step = completed_step
-        final_state = self._create_trainer_state(epoch=epoch)
-        self._control.reset()
-        self._control = await self.callback_handler.call_event_async(
-            "on_train_end", final_state, self._control, trainer=self
-        )
-
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint.")
-            await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
-        if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final model.")
-                await asyncio.to_thread(self._flush_hf_uploads)
-
     async def _train_loop(self):
         """
         Internal training loop, separated for proper generator lifecycle management.

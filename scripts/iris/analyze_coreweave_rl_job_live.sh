@@ -61,6 +61,8 @@ set -euo pipefail
 
 JOB="${1:-}"
 ACTION="${2:-ls}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # Force the CoreWeave kubeconfig. Do NOT honor an inherited $KUBECONFIG — the login shell's default
 # points at a different cluster (→ 'no pods'); override only via PEEK_KUBECONFIG.
 export KUBECONFIG="${PEEK_KUBECONFIG:-$HOME/.kube/coreweave-iris}"
@@ -69,7 +71,11 @@ CONTAINER="${CONTAINER:-task}"
 CLUSTER="${PEEK_CLUSTER:-cw-us-east-02a}"
 # Default to the OTAGENT iris (the marin .venv iris has a broken `kubernetes` import → cannot drive cw).
 IRIS_BIN="${IRIS_BIN:-/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris}"
-PEEK_OUT="${PEEK_OUT:-$HOME/Documents/iris-job-bundles}"
+DEFAULT_PEEK_OUT="$(
+  PYTHONPATH="$REPO_ROOT" python3 -c \
+    'from scripts.iris.iris_ops import DEFAULT_BUNDLE_ROOT; print(DEFAULT_BUNDLE_ROOT)'
+)"
+PEEK_OUT="${PEEK_OUT:-$DEFAULT_PEEK_OUT}"
 
 if [ -z "$JOB" ]; then
   echo "usage: analyze_coreweave_rl_job_live.sh <pod-name-substring> [ls|cat|grep|cp|pull] [args]" >&2

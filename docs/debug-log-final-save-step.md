@@ -24,9 +24,10 @@ observe step 16.
 ## Results
 
 The regression failed because no completed-step finalization boundary existed; the loop proceeded
-directly from the N+1 next-step value to train-end callbacks. A shared finalizer now restores the last
-completed step before constructing callback state or saving. The same finalizer is used for
-resume-at-max and dispatches `on_save` after checkpoint persistence.
+directly from the N+1 next-step value to train-end callbacks. A finalizer on the base trainer now
+restores the last completed step before constructing callback state or saving. Both synchronous and
+fully asynchronous loops use it for normal completion and resume-at-max, and it dispatches `on_save`
+after checkpoint persistence.
 
 ## Future work
 

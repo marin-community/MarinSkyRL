@@ -143,9 +143,10 @@ def test_fresh_run_stops_at_exactly_max_steps():
     assert len(trained_steps) == total
 
 
-def test_train_end_saves_the_last_completed_step():
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+def test_train_end_saves_the_last_completed_step(cls):
     """Final callbacks and artifacts must use completed steps, not the next step index."""
-    trainer = _make_bare_trainer(FullyAsyncRayPPOTrainer, global_step=17, total_training_steps=16)
+    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
     requested = TrainerControl()
     requested.should_save = True
     requested.should_save_hf_model = True

@@ -363,8 +363,16 @@ class RayPPOTrainer:
         if self.colocate_all:
             self.policy_model.backload_to_gpu()
 
-        final_epoch = max(self.cfg.trainer.epochs - 1, 0)
-        final_state = self._create_trainer_state(epoch=final_epoch)
+        await self._finalize_training(
+            completed_step=self.global_step,
+            epoch=max(self.cfg.trainer.epochs - 1, 0),
+        )
+        logger.info("Training already complete on resume — exiting cleanly.")
+
+    async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
+        """Run train-end callbacks and saves at the last completed optimizer step."""
+        self.global_step = completed_step
+        final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
             "on_train_end", final_state, self._control, trainer=self
@@ -372,14 +380,14 @@ class RayPPOTrainer:
 
         if self._control.should_save:
             with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
-                logger.info("Saved final checkpoint (resume-at-max finalize).")
+                await asyncio.to_thread(self.save_checkpoints)
+                logger.info("Saved final checkpoint.")
+            await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
             with Timer("save_hf_model", self.all_timings):
-                self.save_models()
-                logger.info("Saved final HF model (resume-at-max finalize).")
-                self._flush_hf_uploads()
-        logger.info("Training already complete on resume — exiting cleanly.")
+                await asyncio.to_thread(self.save_models)
+                logger.info("Saved final model.")
+                await asyncio.to_thread(self._flush_hf_uploads)
 
     async def _train_loop(self):
         """
@@ -449,6 +457,7 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         start_epoch = self.global_step // len(self.train_dataloader)
+        last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
@@ -639,6 +648,7 @@ class RayPPOTrainer:
 
                 # 10. Update progress bar and global step
                 pbar.update(1)
+                last_completed_step = self.global_step
                 self.global_step += 1
 
                 del training_input, generator_output
@@ -673,23 +683,10 @@ class RayPPOTrainer:
             await self.inference_engine_client.sleep()
             self.policy_model.backload_to_gpu()
 
-        # Call on_train_end callbacks
-        final_state = self._create_trainer_state(epoch=self.cfg.trainer.epochs - 1)
-        self._control.reset()
-        self._control = await self.callback_handler.call_event_async(
-            "on_train_end", final_state, self._control, trainer=self
+        await self._finalize_training(
+            completed_step=last_completed_step,
+            epoch=self.cfg.trainer.epochs - 1,
         )
-
-        # Handle final checkpoint/model save if requested by callbacks
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
-                logger.info("Saved final checkpoint.")
-        if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                self.save_models()
-                logger.info("Saved final model.")
-                self._flush_hf_uploads()
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
