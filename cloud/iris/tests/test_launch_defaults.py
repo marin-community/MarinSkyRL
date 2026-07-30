@@ -6,7 +6,6 @@ Run:
 
 from __future__ import annotations
 
-import base64
 import re
 import sys
 from types import SimpleNamespace
@@ -20,13 +19,16 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
-    RL_CONFIG_PAYLOAD_ENV,
     build_task_command,
     create_parser,
     derive_default_job_name,
     normalize,
     resolve_node_resource_defaults,
     resolve_launch_defaults,
+)
+from cloud.iris.rl_config_translation import (  # noqa: E402
+    RL_CONFIG_TASK_DIR,
+    materialize_rl_config,
 )
 
 
@@ -159,10 +161,10 @@ def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
     launch = args.rl_config_launch
 
     assert Path(args.rl_config) == source
-    assert base64.b64decode(launch.payload) == source.read_bytes()
-    assert launch.task_path.startswith("/tmp/marin-rl-configs/")
-    assert launch.task_environment() == {RL_CONFIG_PAYLOAD_ENV: launch.payload}
-    assert f"${{{RL_CONFIG_PAYLOAD_ENV}:?}}" in command[-1]
+    assert launch.task_path.startswith(f"{RL_CONFIG_TASK_DIR}/")
+    task_copy = tmp_path / "task" / "config.yaml"
+    materialize_rl_config(str(task_copy), launch.task_environment())
+    assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
     assert str(source) not in command[-1]
 

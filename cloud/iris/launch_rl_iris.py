@@ -70,7 +70,7 @@ import yaml
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.gpu_rl_images import image_for_cluster
-from cloud.iris.rl_config_translation import resolve_rl_config_path
+from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
@@ -194,15 +194,12 @@ SKYRL_HOME = "/opt/skyrl"
 # See .agents/ops/gpu-rl-image-build.md. An earlier version of this comment claimed the bundle
 # also won for skyrl-train, and that cost a wasted 48-GPU launch.
 APP_DIR = "/app"
-RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
-RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
 @dataclass(frozen=True)
 class RlConfigLaunch:
-    """Host source and task delivery details for one RL config."""
+    """Task path and optional environment payload for one RL config."""
 
-    source: Path
     task_path: str
     payload: str | None
 
@@ -1442,13 +1439,12 @@ def normalize(args: argparse.Namespace) -> None:
         suffix = source.suffix or ".yaml"
         args.rl_config = str(source)
         args.rl_config_launch = RlConfigLaunch(
-            source=source,
             task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
             payload=base64.b64encode(contents).decode("ascii"),
         )
     else:
         args.rl_config = str(relative_path)
-        args.rl_config_launch = RlConfigLaunch(source=source, task_path=str(relative_path), payload=None)
+        args.rl_config_launch = RlConfigLaunch(task_path=str(relative_path), payload=None)
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -1748,16 +1744,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         f"exit $_rc; "
         f"else exec {ctrl}; fi"
     )
-    rl_config_bootstrap = ""
-    if rl_config_launch.payload is not None:
-        config_dir = shlex.quote(str(Path(task_rl_config).parent))
-        config_path = shlex.quote(task_rl_config)
-        rl_config_bootstrap = (
-            f"install -d {config_dir}; printf '%s' \"${{{RL_CONFIG_PAYLOAD_ENV}:?}}\" | base64 -d > {config_path}; "
-        )
     bash = (
         f"set -e; cd {APP_DIR}; "
-        f"{rl_config_bootstrap}"
         f"{iris_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "

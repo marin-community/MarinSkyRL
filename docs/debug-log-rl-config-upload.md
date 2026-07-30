@@ -39,6 +39,23 @@ The focused regressions still pass after the refactor. The payload mapping and s
 the same `RL_CONFIG_PAYLOAD_ENV` constant, and config-defined environment values cannot replace the
 launcher-owned payload.
 
+## Hypothesis 3
+
+Materializing the config in launcher-generated shell duplicates application behavior and makes the
+delivery contract difficult to test end to end. The in-container Python runner is the natural owner
+of turning the forwarded payload back into a file before parsing it.
+
+## Changes to make
+
+Move payload decoding and file creation into `rl_config_translation.py`, call it from `run_rl.py`,
+and have the regression test pass the launcher's environment mapping through that worker helper.
+
+## Results
+
+The focused launcher and runner tests pass. The regression now verifies that the worker writes the
+exact source bytes from the environment produced by normalization, while the task command contains
+only the content-addressed task path and never the launch-host path.
+
 ## Future work
 
 - [x] Record the failing regression result and final test results.
