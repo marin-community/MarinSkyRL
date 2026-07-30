@@ -42,7 +42,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
+    KUEUE_POD_GROUP_LABEL,
     NAMESPACE,
+    iris_pod_group_prefix,
     iter_objects,
     kubectl_base,
     object_store_client,
@@ -208,7 +210,11 @@ def parse_args() -> argparse.Namespace:
             "(default: 500; 0 syncs every remote trace)."
         ),
     )
-    parser.add_argument("--no-sync", action="store_true", help="Report lifecycle state without collecting artifacts.")
+    parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Fetch only the current finelog tail for status; skip pod, Ray, and trace artifacts.",
+    )
     parser.add_argument(
         "--filter",
         action="append",
@@ -352,10 +358,11 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n")
 
 
-def fetch_finelog(job: RlJob, destination: Path) -> tuple[str, str | None]:
+def fetch_finelog(job: RlJob, destination: Path, *, current_only: bool = False) -> tuple[str, str | None]:
+    log_args = ["--max-lines", "600000", "--tail"] if current_only else ["--max-lines", "10000000", "--no-tail"]
     result = run_iris(
         job.cluster,
-        ["job", "logs", job.job_id, "--max-lines", "10000000", "--no-tail"],
+        ["job", "logs", job.job_id, *log_args],
         timeout=900,
     )
     stderr_path = destination / "finelog.stderr"
@@ -378,13 +385,17 @@ def job_pods(job: RlJob) -> list[tuple[str, str]]:
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout).strip()[-240:])
     needle = job.short_name.lower()
+    pod_group_prefix = iris_pod_group_prefix(job.job_id)
     return sorted(
         (
             item["metadata"]["name"],
             item.get("status", {}).get("phase", "Unknown"),
         )
         for item in json.loads(result.stdout).get("items", [])
-        if needle in item.get("metadata", {}).get("name", "").lower()
+        if (
+            needle in item.get("metadata", {}).get("name", "").lower()
+            or item.get("metadata", {}).get("labels", {}).get(KUEUE_POD_GROUP_LABEL, "").startswith(pod_group_prefix)
+        )
     )
 
 
@@ -842,8 +853,17 @@ def sync_job(
     directory = bundle.directory
     directory.mkdir(parents=True, exist_ok=True)
     if no_sync:
+        if progress:
+            progress.phase(f"current finelog tail {job.cluster.name}/{job.short_name}")
+        finelog, error = fetch_finelog(job, directory, current_only=True)
         return ArtifactResult(
-            "not requested", "not requested", "not requested", "not requested", None, None, ()
+            finelog,
+            "not requested",
+            "not requested",
+            "not requested",
+            None,
+            None,
+            (error,) if error else (),
         ), directory
     errors: list[str] = []
     if progress:

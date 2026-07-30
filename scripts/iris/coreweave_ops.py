@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import random
@@ -62,8 +63,8 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
     "unexpected eof",
     "i/o timeout",
 )
-KUBERNETES_LABEL_MAX_LENGTH = 63
 IRIS_JOB_ID_LABEL = "iris.job_id"
+KUEUE_POD_GROUP_LABEL = "kueue.x-k8s.io/pod-group-name"
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,14 +133,22 @@ def task_short_name(job: str) -> str:
     return job_id_parts(job)[-1]
 
 
+def iris_pod_group_prefix(job: str) -> str:
+    """Return the stable Kueue pod-group prefix Iris derives from a full job id."""
+    canonical_job = "/" + "/".join(job_id_parts(job))
+    job_hash = hashlib.sha256(canonical_job.encode()).hexdigest()[:16]
+    return f"iris-pg-{job_hash}-"
+
+
 def find_pod(base: list[str], args: argparse.Namespace) -> str:
     if args.pod:
         return args.pod
     pods = json.loads(command([*base, "-n", NAMESPACE, "get", "pods", "-o", "json"]))["items"]
     running_pods = [pod for pod in pods if pod.get("status", {}).get("phase") == "Running"]
     needle = task_short_name(args.job).lower()
-    # The label stores the Iris id without its leading slash and with dots as
-    # path separators, subject to Kubernetes label-value truncation.
+    # Exact names and labels remain useful for short jobs. Long iris.job_id labels
+    # truncate at Kubernetes' 63-character limit, so they are never used as a
+    # prefix: same-day sibling arms can share the truncated value.
     labeled_job_id = args.job.lstrip("/").replace("/", ".")
     candidates = sorted(
         pod["metadata"]["name"]
@@ -149,15 +158,14 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
             or pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL) == labeled_job_id
         )
     )
-    # Kubernetes label values are length-limited, so long names lose their
-    # suffix. Fall back to the truncated label only when exact matching fails;
-    # multiple matches remain an error that requires an explicit pod.
+    # Iris hashes the complete parent job id into the Kueue pod-group label.
+    # The trailing attempt number changes on retry, hence prefix matching here.
     if not candidates:
-        truncated_label = labeled_job_id[:KUBERNETES_LABEL_MAX_LENGTH]
+        pod_group_prefix = iris_pod_group_prefix(args.job)
         candidates = sorted(
             pod["metadata"]["name"]
             for pod in running_pods
-            if pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL, "").startswith(truncated_label)
+            if pod.get("metadata", {}).get("labels", {}).get(KUEUE_POD_GROUP_LABEL, "").startswith(pod_group_prefix)
         )
     if len(candidates) == 1:
         return candidates[0]
