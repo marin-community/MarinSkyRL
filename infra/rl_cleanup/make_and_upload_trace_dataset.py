@@ -120,29 +120,29 @@ def _install_safe_episode_guard() -> None:
 
 
 def _install_dataset_sanitizer() -> None:
-    """Patch Harbor's rows_to_dataset to sanitize surrogate characters before HF conversion."""
+    """Patch Harbor's rows_to_dataset to sanitize publishable records before HF conversion."""
     try:
         from harbor.utils import traces_utils  # type: ignore
-        from infra.rl_cleanup.trace_dataset_hygiene import _strip_surrogates  # type: ignore
+        from infra.rl_cleanup.trace_dataset_hygiene import sanitize_trace_record
     except Exception:
         return
 
     original_rows_to_dataset = getattr(traces_utils, "rows_to_dataset", None)
     if original_rows_to_dataset is None:
         return
-    if getattr(original_rows_to_dataset, "__dcagent_surrogate_sanitized__", False):
+    if getattr(original_rows_to_dataset, "__dcagent_trace_sanitized__", False):
         return
 
     def safe_rows_to_dataset(rows, *args, **kwargs):
         cleaned_rows = []
         for row in rows:
             if isinstance(row, dict):
-                cleaned_rows.append({k: _strip_surrogates(v) for k, v in row.items()})
+                cleaned_rows.append(sanitize_trace_record(row))
             else:
                 cleaned_rows.append(row)
         return original_rows_to_dataset(cleaned_rows, *args, **kwargs)
 
-    safe_rows_to_dataset.__dcagent_surrogate_sanitized__ = True  # type: ignore[attr-defined]
+    safe_rows_to_dataset.__dcagent_trace_sanitized__ = True  # type: ignore[attr-defined]
     traces_utils.rows_to_dataset = safe_rows_to_dataset
 
 
