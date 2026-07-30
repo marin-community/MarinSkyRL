@@ -1263,17 +1263,6 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def priority_band_enum_name(priority: str) -> str:
-    """Return the Iris protobuf enum name for a supported CLI priority.
-
-    Raises:
-        KeyError: If ``priority`` is not one of ``PRIORITY_NAMES``.
-    """
-    if priority not in PRIORITY_NAMES:
-        raise KeyError(priority)
-    return f"PRIORITY_BAND_{priority.upper()}"
-
-
 def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
     """Translate the MarinSkyRL runtime-knob CLI flags into SKYRL_* env vars for the
     pod. Only flags that were explicitly set (non-None) emit an entry, so an
@@ -1891,7 +1880,7 @@ def main() -> int:
         target_cluster=args.target_cluster,
     )
 
-    priority_band = job_pb2.PriorityBand.Value(priority_band_enum_name(args.priority))
+    priority_band = job_pb2.PriorityBand.Value(f"PRIORITY_BAND_{args.priority.upper()}")
 
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
