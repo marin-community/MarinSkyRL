@@ -1262,6 +1262,15 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_priority_band(priority: str, job_proto):
+    """Resolve a parser-validated priority without requiring an unspecified enum member."""
+    return {
+        "production": job_proto.PRIORITY_BAND_PRODUCTION,
+        "interactive": job_proto.PRIORITY_BAND_INTERACTIVE,
+        "batch": job_proto.PRIORITY_BAND_BATCH,
+    }[priority]
+
+
 def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
     """Translate the MarinSkyRL runtime-knob CLI flags into SKYRL_* env vars for the
     pod. Only flags that were explicitly set (non-None) emit an entry, so an
@@ -1879,11 +1888,7 @@ def main() -> int:
         target_cluster=args.target_cluster,
     )
 
-    priority_band = {
-        "production": job_pb2.PRIORITY_BAND_PRODUCTION,
-        "interactive": job_pb2.PRIORITY_BAND_INTERACTIVE,
-        "batch": job_pb2.PRIORITY_BAND_BATCH,
-    }.get(args.priority, job_pb2.PRIORITY_BAND_UNSPECIFIED)
+    priority_band = resolve_priority_band(args.priority, job_pb2)
 
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.

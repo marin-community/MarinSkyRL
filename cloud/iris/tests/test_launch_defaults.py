@@ -20,6 +20,7 @@ from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noq
 from cloud.iris.launch_rl_iris import (  # noqa: E402
     create_parser,
     derive_default_job_name,
+    resolve_priority_band,
     resolve_launch_defaults,
 )
 
@@ -134,6 +135,19 @@ def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
 
     assert args.task_image is None
     assert args.max_retries == 6
+
+
+@pytest.mark.parametrize(
+    ("priority", "expected"),
+    [("production", 1), ("interactive", 2), ("batch", 3)],
+)
+def test_priority_resolution_uses_only_supported_iris_enum_members(priority, expected):
+    class InstalledJobProto:
+        PRIORITY_BAND_PRODUCTION = 1
+        PRIORITY_BAND_INTERACTIVE = 2
+        PRIORITY_BAND_BATCH = 3
+
+    assert resolve_priority_band(priority, InstalledJobProto) == expected
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
