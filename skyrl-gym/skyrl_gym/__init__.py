@@ -11,6 +11,7 @@ from skyrl_gym.envs.registration import (
     pprint_registry,
 )
 from skyrl_gym import tools, envs
+from skyrl_gym.envs.data_contracts import get_data_contract
 
 # Define __all__ to control what's exposed
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "register",
     "registry",
     "pprint_registry",
+    "get_data_contract",
     # module folders
     "envs",
     "tools",

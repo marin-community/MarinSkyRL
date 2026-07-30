@@ -23,9 +23,8 @@ Each dataset entry is a dictionary with the following required (and some optiona
            }
        ],
        "env_class": env_class,         # String: Environment class identifier
-       "reward_spec": {
-           "method": "rule",           # String: Either "rule" or "reward_model"
-           "ground_truth": solution,   # Expected solution
+       "reward_model": {
+           "ground_truth": solution,   # Environment-specific verifier input
        },
        "extra_info": {                 # Dict: Optional additional metadata
            # ... add your own fields here
@@ -41,12 +40,35 @@ SkyRL supports loading datasets of this format from a local parquet file, a json
 - **env_class**: Name of environment that the data sample corresponds to. This is used to tell the Generator which environment to instantiate for this prompt.
 
   - Note: **env_class** can also be specified in the training configuration to apply to all dataset entries.
-- **reward_spec**: Dictionary containing the reward specification for the dataset entry (ie, how to get rewards).
+- **reward_model**: Dictionary passed to the selected environment as ``extras["reward_model"]``. Its schema is environment-specific; AIME and IFEval both require a ``ground_truth`` field.
 
-  - **method**: Must be either ``"rule"`` or ``"reward_model"``
-  - **ground_truth**: If ``method`` is ``"rule"``, this is the expected solution.
+  - **ground_truth**: The expected answer or serialized constraint used by the environment verifier.
 
 - **extra_info**: Extensible dictionary for additional metadata - you can add custom fields as needed.
+
+Verifier-backed datasets
+------------------------
+
+Use the environment's preparation contract before writing an artifact. It validates
+the registered ``env_class``, canonicalizes ground truth, and can verify a known-good
+and known-bad response with the exact runtime scorer. Runtime environments remain
+permissive and score malformed rows as incorrect, so this preflight belongs in the
+dataset builder rather than a distributed rollout worker.
+
+.. code-block:: python
+
+   from skyrl_gym import get_data_contract
+
+   contract = get_data_contract("aime")
+   ground_truth = contract.validate_example(
+       raw_answer,
+       positive_response="Answer: \\boxed{42}",
+       negative_response="",
+   )
+
+``get_data_contract`` currently supports ``aime`` and ``ifeval``. Registering a new
+environment is not enough to make it a supported training-data target: add its
+normalizer and verifier contract first.
 
 
 Data Preparation Scripts
@@ -81,8 +103,7 @@ Generally, only a single method (`make_map_fn`) must be implemented to convert t
                     },
                 ],
                 "env_class": "text2sql",
-                "reward_spec": {
-                    "method": "rule",
+                "reward_model": {
                     "ground_truth": example["sql"],
                 },
                 # Custom fields specific to the SynSQL dataset:

@@ -25,13 +25,9 @@ import argparse
 import os
 
 import datasets
-from skyrl_gym.envs.aime.utils import normalize_final_answer
+from skyrl_gym.envs.data_contracts import get_data_contract
 
-# The shared boxed contract — IDENTICAL to the Delphi run-of-record and the held-out eval.
-INSTRUCTION = (
-    " Please reason step by step. At the very end, output your final answer on its "
-    "own line in the exact format: 'Answer: \\boxed{ANSWER}'."
-)
+AIME_CONTRACT = get_data_contract("aime")
 
 TRAIN_DATASET = "allenai/RLVR-MATH"
 VAL_DATASET = "HuggingFaceH4/MATH-500"  # held-out math eval, shared by the math cells
@@ -60,7 +56,7 @@ def _strip_rlvr_math_fewshot(text: str) -> str:
 def _math_row(problem: str, ground_truth: str | None, source: str, idx: int) -> dict:
     return {
         "data_source": source,
-        "prompt": [{"role": "user", "content": problem + INSTRUCTION}],
+        "prompt": [{"role": "user", "content": problem + AIME_CONTRACT.prompt_instruction}],
         "env_class": "aime",
         "reward_model": {"ground_truth": ground_truth if ground_truth is not None else ""},
         "extra_info": {"split": "train", "index": idx},
@@ -73,7 +69,7 @@ def build_rlvr_math() -> datasets.Dataset:
     def _map(ex, i):
         return _math_row(
             _strip_rlvr_math_fewshot(_user_content(ex["messages"])),
-            normalize_final_answer(str(ex["ground_truth"])),
+            AIME_CONTRACT.normalize_ground_truth(ex["ground_truth"]),
             TRAIN_DATASET,
             i,
         )
@@ -85,7 +81,7 @@ def build_math500(split: str = "test") -> datasets.Dataset:
     ds = datasets.load_dataset(VAL_DATASET, split=split)
 
     def _map(ex, i):
-        return _math_row(ex["problem"], normalize_final_answer(ex["answer"]), VAL_DATASET, i)
+        return _math_row(ex["problem"], AIME_CONTRACT.normalize_ground_truth(ex["answer"]), VAL_DATASET, i)
 
     return ds.map(_map, with_indices=True, remove_columns=ds.column_names)
 
