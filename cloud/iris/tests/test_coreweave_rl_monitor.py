@@ -136,17 +136,9 @@ def test_job_id_parts_rejects_noncanonical_or_unsafe_ids(job_id):
         job_id_parts(job_id)
 
 
-@pytest.mark.parametrize(
-    ("job_id", "label", "pod_name"),
-    [
-        (
-            "/benjaminfeuer/grug-agentic-eval-v2-65k-harbor394c-r3",
-            "benjaminfeuer.grug-agentic-eval-v2-65k-harbor394c-r3",
-            "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0",
-        ),
-    ],
-)
-def test_find_pod_uses_exact_iris_job_label(monkeypatch, job_id, label, pod_name):
+def test_find_pod_uses_exact_iris_job_label(monkeypatch):
+    job_id = "/benjaminfeuer/grug-agentic-eval-v2-65k-harbor394c-r3"
+    pod_name = "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0"
     monkeypatch.setattr(
         coreweave_ops,
         "command",
@@ -156,7 +148,7 @@ def test_find_pod_uses_exact_iris_job_label(monkeypatch, job_id, label, pod_name
                     {
                         "metadata": {
                             "name": pod_name,
-                            "labels": {"iris.job_id": label},
+                            "labels": {"iris.job_id": "benjaminfeuer.grug-agentic-eval-v2-65k-harbor394c-r3"},
                         },
                         "status": {"phase": "Running"},
                     }
@@ -448,7 +440,7 @@ def _rl_report_row(tmp_path, finelog: str = "", state: str = "running", artifact
     return watch_coreweave_rl.report_row(job, artifacts, tmp_path)
 
 
-def test_rl_no_sync_refreshes_current_state_from_log_tail(monkeypatch, tmp_path):
+def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_path):
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
     job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", "running", 0, "", dataset="DCAgent/tasks")
     calls: list[list[str]] = []
@@ -467,10 +459,13 @@ def test_rl_no_sync_refreshes_current_state_from_log_tail(monkeypatch, tmp_path)
 
     monkeypatch.setattr(watch_coreweave_rl, "run_iris", fake_run_iris)
 
-    artifacts, directory = watch_coreweave_rl.sync_job(job, tmp_path, no_sync=True)
+    artifacts, directory = watch_coreweave_rl.sync_job(job, tmp_path, status_only=True)
     row = watch_coreweave_rl.report_row(job, artifacts, directory)
 
-    assert calls == [["job", "logs", job.job_id, "--max-lines", "600000", "--tail"]]
+    assert len(calls) == 1
+    assert calls[0][:3] == ["job", "logs", job.job_id]
+    assert "--tail" in calls[0]
+    assert "--no-tail" not in calls[0]
     assert row[3] == "16/80"
     assert row[4] == "0.91"
 
@@ -538,7 +533,7 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
             filter=[],
             bundle_root=tmp_path,
             quiet_progress=True,
-            no_sync=True,
+            status_only=True,
         ),
     )
     monkeypatch.setattr(watch_coreweave_rl, "CLUSTERS", (cluster,))

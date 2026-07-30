@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from botocore.exceptions import ClientError
 
@@ -72,6 +72,9 @@ from scripts.iris.iris_ops import (  # noqa: E402
 DEFAULT_USER = "benjaminfeuer"
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
 DEFAULT_TRACE_SYNC_LIMIT = 500
+CURRENT_FINELOG_MAX_LINES = 600_000
+COMPLETE_FINELOG_MAX_LINES = 10_000_000
+FinelogScope = Literal["current", "complete"]
 ACTIVE_STATES = {1: "pending", 2: "building", 3: "running"}
 STATE_NAMES = {
     **ACTIVE_STATES,
@@ -211,7 +214,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--status-only",
         "--no-sync",
+        dest="status_only",
         action="store_true",
         help="Fetch only the current finelog tail for status; skip pod, Ray, and trace artifacts.",
     )
@@ -358,8 +363,12 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n")
 
 
-def fetch_finelog(job: RlJob, destination: Path, *, current_only: bool = False) -> tuple[str, str | None]:
-    log_args = ["--max-lines", "600000", "--tail"] if current_only else ["--max-lines", "10000000", "--no-tail"]
+def fetch_finelog(job: RlJob, destination: Path, *, scope: FinelogScope = "complete") -> tuple[str, str | None]:
+    log_args = (
+        ["--max-lines", str(CURRENT_FINELOG_MAX_LINES), "--tail"]
+        if scope == "current"
+        else ["--max-lines", str(COMPLETE_FINELOG_MAX_LINES), "--no-tail"]
+    )
     result = run_iris(
         job.cluster,
         ["job", "logs", job.job_id, *log_args],
@@ -844,7 +853,7 @@ def sync_job(
     job: RlJob,
     bundle_root: Path,
     *,
-    no_sync: bool,
+    status_only: bool,
     terminal_only: bool = False,
     progress: ProgressReporter | None = None,
 ) -> tuple[ArtifactResult, Path]:
@@ -852,10 +861,10 @@ def sync_job(
     bundle = job_bundle(bundle_root, job.cluster.name, job.job_id)
     directory = bundle.directory
     directory.mkdir(parents=True, exist_ok=True)
-    if no_sync:
+    if status_only:
         if progress:
             progress.phase(f"current finelog tail {job.cluster.name}/{job.short_name}")
-        finelog, error = fetch_finelog(job, directory, current_only=True)
+        finelog, error = fetch_finelog(job, directory, scope="current")
         return ArtifactResult(
             finelog,
             "not requested",
@@ -1009,7 +1018,7 @@ def main() -> int:
             artifacts, directory = sync_job(
                 job,
                 args.bundle_root,
-                no_sync=args.no_sync,
+                status_only=args.status_only,
                 terminal_only=job.is_terminal,
                 progress=progress,
             )
@@ -1027,7 +1036,7 @@ def main() -> int:
         synced_jobs.append((job, artifacts, directory))
 
     active_job_directories = [(job, directory) for job, _, directory in synced_jobs if not job.is_terminal]
-    if not args.no_sync and active_job_directories:
+    if not args.status_only and active_job_directories:
         progress.phase("starting fleet-wide trace inventory and transfer")
         try:
             trace_statuses = sync_fleet_trace_jobs(
@@ -1070,7 +1079,7 @@ def main() -> int:
                 )
             )
         synced_jobs = synchronized
-    elif not args.no_sync:
+    elif not args.status_only:
         progress.phase("no active RL jobs; trace inventory and transfer skipped")
 
     rows: list[list[object]] = []
