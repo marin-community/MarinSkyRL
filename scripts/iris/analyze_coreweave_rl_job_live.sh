@@ -69,7 +69,7 @@ CONTAINER="${CONTAINER:-task}"
 CLUSTER="${PEEK_CLUSTER:-cw-us-east-02a}"
 # Default to the OTAGENT iris (the marin .venv iris has a broken `kubernetes` import → cannot drive cw).
 IRIS_BIN="${IRIS_BIN:-/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris}"
-PEEK_OUT="${PEEK_OUT:-/Users/benjaminfeuer/Documents/experiments/active/iris-job-bundles}"
+PEEK_OUT="${PEEK_OUT:-$HOME/Documents/iris-job-bundles}"
 
 if [ -z "$JOB" ]; then
   echo "usage: analyze_coreweave_rl_job_live.sh <pod-name-substring> [ls|cat|grep|cp|pull] [args]" >&2

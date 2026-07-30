@@ -65,7 +65,7 @@ from typing import Any, Callable, Collection, Mapping, Sequence, TypeVar
 # that binary by default. Override with $IRIS_BIN if it ever moves.
 IRIS_BIN = os.environ.get("IRIS_BIN", "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris")
 DEFAULT_CLUSTER = "cw-us-east-02a"  # the GPU RL cluster; use "marin" for TPU jobs
-DEFAULT_BUNDLE_ROOT = Path("/Users/benjaminfeuer/Documents/experiments/active/iris-job-bundles")
+DEFAULT_BUNDLE_ROOT = Path.home() / "Documents" / "iris-job-bundles"
 
 # JobState int -> friendly name (lib/iris/src/iris/rpc/job.proto).
 STATE_NAMES = {

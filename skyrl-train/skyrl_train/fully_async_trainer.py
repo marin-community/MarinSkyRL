@@ -544,25 +544,31 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             f"training and finalizing (export/upload if missing)."
         )
 
-        final_epoch = max(self.cfg.trainer.epochs - 1, 0)
-        final_state = self._create_trainer_state(epoch=final_epoch)
+        await self._finalize_training(
+            completed_step=self.global_step,
+            epoch=max(self.cfg.trainer.epochs - 1, 0),
+        )
+        logger.info("Training already complete on resume — exiting cleanly.")
+
+    async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
+        """Run train-end callbacks and saves at the last completed optimizer step."""
+        self.global_step = completed_step
+        final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
             "on_train_end", final_state, self._control, trainer=self
         )
 
-        # Honor final-save requests from callbacks (idempotent: re-saving the gsN
-        # checkpoint / re-exporting HF is safe and ensures the export exists).
         if self._control.should_save:
             with Timer("save_checkpoints", self.all_timings):
                 await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint (resume-at-max finalize).")
+                logger.info("Saved final checkpoint.")
+            await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
             with Timer("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
-                logger.info("Saved final HF model (resume-at-max finalize).")
+                logger.info("Saved final model.")
                 await asyncio.to_thread(self._flush_hf_uploads)
-        logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _train_loop(self):
         """
@@ -654,6 +660,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
         start_epoch = self.global_step // self.num_steps_per_epoch
+        last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
@@ -837,6 +844,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_timings = {}
                 pbar.update(1)
 
+                last_completed_step = self.global_step
                 self.global_step += 1
 
                 # 9. Notify generation workers that the capacity has increased, unblocking them.
@@ -920,23 +928,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # End of training
         pbar.close()
 
-        # Call on_train_end callbacks
-        final_state = self._create_trainer_state(epoch=self.cfg.trainer.epochs - 1)
-        self._control.reset()
-        self._control = await self.callback_handler.call_event_async(
-            "on_train_end", final_state, self._control, trainer=self
+        await self._finalize_training(
+            completed_step=last_completed_step,
+            epoch=self.cfg.trainer.epochs - 1,
         )
-
-        # Handle final checkpoint/model save if requested by callbacks
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint.")
-        if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final model.")
-                await asyncio.to_thread(self._flush_hf_uploads)
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
