@@ -27,7 +27,7 @@ def test_model_initialization_timeout_logs_and_kills_actors(monkeypatch):
 
     try:
         with pytest.raises(RuntimeError, match="timed out after 3600 seconds"):
-            trainer._wait_for_model_initialization(
+            trainer._wait_for_setup_phase(
                 ["policy-worker-ref"],
                 deadline=3700.0,
                 phase="policy/ref/critic model initialization",
@@ -37,7 +37,8 @@ def test_model_initialization_timeout_logs_and_kills_actors(monkeypatch):
 
     get.assert_called_once_with(["policy-worker-ref"], timeout=3600.0)
     trainer._kill_ray_actors.assert_called_once_with()
-    assert any(message.record["level"].name == "ERROR" and "terminating model actors" in message for message in messages)
+    assert len(messages) == 1
+    assert messages[0].record["level"].name == "ERROR"
 
 
 @pytest.mark.asyncio

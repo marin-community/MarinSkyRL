@@ -21,4 +21,4 @@ Initial result: test collection failed because neither the bounded initializatio
 
 The focused regression suite passes. It verifies that Ray receives the remaining 3,600-second initialization budget, timeout emits an ERROR message and kills the actors, the fully async trainer re-raises the original failure after teardown, and the resulting Loguru record contains no exception object and is pickleable.
 
-The focused trainer and logging utility tests pass: 21 tests total. The full CPU command used by PR CI passes with 872 passed, 19 skipped, and 4 expected deselections.
+The focused trainer and logging utility tests pass. The full CPU command used by PR CI also passes.
