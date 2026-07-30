@@ -18,7 +18,6 @@ import subprocess
 import sys
 import tarfile
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -33,6 +32,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.iris.iris_ops import DNS_ATTEMPTS, DNS_INITIAL_BACKOFF, job_id_parts  # noqa: E402
+from scripts.iris.coreweave_clusters import CLUSTERS, ClusterConfig  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -62,39 +62,6 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
     "unexpected eof",
     "i/o timeout",
 )
-
-
-@dataclass(frozen=True)
-class ClusterConfig:
-    kubeconfig: Path
-    context: str | None
-    object_endpoint: str
-
-
-CLUSTERS = {
-    "cw-rno2a": ClusterConfig(
-        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-        context="marin-rn02a_RNO2A",
-        object_endpoint="https://cwobject.com",
-    ),
-    "cw-us-east-02a": ClusterConfig(
-        # ``marin-gpu_US-EAST-02A`` is maintained in the shared Iris
-        # kubeconfig.  The old GPU-only kubeconfig does not carry that
-        # context, which made every cw-us diagnostic fail before it queried a
-        # pod.
-        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-        context="marin-gpu_US-EAST-02A",
-        object_endpoint="https://cwobject.com",
-    ),
-    "cw-us-east-08a": ClusterConfig(
-        # East-08a is the CoreWeave Blackwell (B200/GB200) fleet.  It shares
-        # the Iris kubeconfig and CoreWeave object-store endpoint with the
-        # H100 clusters, but requires its own Kubernetes context.
-        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-        context="marin-us-east-08a_US-EAST-08A",
-        object_endpoint="https://cwobject.com",
-    ),
-}
 
 
 def parse_args() -> argparse.Namespace:

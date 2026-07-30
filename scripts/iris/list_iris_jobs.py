@@ -11,9 +11,9 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Sequence
 
+from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS
 from scripts.iris.iris_ops import (
     STATE_NAMES,
     box_table,
@@ -25,20 +25,16 @@ from scripts.iris.iris_ops import (
 
 USER_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 STATE_LABELS = {"killed": "terminated", "worker_failed": "worker failed"}
-COREWEAVE_KUBECONFIGS = {
-    "cw-rno2a": Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-    "cw-us-east-02a": Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-}
-DEFAULT_CLUSTERS = ("cw-rno2a", "cw-us-east-02a", "marin")
+DEFAULT_CLUSTERS = (*COREWEAVE_CLUSTERS, "marin")
 
 
 def command_environment(cluster: str) -> dict[str, str] | None:
     """Return the local kubeconfig override required for a CoreWeave cluster."""
-    kubeconfig = COREWEAVE_KUBECONFIGS.get(cluster)
-    if kubeconfig is None:
+    config = COREWEAVE_CLUSTERS.get(cluster)
+    if config is None:
         return None
     environment = os.environ.copy()
-    environment["KUBECONFIG"] = str(kubeconfig)
+    environment["KUBECONFIG"] = str(config.kubeconfig)
     return environment
 
 

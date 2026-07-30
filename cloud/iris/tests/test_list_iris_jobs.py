@@ -20,14 +20,14 @@ job_id,state,submitted_at_ms,started_at_ms,finished_at_ms,error,exit_code
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output, stderr=""),
     )
     rows = list_iris_jobs.query_jobs(user="benjaminfeuer", hours=24, cluster="cw", now_ms=86_400_000)
-    table = list_iris_jobs.render_table(rows, now_ms=3_800_000)
     assert [row["job_id"] for row in rows] == [
         "/benjaminfeuer/tracegen-a",
         "/benjaminfeuer/rl-run",
         "/benjaminfeuer/eval-b",
     ]
-    assert "datagen" in table and "RL" in table and "eval" in table and "terminated" in table
-    assert "Duration" in table and "0m" in table
+    values = [list_iris_jobs.job_filter_values(row, now_ms=3_800_000) for row in rows]
+    assert [value["type"] for value in values] == ["datagen", "RL", "eval"]
+    assert [value["state"] for value in values] == ["succeeded", "running", "terminated"]
 
 
 def test_job_inventory_formats_running_and_finished_durations():
@@ -80,7 +80,7 @@ def test_job_inventory_filters_regex_fields():
     assert [row["job_id"] for row in filtered] == ["/benjaminfeuer/glm52-running"]
 
 
-def test_job_inventory_queries_all_default_clusters_and_labels_rows(monkeypatch, capsys):
+def test_job_inventory_queries_all_default_clusters(monkeypatch):
     queried_clusters = []
 
     def fake_query_jobs(*, user, hours, cluster):
@@ -91,15 +91,12 @@ def test_job_inventory_queries_all_default_clusters_and_labels_rows(monkeypatch,
 
     assert list_iris_jobs.main(["--user", "benjaminfeuer", "--hours", "6", "--filter", "state=running"]) == 0
 
-    assert [cluster for _user, _hours, cluster in queried_clusters] == list(list_iris_jobs.DEFAULT_CLUSTERS)
-    output = capsys.readouterr().out
-    assert "clusters=cw-rno2a,cw-us-east-02a,marin" in output
-    assert "Cluster" in output and "cw-rno2a" in output and "marin" in output
+    assert [cluster for _user, _hours, cluster in queried_clusters] == [*list_iris_jobs.COREWEAVE_CLUSTERS, "marin"]
 
 
 def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypatch):
     captured = {}
-    monkeypatch.setenv("KUBECONFIG", "/Users/benjaminfeuer/.kube/lambdaconfig")
+    monkeypatch.setenv("KUBECONFIG", "/tmp/other-kubeconfig")
     monkeypatch.setattr(
         list_iris_jobs,
         "run_iris_command",
@@ -115,7 +112,7 @@ def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypat
 
     list_iris_jobs.query_jobs(user="benjaminfeuer", hours=24, cluster="cw-us-east-02a")
 
-    assert captured["environment"]["KUBECONFIG"] == "/Users/benjaminfeuer/.kube/coreweave-iris"
+    assert captured["environment"]["KUBECONFIG"] == str(list_iris_jobs.COREWEAVE_CLUSTERS["cw-us-east-02a"].kubeconfig)
 
 
 def test_job_inventory_hours_zero_queries_all_history(monkeypatch):

@@ -24,13 +24,14 @@ of every session.
   affected component, and a proposed regression test.
 - Never patch a live pod or remote checkout.
 - Never edit a POLICY.md document without direct user authorization.
+- Never autonomously override a guideline in POLICY.md without direct user authorization. e.g., if a POLICY.md says "always keep 3 jobs in flight," do not launch 2 or 4 jobs.
 - Treat each experiment's STATE.md as its mutable operations record. Update it within the selected
   scope and remove stale information as soon as it is discovered.
 - Scrutinize subagent reports against controller state and durable artifacts before acting.
 - Keep mutable job state out of recurring prompts. Make each recurrence reread the experiment
   records and current Iris state.
 
-## Initialization
+## Supervision loop
 
 1. Discover the repository root and read the relevant `.agents/ops/` runbooks.
 2. Use an explicit experiment list when provided. Otherwise discover active RL experiment records
