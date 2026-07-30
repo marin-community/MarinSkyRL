@@ -29,6 +29,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -38,6 +39,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class CheckpointSelection:
+    rewards: dict[int, float]
+    ema: dict[int, float]
+    best_step: int | None
+    available_exports: list[int]
+    cap_step: int | None
+    eligible: list[int]
+    reason: str
 
 
 def strip_ansi(text: str) -> str:
@@ -190,7 +202,7 @@ def select_best_checkpoint(
     metrics: list[dict[str, Any]],
     run_dir: Path | None = None,
     save_every: int = 20,
-) -> dict[str, Any]:
+) -> CheckpointSelection:
     """Select a checkpoint from parsed agentic or standard GRPO metrics.
 
     Run dir layout:
@@ -204,7 +216,7 @@ def select_best_checkpoint(
         (s >= 2*save_every), pick max EMA among them
       - selection is CAPPED at latest_ckpt_global_step.txt
 
-    Returns a dict with the chosen step, the EMA table, eligibility info, and diagnostics.
+    Returns the chosen step, EMA table, eligibility information, and diagnostics.
     """
     rewards: dict[int, float] = {}  # step -> avg_raw_reward (first-seen wins)
     for metric in metrics:
@@ -219,19 +231,8 @@ def select_best_checkpoint(
             continue
         rewards.setdefault(step, reward)  # first-seen wins (chain links may overlap)
 
-    result: dict[str, Any] = {
-        "rewards": rewards,
-        "ema": {},
-        "best_step": None,
-        "available_exports": [],
-        "cap_step": None,
-        "eligible": [],
-        "reason": "",
-    }
-
     if not rewards:
-        result["reason"] = "No reward lines parsed from any .out"
-        return result
+        return CheckpointSelection(rewards, {}, None, [], None, [], "No reward lines parsed from any .out")
 
     steps = sorted(rewards)
     alpha = 1 / 3
@@ -240,9 +241,6 @@ def select_best_checkpoint(
     for s in steps:
         prev = alpha * rewards[s] + (1 - alpha) * prev
         ema[s] = prev
-    result["ema"] = ema
-
-    # Available exports (intersect candidate set).
     available: list[int] = []
     cap_step: int | None = None
     if run_dir is not None:
@@ -253,15 +251,12 @@ def select_best_checkpoint(
                 if m and child.is_dir():
                     available.append(int(m.group(1)))
             available.sort()
-        result["available_exports"] = available
-
         cap_file = run_dir / "latest_ckpt_global_step.txt"
         if cap_file.is_file():
             try:
                 cap_step = int(cap_file.read_text().strip())
             except (ValueError, OSError):
                 cap_step = None
-        result["cap_step"] = cap_step
 
     # Eligible = saved-aligned (multiple of save_every, excluding the first save),
     # present in the available exports set (if known), and <= cap_step (if known).
@@ -278,34 +273,32 @@ def select_best_checkpoint(
     # otherwise fall back to the EMA steps (selector still reports a recommendation).
     candidate_steps = available if available else steps
     eligible = [s for s in candidate_steps if is_eligible(s) and s in ema]
-    result["eligible"] = eligible
 
     if not eligible:
-        result["reason"] = (
+        reason = (
             "No saved-aligned checkpoint eligible (after cap + exports intersection). "
             f"available_exports={available}, cap_step={cap_step}, save_every={save_every}"
         )
-        return result
+        return CheckpointSelection(rewards, ema, None, available, cap_step, eligible, reason)
 
     best = max(eligible, key=lambda s: ema[s])
-    result["best_step"] = best
     scope = f"exports <= cap_step={cap_step}" if cap_step is not None else "steps"
-    result["reason"] = f"highest trailing-5 EMA ({ema[best]:.4f}) among saved-aligned {scope}"
-    return result
+    reason = f"highest trailing-5 EMA ({ema[best]:.4f}) among saved-aligned {scope}"
+    return CheckpointSelection(rewards, ema, best, available, cap_step, eligible, reason)
 
 
-def print_best_checkpoint(selection: dict[str, Any], save_every: int, fmt: str) -> None:
+def print_best_checkpoint(selection: CheckpointSelection, save_every: int, fmt: str) -> None:
     """Pretty-print the best-checkpoint selector output (EMA table + chosen step)."""
     print("\n" + "=" * 60)
     print(f"BEST-CHECKPOINT SELECTOR ({fmt} GRPO, trailing-5 EMA)")
     print("=" * 60)
 
-    rewards = selection.get("rewards", {})
-    ema = selection.get("ema", {})
-    available = selection.get("available_exports", [])
-    cap_step = selection.get("cap_step")
-    eligible = set(selection.get("eligible", []))
-    best = selection.get("best_step")
+    rewards = selection.rewards
+    ema = selection.ema
+    available = selection.available_exports
+    cap_step = selection.cap_step
+    eligible = set(selection.eligible)
+    best = selection.best_step
 
     print(f"  save_every (hf_save_interval): {save_every}")
     print(f"  available exports: {available}")
@@ -320,25 +313,25 @@ def print_best_checkpoint(selection: dict[str, Any], save_every: int, fmt: str) 
         print(f"  {s:>6} | {rewards.get(s, float('nan')):>10.4f} | {ema[s]:>10.4f} | {has_export} |{elig}{star}")
     print()
     if best is not None:
-        print(f"  CHOSEN STEP: {best}  ({selection.get('reason', '')})")
+        print(f"  CHOSEN STEP: {best}  ({selection.reason})")
         print(f"  export path: exports/global_step_{best}/policy/")
     else:
-        print(f"  NO STEP CHOSEN: {selection.get('reason', '')}")
+        print(f"  NO STEP CHOSEN: {selection.reason}")
 
 
-def _write_best_checkpoint_report(output: TextIO, selection: dict[str, Any]) -> None:
+def _write_best_checkpoint_report(output: TextIO, selection: CheckpointSelection) -> None:
     output.write("## Best Checkpoint (trailing-5 EMA of reward/avg_raw_reward)\n\n")
-    best = selection.get("best_step")
+    best = selection.best_step
     if best is not None:
-        output.write(f"**Chosen step: `{best}`** — {selection.get('reason', '')}\n\n")
+        output.write(f"**Chosen step: `{best}`** — {selection.reason}\n\n")
         output.write(f"Export path: `exports/global_step_{best}/policy/`\n\n")
     else:
-        output.write(f"No step chosen: {selection.get('reason', '')}\n\n")
-    output.write(f"- available exports: `{selection.get('available_exports', [])}`\n")
-    output.write(f"- cap (latest_ckpt_global_step.txt): `{selection.get('cap_step')}`\n\n")
-    ema = selection.get("ema", {})
-    rewards = selection.get("rewards", {})
-    eligible = set(selection.get("eligible", []))
+        output.write(f"No step chosen: {selection.reason}\n\n")
+    output.write(f"- available exports: `{selection.available_exports}`\n")
+    output.write(f"- cap (latest_ckpt_global_step.txt): `{selection.cap_step}`\n\n")
+    ema = selection.ema
+    rewards = selection.rewards
+    eligible = set(selection.eligible)
     if ema:
         output.write("| Step | Reward | EMA | Eligible |\n|------|--------|-----|----------|\n")
         for step in sorted(ema):
@@ -847,7 +840,7 @@ def generate_markdown_report(
     df: pd.DataFrame,
     vllm_data: dict[str, dict[str, Any]] | None = None,
     trial_stats: dict[str, Any] | None = None,
-    selection: dict[str, Any] | None = None,
+    selection: CheckpointSelection | None = None,
 ) -> None:
     """Generate a markdown report with summary statistics."""
 
@@ -1188,7 +1181,7 @@ def generate_standard_report(
     output_path: Path,
     df: pd.DataFrame,
     vllm_data: dict[str, dict[str, Any]] | None = None,
-    selection: dict[str, Any] | None = None,
+    selection: CheckpointSelection | None = None,
 ) -> None:
     """Generate a markdown report for STANDARD (non-agentic) GRPO logs."""
     with open(output_path, "w") as f:
