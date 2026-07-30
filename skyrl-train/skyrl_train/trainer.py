@@ -4,6 +4,7 @@ import math
 import os
 import shutil
 import threading
+import time
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -74,6 +75,8 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
+
+_MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
 class RayPPOTrainer:
@@ -363,8 +366,16 @@ class RayPPOTrainer:
         if self.colocate_all:
             self.policy_model.backload_to_gpu()
 
-        final_epoch = max(self.cfg.trainer.epochs - 1, 0)
-        final_state = self._create_trainer_state(epoch=final_epoch)
+        await self._finalize_training(
+            completed_step=self.global_step,
+            epoch=max(self.cfg.trainer.epochs - 1, 0),
+        )
+        logger.info("Training already complete on resume — exiting cleanly.")
+
+    async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
+        """Run train-end callbacks and saves at the last completed optimizer step."""
+        self.global_step = completed_step
+        final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
             "on_train_end", final_state, self._control, trainer=self
@@ -372,14 +383,14 @@ class RayPPOTrainer:
 
         if self._control.should_save:
             with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
-                logger.info("Saved final checkpoint (resume-at-max finalize).")
+                await asyncio.to_thread(self.save_checkpoints)
+                logger.info("Saved final checkpoint.")
+            await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
             with Timer("save_hf_model", self.all_timings):
-                self.save_models()
-                logger.info("Saved final HF model (resume-at-max finalize).")
-                self._flush_hf_uploads()
-        logger.info("Training already complete on resume — exiting cleanly.")
+                await asyncio.to_thread(self.save_models)
+                logger.info("Saved final model.")
+                await asyncio.to_thread(self._flush_hf_uploads)
 
     async def _train_loop(self):
         """
@@ -449,6 +460,7 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         start_epoch = self.global_step // len(self.train_dataloader)
+        last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
@@ -639,6 +651,7 @@ class RayPPOTrainer:
 
                 # 10. Update progress bar and global step
                 pbar.update(1)
+                last_completed_step = self.global_step
                 self.global_step += 1
 
                 del training_input, generator_output
@@ -673,23 +686,10 @@ class RayPPOTrainer:
             await self.inference_engine_client.sleep()
             self.policy_model.backload_to_gpu()
 
-        # Call on_train_end callbacks
-        final_state = self._create_trainer_state(epoch=self.cfg.trainer.epochs - 1)
-        self._control.reset()
-        self._control = await self.callback_handler.call_event_async(
-            "on_train_end", final_state, self._control, trainer=self
+        await self._finalize_training(
+            completed_step=last_completed_step,
+            epoch=self.cfg.trainer.epochs - 1,
         )
-
-        # Handle final checkpoint/model save if requested by callbacks
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
-                logger.info("Saved final checkpoint.")
-        if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                self.save_models()
-                logger.info("Saved final model.")
-                self._flush_hf_uploads()
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
@@ -858,6 +858,23 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
+        self.policy_model: PPORayActorGroup = policy_model
+        self.critic_model: Optional[PPORayActorGroup] = critic_model
+        self.ref_model: Optional[PPORayActorGroup] = ref_model
+        self._initialize_model_actors(cfg, policy_model, critic_model, ref_model)
+
+        logger.info("init policy/ref/critic models done")
+
+    def _initialize_model_actors(
+        self,
+        cfg: DictConfig,
+        policy_model: PPORayActorGroup,
+        critic_model: Optional[PPORayActorGroup],
+        ref_model: Optional[PPORayActorGroup],
+    ) -> None:
+        """Initialize all model actors within one shared wall-clock deadline."""
+        initialization_deadline = time.monotonic() + _MODEL_INITIALIZATION_TIMEOUT
+
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
@@ -869,40 +886,82 @@ class RayPPOTrainer:
                 )
             )
             if cfg.trainer.critic.model.path:
+                assert critic_model is not None
                 refs.extend(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
                         num_training_steps=self.total_training_steps,
                     )
                 )
-            ray.get(refs)
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            self._wait_for_setup_phase(
+                refs,
+                deadline=initialization_deadline,
+                phase="policy/ref/critic model initialization",
+            )
+            self._wait_for_setup_phase(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                deadline=initialization_deadline,
+                phase="policy model finalization",
+            )
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
-                ref_model.offload_to_cpu()
-            ray.get(
+                self._wait_for_setup_phase(
+                    ref_model.async_init_model(cfg.trainer.ref.model.path),
+                    deadline=initialization_deadline,
+                    phase="reference model initialization",
+                )
+                self._wait_for_setup_phase(
+                    ref_model.offload_to_cpu(nonblocking=True),
+                    deadline=initialization_deadline,
+                    phase="reference model offload",
+                )
+            self._wait_for_setup_phase(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
                     num_training_steps=self.total_training_steps,
-                )
+                ),
+                deadline=initialization_deadline,
+                phase="policy model initialization",
             )
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
-            policy_model.offload_to_cpu()
+            self._wait_for_setup_phase(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                deadline=initialization_deadline,
+                phase="policy model finalization",
+            )
+            self._wait_for_setup_phase(
+                policy_model.offload_to_cpu(nonblocking=True),
+                deadline=initialization_deadline,
+                phase="policy model offload",
+            )
             if cfg.trainer.critic.model.path:
-                ray.get(
+                assert critic_model is not None
+                self._wait_for_setup_phase(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
                         num_training_steps=self.total_training_steps,
-                    )
+                    ),
+                    deadline=initialization_deadline,
+                    phase="critic model initialization",
                 )
-                critic_model.offload_to_cpu()
+                self._wait_for_setup_phase(
+                    critic_model.offload_to_cpu(nonblocking=True),
+                    deadline=initialization_deadline,
+                    phase="critic model offload",
+                )
 
-        self.policy_model: PPORayActorGroup = policy_model
-        self.critic_model: Optional[PPORayActorGroup] = critic_model
-        self.ref_model: Optional[PPORayActorGroup] = ref_model
-
-        logger.info("init policy/ref/critic models done")
+    def _wait_for_setup_phase(self, refs, *, deadline: float, phase: str):
+        """Wait for one setup phase and terminate all actors if the shared deadline expires."""
+        remaining_seconds = max(0.0, deadline - time.monotonic())
+        try:
+            return ray.get(refs, timeout=remaining_seconds)
+        except ray.exceptions.GetTimeoutError as error:
+            message = (
+                f"{phase} timed out after {_MODEL_INITIALIZATION_TIMEOUT} seconds; "
+                "terminating model actors and failing the training job"
+            )
+            logger.error(message)
+            self._kill_ray_actors()
+            raise RuntimeError(message) from error
 
     def init_weight_sync_state(self):
         """

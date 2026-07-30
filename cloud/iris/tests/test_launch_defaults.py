@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -16,19 +17,29 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
-    DEFAULT_RL_DOCKER_IMAGE,
-    DEFAULT_RL_MEGATRON_DOCKER_IMAGE,
     create_parser,
     derive_default_job_name,
+    resolve_node_resource_defaults,
     resolve_launch_defaults,
 )
 
 
-def _cluster_config(tmp_path: Path, cpu: int = 36) -> Path:
-    path = tmp_path / "cluster.yaml"
+def _cluster_config(
+    tmp_path: Path,
+    cpu: int = 36,
+    *,
+    gpu_variant: str = "H100",
+    gpus_per_node: int = 8,
+) -> Path:
+    path = tmp_path / f"cluster-{gpu_variant.lower()}-{gpus_per_node}.yaml"
     path.write_text(
         f"""\
+platform:
+  coreweave:
+    kubeconfig_path: ~/.kube/coreweave-test
+    kube_context: context-{gpu_variant.lower()}
 storage:
   remote_state_dir: s3://example-bucket/iris/example-cluster/state
 scale_groups:
@@ -36,11 +47,32 @@ scale_groups:
     resources:
       cpu: {cpu}
       device_type: gpu
-      device_variant: H100
-      device_count: 8
+      device_variant: {gpu_variant}
+      device_count: {gpus_per_node}
 """
     )
     return path
+
+
+def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, monkeypatch):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(
+            stdout=("4 NVIDIA-H100-80GB-HBM3 500000000Ki 7000000000000\n4 NVIDIA-GB200 1001863488Ki 14591185743078\n")
+        )
+
+    monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
+
+    memory, disk = resolve_node_resource_defaults(str(cluster_config), gpu_variant="GB200", gpus_per_node=4)
+
+    assert memory == "764Gi"
+    assert disk == "10871Gi"
+    command = commands[0]
+    assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
+    assert command[command.index("--context") + 1] == "context-gb200"
 
 
 def _rl_config(tmp_path: Path, harness: str) -> Path:
@@ -129,6 +161,8 @@ def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
 
     assert args.task_image is None
     assert args.max_retries == 6
+    assert args.memory == "auto"
+    assert args.disk == "auto"
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
@@ -156,7 +190,7 @@ def test_megatron_config_selects_the_megatron_image(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_MEGATRON_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
 
 
 def test_non_megatron_config_selects_the_plain_image(tmp_path):
@@ -164,7 +198,7 @@ def test_non_megatron_config_selects_the_plain_image(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", "fsdp2").reference
 
 
 def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
@@ -172,7 +206,7 @@ def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", None).reference
 
 
 def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
@@ -180,7 +214,7 @@ def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_MEGATRON_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
 
 
 def test_explicit_task_image_overrides_strategy_selection(tmp_path):
@@ -189,6 +223,53 @@ def test_explicit_task_image_overrides_strategy_selection(tmp_path):
     resolve_launch_defaults(args)
 
     assert args.task_image == "ghcr.io/example/custom@sha256:abc"
+
+
+@pytest.mark.parametrize("strategy", ["fsdp2", "megatron"])
+def test_east08_selects_an_arm64_image(tmp_path, strategy):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
+    args = _strategy_args(
+        tmp_path,
+        strategy,
+        [
+            "--cluster",
+            "cw-us-east-08a",
+            "--cluster-config",
+            str(cluster_config),
+            "--gpu-variant",
+            "GB200",
+            "--gpus-per-node",
+            "4",
+        ],
+    )
+
+    resolve_launch_defaults(args)
+
+    expected_image = image_for_cluster("cw-us-east-08a", strategy)
+    assert expected_image.architecture is ImageArchitecture.ARM64
+    assert args.task_image == expected_image.reference
+
+
+def test_federated_target_cluster_controls_image_architecture(tmp_path):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
+    args = _strategy_args(
+        tmp_path,
+        "megatron",
+        [
+            "--target-cluster",
+            "cw-us-east-08a",
+            "--cluster-config",
+            str(cluster_config),
+            "--gpu-variant",
+            "GB200",
+            "--gpus-per-node",
+            "4",
+        ],
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == image_for_cluster("cw-us-east-08a", "megatron").reference
 
 
 def test_parser_rejects_removed_harbor_source_override():

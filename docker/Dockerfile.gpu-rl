@@ -78,14 +78,10 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 # INSTALL_MEGATRON=1 to build the megatron variant (adds the `megatron` extra to
 # the uv sync). All megatron deps are linux/x86_64-gated in the lock.
 ARG INSTALL_MEGATRON=0
-# Harbor (agentic rollout) is installed after the trainer lock.
-# Keep this in step with what production actually bakes. It lagged at 01c736a6 while every
-# shipped image carried 772e20f7 (harbor#39, the verifier-teardown deadline), so a build that
-# did not pass an explicit override would have silently reverted harbor by one release.
-# 9ffd6fb5 includes harbor#47's verifier output, harbor#50's cloud-path upload fix, and
-# harbor#46's hard deadlines for artifact uploads and enqueue backpressure. Without #46,
-# a stalled s3fs commit can park an artifact-writer shard indefinitely (MarinSkyRL#194).
-ARG HARBOR_COMMIT=9ffd6fb5
+# Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
+# than overriding it at build time. This revision includes the artifact-upload fixes and setup-file
+# upload support through harbor#51.
+ARG HARBOR_COMMIT=f2dd505f609021611eb85521a097e6dff384d12d
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
@@ -196,6 +192,10 @@ ARG OTEL_EXPORTER_VERSION
 # MarinSkyRL commit this image is built from — recorded in the baked /opt/skyrl
 # git tree (see the git-init step below) for provenance.
 ARG GITSHA=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/marin-community/MarinSkyRL" \
+      org.opencontainers.image.revision="${GITSHA}" \
+      org.marin.harbor-commit="${HARBOR_COMMIT}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 # InfiniBand / RDMA userspace (rdma-core) — REQUIRED for NCCL's built-in IB

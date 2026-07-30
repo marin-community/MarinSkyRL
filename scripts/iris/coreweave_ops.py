@@ -18,7 +18,6 @@ import subprocess
 import sys
 import tarfile
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -32,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS, ClusterConfig  # noqa: E402
 from scripts.iris.iris_ops import DNS_ATTEMPTS, DNS_INITIAL_BACKOFF, job_id_parts  # noqa: E402
 
 
@@ -62,27 +62,8 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
     "unexpected eof",
     "i/o timeout",
 )
-
-
-@dataclass(frozen=True)
-class ClusterConfig:
-    kubeconfig: Path
-    context: str | None
-    object_endpoint: str
-
-
-CLUSTERS = {
-    "cw-rno2a": ClusterConfig(
-        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-        context="marin-rn02a_RNO2A",
-        object_endpoint="https://cwobject.com",
-    ),
-    "cw-us-east-02a": ClusterConfig(
-        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-        context=None,
-        object_endpoint="https://cwobject.com",
-    ),
-}
+KUBERNETES_LABEL_MAX_LENGTH = 63
+IRIS_JOB_ID_LABEL = "iris.job_id"
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         "job",
         help="Iris task name, such as /benjaminfeuer/glm52-pilot-codecontests-r7.",
     )
-    parser.add_argument("--cluster", choices=sorted(CLUSTERS), default="cw-rno2a")
+    parser.add_argument("--cluster", choices=sorted(COREWEAVE_CLUSTERS), default="cw-rno2a")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sample-size", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible sampling.")
@@ -144,10 +125,7 @@ def command(args: list[str], *, input_text: str | None = None, timeout: int | No
 def kubectl_base(cluster: ClusterConfig, args: argparse.Namespace) -> list[str]:
     kubeconfig = args.kubeconfig or cluster.kubeconfig
     context = args.kube_context if args.kube_context is not None else cluster.context
-    base = ["kubectl", "--kubeconfig", str(kubeconfig)]
-    if context:
-        base.extend(["--context", context])
-    return base
+    return ["kubectl", "--kubeconfig", str(kubeconfig), "--context", context]
 
 
 def task_short_name(job: str) -> str:
@@ -158,20 +136,29 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
     if args.pod:
         return args.pod
     pods = json.loads(command([*base, "-n", NAMESPACE, "get", "pods", "-o", "json"]))["items"]
+    running_pods = [pod for pod in pods if pod.get("status", {}).get("phase") == "Running"]
     needle = task_short_name(args.job).lower()
-    # Kubernetes truncates long Iris job names in pod names. The controller's
-    # canonical identity survives in this label, with the leading slash changed
-    # to nothing and path separators changed to dots.
+    # The label stores the Iris id without its leading slash and with dots as
+    # path separators, subject to Kubernetes label-value truncation.
     labeled_job_id = args.job.lstrip("/").replace("/", ".")
     candidates = sorted(
         pod["metadata"]["name"]
-        for pod in pods
-        if pod.get("status", {}).get("phase") == "Running"
-        and (
+        for pod in running_pods
+        if (
             needle in pod["metadata"]["name"].lower()
-            or pod.get("metadata", {}).get("labels", {}).get("iris.job_id") == labeled_job_id
+            or pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL) == labeled_job_id
         )
     )
+    # Kubernetes label values are length-limited, so long names lose their
+    # suffix. Fall back to the truncated label only when exact matching fails;
+    # multiple matches remain an error that requires an explicit pod.
+    if not candidates:
+        truncated_label = labeled_job_id[:KUBERNETES_LABEL_MAX_LENGTH]
+        candidates = sorted(
+            pod["metadata"]["name"]
+            for pod in running_pods
+            if pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL, "").startswith(truncated_label)
+        )
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
@@ -614,7 +601,7 @@ def sync_trials(
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    cluster = CLUSTERS[args.cluster]
+    cluster = COREWEAVE_CLUSTERS[args.cluster]
     base = kubectl_base(cluster, args)
     pod = find_pod(base, args)
     command_line = pod_command_line(base, pod, args.container)

@@ -60,7 +60,7 @@ jobs:
           set -o pipefail
           IRIS_PYTHON="$(uv tool dir)/marin-core/bin/python"
           RL_IMAGE="$("$IRIS_PYTHON" -c \
-            'from cloud.iris.launch_rl_iris import DEFAULT_RL_DOCKER_IMAGE; print(DEFAULT_RL_DOCKER_IMAGE)')"
+            'import os; from cloud.iris.gpu_rl_images import image_for_cluster; print(image_for_cluster(os.environ["TARGET_CLUSTER"], None).reference)')"
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
             --job-name "$JOB_NAME" \

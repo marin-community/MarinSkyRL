@@ -30,7 +30,7 @@ from scripts.iris.iris_ops import (  # noqa: E402
     load_bundle_manifest,
     write_bundle_manifest,
 )
-from scripts.iris.coreweave_ops import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
+from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

@@ -12,9 +12,9 @@ full trace sync. The sync still skips non-log objects larger than the configured
 size bound; that rule avoids repeatedly downloading giant rollout payloads while
 preserving any diagnostic log regardless of size.
 
-By default the scope is the current lab user's active RL jobs on both
-CoreWeave GPU clusters.  Use ``--all-users`` only when cross-user monitoring is
-intended.
+By default the scope is the current lab user's active RL jobs on every
+configured CoreWeave GPU cluster. Use ``--all-users`` only when cross-user
+monitoring is intended.
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
-    CLUSTERS as COREWEAVE_CLUSTERS,
     NAMESPACE,
     iter_objects,
     kubectl_base,
