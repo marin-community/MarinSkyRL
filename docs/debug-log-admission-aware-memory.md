@@ -51,8 +51,8 @@ GB constraints are preserved and participate in node selection.
 
 ## Hypothesis 3
 
-The first green implementation mixed cluster inspection with selection and represented node
-resources as anonymous tuples, making the joint-fit rule harder to verify and maintain.
+Separating cluster inspection from gang selection and naming resource fields makes the joint-fit
+rule explicit and independently testable.
 
 ## Changes to make
 
@@ -61,5 +61,5 @@ and automatic-request detection, and remove the command-shape assertion from the
 
 ## Results
 
-All seven review findings were addressed. The full launcher suite remains green with 131 passed and
-1 skipped, and the mechanical lint pass succeeds.
+Cluster inspection now returns a named snapshot, and the pure selection step consumes named memory
+and disk fields. The full launcher suite and mechanical lint pass remain green.

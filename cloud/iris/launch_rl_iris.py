@@ -128,7 +128,7 @@ def _parse_quantity_to_gib(q: str) -> float:
 
 @dataclass(frozen=True)
 class NodeResources:
-    """Available per-node scheduling resources in GiB."""
+    """Per-node memory and disk quantities in GiB."""
 
     memory_gib: float
     disk_gib: float
@@ -194,8 +194,8 @@ def _available_node_resources(
         node_name = metadata.get("name")
         if not isinstance(node_name, str):
             continue
-        memory_allocatable = _parse_quantity_to_gib(allocatable["memory"])
-        disk_allocatable = _parse_quantity_to_gib(allocatable["ephemeral-storage"])
+        memory_allocatable = _parse_quantity_to_gib(allocatable[MEMORY_RESOURCE])
+        disk_allocatable = _parse_quantity_to_gib(allocatable[DISK_RESOURCE])
         requested = pod_requests.get(node_name, NodeResources(memory_gib=0.0, disk_gib=0.0))
         available.append(
             NodeResources(
