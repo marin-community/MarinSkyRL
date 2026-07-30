@@ -15,9 +15,11 @@ completed, did not apply, or could not proceed.
 ## Authority
 
 Publishing the model and companion trace dataset is part of this workflow when the campaign record
-names their destinations. Registration is optional and requires campaign authorization. Deletion and
-storage reclamation require separate explicit authority and happen only after destination checks pass.
-Never invent a namespace, registry target, base model, or campaign policy.
+names their destinations. Routine ingress and egress within the selected CoreWeave job scope do not
+require confirmation for each action. Registration is optional and requires campaign authorization.
+Deletion and storage reclamation require separate explicit authority and happen only after destination
+checks pass. Large or cross-region transfers remain subject to repository policy. Never invent a
+namespace, registry target, base model, or campaign policy.
 
 ## Inputs
 

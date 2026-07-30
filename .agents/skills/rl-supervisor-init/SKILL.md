@@ -34,6 +34,8 @@ records mutable observations, actions, and pending decisions.
 - Scrutinize subagent reports against controller state and durable artifacts before acting.
 - Keep mutable job state out of recurring prompts. Make each recurrence reread the experiment
   records and current Iris state.
+- Routine ingress and egress within a selected CoreWeave job scope do not require confirmation for
+  each action. Large or cross-region transfers remain subject to repository policy.
 
 ## Supervision loop
 
@@ -63,8 +65,8 @@ records mutable observations, actions, and pending decisions.
 | Diagnose one job | `rl-job-health-deep-dive` | recommendation only; no mutation |
 | Launch agentic RL | `rl-agentic-launch-iris` | dry-run first; submit only when authorized |
 | Launch standard RL | `rl-standard-launch-iris` | dry-run first; submit only when authorized |
-| Preserve agentic output | `rl-agentic-job-cleanup` | publish/register only as its authority section permits |
-| Preserve standard output | `rl-standard-job-cleanup` | publication requires explicit authority |
+| Preserve agentic output | `rl-agentic-job-cleanup` | preservation transfers are allowed; reclamation follows cleanup authority |
+| Preserve standard output | `rl-standard-job-cleanup` | preservation transfers are allowed; reclamation follows cleanup authority |
 | Rebuild an image | hand off to an implementation role using `build-gpu-rl-image-iris` | never performed by the supervisor role |
 
 Cancellation, deletion, publication, registration, credential rotation, and database mutation each

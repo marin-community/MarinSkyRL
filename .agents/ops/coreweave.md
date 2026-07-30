@@ -103,9 +103,10 @@ may use local time.
 
 ## Images
 
-Deployed standard and Megatron image digests live in `cloud/iris/launch_rl_iris.py`. The launcher
-selects by trainer strategy. Verify the resolved digest in the launch banner and the running
-container image ID. `gpu-rl-image-build.md` owns the rebuild boundary and build procedure.
+The immutable GPU-RL image registry lives in `cloud/iris/gpu_rl_images.py`. The launcher selects an
+image from the execution cluster and trainer strategy; `--task-image` is an explicit escape hatch,
+not a routine architecture override. Verify the resolved digest in the launch banner and the
+running container image ID. `gpu-rl-image-build.md` owns the rebuild boundary and build procedure.
 
 ## Guardrails
 

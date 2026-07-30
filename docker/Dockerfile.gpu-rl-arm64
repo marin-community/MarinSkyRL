@@ -252,6 +252,10 @@ ARG OTEL_EXPORTER_VERSION
 # git tree (see the git-init step below) for provenance.
 ARG GITSHA=unknown
 
+LABEL org.opencontainers.image.source="https://github.com/marin-community/MarinSkyRL" \
+      org.opencontainers.image.revision="${GITSHA}" \
+      org.marin.harbor-commit="${HARBOR_COMMIT}"
+
 ENV DEBIAN_FRONTEND=noninteractive
 # InfiniBand / RDMA userspace (rdma-core) — REQUIRED for NCCL's built-in IB
 # transport on CoreWeave (Mellanox mlx5 HCAs). NCCL DLOPENs libibverbs.so.1 +

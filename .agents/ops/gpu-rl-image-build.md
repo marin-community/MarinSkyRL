@@ -16,8 +16,8 @@ Build standard and Megatron variants from the same committed source on each requ
 
 | host architecture | build cluster | placement | tag forms |
 |---|---|---|---|
-| amd64 | `cw-rno2a` | GPU-free request on an H100 worker | `gpu-rl-<sha>`, `gpu-rl-megatron-<sha>` |
-| arm64 | `cw-us-east-08a` | request one GB200 to force a Grace host | `gpu-rl-<sha>-arm64`, `gpu-rl-megatron-<sha>-arm64` |
+| amd64 | `cw-rno2a` | GPU-free request on an H100 worker | `gpu-rl-<full-sha>`, `gpu-rl-megatron-<full-sha>` |
+| arm64 | `cw-us-east-08a` | request one GB200 to force a Grace host | `gpu-rl-<full-sha>-arm64`, `gpu-rl-megatron-<full-sha>-arm64` |
 
 Current build resources:
 
@@ -56,7 +56,7 @@ selection mechanism.
 
 Use `WHEEL_SOURCE=wheel-builder` for arm64. On amd64, use `prebuilt-wheelhouse` only when the operator
 supplies an artifact URI and digest whose manifest matches the Dockerfile; otherwise use
-`wheel-builder`. That mode preserves the compiled wheel stage under `wheels-<sha><arch-suffix>` and
+`wheel-builder`. That mode preserves the compiled wheel stage under `wheels-<full-sha><arch-suffix>` and
 reuses the registry cache on retries.
 
 ## Submit
@@ -98,6 +98,8 @@ places the build context at `/app`.
 
 - Target clusters may lack GHCR pull secrets, so the package must support anonymous pulls.
 - Keep every compressed image layer below the current operational ceiling of approximately 8 GB.
-- Deployed standard and Megatron digests are pinned in `cloud/iris/launch_rl_iris.py`.
+- Register deployed digests, platforms, tags, and baked revisions in `cloud/iris/gpu_rl_images.py`.
+- Inspect the OCI configuration and require `org.opencontainers.image.revision` and
+  `org.marin.harbor-commit` to match the committed build inputs before registering a digest.
 
 The `build-gpu-rl-image-iris` skill owns monitoring, image validation, and deployment procedure.

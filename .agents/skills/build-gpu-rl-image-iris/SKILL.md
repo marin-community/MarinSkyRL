@@ -18,7 +18,7 @@ Before changing or submitting anything, read these files completely:
    constraints, and launch template.
 3. `docker/build_gpu_rl_kaniko.sh` for the required-variable contract and architecture selection.
 4. The selected `docker/Dockerfile.gpu-rl*` for baked dependency pins and build assertions.
-5. `cloud/iris/launch_rl_iris.py` for the deployed standard and Megatron digest pins.
+5. `cloud/iris/gpu_rl_images.py` for deployed digests, platforms, and baked provenance.
 
 The script and Dockerfiles outrank prose when they disagree. Correct stale ops documentation in the same change.
 
@@ -82,16 +82,17 @@ For every built tag:
 2. Inspect the raw manifest and verify the platform matches the intended host architecture.
 3. Verify the layer count and maximum layer size against the current operational ceiling in the ops file.
 4. Pull the manifest anonymously to confirm clusters without registry credentials can access it.
-5. Confirm the build logs contain the expected standard or Megatron assertion set and the resolved MarinSkyRL and
-   Harbor revisions.
+5. Inspect the OCI configuration and require the source-revision and Harbor-revision labels to match the committed
+   build inputs.
+6. Confirm the build logs reached the expected standard or Megatron assertion set and final push.
 
 Do not deploy-pin a tag that passes build assertions but fails platform, layer, visibility, or anonymous-access
 validation.
 
 ## Update deployment pins
 
-1. Update the standard and Megatron digest constants in `cloud/iris/launch_rl_iris.py` together for each supported
-   architecture boundary represented there.
+1. Update the standard and Megatron records in `cloud/iris/gpu_rl_images.py` together for every rebuilt
+   architecture.
 2. Keep provenance comments concise: source revision, Harbor revision, build jobs, variant relationship, and validation
    evidence. Move extended build history to the ops file.
 3. Run the launcher tests, repository lint, and required review pass.

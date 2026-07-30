@@ -16,17 +16,22 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from cloud.iris.gpu_rl_images import image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
-    DEFAULT_RL_DOCKER_IMAGE,
-    DEFAULT_RL_MEGATRON_DOCKER_IMAGE,
     create_parser,
     derive_default_job_name,
     resolve_launch_defaults,
 )
 
 
-def _cluster_config(tmp_path: Path, cpu: int = 36) -> Path:
-    path = tmp_path / "cluster.yaml"
+def _cluster_config(
+    tmp_path: Path,
+    cpu: int = 36,
+    *,
+    gpu_variant: str = "H100",
+    gpus_per_node: int = 8,
+) -> Path:
+    path = tmp_path / f"cluster-{gpu_variant.lower()}-{gpus_per_node}.yaml"
     path.write_text(
         f"""\
 storage:
@@ -36,8 +41,8 @@ scale_groups:
     resources:
       cpu: {cpu}
       device_type: gpu
-      device_variant: H100
-      device_count: 8
+      device_variant: {gpu_variant}
+      device_count: {gpus_per_node}
 """
     )
     return path
@@ -156,7 +161,7 @@ def test_megatron_config_selects_the_megatron_image(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_MEGATRON_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
 
 
 def test_non_megatron_config_selects_the_plain_image(tmp_path):
@@ -164,7 +169,7 @@ def test_non_megatron_config_selects_the_plain_image(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", "fsdp2").reference
 
 
 def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
@@ -172,7 +177,7 @@ def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", None).reference
 
 
 def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
@@ -180,7 +185,7 @@ def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == DEFAULT_RL_MEGATRON_DOCKER_IMAGE
+    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
 
 
 def test_explicit_task_image_overrides_strategy_selection(tmp_path):
@@ -189,6 +194,57 @@ def test_explicit_task_image_overrides_strategy_selection(tmp_path):
     resolve_launch_defaults(args)
 
     assert args.task_image == "ghcr.io/example/custom@sha256:abc"
+
+
+@pytest.mark.parametrize(
+    ("strategy", "digest"),
+    [
+        ("fsdp2", "sha256:36a0d327aed94d26dba411864332cc88d29bc593d769b6544719000f8174d412"),
+        ("megatron", "sha256:50a5c9584be412a0bb5657ea9c0be28d2689c5a587351ed815ef0f73fb30aac4"),
+    ],
+)
+def test_east08_selects_an_arm64_image(tmp_path, strategy, digest):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
+    args = _strategy_args(
+        tmp_path,
+        strategy,
+        [
+            "--cluster",
+            "cw-us-east-08a",
+            "--cluster-config",
+            str(cluster_config),
+            "--gpu-variant",
+            "GB200",
+            "--gpus-per-node",
+            "4",
+        ],
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image.endswith(f"@{digest}")
+
+
+def test_federated_target_cluster_controls_image_architecture(tmp_path):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
+    args = _strategy_args(
+        tmp_path,
+        "megatron",
+        [
+            "--target-cluster",
+            "cw-us-east-08a",
+            "--cluster-config",
+            str(cluster_config),
+            "--gpu-variant",
+            "GB200",
+            "--gpus-per-node",
+            "4",
+        ],
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.task_image == image_for_cluster("cw-us-east-08a", "megatron").reference
 
 
 def test_parser_rejects_removed_harbor_source_override():

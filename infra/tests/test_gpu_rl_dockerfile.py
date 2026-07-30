@@ -4,10 +4,20 @@ import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
 GPU_RL_ARM64_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl-arm64"
+
+
+@pytest.mark.parametrize("dockerfile_path", [GPU_RL_DOCKERFILE, GPU_RL_ARM64_DOCKERFILE])
+def test_runtime_image_exposes_source_and_harbor_provenance(dockerfile_path: Path) -> None:
+    dockerfile = dockerfile_path.read_text()
+
+    assert 'org.opencontainers.image.revision="${GITSHA}"' in dockerfile
+    assert 'org.marin.harbor-commit="${HARBOR_COMMIT}"' in dockerfile
 
 
 def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
