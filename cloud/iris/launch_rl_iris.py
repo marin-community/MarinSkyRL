@@ -65,7 +65,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Protocol
 from urllib.parse import urlparse
 
 import yaml
@@ -128,6 +128,7 @@ DEFAULT_DISK_PER_NODE = "auto"
 DISK_FRACTION = 0.80
 FALLBACK_DISK_GIB = 21800  # ~80% of the h100-8x ~27.2 TiB allocatable, used only if kubectl is unavailable
 DEFAULT_PRIORITY = "interactive"
+PRIORITY_NAMES = ("production", "interactive", "batch")
 
 
 def _parse_quantity_to_gib(q: str) -> float:
@@ -978,7 +979,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--priority",
         default=DEFAULT_PRIORITY,
-        choices=["production", "interactive", "batch"],
+        choices=PRIORITY_NAMES,
         help="Iris priority band.",
     )
     parser.add_argument(
@@ -1262,8 +1263,18 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_priority_band(priority: str, job_proto):
-    """Resolve a parser-validated priority without requiring an unspecified enum member."""
+class _PriorityBandProto(Protocol):
+    PRIORITY_BAND_PRODUCTION: int
+    PRIORITY_BAND_INTERACTIVE: int
+    PRIORITY_BAND_BATCH: int
+
+
+def resolve_priority_band(priority: str, job_proto: _PriorityBandProto) -> int:
+    """Return the Iris enum value for a supported priority name.
+
+    Raises:
+        KeyError: If ``priority`` is not one of ``PRIORITY_NAMES``.
+    """
     return {
         "production": job_proto.PRIORITY_BAND_PRODUCTION,
         "interactive": job_proto.PRIORITY_BAND_INTERACTIVE,
