@@ -14,23 +14,42 @@ of every session.
 
 ## Role boundary
 
-- Do not create worktrees or edit repository source, configuration, skills, or ops documents.
+- Do not create worktrees or edit repository source, configuration, or skills. You may update the
+  selected experiments' mutable STATE.md operations records, but must not commit those edits.
 - Do not commit, push, open or update a PR, merge code, or implement a recommended fix.
+- Load credentials only through approved secret mechanisms; never print or persist their values.
 - You may inspect repository state and operate Iris jobs only within the authority granted by the
   user or campaign policy.
 - Hand source and configuration defects to an implementation role with evidence, expected behavior,
   affected component, and a proposed regression test.
 - Never patch a live pod or remote checkout.
+- Never edit a POLICY.md document without direct user authorization.
+- Treat each experiment's STATE.md as its mutable operations record. Update it within the selected
+  scope and remove stale information as soon as it is discovered.
+- Scrutinize subagent reports against controller state and durable artifacts before acting.
+- Keep mutable job state out of recurring prompts. Make each recurrence reread the experiment
+  records and current Iris state.
 
-## Establish the operating state
+## Initialization
 
-1. Confirm the local source revision and whether the checkout is clean. Treat it as evidence, not an
-   editable workspace.
-2. Read the selected RL configuration and current launcher help. Resolve defaults dynamically.
-3. Load credentials only through approved secret mechanisms; never print or persist their values.
-4. Query the requested jobs and classify each as starting, productive, stalled, terminal, or
-   indeterminate from controller state and durable artifacts.
-5. Classify agentic versus standard RL from resolved configuration, not job names.
+1. Discover the repository root and read the relevant `.agents/ops/` runbooks.
+2. Use an explicit experiment list when provided. Otherwise discover active RL experiment records
+   through the current operations conventions. Read each selected POLICY.md before acting.
+3. Run `scripts/iris/watch_coreweave_rl.py` for the initial survey. If recurring execution is
+   available, schedule a three-hour survey that links the selected experiment records and rereads
+   them on every recurrence.
+4. Incorporate user decisions received since the prior survey into each experiment's STATE.md.
+5. Diagnose every suspect job with a separate `rl-job-health-deep-dive` subagent. Wait for all
+   reports, check them against current evidence, and monitor stalled probes at a bounded interval.
+6. Update each STATE.md with every job's status, evidence, and unresolved decision.
+7. Separate proposed actions into:
+   - escalation actions outside the supervisor's authority;
+   - management actions explicitly authorized by the user or experiment POLICY.md.
+8. Record each escalation in the configured operations log location with evidence and recommended
+   next steps.
+9. Execute authorized management actions in this order: KILL, CLEANUP, then LAUNCH. Update STATE.md
+   after each action.
+10. Report the completed sweep and identify decisions that still require the user.
 
 ## Dispatch and authority
 
@@ -46,27 +65,3 @@ of every session.
 Cancellation, deletion, publication, registration, credential rotation, and database mutation each
 require explicit authority unless the campaign record grants that exact action. Capture evidence
 that disappears at termination before any authorized stop.
-
-## Recurring supervision
-
-A recurring prompt must be self-contained or name the live records it rereads. Include:
-
-1. job scope and exact operational authority;
-2. campaign policy and state records as the source of mutable parameters;
-3. inventory query and state interpretation;
-4. terminal-job preservation before live-job diagnosis;
-5. per-job probes and previously declared flip conditions;
-6. launch gates and refill policy;
-7. escalation and evidence-preservation rules;
-8. reporting destination and a termination condition;
-9. a stable-path status artifact when the campaign needs a dashboard.
-
-Do not inline mutable quotas, thresholds, run identifiers, image revisions, or current capacity in a
-durable prompt when a campaign record can own them.
-
-## Handoff
-
-Record observed job identifiers, source revisions, resolved configurations, artifact locations,
-evidence links, actions taken, and pending decisions in the campaign record. For every recommended
-code/configuration change, state that an implementation agent must reproduce, test, review, and land
-it through the repository workflow.

@@ -78,8 +78,20 @@ CLUSTERS = {
         object_endpoint="https://cwobject.com",
     ),
     "cw-us-east-02a": ClusterConfig(
+        # ``marin-gpu_US-EAST-02A`` is maintained in the shared Iris
+        # kubeconfig.  The old GPU-only kubeconfig does not carry that
+        # context, which made every cw-us diagnostic fail before it queried a
+        # pod.
         kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
-        context=None,
+        context="marin-gpu_US-EAST-02A",
+        object_endpoint="https://cwobject.com",
+    ),
+    "cw-us-east-08a": ClusterConfig(
+        # East-08a is the CoreWeave Blackwell (B200/GB200) fleet.  It shares
+        # the Iris kubeconfig and CoreWeave object-store endpoint with the
+        # H100 clusters, but requires its own Kubernetes context.
+        kubeconfig=Path("/Users/benjaminfeuer/.kube/coreweave-iris"),
+        context="marin-us-east-08a_US-EAST-08A",
         object_endpoint="https://cwobject.com",
     ),
 }
@@ -172,6 +184,19 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
             or pod.get("metadata", {}).get("labels", {}).get("iris.job_id") == labeled_job_id
         )
     )
+    # Iris stores the canonical job id in ``iris.job_id``, but Kubernetes label
+    # values are capped at 63 characters.  Long datagen names therefore lose
+    # their suffix in both that label and the pod name.  Fall back to a prefix
+    # match only when exact matching found nothing; keeping the ambiguity check
+    # below prevents a root job from being confused with one of its child jobs.
+    if not candidates:
+        truncated_label = labeled_job_id[:63]
+        candidates = sorted(
+            pod["metadata"]["name"]
+            for pod in pods
+            if pod.get("status", {}).get("phase") == "Running"
+            and pod.get("metadata", {}).get("labels", {}).get("iris.job_id", "").startswith(truncated_label)
+        )
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:

@@ -50,7 +50,7 @@ jobs:
       - name: Run iris launcher tests
         run: |
           uv run --no-project \
-            --with pytest --with pyyaml --with fsspec --with huggingface_hub --with universal-pathlib \
+            --with pytest --with pyyaml --with fsspec --with huggingface_hub --with universal-pathlib --with boto3 \
             pytest cloud/iris/tests/ -q
 
   skyrl_train_tests:

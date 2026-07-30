@@ -12,9 +12,9 @@ full trace sync. The sync still skips non-log objects larger than the configured
 size bound; that rule avoids repeatedly downloading giant rollout payloads while
 preserving any diagnostic log regardless of size.
 
-By default the scope is the current lab user's active RL jobs on both
-CoreWeave GPU clusters.  Use ``--all-users`` only when cross-user monitoring is
-intended.
+By default the scope is the current lab user's active RL jobs on every
+configured CoreWeave GPU cluster, including the east-08a B200 fleet. Use
+``--all-users`` only when cross-user monitoring is intended.
 """
 
 from __future__ import annotations
