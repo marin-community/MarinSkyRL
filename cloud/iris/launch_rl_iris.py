@@ -23,17 +23,12 @@ and lib/iris/src/iris/cli/job.py):
   - ``--replicas N`` (the `--help` text: "Number of tasks for gang scheduling")
     requests N such tasks.
   - For GPUs with replicas>1, ``resolve_multinode_defaults`` returns
-    ``CoschedulingConfig(group_by="leafgroup")`` — the H100/InfiniBand
-    colocation level — so all N replicas are co-scheduled together on the same
-    IB leaf fabric, all-or-nothing.
-  - The cw-us-east-02a cluster config enables **Kueue gang admission**
-    (``kueue.cluster_queue: iris-cq``, ``host_network: true`` for NCCL/IB), so
-    the N-task gang is admitted atomically: either all N whole nodes are
-    granted or the job queues — true exclusive, co-scheduled multi-node.
+    ``CoschedulingConfig(group_by="leafgroup")`` so all N replicas are
+    co-scheduled on the selected cluster's GPU fabric, all-or-nothing.
 
-So this launcher requests ``--num-nodes N`` whole H100x8 nodes EXCLUSIVELY: one
-iris task per node (``replicas=N``), each holding all 8 GPUs of its node (no
-co-tenants), coscheduled by leafgroup. The RL topology (one cross-node Ray
+This launcher requests ``--num-nodes N`` whole GPU nodes exclusively: one Iris
+task per node (``replicas=N``), holding the selected node shape's GPUs with no
+co-tenants. The RL topology (one cross-node Ray
 cluster, NCCL over IB) is wired by an in-container controller
 (``cloud/iris/start_rl_iris_controller.py``): rank 0 starts the Ray head and
 publishes its IP to a shared rendezvous; ranks 1..N-1 join; then rank 0 runs the
@@ -74,40 +69,13 @@ from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.gpu_rl_images import image_for_cluster
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 
-# Defaults for the CoreWeave H100 GPU cluster.
+# Default cluster and GPU shape. Memory and disk requests are resolved from the
+# selected cluster's live nodes after CLI parsing.
 DEFAULT_CLUSTER = "cw-us-east-02a"
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
-# These H100 nodes are requested WHOLE-NODE-EXCLUSIVE (no co-tenants) — so request ALL the
-# node's allocatable resources; don't under-request (wasted capacity + a too-low --memory
-# caused a container-cgroup OOM at FSDP weight-load on the 30B run). Node allocatable ≈ 128
-# CPU / ~2014 GiB mem / 8 GPU.
-#   - CPU 48 (NOT 64): ~64-68 of the 128 cores are persistent daemonset reservation, so a
-#     request >~60 FAILS the single-IB-leaf gang admission (observed: 64 unplaceable, 48 admits).
-#   - MEMORY 1700GB (≈1583 GiB cgroup) — RAISED from 1400GB on 2026-07-11 because 1400 was
-#     UNDER-allocating. It must clear TWO opposing footguns:
-#     (a) too LOW → container-cgroup OOM at the training forward. The old 512GB OOM'd at FSDP
-#         weight-load; and 1400GB (≈1303 GiB cgroup) sits RIGHT AT the ~1303 GiB forward peak
-#         at 8 ranks/node (the 80B cp1 128-GPU EP8×FSDP8 geometry) — the r2 rankspread run
-#         measured a 1028 GiB forward peak at only 4 ranks/node (2026-07-11 diagnosis), so at
-#         8 ranks/node the peak clears 1400's cgroup → no headroom = OOM risk; and
-#     (b) too HIGH (1800GB ≈ 1676 GiB) → sits so close to node-allocatable (~2014 GiB) that
-#         after daemonset/persistent-reservation overhead a leafgroup gang (all-or-nothing,
-#         one IB leaf) can't fit all pods → Kueue SchedulingGated stall (cost multiple
-#         60-120min stalls overnight 2026-06-26, on a 1-GPU probe AND 8-node gangs).
-#     1700GB fits with headroom (≈1583 GiB < 2014 GiB allocatable) AND clears the forward
-#     peak. Lower toward the real need on an admission stall; do NOT raise toward 1800.
-#     (1000-1200GB suffices for 2-node smokes.) See .claude/ops/iris/coreweave_gpu_ops.md.
-#   - DISK defaults to "auto" = 80% of the node's live allocatable ephemeral-storage (~27.2 TiB
-#     → ~21 TiB). WHY NOT the old 512GB: the long MoE training step's Ray object store spills to
-#     /tmp (a metered emptyDir that counts against the --disk ephemeral-storage limit), growing
-#     to >1.6 TB and EVICTING the pod (2026-06-28). Whole-node-exclusive gangs have NO co-tenants,
-#     so reserving disk is pure waste — claim ~80%. (R2 object-spilling, the durable fix, is also
-#     on; this headroom is belt-and-suspenders.) Pass --disk explicitly to override.
-# A whole H100 node exposes 128 CPUs in the Iris cluster configuration, but the
-# CoreWeave scheduler leaves daemonset headroom. Requests above 48 have proven
-# unplaceable, so use the cluster's advertised capacity only to reduce this
-# safe ceiling for smaller future node types.
+# Whole-node jobs retain 20% of live allocatable RAM and disk for kubelet,
+# daemonsets, and filesystem overhead. CPU keeps a separate scheduling cap.
 MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
@@ -121,12 +89,9 @@ DAYTONA_RL_SECRET_VERSION = "1"
 DAYTONA_RL_SNAPSHOT_QUOTA = 40
 HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
 STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
-DEFAULT_MEMORY_PER_NODE = "1700GB"
-# --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
-# (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
+DEFAULT_MEMORY_PER_NODE = "auto"
 DEFAULT_DISK_PER_NODE = "auto"
-DISK_FRACTION = 0.80
-FALLBACK_DISK_GIB = 21800  # ~80% of the h100-8x ~27.2 TiB allocatable, used only if kubectl is unavailable
+NODE_RESOURCE_FRACTION = 0.80
 DEFAULT_PRIORITY = "interactive"
 PRIORITY_NAMES = ("production", "interactive", "batch")
 
@@ -143,22 +108,37 @@ def _parse_quantity_to_gib(q: str) -> float:
     return float(q) / 2**30  # plain bytes
 
 
-def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
-    """``fraction`` of the GPU node's LIVE allocatable ephemeral-storage, as a ``"<N>Gi"`` string.
+def resolve_node_resource_defaults(
+    cluster_config_path: str | Path,
+    *,
+    gpus_per_node: int,
+    fraction: float = NODE_RESOURCE_FRACTION,
+) -> tuple[str, str]:
+    """Return safe memory and disk requests for the selected cluster's GPU nodes."""
+    cluster_config = _load_cluster_config(str(cluster_config_path))
+    platform = cluster_config.get("platform")
+    coreweave = platform.get("coreweave") if isinstance(platform, dict) else None
+    kubeconfig = coreweave.get("kubeconfig_path") if isinstance(coreweave, dict) else None
+    context = coreweave.get("kube_context") if isinstance(coreweave, dict) else None
+    if not isinstance(kubeconfig, str) or not isinstance(context, str):
+        raise SystemExit(
+            "The selected cluster config needs platform.coreweave.kubeconfig_path and kube_context "
+            "to derive automatic memory and disk requests; pass both explicitly."
+        )
 
-    Whole-node-exclusive gangs have no co-tenants, so claim most of the node NVMe (the old fixed
-    512GB default evicted long MoE steps once Ray's object store spilled to the metered /tmp).
-    Queries kubectl for the MIN allocatable across 8-GPU nodes (never over-request a smaller node);
-    falls back to FALLBACK_DISK_GIB if kubectl is unavailable (requires KUBECONFIG)."""
     try:
         out = subprocess.run(
             [
                 "kubectl",
+                "--kubeconfig",
+                str(Path(kubeconfig).expanduser()),
+                "--context",
+                context,
                 "get",
                 "nodes",
                 "-o",
                 r'jsonpath={range .items[*]}{.status.capacity.nvidia\.com/gpu}{" "}'
-                r'{.status.allocatable.ephemeral-storage}{"\n"}{end}',
+                r'{.status.allocatable.memory}{" "}{.status.allocatable.ephemeral-storage}{"\n"}{end}',
             ],
             capture_output=True,
             text=True,
@@ -166,29 +146,29 @@ def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
             check=True,
         ).stdout
         allocs = [
-            _parse_quantity_to_gib(p[1])
-            for p in (line.split() for line in out.splitlines())
-            if len(p) == 2 and p[0] == "8"
+            (_parse_quantity_to_gib(parts[1]), _parse_quantity_to_gib(parts[2]))
+            for parts in (line.split() for line in out.splitlines())
+            if len(parts) == 3 and parts[0] == str(gpus_per_node)
         ]
-        if allocs:
-            gib = int(min(allocs) * fraction)
-            print(
-                f"[rl-iris] --disk auto: {fraction:.0%} of node allocatable "
-                f"(min {min(allocs):.0f}GiB across {len(allocs)} GPU nodes) = {gib}Gi",
-                flush=True,
-            )
-            return f"{gib}Gi"
-        print(
-            f"[rl-iris] --disk auto: no 8-GPU nodes returned by kubectl; using fallback {FALLBACK_DISK_GIB}Gi",
-            flush=True,
+    except Exception as exc:  # noqa: BLE001 - convert cluster/tool failures into launch guidance
+        raise SystemExit(
+            f"Could not inspect {gpus_per_node}-GPU nodes in kube context {context!r}: {exc}. "
+            "Pass explicit --memory and --disk values."
+        ) from exc
+    if not allocs:
+        raise SystemExit(
+            f"No {gpus_per_node}-GPU nodes were returned by kube context {context!r}; "
+            "pass explicit --memory and --disk values."
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort; fall back rather than block a launch
-        print(
-            f"[rl-iris] --disk auto: kubectl node query failed ({type(exc).__name__}: {exc}); "
-            f"using fallback {FALLBACK_DISK_GIB}Gi",
-            flush=True,
-        )
-    return f"{FALLBACK_DISK_GIB}Gi"
+
+    memory_gib = int(min(memory for memory, _ in allocs) * fraction)
+    disk_gib = int(min(disk for _, disk in allocs) * fraction)
+    print(
+        f"[rl-iris] automatic node resources: {fraction:.0%} of minimum live allocatable "
+        f"across {len(allocs)} matching nodes = memory {memory_gib}Gi, disk {disk_gib}Gi",
+        flush=True,
+    )
+    return f"{memory_gib}Gi", f"{disk_gib}Gi"
 
 
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
@@ -858,8 +838,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="num_nodes",
         type=int,
         default=1,
-        help="Number of WHOLE H100 nodes to request EXCLUSIVELY, gang/co-scheduled "
-        "(one iris task per node, all 8 GPUs each, coscheduled by leafgroup/IB).",
+        help="Number of whole GPU nodes to request exclusively and co-schedule as one gang.",
     )
     parser.add_argument(
         "--gpus-per-node",
@@ -867,7 +846,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="gpus_per_node",
         type=int,
         default=DEFAULT_GPUS_PER_NODE,
-        help="GPUs per node (CoreWeave nodes are 8x H100).",
+        help="GPUs per node. Must match a GPU scale group in the selected cluster config.",
     )
     parser.add_argument(
         "--gpu-variant",
@@ -886,12 +865,13 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--memory",
         default=DEFAULT_MEMORY_PER_NODE,
-        help="Memory per node.",
+        help=f"Memory per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected "
+        "GPU node shape's minimum live allocatable memory.",
     )
     parser.add_argument(
         "--disk",
         default=DEFAULT_DISK_PER_NODE,
-        help=f"Ephemeral disk per node. Default 'auto' = {int(DISK_FRACTION * 100)}%% of the GPU "
+        help=f"Ephemeral disk per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected GPU "
         "node's live allocatable ephemeral-storage (whole-node-exclusive gangs have no "
         "co-tenants, so claim most of the node NVMe — keeps Ray object-spill / checkpoints "
         "clear of the ephemeral-storage eviction). Pass an explicit value (e.g. 4000GB) to override.",
@@ -1799,14 +1779,20 @@ def main() -> int:
 
     command = build_task_command(args)
 
-    # Per-task resources: a WHOLE node (8 H100 + IB), one task per node.
+    # Per-task resources: one whole selected GPU node per task.
     gpu_spec = f"{args.gpu_variant}x{args.gpus_per_node}"
 
-    # Resolve the "auto" disk default to ~80% of the node's live allocatable ephemeral-storage.
-    # (Whole-node-exclusive gangs have no co-tenants → reserving disk is wasted; a too-low fixed
-    # default evicted long MoE steps once Ray spilled to the metered /tmp. See _resolve_default_disk.)
-    if str(args.disk).strip().lower() == "auto":
-        args.disk = _resolve_default_disk()
+    automatic_memory = str(args.memory).strip().lower() == "auto"
+    automatic_disk = str(args.disk).strip().lower() == "auto"
+    if automatic_memory or automatic_disk:
+        default_memory, default_disk = resolve_node_resource_defaults(
+            args.cluster_config,
+            gpus_per_node=args.gpus_per_node,
+        )
+        if automatic_memory:
+            args.memory = default_memory
+        if automatic_disk:
+            args.disk = default_disk
 
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
     print(f"[rl-iris] Job:        /{user}/{args.job_name}", flush=True)

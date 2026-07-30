@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noq
 from cloud.iris.launch_rl_iris import (  # noqa: E402
     create_parser,
     derive_default_job_name,
+    resolve_node_resource_defaults,
     resolve_launch_defaults,
 )
 
@@ -34,6 +36,10 @@ def _cluster_config(
     path = tmp_path / f"cluster-{gpu_variant.lower()}-{gpus_per_node}.yaml"
     path.write_text(
         f"""\
+platform:
+  coreweave:
+    kubeconfig_path: ~/.kube/coreweave-test
+    kube_context: context-{gpu_variant.lower()}
 storage:
   remote_state_dir: s3://example-bucket/iris/example-cluster/state
 scale_groups:
@@ -46,6 +52,36 @@ scale_groups:
 """
     )
     return path
+
+
+def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, monkeypatch):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(stdout="8 2111575172Ki 29186021264636\n4 1001863488Ki 14591185743078\n")
+
+    monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
+
+    memory, disk = resolve_node_resource_defaults(cluster_config, gpus_per_node=4)
+
+    assert memory == "764Gi"
+    assert disk == "10871Gi"
+    assert commands == [
+        [
+            "kubectl",
+            "--kubeconfig",
+            str(Path("~/.kube/coreweave-test").expanduser()),
+            "--context",
+            "context-gb200",
+            "get",
+            "nodes",
+            "-o",
+            'jsonpath={range .items[*]}{.status.capacity.nvidia\\.com/gpu}{" "}'
+            '{.status.allocatable.memory}{" "}{.status.allocatable.ephemeral-storage}{"\\n"}{end}',
+        ]
+    ]
 
 
 def _rl_config(tmp_path: Path, harness: str) -> Path:
@@ -134,6 +170,8 @@ def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
 
     assert args.task_image is None
     assert args.max_retries == 6
+    assert args.memory == "auto"
+    assert args.disk == "auto"
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
