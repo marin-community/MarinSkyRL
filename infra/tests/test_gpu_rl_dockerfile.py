@@ -16,7 +16,7 @@ GPU_RL_DOCKERFILES = (
 )
 
 
-@pytest.mark.parametrize("dockerfile_path", [GPU_RL_DOCKERFILE, GPU_RL_ARM64_DOCKERFILE])
+@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
 def test_runtime_image_exposes_source_and_harbor_provenance(dockerfile_path: Path) -> None:
     dockerfile = dockerfile_path.read_text()
 
