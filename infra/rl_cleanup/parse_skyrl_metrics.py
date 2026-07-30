@@ -198,6 +198,69 @@ def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
     return metrics_list
 
 
+def _checkpoint_rewards(metrics: list[dict[str, Any]]) -> dict[int, float]:
+    rewards: dict[int, float] = {}
+    for metric in metrics:
+        step = metric.get("trainer/global_step")
+        reward = metric.get("reward/avg_raw_reward")
+        if step is None or reward is None:
+            continue
+        try:
+            normalized_step = int(step)
+            normalized_reward = float(reward)
+        except (ValueError, TypeError):
+            continue
+        rewards.setdefault(normalized_step, normalized_reward)
+    return rewards
+
+
+def _trailing_five_ema(rewards: dict[int, float]) -> dict[int, float]:
+    alpha = 1 / 3
+    ema: dict[int, float] = {}
+    previous = rewards[min(rewards)]
+    for step in sorted(rewards):
+        previous = alpha * rewards[step] + (1 - alpha) * previous
+        ema[step] = previous
+    return ema
+
+
+def _checkpoint_inventory(run_dir: Path | None) -> tuple[list[int], int | None]:
+    if run_dir is None:
+        return [], None
+
+    available: list[int] = []
+    exports_dir = run_dir / "exports"
+    if exports_dir.is_dir():
+        for child in exports_dir.iterdir():
+            match = re.match(r"global_step_(\d+)$", child.name)
+            if match and child.is_dir():
+                available.append(int(match.group(1)))
+        available.sort()
+
+    cap_step: int | None = None
+    cap_file = run_dir / "latest_ckpt_global_step.txt"
+    if cap_file.is_file():
+        try:
+            cap_step = int(cap_file.read_text().strip())
+        except (ValueError, OSError):
+            pass
+    return available, cap_step
+
+
+def _eligible_checkpoint_steps(
+    ema: dict[int, float], available: list[int], cap_step: int | None, save_every: int
+) -> list[int]:
+    candidates = available if available else sorted(ema)
+    return [
+        step
+        for step in candidates
+        if step in ema
+        and step % save_every == 0
+        and step >= 2 * save_every
+        and (cap_step is None or step <= cap_step)
+    ]
+
+
 def select_best_checkpoint(
     metrics: list[dict[str, Any]],
     run_dir: Path | None = None,
@@ -218,61 +281,13 @@ def select_best_checkpoint(
 
     Returns the chosen step, EMA table, eligibility information, and diagnostics.
     """
-    rewards: dict[int, float] = {}  # step -> avg_raw_reward (first-seen wins)
-    for metric in metrics:
-        step = metric.get("trainer/global_step")
-        reward = metric.get("reward/avg_raw_reward")
-        if step is None or reward is None:
-            continue
-        try:
-            step = int(step)
-            reward = float(reward)
-        except (ValueError, TypeError):
-            continue
-        rewards.setdefault(step, reward)  # first-seen wins (chain links may overlap)
-
+    rewards = _checkpoint_rewards(metrics)
     if not rewards:
-        return CheckpointSelection(rewards, {}, None, [], None, [], "No reward lines parsed from any .out")
+        return CheckpointSelection(rewards, {}, None, [], None, [], "No rewards found in parsed metrics")
 
-    steps = sorted(rewards)
-    alpha = 1 / 3
-    ema: dict[int, float] = {}
-    prev = rewards[steps[0]]
-    for s in steps:
-        prev = alpha * rewards[s] + (1 - alpha) * prev
-        ema[s] = prev
-    available: list[int] = []
-    cap_step: int | None = None
-    if run_dir is not None:
-        exports_dir = run_dir / "exports"
-        if exports_dir.is_dir():
-            for child in exports_dir.iterdir():
-                m = re.match(r"global_step_(\d+)$", child.name)
-                if m and child.is_dir():
-                    available.append(int(m.group(1)))
-            available.sort()
-        cap_file = run_dir / "latest_ckpt_global_step.txt"
-        if cap_file.is_file():
-            try:
-                cap_step = int(cap_file.read_text().strip())
-            except (ValueError, OSError):
-                cap_step = None
-
-    # Eligible = saved-aligned (multiple of save_every, excluding the first save),
-    # present in the available exports set (if known), and <= cap_step (if known).
-    def is_eligible(s: int) -> bool:
-        if s % save_every != 0 or s < 2 * save_every:
-            return False
-        if cap_step is not None and s > cap_step:
-            return False
-        if available and s not in available:
-            return False
-        return True
-
-    # If we have an explicit exports set, prefer iterating that (a ckpt exists on disk);
-    # otherwise fall back to the EMA steps (selector still reports a recommendation).
-    candidate_steps = available if available else steps
-    eligible = [s for s in candidate_steps if is_eligible(s) and s in ema]
+    ema = _trailing_five_ema(rewards)
+    available, cap_step = _checkpoint_inventory(run_dir)
+    eligible = _eligible_checkpoint_steps(ema, available, cap_step, save_every)
 
     if not eligible:
         reason = (

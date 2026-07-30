@@ -147,6 +147,6 @@ def test_unresolvable_returns_none(tmp_path):
 def test_east08_uses_the_shared_coreweave_kubeconfig():
     assert srl.BUCKET == "marin-us-east-02a"
     assert srl.ENDPOINT == "https://cwobject.com"
-    assert srl.EAST_KUBECONFIG.endswith("coreweave-iris")
+    assert srl.COREWEAVE_KUBECONFIG_PATH.endswith("coreweave-iris")
     assert srl.RAY_SUBDIR == "ray_session_logs"
     assert srl.KCFG["cw-us-east-08a"] == srl.COREWEAVE_KUBECONFIG

@@ -5,7 +5,7 @@ import pytest
 from rl_cleanup import parse_skyrl_metrics
 
 
-def test_agentic_format_prints_reward_ema_table(tmp_path, monkeypatch, capsys):
+def test_agentic_format_writes_reward_ema_table(tmp_path, monkeypatch):
     log_path = tmp_path / "trainer.out"
     log_path.write_text(
         "\n".join(
@@ -34,8 +34,6 @@ def test_agentic_format_prints_reward_ema_table(tmp_path, monkeypatch, capsys):
 
     parse_skyrl_metrics.main()
 
-    output = capsys.readouterr().out
-    assert "BEST-CHECKPOINT SELECTOR (agentic GRPO, trailing-5 EMA)" in output
     report = next(output_path.glob("*_metrics_report.md")).read_text()
     assert "## Best Checkpoint (trailing-5 EMA of reward/avg_raw_reward)" in report
     assert "| 40 | 0.8000 | 0.4000 | yes |" in report

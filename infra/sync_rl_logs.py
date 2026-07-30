@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
 ENDPOINT = "https://cwobject.com"
 COREWEAVE_KUBECONFIG = "~/.kube/coreweave-iris"
-EAST_KUBECONFIG = os.path.expanduser(COREWEAVE_KUBECONFIG)  # holds iris-task-env + the bucket
+COREWEAVE_KUBECONFIG_PATH = os.path.expanduser(COREWEAVE_KUBECONFIG)  # holds iris-task-env + the bucket
 KCFG = dict.fromkeys(("cw-rno2a", "cw-us-east-02a", "cw-us-east-08a"), COREWEAVE_KUBECONFIG)
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 IRIS_CANDIDATES = [
@@ -79,8 +79,8 @@ def s3client():
     return boto3.client(
         "s3",
         endpoint_url=ENDPOINT,
-        aws_access_key_id=_secret("AWS_ACCESS_KEY_ID", EAST_KUBECONFIG),
-        aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY", EAST_KUBECONFIG),
+        aws_access_key_id=_secret("AWS_ACCESS_KEY_ID", COREWEAVE_KUBECONFIG_PATH),
+        aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY", COREWEAVE_KUBECONFIG_PATH),
         config=Config(s3={"addressing_style": "virtual"}, max_pool_connections=32),
     )
 
