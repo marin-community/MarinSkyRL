@@ -9,6 +9,12 @@ from pathlib import Path
 
 from harbor.utils.artifact_writer import ArtifactWriter
 
+UPLOAD_TIMEOUT = 0.05
+VALIDATION_TIMEOUT = 2.0
+# The fake object-store stall must outlive the validation bound so only Harbor's
+# upload deadline can free the worker in time for the follow-up write.
+OBJECT_STORE_STALL_TIMEOUT = 30.0
+
 
 class StalledCloudDestination:
     protocol = "s3"
@@ -23,7 +29,7 @@ class StalledCloudDestination:
 
     @contextmanager
     def open(self, mode: str):
-        self.release.wait(timeout=30)
+        self.release.wait(timeout=OBJECT_STORE_STALL_TIMEOUT)
         try:
             with self.uploaded_path.open(mode) as destination:
                 yield destination
@@ -42,7 +48,7 @@ def main() -> None:
             "spool_dir": root / "spool",
         }
         if "upload_timeout" in inspect.signature(ArtifactWriter).parameters:
-            writer_kwargs["upload_timeout"] = 0.05
+            writer_kwargs["upload_timeout"] = UPLOAD_TIMEOUT
         writer = ArtifactWriter(**writer_kwargs)
 
         stalled = writer.submit(
@@ -54,11 +60,11 @@ def main() -> None:
         followup = writer.submit(followup_path, lambda: "ok", description="follow-up write")
 
         try:
-            failed = writer.flush(timeout=2)
+            failed = writer.flush(timeout=VALIDATION_TIMEOUT)
         finally:
             release.set()
-            upload_finished.wait(timeout=2)
-            concurrent.futures.wait((stalled,), timeout=2)
+            upload_finished.wait(timeout=VALIDATION_TIMEOUT)
+            concurrent.futures.wait((stalled,), timeout=VALIDATION_TIMEOUT)
 
         assert failed == 1
         assert isinstance(stalled.exception(), TimeoutError)
