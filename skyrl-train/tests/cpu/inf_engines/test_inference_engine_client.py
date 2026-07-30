@@ -984,6 +984,44 @@ class _MockStreamEngine:
         yield "data: [DONE]\n\n"
 
 
+class _MockWeightSyncEngine:
+    def __init__(self):
+        self.scheduler_paused = False
+        self.outstanding_requests = 388
+        self.reloads = 0
+
+    async def pause_generation(self):
+        self.scheduler_paused = True
+        self.outstanding_requests = 0
+
+    async def update_named_weights(self, **_request):
+        if not self.scheduler_paused or self.outstanding_requests:
+            raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
+        self.reloads += 1
+
+    async def resume_generation(self):
+        self.scheduler_paused = False
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeypatch):
+    engine = _MockWeightSyncEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
+    )
+
+    await client.pause_generation()
+    await client.update_named_weights(request={"names": ["model.weight"]})
+
+    assert engine.scheduler_paused
+    assert engine.outstanding_requests == 0
+    assert engine.reloads == 1
+
+    await client.resume_generation()
+    assert not engine.scheduler_paused
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_stream_not_paused_passes_through():
     """When generation is not paused, the streaming path reaches the engine
@@ -1006,7 +1044,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
 
     A NEW stream must not reach the engine while generation is paused for a weight
     sync — otherwise it would register a fresh request in the vLLM scheduler during
-    the pause -> reload -> resume window (after abort_generation drained the engine)
+    the pause -> reload -> resume window (after the scheduler pause drained the engine)
     and the next engine step would run a forward pass against meta-device params.
     The streaming path must honor the same ``generation_paused_event`` barrier the
     non-streaming retry loop uses. Once resumed, the stream proceeds normally.
@@ -1015,7 +1053,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
     # Simulate a weight-sync pause directly (bypass pause_generation()'s 5s grace +
-    # abort_generation() fan-out, which are not needed to exercise the barrier).
+    # engine scheduler fan-out, which is not needed to exercise the barrier).
     client.generation_paused_event.set()
 
     payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}

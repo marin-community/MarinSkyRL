@@ -597,14 +597,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         Uses the same session-based routing as ``chat_completion``. Unlike the
         non-streaming retry loop, an in-flight stream cannot be paused/resumed
         mid-generation (there is no per-turn boundary to re-issue from); instead the
-        engine's ``abort_generation`` drains any in-flight stream to idle at the
+        engine's ``pause_generation`` drains any in-flight stream to idle at the
         weight-sync boundary.
 
         We must, however, honor the SAME pause barrier the non-streaming path uses
         (``_wait_for_generation_to_resume``): a NEW stream must not START while
         generation is paused for a weight sync. Otherwise it would register a fresh
         request in the vLLM scheduler during the pause -> reload -> resume window (i.e.
-        AFTER ``abort_generation`` has already drained the engine to idle), and the next
+        AFTER ``pause_generation`` has already drained the engine to idle), and the next
         engine step would run a forward pass (``reshape_and_cache_flash``) against params
         that the layerwise weight reload has moved onto the ``meta`` device ->
         ``EngineDeadError``. This is the streaming analog of the barrier at the top of
@@ -614,7 +614,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # entering the engine while a weight-sync pause is in effect. Placed before
         # routing / _inc_inflight so a blocked stream holds no engine slot and does not
         # touch the engine until resume. Together with pause_generation()'s
-        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + abort_generation()'s
+        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + the engine scheduler pause's
         # drain-to-idle loop, this keeps the engine request-idle across the reload, so no
         # forward pass runs against meta-device params.
         await self._wait_for_generation_to_resume()
@@ -1011,7 +1011,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         2. Wait for a grace period to ensure all in-flight requests have entered the engine's
            scheduler and hence can be aborted. Otherwise, there can be requests already submitted
            but not yet entered the scheduler, which can miss the abort request.
-        3. Finally, we abort requests on all engines. This will cause the requests sent from
+        3. Finally, pause each engine scheduler in abort mode. This causes requests sent from
            InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens.
            The request to `InferenceEngineClient` will not yet return until requests are completed with
            stop reason that is not `abort`.
@@ -1020,7 +1020,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("Generation is already paused, cannot pause again.")
         self.generation_paused_event.set()
         await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
-        await self._run_on_all_engines("abort_generation")
+        await self._run_on_all_engines("pause_generation")
 
     async def resume_generation(self) -> None:
         """
@@ -1031,13 +1031,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
+        await self._run_on_all_engines("resume_generation")
         self.generation_paused_event.clear()
-
-    async def abort_generation(self) -> None:
-        raise NotImplementedError(
-            "InferenceEngineClient does not implement abort_generation(), but calls "
-            "`abort_generation` on all engines in `pause_generation()`."
-        )
 
     # ----------------------------
     # HTTP endpoint related methods
