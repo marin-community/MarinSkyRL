@@ -8,9 +8,7 @@ from skyrl_gym import get_data_contract
 def test_aime_contract_normalizes_ground_truth_and_distinguishes_responses():
     contract = get_data_contract("aime")
 
-    ground_truth = contract.validate_example(
-        r"\boxed{42}", r"Answer: \boxed{42}", ""
-    )
+    ground_truth = contract.validate_example(r"\boxed{42}", r"Answer: \boxed{42}", "")
 
     assert ground_truth == "42"
 
