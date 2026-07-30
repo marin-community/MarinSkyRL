@@ -142,12 +142,13 @@ def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
     [("production", 1), ("interactive", 2), ("batch", 3)],
 )
 def test_priority_resolution_uses_only_supported_iris_enum_members(priority, expected):
-    class InstalledJobProto:
-        PRIORITY_BAND_PRODUCTION = 1
-        PRIORITY_BAND_INTERACTIVE = 2
-        PRIORITY_BAND_BATCH = 3
+    installed_enum_values = {
+        "PRIORITY_BAND_PRODUCTION": 1,
+        "PRIORITY_BAND_INTERACTIVE": 2,
+        "PRIORITY_BAND_BATCH": 3,
+    }
 
-    assert resolve_priority_band(priority, InstalledJobProto) == expected
+    assert resolve_priority_band(priority, installed_enum_values.__getitem__) == expected
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:

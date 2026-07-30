@@ -64,8 +64,9 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, List, Optional, Protocol
+from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import yaml
@@ -1263,23 +1264,15 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-class _PriorityBandProto(Protocol):
-    PRIORITY_BAND_PRODUCTION: int
-    PRIORITY_BAND_INTERACTIVE: int
-    PRIORITY_BAND_BATCH: int
-
-
-def resolve_priority_band(priority: str, job_proto: _PriorityBandProto) -> int:
+def resolve_priority_band(priority: str, enum_value: Callable[[str], int]) -> int:
     """Return the Iris enum value for a supported priority name.
 
     Raises:
         KeyError: If ``priority`` is not one of ``PRIORITY_NAMES``.
     """
-    return {
-        "production": job_proto.PRIORITY_BAND_PRODUCTION,
-        "interactive": job_proto.PRIORITY_BAND_INTERACTIVE,
-        "batch": job_proto.PRIORITY_BAND_BATCH,
-    }[priority]
+    if priority not in PRIORITY_NAMES:
+        raise KeyError(priority)
+    return enum_value(f"PRIORITY_BAND_{priority.upper()}")
 
 
 def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
@@ -1899,7 +1892,7 @@ def main() -> int:
         target_cluster=args.target_cluster,
     )
 
-    priority_band = resolve_priority_band(args.priority, job_pb2)
+    priority_band = resolve_priority_band(args.priority, job_pb2.PriorityBand.Value)
 
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
