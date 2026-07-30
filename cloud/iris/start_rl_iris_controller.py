@@ -364,12 +364,6 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
         RuntimeError: if the override does not take, or a required think-protocol token
             (``<|start_think|>`` / ``<|end_think|>``) is not a single registered token.
     """
-    if is_object_store_model_path(model_path):
-        raise ValueError(unsupported_model_path_message(model_path))
-    if not model_path:
-        _log("apply_policy_chat_template: skip (model_path is empty)")
-        return
-
     template_path = resolve_repo_path(template_repo_rel)
     delphi = template_path.read_text()
 
