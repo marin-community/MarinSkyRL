@@ -91,8 +91,11 @@ DAYTONA_RL_SECRET_VERSION = "1"
 DAYTONA_RL_SNAPSHOT_QUOTA = 40
 HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
 STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
-DEFAULT_MEMORY_PER_NODE = "auto"
-DEFAULT_DISK_PER_NODE = "auto"
+AUTOMATIC_RESOURCE_REQUEST = "auto"
+MEMORY_RESOURCE = "memory"
+DISK_RESOURCE = "ephemeral-storage"
+DEFAULT_MEMORY_PER_NODE = AUTOMATIC_RESOURCE_REQUEST
+DEFAULT_DISK_PER_NODE = AUTOMATIC_RESOURCE_REQUEST
 # Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
 # and filesystem overhead.
 NODE_RESOURCE_FRACTION = 0.80
@@ -101,7 +104,7 @@ PRIORITY_NAMES = ("production", "interactive", "batch")
 
 
 def _parse_quantity_to_gib(q: str) -> float:
-    """Parse a k8s resource quantity (plain bytes, or Ki/Mi/Gi/Ti binary / k/M/G/T decimal suffix) to GiB."""
+    """Parse a Kubernetes or Iris byte quantity to GiB."""
     q = q.strip()
     for suf, mult in (("Ki", 2**10), ("Mi", 2**20), ("Gi", 2**30), ("Ti", 2**40), ("Pi", 2**50)):
         if q.endswith(suf):
@@ -121,6 +124,22 @@ def _parse_quantity_to_gib(q: str) -> float:
         if q.endswith(suf):
             return float(q[: -len(suf)]) * mult / 2**30
     return float(q) / 2**30  # plain bytes
+
+
+@dataclass(frozen=True)
+class NodeResources:
+    """Available per-node scheduling resources in GiB."""
+
+    memory_gib: float
+    disk_gib: float
+
+
+@dataclass(frozen=True)
+class ClusterResourceSnapshot:
+    """Available matching nodes observed in one Kubernetes query."""
+
+    context: str
+    nodes: tuple[NodeResources, ...]
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -148,18 +167,19 @@ def _available_node_resources(
     *,
     gpu_variant: str,
     gpus_per_node: int,
-) -> list[tuple[float, float]]:
-    pod_requests: dict[str, tuple[float, float]] = {}
+) -> list[NodeResources]:
+    """Return live memory and disk headroom in GiB for matching Ready nodes."""
+    pod_requests: dict[str, NodeResources] = {}
     for item in items:
         if item.get("kind") != "Pod" or item.get("status", {}).get("phase") in {"Succeeded", "Failed"}:
             continue
         node_name = item.get("spec", {}).get("nodeName")
         if not isinstance(node_name, str):
             continue
-        memory, disk = pod_requests.get(node_name, (0.0, 0.0))
-        pod_requests[node_name] = (
-            memory + _pod_resource_request_gib(item, "memory"),
-            disk + _pod_resource_request_gib(item, "ephemeral-storage"),
+        requested = pod_requests.get(node_name, NodeResources(memory_gib=0.0, disk_gib=0.0))
+        pod_requests[node_name] = NodeResources(
+            memory_gib=requested.memory_gib + _pod_resource_request_gib(item, MEMORY_RESOURCE),
+            disk_gib=requested.disk_gib + _pod_resource_request_gib(item, DISK_RESOURCE),
         )
 
     available = []
@@ -176,26 +196,26 @@ def _available_node_resources(
             continue
         memory_allocatable = _parse_quantity_to_gib(allocatable["memory"])
         disk_allocatable = _parse_quantity_to_gib(allocatable["ephemeral-storage"])
-        memory_requested, disk_requested = pod_requests.get(node_name, (0.0, 0.0))
+        requested = pod_requests.get(node_name, NodeResources(memory_gib=0.0, disk_gib=0.0))
         available.append(
-            (
-                min(memory_allocatable * NODE_RESOURCE_FRACTION, memory_allocatable - memory_requested),
-                min(disk_allocatable * NODE_RESOURCE_FRACTION, disk_allocatable - disk_requested),
+            NodeResources(
+                memory_gib=min(
+                    memory_allocatable * NODE_RESOURCE_FRACTION,
+                    memory_allocatable - requested.memory_gib,
+                ),
+                disk_gib=min(
+                    disk_allocatable * NODE_RESOURCE_FRACTION,
+                    disk_allocatable - requested.disk_gib,
+                ),
             )
         )
     return available
 
 
-def resolve_node_resource_defaults(
-    cluster_config_path: str,
-    *,
-    gpu_variant: str,
-    gpus_per_node: int,
-    num_nodes: int,
-    memory_request: str,
-    disk_request: str,
-) -> tuple[str, str]:
-    """Return live admission-aware ``(memory, disk)`` requests for a GPU gang."""
+def _inspect_cluster_resources(
+    cluster_config_path: str, *, gpu_variant: str, gpus_per_node: int
+) -> ClusterResourceSnapshot:
+    """Read one live node-and-pod resource snapshot from the selected cluster."""
     cluster_config = _load_cluster_config(cluster_config_path)
     platform = cluster_config.get("platform")
     coreweave = platform.get("coreweave") if isinstance(platform, dict) else None
@@ -227,48 +247,92 @@ def resolve_node_resource_defaults(
             check=True,
         ).stdout
         items = json.loads(out).get("items", [])
-        available = _available_node_resources(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
+        nodes = _available_node_resources(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
     except Exception as exc:  # noqa: BLE001 - convert cluster/tool failures into launch guidance
         raise SystemExit(
             f"Could not inspect {gpus_per_node}x{gpu_variant} nodes in kube context {context!r}: {exc}. "
             "Pass explicit --memory and --disk values."
         ) from exc
-    automatic_memory = memory_request.strip().lower() == "auto"
-    automatic_disk = disk_request.strip().lower() == "auto"
+    return ClusterResourceSnapshot(context=context, nodes=tuple(nodes))
+
+
+def _resource_request_is_automatic(request: str) -> bool:
+    return request.strip().lower() == AUTOMATIC_RESOURCE_REQUEST
+
+
+def _resolve_gang_resource_requests(
+    snapshot: ClusterResourceSnapshot,
+    *,
+    gpu_variant: str,
+    gpus_per_node: int,
+    num_nodes: int,
+    memory_request: str,
+    disk_request: str,
+) -> tuple[str, str]:
+    """Select one resource pair that fits the requested gang in a live snapshot."""
+    automatic_memory = _resource_request_is_automatic(memory_request)
+    automatic_disk = _resource_request_is_automatic(disk_request)
     requested_memory_gib = None if automatic_memory else _parse_quantity_to_gib(memory_request)
     requested_disk_gib = None if automatic_disk else _parse_quantity_to_gib(disk_request)
     candidates = [
         resources
-        for resources in available
-        if (requested_memory_gib is None or resources[0] >= requested_memory_gib)
-        and (requested_disk_gib is None or resources[1] >= requested_disk_gib)
+        for resources in snapshot.nodes
+        if (requested_memory_gib is None or resources.memory_gib >= requested_memory_gib)
+        and (requested_disk_gib is None or resources.disk_gib >= requested_disk_gib)
     ]
     if len(candidates) < num_nodes:
         raise SystemExit(
             f"Automatic resources need {num_nodes} Ready, schedulable {gpus_per_node}x{gpu_variant} nodes, "
-            f"but only {len(candidates)} of {len(available)} matching nodes in kube context {context!r} fit the "
-            f"constraints memory={memory_request}, disk={disk_request}; adjust the resource requests."
+            f"but only {len(candidates)} of {len(snapshot.nodes)} matching nodes in kube context "
+            f"{snapshot.context!r} fit the constraints memory={memory_request}, disk={disk_request}; "
+            "adjust the resource requests."
         )
 
     if automatic_memory:
-        selected = sorted(candidates, key=lambda resources: resources[0], reverse=True)[:num_nodes]
+        selected = sorted(candidates, key=lambda resources: resources.memory_gib, reverse=True)[:num_nodes]
     else:
-        selected = sorted(candidates, key=lambda resources: resources[1], reverse=True)[:num_nodes]
-    memory_gib = int(min(memory for memory, _ in selected))
-    disk_gib = int(min(disk for _, disk in selected))
+        selected = sorted(candidates, key=lambda resources: resources.disk_gib, reverse=True)[:num_nodes]
+    memory_gib = int(min(resources.memory_gib for resources in selected))
+    disk_gib = int(min(resources.disk_gib for resources in selected))
     if (automatic_memory and memory_gib < 1) or (automatic_disk and disk_gib < 1):
         automatic_resources = " and ".join(
             resource for resource, automatic in (("memory", automatic_memory), ("disk", automatic_disk)) if automatic
         )
         raise SystemExit(
             f"No positive automatic {automatic_resources} request fits {num_nodes} {gpus_per_node}x{gpu_variant} nodes "
-            f"in kube context {context!r}; pass explicit --memory and --disk values."
+            f"in kube context {snapshot.context!r}; pass explicit --memory and --disk values."
         )
     resolved_memory = f"{memory_gib}Gi" if automatic_memory else memory_request
     resolved_disk = f"{disk_gib}Gi" if automatic_disk else disk_request
+    return resolved_memory, resolved_disk
+
+
+def resolve_node_resource_defaults(
+    cluster_config_path: str,
+    *,
+    gpu_variant: str,
+    gpus_per_node: int,
+    num_nodes: int,
+    memory_request: str,
+    disk_request: str,
+) -> tuple[str, str]:
+    """Return live admission-aware ``(memory, disk)`` requests for a GPU gang."""
+    snapshot = _inspect_cluster_resources(
+        cluster_config_path,
+        gpu_variant=gpu_variant,
+        gpus_per_node=gpus_per_node,
+    )
+    resolved_memory, resolved_disk = _resolve_gang_resource_requests(
+        snapshot,
+        gpu_variant=gpu_variant,
+        gpus_per_node=gpus_per_node,
+        num_nodes=num_nodes,
+        memory_request=memory_request,
+        disk_request=disk_request,
+    )
     print(
         f"[rl-iris] automatic node resources: largest requests with live headroom on {num_nodes} of "
-        f"{len(available)} matching nodes, capped at {NODE_RESOURCE_FRACTION:.0%} allocatable = "
+        f"{len(snapshot.nodes)} matching nodes, capped at {NODE_RESOURCE_FRACTION:.0%} allocatable = "
         f"memory {resolved_memory}, disk {resolved_disk}",
         flush=True,
     )
@@ -1903,8 +1967,8 @@ def main() -> int:
     # Per-task resources: one whole selected GPU node per task.
     gpu_spec = f"{args.gpu_variant}x{args.gpus_per_node}"
 
-    automatic_memory = str(args.memory).strip().lower() == "auto"
-    automatic_disk = str(args.disk).strip().lower() == "auto"
+    automatic_memory = _resource_request_is_automatic(str(args.memory))
+    automatic_disk = _resource_request_is_automatic(str(args.disk))
     if automatic_memory or automatic_disk:
         args.memory, args.disk = resolve_node_resource_defaults(
             args.cluster_config,

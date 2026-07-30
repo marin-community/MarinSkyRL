@@ -48,3 +48,18 @@ GB constraints are preserved and participate in node selection.
 
 - [x] Record the failing regression and final suite results: 131 passed and 1 skipped under
   `cloud/iris/tests/`.
+
+## Hypothesis 3
+
+The first green implementation mixed cluster inspection with selection and represented node
+resources as anonymous tuples, making the joint-fit rule harder to verify and maintain.
+
+## Changes to make
+
+Split the live snapshot from gang selection, name memory and disk fields, centralize resource keys
+and automatic-request detection, and remove the command-shape assertion from the behavioral test.
+
+## Results
+
+All seven review findings were addressed. The full launcher suite remains green with 131 passed and
+1 skipped, and the mechanical lint pass succeeds.
