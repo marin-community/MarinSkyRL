@@ -1,132 +1,72 @@
 ---
 name: rl-supervisor-init
-description: Initialize a focused MarinSkyRL supervisor session for Iris-only RL operations. Use at the start of an operational session before monitoring, diagnosing, launching, or recovering Iris RL jobs.
+description: >-
+  Initialize and run a focused Iris RL operations session: inventory jobs, dispatch diagnosis,
+  perform authorized lifecycle actions, and maintain a reproducible handoff. This is a no-commit
+  role that never edits repository code or configuration and never opens or updates pull requests.
 ---
 
-# Initialize an Iris RL Supervisor Session
+# Initialize an Iris RL supervisor
 
-Use this workflow to establish current, reproducible facts for MarinSkyRL training on Iris. It is intentionally limited to this repository, its companion Marin checkout, and the Iris jobs placed in scope by the user.
+Establish current facts for the jobs and campaign the user placed in scope. Read the current
+launcher interface, selected configuration, campaign record, and relevant ops runbooks at the start
+of every session.
 
-## 1. Establish source-of-truth state
+## Role boundary
 
-- Inspect the local MarinSkyRL checkout, its active branch, and uncommitted changes. Treat local committed source and configuration as the only launchable ground truth.
-- Confirm that the companion Marin checkout and the current Iris launcher/configuration interface are available.
-- Read the selected RL configuration and current launcher help before making any operational decision. Resolve dynamic defaults from those sources rather than from this skill.
-- Load credentials only through the approved environment/secret mechanism. Do not display, copy, or persist secret values.
+- Do not create worktrees or edit repository source, configuration, skills, or ops documents.
+- Do not commit, push, open or update a PR, merge code, or implement a recommended fix.
+- You may inspect repository state and operate Iris jobs only within the authority granted by the
+  user or campaign policy.
+- Hand source and configuration defects to an implementation role with evidence, expected behavior,
+  affected component, and a proposed regression test.
+- Never patch a live pod or remote checkout.
 
-## 2. Inventory the requested Iris scope
+## Establish the operating state
 
-Query the current Iris control plane for the user's requested jobs and time window. For each job, identify its state, creation/update time, resolved configuration or launch metadata, resource layout, and durable artifact locations.
+1. Confirm the local source revision and whether the checkout is clean. Treat it as evidence, not an
+   editable workspace.
+2. Read the selected RL configuration and current launcher help. Resolve defaults dynamically.
+3. Load credentials only through approved secret mechanisms; never print or persist their values.
+4. Query the requested jobs and classify each as starting, productive, stalled, terminal, or
+   indeterminate from controller state and durable artifacts.
+5. Classify agentic versus standard RL from resolved configuration, not job names.
 
-Classify each job from current evidence:
+## Dispatch and authority
 
-- **starting**: admitted but workers, serving, or the trainer are still initializing;
-- **productive**: trials or batches are completing and training metrics/steps are advancing;
-- **stalled**: no meaningful progress inside the configured expectation, with evidence of the blocking stage;
-- **terminal**: completed, failed, or cancelled, with the first causal error retained when available;
-- **indeterminate**: required job metadata or artifacts are unavailable.
-
-Classify agentic versus standard RL from the resolved configuration, not the job name.
-
-## 3. Report and decide safely
-
-Report the current state, objective evidence, and next safe action for every job in scope. Use the current launcher/configuration for resource and retry expectations; do not embed capacity assumptions or campaign limits in the report.
-
-- Launches and relaunches must use the relevant Iris RL skill and a reviewed dry run.
-- Diagnoses must preserve first-cause evidence and distinguish framework, configuration, infrastructure, training, and agent/verifier faults.
-- Cancellation, deletion, publication, credential rotation, and database mutation require explicit user authority.
-- Never repair a job by modifying a live pod, remote checkout, or remote configuration. Make local changes, validate them, and submit a new attempt.
-
-## 4. Know what each companion skill does — and what it deliberately will not do
-
-Dispatch work to the companion skills rather than improvising, and brief the subagent on the
-skill's **limits** as well as its task. Most supervision mistakes come from assuming a skill
-covers a step it never claimed.
-
-| Need | Skill | What it will NOT do |
+| Need | Procedure | Authority boundary |
 |---|---|---|
-| Probe one live job's health | `rl-job-health-deep-dive` | never kills; returns a recommendation only |
-| Wind down an agentic run | `rl-agentic-job-cleanup` | **does not publish, register, or delete** |
-| Wind down a non-agentic run | `rl-standard-job-cleanup` | same |
-| Launch or relaunch agentic | `rl-agentic-launch-iris` | — |
-| Launch or relaunch standard | `rl-standard-launch-iris` | — |
-| Rebuild the container | `build-gpu-rl-image-iris` | — |
+| Diagnose one job | `rl-job-health-deep-dive` | recommendation only; no mutation |
+| Launch agentic RL | `rl-agentic-launch-iris` | dry-run first; submit only when authorized |
+| Launch standard RL | `rl-standard-launch-iris` | dry-run first; submit only when authorized |
+| Preserve agentic output | `rl-agentic-job-cleanup` | publish/register only as its authority section permits |
+| Preserve standard output | `rl-standard-job-cleanup` | publication requires explicit authority |
+| Rebuild an image | hand off to an implementation role using `build-gpu-rl-image-iris` | never performed by the supervisor role |
 
-**The cleanup skills preserve and validate; they do not publish.** Publication, registration, and
-deletion each require explicit user authority, by design. A supervisor who assumes "cleanup ran,
-therefore the model is on the Hub" will be wrong. If the campaign expects a published artifact at
-the end of every run, that is a separate authorized step the supervisor must schedule and confirm —
-name it in the cron prompt, and verify the destination actually received the artifact rather than
-trusting an exit code.
+Cancellation, deletion, publication, registration, credential rotation, and database mutation each
+require explicit authority unless the campaign record grants that exact action. Capture evidence
+that disappears at termination before any authorized stop.
 
-**Verify publishability before promising it.** A cleanup can only upload an artifact that exists.
-Confirm the finished run actually wrote the format the destination needs; a training checkpoint and
-a publishable model are not the same object, and a run can exit zero having produced only the
-former. Report "nothing to publish" as a finding, not as a completed publication — and check
-whether the campaign has a conversion path before concluding it, since a checkpoint that is not
-publishable as written is often publishable after consolidation.
+## Recurring supervision
 
-**Cleanup is triggered by work banked, not by how a run ended.** The trigger is a minimum step
-count set by the campaign's policy, applied to every terminal run — completed, killed, or failed
-alike. A run stopped at a third of its budget has still bought real compute, and cleanup is what
-converts it into a retained artifact. Reserving cleanup for runs that reached their full budget
-throws away most of what a sweep produces, and it silently penalises exactly the runs a supervisor
-chose to stop.
+A recurring prompt must be self-contained or name the live records it rereads. Include:
 
-Read the threshold from the policy rather than assuming one, and when a terminal run falls below
-it, record the outcome in the tracker and say that cleanup was not due — do not leave it ambiguous.
+1. job scope and exact operational authority;
+2. campaign policy and state records as the source of mutable parameters;
+3. inventory query and state interpretation;
+4. terminal-job preservation before live-job diagnosis;
+5. per-job probes and previously declared flip conditions;
+6. launch gates and refill policy;
+7. escalation and evidence-preservation rules;
+8. reporting destination and a termination condition;
+9. a stable-path status artifact when the campaign needs a dashboard.
 
-## 5. Drafting a cron prompt for sweep monitoring
+Do not inline mutable quotas, thresholds, run identifiers, image revisions, or current capacity in a
+durable prompt when a campaign record can own them.
 
-A recurring supervision prompt is re-read by an agent with **no memory of previous ticks**. Every
-fact it needs must be in the prompt or reachable from a document the prompt names. Write it to
-survive that.
+## Handoff
 
-Include, in order:
-
-1. **Role and authority.** What the agent may do without asking — typically kill and relaunch
-   within the campaign — and what it may not: publish, register, delete artifacts, or touch
-   anything outside the named scope.
-2. **The experiment record as the authority.** Name the policy/state/tracker documents and say to
-   re-read the policy each tick, because it changes. The prompt should carry procedure; the
-   campaign's current parameters live in the record.
-3. **Inventory, with the query and the state encoding.** Give the exact query and spell out the
-   numeric states. Warn about query forms that return an empty set on malformed input, so an agent
-   does not read "no rows" as "no jobs".
-4. **Terminal jobs before live ones.** A finished or dead run is evidence that decays; a live one
-   can be probed next tick. Say which cleanup skill applies to which run type, state the campaign's
-   minimum-step threshold for cleanup and that it applies to killed and failed runs as well as
-   completed ones, and require the outcome be written to the tracker.
-5. **Per-job probes**, dispatched to the health skill, carrying **each job's prespecified flip
-   rule from the previous tick** — the threshold, the window, and the metric — with an instruction
-   to apply it literally rather than re-derive it. A rule invented fresh each tick is not a rule.
-6. **Any screen the campaign gates launches on**, with its metric, its bounds, and where to read
-   it from. State the source explicitly: under async generation the trainer's copy of a metric can
-   lag the live rollouts by `staleness × cycle`, so a screen read from trainer metrics can pass an
-   arm that has already failed.
-7. **Refill policy.** The quota, what counts toward it, and which harness/config is current.
-   Queued and pending work counts against the quota; a job whose row exists but whose tasks are
-   still gated has not started.
-8. **Escalation limits.** Never stop a job showing a signal that is not yet understood — a live
-   job is the reproduction, and an unrelated but valid reason to stop it still destroys the
-   evidence. Require live-only evidence to be captured first when a stop is unavoidable. Require
-   the supervisor to verify a probe's load-bearing claim before acting on a kill.
-9. **Reporting and hygiene.** Where the log goes, and that checkouts return to their canonical
-   branch with no residue — probes sometimes sync logs into a repo root.
-10. **A termination condition**, so the schedule ends itself when the campaign is done rather than
-    firing indefinitely.
-11. **A rendered status board every tick.** Require the tick to publish the campaign's fleet status
-    as an Artifact via `experiment-status-artifact`, in addition to the written log. A recurring
-    supervision schedule produces a long tail of prose reports that nobody reads end to end; a
-    board is scanned in seconds and makes divergence between arms visible at a glance. Publish it
-    to the **same file path** each tick so the URL is stable and the owner can keep one tab open —
-    a new URL per tick defeats the purpose.
-
-Two failure modes worth designing against: a prompt that names no authority forces the agent to
-ask permission every tick and the schedule stops being autonomous; a prompt that carries campaign
-parameters inline goes stale the first time the policy changes, and the agent then acts on numbers
-the owner has already revised.
-
-## 6. Leave a reproducible handoff
-
-For work that continues beyond the current session, record only the observed job identifiers, source revisions, resolved configurations, artifact locations, evidence links, and pending decisions in the user-owned experiment record. Do not turn the skill itself into a campaign log or a repository of mutable operational state.
+Record observed job identifiers, source revisions, resolved configurations, artifact locations,
+evidence links, actions taken, and pending decisions in the campaign record. For every recommended
+code/configuration change, state that an implementation agent must reproduce, test, review, and land
+it through the repository workflow.

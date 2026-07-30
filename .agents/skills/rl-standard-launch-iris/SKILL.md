@@ -1,43 +1,29 @@
 ---
 name: rl-standard-launch-iris
-description: Launch or relaunch non-agentic MarinSkyRL training on an Iris GPU cluster. Use for standard RL configurations backed by datasets and rewards, without Harbor, Daytona, or terminal-bench agent trajectories.
+description: Validate, submit, and observe standard MarinSkyRL training on Iris for dataset-backed rewards without Harbor, Daytona, terminal-bench, or another agent harness.
 ---
 
-# Standard RL on Iris
+# Launch standard RL on Iris
 
-Use this workflow for non-agentic RL. It shares the Iris launcher with agentic training but must not introduce Harbor, Daytona, ingress, or literal-agent dependencies.
+Read the selected configuration and current `cloud.iris.launch_rl_iris` interface. Resolve images,
+resources, retries, names, capacity, and artifact destinations at execution time.
 
-## 1. Classify and inspect the run
+## Workflow
 
-- Work from a clean local checkout and use the current `cloud.iris.launch_rl_iris` interface.
-- Inspect the selected YAML and data inputs. Confirm that it has a standard data/reward path (for example, the configured parquet dataset) and does not define a terminal-bench or Harbor agent environment.
-- Resolve the intended model, train and validation data, resource topology, checkpoint policy, and artifact destination from the experiment specification and live launcher/configuration behavior.
-- Keep database registration disabled unless explicitly authorized.
+1. Start from a clean committed revision. Confirm that the resolved configuration uses a standard
+   dataset and reward path and contains no agent harness or sandbox environment.
+2. Validate model, data, topology, batch geometry, reward function, checkpoint policy, artifact
+   destinations, and registration policy.
+3. Run the complete launch with `--dry-run`. Inspect job identity, image digest, resources, trainer
+   command, input overrides, retry policy, and durable destinations.
+4. Submit the reviewed command and preserve its resolved configuration with the experiment record.
+5. Verify worker admission, distributed initialization, data and reward processing, advancing
+   training metrics, and checkpoints when due.
 
-## 2. Dry-run the actual launch
+## Safety
 
-Provide the required RL configuration and model path to the launcher; add only intentional inputs such as data and node count.
-
-- Run the complete command with `--dry-run` first.
-- Verify the generated job identity, image, resource layout, trainer command, checkpoint/artifact destinations, retry policy, and any user-supplied override.
-- Prefer the launcher's dynamically resolved defaults for names, rendezvous storage, CPU allocation, image selection, and retries. Override them only when the experiment explicitly requires a different value.
 - Do not pass agentic-only arguments or secrets to a standard run.
-
-## 3. Submit and validate progress
-
-Submit the reviewed command without `--dry-run` and preserve the resolved command/configuration with the experiment record.
-
-Verify through the current Iris job interface and durable outputs that:
-
-1. all requested workers are admitted and join the training runtime;
-2. data loading and reward computation begin without schema or dependency errors;
-3. training advances beyond initialization and emits current metrics;
-4. checkpoints appear at the configured destination when due.
-
-A running pod without data, metrics, or advancing steps is not a healthy run. Report the blocked stage and its direct evidence.
-
-## Safety rules
-
-- Fix source or configuration locally, validate it, and relaunch; never hand-edit a live pod or remote checkout.
-- Do not cancel a running job without explicit user authorization.
-- Preserve logs and checkpoint evidence before an authorized cancellation or cleanup.
+- Prefer launcher-derived defaults unless the experiment requires an override.
+- Never patch a live pod or remote checkout.
+- Do not cancel a running job without authority; preserve evidence before an authorized stop.
+- A running controller state without advancing batches or steps is not proof of health.
