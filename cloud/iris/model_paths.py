@@ -6,7 +6,6 @@ OBJECT_STORE_MODEL_SCHEMES = frozenset({"s3", "gs", "gcs"})
 
 
 def is_object_store_model_path(model_path: str) -> bool:
-    """Return whether a model path uses an unsupported object-store scheme."""
     return urlparse(model_path).scheme.lower() in OBJECT_STORE_MODEL_SCHEMES
 
 
