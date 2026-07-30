@@ -70,6 +70,7 @@ import yaml
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.gpu_rl_images import image_for_cluster
+from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 
@@ -990,7 +991,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model_path",
         required=True,
-        help="Model path or HuggingFace ID (e.g., Qwen/Qwen3-8B).",
+        help="Hugging Face repo ID (e.g., Qwen/Qwen3-8B) or a directory available inside every task.",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
 
@@ -1611,6 +1612,9 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
 
 def normalize(args: argparse.Namespace) -> None:
     """Resolve the RL config and validate the requested worker topology."""
+    if is_object_store_model_path(args.model_path):
+        raise SystemExit(unsupported_model_path_message(args.model_path))
+
     try:
         source = resolve_rl_config_path(args.rl_config)
     except FileNotFoundError as error:
@@ -1799,7 +1803,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # A policy_chat_template override rewrites the node-local tokenizer cache, so it REQUIRES
     # a prestage even when the config is not offline (nothing to rewrite otherwise).
     if _offline or _policy_chat_template:
-        if args.model_path and not args.model_path.startswith(("s3://", "gs://", "gcs://")):
+        if args.model_path:
             controller_cmd.extend(["--prestage-model", args.model_path])
             # In-region warm source. Default = auto-derive the CW-S3 convention path from
             # the repo id; a seed job (mirror_hf_to_s3.py) populates it once and every node

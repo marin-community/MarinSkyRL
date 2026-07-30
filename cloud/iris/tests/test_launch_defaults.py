@@ -31,6 +31,7 @@ from cloud.iris.rl_config_translation import (  # noqa: E402
     RL_CONFIG_TASK_DIR,
     materialize_rl_config,
 )
+from cloud.iris.start_rl_iris_controller import stage_model  # noqa: E402
 
 
 def _cluster_config(
@@ -274,6 +275,19 @@ def test_missing_rl_config_fails_during_normalization():
 
     with pytest.raises(SystemExit, match="RL config not found"):
         normalize(args)
+
+
+@pytest.mark.parametrize("model_path", ["s3://models/policy", "gs://models/policy", "gcs://models/policy"])
+def test_object_store_model_path_fails_during_normalization(tmp_path, model_path):
+    args = _args(tmp_path, "opencode", ["--model_path", model_path])
+
+    with pytest.raises(SystemExit, match="must be a Hugging Face repo ID or a task-local directory"):
+        normalize(args)
+
+
+def test_controller_rejects_object_store_model_path_before_staging():
+    with pytest.raises(ValueError, match="must be a Hugging Face repo ID or a task-local directory"):
+        stage_model("s3://models/policy")
 
 
 def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
