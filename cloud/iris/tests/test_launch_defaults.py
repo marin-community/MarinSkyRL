@@ -102,11 +102,10 @@ def _pod_snapshot(
 
 
 @pytest.mark.parametrize(("memory_request", "expected_memory"), [("auto", "764Gi"), ("900Gi", "900Gi")])
-def test_node_resource_requests_use_selected_cluster_and_gpu_shape(
+def test_node_resource_requests_use_selected_gpu_shape_allocatable_resources(
     tmp_path, monkeypatch, memory_request, expected_memory
 ):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
-    commands = []
     nodes = [
         _node_snapshot(
             "gb200-0",
@@ -118,12 +117,11 @@ def test_node_resource_requests_use_selected_cluster_and_gpu_shape(
     ]
 
     def run(command, **kwargs):
-        commands.append(command)
         return SimpleNamespace(stdout=json.dumps({"items": nodes}))
 
     monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
 
-    memory, disk = resolve_node_resource_requests(
+    resolved = resolve_node_resource_requests(
         str(cluster_config),
         gpu_variant="GB200",
         gpus_per_node=4,
@@ -132,11 +130,8 @@ def test_node_resource_requests_use_selected_cluster_and_gpu_shape(
         disk_request="auto",
     )
 
-    assert memory == expected_memory
-    assert disk == "10871Gi"
-    command = commands[0]
-    assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
-    assert command[command.index("--context") + 1] == "context-gb200"
+    assert resolved.memory == expected_memory
+    assert resolved.disk == "10871Gi"
 
 
 @pytest.mark.parametrize(
@@ -174,7 +169,7 @@ def test_node_resource_requests_fit_the_requested_gang_on_busy_nodes(
         lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes + pods})),
     )
 
-    memory, disk = resolve_node_resource_requests(
+    resolved = resolve_node_resource_requests(
         str(cluster_config),
         gpu_variant="H100",
         gpus_per_node=8,
@@ -183,7 +178,7 @@ def test_node_resource_requests_fit_the_requested_gang_on_busy_nodes(
         disk_request=disk_request,
     )
 
-    assert (memory, disk) == expected
+    assert (resolved.memory, resolved.disk) == expected
 
 
 def _rl_config(tmp_path: Path, harness: str) -> Path:

@@ -147,7 +147,17 @@ class ClusterResourceSnapshot:
     """Available matching nodes observed in one Kubernetes query."""
 
     context: str
+    gpu_variant: str
+    gpus_per_node: int
     nodes: tuple[NodeResourceBudget, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedResourceRequests:
+    """Per-node memory and disk requests ready for Iris submission."""
+
+    memory: str
+    disk: str
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -262,7 +272,12 @@ def _inspect_cluster_resources(
         ) from exc
     items = json.loads(out).get("items", [])
     nodes = _node_resource_budgets(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
-    return ClusterResourceSnapshot(context=context, nodes=tuple(nodes))
+    return ClusterResourceSnapshot(
+        context=context,
+        gpu_variant=gpu_variant,
+        gpus_per_node=gpus_per_node,
+        nodes=tuple(nodes),
+    )
 
 
 def _resource_request_is_automatic(request: str) -> bool:
@@ -272,12 +287,10 @@ def _resource_request_is_automatic(request: str) -> bool:
 def _resolve_gang_resource_requests(
     snapshot: ClusterResourceSnapshot,
     *,
-    gpu_variant: str,
-    gpus_per_node: int,
     num_nodes: int,
     memory_request: str,
     disk_request: str,
-) -> tuple[str, str]:
+) -> ResolvedResourceRequests:
     """Select one resource pair that fits the requested gang in a live snapshot."""
     automatic_memory = _resource_request_is_automatic(memory_request)
     automatic_disk = _resource_request_is_automatic(disk_request)
@@ -291,7 +304,8 @@ def _resolve_gang_resource_requests(
     ]
     if len(candidates) < num_nodes:
         raise SystemExit(
-            f"Automatic resources need {num_nodes} Ready, schedulable {gpus_per_node}x{gpu_variant} nodes, "
+            f"Automatic resources need {num_nodes} Ready, schedulable "
+            f"{snapshot.gpus_per_node}x{snapshot.gpu_variant} nodes, "
             f"but only {len(candidates)} of {len(snapshot.nodes)} matching nodes in kube context "
             f"{snapshot.context!r} fit the constraints memory={memory_request}, disk={disk_request}; "
             "adjust the resource requests."
@@ -308,12 +322,13 @@ def _resolve_gang_resource_requests(
             resource for resource, automatic in (("memory", automatic_memory), ("disk", automatic_disk)) if automatic
         )
         raise SystemExit(
-            f"No positive automatic {automatic_resources} request fits {num_nodes} {gpus_per_node}x{gpu_variant} nodes "
+            f"No positive automatic {automatic_resources} request fits {num_nodes} "
+            f"{snapshot.gpus_per_node}x{snapshot.gpu_variant} nodes "
             f"in kube context {snapshot.context!r}; pass explicit --memory and --disk values."
         )
     resolved_memory = f"{memory_gib}Gi" if automatic_memory else memory_request
     resolved_disk = f"{disk_gib}Gi" if automatic_disk else disk_request
-    return resolved_memory, resolved_disk
+    return ResolvedResourceRequests(memory=resolved_memory, disk=resolved_disk)
 
 
 def resolve_node_resource_requests(
@@ -324,17 +339,15 @@ def resolve_node_resource_requests(
     num_nodes: int,
     memory_request: str,
     disk_request: str,
-) -> tuple[str, str]:
-    """Return live admission-aware ``(memory, disk)`` requests for a GPU gang."""
+) -> ResolvedResourceRequests:
+    """Return live admission-aware resource requests for a GPU gang."""
     snapshot = _inspect_cluster_resources(
         cluster_config_path,
         gpu_variant=gpu_variant,
         gpus_per_node=gpus_per_node,
     )
-    resolved_memory, resolved_disk = _resolve_gang_resource_requests(
+    resolved = _resolve_gang_resource_requests(
         snapshot,
-        gpu_variant=gpu_variant,
-        gpus_per_node=gpus_per_node,
         num_nodes=num_nodes,
         memory_request=memory_request,
         disk_request=disk_request,
@@ -342,10 +355,10 @@ def resolve_node_resource_requests(
     print(
         f"[rl-iris] automatic node resources: largest requests with live headroom on {num_nodes} of "
         f"{len(snapshot.nodes)} matching nodes, capped at {NODE_RESOURCE_FRACTION:.0%} allocatable = "
-        f"memory {resolved_memory}, disk {resolved_disk}",
+        f"memory {resolved.memory}, disk {resolved.disk}",
         flush=True,
     )
-    return resolved_memory, resolved_disk
+    return resolved
 
 
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
@@ -1979,7 +1992,7 @@ def main() -> int:
     automatic_memory = _resource_request_is_automatic(str(args.memory))
     automatic_disk = _resource_request_is_automatic(str(args.disk))
     if automatic_memory or automatic_disk:
-        args.memory, args.disk = resolve_node_resource_requests(
+        resolved_resources = resolve_node_resource_requests(
             args.cluster_config,
             gpu_variant=args.gpu_variant,
             gpus_per_node=args.gpus_per_node,
@@ -1987,6 +2000,8 @@ def main() -> int:
             memory_request=str(args.memory),
             disk_request=str(args.disk),
         )
+        args.memory = resolved_resources.memory
+        args.disk = resolved_resources.disk
 
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
     print(f"[rl-iris] Job:        /{user}/{args.job_name}", flush=True)
