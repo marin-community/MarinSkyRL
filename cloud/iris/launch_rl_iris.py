@@ -74,8 +74,6 @@ from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 DEFAULT_CLUSTER = "cw-us-east-02a"
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
-# Whole-node jobs retain 20% of live allocatable RAM and disk for kubelet,
-# daemonsets, and filesystem overhead. CPU keeps a separate scheduling cap.
 MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
@@ -91,6 +89,8 @@ HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
 STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 DEFAULT_MEMORY_PER_NODE = "auto"
 DEFAULT_DISK_PER_NODE = "auto"
+# Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
+# and filesystem overhead.
 NODE_RESOURCE_FRACTION = 0.80
 DEFAULT_PRIORITY = "interactive"
 PRIORITY_NAMES = ("production", "interactive", "batch")
@@ -113,7 +113,6 @@ def resolve_node_resource_defaults(
     *,
     gpu_variant: str,
     gpus_per_node: int,
-    fraction: float = NODE_RESOURCE_FRACTION,
 ) -> tuple[str, str]:
     """Return ``(memory, disk)`` requests as ``"<N>Gi"`` for the selected GPU nodes."""
     cluster_config = _load_cluster_config(cluster_config_path)
@@ -163,10 +162,10 @@ def resolve_node_resource_defaults(
             "pass explicit --memory and --disk values."
         )
 
-    memory_gib = int(min(memory for memory, _ in allocs) * fraction)
-    disk_gib = int(min(disk for _, disk in allocs) * fraction)
+    memory_gib = int(min(memory for memory, _ in allocs) * NODE_RESOURCE_FRACTION)
+    disk_gib = int(min(disk for _, disk in allocs) * NODE_RESOURCE_FRACTION)
     print(
-        f"[rl-iris] automatic node resources: {fraction:.0%} of minimum live allocatable "
+        f"[rl-iris] automatic node resources: {NODE_RESOURCE_FRACTION:.0%} of minimum live allocatable "
         f"across {len(allocs)} matching nodes = memory {memory_gib}Gi, disk {disk_gib}Gi",
         flush=True,
     )
