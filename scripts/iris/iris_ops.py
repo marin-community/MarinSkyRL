@@ -360,12 +360,7 @@ class JobBundle:
 
 
 def job_id_parts(job_id: str) -> tuple[str, ...]:
-    """Validate a canonical root Iris id and return safe path components.
-
-    This mirrors ``JobName.from_string``'s wire-format constraints without
-    importing the operational Iris package, then restricts the result to a
-    root job and rejects filesystem traversal components.
-    """
+    """Validate a canonical root Iris id and return safe path components."""
     if not job_id.startswith("/"):
         raise ValueError(f"Expected root Iris job id '/<user>/<job>', got {job_id!r}.")
     parts = tuple(job_id[1:].split("/"))

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 
-from scripts.iris import coreweave_ops, list_iris_jobs, watch_coreweave_rl
+from scripts.iris import coreweave_ops, watch_coreweave_rl
 from scripts.iris.iris_ops import (
     MonitorError,
     StyledCell,
@@ -27,12 +27,6 @@ from scripts.iris.iris_ops import (
     write_error_report,
     write_bundle_manifest,
 )
-
-
-def test_all_coreweave_clusters_are_in_the_default_job_inventory():
-    assert list(list_iris_jobs.DEFAULT_CLUSTERS) == [*coreweave_ops.CLUSTERS, "marin"]
-
-
 def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path):
     bundle = job_bundle(tmp_path, "cw-rno2a", "/benjaminfeuer/glm52-r10")
 
@@ -125,8 +119,22 @@ def test_job_id_parts_rejects_noncanonical_or_unsafe_ids(job_id):
         job_id_parts(job_id)
 
 
-def test_find_pod_uses_untruncated_iris_job_label(monkeypatch):
-    job_id = "/benjaminfeuer/grug-agentic-eval-v2-65k-harbor394c-r3"
+@pytest.mark.parametrize(
+    ("job_id", "label", "pod_name"),
+    [
+        (
+            "/benjaminfeuer/grug-agentic-eval-v2-65k-harbor394c-r3",
+            "benjaminfeuer.grug-agentic-eval-v2-65k-harbor394c-r3",
+            "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0",
+        ),
+        (
+            "/benjaminfeuer/glm52-datagen-r11-45-mix-h2-language-balanced-retry",
+            "benjaminfeuer.glm52-datagen-r11-45-mix-h2-language-balanced-ret",
+            "iris-benjaminfeuer-glm52-datagen-r1-7390cd90-0-1547b9c722a7aaa4",
+        ),
+    ],
+)
+def test_find_pod_uses_exact_or_truncated_iris_job_label(monkeypatch, job_id, label, pod_name):
     monkeypatch.setattr(
         coreweave_ops,
         "command",
@@ -135,33 +143,9 @@ def test_find_pod_uses_untruncated_iris_job_label(monkeypatch):
                 "items": [
                     {
                         "metadata": {
-                            "name": "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0",
-                            "labels": {"iris.job_id": "benjaminfeuer.grug-agentic-eval-v2-65k-harbor394c-r3"},
+                            "name": pod_name,
+                            "labels": {"iris.job_id": label},
                         },
-                        "status": {"phase": "Running"},
-                    }
-                ]
-            }
-        ),
-    )
-
-    assert coreweave_ops.find_pod(["kubectl"], SimpleNamespace(job=job_id, pod=None)) == (
-        "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0"
-    )
-
-
-def test_find_pod_uses_truncated_iris_job_label_when_unambiguous(monkeypatch):
-    job_id = "/benjaminfeuer/glm52-datagen-r11-45-mix-h2-language-balanced-retry"
-    truncated_label = job_id.lstrip("/").replace("/", ".")[:63]
-    pod_name = "iris-benjaminfeuer-glm52-datagen-r1-7390cd90-0-1547b9c722a7aaa4"
-    monkeypatch.setattr(
-        coreweave_ops,
-        "command",
-        lambda _args: json.dumps(
-            {
-                "items": [
-                    {
-                        "metadata": {"name": pod_name, "labels": {"iris.job_id": truncated_label}},
                         "status": {"phase": "Running"},
                     }
                 ]

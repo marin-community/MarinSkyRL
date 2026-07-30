@@ -31,8 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS, ClusterConfig  # noqa: E402
 from scripts.iris.iris_ops import DNS_ATTEMPTS, DNS_INITIAL_BACKOFF, job_id_parts  # noqa: E402
-from scripts.iris.coreweave_clusters import CLUSTERS, ClusterConfig  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
     "unexpected eof",
     "i/o timeout",
 )
+KUBERNETES_LABEL_MAX_LENGTH = 63
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         "job",
         help="Iris task name, such as /benjaminfeuer/glm52-pilot-codecontests-r7.",
     )
-    parser.add_argument("--cluster", choices=sorted(CLUSTERS), default="cw-rno2a")
+    parser.add_argument("--cluster", choices=sorted(COREWEAVE_CLUSTERS), default="cw-rno2a")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sample-size", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible sampling.")
@@ -157,7 +158,7 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
     # match only when exact matching found nothing; keeping the ambiguity check
     # below prevents a root job from being confused with one of its child jobs.
     if not candidates:
-        truncated_label = labeled_job_id[:63]
+        truncated_label = labeled_job_id[:KUBERNETES_LABEL_MAX_LENGTH]
         candidates = sorted(
             pod["metadata"]["name"]
             for pod in pods
@@ -606,7 +607,7 @@ def sync_trials(
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    cluster = CLUSTERS[args.cluster]
+    cluster = COREWEAVE_CLUSTERS[args.cluster]
     base = kubectl_base(cluster, args)
     pod = find_pod(base, args)
     command_line = pod_command_line(base, pod, args.container)

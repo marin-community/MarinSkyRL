@@ -91,7 +91,12 @@ def test_job_inventory_queries_all_default_clusters(monkeypatch):
 
     assert list_iris_jobs.main(["--user", "benjaminfeuer", "--hours", "6", "--filter", "state=running"]) == 0
 
-    assert [cluster for _user, _hours, cluster in queried_clusters] == [*list_iris_jobs.COREWEAVE_CLUSTERS, "marin"]
+    assert [cluster for _user, _hours, cluster in queried_clusters] == [
+        "cw-rno2a",
+        "cw-us-east-02a",
+        "cw-us-east-08a",
+        "marin",
+    ]
 
 
 def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypatch):
