@@ -76,7 +76,7 @@ from skyrl_train.callbacks import (
     RefModelUpdateCallback,
 )
 
-_MODEL_INITIALIZATION_TIMEOUT_SECONDS = 60 * 60
+_MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
 class RayPPOTrainer:
@@ -873,7 +873,7 @@ class RayPPOTrainer:
         ref_model: Optional[PPORayActorGroup],
     ) -> None:
         """Initialize all model actors within one shared wall-clock deadline."""
-        initialization_deadline = time.monotonic() + _MODEL_INITIALIZATION_TIMEOUT_SECONDS
+        initialization_deadline = time.monotonic() + _MODEL_INITIALIZATION_TIMEOUT
 
         if not cfg.trainer.placement.colocate_all:
             refs = []
@@ -956,7 +956,7 @@ class RayPPOTrainer:
             return ray.get(refs, timeout=remaining_seconds)
         except ray.exceptions.GetTimeoutError as error:
             message = (
-                f"{phase} timed out after {_MODEL_INITIALIZATION_TIMEOUT_SECONDS} seconds; "
+                f"{phase} timed out after {_MODEL_INITIALIZATION_TIMEOUT} seconds; "
                 "terminating model actors and failing the training job"
             )
             logger.error(message)

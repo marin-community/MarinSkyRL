@@ -519,7 +519,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._train_loop()
         except Exception as e:
-            log_exception_as_text(logger, f"Train loop failed at global_step {self.global_step}", e)
+            log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
         finally:
             # Cancel any orphaned generator tasks that survived an early exit
@@ -1045,7 +1045,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self._staleness_manager._stat.running -= 1
             return
         except Exception as e:
-            log_exception_as_text(logger, "Generator worker failed", e)
+            log_exception_as_text("Generator worker failed", e)
             if "slot_acquired" in locals() and slot_acquired:
                 self._staleness_manager._stat.submitted -= 1
                 self._staleness_manager._stat.running -= 1

@@ -547,7 +547,7 @@ def main(cfg: DictConfig) -> None:
     try:
         ray.get(skyrl_entrypoint.remote(cfg))
     except Exception as e:
-        log_exception_as_text(logger, "Training failed", e)
+        log_exception_as_text("Training failed", e)
         raise
     finally:
         logger.info("Shutting down Ray on head node...")

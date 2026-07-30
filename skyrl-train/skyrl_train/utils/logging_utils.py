@@ -1,13 +1,11 @@
 import traceback
-from typing import Any, Dict, List, Optional, Protocol, Union
+from typing import Any, Dict, List, Optional, Union
+
+from loguru import logger
 
 POSITIVE_RESPONSE_COLOR = "green"
 NEGATIVE_RESPONSE_COLOR = "yellow"
 BASE_PROMPT_COLOR = "cyan"
-
-
-class _ErrorLogger(Protocol):
-    def error(self, message: str, *args: object, **kwargs: object) -> None: ...
 
 
 def format_exception_text(error: BaseException) -> str:
@@ -15,7 +13,7 @@ def format_exception_text(error: BaseException) -> str:
     return "".join(traceback.format_exception(type(error), error, error.__traceback__)).rstrip()
 
 
-def log_exception_as_text(logger: _ErrorLogger, context: str, error: BaseException) -> None:
+def log_exception_as_text(context: str, error: BaseException) -> None:
     """Emit a traceback as text so Loguru never needs to pickle the exception."""
     logger.error("{}:\n{}", context, format_exception_text(error))
 
