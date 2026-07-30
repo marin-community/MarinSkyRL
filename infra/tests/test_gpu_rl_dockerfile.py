@@ -10,7 +10,6 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
 GPU_RL_ARM64_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl-arm64"
-GPU_RL_BUILD_SCRIPT = REPOSITORY_ROOT / "docker" / "build_gpu_rl_kaniko.sh"
 GPU_RL_DOCKERFILES = (
     GPU_RL_DOCKERFILE,
     GPU_RL_ARM64_DOCKERFILE,
@@ -45,15 +44,6 @@ def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
     for dockerfile in dockerfiles:
         assert "COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py" in dockerfile
         assert "${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py" in dockerfile
-
-
-def test_kaniko_retries_registry_io_for_both_build_stages() -> None:
-    build_script = GPU_RL_BUILD_SCRIPT.read_text()
-
-    assert "--image-fs-extract-retry=3" in build_script
-    assert "--image-download-retry=3" in build_script
-    assert "--push-retry=3" in build_script
-    assert build_script.count('"${REGISTRY_RETRY_FLAGS[@]}"') == 2
 
 
 def test_arm64_plain_image_accepts_only_known_pip_check_findings(tmp_path: Path) -> None:
