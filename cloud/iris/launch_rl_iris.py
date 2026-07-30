@@ -270,7 +270,9 @@ def _inspect_cluster_resources(
             f"Could not inspect {gpus_per_node}x{gpu_variant} nodes in kube context {context!r}: {exc}. "
             "Pass explicit --memory and --disk values."
         ) from exc
-    items = json.loads(out).get("items", [])
+    items = json.loads(out)["items"]
+    if not isinstance(items, list):
+        raise ValueError("kubectl node-and-pod snapshot has a non-list items field")
     nodes = _node_resource_budgets(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
     return ClusterResourceSnapshot(
         context=context,
