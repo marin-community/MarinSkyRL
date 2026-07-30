@@ -63,6 +63,7 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
     "i/o timeout",
 )
 KUBERNETES_LABEL_MAX_LENGTH = 63
+IRIS_JOB_ID_LABEL = "iris.job_id"
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,10 +125,7 @@ def command(args: list[str], *, input_text: str | None = None, timeout: int | No
 def kubectl_base(cluster: ClusterConfig, args: argparse.Namespace) -> list[str]:
     kubeconfig = args.kubeconfig or cluster.kubeconfig
     context = args.kube_context if args.kube_context is not None else cluster.context
-    base = ["kubectl", "--kubeconfig", str(kubeconfig)]
-    if context:
-        base.extend(["--context", context])
-    return base
+    return ["kubectl", "--kubeconfig", str(kubeconfig), "--context", context]
 
 
 def task_short_name(job: str) -> str:
@@ -138,31 +136,28 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
     if args.pod:
         return args.pod
     pods = json.loads(command([*base, "-n", NAMESPACE, "get", "pods", "-o", "json"]))["items"]
+    running_pods = [pod for pod in pods if pod.get("status", {}).get("phase") == "Running"]
     needle = task_short_name(args.job).lower()
     # The label stores the Iris id without its leading slash and with dots as
     # path separators, subject to Kubernetes label-value truncation.
     labeled_job_id = args.job.lstrip("/").replace("/", ".")
     candidates = sorted(
         pod["metadata"]["name"]
-        for pod in pods
-        if pod.get("status", {}).get("phase") == "Running"
-        and (
+        for pod in running_pods
+        if (
             needle in pod["metadata"]["name"].lower()
-            or pod.get("metadata", {}).get("labels", {}).get("iris.job_id") == labeled_job_id
+            or pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL) == labeled_job_id
         )
     )
-    # Iris stores the canonical job id in ``iris.job_id``, but Kubernetes label
-    # values are length-limited. Long job names therefore lose
-    # their suffix in both that label and the pod name.  Fall back to a prefix
-    # match only when exact matching found nothing; keeping the ambiguity check
-    # below prevents a root job from being confused with one of its child jobs.
+    # Kubernetes label values are length-limited, so long names lose their
+    # suffix. Fall back to the truncated label only when exact matching fails;
+    # multiple matches remain an error that requires an explicit pod.
     if not candidates:
         truncated_label = labeled_job_id[:KUBERNETES_LABEL_MAX_LENGTH]
         candidates = sorted(
             pod["metadata"]["name"]
-            for pod in pods
-            if pod.get("status", {}).get("phase") == "Running"
-            and pod.get("metadata", {}).get("labels", {}).get("iris.job_id", "").startswith(truncated_label)
+            for pod in running_pods
+            if pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL, "").startswith(truncated_label)
         )
     if len(candidates) == 1:
         return candidates[0]

@@ -8,9 +8,9 @@ description: >-
 
 # Initialize an Iris RL supervisor
 
-Establish current facts for the jobs and campaign the user placed in scope. Read the current
-launcher interface, selected configuration, campaign record, and relevant ops runbooks at the start
-of every session.
+Establish current facts for the jobs and experiments the user placed in scope. Read the current
+launcher interface, selected configuration, each experiment's STATE.md and POLICY.md, and relevant
+ops runbooks at the start of every session.
 
 ## Role boundary
 
@@ -24,7 +24,8 @@ of every session.
   affected component, and a proposed regression test.
 - Never patch a live pod or remote checkout.
 - Never edit a POLICY.md document without direct user authorization.
-- Never autonomously override a guideline in POLICY.md without direct user authorization. e.g., if a POLICY.md says "always keep 3 jobs in flight," do not launch 2 or 4 jobs.
+- Follow each POLICY.md directive exactly. Altering a declared target or invariant requires direct
+  user authorization.
 - Treat each experiment's STATE.md as its mutable operations record. Update it within the selected
   scope and remove stale information as soon as it is discovered.
 - Scrutinize subagent reports against controller state and durable artifacts before acting.
@@ -64,5 +65,5 @@ of every session.
 | Rebuild an image | hand off to an implementation role using `build-gpu-rl-image-iris` | never performed by the supervisor role |
 
 Cancellation, deletion, publication, registration, credential rotation, and database mutation each
-require explicit authority unless the campaign record grants that exact action. Capture evidence
+require explicit authority unless the experiment's POLICY.md grants that exact action. Capture evidence
 that disappears at termination before any authorized stop.

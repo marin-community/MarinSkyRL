@@ -7,18 +7,33 @@ import pytest
 from scripts.iris import list_iris_jobs
 
 
-def test_job_inventory_classifies_and_orders_controller_rows(monkeypatch):
+@pytest.fixture
+def iris_command(monkeypatch):
+    recorder = SimpleNamespace(
+        calls=[],
+        response=SimpleNamespace(
+            returncode=0,
+            stdout="job_id,state,submitted_at_ms,started_at_ms,finished_at_ms,error,exit_code\n",
+            stderr="",
+        ),
+    )
+
+    def fake_command(arguments, **kwargs):
+        recorder.calls.append((arguments, kwargs))
+        return recorder.response
+
+    monkeypatch.setattr(list_iris_jobs, "run_iris_command", fake_command)
+    return recorder
+
+
+def test_job_inventory_classifies_and_orders_controller_rows(iris_command):
     output = """info line
 job_id,state,submitted_at_ms,started_at_ms,finished_at_ms,error,exit_code
 /benjaminfeuer/tracegen-a,4,1000,1100,1200,,0
 /benjaminfeuer/rl-run,3,2000,2100,,,
 /benjaminfeuer/eval-b,6,3000,3100,3200,manual stop,1
 """
-    monkeypatch.setattr(
-        list_iris_jobs,
-        "run_iris_command",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output, stderr=""),
-    )
+    iris_command.response.stdout = output
     rows = list_iris_jobs.query_jobs(user="benjaminfeuer", hours=24, cluster="cw", now_ms=86_400_000)
     assert [row["job_id"] for row in rows] == [
         "/benjaminfeuer/tracegen-a",
@@ -99,45 +114,20 @@ def test_job_inventory_queries_all_default_clusters(monkeypatch):
     ]
 
 
-def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypatch):
-    captured = {}
+def test_job_inventory_overrides_an_inherited_non_coreweave_kubeconfig(monkeypatch, iris_command):
     monkeypatch.setenv("KUBECONFIG", "/tmp/other-kubeconfig")
-    monkeypatch.setattr(
-        list_iris_jobs,
-        "run_iris_command",
-        lambda *_args, **kwargs: (
-            captured.update(kwargs)
-            or SimpleNamespace(
-                returncode=0,
-                stdout="job_id,state,submitted_at_ms,started_at_ms,finished_at_ms,error,exit_code\n",
-                stderr="",
-            )
-        ),
-    )
 
     list_iris_jobs.query_jobs(user="benjaminfeuer", hours=24, cluster="cw-us-east-02a")
 
-    assert captured["environment"]["KUBECONFIG"] == str(list_iris_jobs.COREWEAVE_CLUSTERS["cw-us-east-02a"].kubeconfig)
-
-
-def test_job_inventory_hours_zero_queries_all_history(monkeypatch):
-    commands = []
-    monkeypatch.setattr(
-        list_iris_jobs,
-        "run_iris_command",
-        lambda arguments, **_kwargs: (
-            commands.append(arguments)
-            or SimpleNamespace(
-                returncode=0,
-                stdout="job_id,state,submitted_at_ms,started_at_ms,finished_at_ms,error,exit_code\n",
-                stderr="",
-            )
-        ),
+    assert iris_command.calls[0][1]["environment"]["KUBECONFIG"] == str(
+        list_iris_jobs.COREWEAVE_CLUSTERS["cw-us-east-02a"].kubeconfig
     )
 
+
+def test_job_inventory_hours_zero_queries_all_history(iris_command):
     list_iris_jobs.query_jobs(user="benjaminfeuer", hours=0, cluster="marin", now_ms=86_400_000)
 
-    assert "submitted_at_ms >=" not in commands[0][1]
+    assert "submitted_at_ms >=" not in iris_command.calls[0][0][1]
 
 
 def test_job_inventory_rejects_an_invalid_user_before_query():
