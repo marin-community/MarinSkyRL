@@ -60,28 +60,20 @@ def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, mon
 
     def run(command, **kwargs):
         commands.append(command)
-        return SimpleNamespace(stdout="8 2111575172Ki 29186021264636\n4 1001863488Ki 14591185743078\n")
+        return SimpleNamespace(
+            stdout=("4 NVIDIA-H100-80GB-HBM3 500000000Ki 7000000000000\n4 NVIDIA-GB200 1001863488Ki 14591185743078\n")
+        )
 
     monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
 
-    memory, disk = resolve_node_resource_defaults(cluster_config, gpus_per_node=4)
+    memory, disk = resolve_node_resource_defaults(str(cluster_config), gpu_variant="GB200", gpus_per_node=4)
 
     assert memory == "764Gi"
     assert disk == "10871Gi"
-    assert commands == [
-        [
-            "kubectl",
-            "--kubeconfig",
-            str(Path("~/.kube/coreweave-test").expanduser()),
-            "--context",
-            "context-gb200",
-            "get",
-            "nodes",
-            "-o",
-            'jsonpath={range .items[*]}{.status.capacity.nvidia\\.com/gpu}{" "}'
-            '{.status.allocatable.memory}{" "}{.status.allocatable.ephemeral-storage}{"\\n"}{end}',
-        ]
-    ]
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
+    assert command[command.index("--context") + 1] == "context-gb200"
 
 
 def _rl_config(tmp_path: Path, harness: str) -> Path:

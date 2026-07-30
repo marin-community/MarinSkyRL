@@ -109,13 +109,14 @@ def _parse_quantity_to_gib(q: str) -> float:
 
 
 def resolve_node_resource_defaults(
-    cluster_config_path: str | Path,
+    cluster_config_path: str,
     *,
+    gpu_variant: str,
     gpus_per_node: int,
     fraction: float = NODE_RESOURCE_FRACTION,
 ) -> tuple[str, str]:
-    """Return safe memory and disk requests for the selected cluster's GPU nodes."""
-    cluster_config = _load_cluster_config(str(cluster_config_path))
+    """Return ``(memory, disk)`` requests as ``"<N>Gi"`` for the selected GPU nodes."""
+    cluster_config = _load_cluster_config(cluster_config_path)
     platform = cluster_config.get("platform")
     coreweave = platform.get("coreweave") if isinstance(platform, dict) else None
     kubeconfig = coreweave.get("kubeconfig_path") if isinstance(coreweave, dict) else None
@@ -138,6 +139,7 @@ def resolve_node_resource_defaults(
                 "nodes",
                 "-o",
                 r'jsonpath={range .items[*]}{.status.capacity.nvidia\.com/gpu}{" "}'
+                r'{.metadata.labels.nvidia\.com/gpu\.product}{" "}'
                 r'{.status.allocatable.memory}{" "}{.status.allocatable.ephemeral-storage}{"\n"}{end}',
             ],
             capture_output=True,
@@ -146,18 +148,18 @@ def resolve_node_resource_defaults(
             check=True,
         ).stdout
         allocs = [
-            (_parse_quantity_to_gib(parts[1]), _parse_quantity_to_gib(parts[2]))
+            (_parse_quantity_to_gib(parts[2]), _parse_quantity_to_gib(parts[3]))
             for parts in (line.split() for line in out.splitlines())
-            if len(parts) == 3 and parts[0] == str(gpus_per_node)
+            if len(parts) == 4 and parts[0] == str(gpus_per_node) and gpu_variant.lower() in parts[1].lower()
         ]
     except Exception as exc:  # noqa: BLE001 - convert cluster/tool failures into launch guidance
         raise SystemExit(
-            f"Could not inspect {gpus_per_node}-GPU nodes in kube context {context!r}: {exc}. "
+            f"Could not inspect {gpus_per_node}x{gpu_variant} nodes in kube context {context!r}: {exc}. "
             "Pass explicit --memory and --disk values."
         ) from exc
     if not allocs:
         raise SystemExit(
-            f"No {gpus_per_node}-GPU nodes were returned by kube context {context!r}; "
+            f"No {gpus_per_node}x{gpu_variant} nodes were returned by kube context {context!r}; "
             "pass explicit --memory and --disk values."
         )
 
@@ -1787,6 +1789,7 @@ def main() -> int:
     if automatic_memory or automatic_disk:
         default_memory, default_disk = resolve_node_resource_defaults(
             args.cluster_config,
+            gpu_variant=args.gpu_variant,
             gpus_per_node=args.gpus_per_node,
         )
         if automatic_memory:
