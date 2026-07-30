@@ -614,8 +614,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # entering the engine while a weight-sync pause is in effect. Placed before
         # routing / _inc_inflight so a blocked stream holds no engine slot and does not
         # touch the engine until resume. Together with pause_generation()'s
-        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + the engine scheduler pause's
-        # drain-to-idle loop, this keeps the engine request-idle across the reload, so no
+        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + the blocking scheduler pause RPC,
+        # this keeps the engine request-idle across the reload, so no
         # forward pass runs against meta-device params.
         await self._wait_for_generation_to_resume()
 
