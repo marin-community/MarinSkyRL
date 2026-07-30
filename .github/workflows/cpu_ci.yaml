@@ -19,7 +19,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
@@ -33,7 +33,7 @@ jobs:
   infra_tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
@@ -43,7 +43,7 @@ jobs:
   iris_launcher_tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
@@ -60,7 +60,7 @@ jobs:
         shell: bash
         working-directory: ./skyrl-train
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
@@ -88,7 +88,7 @@ jobs:
         shell: bash
         working-directory: ./skyrl-gym
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
