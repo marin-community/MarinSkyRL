@@ -24,7 +24,7 @@ from cloud.iris.launch_rl_iris import (  # noqa: E402
     create_parser,
     derive_default_job_name,
     normalize,
-    resolve_node_resource_defaults,
+    resolve_node_resource_requests,
     resolve_launch_defaults,
 )
 from cloud.iris.rl_config_translation import (  # noqa: E402
@@ -101,7 +101,10 @@ def _pod_snapshot(
     }
 
 
-def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("memory_request", "expected_memory"), [("auto", "764Gi"), ("900Gi", "900Gi")])
+def test_node_resource_requests_use_selected_cluster_and_gpu_shape(
+    tmp_path, monkeypatch, memory_request, expected_memory
+):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
     commands = []
     nodes = [
@@ -120,27 +123,17 @@ def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, mon
 
     monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
 
-    memory, disk = resolve_node_resource_defaults(
+    memory, disk = resolve_node_resource_requests(
         str(cluster_config),
         gpu_variant="GB200",
         gpus_per_node=4,
         num_nodes=1,
-        memory_request="auto",
+        memory_request=memory_request,
         disk_request="auto",
     )
 
-    assert memory == "764Gi"
+    assert memory == expected_memory
     assert disk == "10871Gi"
-    explicit_memory, automatic_disk = resolve_node_resource_defaults(
-        str(cluster_config),
-        gpu_variant="GB200",
-        gpus_per_node=4,
-        num_nodes=1,
-        memory_request="900Gi",
-        disk_request="auto",
-    )
-    assert explicit_memory == "900Gi"
-    assert automatic_disk == "10871Gi"
     command = commands[0]
     assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
     assert command[command.index("--context") + 1] == "context-gb200"
@@ -181,7 +174,7 @@ def test_node_resource_defaults_fit_the_requested_gang_on_busy_nodes(
         lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes + pods})),
     )
 
-    memory, disk = resolve_node_resource_defaults(
+    memory, disk = resolve_node_resource_requests(
         str(cluster_config),
         gpu_variant="H100",
         gpus_per_node=8,

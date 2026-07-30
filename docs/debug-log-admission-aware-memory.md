@@ -46,7 +46,7 @@ GB constraints are preserved and participate in node selection.
 
 ## Future work
 
-- [x] Record the failing regression and final suite results: 131 passed and 1 skipped under
+- [x] Record the failing regression and final suite results: 132 passed and 1 skipped under
   `cloud/iris/tests/`.
 
 ## Hypothesis 3
@@ -78,3 +78,16 @@ explicit request above the automatic ceiling.
 
 Explicit requests are now compared with uncapped live headroom, and the automatic side of a mixed
 request still uses the 80% ceiling. The full launcher suite and mechanical lint pass remain green.
+
+## Hypothesis 5
+
+The public resolver's name should cover both automatic selection and explicit-request validation.
+
+## Changes to make
+
+Rename it from resource defaults to resource requests and parameterize the automatic/explicit
+behavior test.
+
+## Results
+
+The launcher suite passes with 132 tests and 1 skip, and the mechanical lint pass succeeds.

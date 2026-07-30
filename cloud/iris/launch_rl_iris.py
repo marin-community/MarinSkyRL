@@ -316,7 +316,7 @@ def _resolve_gang_resource_requests(
     return resolved_memory, resolved_disk
 
 
-def resolve_node_resource_defaults(
+def resolve_node_resource_requests(
     cluster_config_path: str,
     *,
     gpu_variant: str,
@@ -1979,7 +1979,7 @@ def main() -> int:
     automatic_memory = _resource_request_is_automatic(str(args.memory))
     automatic_disk = _resource_request_is_automatic(str(args.disk))
     if automatic_memory or automatic_disk:
-        args.memory, args.disk = resolve_node_resource_defaults(
+        args.memory, args.disk = resolve_node_resource_requests(
             args.cluster_config,
             gpu_variant=args.gpu_variant,
             gpus_per_node=args.gpus_per_node,
