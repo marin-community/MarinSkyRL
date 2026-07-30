@@ -30,6 +30,7 @@ import sys
 import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
+from skyrl_train.utils.logging_utils import log_exception_as_text
 import asyncio
 import multiprocessing as mp
 
@@ -546,7 +547,7 @@ def main(cfg: DictConfig) -> None:
     try:
         ray.get(skyrl_entrypoint.remote(cfg))
     except Exception as e:
-        logger.opt(exception=True).error("Training failed: " + str(e))
+        log_exception_as_text(logger, "Training failed", e)
         raise
     finally:
         logger.info("Shutting down Ray on head node...")

@@ -24,6 +24,7 @@ from .constants import (
     DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
     get_worker_nccl_timeout_s,
 )
+from .logging_utils import format_exception_text
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
@@ -1338,7 +1339,10 @@ def configure_ray_worker_logging() -> None:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+            message = record.getMessage()
+            if record.exc_info is not None and record.exc_info[1] is not None:
+                message = f"{message}\n{format_exception_text(record.exc_info[1])}"
+            logger.opt(depth=6).log(level, message)
 
     logging.root.handlers = [_InterceptHandler()]
     level = getattr(logging, level_name, logging.INFO)

@@ -4,6 +4,7 @@ import math
 import os
 import shutil
 import threading
+import time
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -74,6 +75,8 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
+
+_MODEL_INITIALIZATION_TIMEOUT_SECONDS = 60 * 60
 
 
 class RayPPOTrainer:
@@ -855,6 +858,11 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
+        self.policy_model: PPORayActorGroup = policy_model
+        self.critic_model: Optional[PPORayActorGroup] = critic_model
+        self.ref_model: Optional[PPORayActorGroup] = ref_model
+        initialization_deadline = time.monotonic() + _MODEL_INITIALIZATION_TIMEOUT_SECONDS
+
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
@@ -872,34 +880,75 @@ class RayPPOTrainer:
                         num_training_steps=self.total_training_steps,
                     )
                 )
-            ray.get(refs)
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            self._wait_for_model_initialization(
+                refs,
+                deadline=initialization_deadline,
+                phase="policy/ref/critic model initialization",
+            )
+            self._wait_for_model_initialization(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                deadline=initialization_deadline,
+                phase="policy model finalization",
+            )
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
-                ref_model.offload_to_cpu()
-            ray.get(
+                self._wait_for_model_initialization(
+                    ref_model.async_init_model(cfg.trainer.ref.model.path),
+                    deadline=initialization_deadline,
+                    phase="reference model initialization",
+                )
+                self._wait_for_model_initialization(
+                    ref_model.offload_to_cpu(nonblocking=True),
+                    deadline=initialization_deadline,
+                    phase="reference model offload",
+                )
+            self._wait_for_model_initialization(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
                     num_training_steps=self.total_training_steps,
-                )
+                ),
+                deadline=initialization_deadline,
+                phase="policy model initialization",
             )
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
-            policy_model.offload_to_cpu()
+            self._wait_for_model_initialization(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                deadline=initialization_deadline,
+                phase="policy model finalization",
+            )
+            self._wait_for_model_initialization(
+                policy_model.offload_to_cpu(nonblocking=True),
+                deadline=initialization_deadline,
+                phase="policy model offload",
+            )
             if cfg.trainer.critic.model.path:
-                ray.get(
+                self._wait_for_model_initialization(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
                         num_training_steps=self.total_training_steps,
-                    )
+                    ),
+                    deadline=initialization_deadline,
+                    phase="critic model initialization",
                 )
-                critic_model.offload_to_cpu()
-
-        self.policy_model: PPORayActorGroup = policy_model
-        self.critic_model: Optional[PPORayActorGroup] = critic_model
-        self.ref_model: Optional[PPORayActorGroup] = ref_model
+                self._wait_for_model_initialization(
+                    critic_model.offload_to_cpu(nonblocking=True),
+                    deadline=initialization_deadline,
+                    phase="critic model offload",
+                )
 
         logger.info("init policy/ref/critic models done")
+
+    def _wait_for_model_initialization(self, refs, *, deadline: float, phase: str):
+        remaining_seconds = max(0.0, deadline - time.monotonic())
+        try:
+            return ray.get(refs, timeout=remaining_seconds)
+        except ray.exceptions.GetTimeoutError as error:
+            message = (
+                f"{phase} timed out after {_MODEL_INITIALIZATION_TIMEOUT_SECONDS} seconds; "
+                "terminating model actors and failing the training job"
+            )
+            logger.error(message)
+            self._kill_ray_actors()
+            raise RuntimeError(message) from error
 
     def init_weight_sync_state(self):
         """

@@ -21,6 +21,7 @@ from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
+from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.generators.utils import prepare_generator_input, concatenate_generator_outputs
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
@@ -518,9 +519,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._train_loop()
         except Exception as e:
-            logger.opt(exception=True).error(
-                "Train loop failed at global_step " + str(self.global_step) + ": " + str(e)
-            )
+            log_exception_as_text(logger, f"Train loop failed at global_step {self.global_step}", e)
             raise
         finally:
             # Cancel any orphaned generator tasks that survived an early exit
@@ -1046,7 +1045,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self._staleness_manager._stat.running -= 1
             return
         except Exception as e:
-            logger.opt(exception=True).error("Generator worker errored out with exception: " + str(e))
+            log_exception_as_text(logger, "Generator worker failed", e)
             if "slot_acquired" in locals() and slot_acquired:
                 self._staleness_manager._stat.submitted -= 1
                 self._staleness_manager._stat.running -= 1
