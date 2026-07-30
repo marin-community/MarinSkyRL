@@ -146,7 +146,7 @@ def test_node_resource_requests_use_selected_cluster_and_gpu_shape(
         ("700GB", "auto", ("700GB", "3000Gi")),
     ],
 )
-def test_node_resource_defaults_fit_the_requested_gang_on_busy_nodes(
+def test_node_resource_requests_fit_the_requested_gang_on_busy_nodes(
     tmp_path,
     monkeypatch,
     memory_request,

@@ -255,13 +255,13 @@ def _inspect_cluster_resources(
             timeout=20,
             check=True,
         ).stdout
-        items = json.loads(out).get("items", [])
-        nodes = _node_resource_budgets(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
     except Exception as exc:  # noqa: BLE001 - convert cluster/tool failures into launch guidance
         raise SystemExit(
             f"Could not inspect {gpus_per_node}x{gpu_variant} nodes in kube context {context!r}: {exc}. "
             "Pass explicit --memory and --disk values."
         ) from exc
+    items = json.loads(out).get("items", [])
+    nodes = _node_resource_budgets(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
     return ClusterResourceSnapshot(context=context, nodes=tuple(nodes))
 
 
