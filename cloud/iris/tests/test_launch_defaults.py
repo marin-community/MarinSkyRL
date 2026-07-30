@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 import sys
-from types import ModuleType, SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,7 @@ from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noq
 from cloud.iris.launch_rl_iris import (  # noqa: E402
     create_parser,
     derive_default_job_name,
-    resolve_priority_band,
+    priority_band_enum_name,
     resolve_launch_defaults,
 )
 
@@ -140,22 +139,14 @@ def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
 
 @pytest.mark.parametrize(
     ("priority", "expected"),
-    [("production", 1), ("interactive", 2), ("batch", 3)],
+    [
+        ("production", "PRIORITY_BAND_PRODUCTION"),
+        ("interactive", "PRIORITY_BAND_INTERACTIVE"),
+        ("batch", "PRIORITY_BAND_BATCH"),
+    ],
 )
-def test_priority_resolution_uses_only_supported_iris_enum_members(monkeypatch, priority, expected):
-    installed_enum_values = {
-        "PRIORITY_BAND_PRODUCTION": 1,
-        "PRIORITY_BAND_INTERACTIVE": 2,
-        "PRIORITY_BAND_BATCH": 3,
-    }
-    iris_module = ModuleType("iris")
-    rpc_module = ModuleType("iris.rpc")
-    rpc_module.job_pb2 = SimpleNamespace(PriorityBand=SimpleNamespace(Value=installed_enum_values.__getitem__))
-    iris_module.rpc = rpc_module
-    monkeypatch.setitem(sys.modules, "iris", iris_module)
-    monkeypatch.setitem(sys.modules, "iris.rpc", rpc_module)
-
-    assert resolve_priority_band(priority) == expected
+def test_priority_names_match_supported_iris_enum_members(priority, expected):
+    assert priority_band_enum_name(priority) == expected
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
