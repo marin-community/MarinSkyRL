@@ -33,10 +33,6 @@ class GpuRlImage:
     def reference(self) -> str:
         return f"{IMAGE_REPOSITORY}@{self.digest}"
 
-    @property
-    def platform(self) -> str:
-        return f"linux/{self.architecture}"
-
 
 SOURCE_COMMIT = "2f281a199b700fb61d83378b209baffa46c6d71c"
 HARBOR_COMMIT = "f2dd505f609021611eb85521a097e6dff384d12d"

@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.gpu_rl_images import image_for_cluster  # noqa: E402
+from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
     create_parser,
     derive_default_job_name,
@@ -196,14 +196,8 @@ def test_explicit_task_image_overrides_strategy_selection(tmp_path):
     assert args.task_image == "ghcr.io/example/custom@sha256:abc"
 
 
-@pytest.mark.parametrize(
-    ("strategy", "digest"),
-    [
-        ("fsdp2", "sha256:36a0d327aed94d26dba411864332cc88d29bc593d769b6544719000f8174d412"),
-        ("megatron", "sha256:50a5c9584be412a0bb5657ea9c0be28d2689c5a587351ed815ef0f73fb30aac4"),
-    ],
-)
-def test_east08_selects_an_arm64_image(tmp_path, strategy, digest):
+@pytest.mark.parametrize("strategy", ["fsdp2", "megatron"])
+def test_east08_selects_an_arm64_image(tmp_path, strategy):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
     args = _strategy_args(
         tmp_path,
@@ -222,7 +216,9 @@ def test_east08_selects_an_arm64_image(tmp_path, strategy, digest):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image.endswith(f"@{digest}")
+    expected_image = image_for_cluster("cw-us-east-08a", strategy)
+    assert expected_image.architecture is ImageArchitecture.ARM64
+    assert args.task_image == expected_image.reference
 
 
 def test_federated_target_cluster_controls_image_architecture(tmp_path):
