@@ -45,12 +45,20 @@ import subprocess
 import sys
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from scripts.iris.coreweave_clusters import (  # noqa: E402
+    CLUSTERS as COREWEAVE_CLUSTERS,
+    COREWEAVE_KUBECONFIG,
+    COREWEAVE_OBJECT_ENDPOINT,
+)
 
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
-ENDPOINT = "https://cwobject.com"
-COREWEAVE_KUBECONFIG = "~/.kube/coreweave-iris"
-COREWEAVE_KUBECONFIG_PATH = os.path.expanduser(COREWEAVE_KUBECONFIG)  # holds iris-task-env + the bucket
-KCFG = dict.fromkeys(("cw-rno2a", "cw-us-east-02a", "cw-us-east-08a"), COREWEAVE_KUBECONFIG)
+ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 IRIS_CANDIDATES = [
     "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
@@ -79,8 +87,8 @@ def s3client():
     return boto3.client(
         "s3",
         endpoint_url=ENDPOINT,
-        aws_access_key_id=_secret("AWS_ACCESS_KEY_ID", COREWEAVE_KUBECONFIG_PATH),
-        aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY", COREWEAVE_KUBECONFIG_PATH),
+        aws_access_key_id=_secret("AWS_ACCESS_KEY_ID", str(COREWEAVE_KUBECONFIG)),
+        aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY", str(COREWEAVE_KUBECONFIG)),
         config=Config(s3={"addressing_style": "virtual"}, max_pool_connections=32),
     )
 
@@ -280,8 +288,8 @@ def sync_trace_jobs(s3, slug, dest, gzip=True):
 
 
 def sync_finelog(job, cluster, dest, lines):
-    kcfg = os.path.expanduser(KCFG[cluster])
-    env = {**os.environ, "KUBECONFIG": kcfg}
+    kubeconfig = COREWEAVE_CLUSTERS[cluster].kubeconfig
+    env = {**os.environ, "KUBECONFIG": str(kubeconfig)}
     iris = next((c for c in IRIS_CANDIDATES if c == "iris" or os.path.exists(c)), "iris")
     out_path = os.path.join(dest, "finelog.log")
     print(f"[finelog] {job} via {os.path.basename(iris)} --cluster={cluster} --no-tail --max-lines {lines} ...")
@@ -301,10 +309,10 @@ def sync_finelog(job, cluster, dest, lines):
     return n
 
 
-def main():
+def argument_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Sync an Iris RL job's ray_session_logs + finelog (+ trace_jobs) locally.")
     ap.add_argument("job", help="full job id, e.g. /benjaminfeuer/rl-tasktrove-keep1-ncclnet")
-    ap.add_argument("--cluster", default="cw-us-east-02a", choices=list(KCFG))
+    ap.add_argument("--cluster", default="cw-us-east-02a", choices=list(COREWEAVE_CLUSTERS))
     ap.add_argument("--run", default=None, help="agentic rendezvous run-<ts> (default: newest under the job prefix)")
     ap.add_argument(
         "--rendezvous-dir",
@@ -329,7 +337,11 @@ def main():
         action="store_true",
         help="with --trace-jobs, write an uncompressed .tar instead of .tar.gz",
     )
-    a = ap.parse_args()
+    return ap
+
+
+def main():
+    a = argument_parser().parse_args()
     slug = a.job.rstrip("/").split("/")[-1]
     s3 = s3client()
 

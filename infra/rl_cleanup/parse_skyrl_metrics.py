@@ -242,8 +242,8 @@ def _checkpoint_inventory(run_dir: Path | None) -> tuple[list[int], int | None]:
     if cap_file.is_file():
         try:
             cap_step = int(cap_file.read_text().strip())
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"Could not read a checkpoint step from {cap_file}: {exc}") from exc
     return available, cap_step
 
 
@@ -268,9 +268,11 @@ def select_best_checkpoint(
 ) -> CheckpointSelection:
     """Select a checkpoint from parsed agentic or standard GRPO metrics.
 
-    Run dir layout:
+    When ``run_dir`` is provided, candidates are intersected with this layout:
         <run_dir>/exports/global_step_<N>/policy/<weights>
         <run_dir>/latest_ckpt_global_step.txt
+
+    Without ``run_dir``, saved-aligned steps in the parsed metrics are candidates and no cap is applied.
 
     Trailing-5 EMA selection over reward/avg_raw_reward:
       - reward keyed by trainer/global_step, first-seen wins

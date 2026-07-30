@@ -48,3 +48,14 @@ def test_checkpoint_selection_calculates_trailing_five_ema():
         save_every=20,
     )
     assert selection.ema[40] == pytest.approx(0.4)
+
+
+def test_checkpoint_selection_rejects_an_invalid_cap(tmp_path):
+    (tmp_path / "latest_ckpt_global_step.txt").write_text("not-a-step")
+
+    with pytest.raises(ValueError, match="latest_ckpt_global_step.txt"):
+        parse_skyrl_metrics.select_best_checkpoint(
+            [{"trainer/global_step": 40, "reward/avg_raw_reward": 0.8}],
+            run_dir=tmp_path,
+            save_every=20,
+        )
