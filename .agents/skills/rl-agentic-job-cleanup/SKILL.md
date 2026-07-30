@@ -41,9 +41,29 @@ pending retries that belong to this run before reading mutable checkpoint direct
    safetensors, configuration, and tokenizer metadata.
 4. **Publish the model.** Follow the consolidation runbook's canonical staging, secret-scan,
    additive-upload, and remote-verification procedure.
-5. **Publish traces.** Run `infra/rl_cleanup/make_and_upload_trace_dataset.py` over the complete
-   trial set. Keep its hygiene transforms, do not subsample, and verify the dataset before linking it
-   from the model card.
+5. **Publish traces.** The monitor's `trace_jobs/` directory is an evidence sample by default; it
+   mirrors only the newest 500 traces across the fleet. Rebuild the dataset from the full durable
+   object-store tree instead:
+
+   ```bash
+   python infra/sync_rl_logs.py /benjaminfeuer/<job> --cluster <cluster> --dest "$TRACE_ROOT" \
+     --no-ray --no-finelog --trace-jobs --trace-jobs-no-gzip
+   mkdir -p "$TRACE_ROOT/trace_jobs"
+   tar -xf "$TRACE_ROOT/<job>_trace_jobs.tar" -C "$TRACE_ROOT/trace_jobs"
+   python -m infra.rl_cleanup.make_and_upload_trace_dataset \
+     --job_dir "$TRACE_ROOT/trace_jobs" --repo_id <namespace>/<dataset> --episodes last --filter none \
+     --skip_register --single_commit
+   ```
+
+   `--trace-jobs` is the source of record for this rebuild. It writes a tar plus a sync manifest;
+   inspect `objects_skipped` before export. A full monitor mirror requires `--trace-sync-limit 0`,
+   but remains evidence-only when its size guard skips objects. Inspect
+   `trace_export_manifest.json`: `result_coverage` is dataset rows divided by source
+   `result.json` files and defaults to a 95% gate. The staged tree has deterministic shard names
+   and replaces stale `train-*.parquet` shards on rerun. `--single_commit` stages then replaces the
+   complete remote shard set. Use `--stage-only "$STAGING_ROOT"` to retain that staged tree locally
+   for inspection or offline tests; it does not write to Hugging Face. Verify the remote shard list
+   and manifest, then link the dataset from the model card.
 6. **Register if authorized.** Use the campaign's schema, explicit RL training type, exact base-model
    lineage, and only records the operator owns. Stop on foreign-key or ownership ambiguity.
 7. **Reclaim only if separately authorized.** Retain staging and source artifacts until all remote

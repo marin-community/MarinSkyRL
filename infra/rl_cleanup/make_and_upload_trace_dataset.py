@@ -45,8 +45,41 @@ import json
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence
+
+
+EXPORT_MANIFEST_FILENAME = "trace_export_manifest.json"
+
+
+@dataclass(frozen=True)
+class TraceExportSummary:
+    result_count: int
+    row_count: int
+    shard_names: list[str]
+
+    @property
+    def result_coverage(self) -> float:
+        return 1.0 if self.result_count == 0 and self.row_count == 0 else self.row_count / max(1, self.result_count)
+
+
+def trace_export_manifest(*, result_count: int, row_count: int, shard_names: list[str]) -> dict[str, Any]:
+    """Return the published coverage record for a complete trace export."""
+    return {
+        "result_count": result_count,
+        "row_count": row_count,
+        "result_coverage": 1.0 if result_count == 0 and row_count == 0 else row_count / max(1, result_count),
+        "shards": shard_names,
+    }
+
+
+def prepare_trace_stage(stage_dir: Path) -> None:
+    """Prepare a reusable staged dataset tree without retaining old trace shards."""
+    data_dir = stage_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for stale_shard in data_dir.glob("train-*.parquet"):
+        stale_shard.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -580,17 +613,16 @@ def _flush_chunk_to_parquet(
     return n
 
 
-def _upload_shard(api, repo_id: str, shard_path: Path) -> None:
-    """Push ONE shard as its own additive commit, then remove it locally."""
+def _upload_shard(api: Any | None, repo_id: str, shard_path: Path, stage_dir: Path | None = None) -> None:
+    """Push one shard or place it in a complete staged dataset tree."""
     path_in_repo = f"data/{shard_path.name}"
-    # Test seam: when set, copy the shard to a local dir instead of hitting the
-    # Hub (lets the subprocess path be exercised offline without real creds).
-    fake_dir = os.environ.get("TRACE_EXPORT_FAKE_UPLOAD_DIR")
-    if fake_dir:
-        dest = Path(fake_dir) / shard_path.name
+    if stage_dir is not None:
+        dest = stage_dir / path_in_repo
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(shard_path, dest)
     else:
+        if api is None:
+            raise RuntimeError("An HF API client is required when no stage directory is configured")
         api.upload_file(
             path_or_fileobj=str(shard_path),
             path_in_repo=path_in_repo,
@@ -615,6 +647,7 @@ def _process_one_shard_in_subprocess(
     tmp_root: str,
     verbose: bool,
     include_literal_tokens: bool = False,
+    stage_dir: str | None = None,
 ) -> int:
     """Worker body: collect this batch's rows, write + upload ONE shard, return row count.
 
@@ -625,8 +658,6 @@ def _process_one_shard_in_subprocess(
     so parent RSS stays flat at roughly one chunk. The parent only ever holds a
     list of trial-dir path strings.
     """
-    from huggingface_hub import HfApi  # type: ignore
-
     traces_utils = _import_traces_utils()
     _install_harbor_patches(include_literal_tokens=include_literal_tokens)
 
@@ -662,8 +693,12 @@ def _process_one_shard_in_subprocess(
         shard_path.unlink(missing_ok=True)
         return 0
 
-    api = HfApi()
-    _upload_shard(api, repo_id, shard_path)
+    api = None
+    if stage_dir is None:
+        from huggingface_hub import HfApi  # type: ignore
+
+        api = HfApi()
+    _upload_shard(api, repo_id, shard_path, Path(stage_dir) if stage_dir else None)
     return written
 
 
@@ -698,7 +733,8 @@ def stream_export_and_upload(
     chunk_size: int = 200,
     verbose: bool = False,
     include_literal_tokens: bool = False,
-) -> int:
+    stage_dir: Path | None = None,
+) -> TraceExportSummary:
     """Single streaming path: enumerate trials, write parquet shards, upload via HfApi.
 
     Memory is bounded to roughly one ``chunk_size`` worth of TRIALS at any time.
@@ -706,22 +742,30 @@ def stream_export_and_upload(
     each batch's collect + parquet-write + upload happens in a FRESH spawned
     subprocess that exits afterward, so the OS reclaims the per-chunk
     native-memory leak. Each shard is an additive hub commit, so a mid-run
-    failure leaves prior shards intact + resumable. Returns the total row count.
+    failure leaves prior shards intact + resumable. When ``stage_dir`` is supplied,
+    it contains the complete reusable dataset tree and no network write occurs.
     """
-    from huggingface_hub import HfApi  # type: ignore
-
     traces_utils = _import_traces_utils()
 
-    api = HfApi()
-    api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
-    print(f"[trace-export] Repo {repo_id} ensured (private={private}).")
+    api = None
+    if stage_dir is None:
+        from huggingface_hub import HfApi  # type: ignore
+
+        api = HfApi()
+        api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
+        print(f"[trace-export] Repo {repo_id} ensured (private={private}).")
+    else:
+        prepare_trace_stage(stage_dir)
+        print(f"[trace-export] Staging a complete dataset tree under {stage_dir}.")
 
     # Working root: each shard is written here by its subprocess, uploaded, then
     # deleted. We never keep more than one shard's worth of parquet on disk.
     tmp_root = Path(tempfile.mkdtemp(prefix="trace_shards_"))
 
     total_rows = 0
+    result_count = 0
     shard_idx = 0
+    shard_names: list[str] = []
 
     def _dispatch(batch: List[str]) -> None:
         nonlocal total_rows, shard_idx
@@ -740,10 +784,12 @@ def stream_export_and_upload(
                 tmp_root=str(tmp_root),
                 verbose=verbose,
                 include_literal_tokens=include_literal_tokens,
+                stage_dir=str(stage_dir) if stage_dir else None,
             )
         )
         if written:
             total_rows += written
+            shard_names.append(f"train-{shard_idx:05d}.parquet")
             shard_idx += 1
             print(f"[trace-export] Shard {shard_idx - 1:05d} done ({written} rows; running total {total_rows}).")
 
@@ -752,6 +798,8 @@ def stream_export_and_upload(
         batch: List[str] = []
         for trial_dir in _iter_trial_dirs_nonrecursive(traces_utils, job_dir):
             n_trials += 1
+            if (trial_dir / "result.json").is_file():
+                result_count += 1
             batch.append(str(trial_dir))
             # Batch by TRIAL count — the driver of per-shard memory. (rows/trial
             # varies, but a fixed trial-batch keeps each subprocess bounded.)
@@ -772,12 +820,13 @@ def stream_export_and_upload(
             empty_ds.to_parquet(str(empty_path))
             del empty_ds
             _release_arrow_memory()
-            _upload_shard(api, repo_id, empty_path)
+            _upload_shard(api, repo_id, empty_path, stage_dir)
+            shard_names.append("train-00000.parquet")
             print("[trace-export] No rows collected; uploaded an empty parquet shard.")
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    return total_rows
+    return TraceExportSummary(result_count=result_count, row_count=total_rows, shard_names=shard_names)
 
 
 def register_trace_dataset(repo_id: str, dataset_type: str = "SFT") -> None:
@@ -887,6 +936,18 @@ def _parse_args() -> argparse.Namespace:
         "one commit per shard. Use for large datasets (>128 shards) to avoid HF's per-repo "
         "commit rate limit (128/hour). Trade-off: all shards accumulate on local disk before "
         "the single upload (peak disk ~ full dataset), vs one shard at a time for the default path.",
+    )
+    p.add_argument(
+        "--stage-only",
+        type=Path,
+        default=None,
+        help="Write a complete reusable dataset tree to this directory without creating or uploading an HF repo.",
+    )
+    p.add_argument(
+        "--minimum-result-coverage",
+        type=float,
+        default=0.95,
+        help="Refuse an export when dataset rows / result.json files is below this ratio (default: 0.95).",
     )
     return p.parse_args()
 
@@ -1064,6 +1125,11 @@ def resolve_literal_inclusion(
 def main() -> None:
     args = _parse_args()
 
+    if args.single_commit and args.stage_only is not None:
+        raise SystemExit("--single_commit and --stage-only cannot be combined")
+    if not 0.0 <= args.minimum_result_coverage <= 1.0:
+        raise SystemExit("--minimum-result-coverage must be between 0 and 1")
+
     job_dir = Path(args.job_dir).expanduser().resolve()
     if not job_dir.exists() or not job_dir.is_dir():
         raise SystemExit(f"job_dir does not exist or is not a directory: {job_dir}")
@@ -1112,16 +1178,18 @@ def main() -> None:
 
     # Step 1 — the single, always-streaming, memory-safe upload mechanism.
     print(f"[trace-export] Streaming export from: {job_dir}")
-    # --single_commit: stage every shard on local disk (reuse the per-shard subprocess's
-    # TRACE_EXPORT_FAKE_UPLOAD_DIR seam so it writes-to-disk instead of committing to the
-    # Hub), then push the whole folder in ONE upload_folder commit below. Sidesteps HF's
-    # per-repo 128-commits/hour limit on >128-shard datasets.
-    single_commit_dir = None
+    # Single-commit upload and stage-only export share a complete local dataset
+    # tree. The tree's manifest makes reruns auditable and overwrites stale
+    # deterministic train shards before a replacement upload.
+    single_commit_dir: Path | None = None
+    stage_dir: Path | None = None
     if args.single_commit:
-        single_commit_dir = tempfile.mkdtemp(prefix="trace_single_commit_")
-        os.environ["TRACE_EXPORT_FAKE_UPLOAD_DIR"] = single_commit_dir
+        single_commit_dir = Path(tempfile.mkdtemp(prefix="trace_single_commit_"))
+        stage_dir = single_commit_dir
         print(f"[trace-export] --single_commit: staging shards under {single_commit_dir} (no per-shard commits).")
-    total = stream_export_and_upload(
+    elif args.stage_only is not None:
+        stage_dir = args.stage_only.expanduser().resolve()
+    summary = stream_export_and_upload(
         job_dir=job_dir,
         repo_id=args.repo_id,
         episodes=args.episodes,
@@ -1131,23 +1199,52 @@ def main() -> None:
         chunk_size=max(1, int(args.chunk_size)),
         verbose=bool(args.verbose),
         include_literal_tokens=include_literal_tokens,
+        stage_dir=stage_dir,
     )
+    manifest = trace_export_manifest(
+        result_count=summary.result_count,
+        row_count=summary.row_count,
+        shard_names=summary.shard_names,
+    )
+    if manifest["result_coverage"] < args.minimum_result_coverage:
+        raise SystemExit(
+            "[trace-export] result coverage below threshold: "
+            f"{manifest['row_count']}/{manifest['result_count']} = {manifest['result_coverage']:.2%}; "
+            f"required >= {args.minimum_result_coverage:.2%}."
+        )
     if single_commit_dir is not None:
         from huggingface_hub import HfApi  # type: ignore
 
-        os.environ.pop("TRACE_EXPORT_FAKE_UPLOAD_DIR", None)
-        print(f"[trace-export] --single_commit: pushing {total} rows in ONE upload_folder commit...")
+        (single_commit_dir / EXPORT_MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        print(f"[trace-export] --single_commit: pushing {summary.row_count} rows in ONE replacement upload...")
         HfApi().upload_folder(
             folder_path=single_commit_dir,
-            path_in_repo="data",
+            path_in_repo="",
             repo_id=args.repo_id,
             repo_type="dataset",
-            allow_patterns=["*.parquet"],
-            commit_message=f"Upload {total} rows ({total // max(1, int(args.chunk_size))}+ shards) in one commit",
+            allow_patterns=["data/*.parquet", EXPORT_MANIFEST_FILENAME],
+            delete_patterns=["data/train-*.parquet", EXPORT_MANIFEST_FILENAME],
+            commit_message=f"Replace trace export with {summary.row_count} rows",
         )
         shutil.rmtree(single_commit_dir, ignore_errors=True)
+    elif stage_dir is not None:
+        (stage_dir / EXPORT_MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        print(f"[trace-export] Staged {summary.row_count} rows at {stage_dir}.")
+    else:
+        from huggingface_hub import HfApi  # type: ignore
 
-    print(f"[trace-export] Upload complete ({total} rows): https://huggingface.co/datasets/{args.repo_id}")
+        HfApi().upload_file(
+            path_or_fileobj=(json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            path_in_repo=EXPORT_MANIFEST_FILENAME,
+            repo_id=args.repo_id,
+            repo_type="dataset",
+            commit_message="Record trace export coverage",
+        )
+
+    if args.stage_only is None:
+        print(f"[trace-export] Upload complete ({summary.row_count} rows): https://huggingface.co/datasets/{args.repo_id}")
+    else:
+        return
 
     # Step 1b — stamp tokenizer/model provenance so the literal token columns are
     # self-service decodable. Warn loud if literals shipped without a --served_model
