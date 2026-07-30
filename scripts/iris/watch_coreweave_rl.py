@@ -75,6 +75,7 @@ DEFAULT_TRACE_SYNC_LIMIT = 500
 CURRENT_FINELOG_MAX_LINES = 600_000
 COMPLETE_FINELOG_MAX_LINES = 10_000_000
 FinelogScope = Literal["current", "complete"]
+SyncScope = Literal["status", "finelog", "full"]
 ACTIVE_STATES = {1: "pending", 2: "building", 3: "running"}
 STATE_NAMES = {
     **ACTIVE_STATES,
@@ -215,8 +216,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--status-only",
-        "--no-sync",
-        dest="status_only",
         action="store_true",
         help="Fetch only the current finelog tail for status; skip pod, Ray, and trace artifacts.",
     )
@@ -853,15 +852,14 @@ def sync_job(
     job: RlJob,
     bundle_root: Path,
     *,
-    status_only: bool,
-    terminal_only: bool = False,
+    scope: SyncScope,
     progress: ProgressReporter | None = None,
 ) -> tuple[ArtifactResult, Path]:
     """Sync non-trace evidence for one job before the fleet trace selection."""
     bundle = job_bundle(bundle_root, job.cluster.name, job.job_id)
     directory = bundle.directory
     directory.mkdir(parents=True, exist_ok=True)
-    if status_only:
+    if scope == "status":
         if progress:
             progress.phase(f"current finelog tail {job.cluster.name}/{job.short_name}")
         finelog, error = fetch_finelog(job, directory, scope="current")
@@ -880,7 +878,7 @@ def sync_job(
     finelog, error = fetch_finelog(job, directory)
     if error:
         errors.append(error)
-    if terminal_only:
+    if scope == "finelog":
         return ArtifactResult(
             finelog,
             "not requested (terminal)",
@@ -1018,8 +1016,7 @@ def main() -> int:
             artifacts, directory = sync_job(
                 job,
                 args.bundle_root,
-                status_only=args.status_only,
-                terminal_only=job.is_terminal,
+                scope="status" if args.status_only else "finelog" if job.is_terminal else "full",
                 progress=progress,
             )
         except Exception as error:

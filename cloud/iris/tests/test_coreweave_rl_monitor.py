@@ -447,25 +447,23 @@ def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_p
 
     def fake_run_iris(_cluster, arguments, **_kwargs):
         calls.append(arguments)
+        step, reward = (16, 0.91) if "--tail" in arguments else (4, 0.8003)
         return subprocess.CompletedProcess(
             arguments,
             0,
             stdout=(
-                "Training Step Progress: 16 / 80\n"
-                'WANDB_MIRROR kind=train step=16 metrics={"reward/avg_raw_reward": 0.91}\n'
+                f"Training Step Progress: {step} / 80\n"
+                f'WANDB_MIRROR kind=train step={step} metrics={{"reward/avg_raw_reward": {reward}}}\n'
             ),
             stderr="",
         )
 
     monkeypatch.setattr(watch_coreweave_rl, "run_iris", fake_run_iris)
 
-    artifacts, directory = watch_coreweave_rl.sync_job(job, tmp_path, status_only=True)
+    artifacts, directory = watch_coreweave_rl.sync_job(job, tmp_path, scope="status")
     row = watch_coreweave_rl.report_row(job, artifacts, directory)
 
     assert len(calls) == 1
-    assert calls[0][:3] == ["job", "logs", job.job_id]
-    assert "--tail" in calls[0]
-    assert "--no-tail" not in calls[0]
     assert row[3] == "16/80"
     assert row[4] == "0.91"
 

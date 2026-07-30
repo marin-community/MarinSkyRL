@@ -65,6 +65,8 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
 )
 IRIS_JOB_ID_LABEL = "iris.job_id"
 KUEUE_POD_GROUP_LABEL = "kueue.x-k8s.io/pod-group-name"
+IRIS_POD_GROUP_PREFIX = "iris-pg-"
+IRIS_TASK_HASH_HEX_LENGTH = 16
 
 
 def parse_args() -> argparse.Namespace:
@@ -136,8 +138,8 @@ def task_short_name(job: str) -> str:
 def iris_pod_group_prefix(job: str) -> str:
     """Return the stable Kueue pod-group prefix Iris derives from a full job id."""
     canonical_job = "/" + "/".join(job_id_parts(job))
-    job_hash = hashlib.sha256(canonical_job.encode()).hexdigest()[:16]
-    return f"iris-pg-{job_hash}-"
+    job_hash = hashlib.sha256(canonical_job.encode()).hexdigest()[:IRIS_TASK_HASH_HEX_LENGTH]
+    return f"{IRIS_POD_GROUP_PREFIX}{job_hash}-"
 
 
 def find_pod(base: list[str], args: argparse.Namespace) -> str:
