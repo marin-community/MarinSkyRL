@@ -18,8 +18,8 @@ Usage:
     python parse_skyrl_metrics.py /path/to/logs /path/to/results --trace_jobs_dir /path/to/trace_jobs
 
     # Standard (non-agentic) GRPO: double-quoted WANDB_MIRROR JSON lines, no trace_jobs.
-    # Emits metrics.csv / vllm_metrics.csv / report.md / reward_plot.png, plus a
-    # trailing-5-EMA best-checkpoint selection over <run_dir>/exports/.
+    # Both formats emit a trailing-5-EMA best-checkpoint selection over parsed rewards;
+    # --run_dir additionally intersects candidates with exports present on disk.
     python parse_skyrl_metrics.py <log_file_or_dir> <output_folder> --format standard \
         --run_dir $WORK/rl_ckpts/<RUN_NAME> --save_every 20
 """
@@ -31,7 +31,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import matplotlib
 
@@ -186,13 +186,12 @@ def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
     return metrics_list
 
 
-def select_best_standard_checkpoint(
-    log_files: list[Path],
+def select_best_checkpoint(
+    metrics: list[dict[str, Any]],
     run_dir: Path | None = None,
     save_every: int = 20,
 ) -> dict[str, Any]:
-    """
-    Best-checkpoint selector for the STANDARD GRPO run layout.
+    """Select a checkpoint from parsed agentic or standard GRPO metrics.
 
     Run dir layout:
         <run_dir>/exports/global_step_<N>/policy/<weights>
@@ -207,25 +206,18 @@ def select_best_standard_checkpoint(
 
     Returns a dict with the chosen step, the EMA table, eligibility info, and diagnostics.
     """
-    # Collect rewards from every .out, parsing the standard WANDB_MIRROR train lines.
     rewards: dict[int, float] = {}  # step -> avg_raw_reward (first-seen wins)
-    for fn in log_files:
-        try:
-            with open(fn, "r", errors="replace") as f:
-                content = f.read()
-        except OSError:
+    for metric in metrics:
+        step = metric.get("trainer/global_step")
+        reward = metric.get("reward/avg_raw_reward")
+        if step is None or reward is None:
             continue
-        for m in extract_standard_metrics(content):
-            step = m.get("trainer/global_step")
-            reward = m.get("reward/avg_raw_reward")
-            if step is None or reward is None:
-                continue
-            try:
-                step = int(step)
-                reward = float(reward)
-            except (ValueError, TypeError):
-                continue
-            rewards.setdefault(step, reward)  # first-seen wins (chain links may overlap)
+        try:
+            step = int(step)
+            reward = float(reward)
+        except (ValueError, TypeError):
+            continue
+        rewards.setdefault(step, reward)  # first-seen wins (chain links may overlap)
 
     result: dict[str, Any] = {
         "rewards": rewards,
@@ -297,14 +289,15 @@ def select_best_standard_checkpoint(
 
     best = max(eligible, key=lambda s: ema[s])
     result["best_step"] = best
-    result["reason"] = f"highest trailing-5 EMA ({ema[best]:.4f}) among saved-aligned exports <= cap_step={cap_step}"
+    scope = f"exports <= cap_step={cap_step}" if cap_step is not None else "steps"
+    result["reason"] = f"highest trailing-5 EMA ({ema[best]:.4f}) among saved-aligned {scope}"
     return result
 
 
-def print_best_standard_checkpoint(selection: dict[str, Any], save_every: int) -> None:
+def print_best_checkpoint(selection: dict[str, Any], save_every: int, fmt: str) -> None:
     """Pretty-print the best-checkpoint selector output (EMA table + chosen step)."""
     print("\n" + "=" * 60)
-    print("BEST-CHECKPOINT SELECTOR (standard GRPO, trailing-5 EMA)")
+    print(f"BEST-CHECKPOINT SELECTOR ({fmt} GRPO, trailing-5 EMA)")
     print("=" * 60)
 
     rewards = selection.get("rewards", {})
@@ -331,6 +324,29 @@ def print_best_standard_checkpoint(selection: dict[str, Any], save_every: int) -
         print(f"  export path: exports/global_step_{best}/policy/")
     else:
         print(f"  NO STEP CHOSEN: {selection.get('reason', '')}")
+
+
+def _write_best_checkpoint_report(output: TextIO, selection: dict[str, Any]) -> None:
+    output.write("## Best Checkpoint (trailing-5 EMA of reward/avg_raw_reward)\n\n")
+    best = selection.get("best_step")
+    if best is not None:
+        output.write(f"**Chosen step: `{best}`** — {selection.get('reason', '')}\n\n")
+        output.write(f"Export path: `exports/global_step_{best}/policy/`\n\n")
+    else:
+        output.write(f"No step chosen: {selection.get('reason', '')}\n\n")
+    output.write(f"- available exports: `{selection.get('available_exports', [])}`\n")
+    output.write(f"- cap (latest_ckpt_global_step.txt): `{selection.get('cap_step')}`\n\n")
+    ema = selection.get("ema", {})
+    rewards = selection.get("rewards", {})
+    eligible = set(selection.get("eligible", []))
+    if ema:
+        output.write("| Step | Reward | EMA | Eligible |\n|------|--------|-----|----------|\n")
+        for step in sorted(ema):
+            output.write(
+                f"| {step} | {rewards.get(step, float('nan')):.4f} | {ema[step]:.4f} | "
+                f"{'yes' if step in eligible else ''} |\n"
+            )
+        output.write("\n")
 
 
 def extract_batch_errors(log_content: str) -> dict[int, dict[str, float]]:
@@ -831,6 +847,7 @@ def generate_markdown_report(
     df: pd.DataFrame,
     vllm_data: dict[str, dict[str, Any]] | None = None,
     trial_stats: dict[str, Any] | None = None,
+    selection: dict[str, Any] | None = None,
 ) -> None:
     """Generate a markdown report with summary statistics."""
 
@@ -900,6 +917,9 @@ def generate_markdown_report(
                 )
 
             f.write("\n")
+
+        if selection is not None:
+            _write_best_checkpoint_report(f, selection)
 
         # Timing breakdown
         f.write("## Timing Analysis\n\n")
@@ -1252,28 +1272,8 @@ def generate_standard_report(
                 )
             f.write("\n")
 
-        # Best-checkpoint selection
         if selection is not None:
-            f.write("## Best Checkpoint (trailing-5 EMA of reward/avg_raw_reward)\n\n")
-            best = selection.get("best_step")
-            if best is not None:
-                f.write(f"**Chosen step: `{best}`** — {selection.get('reason', '')}\n\n")
-                f.write(f"Export path: `exports/global_step_{best}/policy/`\n\n")
-            else:
-                f.write(f"No step chosen: {selection.get('reason', '')}\n\n")
-            f.write(f"- available exports: `{selection.get('available_exports', [])}`\n")
-            f.write(f"- cap (latest_ckpt_global_step.txt): `{selection.get('cap_step')}`\n\n")
-            ema = selection.get("ema", {})
-            rewards = selection.get("rewards", {})
-            eligible = set(selection.get("eligible", []))
-            if ema:
-                f.write("| Step | Reward | EMA | Eligible |\n|------|--------|-----|----------|\n")
-                for s in sorted(ema):
-                    f.write(
-                        f"| {s} | {rewards.get(s, float('nan')):.4f} | {ema[s]:.4f} | "
-                        f"{'yes' if s in eligible else ''} |\n"
-                    )
-                f.write("\n")
+            _write_best_checkpoint_report(f, selection)
 
 
 def generate_standard_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
@@ -1442,14 +1442,14 @@ def main():
         "--run_dir",
         type=str,
         default=None,
-        help="(standard only) RL run dir for best-checkpoint selection: "
+        help="RL run dir for best-checkpoint selection: "
         "<run_dir>/exports/global_step_<N>/policy + latest_ckpt_global_step.txt",
     )
     parser.add_argument(
         "--save_every",
         type=int,
         default=20,
-        help="(standard only) hf_save_interval; checkpoint-alignment for best-ckpt EMA (default: 20)",
+        help="hf_save_interval; checkpoint alignment for best-checkpoint EMA (default: 20)",
     )
 
     args = parser.parse_args()
@@ -1604,12 +1604,9 @@ def main():
         else:
             print("\nNo trace_jobs directory found; skipping per-trial analysis")
 
-    # Best-checkpoint selection (standard only)
-    selection = None
-    if fmt == "standard":
-        run_dir = Path(args.run_dir) if args.run_dir else None
-        selection = select_best_standard_checkpoint(log_files, run_dir=run_dir, save_every=args.save_every)
-        print_best_standard_checkpoint(selection, args.save_every)
+    run_dir = Path(args.run_dir) if args.run_dir else None
+    selection = select_best_checkpoint(all_rows, run_dir=run_dir, save_every=args.save_every)
+    print_best_checkpoint(selection, args.save_every, fmt)
 
     # Generate markdown report
     if fmt == "standard":
@@ -1630,6 +1627,7 @@ def main():
             df,
             vllm_data=all_vllm_data if all_vllm_data else None,
             trial_stats=trial_stats_result,
+            selection=selection,
         )
         print(f"Saved markdown report to: {md_path}")
 

@@ -22,12 +22,12 @@ Ray-log layouts:
   same URI you launched with, or let the tool auto-derive it from the finelog (the launcher prints
   `Rendezvous: <uri>`), so non-agentic jobs sync with no extra flags as long as the finelog is fetched.
 
-Ray logs land in the marin-us-east-02a bucket for BOTH east and rno2a jobs (it's east's LOTA store),
-so the object-store creds always come from the EAST kubeconfig; the finelog is fetched per the job's
-own cluster. trace_jobs is written under the job SLUG (run-independent), unlike ray_session_logs.
+Ray logs land in the marin-us-east-02a bucket for every supported CoreWeave cluster, so the object-store
+creds always come from the east-02a store; the finelog is fetched from the job's own cluster. trace_jobs
+is written under the job SLUG (run-independent), unlike ray_session_logs.
 
 Usage:
-  sync_rl_logs.py /benjaminfeuer/<job> [--cluster cw-us-east-02a|cw-rno2a]
+  sync_rl_logs.py /benjaminfeuer/<job> [--cluster cw-us-east-02a|cw-us-east-08a|cw-rno2a]
                   [--run run-<ts>] [--rendezvous-dir URI] [--dest DIR] [--finelog-lines N]
                   [--no-ray] [--no-finelog] [--trace-jobs] [--trace-jobs-no-gzip]
 
@@ -46,10 +46,14 @@ import sys
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
 
-BUCKET = "marin-us-east-02a"  # ray logs + trace_jobs land here for BOTH east + rno2a (east LOTA store)
+BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
 ENDPOINT = "https://cwobject.com"
 EAST_KUBECONFIG = os.path.expanduser("~/.kube/coreweave-iris")  # holds iris-task-env + the bucket
-KCFG = {"cw-us-east-02a": "~/.kube/coreweave-iris", "cw-rno2a": "~/.kube/coreweave-iris"}
+KCFG = {
+    "cw-rno2a": "~/.kube/coreweave-iris",
+    "cw-us-east-02a": "~/.kube/coreweave-iris",
+    "cw-us-east-08a": "~/.kube/coreweave-iris",
+}
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 IRIS_CANDIDATES = [
     "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
