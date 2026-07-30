@@ -6,6 +6,7 @@ Run:
 
 from __future__ import annotations
 
+import base64
 import re
 import sys
 from types import SimpleNamespace
@@ -19,8 +20,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
+    build_task_command,
     create_parser,
     derive_default_job_name,
+    normalize,
     resolve_node_resource_defaults,
     resolve_launch_defaults,
 )
@@ -143,6 +146,29 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     assert args.rendezvous_dir == "s3://custom/rendezvous"
     assert args.cpu == 12
     assert args.record_literal is False
+
+
+def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
+    args = _args(tmp_path, "opencode", ["--job-name", "external-config"])
+    source = Path(args.rl_config).resolve()
+
+    normalize(args)
+    resolve_launch_defaults(args)
+    command = build_task_command(args)
+
+    assert Path(args.rl_config) == source
+    assert base64.b64decode(args.rl_config_payload) == source.read_bytes()
+    assert args.rl_config_in_pod.startswith("/tmp/marin-rl-configs/")
+    assert "MARIN_RL_CONFIG_B64" in command[-1]
+    assert args.rl_config_in_pod in command[-1]
+    assert str(source) not in command[-1]
+
+
+def test_missing_rl_config_fails_during_normalization():
+    args = create_parser().parse_args(["--rl_config", "missing-config", "--model_path", "model"])
+
+    with pytest.raises(SystemExit, match="RL config not found"):
+        normalize(args)
 
 
 def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
