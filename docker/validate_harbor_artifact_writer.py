@@ -1,7 +1,6 @@
 """Validate that Harbor bounds a stalled artifact upload and frees its worker."""
 
 import concurrent.futures
-import inspect
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -42,14 +41,12 @@ def main() -> None:
         root = Path(temp_dir)
         release = threading.Event()
         upload_finished = threading.Event()
-        writer_kwargs = {
-            "queue_size": 2,
-            "num_workers": 1,
-            "spool_dir": root / "spool",
-        }
-        if "upload_timeout" in inspect.signature(ArtifactWriter).parameters:
-            writer_kwargs["upload_timeout"] = UPLOAD_TIMEOUT
-        writer = ArtifactWriter(**writer_kwargs)
+        writer = ArtifactWriter(
+            queue_size=2,
+            num_workers=1,
+            spool_dir=root / "spool",
+            upload_timeout=UPLOAD_TIMEOUT,
+        )
 
         stalled = writer.submit(
             StalledCloudDestination(release, upload_finished, root / "stalled.json"),
