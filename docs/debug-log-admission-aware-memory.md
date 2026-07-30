@@ -46,8 +46,7 @@ GB constraints are preserved and participate in node selection.
 
 ## Future work
 
-- [x] Record the failing regression and final suite results: 132 passed and 1 skipped under
-  `cloud/iris/tests/`.
+- None.
 
 ## Hypothesis 3
 
@@ -61,8 +60,8 @@ and automatic-request detection, and remove the command-shape assertion from the
 
 ## Results
 
-Cluster inspection now returns a named snapshot, and the pure selection step consumes named memory
-and disk fields. The full launcher suite and mechanical lint pass remain green.
+Cluster inspection returns a named snapshot, and the pure selection step consumes named memory and
+disk fields. Launcher tests and mechanical lint pass.
 
 ## Hypothesis 4
 
@@ -90,4 +89,4 @@ behavior test.
 
 ## Results
 
-The launcher suite passes with 132 tests and 1 skip, and the mechanical lint pass succeeds.
+Launcher tests and mechanical lint pass.

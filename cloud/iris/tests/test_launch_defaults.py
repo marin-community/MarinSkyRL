@@ -116,10 +116,10 @@ def test_node_resource_requests_use_selected_gpu_shape_allocatable_resources(
         )
     ]
 
-    def run(command, **kwargs):
-        return SimpleNamespace(stdout=json.dumps({"items": nodes}))
-
-    monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
+    monkeypatch.setattr(
+        "cloud.iris.launch_rl_iris.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes})),
+    )
 
     resolved = resolve_node_resource_requests(
         str(cluster_config),

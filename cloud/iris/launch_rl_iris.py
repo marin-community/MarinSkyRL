@@ -1083,9 +1083,8 @@ def create_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DISK_PER_NODE,
         help=f"Ephemeral disk per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected GPU "
         "node's allocatable ephemeral-storage, reduced as needed to fit the requested gang after current pod "
-        "requests (whole-node-exclusive gangs have no "
-        "co-tenants, so claim most of the node NVMe — keeps Ray object-spill / checkpoints "
-        "clear of the ephemeral-storage eviction). Pass an explicit value (e.g. 4000GB) to override.",
+        "requests. The remaining headroom protects Ray object spill and checkpoints from "
+        "ephemeral-storage eviction. Pass an explicit value (e.g. 4000GB) to override.",
     )
     parser.add_argument(
         "--ray-port",
