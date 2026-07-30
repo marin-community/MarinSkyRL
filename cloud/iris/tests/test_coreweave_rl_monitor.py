@@ -27,6 +27,8 @@ from scripts.iris.iris_ops import (
     write_error_report,
     write_bundle_manifest,
 )
+
+
 def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path):
     bundle = job_bundle(tmp_path, "cw-rno2a", "/benjaminfeuer/glm52-r10")
 
@@ -156,15 +158,25 @@ def test_find_pod_uses_exact_or_truncated_iris_job_label(monkeypatch, job_id, la
     assert coreweave_ops.find_pod(["kubectl"], SimpleNamespace(job=job_id, pod=None)) == pod_name
 
 
+class CapturingInput(BytesIO):
+    def close(self) -> None:
+        self.closed_by_sync = True
+
+
+class TarProcess:
+    def __init__(self, stdout: bytes, stderr: bytes = b"", return_code: int = 0, *, capture_input: bool = False):
+        self.stdin = CapturingInput() if capture_input else None
+        self.stdout = BytesIO(stdout)
+        self.stderr = BytesIO(stderr)
+        self.return_code = return_code
+
+    def wait(self) -> int:
+        return self.return_code
+
+
 def test_save_ray_logs_reports_empty_tar_stream_as_sync_error(monkeypatch, tmp_path):
-    class EmptyTarProcess:
-        stdout = BytesIO()
-        stderr = BytesIO(b"tar: session log vanished")
-
-        def wait(self) -> int:
-            return 1
-
-    monkeypatch.setattr(coreweave_ops.subprocess, "Popen", lambda *_args, **_kwargs: EmptyTarProcess())
+    process = TarProcess(b"", b"tar: session log vanished", 1)
+    monkeypatch.setattr(coreweave_ops.subprocess, "Popen", lambda *_args, **_kwargs: process)
 
     with pytest.raises(RuntimeError, match="Could not archive Ray/vLLM logs"):
         coreweave_ops.save_ray_logs(
@@ -185,15 +197,6 @@ def test_save_ray_logs_retries_transient_kubectl_html(monkeypatch, tmp_path):
         payload = b"ray log\n"
         member.size = len(payload)
         archive.addfile(member, BytesIO(payload))
-
-    class TarProcess:
-        def __init__(self, stdout: bytes, stderr: bytes, return_code: int):
-            self.stdout = BytesIO(stdout)
-            self.stderr = BytesIO(stderr)
-            self.return_code = return_code
-
-        def wait(self) -> int:
-            return self.return_code
 
     processes = iter(
         [
@@ -232,19 +235,6 @@ def _ray_delta_archive(entries: list[tuple[str, int, bytes]]) -> bytes:
 
 
 def test_save_ray_logs_incrementally_appends_and_replaces_rotated_logs(monkeypatch, tmp_path):
-    class CapturingInput(BytesIO):
-        def close(self) -> None:
-            self.closed_by_sync = True
-
-    class TarProcess:
-        def __init__(self, archive: bytes):
-            self.stdin = CapturingInput()
-            self.stdout = BytesIO(archive)
-            self.stderr = BytesIO()
-
-        def wait(self) -> int:
-            return 0
-
     commands: list[list[str]] = []
     inputs: list[CapturingInput] = []
     archives = iter(
@@ -257,7 +247,8 @@ def test_save_ray_logs_incrementally_appends_and_replaces_rotated_logs(monkeypat
 
     def fake_popen(command, **_kwargs):
         commands.append(command)
-        process = TarProcess(next(archives))
+        process = TarProcess(next(archives), capture_input=True)
+        assert process.stdin is not None
         inputs.append(process.stdin)
         return process
 
@@ -368,16 +359,17 @@ def test_rl_sync_warning_never_renders_proxy_html():
     assert warning == "Ray/vLLM log sync unavailable; local diagnostic saved"
 
 
-def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
+def _rl_report_row(tmp_path, finelog: str = "", state: str = "running", artifacts=None):
+    if finelog:
+        (tmp_path / "finelog.log").write_text(finelog)
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(
-        cluster,
-        "/user/rl-job",
-        "running",
-        0,
-        "",
-        dataset="DCAgent/tasks",
-    )
+    job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", state, 0, "", dataset="DCAgent/tasks")
+    if artifacts is None:
+        artifacts = watch_coreweave_rl.ArtifactResult("synced", "synced", "synced", "synced", None, None, ())
+    return watch_coreweave_rl.report_row(job, artifacts, tmp_path)
+
+
+def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
     artifacts = watch_coreweave_rl.ArtifactResult(
         "unavailable",
         "unavailable",
@@ -388,23 +380,19 @@ def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
         ("Ray/vLLM: raw proxy exception body",),
     )
 
-    row = watch_coreweave_rl.report_row(job, artifacts, tmp_path)
+    row = _rl_report_row(tmp_path, artifacts=artifacts)
 
     assert "raw proxy exception body" not in repr(row)
     assert row[2].value == "running"
 
 
 def test_rl_report_row_reads_policy_namespaced_tis_log_ratio(tmp_path):
-    (tmp_path / "finelog.log").write_text(
+    row = _rl_report_row(
+        tmp_path,
         "Training Step Progress: 7 / 80\n"
         'WANDB_MIRROR kind=train step=7 metrics={"policy/policy_entropy": 0.05, '
-        '"policy/tis/log_ratio_abs_mean": 0.125}\n'
+        '"policy/tis/log_ratio_abs_mean": 0.125}\n',
     )
-    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", "running", 0, "")
-    artifacts = watch_coreweave_rl.ArtifactResult("synced", "synced", "synced", "synced", None, None, ())
-
-    row = watch_coreweave_rl.report_row(job, artifacts, tmp_path)
 
     assert row[-1].value == "entropy=0.05; TIS |log r|=0.125"
 
@@ -416,12 +404,7 @@ def test_tis_ratio_summary_uses_distinct_legacy_importance_ratio_label():
 
 
 def test_rl_report_row_replaces_traceback_signal_with_error_report_pointer(tmp_path):
-    (tmp_path / "finelog.log").write_text("Traceback (most recent call last)\nraw details\n")
-    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", "failed", 0, "")
-    artifacts = watch_coreweave_rl.ArtifactResult("synced", "synced", "synced", "synced", None, None, ())
-
-    row = watch_coreweave_rl.report_row(job, artifacts, tmp_path)
+    row = _rl_report_row(tmp_path, "Traceback (most recent call last)\nraw details\n", state="failed")
 
     assert "Traceback" not in repr(row)
     assert row[-1].value == "workload error detected; see error report"

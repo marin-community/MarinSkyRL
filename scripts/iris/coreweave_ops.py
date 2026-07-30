@@ -139,9 +139,8 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
         return args.pod
     pods = json.loads(command([*base, "-n", NAMESPACE, "get", "pods", "-o", "json"]))["items"]
     needle = task_short_name(args.job).lower()
-    # Kubernetes truncates long Iris job names in pod names. The controller's
-    # canonical identity survives in this label, with the leading slash changed
-    # to nothing and path separators changed to dots.
+    # The label stores the Iris id without its leading slash and with dots as
+    # path separators, subject to Kubernetes label-value truncation.
     labeled_job_id = args.job.lstrip("/").replace("/", ".")
     candidates = sorted(
         pod["metadata"]["name"]
@@ -153,7 +152,7 @@ def find_pod(base: list[str], args: argparse.Namespace) -> str:
         )
     )
     # Iris stores the canonical job id in ``iris.job_id``, but Kubernetes label
-    # values are capped at 63 characters.  Long datagen names therefore lose
+    # values are length-limited. Long job names therefore lose
     # their suffix in both that label and the pod name.  Fall back to a prefix
     # match only when exact matching found nothing; keeping the ambiguity check
     # below prevents a root job from being confused with one of its child jobs.
