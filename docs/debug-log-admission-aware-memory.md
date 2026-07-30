@@ -44,10 +44,6 @@ resolves to 700Gi in the reported two-of-four shape. Automatic disk resolves to 
 two nodes, avoiding a memory/disk pair that exists only across disjoint node sets. Explicit decimal
 GB constraints are preserved and participate in node selection.
 
-## Future work
-
-- None.
-
 ## Hypothesis 3
 
 Separating cluster inspection from gang selection and naming resource fields makes the joint-fit
@@ -90,3 +86,7 @@ behavior test.
 ## Results
 
 Launcher tests and mechanical lint pass.
+
+## Future work
+
+- None.

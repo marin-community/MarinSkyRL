@@ -94,8 +94,6 @@ STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 AUTOMATIC_RESOURCE_REQUEST = "auto"
 MEMORY_RESOURCE = "memory"
 DISK_RESOURCE = "ephemeral-storage"
-DEFAULT_MEMORY_PER_NODE = AUTOMATIC_RESOURCE_REQUEST
-DEFAULT_DISK_PER_NODE = AUTOMATIC_RESOURCE_REQUEST
 # Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
 # and filesystem overhead.
 NODE_RESOURCE_FRACTION = 0.80
@@ -1074,13 +1072,13 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory",
-        default=DEFAULT_MEMORY_PER_NODE,
+        default=AUTOMATIC_RESOURCE_REQUEST,
         help=f"Memory per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected "
         "GPU node's allocatable memory, reduced as needed to fit the requested gang after current pod requests.",
     )
     parser.add_argument(
         "--disk",
-        default=DEFAULT_DISK_PER_NODE,
+        default=AUTOMATIC_RESOURCE_REQUEST,
         help=f"Ephemeral disk per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected GPU "
         "node's allocatable ephemeral-storage, reduced as needed to fit the requested gang after current pod "
         "requests. The remaining headroom protects Ray object spill and checkpoints from "
