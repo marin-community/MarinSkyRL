@@ -59,3 +59,11 @@ def test_checkpoint_selection_rejects_an_invalid_cap(tmp_path):
             run_dir=tmp_path,
             save_every=20,
         )
+
+
+def test_checkpoint_selection_rejects_an_invalid_reward():
+    with pytest.raises(ValueError, match="reward='not-a-reward'"):
+        parse_skyrl_metrics.select_best_checkpoint(
+            [{"trainer/global_step": 40, "reward/avg_raw_reward": "not-a-reward"}],
+            save_every=20,
+        )

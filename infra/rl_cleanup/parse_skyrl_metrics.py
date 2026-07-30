@@ -52,6 +52,12 @@ class CheckpointSelection:
     reason: str
 
 
+@dataclass(frozen=True)
+class CheckpointInventory:
+    available_exports: list[int]
+    cap_step: int | None
+
+
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
@@ -208,8 +214,8 @@ def _checkpoint_rewards(metrics: list[dict[str, Any]]) -> dict[int, float]:
         try:
             normalized_step = int(step)
             normalized_reward = float(reward)
-        except (ValueError, TypeError):
-            continue
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid checkpoint reward metric: step={step!r}, reward={reward!r}") from exc
         rewards.setdefault(normalized_step, normalized_reward)
     return rewards
 
@@ -224,9 +230,10 @@ def _trailing_five_ema(rewards: dict[int, float]) -> dict[int, float]:
     return ema
 
 
-def _checkpoint_inventory(run_dir: Path | None) -> tuple[list[int], int | None]:
+def _checkpoint_inventory(run_dir: Path | None) -> CheckpointInventory:
+    """Return exported checkpoint steps and the durable save cap, when available."""
     if run_dir is None:
-        return [], None
+        return CheckpointInventory([], None)
 
     available: list[int] = []
     exports_dir = run_dir / "exports"
@@ -244,7 +251,7 @@ def _checkpoint_inventory(run_dir: Path | None) -> tuple[list[int], int | None]:
             cap_step = int(cap_file.read_text().strip())
         except (ValueError, OSError) as exc:
             raise ValueError(f"Could not read a checkpoint step from {cap_file}: {exc}") from exc
-    return available, cap_step
+    return CheckpointInventory(available, cap_step)
 
 
 def _eligible_checkpoint_steps(
@@ -288,7 +295,9 @@ def select_best_checkpoint(
         return CheckpointSelection(rewards, {}, None, [], None, [], "No rewards found in parsed metrics")
 
     ema = _trailing_five_ema(rewards)
-    available, cap_step = _checkpoint_inventory(run_dir)
+    inventory = _checkpoint_inventory(run_dir)
+    available = inventory.available_exports
+    cap_step = inventory.cap_step
     eligible = _eligible_checkpoint_steps(ema, available, cap_step, save_every)
 
     if not eligible:
