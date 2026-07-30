@@ -22,6 +22,23 @@ tests pass. The task command references a content-addressed path under `/tmp/mar
 does not contain the launch host path. The full `cloud/iris/tests/` suite passes with 128 tests and
 2 skips.
 
+## Hypothesis 2
+
+The initial fix duplicated shared config resolution and spread delivery state across dynamic
+`argparse.Namespace` attributes, which could let host and task behavior drift.
+
+## Changes to make
+
+Reuse `resolve_rl_config_path`, represent delivery with a frozen `RlConfigLaunch`, require
+normalization before command construction, and derive the submitted task environment from that
+record.
+
+## Results
+
+The focused regressions still pass after the refactor. The payload mapping and shell reference use
+the same `RL_CONFIG_PAYLOAD_ENV` constant, and config-defined environment values cannot replace the
+launcher-owned payload.
+
 ## Future work
 
 - [x] Record the failing regression result and final test results.

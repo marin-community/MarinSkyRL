@@ -61,6 +61,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 from urllib.parse import urlparse
@@ -69,6 +70,7 @@ import yaml
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.gpu_rl_images import image_for_cluster
+from cloud.iris.rl_config_translation import resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
@@ -194,6 +196,22 @@ SKYRL_HOME = "/opt/skyrl"
 APP_DIR = "/app"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
+
+
+@dataclass(frozen=True)
+class RlConfigLaunch:
+    """Host source and task delivery details for one RL config."""
+
+    source: Path
+    task_path: str
+    payload: str | None
+
+    def task_environment(self) -> dict[str, str]:
+        """Return the environment needed to materialize an external config."""
+        if self.payload is None:
+            return {}
+        return {RL_CONFIG_PAYLOAD_ENV: self.payload}
+
 
 # marin-iris wheel installed into the RL venv at pod bootstrap for the controller-ingress
 # registration path (GAP D). The gpu-rl image bakes ONLY MarinSkyRL + harbor, never iris (a
@@ -1410,21 +1428,11 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
 
 
 def normalize(args: argparse.Namespace) -> None:
-    """Validate the config path and select its host and in-pod locations."""
-    raw_path = Path(args.rl_config).expanduser()
-    candidates = (
-        [raw_path]
-        if raw_path.is_absolute()
-        else [
-            PROJECT_ROOT / raw_path,
-            PROJECT_ROOT / "cloud/iris/configs" / raw_path,
-            PROJECT_ROOT / "cloud/iris/configs" / f"{raw_path}.yaml",
-        ]
-    )
-    source = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
-    if source is None:
-        searched = ", ".join(str(candidate) for candidate in candidates)
-        raise SystemExit(f"RL config not found: {args.rl_config!r}. Searched: {searched}")
+    """Resolve the RL config and validate the requested worker topology."""
+    try:
+        source = resolve_rl_config_path(args.rl_config)
+    except FileNotFoundError as error:
+        raise SystemExit(str(error)) from error
 
     try:
         relative_path = source.relative_to(PROJECT_ROOT)
@@ -1433,12 +1441,14 @@ def normalize(args: argparse.Namespace) -> None:
         digest = hashlib.sha256(contents).hexdigest()[:16]
         suffix = source.suffix or ".yaml"
         args.rl_config = str(source)
-        args.rl_config_in_pod = f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}"
-        args.rl_config_payload = base64.b64encode(contents).decode("ascii")
+        args.rl_config_launch = RlConfigLaunch(
+            source=source,
+            task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
+            payload=base64.b64encode(contents).decode("ascii"),
+        )
     else:
         args.rl_config = str(relative_path)
-        args.rl_config_in_pod = str(relative_path)
-        args.rl_config_payload = None
+        args.rl_config_launch = RlConfigLaunch(source=source, task_path=str(relative_path), payload=None)
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -1466,7 +1476,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
 
     # The MarinSkyRL training command rank 0 runs (run_rl.py owns config parse,
     # hydra-arg build, HF data resolution, and the SkyRL entrypoint launch).
-    task_rl_config = getattr(args, "rl_config_in_pod", args.rl_config)
+    rl_config_launch = args.rl_config_launch
+    if not isinstance(rl_config_launch, RlConfigLaunch):
+        raise RuntimeError("normalize() must resolve --rl_config before building the task command")
+    task_rl_config = rl_config_launch.task_path
     train_cmd: List[str] = [
         RL_PYTHON,
         "-m",
@@ -1736,7 +1749,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         f"else exec {ctrl}; fi"
     )
     rl_config_bootstrap = ""
-    if getattr(args, "rl_config_payload", None):
+    if rl_config_launch.payload is not None:
         config_dir = shlex.quote(str(Path(task_rl_config).parent))
         config_path = shlex.quote(task_rl_config)
         rl_config_bootstrap = (
@@ -1892,8 +1905,6 @@ def main() -> int:
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
     env_vars: dict[str, str] = {}
-    if getattr(args, "rl_config_payload", None):
-        env_vars[RL_CONFIG_PAYLOAD_ENV] = args.rl_config_payload
     # MarinSkyRL runtime-knob flags (deslop stage 3) -> SKYRL_* env vars. Seeded
     # FIRST (below the config extra_env) so a config's explicit extra_env value still
     # OVERRIDES a flag; an all-defaults launch contributes {} (byte-identical).
@@ -1909,6 +1920,7 @@ def main() -> int:
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
+    env_vars.update(args.rl_config_launch.task_environment())
     # ── Per-cluster infra-env DEFAULTS (fill-gap belt for cluster-specific footguns) ──────────
     # Some clusters need a specific network/NCCL interface that a cluster-AGNOSTIC RL config
     # won't (and shouldn't) carry. Fill it in here, keyed on --target-cluster, ONLY if neither
