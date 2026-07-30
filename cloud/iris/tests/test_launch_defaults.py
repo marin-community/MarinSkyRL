@@ -131,6 +131,16 @@ def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, mon
 
     assert memory == "764Gi"
     assert disk == "10871Gi"
+    explicit_memory, automatic_disk = resolve_node_resource_defaults(
+        str(cluster_config),
+        gpu_variant="GB200",
+        gpus_per_node=4,
+        num_nodes=1,
+        memory_request="900Gi",
+        disk_request="auto",
+    )
+    assert explicit_memory == "900Gi"
+    assert automatic_disk == "10871Gi"
     command = commands[0]
     assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
     assert command[command.index("--context") + 1] == "context-gb200"

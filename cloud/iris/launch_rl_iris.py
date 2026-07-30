@@ -127,7 +127,7 @@ def _parse_quantity_to_gib(q: str) -> float:
 
 
 @dataclass(frozen=True)
-class NodeResources:
+class ResourceQuantities:
     """Per-node memory and disk quantities in GiB."""
 
     memory_gib: float
@@ -135,11 +135,19 @@ class NodeResources:
 
 
 @dataclass(frozen=True)
+class NodeResourceBudget:
+    """Live headroom and policy-capped automatic requests for one node."""
+
+    headroom: ResourceQuantities
+    automatic: ResourceQuantities
+
+
+@dataclass(frozen=True)
 class ClusterResourceSnapshot:
     """Available matching nodes observed in one Kubernetes query."""
 
     context: str
-    nodes: tuple[NodeResources, ...]
+    nodes: tuple[NodeResourceBudget, ...]
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -162,22 +170,22 @@ def _node_is_ready(node: dict[str, Any]) -> bool:
     return any(condition.get("type") == "Ready" and condition.get("status") == "True" for condition in conditions)
 
 
-def _available_node_resources(
+def _node_resource_budgets(
     items: list[dict[str, Any]],
     *,
     gpu_variant: str,
     gpus_per_node: int,
-) -> list[NodeResources]:
-    """Return live memory and disk headroom in GiB for matching Ready nodes."""
-    pod_requests: dict[str, NodeResources] = {}
+) -> list[NodeResourceBudget]:
+    """Return live headroom and automatic request budgets for matching Ready nodes."""
+    pod_requests: dict[str, ResourceQuantities] = {}
     for item in items:
         if item.get("kind") != "Pod" or item.get("status", {}).get("phase") in {"Succeeded", "Failed"}:
             continue
         node_name = item.get("spec", {}).get("nodeName")
         if not isinstance(node_name, str):
             continue
-        requested = pod_requests.get(node_name, NodeResources(memory_gib=0.0, disk_gib=0.0))
-        pod_requests[node_name] = NodeResources(
+        requested = pod_requests.get(node_name, ResourceQuantities(memory_gib=0.0, disk_gib=0.0))
+        pod_requests[node_name] = ResourceQuantities(
             memory_gib=requested.memory_gib + _pod_resource_request_gib(item, MEMORY_RESOURCE),
             disk_gib=requested.disk_gib + _pod_resource_request_gib(item, DISK_RESOURCE),
         )
@@ -196,16 +204,17 @@ def _available_node_resources(
             continue
         memory_allocatable = _parse_quantity_to_gib(allocatable[MEMORY_RESOURCE])
         disk_allocatable = _parse_quantity_to_gib(allocatable[DISK_RESOURCE])
-        requested = pod_requests.get(node_name, NodeResources(memory_gib=0.0, disk_gib=0.0))
+        requested = pod_requests.get(node_name, ResourceQuantities(memory_gib=0.0, disk_gib=0.0))
+        headroom = ResourceQuantities(
+            memory_gib=memory_allocatable - requested.memory_gib,
+            disk_gib=disk_allocatable - requested.disk_gib,
+        )
         available.append(
-            NodeResources(
-                memory_gib=min(
-                    memory_allocatable * NODE_RESOURCE_FRACTION,
-                    memory_allocatable - requested.memory_gib,
-                ),
-                disk_gib=min(
-                    disk_allocatable * NODE_RESOURCE_FRACTION,
-                    disk_allocatable - requested.disk_gib,
+            NodeResourceBudget(
+                headroom=headroom,
+                automatic=ResourceQuantities(
+                    memory_gib=min(memory_allocatable * NODE_RESOURCE_FRACTION, headroom.memory_gib),
+                    disk_gib=min(disk_allocatable * NODE_RESOURCE_FRACTION, headroom.disk_gib),
                 ),
             )
         )
@@ -247,7 +256,7 @@ def _inspect_cluster_resources(
             check=True,
         ).stdout
         items = json.loads(out).get("items", [])
-        nodes = _available_node_resources(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
+        nodes = _node_resource_budgets(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
     except Exception as exc:  # noqa: BLE001 - convert cluster/tool failures into launch guidance
         raise SystemExit(
             f"Could not inspect {gpus_per_node}x{gpu_variant} nodes in kube context {context!r}: {exc}. "
@@ -277,8 +286,8 @@ def _resolve_gang_resource_requests(
     candidates = [
         resources
         for resources in snapshot.nodes
-        if (requested_memory_gib is None or resources.memory_gib >= requested_memory_gib)
-        and (requested_disk_gib is None or resources.disk_gib >= requested_disk_gib)
+        if (requested_memory_gib is None or resources.headroom.memory_gib >= requested_memory_gib)
+        and (requested_disk_gib is None or resources.headroom.disk_gib >= requested_disk_gib)
     ]
     if len(candidates) < num_nodes:
         raise SystemExit(
@@ -289,11 +298,11 @@ def _resolve_gang_resource_requests(
         )
 
     if automatic_memory:
-        selected = sorted(candidates, key=lambda resources: resources.memory_gib, reverse=True)[:num_nodes]
+        selected = sorted(candidates, key=lambda resources: resources.automatic.memory_gib, reverse=True)[:num_nodes]
     else:
-        selected = sorted(candidates, key=lambda resources: resources.disk_gib, reverse=True)[:num_nodes]
-    memory_gib = int(min(resources.memory_gib for resources in selected))
-    disk_gib = int(min(resources.disk_gib for resources in selected))
+        selected = sorted(candidates, key=lambda resources: resources.automatic.disk_gib, reverse=True)[:num_nodes]
+    memory_gib = int(min(resources.automatic.memory_gib for resources in selected))
+    disk_gib = int(min(resources.automatic.disk_gib for resources in selected))
     if (automatic_memory and memory_gib < 1) or (automatic_disk and disk_gib < 1):
         automatic_resources = " and ".join(
             resource for resource, automatic in (("memory", automatic_memory), ("disk", automatic_disk)) if automatic

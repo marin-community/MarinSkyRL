@@ -63,3 +63,18 @@ and automatic-request detection, and remove the command-shape assertion from the
 
 Cluster inspection now returns a named snapshot, and the pure selection step consumes named memory
 and disk fields. The full launcher suite and mechanical lint pass remain green.
+
+## Hypothesis 4
+
+The 80% ceiling is an automatic-default policy, not a feasibility limit for explicit overrides.
+Explicit requests should be checked against live headroom, while automatic requests remain capped.
+
+## Changes to make
+
+Track uncapped live headroom separately from policy-capped automatic budgets and add coverage for an
+explicit request above the automatic ceiling.
+
+## Results
+
+Explicit requests are now compared with uncapped live headroom, and the automatic side of a mixed
+request still uses the 80% ceiling. The full launcher suite and mechanical lint pass remain green.
