@@ -353,7 +353,10 @@ DEFAULT_RL_DOCKER_IMAGE = (
     # gpu-rl-ff9affef (built 2026-07-29, kaniko job gpurl-kaniko-plain-ff9affef): the fsdp2 variant
     # of gpu-rl-megatron-ff9affef, built from the same source and the same pins in the same pass.
     # Pull-verified anonymously: 41 layers, max 4.07 GB, 21.60 GB total.
-    "@sha256:619938bac770c5ea378c916933730c916752883a6043b5d34fff70f920e5eadb"  # noqa: E501
+    # gpu-rl-2f281a19 (built 2026-07-30): Harbor f2dd505f through harbor#51. Pull-verified
+    # anonymously as linux/amd64: 41 layers, max 4.07 GB, 21.60 GB total.
+    "@sha256:b0220be3badbc408e902b2800ce6718208935904b35b42daa1db4702ac9e9bae"  # noqa: E501
+    # (prev: gpu-rl-ff9affef @sha256:619938ba, Harbor 74d76ecb)
     # (prev: gpu-rl-7f97d057 @sha256:0f4f916a, Harbor 772e20f7, no verifier stdout)
     # (prev: gpu-rl-90072ada @sha256:43372633, old org, CUDA 12.8, no Blackwell)
     # (prev: gpu-rl-f2b44d4a @sha256:c7e05af3, Harbor 772e20f7 + the baked profiler)
@@ -421,7 +424,10 @@ DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
     # 2.11.0+cu129 and the skyrl-train lock are all unchanged. Build asserts green, including
     # megatron.core + megatron.bridge + transformer_engine.
     # Pull-verified anonymously: 43 layers, max 4.07 GB, 24.30 GB total.
-    "@sha256:db3f1890ce530378d440b5b4fc3a27b98e89e58716ffc91759c7e6d9b2dc8dab"  # noqa: E501
+    # gpu-rl-megatron-2f281a19 (built 2026-07-30): the Megatron sibling of gpu-rl-2f281a19.
+    # Pull-verified anonymously as linux/amd64: 43 layers, max 4.07 GB, 24.30 GB total.
+    "@sha256:5f1291fb453d7439d96375eb103f535c815674ebf40a7c40324c2fcde589af4a"  # noqa: E501
+    # (prev: gpu-rl-megatron-ff9affef @sha256:db3f1890, Harbor 74d76ecb)
     # (prev: gpu-rl-megatron-2b14abd3 @sha256:283cf2af, Harbor 772e20f7, no verifier stdout)
     # (prev: gpu-rl-megatron-90072ada @sha256:27a94ceb, old org, CUDA 12.8, no Blackwell)
     # (prev: gpu-rl-megatron-f2b44d4a @sha256:a374dd04, Harbor 772e20f7)

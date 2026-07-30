@@ -127,14 +127,10 @@ ARG NVIDIA_MODELOPT_VERSION=0.45.0
 ARG TE_TORCH_AARCH64_WHEEL=https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl
 ARG MAMBA_SSM_AARCH64_WHEEL=https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl
 ARG CAUSAL_CONV1D_AARCH64_WHEEL=https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl
-# Harbor (agentic rollout) is installed after the trainer lock.
-# Keep this in step with what production actually bakes. It lagged at 01c736a6 while every
-# shipped image carried 772e20f7 (harbor#39, the verifier-teardown deadline), so a build that
-# did not pass an explicit override would have silently reverted harbor by one release.
-# 74d76ecb is harbor#47: VerifierResult now carries the test script's stdout and stderr.
-# Reward shapers read `verifier_result.stdout`; on 772e20f7 the attribute does not exist, so
-# every shaped run fell back to binary reward without logging anything.
-ARG HARBOR_COMMIT=74d76ecb
+# Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
+# than overriding it at build time. This revision includes the artifact-upload fixes and setup-file
+# upload support through harbor#51.
+ARG HARBOR_COMMIT=f2dd505f609021611eb85521a097e6dff384d12d
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
@@ -574,10 +570,10 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
-# The pip-check gate below always prints the full conflict report. The plain
-# image must have exactly the one known aiobotocore/botocore conflict; the
-# megatron install adds further conflicts of its own, so INSTALL_MEGATRON=1
-# only requires the known conflict and leaves the printed report for review.
+# The pip-check gate below always prints the full conflict report. The plain image must have exactly
+# the known aiobotocore/botocore conflict and the arm64 cusparselt platform marker. The Megatron
+# install adds further conflicts of its own, so INSTALL_MEGATRON=1 only requires the aiobotocore
+# conflict and leaves the printed report for review.
 #
 # `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
 # them into extras, so every image up to that pin already carried them. Naming
@@ -600,7 +596,9 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
     grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
       /tmp/rl-pip-check && \
     if [ "${INSTALL_MEGATRON}" != "1" ]; then \
-      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1"; \
+      grep -Fx 'The package `nvidia-cusparselt-cu12` was built for a different platform' \
+        /tmp/rl-pip-check && \
+      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "2"; \
     fi && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"

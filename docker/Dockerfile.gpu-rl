@@ -78,14 +78,10 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 # INSTALL_MEGATRON=1 to build the megatron variant (adds the `megatron` extra to
 # the uv sync). All megatron deps are linux/x86_64-gated in the lock.
 ARG INSTALL_MEGATRON=0
-# Harbor (agentic rollout) is installed after the trainer lock.
-# Keep this in step with what production actually bakes. It lagged at 01c736a6 while every
-# shipped image carried 772e20f7 (harbor#39, the verifier-teardown deadline), so a build that
-# did not pass an explicit override would have silently reverted harbor by one release.
-# 74d76ecb is harbor#47: VerifierResult now carries the test script's stdout and stderr.
-# Reward shapers read `verifier_result.stdout`; on 772e20f7 the attribute does not exist, so
-# every shaped run fell back to binary reward without logging anything.
-ARG HARBOR_COMMIT=74d76ecb
+# Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
+# than overriding it at build time. This revision includes the artifact-upload fixes and setup-file
+# upload support through harbor#51.
+ARG HARBOR_COMMIT=f2dd505f609021611eb85521a097e6dff384d12d
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
