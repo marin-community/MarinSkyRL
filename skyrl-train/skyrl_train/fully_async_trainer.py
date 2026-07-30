@@ -529,27 +529,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             await self._teardown()
 
-    async def _handle_resume_at_max_steps(self) -> None:
-        """Handle a run that resumed AT or PAST max_steps (already complete).
-
-        Fires the on_train_end callbacks (so any configured final checkpoint /
-        HF export / HF upload runs if it is missing) and returns without executing
-        another training step. This makes a resumed-at-max run exit 0 (clean
-        COMPLETED), which terminates the afternotok restart chain instead of
-        overshooting to gs N+1 and FAILING.
-        """
-        logger.info(
-            f"Resumed at global_step {self.global_step} >= max training steps "
-            f"({self.total_training_steps}); run is already COMPLETE. Skipping further "
-            f"training and finalizing (export/upload if missing)."
-        )
-
-        await self._finalize_training(
-            completed_step=self.global_step,
-            epoch=max(self.cfg.trainer.epochs - 1, 0),
-        )
-        logger.info("Training already complete on resume — exiting cleanly.")
-
     async def _train_loop(self):
         """
         Internal training loop, separated for proper generator lifecycle management.

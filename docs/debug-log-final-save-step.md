@@ -29,7 +29,7 @@ restores the last completed step before constructing callback state or saving. B
 fully asynchronous loops use it for normal completion and resume-at-max, and it dispatches `on_save`
 after checkpoint persistence.
 
-## Future work
+## Verification
 
-- [x] Verify the final checkpoint dispatches `on_save` so data and generation-buffer state are included.
-- [x] Keep resume-at-max behavior at the loaded completed step.
+- The final checkpoint dispatches `on_save` so data and generation-buffer state are included.
+- Resume-at-max behavior remains at the loaded completed step.

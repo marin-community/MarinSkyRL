@@ -16,7 +16,6 @@ from scripts.iris.iris_ops import (
     MonitorError,
     StyledCell,
     box_table,
-    default_bundle_root,
     filter_records,
     format_duration,
     job_bundle,
@@ -33,8 +32,16 @@ from scripts.iris.iris_ops import (
 def test_monitor_defaults_to_the_shared_document_bundle_root(monkeypatch):
     monkeypatch.setattr("sys.argv", ["watch_coreweave_rl.py"])
 
-    assert default_bundle_root(Path("/tmp/operator")) == Path("/tmp/operator/Documents/iris-job-bundles")
-    assert watch_coreweave_rl.parse_args().bundle_root == default_bundle_root()
+    bundle = job_bundle(watch_coreweave_rl.parse_args().bundle_root, "cw-rno2a", "/operator/training")
+
+    assert bundle.directory.parts[-5:] == (
+        "iris-job-bundles",
+        "jobs",
+        "cw-rno2a",
+        "operator",
+        "training",
+    )
+    assert "experiments" not in bundle.directory.parts
 
 
 def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path):
