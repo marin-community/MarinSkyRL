@@ -6,6 +6,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from types import SimpleNamespace
@@ -60,25 +61,127 @@ scale_groups:
     return path
 
 
+def _node_snapshot(
+    name: str,
+    *,
+    gpu_variant: str,
+    gpus: int,
+    memory: str,
+    disk: str,
+) -> dict:
+    return {
+        "kind": "Node",
+        "metadata": {"name": name, "labels": {"nvidia.com/gpu.product": f"NVIDIA-{gpu_variant}"}},
+        "spec": {},
+        "status": {
+            "allocatable": {"nvidia.com/gpu": str(gpus), "memory": memory, "ephemeral-storage": disk},
+            "conditions": [{"type": "Ready", "status": "True"}],
+        },
+    }
+
+
+def _pod_snapshot(
+    name: str,
+    *,
+    node: str,
+    memory: str,
+    disk: str = "0",
+    phase: str = "Running",
+) -> dict:
+    return {
+        "kind": "Pod",
+        "metadata": {"name": name},
+        "spec": {
+            "nodeName": node,
+            "containers": [
+                {"resources": {"requests": {"memory": memory, "ephemeral-storage": disk}}},
+            ],
+        },
+        "status": {"phase": phase},
+    }
+
+
 def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, monkeypatch):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
     commands = []
+    nodes = [
+        _node_snapshot(
+            "gb200-0",
+            gpu_variant="GB200",
+            gpus=4,
+            memory="1001863488Ki",
+            disk="14591185743078",
+        )
+    ]
 
     def run(command, **kwargs):
         commands.append(command)
-        return SimpleNamespace(
-            stdout=("4 NVIDIA-H100-80GB-HBM3 500000000Ki 7000000000000\n4 NVIDIA-GB200 1001863488Ki 14591185743078\n")
-        )
+        return SimpleNamespace(stdout=json.dumps({"items": nodes}))
 
     monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
 
-    memory, disk = resolve_node_resource_defaults(str(cluster_config), gpu_variant="GB200", gpus_per_node=4)
+    memory, disk = resolve_node_resource_defaults(
+        str(cluster_config),
+        gpu_variant="GB200",
+        gpus_per_node=4,
+        num_nodes=1,
+        memory_request="auto",
+        disk_request="auto",
+    )
 
     assert memory == "764Gi"
     assert disk == "10871Gi"
     command = commands[0]
     assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
     assert command[command.index("--context") + 1] == "context-gb200"
+    assert command[command.index("get") + 1] == "nodes,pods"
+
+
+@pytest.mark.parametrize(
+    ("memory_request", "disk_request", "expected"),
+    [
+        ("auto", "auto", ("700Gi", "3000Gi")),
+        ("700GB", "auto", ("700GB", "3000Gi")),
+    ],
+)
+def test_node_resource_defaults_fit_the_requested_gang_on_busy_nodes(
+    tmp_path,
+    monkeypatch,
+    memory_request,
+    disk_request,
+    expected,
+):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="H100", gpus_per_node=8)
+    nodes = [
+        _node_snapshot(f"gpu-{index}", gpu_variant="H100", gpus=8, memory="1000Gi", disk="10000Gi")
+        for index in range(4)
+    ]
+    pods = [
+        _pod_snapshot(
+            f"worker-{index}",
+            node=f"gpu-{index}",
+            memory=memory,
+            disk="7000Gi" if index < 2 else "0",
+        )
+        for index, memory in enumerate(("300Gi", "300Gi", "700Gi", "700Gi"))
+    ]
+    pods.append(_pod_snapshot("finished", node="gpu-0", memory="900Gi", phase="Failed"))
+
+    monkeypatch.setattr(
+        "cloud.iris.launch_rl_iris.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes + pods})),
+    )
+
+    memory, disk = resolve_node_resource_defaults(
+        str(cluster_config),
+        gpu_variant="H100",
+        gpus_per_node=8,
+        num_nodes=2,
+        memory_request=memory_request,
+        disk_request=disk_request,
+    )
+
+    assert (memory, disk) == expected
 
 
 def _rl_config(tmp_path: Path, harness: str) -> Path:
