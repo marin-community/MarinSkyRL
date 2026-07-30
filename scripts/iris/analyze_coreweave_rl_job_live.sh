@@ -27,11 +27,11 @@
 #                                                             #   = it never banked a turn (see the "not-parsed-on-kill /
 #                                                             #   upload-on-finalize" note below).
 #   analyze_coreweave_rl_job_live.sh <substr> cp   <trial-dir> [dest]      # pull a single trial dir to the launch host
-#   analyze_coreweave_rl_job_live.sh <substr> pull [out-base-dir]          # FULL CAPTURE -> date-stamped subdir:
+#   analyze_coreweave_rl_job_live.sh <substr> pull <out-base-dir>          # FULL CAPTURE -> date-stamped subdir:
 #                                                             #   complete iris finelog + per-rank pod logs
 #                                                             #   + ALL trace_jobs (synced from R2) + MANIFEST.md
 #                                                             #   + any torch NCCL flight-recorder dumps (see frdump)
-#   analyze_coreweave_rl_job_live.sh <substr> frdump [dest] [fr-base]      # torch NCCL flight-recorder dump ONLY (fast, no
+#   analyze_coreweave_rl_job_live.sh <substr> frdump <dest> [fr-base]      # torch NCCL flight-recorder dump ONLY (fast, no
 #                                                             #   S3/trace_jobs/finelog): kubectl-cp's
 #                                                             #   TORCH_NCCL_DEBUG_INFO_TEMP_FILE-prefixed files off
 #                                                             #   EVERY pod of this job (not just rank-0) into
@@ -51,7 +51,7 @@
 #
 # ENV: PEEK_KUBECONFIG (default ~/.kube/coreweave-iris), NS (default iris), CONTAINER (default task),
 #      PEEK_CLUSTER (default cw-us-east-02a), IRIS_BIN (default the otagent cw-capable iris),
-#      PEEK_OUT (default shared Iris evidence-bundle root),
+#      PEEK_OUT (output root for pull/frdump when no positional root is supplied),
 #      PEEK_TRIALS_S3 (override the remote trials_dir; default s3://marin-us-east-02a/iris/<jobname>/trace_jobs),
 #      PEEK_MAX_OBJECT_BYTES (pull: skip any single object larger than this; default 20MB=20971520,
 #                             set 0 to fetch everything incl. the 100s-of-MB result.json blobs)
@@ -61,8 +61,6 @@ set -euo pipefail
 
 JOB="${1:-}"
 ACTION="${2:-ls}"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # Force the CoreWeave kubeconfig. Do NOT honor an inherited $KUBECONFIG — the login shell's default
 # points at a different cluster (→ 'no pods'); override only via PEEK_KUBECONFIG.
 export KUBECONFIG="${PEEK_KUBECONFIG:-$HOME/.kube/coreweave-iris}"
@@ -71,11 +69,19 @@ CONTAINER="${CONTAINER:-task}"
 CLUSTER="${PEEK_CLUSTER:-cw-us-east-02a}"
 # Default to the OTAGENT iris (the marin .venv iris has a broken `kubernetes` import → cannot drive cw).
 IRIS_BIN="${IRIS_BIN:-/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris}"
-DEFAULT_PEEK_OUT="$(
-  PYTHONPATH="$REPO_ROOT" python3 -c \
-    'from scripts.iris.iris_ops import DEFAULT_BUNDLE_ROOT; print(DEFAULT_BUNDLE_ROOT)'
-)"
-PEEK_OUT="${PEEK_OUT:-$DEFAULT_PEEK_OUT}"
+PEEK_OUT="${PEEK_OUT:-}"
+
+resolve_output_root() {
+  local positional_root="${1:-}"
+  if [ -n "$positional_root" ]; then
+    printf '%s\n' "$positional_root"
+  elif [ -n "$PEEK_OUT" ]; then
+    printf '%s\n' "$PEEK_OUT"
+  else
+    echo "[peek] output root required: pass it as the third argument or set PEEK_OUT" >&2
+    return 64
+  fi
+}
 
 if [ -z "$JOB" ]; then
   echo "usage: analyze_coreweave_rl_job_live.sh <pod-name-substring> [ls|cat|grep|cp|pull] [args]" >&2
@@ -383,7 +389,7 @@ PYEOF
   pull)
     # FULL CAPTURE into this job's canonical evidence bundle: complete iris finelog + per-rank pod logs + ALL
     # trace_jobs (synced from R2, or tar'd from a legacy node-local path) + a provenance MANIFEST.
-    OUTBASE="${3:-$PEEK_OUT}"
+    OUTBASE="$(resolve_output_root "${3:-}")"
     DEST="${OUTBASE}/jobs/${CLUSTER}/${USER_FROM_POD}/${JOBNAME}"
     mkdir -p "$DEST/pod_logs" "$DEST/trace_jobs"
     echo "[pull] dest=$DEST  jobid=$JOBID  cluster=$CLUSTER"
@@ -550,7 +556,7 @@ EOF
     # Fast, S3-free capture of JUST the torch NCCL flight-recorder dumps off every pod of
     # this job. Intended to be run THE MOMENT a hang is suspected (watchdog-stuck / Aborted
     # in the finelog), before any kill — see the usage header.
-    OUTBASE="${3:-$PEEK_OUT}"
+    OUTBASE="$(resolve_output_root "${3:-}")"
     if [ -n "${4:-}" ]; then
       FR_BASE="$4"
     fi
