@@ -142,33 +142,24 @@ def iris_pod_group_prefix(job: str) -> str:
     return f"{IRIS_POD_GROUP_PREFIX}{job_hash}-"
 
 
+def pod_matches_job(pod: dict[str, Any], job: str) -> bool:
+    """Return whether Kubernetes pod metadata identifies the complete Iris job."""
+    metadata = pod.get("metadata", {})
+    labels = metadata.get("labels", {})
+    labeled_job_id = job.lstrip("/").replace("/", ".")
+    return (
+        task_short_name(job).lower() in metadata.get("name", "").lower()
+        or labels.get(IRIS_JOB_ID_LABEL) == labeled_job_id
+        or labels.get(KUEUE_POD_GROUP_LABEL, "").startswith(iris_pod_group_prefix(job))
+    )
+
+
 def find_pod(base: list[str], args: argparse.Namespace) -> str:
     if args.pod:
         return args.pod
     pods = json.loads(command([*base, "-n", NAMESPACE, "get", "pods", "-o", "json"]))["items"]
     running_pods = [pod for pod in pods if pod.get("status", {}).get("phase") == "Running"]
-    needle = task_short_name(args.job).lower()
-    # Exact names and labels remain useful for short jobs. Long iris.job_id labels
-    # truncate at Kubernetes' 63-character limit, so they are never used as a
-    # prefix: same-day sibling arms can share the truncated value.
-    labeled_job_id = args.job.lstrip("/").replace("/", ".")
-    candidates = sorted(
-        pod["metadata"]["name"]
-        for pod in running_pods
-        if (
-            needle in pod["metadata"]["name"].lower()
-            or pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL) == labeled_job_id
-        )
-    )
-    # Iris hashes the complete parent job id into the Kueue pod-group label.
-    # The trailing attempt number changes on retry, hence prefix matching here.
-    if not candidates:
-        pod_group_prefix = iris_pod_group_prefix(args.job)
-        candidates = sorted(
-            pod["metadata"]["name"]
-            for pod in running_pods
-            if pod.get("metadata", {}).get("labels", {}).get(KUEUE_POD_GROUP_LABEL, "").startswith(pod_group_prefix)
-        )
+    candidates = sorted(pod["metadata"]["name"] for pod in running_pods if pod_matches_job(pod, args.job))
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:

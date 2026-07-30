@@ -42,12 +42,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
-    KUEUE_POD_GROUP_LABEL,
     NAMESPACE,
-    iris_pod_group_prefix,
     iter_objects,
     kubectl_base,
     object_store_client,
+    pod_matches_job,
     ray_log_inventory,
     resolve_runtime_python,
     safe_relative_path,
@@ -75,7 +74,7 @@ DEFAULT_TRACE_SYNC_LIMIT = 500
 CURRENT_FINELOG_MAX_LINES = 600_000
 COMPLETE_FINELOG_MAX_LINES = 10_000_000
 FinelogScope = Literal["current", "complete"]
-SyncScope = Literal["status", "finelog", "full"]
+SyncScope = Literal["status", "terminal", "full"]
 ACTIVE_STATES = {1: "pending", 2: "building", 3: "running"}
 STATE_NAMES = {
     **ACTIVE_STATES,
@@ -392,18 +391,13 @@ def job_pods(job: RlJob) -> list[tuple[str, str]]:
     )
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout).strip()[-240:])
-    needle = job.short_name.lower()
-    pod_group_prefix = iris_pod_group_prefix(job.job_id)
     return sorted(
         (
             item["metadata"]["name"],
             item.get("status", {}).get("phase", "Unknown"),
         )
         for item in json.loads(result.stdout).get("items", [])
-        if (
-            needle in item.get("metadata", {}).get("name", "").lower()
-            or item.get("metadata", {}).get("labels", {}).get(KUEUE_POD_GROUP_LABEL, "").startswith(pod_group_prefix)
-        )
+        if pod_matches_job(item, job.job_id)
     )
 
 
@@ -878,7 +872,7 @@ def sync_job(
     finelog, error = fetch_finelog(job, directory)
     if error:
         errors.append(error)
-    if scope == "finelog":
+    if scope == "terminal":
         return ArtifactResult(
             finelog,
             "not requested (terminal)",
@@ -1016,7 +1010,7 @@ def main() -> int:
             artifacts, directory = sync_job(
                 job,
                 args.bundle_root,
-                scope="status" if args.status_only else "finelog" if job.is_terminal else "full",
+                scope="status" if args.status_only else "terminal" if job.is_terminal else "full",
                 progress=progress,
             )
         except Exception as error:
