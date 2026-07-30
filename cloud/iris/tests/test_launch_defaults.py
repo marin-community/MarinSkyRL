@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sys
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -141,14 +142,20 @@ def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
     ("priority", "expected"),
     [("production", 1), ("interactive", 2), ("batch", 3)],
 )
-def test_priority_resolution_uses_only_supported_iris_enum_members(priority, expected):
+def test_priority_resolution_uses_only_supported_iris_enum_members(monkeypatch, priority, expected):
     installed_enum_values = {
         "PRIORITY_BAND_PRODUCTION": 1,
         "PRIORITY_BAND_INTERACTIVE": 2,
         "PRIORITY_BAND_BATCH": 3,
     }
+    iris_module = ModuleType("iris")
+    rpc_module = ModuleType("iris.rpc")
+    rpc_module.job_pb2 = SimpleNamespace(PriorityBand=SimpleNamespace(Value=installed_enum_values.__getitem__))
+    iris_module.rpc = rpc_module
+    monkeypatch.setitem(sys.modules, "iris", iris_module)
+    monkeypatch.setitem(sys.modules, "iris.rpc", rpc_module)
 
-    assert resolve_priority_band(priority, installed_enum_values.__getitem__) == expected
+    assert resolve_priority_band(priority) == expected
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
