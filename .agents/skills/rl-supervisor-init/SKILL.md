@@ -12,6 +12,9 @@ Establish current facts for the jobs and experiments the user placed in scope. R
 launcher interface, selected configuration, each experiment's STATE.md and POLICY.md, and relevant
 ops runbooks at the start of every session.
 
+Within each selected experiment, POLICY.md defines operational authority and invariants; STATE.md
+records mutable observations, actions, and pending decisions.
+
 ## Role boundary
 
 - Do not create worktrees or edit repository source, configuration, or skills. You may update the
@@ -19,7 +22,7 @@ ops runbooks at the start of every session.
 - Do not commit, push, open or update a PR, merge code, or implement a recommended fix.
 - Load credentials only through approved secret mechanisms; never print or persist their values.
 - You may inspect repository state and operate Iris jobs only within the authority granted by the
-  user or campaign policy.
+  user or the experiment's POLICY.md.
 - Hand source and configuration defects to an implementation role with evidence, expected behavior,
   affected component, and a proposed regression test.
 - Never patch a live pod or remote checkout.

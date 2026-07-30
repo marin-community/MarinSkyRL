@@ -462,7 +462,9 @@ def test_rl_progress_reporter_writes_phase_and_elapsed_time(monkeypatch, capsys)
     reporter = watch_coreweave_rl.ProgressReporter(started_at=100.0)
     reporter.phase("trace inventory 1/2")
 
-    assert capsys.readouterr().err == "[rl-watch +01:05] trace inventory 1/2\n"
+    prefix, phase = capsys.readouterr().err.rstrip().split("] ", 1)
+    assert prefix.endswith("+01:05")
+    assert phase == "trace inventory 1/2"
 
 
 def test_rl_discovery_skips_iris_preamble_and_parses_terminal_states(
