@@ -1,9 +1,9 @@
 """Grug FSDP2 capstones on Hopper.
 
-The two-H100 test covers colocated CUDA-IPC weight sync. The four-H100 test
-puts the same vLLM TP1/DP2/EP2 and FSDP2 EP1 workers on disjoint GPUs and
-covers the production NCCL-broadcast path. Both run rollout -> RL update +
-query bias -> exact weight readback -> a second rollout.
+The two-H100 test covers colocated CUDA-IPC weight sync. The six-H100 test
+puts vLLM TP1/DP2/EP2 and FSDP2 ``(fsdp=2, ep=2)`` workers on disjoint GPUs
+and covers the production NCCL-broadcast path. Both run rollout -> RL update +
+query bias -> checkpoint restore -> exact weight readback -> a second rollout.
 """
 
 from __future__ import annotations
@@ -35,12 +35,17 @@ from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 
-POLICY_WORLD_SIZE = 2
-COLOCATED_NUM_GPUS = POLICY_WORLD_SIZE
-DISAGGREGATED_NUM_GPUS = POLICY_WORLD_SIZE * 2
+EP1_POLICY_WORLD_SIZE = 2
+MIXED_EP_POLICY_WORLD_SIZE = 4
+ROLLOUT_WORLD_SIZE = 2
+COLOCATED_NUM_GPUS = EP1_POLICY_WORLD_SIZE
+MIXED_EP_DISAGGREGATED_NUM_GPUS = MIXED_EP_POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
-SERVING_EXPERT_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
+SERVING_EXPERT_NAMES = {
+    "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
+    "model.layers.0.mlp.experts.4.gate_proj.weight": 4,
+}
 LM_HEAD_NAME = "lm_head.weight"
 
 
@@ -84,7 +89,10 @@ def _config(
     model_path: str,
     *,
     colocate_all: bool = True,
+    policy_world_size: int = EP1_POLICY_WORLD_SIZE,
+    expert_model_parallel_size: int = 1,
 ):
+    assert policy_world_size % expert_model_parallel_size == 0
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model_path
     cfg.trainer.critic.model.path = ""
@@ -94,42 +102,49 @@ def _config(
     cfg.trainer.gradient_checkpointing = True
     cfg.trainer.gradient_checkpointing_use_reentrant = False
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.train_batch_size = POLICY_WORLD_SIZE
-    cfg.trainer.policy_mini_batch_size = POLICY_WORLD_SIZE
+    cfg.trainer.train_batch_size = policy_world_size
+    cfg.trainer.policy_mini_batch_size = policy_world_size
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.algorithm.use_entropy_loss = False
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.trainer.placement.policy_num_nodes = 1
-    cfg.trainer.placement.policy_num_gpus_per_node = POLICY_WORLD_SIZE
+    cfg.trainer.placement.policy_num_gpus_per_node = policy_world_size
     cfg.trainer.policy.fsdp_config.cpu_offload = True
-    cfg.trainer.policy.fsdp_config.fsdp_size = POLICY_WORLD_SIZE
-    cfg.trainer.policy.fsdp_config.expert_model_parallel_size = 1
+    cfg.trainer.policy.fsdp_config.fsdp_size = policy_world_size // expert_model_parallel_size
+    cfg.trainer.policy.fsdp_config.expert_model_parallel_size = expert_model_parallel_size
     cfg.trainer.policy.fsdp_config.context_parallel_size = 1
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.fsdp_config.moe_grouped_gemm = False
-    cfg.trainer.policy.fsdp_config.use_grouped_mm = False
-    cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
-    cfg.trainer.policy.optimizer_config.lr = 3.0e-2
-    cfg.trainer.policy.optimizer_config.weight_decay = 123.0
+    cfg.trainer.policy.fsdp_config.use_grouped_mm = expert_model_parallel_size > 1
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
-    cfg.trainer.policy.optimizer_config.optimizer_kwargs = {
-        "adam_lr": 4.0e-3,
-        "momentum": 0.95,
-        "nesterov": True,
-        "backend_steps": 5,
-        "beta1": 0.9,
-        "beta2": 0.95,
-        "epsilon": 1.0e-8,
-        "muon_epsilon": 1.0e-8,
-    }
+    if expert_model_parallel_size > 1:
+        cfg.trainer.policy.optimizer_config.optimizer = "AdamW"
+        cfg.trainer.policy.optimizer_config.lr = 4.0e-3
+        cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
+        cfg.trainer.policy.optimizer_config.weight_decay = 1.0e-2
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {}
+    else:
+        cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+        cfg.trainer.policy.optimizer_config.lr = 3.0e-2
+        cfg.trainer.policy.optimizer_config.weight_decay = 123.0
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {
+            "adam_lr": 4.0e-3,
+            "momentum": 0.95,
+            "nesterov": True,
+            "backend_steps": 5,
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "epsilon": 1.0e-8,
+            "muon_epsilon": 1.0e-8,
+        }
     cfg.generator.backend = "vllm"
     cfg.generator.async_engine = True
     cfg.generator.weight_sync_backend = "nccl"
     cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.inference_engine_data_parallel_size = POLICY_WORLD_SIZE
-    cfg.generator.inference_engine_expert_parallel_size = POLICY_WORLD_SIZE
+    cfg.generator.inference_engine_data_parallel_size = ROLLOUT_WORLD_SIZE
+    cfg.generator.inference_engine_expert_parallel_size = ROLLOUT_WORLD_SIZE
     cfg.generator.num_inference_engines = 1
     cfg.generator.n_samples_per_prompt = 1
     cfg.generator.gpu_memory_utilization = 0.35
@@ -226,7 +241,12 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
     return _RepresentativeNames(
         bias_names=biases,
         parameter_names=parameter_names,
-        sync_parameter_names=[parameter_names[0], SERVING_EXPERT_NAME, parameter_names[2], parameter_names[3]],
+        sync_parameter_names=[
+            parameter_names[0],
+            *SERVING_EXPERT_NAMES,
+            parameter_names[2],
+            parameter_names[3],
+        ],
         wire_bf16_sentinel_name="model.layers.0.input_layernorm.weight",
     )
 
@@ -328,8 +348,11 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
                     "float32" if name in training.bias_names or name.endswith(".mlp.router.weight") else "bfloat16"
                 )
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
+                expert_index = SERVING_EXPERT_NAMES.get(name)
                 expected = (
-                    training.weights[STACKED_EXPERT_NAME][0] if name == SERVING_EXPERT_NAME else training.weights[name]
+                    training.weights[STACKED_EXPERT_NAME][expert_index]
+                    if expert_index is not None
+                    else training.weights[name]
                 )
                 actual = entry["tensor"]
                 if name not in training.bias_names:
@@ -348,17 +371,26 @@ def _run_full_cycle(
     tmp_path: Path,
     *,
     colocate_all: bool = True,
+    policy_world_size: int = EP1_POLICY_WORLD_SIZE,
+    expert_model_parallel_size: int = 1,
 ) -> None:
-    cfg = _config(model_path, colocate_all=colocate_all)
+    cfg = _config(
+        model_path,
+        colocate_all=colocate_all,
+        policy_world_size=policy_world_size,
+        expert_model_parallel_size=expert_model_parallel_size,
+    )
     initialize_ray(cfg)
-    required_gpus = COLOCATED_NUM_GPUS if colocate_all else DISAGGREGATED_NUM_GPUS
+    required_gpus = (
+        max(policy_world_size, ROLLOUT_WORLD_SIZE) if colocate_all else policy_world_size + ROLLOUT_WORLD_SIZE
+    )
     available_gpus = int(ray.cluster_resources().get("GPU", 0))
     if available_gpus < required_gpus:
         pytest.skip(f"topology requires {required_gpus} Ray GPUs, found {available_gpus}")
     pg = None
     if colocate_all:
         pg = placement_group(
-            [{"GPU": 1, "CPU": 1}] * COLOCATED_NUM_GPUS,
+            [{"GPU": 1, "CPU": 1}] * policy_world_size,
             strategy="PACK",
         )
         get_ray_pg_ready_with_timeout(pg, timeout=60)
@@ -392,7 +424,7 @@ def _run_full_cycle(
             "policy",
             shared_pg=pg,
             colocate_all=colocate_all,
-            num_gpus_per_node=POLICY_WORLD_SIZE,
+            num_gpus_per_node=policy_world_size,
             num_nodes=1,
             cfg=cfg,
         )
@@ -405,7 +437,12 @@ def _run_full_cycle(
                 representative_names.parameter_names,
             )
         )
-        assert sorted(traced_ranks) == list(range(POLICY_WORLD_SIZE))
+        assert sorted(traced_ranks) == list(range(policy_world_size))
+        if expert_model_parallel_size > 1:
+            geometry = ray.get(policy.async_run_ray_method("pass_through", "diag_ep8_geometry"))
+            assert all(item["mesh_dim_names"] == ["ddp", "fsdp", "ep"] for item in geometry)
+            assert all(tuple(item["mesh_shape"]) == (1, 2, 2) for item in geometry)
+            assert {item["ep_coord"] for item in geometry} == {0, 1}
         training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
         checkpoint_names = [
             *training.bias_names,
@@ -436,6 +473,8 @@ def _run_full_cycle(
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
         _assert_engine_weights(client, sync_names, training)
+        if expert_model_parallel_size > 1:
+            assert set(SERVING_EXPERT_NAMES).issubset(sync_names)
 
         if colocate_all:
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
@@ -465,10 +504,16 @@ def test_grug_two_h100_rollout_train_sync_rollout(tmp_path):
 
 
 @pytest.mark.vllm
-def test_grug_four_h100_disaggregated_rollout_train_broadcast_rollout(tmp_path):
-    """Exercise mixed-dtype Grug sync with trainer and rollout on disjoint GPUs."""
+def test_grug_six_h100_mixed_ep_disaggregated_rollout_train_broadcast_rollout(tmp_path):
+    """Exercise EP-owned experts and exact sync on disjoint trainer/rollout GPUs."""
 
-    require_hoppers(DISAGGREGATED_NUM_GPUS)
+    require_hoppers(MIXED_EP_DISAGGREGATED_NUM_GPUS)
 
     _write_tiny_checkpoint(tmp_path)
-    _run_full_cycle(str(tmp_path), tmp_path, colocate_all=False)
+    _run_full_cycle(
+        str(tmp_path),
+        tmp_path,
+        colocate_all=False,
+        policy_world_size=MIXED_EP_POLICY_WORLD_SIZE,
+        expert_model_parallel_size=2,
+    )

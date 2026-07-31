@@ -8,8 +8,15 @@ import torch
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
+import skyrl_train.models.grug_moe as grug_moe
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig, GrugMoeForCausalLM, GrugMoeRouter
+from skyrl_train.models.grug_moe import (
+    GrugMoeAttention,
+    GrugMoeConfig,
+    GrugMoeForCausalLM,
+    GrugMoeRouter,
+    enable_grug_grouped_mm,
+)
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
     GrugQueryBiasLayerObservation,
@@ -83,6 +90,53 @@ def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
         actual = reloaded(tokens).logits
         expected = model(tokens).logits
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_native_grouped_mm_builds_routed_rows_and_preserves_checkpoint_keys(monkeypatch):
+    torch.manual_seed(9)
+    model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1))
+    block = model.model.layers[0].mlp
+    hidden = torch.randn(2, 3, model.config.hidden_size)
+    keys_before = tuple(model.state_dict())
+    captured = {}
+
+    def grouped_contract(gate, down, up, routed_input, counts):
+        captured["weights"] = (gate, down, up)
+        captured["routed_input"] = routed_input.detach().clone()
+        captured["counts"] = counts.detach().clone()
+        return routed_input * 2
+
+    monkeypatch.setattr(grug_moe, "_run_grug_grouped_mm", grouped_contract)
+    assert enable_grug_grouped_mm(model) == 1
+
+    output = block(hidden)
+    flat = hidden.reshape(-1, hidden.shape[-1])
+    _, selected_experts, combine_weights = block.router(flat)
+    flat_experts = selected_experts.reshape(-1)
+    order = torch.argsort(flat_experts, stable=True)
+    token_indices = torch.arange(flat.shape[0]).unsqueeze(1).expand(-1, model.config.num_experts_per_tok).reshape(-1)
+    expected_routed_input = flat.index_select(0, token_indices.index_select(0, order))
+    expected_counts = torch.bincount(flat_experts, minlength=model.config.num_local_experts)
+    expected = torch.zeros_like(flat)
+    expected.index_add_(
+        0,
+        token_indices.index_select(0, order),
+        expected_routed_input * 2 * combine_weights.reshape(-1).index_select(0, order).to(flat.dtype).unsqueeze(-1),
+    )
+
+    assert block.experts.use_grouped_mm is True
+    assert captured["weights"] == (
+        block.experts.gate_proj.weight,
+        block.experts.down_proj.weight,
+        block.experts.up_proj.weight,
+    )
+    torch.testing.assert_close(captured["routed_input"], expected_routed_input, rtol=0, atol=0)
+    torch.testing.assert_close(captured["counts"], expected_counts, rtol=0, atol=0)
+    torch.testing.assert_close(output, expected.reshape_as(hidden), rtol=0, atol=0)
+    assert tuple(model.state_dict()) == keys_before
+    assert "model.layers.0.mlp.experts.gate_proj.weight" in keys_before
+    assert "model.layers.0.mlp.experts.up_proj.weight" in keys_before
+    assert "model.layers.0.mlp.experts.down_proj.weight" in keys_before
 
 
 def test_gradient_checkpointing_preserves_logits_and_gradients():

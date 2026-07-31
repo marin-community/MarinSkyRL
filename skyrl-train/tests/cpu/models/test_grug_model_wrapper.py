@@ -1,7 +1,11 @@
 import pytest
 
 from skyrl_train.model_wrapper import validate_grug_training_options
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
+from skyrl_train.models.grug_moe import (
+    GRUG_MOE_MODEL_TYPE,
+    validate_grug_expert_parallel_options,
+    validate_grug_training_strategy,
+)
 
 
 _SUPPORTED_OPTIONS = {
@@ -30,7 +34,6 @@ _SUPPORTED_OPTIONS = {
         ("context_parallel_size", 2, "context parallelism"),
         ("moe_router_replay", True, "router replay/R3"),
         ("moe_grouped_gemm", True, "grouped MoE"),
-        ("use_grouped_mm", True, "grouped MoE"),
         ("use_liger_kernel", True, "Liger kernels"),
     ],
 )
@@ -44,6 +47,10 @@ def test_grug_training_options_reject_each_unsupported_feature(option, value, la
 @pytest.mark.parametrize("attn_implementation", ["eager", "flash_attention_2"])
 def test_grug_training_options_accept_supported_attention(attn_implementation):
     validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "attn_implementation": attn_implementation})
+
+
+def test_grug_training_options_accept_native_grouped_mm():
+    validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "use_grouped_mm": True})
 
 
 def test_grug_training_options_ignore_other_models():
@@ -66,3 +73,33 @@ def test_grug_training_strategy_rejects_non_fsdp2_backends(strategy):
 def test_grug_training_strategy_accepts_fsdp2_and_ignores_other_models():
     validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, "fsdp2")
     validate_grug_training_strategy("qwen3", "deepspeed")
+
+
+def test_grug_expert_parallel_requires_native_grouped_torch_path():
+    with pytest.raises(ValueError, match="use_grouped_mm=true"):
+        validate_grug_expert_parallel_options(
+            GRUG_MOE_MODEL_TYPE,
+            expert_model_parallel_size=2,
+            use_grouped_mm=False,
+            ep_comm_backend="torch",
+        )
+    with pytest.raises(ValueError, match="ep_comm_backend=torch"):
+        validate_grug_expert_parallel_options(
+            GRUG_MOE_MODEL_TYPE,
+            expert_model_parallel_size=2,
+            use_grouped_mm=True,
+            ep_comm_backend="deepep",
+        )
+
+    validate_grug_expert_parallel_options(
+        GRUG_MOE_MODEL_TYPE,
+        expert_model_parallel_size=2,
+        use_grouped_mm=True,
+        ep_comm_backend="torch",
+    )
+    validate_grug_expert_parallel_options(
+        GRUG_MOE_MODEL_TYPE,
+        expert_model_parallel_size=1,
+        use_grouped_mm=False,
+        ep_comm_backend="deepep",
+    )
