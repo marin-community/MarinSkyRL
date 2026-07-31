@@ -31,7 +31,7 @@ jobs:
       JOB_NAME: marinskyrl-nightly-gsm8k-${{ github.run_id }}-${{ github.run_attempt }}
       TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Trim the Iris bundle
         run: git rm -r --cached --quiet skyrl-train/docs skyrl-agent
@@ -78,7 +78,7 @@ jobs:
         if: always()
         run: iris --cluster marin job stop "/runner/$JOB_NAME" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: nightly-run-log
