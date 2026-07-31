@@ -40,6 +40,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from infra.rl_analysis.training_metrics import parse_training_metrics_result
+
 
 @dataclass(frozen=True)
 class CheckpointSelection:
@@ -172,36 +174,10 @@ def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
     policy/raw_grad_norm, policy/policy_loss, policy/ppo_clip_ratio, policy/log_ratio_abs_*,
     policy/n_tokens_dp_gt_*pct, loss/avg_raw_advantages, timing/*, ...).
     """
-    content = strip_ansi(log_content)
-
-    # Match the WANDB_MIRROR train line. The metrics dict runs to end-of-line; after ANSI
-    # stripping the trailing reset code is gone, so {.*} to line end is the JSON object.
-    pattern = re.compile(
-        r"WANDB_MIRROR\s+kind=train\s+step=(\d+)\s+metrics=(\{.*\})\s*$",
-        re.MULTILINE,
-    )
-
-    metrics_list: list[dict[str, Any]] = []
-    n_bad = 0
-    for match in pattern.finditer(content):
-        step_str, dict_str = match.group(1), match.group(2)
-        try:
-            metrics = json.loads(dict_str)
-        except json.JSONDecodeError:
-            n_bad += 1
-            continue
-        # Ensure trainer/global_step is present (fall back to the step= token).
-        if "trainer/global_step" not in metrics:
-            try:
-                metrics["trainer/global_step"] = int(step_str)
-            except ValueError:
-                pass
-        metrics_list.append(metrics)
-
-    if n_bad:
-        print(f"  Warning: {n_bad} WANDB_MIRROR train lines failed JSON parse")
-
-    return metrics_list
+    result = parse_training_metrics_result(log_content)
+    if result.malformed_lines:
+        print(f"  Warning: {result.malformed_lines} WANDB_MIRROR train lines failed JSON parse")
+    return [record.metrics for record in result.records]
 
 
 def _checkpoint_rewards(metrics: list[dict[str, Any]]) -> dict[int, float]:

@@ -40,6 +40,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from infra.rl_analysis.training_metrics import (  # noqa: E402
+    ENTROPY_KEYS,
+    GRAD_NORM_KEYS,
+    POLICY_LOSS_KEYS,
+    REWARD_KEYS,
+    metric_value,
+    parse_training_metrics_result,
+)
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
     NAMESPACE,
@@ -93,7 +101,6 @@ TRAIN_DATA_PATTERN = re.compile(
     r"--train[_-]data(?:=|\s+)(?:'(?P<single>\[[^']+\])'|\"(?P<double>\[[^\"]+\])\"|(?P<bare>\[[^\s]+\]))"
 )
 PROGRESS_PATTERN = re.compile(r"Training Step Progress:\s*(\d+)\s*/\s*(\d+)")
-MIRROR_PATTERN = re.compile(r"WANDB_MIRROR kind=train step=(\d+) metrics=(\{.*\})")
 ERROR_PATTERNS = (
     re.compile(r"CUDA out of memory", re.IGNORECASE),
     re.compile(r"(?:RayTaskError|ActorDiedError|WorkerCrashedError)"),
@@ -707,23 +714,17 @@ def parse_metrics(finelog: Path) -> tuple[int | None, int | None, dict[str, Any]
     progress = PROGRESS_PATTERN.findall(text)
     step = int(progress[-1][0]) if progress else None
     total = int(progress[-1][1]) if progress else None
-    for line in reversed(text.splitlines()):
-        match = MIRROR_PATTERN.search(line)
-        if not match:
-            continue
-        try:
-            metrics = json.loads(match.group(2))
-        except json.JSONDecodeError:
-            continue
-        return int(match.group(1)), total, metrics, None
+    result = parse_training_metrics_result(text)
+    if result.records:
+        latest = result.records[-1]
+        return latest.step, total, latest.metrics, None
+    if result.malformed_lines:
+        return step, total, {}, f"{result.malformed_lines} WANDB_MIRROR train lines failed JSON parse"
     return step, total, {}, None
 
 
 def metric(metrics: dict[str, Any], *names: str) -> Any | None:
-    for name in names:
-        if name in metrics:
-            return metrics[name]
-    return None
+    return metric_value(metrics, *names)
 
 
 def display_metric(value: Any | None, precision: int = 4) -> str:
@@ -819,10 +820,10 @@ def report_row(job: RlJob, artifacts: ArtifactResult, directory: Path) -> list[o
     """Build one status row; monitor failures belong in the separate error report."""
     step, total, metrics, _parse_error = parse_metrics(directory / "finelog.log")
     step_display = "—" if step is None else f"{step}/{total if total is not None else '—'}"
-    reward = metric(metrics, "reward/avg_raw_reward", "loss/avg_final_rewards")
-    policy_loss = metric(metrics, "policy/policy_loss", "policy_loss")
-    grad_norm = metric(metrics, "policy/raw_grad_norm", "raw_grad_norm")
-    entropy = metric(metrics, "policy/policy_entropy", "policy_entropy")
+    reward = metric(metrics, *REWARD_KEYS)
+    policy_loss = metric(metrics, *POLICY_LOSS_KEYS)
+    grad_norm = metric(metrics, *GRAD_NORM_KEYS)
+    entropy = metric(metrics, *ENTROPY_KEYS)
     signal = terminal_signal(directory / "finelog.log")
     trend = f"entropy={display_metric(entropy)}; {tis_ratio_summary(metrics)}"
     if signal:
