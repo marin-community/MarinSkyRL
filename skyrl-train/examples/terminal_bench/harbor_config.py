@@ -344,6 +344,7 @@ ERROR_HANDLING_SCHEMA = SectionSchema(
         ),
         # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
         "default_error_treatment": FieldMapping("default_error_treatment", default=DEFAULT_ERROR_TREATMENT.value),
+        "preserve_logprobs_on_timeout": FieldMapping("preserve_logprobs_on_timeout", default=True),
     }
 )
 
@@ -764,22 +765,7 @@ class HarborConfigBuilder:
         return default
 
     def get_error_handling_config(self) -> ErrorHandlingConfig:
-        """
-        Get error handling configuration for RLOO-N advantage estimator.
-
-        This controls how different exception types are treated:
-        - "passthrough" exceptions: Ignore exception, use verifier reward normally
-        - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
-        - "zero" exceptions: Included in baseline with reward=0 (agent failures)
-
-        Returns:
-            Dict with keys:
-                - enable_error_classification: bool - whether to classify errors
-                - passthrough_exceptions: Set[str] - exception names to pass through (use verifier reward)
-                - mask_exceptions: Set[str] - exception names to mask (exclude from baseline)
-                - zero_exceptions: Set[str] - exception names to zero (include with reward=0)
-                - default_error_treatment: str - "mask", "zero", or "passthrough" for unclassified errors
-        """
+        """Build the validated RLOO-N treatment configuration."""
         config = {}
 
         for yaml_key, mapping in ERROR_HANDLING_SCHEMA.fields.items():

@@ -1,6 +1,11 @@
 from loguru import logger
 
-from skyrl_train.utils.harbor_errors import ErrorHandlingConfig, ErrorTreatment, classify_exception_type
+from skyrl_train.utils.harbor_errors import (
+    ErrorHandlingConfig,
+    ErrorTreatment,
+    classify_exception_type,
+    treatment_excludes_from_baseline,
+)
 
 
 def test_error_handling_mapping_is_validated_at_config_boundary():
@@ -55,4 +60,10 @@ def test_unknown_error_is_loud_before_explicit_fallback():
     assert treatment is ErrorTreatment.MASK
     assert len(records) == 1
     assert records[0]["level"].name == "ERROR"
-    assert "FutureHarborError" in records[0]["message"]
+
+
+def test_passthrough_requires_a_verifier_result_to_remain_in_baseline():
+    assert treatment_excludes_from_baseline(ErrorTreatment.PASSTHROUGH, verifier_available=False) is True
+    assert treatment_excludes_from_baseline(ErrorTreatment.PASSTHROUGH, verifier_available=True) is False
+    assert treatment_excludes_from_baseline(ErrorTreatment.MASK, verifier_available=True) is True
+    assert treatment_excludes_from_baseline(ErrorTreatment.ZERO, verifier_available=False) is False

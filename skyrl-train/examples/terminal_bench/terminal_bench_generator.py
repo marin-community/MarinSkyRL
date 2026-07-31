@@ -27,7 +27,11 @@ from skyrl_train.generators.utils import (
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
-from skyrl_train.utils.harbor_errors import ErrorTreatment, classify_exception_type
+from skyrl_train.utils.harbor_errors import (
+    ErrorTreatment,
+    classify_exception_type,
+    treatment_excludes_from_baseline,
+)
 from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
@@ -977,7 +981,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 treatment, exception_type = self._classify_exception(process_error)
                 # A processing-time render error has no verifier reward to pass
                 # through, so only an agent-category error remains in the baseline.
-                exclude_from_baseline = treatment is not ErrorTreatment.ZERO
+                exclude_from_baseline = treatment_excludes_from_baseline(treatment, verifier_available=False)
                 logger.warning(
                     f"Trajectory {trajectory_id} failed during result processing "
                     f"(NOT fatal — skipping this trial): "
@@ -1316,19 +1320,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         return generator_output
 
     def _classify_exception(self, exception: Exception) -> tuple[ErrorTreatment, str]:
-        """
-        Classify an exception as infrastructure failure (mask), agent failure
-        (zero), or passthrough (ignore the exception and use the verifier
-        reward as-is).
-
-        Args:
-            exception: The exception to classify.
-
-        Returns:
-            The typed training treatment and persisted exception type name.
-        """
+        """Classify an exception and return its treatment and persisted type name."""
         exception_type = type(exception).__name__
-
         return self._classify_exception_type(exception_type)
 
     def _classify_exception_type(self, exception_type: str) -> tuple[ErrorTreatment, str]:
@@ -1563,7 +1556,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Handle exceptions from the orchestrator
         if isinstance(result, Exception):
             treatment, exception_type = self._classify_exception(result)
-            exclude_from_baseline = treatment is not ErrorTreatment.ZERO
+            exclude_from_baseline = treatment_excludes_from_baseline(treatment, verifier_available=False)
             logger.warning(
                 f"Trajectory {trajectory_id} failed with exception: {result} "
                 f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
@@ -1640,7 +1633,9 @@ class TerminalBenchGenerator(GeneratorInterface):
                         exception_type=exception_type,
                     )
             else:
-                exclude_from_baseline = treatment is ErrorTreatment.MASK
+                exclude_from_baseline = treatment_excludes_from_baseline(
+                    treatment, verifier_available=bool(result.verifier_result)
+                )
                 if self._should_preserve_timeout_trajectory(result):
                     # POST-generation failure classified ZERO/MASK (e.g.
                     # VerifierTimeoutError). The agent generated a full trajectory
@@ -1716,7 +1711,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Data extraction failure is typically an infrastructure issue
             exception_type = type(e).__name__
             treatment, _ = self._classify_exception(e)
-            exclude_from_baseline = treatment is not ErrorTreatment.ZERO
+            exclude_from_baseline = treatment_excludes_from_baseline(treatment, verifier_available=False)
             logger.warning(
                 f"Trajectory {trajectory_id} failed: Could not extract results. "
                 f"Error: {e}, Result: {result} "
