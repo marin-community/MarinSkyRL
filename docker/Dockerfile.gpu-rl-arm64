@@ -129,7 +129,7 @@ ARG MAMBA_SSM_AARCH64_WHEEL=https://github.com/erictang000/mamba/releases/downlo
 ARG CAUSAL_CONV1D_AARCH64_WHEEL=https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl
 # Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
 # than overriding it at build time.
-ARG HARBOR_COMMIT=1b02e70c3ec5778e0ef46a70b66156ba554501be
+ARG HARBOR_COMMIT=1ffb4003f202daadcb7e407f449bd62278b5e8e1
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 

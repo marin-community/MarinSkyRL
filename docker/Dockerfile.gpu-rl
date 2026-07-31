@@ -80,7 +80,7 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 ARG INSTALL_MEGATRON=0
 # Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
 # than overriding it at build time.
-ARG HARBOR_COMMIT=1b02e70c3ec5778e0ef46a70b66156ba554501be
+ARG HARBOR_COMMIT=1ffb4003f202daadcb7e407f449bd62278b5e8e1
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
