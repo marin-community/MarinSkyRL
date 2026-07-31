@@ -4,7 +4,7 @@ Review the fused Grug attention path against its eager reference, supported mask
 
 ## Initial status
 
-PR #248 passed its CPU and H100 checks. Its fused implementation supported full-causal and sliding-window attention with left- or right-padded batches.
+The fused implementation passed its original CPU and H100 checks. It supported full-causal and sliding-window attention with left-padded batches.
 
 ## Mask-contract hypothesis
 

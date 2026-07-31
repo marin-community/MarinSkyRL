@@ -11,6 +11,7 @@ without materializing dense sequence-by-sequence scores or masks.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import torch
@@ -27,11 +28,11 @@ try:
     from flash_attn.bert_padding import unpad_input as _unpad_input
 except ImportError as error:
     _FLASH_ATTN_IMPORT_ERROR: ImportError | None = error
-    _flash_attn_func: Any = None
-    _flash_attn_varlen_func: Any = None
-    _index_first_axis: Any = None
-    _pad_input: Any = None
-    _unpad_input: Any = None
+    _flash_attn_func: Callable[..., torch.Tensor] | None = None
+    _flash_attn_varlen_func: Callable[..., torch.Tensor] | None = None
+    _index_first_axis: Callable[..., torch.Tensor] | None = None
+    _pad_input: Callable[..., torch.Tensor] | None = None
+    _unpad_input: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]] | None = None
 else:
     _FLASH_ATTN_IMPORT_ERROR = None
 
@@ -486,8 +487,7 @@ class GrugMoeAttention(nn.Module):
         if attn_implementation == GRUG_EAGER_ATTENTION_BACKEND:
             attn_output, v_for_xsa = self._eager_attention(q, k, v, attention_mask, is_long=is_long)
         elif attn_implementation == GRUG_FLASH_ATTENTION_BACKEND:
-            attn_output = self._flash_attention(q, k, v, attention_mask, is_long=is_long)
-            v_for_xsa = self._repeat_kv_heads(v)
+            attn_output, v_for_xsa = self._flash_attention(q, k, v, attention_mask, is_long=is_long)
         else:
             raise ValueError(f"unsupported Grug attention backend {attn_implementation!r}")
 
@@ -542,22 +542,26 @@ class GrugMoeAttention(nn.Module):
         attention_mask: torch.Tensor | None,
         *,
         is_long: bool,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if _FLASH_ATTN_IMPORT_ERROR is not None:
             raise ImportError(
                 "Grug FlashAttention was requested, but the flash-attn CUDA extension could not be imported"
             ) from _FLASH_ATTN_IMPORT_ERROR
+        value_for_xsa = self._repeat_kv_heads(value)
         window_size = (-1, -1) if is_long else (self.config.sliding_window - 1, 0)
         softmax_scale = 1.0 / math.sqrt(self.config.head_dim)
         if attention_mask is None:
-            return _flash_attn_func(
-                query,
-                key,
-                value,
-                dropout_p=0.0,
-                softmax_scale=softmax_scale,
-                causal=True,
-                window_size=window_size,
+            return (
+                _flash_attn_func(
+                    query,
+                    key,
+                    value,
+                    dropout_p=0.0,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    window_size=window_size,
+                ),
+                value_for_xsa,
             )
 
         batch, seq_len = attention_mask.shape
@@ -578,7 +582,7 @@ class GrugMoeAttention(nn.Module):
             causal=True,
             window_size=window_size,
         )
-        return _pad_input(unpadded_output, indices, batch, seq_len)
+        return _pad_input(unpadded_output, indices, batch, seq_len), value_for_xsa
 
 
 class GrugMoeDecoderLayer(nn.Module):

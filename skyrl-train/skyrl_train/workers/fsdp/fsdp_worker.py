@@ -397,8 +397,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """Return the calling rank and requested Grug weights gathered on rank 0.
 
         Every rank must call this with the same names because DTensor
-        materialization is collective. The ``weights`` mapping is empty on
-        nonzero ranks.
+        materialization is collective. The result includes the rank, loaded
+        attention backend, and requested ``weights``; the weights mapping is
+        empty on nonzero ranks.
         """
         config = getattr(self.model.model, "config", None)
         if getattr(config, "model_type", None) != GRUG_MOE_MODEL_TYPE:

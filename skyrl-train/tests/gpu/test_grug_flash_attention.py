@@ -14,9 +14,11 @@ OUTPUT_MAX_ERROR = 1e-2
 OUTPUT_MEAN_ERROR = 2e-3
 QKV_GRAD_MAX_ERROR = 2e-2
 QKV_GRAD_MEAN_ERROR = 5e-3
-OUTPUT_ATOL = 2e-2
-QKV_GRAD_ATOL = 7e-2
-RTOL = 5e-2
+PARITY_BATCH_SIZE = 2
+PARITY_SEQUENCE_LENGTH = 32
+PARITY_HIDDEN_SIZE = 256
+LEFT_PADDING_LENGTHS = (7, 3)
+RIGHT_PADDING_LENGTHS = (7, 3)
 PRODUCTION_SEQUENCE_LENGTH = 16_384
 MEMORY_CEILING_GIB = 12
 GIB = 1024**3
@@ -102,8 +104,8 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
             False,
             torch.tensor(
                 [
-                    [0] * 7 + [1] * 25,
-                    [0] * 3 + [1] * 29,
+                    [0] * LEFT_PADDING_LENGTHS[0] + [1] * (PARITY_SEQUENCE_LENGTH - LEFT_PADDING_LENGTHS[0]),
+                    [0] * LEFT_PADDING_LENGTHS[1] + [1] * (PARITY_SEQUENCE_LENGTH - LEFT_PADDING_LENGTHS[1]),
                 ],
                 device="cuda",
             ),
@@ -113,8 +115,8 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
             False,
             torch.tensor(
                 [
-                    [1] * 25 + [0] * 7,
-                    [1] * 29 + [0] * 3,
+                    [1] * (PARITY_SEQUENCE_LENGTH - RIGHT_PADDING_LENGTHS[0]) + [0] * RIGHT_PADDING_LENGTHS[0],
+                    [1] * (PARITY_SEQUENCE_LENGTH - RIGHT_PADDING_LENGTHS[1]) + [0] * RIGHT_PADDING_LENGTHS[1],
                 ],
                 device="cuda",
             ),
@@ -124,16 +126,36 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
     for label, is_long, attention_mask in cases:
         eager.zero_grad(set_to_none=True)
         fused.zero_grad(set_to_none=True)
-        eager_hidden = torch.randn(2, 32, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        eager_hidden = torch.randn(
+            PARITY_BATCH_SIZE,
+            PARITY_SEQUENCE_LENGTH,
+            PARITY_HIDDEN_SIZE,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
         fused_hidden = eager_hidden.detach().clone().requires_grad_(True)
         if attention_mask is None:
-            position_ids = torch.arange(32, device="cuda").unsqueeze(0).expand(2, -1)
-            valid_queries = torch.ones(2, 32, 1, device="cuda", dtype=torch.bool)
+            position_ids = (
+                torch.arange(PARITY_SEQUENCE_LENGTH, device="cuda").unsqueeze(0).expand(PARITY_BATCH_SIZE, -1)
+            )
+            valid_queries = torch.ones(
+                PARITY_BATCH_SIZE,
+                PARITY_SEQUENCE_LENGTH,
+                1,
+                device="cuda",
+                dtype=torch.bool,
+            )
         else:
             position_ids = attention_mask.long().cumsum(dim=-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
             valid_queries = attention_mask.bool().unsqueeze(-1)
-        output_gradient = torch.randn(2, 32, 256, device="cuda")
+        output_gradient = torch.randn(
+            PARITY_BATCH_SIZE,
+            PARITY_SEQUENCE_LENGTH,
+            PARITY_HIDDEN_SIZE,
+            device="cuda",
+        )
         output_gradient.masked_fill_(~valid_queries, 0)
 
         eager_output, eager_gradients = _projection_gradients(
@@ -158,12 +180,6 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
         print(f"{label} output max_abs={output_max:.8g} mean_abs={output_mean:.8g}")
         assert output_max <= OUTPUT_MAX_ERROR
         assert output_mean <= OUTPUT_MEAN_ERROR
-        torch.testing.assert_close(
-            fused_output[output_valid],
-            eager_output[output_valid],
-            atol=OUTPUT_ATOL,
-            rtol=RTOL,
-        )
         for name in ("q_proj", "k_proj", "v_proj"):
             gradient_valid = valid_queries.expand_as(eager_gradients[name])
             gradient_max, gradient_mean = _difference(
@@ -173,12 +189,6 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
             print(f"{label} {name} gradient max_abs={gradient_max:.8g} mean_abs={gradient_mean:.8g}")
             assert gradient_max <= QKV_GRAD_MAX_ERROR
             assert gradient_mean <= QKV_GRAD_MEAN_ERROR
-            torch.testing.assert_close(
-                fused_gradients[name][gradient_valid],
-                eager_gradients[name][gradient_valid],
-                atol=QKV_GRAD_ATOL,
-                rtol=RTOL,
-            )
 
 
 def test_grug_flash_attention_sliding_window_peak_memory() -> None:
