@@ -9,7 +9,7 @@ from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM, GrugMoeRouter
+from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig, GrugMoeForCausalLM, GrugMoeRouter
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
     GrugQueryBiasLayerObservation,
@@ -176,7 +176,7 @@ def test_output_hidden_states_honors_config_default():
     ("attention_mask", "message"),
     [
         (torch.tensor([[0, 0, 0, 0]]), "at least one valid token"),
-        (torch.tensor([[1, 0, 1, 0]]), "only dense, left-padded, or right-padded"),
+        (torch.tensor([[1, 0, 1, 0]]), "one contiguous span"),
     ],
 )
 def test_flash_attention_rejects_unsupported_attention_masks(attention_mask, message):
@@ -185,6 +185,19 @@ def test_flash_attention_rejects_unsupported_attention_masks(attention_mask, mes
 
     with pytest.raises(RuntimeError, match=message):
         model(torch.tensor([[1, 2, 3, 4]]), attention_mask=attention_mask)
+
+
+def test_flash_attention_accepts_rl_contiguous_span_mask(monkeypatch):
+    model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1))
+    model.config._attn_implementation = "flash_attention_2"
+    monkeypatch.setattr(GrugMoeAttention, "_flash_attention", GrugMoeAttention._eager_attention)
+
+    output = model(
+        torch.tensor([[1, 2, 3, 4]]),
+        attention_mask=torch.tensor([[0, 1, 1, 0]]),
+    )
+
+    assert torch.isfinite(output.logits).all()
 
 
 def test_query_bias_candidates_accumulate_exactly_and_change_next_routing():

@@ -101,7 +101,15 @@ def _padding_mask(direction: str | None) -> torch.Tensor | None:
     for padding_length in PADDING_LENGTHS:
         valid = [1] * (PARITY_SEQUENCE_LENGTH - padding_length)
         padding = [0] * padding_length
-        rows.append(padding + valid if direction == "left" else valid + padding)
+        if direction == "left":
+            rows.append(padding + valid)
+        elif direction == "right":
+            rows.append(valid + padding)
+        elif direction == "both":
+            left_padding = padding_length // 2
+            rows.append(padding[:left_padding] + valid + padding[left_padding:])
+        else:
+            raise ValueError(f"unknown padding direction: {direction}")
     return torch.tensor(rows, device="cuda")
 
 
@@ -173,6 +181,7 @@ def _assert_parity_errors(
     (
         ("local-left-padded", False, "left"),
         ("local-right-padded", False, "right"),
+        ("local-rl-contiguous-span", False, "both"),
         ("full-causal", True, None),
     ),
 )

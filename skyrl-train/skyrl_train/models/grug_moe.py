@@ -65,10 +65,10 @@ def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:
         valid.any(dim=-1).all(),
         "Grug FlashAttention requires at least one valid token in each attention-mask row",
     )
-    transitions = (valid[:, 1:] != valid[:, :-1]).sum(dim=-1)
+    span_starts = valid[:, 0].to(torch.int64) + ((~valid[:, :-1]) & valid[:, 1:]).sum(dim=-1)
     torch._assert_async(
-        (transitions <= 1).all(),
-        "Grug FlashAttention supports only dense, left-padded, or right-padded attention-mask rows",
+        (span_starts == 1).all(),
+        "Grug FlashAttention requires valid tokens to form one contiguous span in each attention-mask row",
     )
 
 
