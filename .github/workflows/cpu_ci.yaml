@@ -81,6 +81,22 @@ jobs:
             --deselect tests/cpu/test_ep_config_noop.py::test_all_defaults_is_structurally_identical_to_pre_ep \
             --deselect tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
 
+  skyrl_train_macos_install:
+    runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./skyrl-train
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: true
+      - name: Install skyrl-train
+        run: uv sync --frozen --extra dev
+      - name: Exercise local filesystem I/O
+        run: uv run --frozen pytest tests/cpu/utils/test_io.py
+
   skyrl_gym_tests:
     runs-on: ubuntu-latest
     defaults:
