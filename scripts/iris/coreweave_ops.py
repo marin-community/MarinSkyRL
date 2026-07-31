@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import random
@@ -62,8 +63,10 @@ TRANSIENT_KUBECTL_EXEC_MARKERS = (
     "unexpected eof",
     "i/o timeout",
 )
-KUBERNETES_LABEL_MAX_LENGTH = 63
 IRIS_JOB_ID_LABEL = "iris.job_id"
+KUEUE_POD_GROUP_LABEL = "kueue.x-k8s.io/pod-group-name"
+IRIS_POD_GROUP_PREFIX = "iris-pg-"
+IRIS_TASK_HASH_HEX_LENGTH = 16
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,33 +135,31 @@ def task_short_name(job: str) -> str:
     return job_id_parts(job)[-1]
 
 
+def iris_pod_group_prefix(job: str) -> str:
+    """Return the stable Kueue pod-group prefix Iris derives from a full job id."""
+    canonical_job = "/" + "/".join(job_id_parts(job))
+    job_hash = hashlib.sha256(canonical_job.encode()).hexdigest()[:IRIS_TASK_HASH_HEX_LENGTH]
+    return f"{IRIS_POD_GROUP_PREFIX}{job_hash}-"
+
+
+def pod_matches_job(pod: dict[str, Any], job: str) -> bool:
+    """Return whether Kubernetes pod metadata identifies the complete Iris job."""
+    metadata = pod.get("metadata", {})
+    labels = metadata.get("labels", {})
+    labeled_job_id = job.lstrip("/").replace("/", ".")
+    return (
+        task_short_name(job).lower() in metadata.get("name", "").lower()
+        or labels.get(IRIS_JOB_ID_LABEL) == labeled_job_id
+        or labels.get(KUEUE_POD_GROUP_LABEL, "").startswith(iris_pod_group_prefix(job))
+    )
+
+
 def find_pod(base: list[str], args: argparse.Namespace) -> str:
     if args.pod:
         return args.pod
     pods = json.loads(command([*base, "-n", NAMESPACE, "get", "pods", "-o", "json"]))["items"]
     running_pods = [pod for pod in pods if pod.get("status", {}).get("phase") == "Running"]
-    needle = task_short_name(args.job).lower()
-    # The label stores the Iris id without its leading slash and with dots as
-    # path separators, subject to Kubernetes label-value truncation.
-    labeled_job_id = args.job.lstrip("/").replace("/", ".")
-    candidates = sorted(
-        pod["metadata"]["name"]
-        for pod in running_pods
-        if (
-            needle in pod["metadata"]["name"].lower()
-            or pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL) == labeled_job_id
-        )
-    )
-    # Kubernetes label values are length-limited, so long names lose their
-    # suffix. Fall back to the truncated label only when exact matching fails;
-    # multiple matches remain an error that requires an explicit pod.
-    if not candidates:
-        truncated_label = labeled_job_id[:KUBERNETES_LABEL_MAX_LENGTH]
-        candidates = sorted(
-            pod["metadata"]["name"]
-            for pod in running_pods
-            if pod.get("metadata", {}).get("labels", {}).get(IRIS_JOB_ID_LABEL, "").startswith(truncated_label)
-        )
+    candidates = sorted(pod["metadata"]["name"] for pod in running_pods if pod_matches_job(pod, args.job))
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:

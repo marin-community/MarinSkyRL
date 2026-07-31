@@ -6,6 +6,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from types import SimpleNamespace
@@ -19,11 +20,18 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
+    build_task_command,
     create_parser,
     derive_default_job_name,
-    resolve_node_resource_defaults,
+    normalize,
+    resolve_node_resource_requests,
     resolve_launch_defaults,
 )
+from cloud.iris.rl_config_translation import (  # noqa: E402
+    RL_CONFIG_TASK_DIR,
+    materialize_rl_config,
+)
+from cloud.iris.start_rl_iris_controller import stage_model  # noqa: E402
 
 
 def _cluster_config(
@@ -54,25 +62,124 @@ scale_groups:
     return path
 
 
-def test_node_resource_defaults_use_selected_cluster_and_gpu_shape(tmp_path, monkeypatch):
+def _node_snapshot(
+    name: str,
+    *,
+    gpu_variant: str,
+    gpus: int,
+    memory: str,
+    disk: str,
+) -> dict:
+    return {
+        "kind": "Node",
+        "metadata": {"name": name, "labels": {"nvidia.com/gpu.product": f"NVIDIA-{gpu_variant}"}},
+        "spec": {},
+        "status": {
+            "allocatable": {"nvidia.com/gpu": str(gpus), "memory": memory, "ephemeral-storage": disk},
+            "conditions": [{"type": "Ready", "status": "True"}],
+        },
+    }
+
+
+def _pod_snapshot(
+    name: str,
+    *,
+    node: str,
+    memory: str,
+    disk: str = "0",
+    phase: str = "Running",
+) -> dict:
+    return {
+        "kind": "Pod",
+        "metadata": {"name": name},
+        "spec": {
+            "nodeName": node,
+            "containers": [
+                {"resources": {"requests": {"memory": memory, "ephemeral-storage": disk}}},
+            ],
+        },
+        "status": {"phase": phase},
+    }
+
+
+@pytest.mark.parametrize(("memory_request", "expected_memory"), [("auto", "764Gi"), ("900Gi", "900Gi")])
+def test_node_resource_requests_use_selected_gpu_shape_allocatable_resources(
+    tmp_path, monkeypatch, memory_request, expected_memory
+):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
-    commands = []
-
-    def run(command, **kwargs):
-        commands.append(command)
-        return SimpleNamespace(
-            stdout=("4 NVIDIA-H100-80GB-HBM3 500000000Ki 7000000000000\n4 NVIDIA-GB200 1001863488Ki 14591185743078\n")
+    nodes = [
+        _node_snapshot(
+            "gb200-0",
+            gpu_variant="GB200",
+            gpus=4,
+            memory="1001863488Ki",
+            disk="14591185743078",
         )
+    ]
 
-    monkeypatch.setattr("cloud.iris.launch_rl_iris.subprocess.run", run)
+    monkeypatch.setattr(
+        "cloud.iris.launch_rl_iris.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes})),
+    )
 
-    memory, disk = resolve_node_resource_defaults(str(cluster_config), gpu_variant="GB200", gpus_per_node=4)
+    resolved = resolve_node_resource_requests(
+        str(cluster_config),
+        gpu_variant="GB200",
+        gpus_per_node=4,
+        num_nodes=1,
+        memory_request=memory_request,
+        disk_request="auto",
+    )
 
-    assert memory == "764Gi"
-    assert disk == "10871Gi"
-    command = commands[0]
-    assert command[command.index("--kubeconfig") + 1] == str(Path("~/.kube/coreweave-test").expanduser())
-    assert command[command.index("--context") + 1] == "context-gb200"
+    assert resolved.memory == expected_memory
+    assert resolved.disk == "10871Gi"
+
+
+@pytest.mark.parametrize(
+    ("memory_request", "disk_request", "expected"),
+    [
+        ("auto", "auto", ("700Gi", "3000Gi")),
+        ("700GB", "auto", ("700GB", "3000Gi")),
+    ],
+)
+def test_node_resource_requests_fit_the_requested_gang_on_busy_nodes(
+    tmp_path,
+    monkeypatch,
+    memory_request,
+    disk_request,
+    expected,
+):
+    cluster_config = _cluster_config(tmp_path, gpu_variant="H100", gpus_per_node=8)
+    nodes = [
+        _node_snapshot(f"gpu-{index}", gpu_variant="H100", gpus=8, memory="1000Gi", disk="10000Gi")
+        for index in range(4)
+    ]
+    pods = [
+        _pod_snapshot(
+            f"worker-{index}",
+            node=f"gpu-{index}",
+            memory=memory,
+            disk="7000Gi" if index < 2 else "0",
+        )
+        for index, memory in enumerate(("300Gi", "300Gi", "700Gi", "700Gi"))
+    ]
+    pods.append(_pod_snapshot("finished", node="gpu-0", memory="900Gi", phase="Failed"))
+
+    monkeypatch.setattr(
+        "cloud.iris.launch_rl_iris.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes + pods})),
+    )
+
+    resolved = resolve_node_resource_requests(
+        str(cluster_config),
+        gpu_variant="H100",
+        gpus_per_node=8,
+        num_nodes=2,
+        memory_request=memory_request,
+        disk_request=disk_request,
+    )
+
+    assert (resolved.memory, resolved.disk) == expected
 
 
 def _rl_config(tmp_path: Path, harness: str) -> Path:
@@ -143,6 +250,44 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     assert args.rendezvous_dir == "s3://custom/rendezvous"
     assert args.cpu == 12
     assert args.record_literal is False
+
+
+def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
+    args = _args(tmp_path, "opencode", ["--job-name", "external-config"])
+    source = Path(args.rl_config).resolve()
+
+    normalize(args)
+    resolve_launch_defaults(args)
+    command = build_task_command(args)
+    launch = args.rl_config_launch
+
+    assert Path(args.rl_config) == source
+    assert launch.task_path.startswith(f"{RL_CONFIG_TASK_DIR}/")
+    task_copy = tmp_path / "task" / "config.yaml"
+    materialize_rl_config(str(task_copy), launch.task_environment())
+    assert task_copy.read_bytes() == source.read_bytes()
+    assert launch.task_path in command[-1]
+    assert str(source) not in command[-1]
+
+
+def test_missing_rl_config_fails_during_normalization():
+    args = create_parser().parse_args(["--rl_config", "missing-config", "--model_path", "model"])
+
+    with pytest.raises(SystemExit, match="RL config not found"):
+        normalize(args)
+
+
+@pytest.mark.parametrize("model_path", ["s3://models/policy", "gs://models/policy", "gcs://models/policy"])
+def test_object_store_model_path_fails_during_normalization(tmp_path, model_path):
+    args = _args(tmp_path, "opencode", ["--model_path", model_path])
+
+    with pytest.raises(SystemExit, match="must be a Hugging Face repo ID or a task-local directory"):
+        normalize(args)
+
+
+def test_controller_rejects_object_store_model_path_before_staging():
+    with pytest.raises(ValueError, match="must be a Hugging Face repo ID or a task-local directory"):
+        stage_model("s3://models/policy")
 
 
 def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):

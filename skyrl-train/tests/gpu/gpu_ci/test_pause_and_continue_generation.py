@@ -6,8 +6,9 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_pause_an
 
 import pytest
 import asyncio
+import ray
 from tests.gpu.gpu_ci.test_inference_engine_client_http_endpoint import get_test_actor_config
-from tests.gpu.utils import init_inference_engines, get_test_prompts
+from tests.gpu.utils import get_test_prompts, init_inference_engines, init_worker_with_type
 from skyrl_train.inference_engines.base import ConversationType
 from transformers import AutoTokenizer
 from typing import List
@@ -262,10 +263,10 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
 
 
 @pytest.mark.vllm
-def test_abort_generation_vllm_engine(ray_init_fixture):
+def test_pause_generation_vllm_engine(ray_init_fixture):
     """
     We send 4 requests that are really long to `InferenceEngineClient.engines[0].chat_completion`
-    and then call abort. We set max_num_seqs=2 to test aborting 2 running requests and 2 waiting
+    and then pause generation. We set max_num_seqs=2 to test aborting 2 running requests and 2 waiting
     requests. We expect 2 requests to be returned with completion_tokens=0 and 2 with non-zero
     completion_tokens. We also expect the finish_reason to be "abort" for all requests.
     """
@@ -352,3 +353,59 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
 
         # Unpause for the next API run
         asyncio.run(client.resume_generation())
+
+
+@pytest.mark.vllm
+def test_weight_sync_with_inflight_decodes_keeps_engine_alive(ray_init_fixture):
+    """Regression for EngineCore decoding against meta tensors during a weight reload."""
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "fsdp2"
+    client, placement_group = init_inference_engines(
+        cfg=cfg,
+        use_local=True,
+        async_engine=True,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        colocate_all=True,
+        backend="vllm",
+        model=MODEL,
+        num_inference_engines=1,
+        sleep_level=2,
+        max_num_seqs=2,
+    )
+    policy = init_worker_with_type(
+        "policy",
+        shared_pg=placement_group,
+        colocate_all=True,
+        num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+        cfg=cfg,
+    )
+    ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+    messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
+    body = {
+        "model": MODEL,
+        "messages": messages,
+        "max_tokens": 8192,
+        "ignore_eos": True,
+        "temperature": 0.0,
+    }
+
+    async def decode_during_weight_sync():
+        tasks = [
+            asyncio.create_task(client.engines[0].chat_completion({"json": dict(body), "headers": {}}))
+            for _ in range(8)
+        ]
+        await asyncio.sleep(1)
+        await client.pause_generation()
+        try:
+            refs = policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client)
+            await asyncio.to_thread(ray.get, refs)
+        finally:
+            await client.resume_generation()
+        return await asyncio.gather(*tasks)
+
+    outputs = asyncio.run(decode_during_weight_sync())
+
+    assert len(outputs) == 8
+    assert all(output["choices"][0]["finish_reason"] == "abort" for output in outputs)

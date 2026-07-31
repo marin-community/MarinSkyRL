@@ -114,10 +114,15 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def abort_generation(self) -> None:
+    async def pause_generation(self) -> None:
         """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort". If the request was waiting,
-        it returns a response with zero completion tokens.
+        Pause the scheduler for a weight update after aborting all running and waiting
+        requests. Running requests return their generated tokens with stop_reason "abort";
+        waiting requests return zero completion tokens.
         """
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume the scheduler after a weight update."""
         raise NotImplementedError()

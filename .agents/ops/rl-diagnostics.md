@@ -2,6 +2,19 @@
 
 Use these semantics with evidence captured through `coreweave.md`.
 
+## Diagnostic mode
+
+Determine the mode from the launched configuration before choosing probes.
+
+- **Agentic:** Harbor, Daytona, terminal-bench, or another sandboxed agent harness. These runs can
+  produce per-trial results, exceptions, transcripts, and timing artifacts under `trace_jobs/`.
+- **Standard:** dataset-backed rewards without an agent harness. These runs have no per-trial
+  sandbox artifacts; absence of `trace_jobs/` is expected and is not an evidence error.
+
+Parse synchronized metrics with `infra/rl_cleanup/parse_skyrl_metrics.py --format agentic` for
+agentic runs and `--format standard` for standard runs. Treat empty parser output as a failed probe
+and verify the selected mode and format.
+
 ## Progress
 
 Trainer phase boundaries and the training-step counter are the progress truth. Fresh inference
@@ -22,17 +35,24 @@ memory-bandwidth activity.
 - Sawtooth running counts during policy training can be healthy backpressure when generation-buffer
   wait time is negligible.
 
-Demand and supply are coupled:
+For agentic runs, demand and supply are coupled:
 
 ```text
 demand = n_concurrent_trials
 supply = max_num_seqs * num_inference_engines
 ```
 
+For standard runs, use the rollout batch as demand:
+
+```text
+demand = train_batch_size * n_samples_per_prompt
+supply = max_num_seqs * num_inference_engines
+```
+
 Before attributing starvation, measure coordinator CPU/GIL pressure, staleness throttling, and
 whether engine requests arrive and drain quickly.
 
-## Rollout quality
+## Agentic rollout quality
 
 Inspect actual trial outputs, rewards, verifier results, stop reasons, and exceptions.
 
@@ -44,6 +64,22 @@ Inspect actual trial outputs, rewards, verifier results, stop reasons, and excep
 - Sandbox-not-found errors during queued work point toward idle-reap policy.
 - Uniform environment-setup failures point toward image/dependency or provider configuration; name
   the concrete exception before attributing cause.
+
+## Standard rollout quality
+
+Standard runs have no Harbor result files, sandbox transcripts, or per-trial exception artifacts.
+Use these substitutes for the rollout gate:
+
+- `reward/avg_raw_reward` and the trainer reward histogram for reward level and distribution;
+- verifier or environment exceptions surfaced in trainer logs;
+- banked-step cadence and `checkpoints/global_step_N` freshness for durable progress evidence;
+- `generate/avg_num_tokens` for empty-output or generation-collapse detection;
+- engine `Running` and `Waiting` counts relative to `train_batch_size * n_samples_per_prompt` for
+  request flow and saturation.
+
+Missing `trace_jobs/` is not an `ERROR` in standard mode. A rollout `ERROR` requires unavailable or
+contradictory standard evidence, such as missing trainer metrics and logs, not absent agentic
+artifacts.
 
 ## Training dynamics
 
@@ -57,20 +93,25 @@ shorter learning-quality window as insufficient evidence and report the actual s
 - per-phase durations, especially generation-buffer wait.
 
 Metric sinks may add prefixes. Match the semantic suffix rather than assuming one serialized key.
-Trainer metrics can lag live rollouts under asynchronous generation, so require trial-level
-agreement before a learning-quality kill recommendation.
+Trainer metrics can lag live rollouts under asynchronous generation. For agentic runs, require
+trial-level agreement before a learning-quality kill recommendation. For standard runs, reconcile
+the trainer metric stream with banked-step/checkpoint cadence and verifier errors in trainer logs.
 
 A plateau alone is not collapse. For a degradation verdict, identify the mechanism, confirm it over
 the declared window, show that it is not recovering, and distinguish model behavior from optimizer
 signal. Extreme ratio, loss, or gradient changes following synchronization indicate stale or wrong
 weights more strongly than reward alone.
 
-## Per-trial duty cycle
+## Agentic per-trial duty cycle
 
 Trial timing commonly separates environment setup, agent setup, agent execution, and verifier.
 Per-request API timings isolate generation within agent execution; the remainder approximates tool
 work. Report bounded-sample medians and tails with the sampling window. Startup provisioning bursts
 are not steady-state sandbox churn.
+
+Per-trial duty cycle is not applicable to standard runs. Report it as `N/A`. Include standard
+`timing/*` phases such as `wait_for_generation_buffer`, `policy_train`, and `sync_weights` in the
+dynamics phase table instead.
 
 ## Configuration and resume failures
 

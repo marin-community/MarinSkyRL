@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from infra.rl_cleanup.secret_redaction import redact_record
+
 
 _BASH_JOB_CONTROL_WARNING = "bash: initialize_job_control: no job control in background: Bad file descriptor"
 
@@ -82,6 +84,12 @@ def _sanitize_surrogates(dataset):
 
 def _strip_surrogates_from_record(record: dict[str, Any]) -> dict[str, Any]:
     return {key: _strip_surrogates(value) for key, value in record.items()}
+
+
+def sanitize_trace_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Apply publication-safe text cleanup to one trace record."""
+    redacted, _ = redact_record(record)
+    return {key: _strip_surrogates(value) for key, value in redacted.items()}
 
 
 def _strip_surrogates(value: Any) -> Any:

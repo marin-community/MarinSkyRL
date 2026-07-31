@@ -12,6 +12,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from skyrl_gym.envs.data_contracts import normalize_lcb_ground_truth
 
 """Utility functions for loading and processing datasets."""
 
@@ -99,7 +100,7 @@ def process_example(example: Dict[str, Any], idx: int, dataset_name: str, split:
                 assert isinstance(test, dict), "Test is not a dict"
                 test["metadata"] = example["metadata"]
 
-    tests = json.dumps(tests)
+    tests = normalize_lcb_ground_truth(tests)
 
     if dataset_name == LIVECODEBENCH:
         starter_code = example.get("starter_code", None)
@@ -110,7 +111,8 @@ def process_example(example: Dict[str, Any], idx: int, dataset_name: str, split:
         "data_source": dataset_name,
         "prompt": [{"role": "user", "content": question}],
         "ability": "code",
-        "reward_spec": {"method": "rule", "ground_truth": tests},
+        "env_class": "lcb",
+        "reward_model": {"method": "rule", "ground_truth": tests},
         "extra_info": {
             "split": split,
             "index": idx,
