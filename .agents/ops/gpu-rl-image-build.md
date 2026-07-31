@@ -16,7 +16,7 @@ Build standard and Megatron variants from the same committed source on each requ
 
 | host architecture | build cluster | placement | tag forms |
 |---|---|---|---|
-| amd64 | `cw-rno2a` | GPU-free request on an H100 worker | `gpu-rl-<full-sha>`, `gpu-rl-megatron-<full-sha>` |
+| amd64 | `cw-rno2a` | GPU-free request on a native amd64 node | `gpu-rl-<full-sha>`, `gpu-rl-megatron-<full-sha>` |
 | arm64 | `cw-us-east-08a` | request one GB200 to force a Grace host | `gpu-rl-<full-sha>-arm64`, `gpu-rl-megatron-<full-sha>-arm64` |
 
 Current build resources:
