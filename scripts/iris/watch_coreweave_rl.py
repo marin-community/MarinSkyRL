@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from infra.rl_analysis.training_metrics import (  # noqa: E402
+from infra.rl_metrics import (  # noqa: E402
     ENTROPY_KEYS,
     GRAD_NORM_KEYS,
     POLICY_LOSS_KEYS,
@@ -717,7 +717,10 @@ def parse_metrics(finelog: Path) -> tuple[int | None, int | None, dict[str, Any]
     result = parse_training_metrics_result(text)
     if result.records:
         latest = result.records[-1]
-        return latest.step, total, latest.metrics, None
+        parse_error = (
+            f"{result.malformed_lines} WANDB_MIRROR train lines failed JSON parse" if result.malformed_lines else None
+        )
+        return latest.step, total, latest.metrics, parse_error
     if result.malformed_lines:
         return step, total, {}, f"{result.malformed_lines} WANDB_MIRROR train lines failed JSON parse"
     return step, total, {}, None

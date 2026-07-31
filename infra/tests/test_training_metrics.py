@@ -1,4 +1,4 @@
-from infra.rl_analysis.training_metrics import (
+from infra.rl_metrics import (
     ENTROPY_KEYS,
     GRAD_NORM_KEYS,
     POLICY_LOSS_KEYS,
@@ -55,3 +55,21 @@ def test_watcher_uses_the_shared_latest_training_record(tmp_path) -> None:
         "policy/raw_grad_norm": 0.2,
         "trainer/global_step": 2,
     }
+
+
+def test_watcher_reports_a_malformed_record_after_valid_metrics(tmp_path) -> None:
+    finelog = tmp_path / "finelog.log"
+    finelog.write_text(
+        "\n".join(
+            [
+                'WANDB_MIRROR kind=train step=2 metrics={"reward/avg_raw_reward": 0.5}',
+                'WANDB_MIRROR kind=train step=3 metrics={"reward/avg_raw_reward": ',
+            ]
+        )
+    )
+
+    step, total, metrics, error = parse_metrics(finelog)
+
+    assert (step, total) == (2, None)
+    assert metrics["reward/avg_raw_reward"] == 0.5
+    assert error == "1 WANDB_MIRROR train lines failed JSON parse"

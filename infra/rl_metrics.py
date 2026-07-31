@@ -40,7 +40,6 @@ class TrainingMetricsParseResult:
 
 
 def strip_ansi(text: str) -> str:
-    """Remove terminal color escapes from log text."""
     return _ANSI_PATTERN.sub("", text)
 
 
