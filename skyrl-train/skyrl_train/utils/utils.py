@@ -21,6 +21,7 @@ from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
+    DEFAULT_NCCL_TRACE_BUFFER_SIZE,
     DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
     get_nccl_monitor_heartbeat_timeout,
     get_worker_nccl_timeout_s,
@@ -1106,8 +1107,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # Flight-recorder buffer size: torch 2.9 renamed TORCH_NCCL_TRACE_BUFFER_SIZE
     # -> TORCH_FR_BUFFER_SIZE (old name still honored as a deprecated alias). Set
     # both so the recorder is enabled regardless of the torch version in the SIF.
-    env_vars["TORCH_FR_BUFFER_SIZE"] = "20000"
-    env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
+    env_vars["TORCH_FR_BUFFER_SIZE"] = str(DEFAULT_NCCL_TRACE_BUFFER_SIZE)
+    env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = str(DEFAULT_NCCL_TRACE_BUFFER_SIZE)
     env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
     env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
     # Flight-recorder dump-on-timeout target. This MUST resolve to a path that is

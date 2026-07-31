@@ -27,6 +27,7 @@ import torch.distributed as dist
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
 
 
 WORLD_SIZE = 4
@@ -47,7 +48,6 @@ FAULT_MODES = tuple(FaultMode)
 @dataclass(frozen=True)
 class FaultRun:
     returncode: int
-    elapsed: float
     output: str
 
 
@@ -90,7 +90,8 @@ def _run_fault(mode: FaultMode) -> FaultRun:
             "TORCH_NCCL_ENABLE_MONITORING": "1",
             "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "5",
             "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
-            "TORCH_NCCL_TRACE_BUFFER_SIZE": "20000",
+            "TORCH_FR_BUFFER_SIZE": str(DEFAULT_NCCL_TRACE_BUFFER_SIZE),
+            "TORCH_NCCL_TRACE_BUFFER_SIZE": str(DEFAULT_NCCL_TRACE_BUFFER_SIZE),
         }
     )
     command = [
@@ -103,7 +104,6 @@ def _run_fault(mode: FaultMode) -> FaultRun:
         "--worker",
         mode.value,
     ]
-    started_at = time.monotonic()
     process = subprocess.Popen(
         command,
         cwd=SKYRL_TRAIN_ROOT,
@@ -122,7 +122,7 @@ def _run_fault(mode: FaultMode) -> FaultRun:
             f"{mode.value} did not tear down within {PROCESS_TIMEOUT_SECONDS}s; output:\n{output}",
             pytrace=False,
         )
-    return FaultRun(process.returncode, time.monotonic() - started_at, output)
+    return FaultRun(process.returncode, output)
 
 
 @pytest.mark.parametrize("mode", FAULT_MODES)
@@ -135,7 +135,6 @@ def test_nccl_fault_terminates_torchrun_gang(mode: FaultMode) -> None:
     assert f"FAULT_INJECTION_READY mode={mode.value}" in result.output
     assert "FAULT_INJECTION_UNEXPECTED_COMPLETION" not in result.output
     assert result.returncode != 0, result.output
-    assert result.elapsed < PROCESS_TIMEOUT_SECONDS
 
 
 if __name__ == "__main__":
