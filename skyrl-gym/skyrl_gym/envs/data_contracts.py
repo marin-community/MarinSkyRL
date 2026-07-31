@@ -22,6 +22,11 @@ from skyrl_gym.envs.registration import spec
 
 NormalizeGroundTruth = Callable[[Any], str]
 IsCorrect = Callable[[str, str], bool]
+_STDIN_TEST_TYPE = "stdin"
+_FUNCTIONAL_TEST_TYPE = "functional"
+_STDIN_SOURCE_TEST_TYPES = {_STDIN_TEST_TYPE, "stdin_stdout"}
+_FUNCTIONAL_SOURCE_TEST_TYPES = {_FUNCTIONAL_TEST_TYPE, "call_based"}
+_FUNCTION_NAME_KEY = "func_name"
 
 
 @dataclass(frozen=True)
@@ -106,15 +111,15 @@ def _canonical_code_case(case: Any) -> dict[str, Any]:
     expected_output = case.get("output")
 
     test_type = case.get("testtype", case.get("type"))
-    if test_type in {"stdin", "stdin_stdout"}:
+    if test_type in _STDIN_SOURCE_TEST_TYPES:
         if not isinstance(test_input, str) or not isinstance(expected_output, str):
             raise TypeError("Standard-input LCB test-case input and output must be strings.")
-        return {"input": test_input, "output": expected_output, "testtype": "stdin"}
-    if test_type in {"functional", "call_based"}:
+        return {"input": test_input, "output": expected_output, "testtype": _STDIN_TEST_TYPE}
+    if test_type in _FUNCTIONAL_SOURCE_TEST_TYPES:
         function_name = case.get("fn_name")
         metadata = case.get("metadata")
         if function_name is None and isinstance(metadata, Mapping):
-            function_name = metadata.get("func_name")
+            function_name = metadata.get(_FUNCTION_NAME_KEY)
         if not isinstance(function_name, str) or not function_name:
             raise ValueError("Functional LCB test cases require a function name.")
         if isinstance(test_input, list):
@@ -126,8 +131,8 @@ def _canonical_code_case(case: Any) -> dict[str, Any]:
         return {
             "input": test_input,
             "output": expected_output,
-            "testtype": "functional",
-            "metadata": {"func_name": function_name},
+            "testtype": _FUNCTIONAL_TEST_TYPE,
+            "metadata": {_FUNCTION_NAME_KEY: function_name},
         }
     raise ValueError(f"Unsupported LCB test-case type: {test_type!r}.")
 
@@ -141,7 +146,7 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[dict[str, Any
         raise ValueError("APPS ground_truth requires equally sized, non-empty input and output lists.")
 
     function_name = ground_truth.get("fn_name")
-    test_type = "functional" if function_name is not None else "stdin"
+    test_type = _FUNCTIONAL_TEST_TYPE if function_name is not None else _STDIN_TEST_TYPE
     return [
         _canonical_code_case(
             {

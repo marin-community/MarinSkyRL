@@ -1,3 +1,4 @@
+import logging
 import multiprocessing
 import pytest
 import skyrl_gym
@@ -125,4 +126,4 @@ def test_malformed_reward_model_scores_zero(extras, caplog):
 
     assert output["reward"] == 0.0
     assert output["metadata"]["verifier_error"] == "invalid reward_model.ground_truth"
-    assert "invalid reward_model.ground_truth; scoring 0" in caplog.text
+    assert any(record.name.endswith(".lcb.env") and record.levelno == logging.ERROR for record in caplog.records)
