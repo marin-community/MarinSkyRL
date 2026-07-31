@@ -107,6 +107,16 @@ else
   CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
 fi
 
+# Large cached layers traverse the CoreWeave-to-GHCR path for several minutes.
+# Kaniko otherwise defaults every registry operation to zero retries, so one
+# reset discards an otherwise healthy multi-hour build. Retry extraction,
+# download, and push failures inside the same task while preserving its cache.
+REGISTRY_RETRY_FLAGS=(
+  --image-fs-extract-retry=3
+  --image-download-retry=3
+  --push-retry=3
+)
+
 IMAGE_TAG="${TAG_PREFIX}-${GITSHA}${ARCH_TAG_SUFFIX}"
 DESTINATIONS=(--destination "${GHCR_IMAGE_REPOSITORY}:${IMAGE_TAG}")
 if [ "${PUSH_FLOATING:-0}" = "1" ]; then
@@ -217,6 +227,7 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; t
     --build-arg VLLM_NATIVE_DONOR_ARCHIVE_SHA256="$NATIVE_ARCHIVE_SHA256" \
     --skip-unused-stages \
     --compressed-caching=false \
+    "${REGISTRY_RETRY_FLAGS[@]}" \
     "${CACHE_FLAGS[@]}" \
     --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
   echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
@@ -233,5 +244,6 @@ exec /kaniko/executor \
   --skip-unused-stages \
   "${SNAPSHOT_FLAGS[@]}" \
   --compressed-caching=false \
+  "${REGISTRY_RETRY_FLAGS[@]}" \
   "${CACHE_FLAGS[@]}" \
   "${DESTINATIONS[@]}"

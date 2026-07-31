@@ -1043,8 +1043,11 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
-    async def abort_generation(self) -> None:
-        raise NotImplementedError("Abort generation is only supported for AsyncVLLMInferenceEngine.")
+    async def pause_generation(self) -> None:
+        raise NotImplementedError("Pausing generation is only supported for AsyncVLLMInferenceEngine.")
+
+    async def resume_generation(self) -> None:
+        raise NotImplementedError("Resuming generation is only supported for AsyncVLLMInferenceEngine.")
 
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -2189,40 +2192,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         stats["engine_id"] = self._stats_engine_id
         return stats
 
-    async def abort_generation(self) -> None:
-        """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort".
-        """
+    async def pause_generation(self) -> None:
+        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
         engine = self._get_engine()
-        # Collect all request IDs currently tracked by the scheduler/output processor
-        unfinished_request_ids = list(engine.output_processor.request_states.keys())
-        if unfinished_request_ids:
-            # DRAIN the engine to idle before returning. The caller (weight sync) then moves model
-            # params onto the `meta` device (vLLM layerwise reload); a decode that steps after this
-            # returns would hit `_C::rms_norm` on a meta tensor -> EngineCore crash (enforce_eager)
-            # or a freed-buffer read (cudagraph). engine.abort() -> output_processor.abort_requests()
-            # DIRECTLY pops request_states, so we LOOP (re-snapshot -> re-abort) until idle: a one-shot
-            # abort stalled because stragglers / late arrivals landed after the first snapshot and were
-            # never aborted (the 60s-timeout teardown hit at the 35B weight sync). Re-aborting each
-            # iteration converges. NON-FATAL on the (now-unlikely) 600s deadline: log loudly + proceed
-            # rather than tear down a multi-hour job -- a residual straggler is masked by cudagraph, and
-            # a genuine 600s wedge is already a lost engine that teardown would not recover.
-            drain_deadline = time.monotonic() + 600.0
-            while engine.output_processor.has_unfinished_requests():
-                straggler_ids = list(engine.output_processor.request_states.keys())
-                if straggler_ids:
-                    await engine.abort(straggler_ids)
-                if time.monotonic() > drain_deadline:
-                    logger.warning(
-                        "abort_generation: %d requests still unfinished after 600s of draining; "
-                        "proceeding with the weight reload anyway (wedged engine, not a normal drain).",
-                        len(engine.output_processor.request_states),
-                    )
-                    break
-                await asyncio.sleep(0.02)
-        await engine.reset_prefix_cache()  # avoid KV-cache pollution
-        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
+        outstanding_requests = len(engine.output_processor.request_states)
+        # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
+        # mode it aborts running/waiting requests, waits for the scheduler to reach
+        # its paused state, and clears the KV/prefix cache before returning. Unlike
+        # AsyncLLM.abort(), it cannot report success merely because the frontend
+        # output_processor already removed the request IDs.
+        await engine.pause_generation(mode="abort", clear_cache=True)
+        logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
+
+    async def resume_generation(self) -> None:
+        """Release the EngineCore scheduler after the weight reload completes."""
+        await self._get_engine().resume_generation()
 
 
 class _MinimalRequest:

@@ -2,8 +2,18 @@
 
 This is a policy-only, EP1 FSDP2 implementation. The trainer uses the
 canonical PyTorch model in `skyrl_train.models.grug_moe`; vLLM serves the same
-HF checkpoint. Packing, FlashAttention, trainer EP/CP, R3/router
-replay, grouped MoE, LoRA/4-bit loading, and PKO are intentionally rejected.
+HF checkpoint. Eager attention remains the correctness reference. Policy
+training also supports `flash_attention_2`, selected with
+`trainer.flash_attn=true` or `trainer.attn_backend=flash_attention_2`.
+Unsupported fused requests fail instead of falling back to eager attention.
+
+The fused path requires BF16 or FP16 on a supported CUDA GPU. It preserves
+Grug's 20-query/5-KV-head GQA, half-RoPE on local layers, full causal long
+layers, 2,048-token local window, QK scaling, XSA, and per-head gating. Dense
+unpacked batches may contain left or right padding; FlashAttention unpads valid
+tokens, and model outputs are defined at valid query positions. Sample packing,
+trainer EP/CP, R3/router replay, grouped MoE, LoRA/4-bit loading, and PKO remain
+unsupported.
 
 ## Runtime image
 

@@ -587,11 +587,14 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # fsspec 2026.4.0, so without the extra a second conflict appears. The gate below
 # catches that only when INSTALL_MEGATRON=0, and the megatron variant is the one
 # this image exists to ship, so nothing would catch it there — name the extras.
+COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
         "harbor[analysis,datasets,daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
     ${RL_ENV_DIR}/bin/python -c "import harbor, importlib.metadata as m; assert m.version('fastapi') == '${FASTAPI_VERSION}'; assert m.version('opentelemetry-exporter-otlp') == '${OTEL_EXPORTER_VERSION}'; print('harbor', m.version('harbor'))" && \
+    ${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py && \
+    rm /tmp/validate_harbor_artifact_writer.py && \
     if uv pip check --python ${RL_ENV_DIR}/bin/python > /tmp/rl-pip-check 2>&1; then \
       echo "expected the known aiobotocore/botocore metadata conflict"; \
       exit 1; \

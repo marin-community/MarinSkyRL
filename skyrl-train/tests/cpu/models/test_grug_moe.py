@@ -172,6 +172,21 @@ def test_output_hidden_states_honors_config_default():
     assert len(output.hidden_states) == model.config.num_hidden_layers + 2
 
 
+@pytest.mark.parametrize(
+    ("attention_mask", "message"),
+    [
+        (torch.tensor([[0, 0, 0, 0]]), "at least one valid token"),
+        (torch.tensor([[1, 0, 1, 0]]), "only dense, left-padded, or right-padded"),
+    ],
+)
+def test_flash_attention_rejects_unsupported_attention_masks(attention_mask, message):
+    model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1))
+    model.config._attn_implementation = "flash_attention_2"
+
+    with pytest.raises(RuntimeError, match=message):
+        model(torch.tensor([[1, 2, 3, 4]]), attention_mask=attention_mask)
+
+
 def test_query_bias_candidates_accumulate_exactly_and_change_next_routing():
     config = tiny_config(num_hidden_layers=1, num_local_experts=4, num_experts_per_tok=1)
     router = GrugMoeRouter(config)
