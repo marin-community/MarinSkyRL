@@ -2,31 +2,31 @@
 
 Prevent Harbor infrastructure failures from becoming reward-zero agent outcomes when error names evolve.
 
-## Initial status
+## Failure mechanism
 
 MarinSkyRL classifies the string in a persisted Harbor `ExceptionInfo` against three locally maintained sets.
 `ContextManagementInfrastructureError` is absent, so configurations with `default_error_treatment: zero` turn
 Harbor context-management failures into policy training signal.
 
-Harbor release `harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c` publishes the semantic category
-for every stable trial-outcome exception. The downloaded wheel matches its published SHA-256 digest.
+Harbor's lightweight configuration package publishes the semantic category for every stable trial-outcome
+exception, so the duplicated lists are not an appropriate ownership boundary.
 
 ## Hypothesis
 
 Making the published taxonomy the default source of truth, while retaining campaign lists as explicit
 overrides, will mask the new infrastructure error and expose future unknown names before applying a fallback.
 
-## Changes to make
+## Decision
 
-Pin the immutable `harbor-config` wheel, classify persisted exception names through its public API, empty the
-duplicated schema defaults, and cover infrastructure, agent, passthrough, override, and unknown-category paths.
+The immutable `harbor-config` wheel is a direct dependency. Persisted exception names use its public taxonomy;
+campaign lists remain explicit overrides, and an unknown category is logged as an error before its configured
+fallback is applied.
 
-## Results
+## Evidence
 
-The taxonomy tests fail at collection before the classifier exists. With the immutable wheel and classifier
-in place, the serialized context-management failure maps to `mask` even when the configured unknown-error
-fallback is `zero`. Agent and passthrough categories follow Harbor's decisions, campaign overrides take
-precedence, and an unknown name emits an error before applying the configured fallback.
+The regression contract verifies that a persisted `ContextManagementInfrastructureError` name maps to `mask`
+even when the unknown-error fallback is `zero`. It also covers Harbor's agent and passthrough categories,
+campaign-override precedence, and error-level reporting for unknown names.
 
 The frozen lock retains the existing dependency graph. Its Harbor wheel entry records the release URL and
 the independently verified SHA-256 digest.

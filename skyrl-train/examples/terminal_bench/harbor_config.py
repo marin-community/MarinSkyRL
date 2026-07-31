@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_train.utils.harbor_errors import DEFAULT_ERROR_TREATMENT, ErrorHandlingConfig
 
 from harbor.models.trial.config import (
     TrialConfig,
@@ -342,7 +343,7 @@ ERROR_HANDLING_SCHEMA = SectionSchema(
             default=[],
         ),
         # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
-        "default_error_treatment": FieldMapping("default_error_treatment", default="zero"),
+        "default_error_treatment": FieldMapping("default_error_treatment", default=DEFAULT_ERROR_TREATMENT.value),
     }
 )
 
@@ -762,7 +763,7 @@ class HarborConfigBuilder:
                 return str(value).upper()
         return default
 
-    def get_error_handling_config(self) -> Dict[str, Any]:
+    def get_error_handling_config(self) -> ErrorHandlingConfig:
         """
         Get error handling configuration for RLOO-N advantage estimator.
 
@@ -792,7 +793,7 @@ class HarborConfigBuilder:
                         value = {s.strip() for s in value.split(",") if s.strip()}
                 config[yaml_key] = value
 
-        return config
+        return ErrorHandlingConfig.from_mapping(config)
 
     def get_eval_timeout_override_sec(self, default: int = 900) -> int:
         """

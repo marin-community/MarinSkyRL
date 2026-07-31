@@ -364,7 +364,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # generation has no TIS-valid (length-matched) logprobs. Default ON; set
         # harbor.error_handling.preserve_logprobs_on_timeout=false for the old
         # discard-everything behavior.
-        self._preserve_logprobs_on_timeout = self._error_handling_config.get("preserve_logprobs_on_timeout", True)
+        self._preserve_logprobs_on_timeout = self._error_handling_config.preserve_logprobs_on_timeout
 
         # TIS (Truncated Importance Sampling) config
         # Only show TIS-related warnings when collect_rollout_details is enabled
@@ -384,7 +384,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             f"Concurrent trials: {self._n_concurrent_trials}. "
             f"Reward shaping: enabled={self._reward_shaping_config.get('enable_reward_shaping', True)}, "
             f"shaper={self._reward_shaping_config.get('reward_shaper', 'pass_ratio')}. "
-            f"Error classification: enabled={self._error_handling_config.get('enable_error_classification', False)}"
+            f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
 
         # Read custom chat template
@@ -974,12 +974,10 @@ class TerminalBenchGenerator(GeneratorInterface):
             try:
                 output = self._process_trial_result(result, trajectory_id)
             except Exception as process_error:
-                exclude_from_baseline, exception_type = self._classify_exception(process_error)
-                # _classify_exception may return the _PASSTHROUGH sentinel; for a
-                # processing-time render error there is no usable verifier reward
-                # to pass through, so coerce it to a masked (excluded) failure.
-                if exclude_from_baseline is self._PASSTHROUGH:
-                    exclude_from_baseline = True
+                treatment, exception_type = self._classify_exception(process_error)
+                # A processing-time render error has no verifier reward to pass
+                # through, so only an agent-category error remains in the baseline.
+                exclude_from_baseline = treatment is not ErrorTreatment.ZERO
                 logger.warning(
                     f"Trajectory {trajectory_id} failed during result processing "
                     f"(NOT fatal — skipping this trial): "
@@ -1005,7 +1003,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         #   - Infrastructure failures (exclude_from_baseline=True): mark for exclusion from baseline
         #   - Agent failures (exclude_from_baseline=False): include in baseline with reward=0
         #   - If ALL trajectories in a group fail, they all get excluded from baseline
-        enable_error_classification = self._error_handling_config.get("enable_error_classification", False)
+        enable_error_classification = self._error_handling_config.enable_error_classification
 
         failed_instance_ids = set()
         num_failed_trajectories = 0  # per-trajectory, rather than per-instance
@@ -1317,11 +1315,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         return generator_output
 
-    # Sentinel: returned by _classify_exception when the exception should be
-    # treated as if it never happened (fall through to normal verifier flow).
-    _PASSTHROUGH = object()
-
-    def _classify_exception(self, exception: Exception) -> tuple[bool | object, str]:
+    def _classify_exception(self, exception: Exception) -> tuple[ErrorTreatment, str]:
         """
         Classify an exception as infrastructure failure (mask), agent failure
         (zero), or passthrough (ignore the exception and use the verifier
@@ -1331,26 +1325,21 @@ class TerminalBenchGenerator(GeneratorInterface):
             exception: The exception to classify.
 
         Returns:
-            Tuple of (treatment, exception_type_name)
-            - treatment=True: Infrastructure failure, exclude from RLOO-N baseline
-            - treatment=False: Agent failure, include in baseline with reward=0
-            - treatment=_PASSTHROUGH: Ignore exception, use verifier result normally
+            The typed training treatment and persisted exception type name.
         """
         exception_type = type(exception).__name__
 
         return self._classify_exception_type(exception_type)
 
-    def _classify_exception_type(self, exception_type: str) -> tuple[bool | object, str]:
-        """Translate a persisted Harbor exception name into the legacy treatment shape."""
+    def _classify_exception_type(self, exception_type: str) -> tuple[ErrorTreatment, str]:
+        """Classify a persisted Harbor exception type name."""
 
         # If error classification is disabled, treat all errors as agent failures
-        if not self._error_handling_config.get("enable_error_classification", False):
-            return False, exception_type
+        if not self._error_handling_config.enable_error_classification:
+            return ErrorTreatment.ZERO, exception_type
 
         treatment = classify_exception_type(exception_type, self._error_handling_config)
-        if treatment is ErrorTreatment.PASSTHROUGH:
-            return self._PASSTHROUGH, exception_type
-        return treatment is ErrorTreatment.MASK, exception_type
+        return treatment, exception_type
 
     def _should_preserve_timeout_trajectory(self, result) -> bool:
         """Whether to KEEP a fully-generated trajectory whose POST-generation step
@@ -1369,7 +1358,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             return False
         # Only in RLOO-N error-classification mode; legacy group-zeroing mode
         # (classification off) keeps its byte-identical behavior.
-        if not self._error_handling_config.get("enable_error_classification", False):
+        if not self._error_handling_config.enable_error_classification:
             return False
         agent_result = getattr(result, "agent_result", None)
         rollout_details = getattr(agent_result, "rollout_details", None)
@@ -1573,7 +1562,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         # Handle exceptions from the orchestrator
         if isinstance(result, Exception):
-            exclude_from_baseline, exception_type = self._classify_exception(result)
+            treatment, exception_type = self._classify_exception(result)
+            exclude_from_baseline = treatment is not ErrorTreatment.ZERO
             logger.warning(
                 f"Trajectory {trajectory_id} failed with exception: {result} "
                 f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
@@ -1615,7 +1605,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Passthrough: ignore the exception and fall through to normal
             # verifier processing. The agent hit a soft limit (timeout, context
             # length) but the verifier still ran and produced a real reward.
-            if treatment is self._PASSTHROUGH:
+            if treatment is ErrorTreatment.PASSTHROUGH:
                 if result.verifier_result:
                     logger.info(
                         f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH, using verifier reward"
@@ -1650,7 +1640,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         exception_type=exception_type,
                     )
             else:
-                exclude_from_baseline = bool(treatment)
+                exclude_from_baseline = treatment is ErrorTreatment.MASK
                 if self._should_preserve_timeout_trajectory(result):
                     # POST-generation failure classified ZERO/MASK (e.g.
                     # VerifierTimeoutError). The agent generated a full trajectory
@@ -1725,7 +1715,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         except (KeyError, AttributeError, TypeError) as e:
             # Data extraction failure is typically an infrastructure issue
             exception_type = type(e).__name__
-            exclude_from_baseline, _ = self._classify_exception(e)
+            treatment, _ = self._classify_exception(e)
+            exclude_from_baseline = treatment is not ErrorTreatment.ZERO
             logger.warning(
                 f"Trajectory {trajectory_id} failed: Could not extract results. "
                 f"Error: {e}, Result: {result} "
