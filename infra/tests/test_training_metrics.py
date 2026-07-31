@@ -6,7 +6,6 @@ from infra.rl_metrics import (
     metric_value,
     parse_training_metrics_result,
 )
-from scripts.iris.watch_coreweave_rl import parse_metrics
 
 
 def test_parse_training_metrics_extracts_standard_rl_status_fields() -> None:
@@ -21,9 +20,11 @@ def test_parse_training_metrics_extracts_standard_rl_status_fields() -> None:
         ]
     )
 
-    records = parse_training_metrics_result(log).records
+    result = parse_training_metrics_result(log)
+    records = result.records
 
     assert len(records) == 1
+    assert result.malformed_lines == 1
     assert records[0].step == 7
     assert records[0].metrics["trainer/global_step"] == 7
     assert metric_value(records[0].metrics, *REWARD_KEYS) == -0.9194
@@ -32,44 +33,26 @@ def test_parse_training_metrics_extracts_standard_rl_status_fields() -> None:
     assert metric_value(records[0].metrics, *ENTROPY_KEYS) == 1.178
 
 
-def test_watcher_uses_the_shared_latest_training_record(tmp_path) -> None:
-    finelog = tmp_path / "finelog.log"
-    finelog.write_text(
-        "\n".join(
-            [
-                'WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.25}',
-                (
-                    'WANDB_MIRROR kind=train step=2 metrics={"reward/avg_raw_reward": 0.5, '
-                    '"policy/policy_loss": 0.01, "policy/raw_grad_norm": 0.2}'
-                ),
-            ]
-        )
+def test_parse_training_metrics_preserves_latest_valid_record_and_reports_malformed_lines() -> None:
+    log = "\n".join(
+        [
+            'WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.25}',
+            (
+                'WANDB_MIRROR kind=train step=2 metrics={"reward/avg_raw_reward": 0.5, '
+                '"policy/policy_loss": 0.01, "policy/raw_grad_norm": 0.2}'
+            ),
+            'WANDB_MIRROR kind=train step=3 metrics={"reward/avg_raw_reward": ',
+        ]
     )
 
-    step, total, metrics, error = parse_metrics(finelog)
+    result = parse_training_metrics_result(log)
 
-    assert (step, total, error) == (2, None, None)
-    assert metrics == {
+    assert result.malformed_lines == 1
+    assert len(result.records) == 2
+    assert result.records[-1].step == 2
+    assert result.records[-1].metrics == {
         "reward/avg_raw_reward": 0.5,
         "policy/policy_loss": 0.01,
         "policy/raw_grad_norm": 0.2,
         "trainer/global_step": 2,
     }
-
-
-def test_watcher_reports_a_malformed_record_after_valid_metrics(tmp_path) -> None:
-    finelog = tmp_path / "finelog.log"
-    finelog.write_text(
-        "\n".join(
-            [
-                'WANDB_MIRROR kind=train step=2 metrics={"reward/avg_raw_reward": 0.5}',
-                'WANDB_MIRROR kind=train step=3 metrics={"reward/avg_raw_reward": ',
-            ]
-        )
-    )
-
-    step, total, metrics, error = parse_metrics(finelog)
-
-    assert (step, total) == (2, None)
-    assert metrics["reward/avg_raw_reward"] == 0.5
-    assert error == "1 WANDB_MIRROR train lines failed JSON parse"
