@@ -71,6 +71,16 @@ def _strip_dapo_boilerplate(text: str) -> str:
     return body.strip()
 
 
+def _prepared_verifier_row(problem: str, normalized: str, source: Source, index: int) -> PreparedRow:
+    return {
+        "data_source": source.dataset_id,
+        "prompt": [{"role": "user", "content": problem}],
+        "env_class": source.env_id,
+        "reward_model": {"ground_truth": normalized},
+        "extra_info": {"split": "train", "index": index},
+    }
+
+
 def _math_row(
     problem: str, ground_truth: Any, source: Source, index: int, contract: VerifierDataContract
 ) -> PreparedRow:
@@ -82,13 +92,7 @@ def _math_row(
 
     normalized = contract.normalize_ground_truth(ground_truth)
     verified = contract.validate_example(normalized, f"Answer: \\boxed{{{normalized}}}", "")
-    return {
-        "data_source": source.dataset_id,
-        "prompt": [{"role": "user", "content": problem + instruction}],
-        "env_class": source.env_id,
-        "reward_model": {"ground_truth": verified},
-        "extra_info": {"split": "train", "index": index},
-    }
+    return _prepared_verifier_row(problem + instruction, verified, source, index)
 
 
 def _prepare_rlvr_math(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
@@ -187,13 +191,7 @@ def _prepare_gsm8k(example: Mapping[str, Any], index: int, contract: VerifierDat
     if not instruction:
         raise ValueError(f"{source.name} requires a verifier prompt instruction.")
     normalized = contract.normalize_ground_truth(ground_truth)
-    return {
-        "data_source": source.dataset_id,
-        "prompt": [{"role": "user", "content": question + instruction}],
-        "env_class": source.env_id,
-        "reward_model": {"ground_truth": normalized},
-        "extra_info": {"split": "train", "index": index},
-    }
+    return _prepared_verifier_row(question + instruction, normalized, source, index)
 
 
 # ---------------------------------------------------------------------------
@@ -207,13 +205,7 @@ def _code_row(
     if not contract.prompt_instruction:
         raise ValueError(f"{source.name} requires a verifier prompt instruction.")
     normalized = contract.normalize_ground_truth(ground_truth)
-    return {
-        "data_source": source.dataset_id,
-        "prompt": [{"role": "user", "content": problem + contract.prompt_instruction}],
-        "env_class": source.env_id,
-        "reward_model": {"ground_truth": normalized},
-        "extra_info": {"split": "train", "index": index},
-    }
+    return _prepared_verifier_row(problem + contract.prompt_instruction, normalized, source, index)
 
 
 def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:

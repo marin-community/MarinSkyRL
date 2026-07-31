@@ -6,16 +6,17 @@ from typing import Any
 from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from skyrl_gym.envs.data_contracts import normalize_lcb_ground_truth
-from skyrl_gym.envs.lcb.livecodebench import compute_score
+from skyrl_gym.envs.lcb.livecodebench import compute_score, normalize_lcb_ground_truth
 
 logger = logging.getLogger(__name__)
 _INVALID_GROUND_TRUTH_ERROR = "invalid reward_model.ground_truth"
 
 
 class LCBEnv(BaseTextEnv):
-    """
-    Environment for LiveCodeBench execution environment.
+    """LiveCodeBench execution environment.
+
+    Malformed ground truth is logged and scores zero with verifier-error metadata
+    rather than crashing a distributed rollout worker.
     """
 
     def __init__(
