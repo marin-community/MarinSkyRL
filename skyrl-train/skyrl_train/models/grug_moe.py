@@ -361,6 +361,7 @@ class GrugMoeExperts(nn.Module):
         self.up_proj = _GrugStackedLinear((num_experts, intermediate_size, hidden_size))
         self.down_proj = _GrugStackedLinear((num_experts, hidden_size, intermediate_size))
         self.use_grouped_mm = False
+        self.ep_size = 1
 
     def forward_eager(
         self,

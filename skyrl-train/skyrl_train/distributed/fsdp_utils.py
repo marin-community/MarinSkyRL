@@ -23,6 +23,7 @@ from typing import Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from loguru import logger
 from torch.distributed import DeviceMesh
 from torch.distributed.distributed_c10d import _set_pg_timeout
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -241,6 +242,32 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 # Fsdp2 load full state dict from `accelerate`
 # Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
 # NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
+def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
+    """Attach expert-gradient averaging to the currently registered Parameters."""
+
+    from skyrl_train.models.grug_moe import GrugMoeExperts
+
+    module_count = 0
+    parameter_count = 0
+    for experts in model.modules():
+        if not isinstance(experts, GrugMoeExperts):
+            continue
+
+        for handle in getattr(experts, "_ep_gradient_scale_handles", ()):
+            handle.remove()
+
+        ep_size = int(experts.ep_size)
+        handles = []
+        if ep_size > 1:
+            for parameter in experts.parameters():
+                if parameter.requires_grad:
+                    handles.append(parameter.register_hook(lambda grad, size=ep_size: grad / size))
+        experts._ep_gradient_scale_handles = handles
+        module_count += 1
+        parameter_count += len(handles)
+    return module_count, parameter_count
+
+
 def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None, ep_enabled=False):
     """
     Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
@@ -456,6 +483,12 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # assign=True: params are meta DTensors, replace storage in-place.
         model.load_state_dict(new_sd, assign=True)
         del new_sd
+        grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
+        if grug_parameters:
+            logger.info(
+                "[Grug-EP-GRAD] refreshed gradient averaging after checkpoint assignment "
+                f"(modules={grug_modules}, parameters={grug_parameters})"
+            )
 
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
         offload_fsdp2_model_to_cpu(model)
@@ -798,9 +831,6 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
             # contribution from every EP rank. Average only expert parameter
             # gradients; router and dense gradients are already local replicas
             # and must retain their EP=1 scale.
-            if ep_mesh.size() > 1:
-                for parameter in experts.parameters():
-                    parameter.register_hook(lambda grad, size=ep_mesh.size(): grad / size)
             experts.ep_size = ep_mesh.size()
         else:
             # Tell the grouped block which comm backend to run. For deepep this
@@ -810,6 +840,12 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
             # Flag the grouped block so its forward selects EP-decorated compute.
             moe._ep_enabled = True
         sharded += 1
+    grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
+    if grug_parameters:
+        logger.info(
+            "[Grug-EP-GRAD] enabled expert gradient averaging "
+            f"(ep_size={ep_mesh.size()}, modules={grug_modules}, parameters={grug_parameters})"
+        )
     return sharded
 
 

@@ -21,7 +21,11 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.models.grug_query_bias import next_query_bias
 import numpy as np
-from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
+from skyrl_train.workers.worker import (
+    CriticWorkerBase,
+    PolicyWorkerBase,
+    _grug_query_bias_virtual_shard_mask,
+)
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
@@ -122,6 +126,52 @@ def test_successful_optimizer_step_applies_grug_query_bias_once():
     causal_lm.query_bias.fill_(17)
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
     torch.testing.assert_close(causal_lm.query_bias, torch.full_like(causal_lm.query_bias, 17))
+
+
+def test_grug_query_bias_virtual_shards_partition_optimizer_window():
+    attention_mask = torch.tensor(
+        [
+            [1, 1, 0],
+            [1, 0, 0],
+            [1, 1, 1],
+            [0, 1, 1],
+        ]
+    )
+    microbatches = attention_mask.split(2)
+
+    rank_masks = []
+    for ep_rank in range(2):
+        rank_masks.append(
+            torch.cat(
+                [
+                    _grug_query_bias_virtual_shard_mask(
+                        mask,
+                        local_step=local_step,
+                        micro_batch_size=2,
+                        accumulation_steps=2,
+                        ep_size=2,
+                        ep_rank=ep_rank,
+                    )
+                    for local_step, mask in enumerate(microbatches)
+                ]
+            )
+        )
+
+    torch.testing.assert_close(rank_masks[0].logical_xor(rank_masks[1]), attention_mask.bool())
+    assert not torch.logical_and(rank_masks[0], rank_masks[1]).any()
+    assert rank_masks[0].sum().item() == 3
+    assert rank_masks[1].sum().item() == 5
+    torch.testing.assert_close(
+        _grug_query_bias_virtual_shard_mask(
+            attention_mask,
+            local_step=0,
+            micro_batch_size=4,
+            accumulation_steps=1,
+            ep_size=1,
+            ep_rank=0,
+        ),
+        attention_mask.bool(),
+    )
 
 
 def _get_test_data(trainer: RayPPOTrainer):

@@ -28,6 +28,7 @@ from skyrl_train.distributed.fsdp_utils import (
     apply_ep,
     apply_fsdp2,
     create_device_mesh,
+    fsdp2_load_full_state_dict,
     gather_dtensor_strided_safe,
 )
 from skyrl_train.models.grug_moe import (
@@ -36,7 +37,12 @@ from skyrl_train.models.grug_moe import (
     GrugMoeSparseMoeBlock,
     enable_grug_grouped_mm,
 )
-from skyrl_train.models.grug_query_bias import GrugQueryBiasAccumulator, next_query_bias
+from skyrl_train.models.grug_query_bias import (
+    GrugQueryBiasAccumulator,
+    next_query_bias,
+    query_bias_candidate_count,
+)
+from skyrl_train.workers.worker import _grug_query_bias_virtual_shard_mask
 
 
 SEED = 31415
@@ -145,6 +151,11 @@ def _run_topology(*, fsdp_size: int, ep_size: int, device: torch.device) -> _Top
     torch.manual_seed(SEED + 2)
     model = GrugMoeForCausalLM(_config()).to(device=device, dtype=torch.bfloat16)
     assert enable_grug_grouped_mm(model) == model.config.num_hidden_layers
+    full_state = (
+        {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+        if dist.get_rank() == 0
+        else {}
+    )
 
     mesh = create_device_mesh(world_size=dist.get_world_size(), fsdp_size=fsdp_size, ep_size=ep_size)
     fsdp_mesh = mesh["fsdp"]
@@ -163,25 +174,17 @@ def _run_topology(*, fsdp_size: int, ep_size: int, device: torch.device) -> _Top
         num_sharded = apply_ep(model, mesh, ep_comm_backend="torch", fsdp_kwargs=fsdp_kwargs)
         assert num_sharded == model.config.num_hidden_layers
     apply_fsdp2(model, fsdp_kwargs, {"cpu_offload": False})
+    if ep_size > 1:
+        fsdp2_load_full_state_dict(
+            model,
+            full_state,
+            cpu_offload=False,
+            ep_enabled=True,
+        )
+    del full_state
 
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, betas=(0.9, 0.95), weight_decay=1e-2)
-
-    # Capture query-bias candidates from one identical probe per rank. With one
-    # layer, routing happens before expert compute, so the FP32 readback must be
-    # bit-exact across the two topologies.
-    probe_tokens = _same_tokens(device)[:2]
-    token_mask = torch.ones_like(probe_tokens, dtype=torch.bool)
-    model.begin_query_bias_capture(candidate_count=1, token_mask=token_mask)
-    with torch.no_grad():
-        model(probe_tokens)
-    observation = model.take_query_bias_observation(candidate_count=1)
-    accumulator = GrugQueryBiasAccumulator(
-        candidate_count=1,
-        num_layers=model.config.num_hidden_layers,
-        num_experts=model.config.num_local_experts,
-    )
-    accumulator.observe(observation)
 
     # Emulate MeshDispatch: FSDP ranks get distinct pieces of one global batch,
     # while ranks differing only in EP get the same piece.
@@ -189,7 +192,35 @@ def _run_topology(*, fsdp_size: int, ep_size: int, device: torch.device) -> _Top
     data_parallel_size = dist.get_world_size() // ep_size
     data_rank = dist.get_rank() // ep_size
     tokens = global_tokens.chunk(data_parallel_size, dim=0)[data_rank]
+
+    # Observe the actual asymmetric training tokens. An EP rank owns one virtual
+    # contiguous shard of the replicated optimizer window, matching EP=1's
+    # logical rank geometry without changing the loss forward.
+    ep_rank = mesh["ep"].get_local_rank() if ep_size > 1 else 0
+    token_mask = _grug_query_bias_virtual_shard_mask(
+        torch.ones_like(tokens, dtype=torch.bool),
+        local_step=0,
+        micro_batch_size=tokens.shape[0],
+        accumulation_steps=1,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )
+    candidate_count = query_bias_candidate_count(
+        int(token_mask.sum().item()),
+        model.config.num_experts_per_tok,
+        model.config.num_local_experts,
+    )
+    assert candidate_count > 1
+    model.begin_query_bias_capture(candidate_count=candidate_count, token_mask=token_mask)
+
     output = model(tokens, labels=tokens)
+    observation = model.take_query_bias_observation(candidate_count=candidate_count)
+    accumulator = GrugQueryBiasAccumulator(
+        candidate_count=candidate_count,
+        num_layers=model.config.num_hidden_layers,
+        num_experts=model.config.num_local_experts,
+    )
+    accumulator.observe(observation)
     gathered_logits = [torch.empty_like(output.logits) for _ in range(dist.get_world_size())]
     dist.all_gather(gathered_logits, output.logits.detach())
     global_loss = output.loss.detach().clone()

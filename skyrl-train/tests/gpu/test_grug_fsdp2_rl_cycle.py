@@ -331,8 +331,9 @@ def _assert_checkpoint_resume_next_step(
     return resumed_next_step
 
 
-def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot) -> None:
+def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot) -> dict[str, int]:
     found = {name: False for name in names}
+    expert_owners = {name: set() for name in SERVING_EXPERT_NAMES}
     for engine in client.engines:
         per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(names, False))
         if isinstance(per_rank, dict):
@@ -349,6 +350,8 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
                 )
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
                 expert_index = SERVING_EXPERT_NAMES.get(name)
+                if expert_index is not None:
+                    expert_owners[name].add(int(entry["ep_rank"]))
                 expected = (
                     training.weights[STACKED_EXPERT_NAME][expert_index]
                     if expert_index is not None
@@ -364,6 +367,8 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
                     actual = actual[: expected.shape[0]]
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert all(found.values()), found
+    assert all(len(owners) == 1 for owners in expert_owners.values()), expert_owners
+    return {name: next(iter(owners)) for name, owners in expert_owners.items()}
 
 
 def _run_full_cycle(
@@ -472,9 +477,18 @@ def _run_full_cycle(
             asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        _assert_engine_weights(client, sync_names, training)
+        serving_owners = _assert_engine_weights(client, sync_names, training)
         if expert_model_parallel_size > 1:
-            assert set(SERVING_EXPERT_NAMES).issubset(sync_names)
+            experts_per_trainer_owner = (
+                AutoConfig.from_pretrained(model_path, trust_remote_code=False, local_files_only=True).num_local_experts
+                // expert_model_parallel_size
+            )
+            trainer_owners = {
+                name: expert_index // experts_per_trainer_owner for name, expert_index in SERVING_EXPERT_NAMES.items()
+            }
+            assert len(set(trainer_owners.values())) > 1, trainer_owners
+            assert len(set(serving_owners.values())) > 1, serving_owners
+            assert serving_owners == trainer_owners
 
         if colocate_all:
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
