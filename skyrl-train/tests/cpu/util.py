@@ -56,21 +56,18 @@ def example_dummy_config():
 
 
 @contextmanager
-def gloo_process_group(rank: int, world_size: int, port: int, *, timeout_seconds: int = 10):
+def gloo_process_group(rank: int, world_size: int, port: int, *, timeout_seconds: int | None = None):
     """Initialize and reliably tear down a local Gloo process group."""
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
-    dist.init_process_group(
-        backend="gloo",
-        rank=rank,
-        world_size=world_size,
-        timeout=timedelta(seconds=timeout_seconds),
-    )
+    kwargs = {"timeout": timedelta(seconds=timeout_seconds)} if timeout_seconds is not None else {}
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size, **kwargs)
     try:
         yield
     finally:
+        dist.barrier()
         dist.destroy_process_group()
 
 

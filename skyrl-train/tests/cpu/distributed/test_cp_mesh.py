@@ -29,6 +29,7 @@ import os
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from tests.cpu.util import gloo_process_group
 
 try:
     import pytest
@@ -98,12 +99,7 @@ def test_cp_mesh_divisibility_asserts():
 
 
 def _shape_worker(rank, world_size):
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29557"
-    os.environ.setdefault("RANK", str(rank))
-    os.environ.setdefault("WORLD_SIZE", str(world_size))
-    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    try:
+    with gloo_process_group(rank, world_size, 29557):
         # #1 (G1): cp_size=1 on a single fsdp group → UNCHANGED 1-D ["fsdp"].
         m_1d = create_device_mesh(world_size=4, fsdp_size=4, cp_size=1, device_type="cpu")
         assert m_1d.mesh_dim_names == ("fsdp",), f"#1 1-D names={m_1d.mesh_dim_names}"
@@ -128,17 +124,10 @@ def _shape_worker(rank, world_size):
         if rank == 0:
             print("[#1] cp_size=1 → byte-identical 1-D/2-D mesh (no cp dim): PASS")
             print("[#2] cp_size=2 → ['ddp','fsdp','cp'] numel==world: PASS")
-    finally:
-        dist.destroy_process_group()
 
 
 def _shape_worker_cp_ep(rank, world_size):
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29558"
-    os.environ.setdefault("RANK", str(rank))
-    os.environ.setdefault("WORLD_SIZE", str(world_size))
-    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    try:
+    with gloo_process_group(rank, world_size, 29558):
         # #3: cp=2, ep=2, fsdp=2 on 8 ranks → (ddp=1, fsdp=2, cp=2, ep=2).
         mesh = create_device_mesh(world_size=8, fsdp_size=2, cp_size=2, ep_size=2, device_type="cpu")
         assert mesh.mesh_dim_names == ("ddp", "fsdp", "cp", "ep"), f"#3 names={mesh.mesh_dim_names}"
@@ -152,17 +141,10 @@ def _shape_worker_cp_ep(rank, world_size):
         assert mesh["fsdp"].size() == 2 and mesh["cp"].size() == 2 and mesh["ep"].size() == 2
         if rank == 0:
             print("[#3] cp=2,ep=2 → ['ddp','fsdp','cp','ep'] fsdp<cp<ep numel==world: PASS")
-    finally:
-        dist.destroy_process_group()
 
 
 def _cp_group_worker(rank, world_size):
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29559"
-    os.environ.setdefault("RANK", str(rank))
-    os.environ.setdefault("WORLD_SIZE", str(world_size))
-    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    try:
+    with gloo_process_group(rank, world_size, 29559):
         # #5: cp_size=2 on 4 ranks → (ddp=1, fsdp=2, cp=2). The cp group this rank
         # belongs to must have world size == cp_size and contiguous, disjoint members.
         cp_size = 2
@@ -194,8 +176,6 @@ def _cp_group_worker(rank, world_size):
         assert union == set(range(world_size)), f"#5 cp groups do not partition all ranks: {union}"
         if rank == 0:
             print(f"[#5] cp_group size=={cp_size}, contiguous + disjoint partition {sorted(unique)}: PASS")
-    finally:
-        dist.destroy_process_group()
 
 
 def test_cp_mesh_shape_and_names():
