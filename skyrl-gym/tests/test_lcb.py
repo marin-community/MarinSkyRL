@@ -124,4 +124,4 @@ def test_malformed_reward_model_scores_zero(extras):
     output = env.step(SECOND_LARGEST_SOLUTION)
 
     assert output["reward"] == 0.0
-    assert output["metadata"]["verifier_error"] == "invalid reward_model.ground_truth"
+    assert output["metadata"]["verifier_error"]

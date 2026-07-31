@@ -9,6 +9,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.lcb.livecodebench import compute_score
 
 logger = logging.getLogger(__name__)
+_INVALID_GROUND_TRUTH_ERROR = "invalid reward_model.ground_truth"
 
 
 class LCBEnv(BaseTextEnv):
@@ -29,12 +30,12 @@ class LCBEnv(BaseTextEnv):
         try:
             tests = json.loads(ground_truth) if isinstance(ground_truth, str) else None
         except json.JSONDecodeError:
-            logger.exception("lcb: invalid reward_model.ground_truth=%r; scoring 0.", ground_truth)
+            logger.exception("lcb: %s=%r; scoring 0.", _INVALID_GROUND_TRUTH_ERROR, ground_truth)
             json_error = True
             tests = None
         self.tests = tests if isinstance(tests, list) and tests else None
         if self.tests is None and not json_error:
-            logger.error("lcb: invalid reward_model.ground_truth=%r; scoring 0.", ground_truth)
+            logger.error("lcb: %s=%r; scoring 0.", _INVALID_GROUND_TRUTH_ERROR, ground_truth)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         if self.tests is None:
@@ -42,7 +43,7 @@ class LCBEnv(BaseTextEnv):
                 observations=[],
                 reward=0.0,
                 done=True,
-                metadata={"parsed_code": None, "verifier_error": "invalid reward_model.ground_truth"},
+                metadata={"parsed_code": None, "verifier_error": _INVALID_GROUND_TRUTH_ERROR},
             )
         parsed_code, reward = compute_score(action, self.tests)
 
