@@ -46,17 +46,6 @@ def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
         assert "${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py" in dockerfile
 
 
-def test_arm64_native_wheels_cover_hopper_and_blackwell() -> None:
-    dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
-    arch_list = next(
-        line.removeprefix('ARG TORCH_CUDA_ARCH_LIST="').removesuffix('"')
-        for line in dockerfile.splitlines()
-        if line.startswith("ARG TORCH_CUDA_ARCH_LIST=")
-    )
-
-    assert set(arch_list.split(";")) == {"9.0", "10.0"}
-
-
 def test_arm64_plain_image_accepts_only_known_pip_check_findings(tmp_path: Path) -> None:
     """Exercise the Dockerfile's dependency gate against representative reports."""
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()

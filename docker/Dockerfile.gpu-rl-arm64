@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 #
-# gpu-rl-arm64 — the GB200 (aarch64) counterpart of docker/Dockerfile.gpu-rl.
+# gpu-rl-arm64 — the aarch64 counterpart of docker/Dockerfile.gpu-rl.
 #
-# linux/arm64, from-source CUDA, for cw-us-east-08a. Every GPU on that cluster
-# sits behind a Grace host, so the shipped linux/amd64 image cannot run there at
-# all: sm_100 kernels are necessary but the host CPU is the binding constraint.
+# linux/arm64, from-source CUDA, for Grace Hopper GH200 and Grace Blackwell
+# GB200 systems. The host CPU requires an arm64 image; native extensions carry
+# both sm_90 and sm_100 kernels.
 #
 # WHY A SEPARATE FILE, NOT ARCH-CONDITIONAL ARGS IN Dockerfile.gpu-rl
 # -------------------------------------------------------------------
