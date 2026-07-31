@@ -32,6 +32,7 @@ ParsedCodeGroundTruth = Mapping[str, Any] | list[Any] | str | int | float | bool
 LCB_PROMPT_INSTRUCTION = "\nReturn the complete Python solution in this format:\n```python\n# solution\n```"
 _STDIN_SOURCE_TEST_TYPES = {STDIN_TEST_TYPE, "stdin_stdout"}
 _FUNCTIONAL_SOURCE_TEST_TYPES = {FUNCTIONAL_TEST_TYPE, "call_based"}
+_SOURCE_FUNCTION_NAME_KEY = "fn_name"
 
 
 class CanonicalCodeCase(TypedDict):
@@ -126,7 +127,7 @@ def _canonical_code_case(case: Mapping[str, Any]) -> CanonicalCodeCase:
             raise TypeError("Standard-input LCB test-case input and output must be strings.")
         return {"input": test_input, "output": expected_output, "testtype": STDIN_TEST_TYPE}
     if test_type in _FUNCTIONAL_SOURCE_TEST_TYPES:
-        function_name = case.get("fn_name")
+        function_name = case.get(_SOURCE_FUNCTION_NAME_KEY)
         metadata = case.get("metadata")
         if function_name is None and isinstance(metadata, Mapping):
             function_name = metadata.get(FUNCTION_NAME_KEY)
@@ -155,7 +156,7 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[CanonicalCode
     if not inputs or len(inputs) != len(outputs):
         raise ValueError("APPS ground_truth requires equally sized, non-empty input and output lists.")
 
-    function_name = ground_truth.get("fn_name")
+    function_name = ground_truth.get(_SOURCE_FUNCTION_NAME_KEY)
     test_type = FUNCTIONAL_TEST_TYPE if function_name is not None else STDIN_TEST_TYPE
     return [
         _canonical_code_case(
@@ -163,7 +164,7 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[CanonicalCode
                 "input": test_input,
                 "output": expected_output,
                 "testtype": test_type,
-                "fn_name": function_name,
+                _SOURCE_FUNCTION_NAME_KEY: function_name,
             }
         )
         for test_input, expected_output in zip(inputs, outputs)
@@ -171,6 +172,12 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[CanonicalCode
 
 
 def normalize_lcb_ground_truth(ground_truth: CodeGroundTruth) -> str:
+    """Return a canonical JSON-encoded LCB case list.
+
+    Accepts canonical case lists, APPS ``inputs``/``outputs`` mappings, and open-r1
+    ``test_cases`` mappings, either directly or as JSON text. All cases must use one
+    execution mode and, for functional tests, one function name.
+    """
     parsed = _parse_code_ground_truth(ground_truth)
     if isinstance(parsed, Mapping) and "test_cases" in parsed:
         if parsed.get("language") not in {None, "python"}:
