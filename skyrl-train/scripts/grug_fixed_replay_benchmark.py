@@ -206,7 +206,7 @@ def load_verified_replay(
     return manifest, shards
 
 
-def make_config(args: argparse.Namespace):
+def make_config(args: argparse.Namespace, sequence_length: int):
     with hydra.initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = hydra.compose(config_name="ppo_base_config")
     cfg.trainer.logger = "console"
@@ -232,6 +232,9 @@ def make_config(args: argparse.Namespace):
     cfg.trainer.algorithm.think_token_weight = 1.0
     cfg.trainer.algorithm.z_clip.enabled = False
     cfg.trainer.algorithm.stale_clip.enabled = False
+    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
+    algorithm_config.max_seq_len = sequence_length
+    cfg.trainer.algorithm = algorithm_config
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.placement.colocate_policy_ref = False
     cfg.trainer.placement.policy_num_nodes = 1 if args.mode == "preflight" else 4
@@ -350,7 +353,8 @@ def main() -> None:
         for batch in batches:
             batch.metadata["grug_benchmark_global_loss_tokens"] = global_loss_tokens
 
-        cfg = make_config(args)
+        sequence_length = int(manifest["batch"]["fields"]["sequences"]["shape"][1])
+        cfg = make_config(args, sequence_length)
         initialize_ray(cfg)
         cluster_gpus = int(ray.cluster_resources().get("GPU", 0))
         if cluster_gpus < world_size:
