@@ -22,8 +22,8 @@ finish. It will not overwrite an existing artifact.
 statistics, raw/unique/emitted counts, dedup and subsampling limits, and verifier-preflight
 coverage. AIME sources use two-sided verifier checks. IFEval validates the constraint schema;
 the source does not carry canonical satisfying responses for arbitrary constraints. Code sources
-normalize their source-specific tests into the LiveCodeBench runtime schema and execute both a
-canonical solution and a deliberately incorrect response before publishing an artifact.
+normalize their source-specific tests into the LiveCodeBench runtime schema. They deliberately do
+not execute downloaded reference solutions during preparation because the verifier is not a security sandbox.
 
 The DAPO adapter streams by default and stops after 20,000 unique prompts unless
 `--unique-cap` overrides it. DAPO's default minimum of 1,000 unique prompts catches cleanup

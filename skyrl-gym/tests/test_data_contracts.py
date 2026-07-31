@@ -87,6 +87,51 @@ def test_lcb_contract_normalizes_and_executes_functional_cases():
 
 
 @pytest.mark.parametrize(
+    "ground_truth, error",
+    [
+        ({"language": "rust", "test_cases": []}, "only Python"),
+        ({"inputs": ["1\n"], "outputs": []}, "equally sized"),
+        (
+            [{"input": "1\n", "output": "1\n", "testtype": "functional"}],
+            "function name",
+        ),
+        (
+            [
+                {"input": "1\n", "output": "1\n", "testtype": "stdin"},
+                {
+                    "input": "1",
+                    "output": "1",
+                    "testtype": "functional",
+                    "metadata": {"func_name": "identity"},
+                },
+            ],
+            "cannot mix",
+        ),
+        (
+            [
+                {
+                    "input": "1",
+                    "output": "1",
+                    "testtype": "functional",
+                    "metadata": {"func_name": "first"},
+                },
+                {
+                    "input": "1",
+                    "output": "1",
+                    "testtype": "functional",
+                    "metadata": {"func_name": "second"},
+                },
+            ],
+            "same function name",
+        ),
+    ],
+)
+def test_lcb_contract_rejects_unlaunchable_test_schemas(ground_truth, error):
+    with pytest.raises((TypeError, ValueError), match=error):
+        get_data_contract("lcb").normalize_ground_truth(ground_truth)
+
+
+@pytest.mark.parametrize(
     "env_id, ground_truth",
     [
         ("unknown", "42"),

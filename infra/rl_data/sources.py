@@ -25,7 +25,6 @@ HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
 _DAPO_TRAILING_MARKERS = ("Remember to put your answer", "The last line of your response")
-_NEGATIVE_CODE_PREFLIGHT = "```python\nraise RuntimeError('negative verifier preflight')\n```"
 
 
 PreparedRow = dict[str, Any]
@@ -202,20 +201,12 @@ def _prepare_gsm8k(example: Mapping[str, Any], index: int, contract: VerifierDat
 # ---------------------------------------------------------------------------
 
 
-def _fenced_python(solution: str) -> str:
-    stripped = solution.strip()
-    return stripped if stripped.startswith("```") else f"```python\n{stripped}\n```"
-
-
 def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = verifiable_code_source()
     problem = example.get("problem_statement")
-    solution = example.get("gold_standard_solution")
     verification_info = example.get("verification_info")
     if not isinstance(problem, str):
         raise TypeError("verifiable-coding-problems row problem_statement must be a string.")
-    if not isinstance(solution, str) or not solution.strip():
-        raise TypeError("verifiable-coding-problems row gold_standard_solution must be a non-empty string.")
     if verification_info is None:
         raise ValueError("verifiable-coding-problems row is missing verification_info.")
     if isinstance(verification_info, str):
@@ -223,14 +214,12 @@ def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: V
             verification_info = ast.literal_eval(verification_info)
         except (ValueError, SyntaxError) as exc:
             raise ValueError("verification_info string could not be parsed.") from exc
-    normalized = contract.validate_example(
-        verification_info,
-        _fenced_python(solution),
-        _NEGATIVE_CODE_PREFLIGHT,
-    )
+    if not contract.prompt_instruction:
+        raise ValueError(f"{source.name} requires a verifier prompt instruction.")
+    normalized = contract.normalize_ground_truth(verification_info)
     return {
         "data_source": source.dataset_id,
-        "prompt": [{"role": "user", "content": problem}],
+        "prompt": [{"role": "user", "content": problem + contract.prompt_instruction}],
         "env_class": source.env_id,
         "reward_model": {"ground_truth": normalized},
         "extra_info": {"split": "train", "index": index},
@@ -241,7 +230,6 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
     source = apps_source()
     problem = example.get("question")
     input_output = example.get("input_output")
-    solutions = example.get("solutions")
     if not isinstance(problem, str):
         raise TypeError("APPS row question must be a string.")
     if input_output is None:
@@ -251,21 +239,12 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
             input_output = json.loads(input_output)
         except json.JSONDecodeError as exc:
             raise ValueError("APPS input_output string is not valid JSON.") from exc
-    if isinstance(solutions, str):
-        try:
-            solutions = json.loads(solutions)
-        except json.JSONDecodeError as exc:
-            raise ValueError("APPS solutions string is not valid JSON.") from exc
-    if not isinstance(solutions, list) or not solutions or not isinstance(solutions[0], str):
-        raise TypeError("APPS row solutions must contain at least one string.")
-    normalized = contract.validate_example(
-        input_output,
-        _fenced_python(solutions[0]),
-        _NEGATIVE_CODE_PREFLIGHT,
-    )
+    if not contract.prompt_instruction:
+        raise ValueError(f"{source.name} requires a verifier prompt instruction.")
+    normalized = contract.normalize_ground_truth(input_output)
     return {
         "data_source": source.dataset_id,
-        "prompt": [{"role": "user", "content": problem}],
+        "prompt": [{"role": "user", "content": problem + contract.prompt_instruction}],
         "env_class": source.env_id,
         "reward_model": {"ground_truth": normalized},
         "extra_info": {"split": "train", "index": index},
@@ -426,12 +405,12 @@ def gsm8k_source() -> Source:
 
 def verifiable_code_source() -> Source:
     return Source(
-        "verifiable_code", VERIFIABLE_CODE_DATASET, "lcb", "train", False, "two_sided", _prepare_verifiable_code
+        "verifiable_code", VERIFIABLE_CODE_DATASET, "lcb", "train", False, "schema_only", _prepare_verifiable_code
     )
 
 
 def apps_source() -> Source:
-    return Source("apps", APPS_DATASET, "lcb", "train", False, "two_sided", _prepare_apps)
+    return Source("apps", APPS_DATASET, "lcb", "train", False, "schema_only", _prepare_apps)
 
 
 def gpqa_source() -> Source:

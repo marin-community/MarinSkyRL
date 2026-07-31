@@ -112,6 +112,8 @@ def test_compute_score_under_spawn():
         {"reward_model": {}},
         {"reward_model": {"ground_truth": "not JSON"}},
         {"reward_model": {"ground_truth": "[]"}},
+        {"reward_model": {"ground_truth": "[{}]"}},
+        {"reward_model": {"ground_truth": "[1]"}},
     ],
 )
 def test_malformed_reward_model_scores_zero(extras):

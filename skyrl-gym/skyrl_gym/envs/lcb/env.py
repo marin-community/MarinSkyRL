@@ -6,6 +6,7 @@ from typing import Any
 from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.data_contracts import normalize_lcb_ground_truth
 from skyrl_gym.envs.lcb.livecodebench import compute_score
 
 logger = logging.getLogger(__name__)
@@ -26,15 +27,14 @@ class LCBEnv(BaseTextEnv):
 
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
-        json_error = False
         try:
-            tests = json.loads(ground_truth) if isinstance(ground_truth, str) else None
-        except json.JSONDecodeError:
+            normalized = normalize_lcb_ground_truth(ground_truth) if isinstance(ground_truth, str) else None
+            tests = json.loads(normalized) if normalized is not None else None
+        except (TypeError, ValueError):
             logger.exception("lcb: %s=%r; scoring 0.", _INVALID_GROUND_TRUTH_ERROR, ground_truth)
-            json_error = True
             tests = None
         self.tests = tests if isinstance(tests, list) and tests else None
-        if self.tests is None and not json_error:
+        if self.tests is None and not isinstance(ground_truth, str):
             logger.error("lcb: %s=%r; scoring 0.", _INVALID_GROUND_TRUTH_ERROR, ground_truth)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:

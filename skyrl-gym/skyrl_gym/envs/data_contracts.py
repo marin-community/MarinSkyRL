@@ -28,6 +28,7 @@ from skyrl_gym.envs.registration import spec
 NormalizeGroundTruth = Callable[[Any], str]
 IsCorrect = Callable[[str, str], bool]
 CodeGroundTruth = str | Mapping[str, Any] | list[Mapping[str, Any]]
+LCB_PROMPT_INSTRUCTION = "\nReturn the complete Python solution in this format:\n```python\n# solution\n```"
 _STDIN_SOURCE_TEST_TYPES = {STDIN_TEST_TYPE, "stdin_stdout"}
 _FUNCTIONAL_SOURCE_TEST_TYPES = {FUNCTIONAL_TEST_TYPE, "call_based"}
 
@@ -168,7 +169,7 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[CanonicalCode
     ]
 
 
-def _normalize_code(ground_truth: CodeGroundTruth) -> str:
+def normalize_lcb_ground_truth(ground_truth: CodeGroundTruth) -> str:
     parsed = _parse_code_ground_truth(ground_truth)
     if isinstance(parsed, Mapping) and "test_cases" in parsed:
         if parsed.get("language") not in {None, "python"}:
@@ -182,7 +183,15 @@ def _normalize_code(ground_truth: CodeGroundTruth) -> str:
         raise ValueError("LCB ground_truth must contain at least one test case.")
     if not all(isinstance(case, Mapping) for case in cases):
         raise TypeError("LCB test cases must be mappings.")
-    return json.dumps([_canonical_code_case(case) for case in cases], sort_keys=True)
+    canonical_cases = [_canonical_code_case(case) for case in cases]
+    test_types = {case["testtype"] for case in canonical_cases}
+    if len(test_types) != 1:
+        raise ValueError("LCB ground_truth cannot mix standard-input and functional test cases.")
+    if FUNCTIONAL_TEST_TYPE in test_types:
+        function_names = {case["metadata"][FUNCTION_NAME_KEY] for case in canonical_cases}
+        if len(function_names) != 1:
+            raise ValueError("All functional LCB test cases must use the same function name.")
+    return json.dumps(canonical_cases, sort_keys=True)
 
 
 def _code_is_correct(response: str, ground_truth: str) -> bool:
@@ -244,8 +253,9 @@ CONTRACTS = {
     ),
     "lcb": VerifierDataContract(
         env_id="lcb",
-        normalize_ground_truth=_normalize_code,
+        normalize_ground_truth=normalize_lcb_ground_truth,
         is_correct=_code_is_correct,
+        prompt_instruction=LCB_PROMPT_INSTRUCTION,
     ),
     "mcq": VerifierDataContract(
         env_id="mcq",
