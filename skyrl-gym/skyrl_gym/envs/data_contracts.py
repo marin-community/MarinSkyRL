@@ -89,6 +89,11 @@ def _gsm8k_is_correct(response: str, ground_truth: str) -> bool:
     return gsm8k_utils.compute_score(response, ground_truth) > 0
 
 
+# ---------------------------------------------------------------------------
+# LCB / code
+# ---------------------------------------------------------------------------
+
+
 def _code_is_correct(response: str, ground_truth: str) -> bool:
     _, reward = compute_score(response, json.loads(ground_truth))
     return reward == 1.0

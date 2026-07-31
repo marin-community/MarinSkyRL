@@ -81,6 +81,15 @@ def _prepared_verifier_row(problem: str, normalized: str, source: Source, index:
     }
 
 
+def _schema_row(
+    problem: str, ground_truth: Any, source: Source, index: int, contract: VerifierDataContract
+) -> PreparedRow:
+    if not contract.prompt_instruction:
+        raise ValueError(f"{source.name} requires a verifier prompt instruction.")
+    normalized = contract.normalize_ground_truth(ground_truth)
+    return _prepared_verifier_row(problem + contract.prompt_instruction, normalized, source, index)
+
+
 def _math_row(
     problem: str, ground_truth: Any, source: Source, index: int, contract: VerifierDataContract
 ) -> PreparedRow:
@@ -187,25 +196,12 @@ def _prepare_gsm8k(example: Mapping[str, Any], index: int, contract: VerifierDat
     if not isinstance(answer_text, str):
         raise TypeError("GSM8K row answer must be a string.")
     ground_truth = _gsm8k_extract_answer(answer_text)
-    instruction = contract.prompt_instruction
-    if not instruction:
-        raise ValueError(f"{source.name} requires a verifier prompt instruction.")
-    normalized = contract.normalize_ground_truth(ground_truth)
-    return _prepared_verifier_row(question + instruction, normalized, source, index)
+    return _schema_row(question, ground_truth, source, index, contract)
 
 
 # ---------------------------------------------------------------------------
 # Code: verifiable-coding-problems-python and APPS
 # ---------------------------------------------------------------------------
-
-
-def _code_row(
-    problem: str, ground_truth: Any, source: Source, index: int, contract: VerifierDataContract
-) -> PreparedRow:
-    if not contract.prompt_instruction:
-        raise ValueError(f"{source.name} requires a verifier prompt instruction.")
-    normalized = contract.normalize_ground_truth(ground_truth)
-    return _prepared_verifier_row(problem + contract.prompt_instruction, normalized, source, index)
 
 
 def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
@@ -221,7 +217,7 @@ def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: V
             verification_info = ast.literal_eval(verification_info)
         except (ValueError, SyntaxError) as exc:
             raise ValueError("verification_info string could not be parsed.") from exc
-    return _code_row(problem, verification_info, source, index, contract)
+    return _schema_row(problem, verification_info, source, index, contract)
 
 
 def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
@@ -237,7 +233,7 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
             input_output = json.loads(input_output)
         except json.JSONDecodeError as exc:
             raise ValueError("APPS input_output string is not valid JSON.") from exc
-    return _code_row(problem, input_output, source, index, contract)
+    return _schema_row(problem, input_output, source, index, contract)
 
 
 # ---------------------------------------------------------------------------
