@@ -66,10 +66,10 @@
 # isolated in the `wheel-builder` stage, which emits RELOCATABLE WHEELS.
 # There is no prebuilt alternative, unlike the amd64 file: the published wheelhouse
 # artifact holds linux_x86_64 wheels and cannot satisfy an aarch64 build, so this
-# image always compiles. Doing it for a single arch (10.0) instead of three roughly
-# thirds the nvcc work relative to the amd64 wheel-builder path.
+# image always compiles. Build the two architectures used by the aarch64 fleet:
+# Hopper (9.0) for GH200 systems such as JSC Jupiter and Blackwell (10.0) for GB200.
 # NATIVE CACHE KEY = { VLLM_FORK_COMMIT, FLASH_ATTN_VERSION, torch
-#   2.11.0, CUDA 12.9, cp312, aarch64, TORCH_CUDA_ARCH_LIST "10.0" }.
+#   2.11.0, CUDA 12.9, cp312, aarch64, TORCH_CUDA_ARCH_LIST "9.0;10.0" }.
 #
 # =============================================================================
 # Version pins (ground truth = skyrl-train/pyproject.toml + uv.lock):
@@ -102,9 +102,9 @@ ARG TORCHVISION_VERSION=0.26.0
 ARG FLASH_ATTN_VERSION=2.8.3
 ARG VLLM_FORK_REPO=https://github.com/marin-community/vllm.git
 ARG VLLM_FORK_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
-# Blackwell (10.0) only. GB200 is the sole aarch64 target — there is no aarch64
-# A100 or Hopper fleet to serve — so this compiles one arch instead of three.
-ARG TORCH_CUDA_ARCH_LIST="10.0"
+# Hopper (9.0) and Blackwell (10.0). The arm64 image serves both GH200 and GB200
+# hosts, so native extensions must carry kernels for both compute capabilities.
+ARG TORCH_CUDA_ARCH_LIST="9.0;10.0"
 # The aarch64 build host is a GB200 node: 144 cores and 955 GB RAM, against the
 # 48 cores and 512 GB of the amd64 builder. Widen the nvcc fan-out to match, but
 # keep it well under the core count: a cutlass translation unit can hold ~10 GB,
