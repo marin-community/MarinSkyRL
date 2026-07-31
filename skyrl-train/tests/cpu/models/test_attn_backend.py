@@ -18,6 +18,13 @@ import sys
 import pytest
 
 
+FLASH_IMPORT_MODULES = (
+    "skyrl_train.model_wrapper",
+    "skyrl_train.models.grug_moe",
+    "skyrl_train.utils.flash_attention",
+)
+
+
 # ---------------------------------------------------------------------------
 # Group 1: attn_backend="auto" reproduces the pre-Stage-2 logic byte-for-byte.
 # ---------------------------------------------------------------------------
@@ -70,11 +77,7 @@ def test_import_succeeds_with_flash_absent(monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(builtins, "__import__", fake_import)
-        for mod in (
-            "skyrl_train.model_wrapper",
-            "skyrl_train.models.grug_moe",
-            "skyrl_train.utils.flash_attention",
-        ):
+        for mod in FLASH_IMPORT_MODULES:
             sys.modules.pop(mod, None)
 
         mw = importlib.import_module("skyrl_train.model_wrapper")
@@ -83,17 +86,13 @@ def test_import_succeeds_with_flash_absent(monkeypatch):
 
         assert "simulated: flash_attn not installed" in str(flash_attention.FLASH_ATTN_IMPORT_ERROR)
         with pytest.raises(ImportError):
-            mw.pad_input(None)
+            mw.flash_pad_input(None)
         with pytest.raises(ImportError):
-            mw.unpad_input(None)
+            mw.flash_unpad_input(None)
         assert mw.resolve_attn_implementation(attn_backend="sdpa") == "sdpa"
 
     # Do not leave the simulated import failure cached for later tests.
-    for mod in (
-        "skyrl_train.model_wrapper",
-        "skyrl_train.models.grug_moe",
-        "skyrl_train.utils.flash_attention",
-    ):
+    for mod in FLASH_IMPORT_MODULES:
         sys.modules.pop(mod, None)
     importlib.import_module("skyrl_train.model_wrapper")
     flash_attention = importlib.import_module("skyrl_train.utils.flash_attention")

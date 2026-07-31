@@ -33,8 +33,8 @@ from skyrl_train.models.grug_moe import (
     validate_grug_training_strategy,
 )
 from skyrl_train.utils.flash_attention import (
-    flash_pad_input as pad_input,
-    flash_unpad_input as unpad_input,
+    flash_pad_input,
+    flash_unpad_input,
 )
 from packaging.version import Version
 
@@ -770,10 +770,12 @@ class HFModelWrapper(nn.Module):
                 # max_seqlen); >= 2.7 adds a 5th `seqused`. We only consume the
                 # first two, so star the tail to stay version-agnostic (the SIF
                 # ships flash_attn 2.6.3 -> 4-tuple).
-                sequences_fwd, nnz_indices, *_ = unpad_input(sequences.unsqueeze(-1), attention_mask=attention_mask)
+                sequences_fwd, nnz_indices, *_ = flash_unpad_input(
+                    sequences.unsqueeze(-1), attention_mask=attention_mask
+                )
                 # (nnz, 1) -> (1, nnz)
                 sequences_fwd = sequences_fwd.transpose(0, 1)
-                position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
+                position_ids_fwd, *_ = flash_unpad_input(position_ids.unsqueeze(-1), attention_mask)
                 # (nnz, 1) -> (1, nnz)
                 position_ids_fwd = position_ids_fwd.transpose(0, 1)
                 attention_mask_fwd = None  # no attention mask with FA 2
@@ -1115,7 +1117,7 @@ class HFModelWrapper(nn.Module):
             # add padding back - postprocess logprobs to be compatible with original tensor
             batch_size, seqlen = attention_mask.shape
             # (1, nnz-1) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
-            log_probs = pad_input(
+            log_probs = flash_pad_input(
                 log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
             ).squeeze(-1)
 
@@ -1156,7 +1158,7 @@ class HFModelWrapper(nn.Module):
                     entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
                 )  # shape can be (1, nnz) - with packing or (B,S) - without packing
             if self.use_sample_packing:
-                entropy_BS = pad_input(
+                entropy_BS = flash_pad_input(
                     entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
                 ).squeeze(-1)  # (1, nnz) -> (B, S)
 
@@ -1472,10 +1474,12 @@ def _get_critic_model(
                 with torch.no_grad():
                     # remove padding. `unpad_input` expects 3 dimensional tensor
                     # version-agnostic unpack (flash_attn 2.6 -> 4-tuple, 2.7+ -> 5-tuple)
-                    input_ids_fwd, nnz_indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
+                    input_ids_fwd, nnz_indices, *_ = flash_unpad_input(
+                        input_ids.unsqueeze(-1), attention_mask=attention_mask
+                    )
                     # (nnz, 1) -> (1, nnz)
                     input_ids_fwd = input_ids_fwd.transpose(0, 1)
-                    position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask=attention_mask)
+                    position_ids_fwd, *_ = flash_unpad_input(position_ids.unsqueeze(-1), attention_mask=attention_mask)
                     # (nnz, 1) -> (1, nnz)
                     position_ids_fwd = position_ids_fwd.transpose(0, 1)
                     # don't use attention mask with FA2
@@ -1611,7 +1615,9 @@ def _get_critic_model(
                 # add padding back - postprocess logits to be compatible with original tensors
                 batch_size, seqlen = attention_mask.shape
                 # (1, nnz, 1) -> (nnz, 1) -> (batch_size, seqlen, 1)
-                values_BSH = pad_input(values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen)
+                values_BSH = flash_pad_input(
+                    values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                )
 
             # Stage 4: strip the CP right-pad so values return to [B, S] before the
             # :-1 trim and action slice land on the real response tokens (no-op cp=1).

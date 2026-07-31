@@ -89,7 +89,7 @@ def _forward_and_projection_gradients(
     return output.detach().float(), gradients
 
 
-def _difference(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float]:
+def _absolute_error_summary(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float]:
     difference = (actual - expected).abs()
     return difference.max().item(), difference.mean().item()
 
@@ -153,13 +153,13 @@ def _assert_parity_errors(
     valid_queries: torch.Tensor,
 ) -> None:
     output_valid = valid_queries.expand_as(expected_output)
-    output_max, output_mean = _difference(actual_output[output_valid], expected_output[output_valid])
+    output_max, output_mean = _absolute_error_summary(actual_output[output_valid], expected_output[output_valid])
     print(f"{label} output max_abs={output_max:.8g} mean_abs={output_mean:.8g}")
     assert output_max <= OUTPUT_MAX_ERROR
     assert output_mean <= OUTPUT_MEAN_ERROR
     for name in ("q_proj", "k_proj", "v_proj"):
         gradient_valid = valid_queries.expand_as(expected_gradients[name])
-        gradient_max, gradient_mean = _difference(
+        gradient_max, gradient_mean = _absolute_error_summary(
             actual_gradients[name][gradient_valid],
             expected_gradients[name][gradient_valid],
         )
