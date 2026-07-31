@@ -68,45 +68,36 @@ def test_import_succeeds_with_flash_absent(monkeypatch):
             raise ImportError("simulated: flash_attn not installed")
         return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    # Drop any cached copy so the module body re-executes under the blocked import.
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", fake_import)
+        for mod in (
+            "skyrl_train.model_wrapper",
+            "skyrl_train.models.grug_moe",
+            "skyrl_train.utils.flash_attention",
+        ):
+            sys.modules.pop(mod, None)
+
+        mw = importlib.import_module("skyrl_train.model_wrapper")
+        importlib.reload(mw)
+        flash_attention = importlib.import_module("skyrl_train.utils.flash_attention")
+
+        assert "simulated: flash_attn not installed" in str(flash_attention.FLASH_ATTN_IMPORT_ERROR)
+        with pytest.raises(ImportError):
+            mw.pad_input(None)
+        with pytest.raises(ImportError):
+            mw.unpad_input(None)
+        assert mw.resolve_attn_implementation(attn_backend="sdpa") == "sdpa"
+
+    # Do not leave the simulated import failure cached for later tests.
     for mod in (
         "skyrl_train.model_wrapper",
         "skyrl_train.models.grug_moe",
         "skyrl_train.utils.flash_attention",
     ):
         sys.modules.pop(mod, None)
-
-    mw = importlib.import_module("skyrl_train.model_wrapper")
-    importlib.reload(mw)
+    importlib.import_module("skyrl_train.model_wrapper")
     flash_attention = importlib.import_module("skyrl_train.utils.flash_attention")
-
-    assert flash_attention.FLASH_ATTN_AVAILABLE is False, "flash should be reported absent under the blocked import"
-
-    # The shims exist and raise ONLY when called (not at import time).
-    with pytest.raises(ImportError):
-        mw.pad_input(None)
-    with pytest.raises(ImportError):
-        mw.unpad_input(None)
-
-    # The sdpa path resolves without touching flash.
-    assert mw.resolve_attn_implementation(attn_backend="sdpa") == "sdpa"
-
-
-def test_import_then_reload_restores_flash_state():
-    """After the monkeypatched test, reloading normally restores real state."""
-    for mod in (
-        "skyrl_train.model_wrapper",
-        "skyrl_train.models.grug_moe",
-        "skyrl_train.utils.flash_attention",
-    ):
-        sys.modules.pop(mod, None)
-    mw = importlib.import_module("skyrl_train.model_wrapper")
-    # FLASH_ATTN_AVAILABLE reflects the actual env (True in the SIF, may be False elsewhere);
-    # either way the module imports cleanly.
-    flash_attention = importlib.import_module("skyrl_train.utils.flash_attention")
-    assert isinstance(flash_attention.FLASH_ATTN_AVAILABLE, bool)
-    assert callable(mw.resolve_attn_implementation)
+    assert "simulated: flash_attn not installed" not in str(flash_attention.FLASH_ATTN_IMPORT_ERROR)
 
 
 # ---------------------------------------------------------------------------

@@ -23,5 +23,3 @@ except ImportError as error:
     flash_unpad_input = _flash_attn_missing
 else:
     FLASH_ATTN_IMPORT_ERROR = None
-
-FLASH_ATTN_AVAILABLE = FLASH_ATTN_IMPORT_ERROR is None

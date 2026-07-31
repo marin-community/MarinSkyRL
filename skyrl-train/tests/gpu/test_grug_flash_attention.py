@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 
 import pytest
 import torch
@@ -18,8 +19,7 @@ QKV_GRAD_MEAN_ERROR = 5e-3
 PARITY_BATCH_SIZE = 2
 PARITY_SEQUENCE_LENGTH = 32
 PARITY_HIDDEN_SIZE = 256
-LEFT_PADDING_LENGTHS = (7, 3)
-RIGHT_PADDING_LENGTHS = (7, 3)
+PADDING_LENGTHS = (7, 3)
 PRODUCTION_SEQUENCE_LENGTH = 16_384
 PRODUCTION_HIDDEN_SIZE = 2560
 MEMORY_CEILING_GIB = 12
@@ -52,7 +52,15 @@ def _attention_config(
     return config
 
 
-def _projection_gradients(
+@dataclass(frozen=True)
+class _ParityInputs:
+    hidden: torch.Tensor
+    position_ids: torch.Tensor
+    valid_queries: torch.Tensor
+    output_gradient: torch.Tensor
+
+
+def _forward_and_projection_gradients(
     attention: GrugMoeAttention,
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor | None,
@@ -89,9 +97,8 @@ def _difference(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, fl
 def _padding_mask(direction: str | None) -> torch.Tensor | None:
     if direction is None:
         return None
-    padding_lengths = LEFT_PADDING_LENGTHS if direction == "left" else RIGHT_PADDING_LENGTHS
     rows = []
-    for padding_length in padding_lengths:
+    for padding_length in PADDING_LENGTHS:
         valid = [1] * (PARITY_SEQUENCE_LENGTH - padding_length)
         padding = [0] * padding_length
         rows.append(padding + valid if direction == "left" else valid + padding)
@@ -100,7 +107,7 @@ def _padding_mask(direction: str | None) -> torch.Tensor | None:
 
 def _parity_inputs(
     attention_mask: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> _ParityInputs:
     hidden = torch.randn(
         PARITY_BATCH_SIZE,
         PARITY_SEQUENCE_LENGTH,
@@ -129,7 +136,12 @@ def _parity_inputs(
         device="cuda",
     )
     output_gradient.masked_fill_(~valid_queries, 0)
-    return hidden, position_ids, valid_queries, output_gradient
+    return _ParityInputs(
+        hidden=hidden,
+        position_ids=position_ids,
+        valid_queries=valid_queries,
+        output_gradient=output_gradient,
+    )
 
 
 def _assert_parity_errors(
@@ -176,23 +188,23 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients(
     fused.config._attn_implementation = "flash_attention_2"
 
     attention_mask = _padding_mask(padding_direction)
-    eager_hidden, position_ids, valid_queries, output_gradient = _parity_inputs(attention_mask)
-    fused_hidden = eager_hidden.detach().clone().requires_grad_(True)
-    eager_output, eager_gradients = _projection_gradients(
+    inputs = _parity_inputs(attention_mask)
+    fused_hidden = inputs.hidden.detach().clone().requires_grad_(True)
+    eager_output, eager_gradients = _forward_and_projection_gradients(
         eager,
-        eager_hidden,
+        inputs.hidden,
         attention_mask,
-        position_ids,
+        inputs.position_ids,
         is_long=is_long,
-        output_gradient=output_gradient,
+        output_gradient=inputs.output_gradient,
     )
-    fused_output, fused_gradients = _projection_gradients(
+    fused_output, fused_gradients = _forward_and_projection_gradients(
         fused,
         fused_hidden,
         attention_mask,
-        position_ids,
+        inputs.position_ids,
         is_long=is_long,
-        output_gradient=output_gradient,
+        output_gradient=inputs.output_gradient,
     )
     _assert_parity_errors(
         label,
@@ -200,7 +212,7 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients(
         eager_output,
         fused_gradients,
         eager_gradients,
-        valid_queries,
+        inputs.valid_queries,
     )
 
 
