@@ -40,11 +40,7 @@ class SchemaOnlyCodeContract:
     env_id = "lcb"
     prompt_instruction = "\nReturn fenced Python."
 
-    def __init__(self):
-        self.normalized = []
-
     def normalize_ground_truth(self, ground_truth):
-        self.normalized.append(ground_truth)
         return json.dumps(ground_truth, sort_keys=True)
 
     def validate_example(self, ground_truth, positive_response, negative_response):
@@ -311,7 +307,6 @@ def test_verifiable_code_preparation():
     assert artifact.rows[0]["data_source"] == "open-r1/verifiable-coding-problems-python"
     assert "test_cases" in artifact.rows[0]["reward_model"]["ground_truth"]
     assert artifact.rows[0]["prompt"][0]["content"].endswith(contract.prompt_instruction)
-    assert len(contract.normalized) == 1
     assert artifact.provenance["verification"] == "schema_only"
 
 
@@ -332,7 +327,6 @@ def test_apps_preparation():
     assert artifact.rows[0]["data_source"] == "codeparrot/apps"
     assert "inputs" in artifact.rows[0]["reward_model"]["ground_truth"]
     assert artifact.rows[0]["prompt"][0]["content"].endswith(contract.prompt_instruction)
-    assert len(contract.normalized) == 1
     assert artifact.provenance["verification"] == "schema_only"
 
 

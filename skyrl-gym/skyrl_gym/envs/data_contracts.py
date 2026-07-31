@@ -28,6 +28,7 @@ from skyrl_gym.envs.registration import spec
 NormalizeGroundTruth = Callable[[Any], str]
 IsCorrect = Callable[[str, str], bool]
 CodeGroundTruth = str | Mapping[str, Any] | list[Mapping[str, Any]]
+ParsedCodeGroundTruth = Mapping[str, Any] | list[Any] | str | int | float | bool | None
 LCB_PROMPT_INSTRUCTION = "\nReturn the complete Python solution in this format:\n```python\n# solution\n```"
 _STDIN_SOURCE_TEST_TYPES = {STDIN_TEST_TYPE, "stdin_stdout"}
 _FUNCTIONAL_SOURCE_TEST_TYPES = {FUNCTIONAL_TEST_TYPE, "call_based"}
@@ -106,7 +107,7 @@ def _gsm8k_is_correct(response: str, ground_truth: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _parse_code_ground_truth(ground_truth: CodeGroundTruth) -> object:
+def _parse_code_ground_truth(ground_truth: CodeGroundTruth) -> ParsedCodeGroundTruth:
     if not isinstance(ground_truth, str):
         return ground_truth
     try:
