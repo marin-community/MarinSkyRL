@@ -500,14 +500,9 @@ def _cluster_gpu_cpu_capacity(cluster_config: dict[str, Any], *, gpu_variant: st
     )
 
 
-def _resolve_daytona_rl_api_key() -> str:
-    """Read the pinned RL Daytona key from Secret Manager on the launch host.
-
-    Iris task environments currently carry literal values, not secret references; the
-    ``gcp-secret://`` resolver applies to Iris controller config only.  Resolve the
-    canonical pinned secret here, retain it only in process memory, and let the existing
-    Iris job-secret path inject it.  Do not include the value in diagnostics.
-    """
+def _daytona_rl_api_key_from_secret_manager() -> Optional[str]:
+    """The pinned RL Daytona key from Secret Manager, or ``None`` if gcloud is
+    missing/denied or the secret is empty. Never logged."""
     command = [
         "gcloud",
         "secrets",
@@ -519,18 +514,37 @@ def _resolve_daytona_rl_api_key() -> str:
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise SystemExit(
-            "[rl-iris] could not resolve the canonical DAYTONA_RL_API_KEY from Google Secret Manager; "
-            "authenticate gcloud for the Marin project and retry."
-        ) from exc
-    value = result.stdout.strip()
-    if not value:
-        raise SystemExit(
-            "[rl-iris] canonical DAYTONA_RL_API_KEY resolved empty from Google Secret Manager; "
-            "check the pinned secret version."
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _resolve_daytona_rl_api_key() -> str:
+    """The canonical Secret Manager key, else a ``DAYTONA_API_KEY`` already in the
+    environment (e.g. from ``--secrets-env``) when Secret Manager is unreachable, else exit.
+    Lets an operator without Secret Manager access launch with a key they already hold; the
+    value is injected through the usual job-secret path."""
+    value = _daytona_rl_api_key_from_secret_manager()
+    if value:
+        print(
+            "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
+            f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
+            flush=True,
         )
-    return value
+        return value
+    env_key = os.environ.get("DAYTONA_API_KEY")
+    if env_key:
+        print(
+            "[rl-iris] Daytona: canonical Google Secret Manager key unavailable; using the "
+            "DAYTONA_API_KEY already in the environment (from --secrets-env).",
+            flush=True,
+        )
+        return env_key
+    raise SystemExit(
+        "[rl-iris] no Daytona RL key available: Google Secret Manager was unreachable and no "
+        "DAYTONA_API_KEY is set. Authenticate gcloud for the Marin project, or provide "
+        "DAYTONA_API_KEY via --secrets-env, then retry."
+    )
 
 
 def _daytona_client(api_key: str) -> Any:
@@ -1980,12 +1994,11 @@ def main() -> int:
     if _rl_config_is_agentic(args.rl_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
-        print(
-            "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
-            f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
-            flush=True,
-        )
-        _purge_stale_daytona_snapshots(daytona_api_key)
+        # The purge deletes stale snapshots across the shared RL org, so skip it on a
+        # --dry-run — with the --secrets-env fallback above, a dry-run now reaches this
+        # point instead of exiting at the Secret Manager call.
+        if not args.dry_run:
+            _purge_stale_daytona_snapshots(daytona_api_key)
 
     command = build_task_command(args)
 
