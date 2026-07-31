@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import timedelta
 
 import torch
@@ -24,10 +25,12 @@ def _mismatched_collective_worker(rank: int, world_size: int, port: int) -> None
         mesh = create_device_mesh(world_size, fsdp_size=2, ep_size=2, device_type="cpu")
         group = mesh["ep"].get_group() if rank in (0, 3) else mesh["fsdp"].get_group()
 
+        started_at = time.monotonic()
         try:
             dist.all_reduce(torch.ones(1), group=group)
         except RuntimeError as error:
             assert "timed out" in str(error).lower()
+            assert time.monotonic() - started_at < 5, "collective fell through to the 10-second WORLD timeout"
         else:
             raise AssertionError("rank-divergent collective did not honor the device-mesh timeout")
     finally:
