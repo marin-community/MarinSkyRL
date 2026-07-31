@@ -11,7 +11,7 @@ without materializing dense sequence-by-sequence scores or masks.
 from __future__ import annotations
 
 import math
-from typing import Any, NamedTuple, Never
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -23,30 +23,14 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
 )
-
-try:
-    from flash_attn import flash_attn_func
-    from flash_attn import flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis as flash_index_first_axis
-    from flash_attn.bert_padding import pad_input as flash_pad_input
-    from flash_attn.bert_padding import unpad_input as flash_unpad_input
-except ImportError as error:
-    _FLASH_ATTN_IMPORT_ERROR: ImportError | None = error
-
-    def _flash_attn_missing(*_args: object, **_kwargs: object) -> Never:
-        raise ImportError(
-            "flash-attn is not installed but a FlashAttention-only code path was invoked"
-        ) from _FLASH_ATTN_IMPORT_ERROR
-
-    flash_attn_func = _flash_attn_missing
-    flash_attn_varlen_func = _flash_attn_missing
-    flash_index_first_axis = _flash_attn_missing
-    flash_pad_input = _flash_attn_missing
-    flash_unpad_input = _flash_attn_missing
-else:
-    _FLASH_ATTN_IMPORT_ERROR = None
-
-FLASH_ATTN_AVAILABLE = _FLASH_ATTN_IMPORT_ERROR is None
+from skyrl_train.utils.flash_attention import (
+    FLASH_ATTN_IMPORT_ERROR,
+    flash_attn_func,
+    flash_attn_varlen_func,
+    flash_index_first_axis,
+    flash_pad_input,
+    flash_unpad_input,
+)
 
 
 GRUG_MOE_MODEL_TYPE = "grug_moe"
@@ -552,10 +536,10 @@ class GrugMoeAttention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the fused output and GQA-expanded value used by XSA."""
 
-        if _FLASH_ATTN_IMPORT_ERROR is not None:
+        if FLASH_ATTN_IMPORT_ERROR is not None:
             raise ImportError(
                 "Grug FlashAttention was requested, but the flash-attn CUDA extension could not be imported"
-            ) from _FLASH_ATTN_IMPORT_ERROR
+            ) from FLASH_ATTN_IMPORT_ERROR
         value_for_xsa = self._repeat_kv_heads(value)
         window_size = (-1, -1) if is_long else (self.config.sliding_window - 1, 0)
         softmax_scale = 1.0 / math.sqrt(self.config.head_dim)

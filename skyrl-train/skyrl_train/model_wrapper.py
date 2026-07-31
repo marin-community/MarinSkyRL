@@ -28,17 +28,15 @@ from skyrl_train.distributed.cp_utils import (
 )
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from skyrl_train.models.grug_moe import (
-    FLASH_ATTN_AVAILABLE,
     GRUG_MOE_MODEL_TYPE,
     GRUG_SUPPORTED_ATTENTION_BACKENDS,
-    flash_pad_input as pad_input,
-    flash_unpad_input as unpad_input,
     validate_grug_training_strategy,
 )
+from skyrl_train.utils.flash_attention import (
+    flash_pad_input as pad_input,
+    flash_unpad_input as unpad_input,
+)
 from packaging.version import Version
-
-_HAS_FLASH = FLASH_ATTN_AVAILABLE
-
 
 # Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now
 # lives in skyrl_train.utils.hf_load_retry (dependency-light) so the Megatron

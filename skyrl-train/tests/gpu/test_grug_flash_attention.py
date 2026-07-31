@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
 import torch
 
 from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig
@@ -85,104 +86,122 @@ def _difference(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, fl
     return difference.max().item(), difference.mean().item()
 
 
-def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
+def _padding_mask(direction: str | None) -> torch.Tensor | None:
+    if direction is None:
+        return None
+    padding_lengths = LEFT_PADDING_LENGTHS if direction == "left" else RIGHT_PADDING_LENGTHS
+    rows = []
+    for padding_length in padding_lengths:
+        valid = [1] * (PARITY_SEQUENCE_LENGTH - padding_length)
+        padding = [0] * padding_length
+        rows.append(padding + valid if direction == "left" else valid + padding)
+    return torch.tensor(rows, device="cuda")
+
+
+def _parity_inputs(
+    attention_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    hidden = torch.randn(
+        PARITY_BATCH_SIZE,
+        PARITY_SEQUENCE_LENGTH,
+        PARITY_HIDDEN_SIZE,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    if attention_mask is None:
+        position_ids = torch.arange(PARITY_SEQUENCE_LENGTH, device="cuda").unsqueeze(0).expand(PARITY_BATCH_SIZE, -1)
+        valid_queries = torch.ones(
+            PARITY_BATCH_SIZE,
+            PARITY_SEQUENCE_LENGTH,
+            1,
+            device="cuda",
+            dtype=torch.bool,
+        )
+    else:
+        position_ids = attention_mask.long().cumsum(dim=-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 0)
+        valid_queries = attention_mask.bool().unsqueeze(-1)
+    output_gradient = torch.randn(
+        PARITY_BATCH_SIZE,
+        PARITY_SEQUENCE_LENGTH,
+        PARITY_HIDDEN_SIZE,
+        device="cuda",
+    )
+    output_gradient.masked_fill_(~valid_queries, 0)
+    return hidden, position_ids, valid_queries, output_gradient
+
+
+def _assert_parity_errors(
+    label: str,
+    actual_output: torch.Tensor,
+    expected_output: torch.Tensor,
+    actual_gradients: dict[str, torch.Tensor],
+    expected_gradients: dict[str, torch.Tensor],
+    valid_queries: torch.Tensor,
+) -> None:
+    output_valid = valid_queries.expand_as(expected_output)
+    output_max, output_mean = _difference(actual_output[output_valid], expected_output[output_valid])
+    print(f"{label} output max_abs={output_max:.8g} mean_abs={output_mean:.8g}")
+    assert output_max <= OUTPUT_MAX_ERROR
+    assert output_mean <= OUTPUT_MEAN_ERROR
+    for name in ("q_proj", "k_proj", "v_proj"):
+        gradient_valid = valid_queries.expand_as(expected_gradients[name])
+        gradient_max, gradient_mean = _difference(
+            actual_gradients[name][gradient_valid],
+            expected_gradients[name][gradient_valid],
+        )
+        print(f"{label} {name} gradient max_abs={gradient_max:.8g} mean_abs={gradient_mean:.8g}")
+        assert gradient_max <= QKV_GRAD_MAX_ERROR
+        assert gradient_mean <= QKV_GRAD_MEAN_ERROR
+
+
+@pytest.mark.parametrize(
+    ("label", "is_long", "padding_direction"),
+    (
+        ("local-left-padded", False, "left"),
+        ("local-right-padded", False, "right"),
+        ("full-causal", True, None),
+    ),
+)
+def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients(
+    label: str,
+    is_long: bool,
+    padding_direction: str | None,
+) -> None:
     require_hoppers(1)
     torch.manual_seed(17)
     eager = GrugMoeAttention(_attention_config("eager", sliding_window=8)).cuda().to(torch.bfloat16)
     fused = deepcopy(eager)
     fused.config._attn_implementation = "flash_attention_2"
 
-    cases = (
-        (
-            "local-left-padded",
-            False,
-            torch.tensor(
-                [
-                    [0] * LEFT_PADDING_LENGTHS[0] + [1] * (PARITY_SEQUENCE_LENGTH - LEFT_PADDING_LENGTHS[0]),
-                    [0] * LEFT_PADDING_LENGTHS[1] + [1] * (PARITY_SEQUENCE_LENGTH - LEFT_PADDING_LENGTHS[1]),
-                ],
-                device="cuda",
-            ),
-        ),
-        (
-            "local-right-padded",
-            False,
-            torch.tensor(
-                [
-                    [1] * (PARITY_SEQUENCE_LENGTH - RIGHT_PADDING_LENGTHS[0]) + [0] * RIGHT_PADDING_LENGTHS[0],
-                    [1] * (PARITY_SEQUENCE_LENGTH - RIGHT_PADDING_LENGTHS[1]) + [0] * RIGHT_PADDING_LENGTHS[1],
-                ],
-                device="cuda",
-            ),
-        ),
-        ("full-causal", True, None),
+    attention_mask = _padding_mask(padding_direction)
+    eager_hidden, position_ids, valid_queries, output_gradient = _parity_inputs(attention_mask)
+    fused_hidden = eager_hidden.detach().clone().requires_grad_(True)
+    eager_output, eager_gradients = _projection_gradients(
+        eager,
+        eager_hidden,
+        attention_mask,
+        position_ids,
+        is_long=is_long,
+        output_gradient=output_gradient,
     )
-    for label, is_long, attention_mask in cases:
-        eager.zero_grad(set_to_none=True)
-        fused.zero_grad(set_to_none=True)
-        eager_hidden = torch.randn(
-            PARITY_BATCH_SIZE,
-            PARITY_SEQUENCE_LENGTH,
-            PARITY_HIDDEN_SIZE,
-            device="cuda",
-            dtype=torch.bfloat16,
-            requires_grad=True,
-        )
-        fused_hidden = eager_hidden.detach().clone().requires_grad_(True)
-        if attention_mask is None:
-            position_ids = (
-                torch.arange(PARITY_SEQUENCE_LENGTH, device="cuda").unsqueeze(0).expand(PARITY_BATCH_SIZE, -1)
-            )
-            valid_queries = torch.ones(
-                PARITY_BATCH_SIZE,
-                PARITY_SEQUENCE_LENGTH,
-                1,
-                device="cuda",
-                dtype=torch.bool,
-            )
-        else:
-            position_ids = attention_mask.long().cumsum(dim=-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            valid_queries = attention_mask.bool().unsqueeze(-1)
-        output_gradient = torch.randn(
-            PARITY_BATCH_SIZE,
-            PARITY_SEQUENCE_LENGTH,
-            PARITY_HIDDEN_SIZE,
-            device="cuda",
-        )
-        output_gradient.masked_fill_(~valid_queries, 0)
-
-        eager_output, eager_gradients = _projection_gradients(
-            eager,
-            eager_hidden,
-            attention_mask,
-            position_ids,
-            is_long=is_long,
-            output_gradient=output_gradient,
-        )
-        fused_output, fused_gradients = _projection_gradients(
-            fused,
-            fused_hidden,
-            attention_mask,
-            position_ids,
-            is_long=is_long,
-            output_gradient=output_gradient,
-        )
-
-        output_valid = valid_queries.expand_as(eager_output)
-        output_max, output_mean = _difference(fused_output[output_valid], eager_output[output_valid])
-        print(f"{label} output max_abs={output_max:.8g} mean_abs={output_mean:.8g}")
-        assert output_max <= OUTPUT_MAX_ERROR
-        assert output_mean <= OUTPUT_MEAN_ERROR
-        for name in ("q_proj", "k_proj", "v_proj"):
-            gradient_valid = valid_queries.expand_as(eager_gradients[name])
-            gradient_max, gradient_mean = _difference(
-                fused_gradients[name][gradient_valid],
-                eager_gradients[name][gradient_valid],
-            )
-            print(f"{label} {name} gradient max_abs={gradient_max:.8g} mean_abs={gradient_mean:.8g}")
-            assert gradient_max <= QKV_GRAD_MAX_ERROR
-            assert gradient_mean <= QKV_GRAD_MEAN_ERROR
+    fused_output, fused_gradients = _projection_gradients(
+        fused,
+        fused_hidden,
+        attention_mask,
+        position_ids,
+        is_long=is_long,
+        output_gradient=output_gradient,
+    )
+    _assert_parity_errors(
+        label,
+        fused_output,
+        eager_output,
+        fused_gradients,
+        eager_gradients,
+        valid_queries,
+    )
 
 
 def test_grug_flash_attention_sliding_window_peak_memory() -> None:
