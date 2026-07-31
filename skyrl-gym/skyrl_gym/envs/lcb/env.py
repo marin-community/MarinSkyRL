@@ -25,13 +25,16 @@ class LCBEnv(BaseTextEnv):
 
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
+        json_error = False
         try:
             tests = json.loads(ground_truth) if isinstance(ground_truth, str) else None
         except json.JSONDecodeError:
+            logger.exception("lcb: invalid reward_model.ground_truth=%r; scoring 0.", ground_truth)
+            json_error = True
             tests = None
         self.tests = tests if isinstance(tests, list) and tests else None
-        if self.tests is None:
-            logger.error("lcb: invalid reward_model.ground_truth; scoring 0.")
+        if self.tests is None and not json_error:
+            logger.error("lcb: invalid reward_model.ground_truth=%r; scoring 0.", ground_truth)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         if self.tests is None:

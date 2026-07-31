@@ -77,6 +77,11 @@ class CODE_TYPE(Enum):
     standard_input = 1
 
 
+STDIN_TEST_TYPE = "stdin"
+FUNCTIONAL_TEST_TYPE = "functional"
+FUNCTION_NAME_KEY = "func_name"
+
+
 # stuff for setting up signal timer
 class TimeoutException(Exception):
     pass
@@ -585,9 +590,9 @@ def postprocess_lcb_sample(sample):
         "outputs": sample_outputs,
     }
 
-    if sample[0].get("testtype") == "functional":
+    if sample[0].get("testtype") == FUNCTIONAL_TEST_TYPE:
         metadata = sample[0].get("metadata", {})
-        fn_name = metadata.get("func_name", None)
+        fn_name = metadata.get(FUNCTION_NAME_KEY, None)
         assert fn_name is not None, (
             f"Function name is not found, check if your LCB data is preprocessed correctly: {metadata}"
         )

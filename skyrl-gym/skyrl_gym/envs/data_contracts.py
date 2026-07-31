@@ -11,22 +11,32 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from skyrl_gym import error
 from skyrl_gym.envs.aime import utils as aime_utils
 from skyrl_gym.envs.gsm8k import utils as gsm8k_utils
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
-from skyrl_gym.envs.lcb.livecodebench import compute_score
+from skyrl_gym.envs.lcb.livecodebench import (
+    FUNCTION_NAME_KEY,
+    FUNCTIONAL_TEST_TYPE,
+    STDIN_TEST_TYPE,
+    compute_score,
+)
 from skyrl_gym.envs.registration import spec
 
 NormalizeGroundTruth = Callable[[Any], str]
 IsCorrect = Callable[[str, str], bool]
-_STDIN_TEST_TYPE = "stdin"
-_FUNCTIONAL_TEST_TYPE = "functional"
-_STDIN_SOURCE_TEST_TYPES = {_STDIN_TEST_TYPE, "stdin_stdout"}
-_FUNCTIONAL_SOURCE_TEST_TYPES = {_FUNCTIONAL_TEST_TYPE, "call_based"}
-_FUNCTION_NAME_KEY = "func_name"
+CodeGroundTruth = str | Mapping[str, Any] | list[Mapping[str, Any]]
+_STDIN_SOURCE_TEST_TYPES = {STDIN_TEST_TYPE, "stdin_stdout"}
+_FUNCTIONAL_SOURCE_TEST_TYPES = {FUNCTIONAL_TEST_TYPE, "call_based"}
+
+
+class CanonicalCodeCase(TypedDict):
+    input: str
+    output: str
+    testtype: str
+    metadata: NotRequired[dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -95,7 +105,7 @@ def _gsm8k_is_correct(response: str, ground_truth: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _parse_code_ground_truth(ground_truth: Any) -> Any:
+def _parse_code_ground_truth(ground_truth: CodeGroundTruth) -> object:
     if not isinstance(ground_truth, str):
         return ground_truth
     try:
@@ -104,9 +114,7 @@ def _parse_code_ground_truth(ground_truth: Any) -> Any:
         raise ValueError("LCB ground_truth must be valid JSON.") from exc
 
 
-def _canonical_code_case(case: Any) -> dict[str, Any]:
-    if not isinstance(case, Mapping):
-        raise TypeError("LCB test cases must be mappings.")
+def _canonical_code_case(case: Mapping[str, Any]) -> CanonicalCodeCase:
     test_input = case.get("input")
     expected_output = case.get("output")
 
@@ -114,12 +122,12 @@ def _canonical_code_case(case: Any) -> dict[str, Any]:
     if test_type in _STDIN_SOURCE_TEST_TYPES:
         if not isinstance(test_input, str) or not isinstance(expected_output, str):
             raise TypeError("Standard-input LCB test-case input and output must be strings.")
-        return {"input": test_input, "output": expected_output, "testtype": _STDIN_TEST_TYPE}
+        return {"input": test_input, "output": expected_output, "testtype": STDIN_TEST_TYPE}
     if test_type in _FUNCTIONAL_SOURCE_TEST_TYPES:
         function_name = case.get("fn_name")
         metadata = case.get("metadata")
         if function_name is None and isinstance(metadata, Mapping):
-            function_name = metadata.get(_FUNCTION_NAME_KEY)
+            function_name = metadata.get(FUNCTION_NAME_KEY)
         if not isinstance(function_name, str) or not function_name:
             raise ValueError("Functional LCB test cases require a function name.")
         if isinstance(test_input, list):
@@ -131,13 +139,13 @@ def _canonical_code_case(case: Any) -> dict[str, Any]:
         return {
             "input": test_input,
             "output": expected_output,
-            "testtype": _FUNCTIONAL_TEST_TYPE,
-            "metadata": {_FUNCTION_NAME_KEY: function_name},
+            "testtype": FUNCTIONAL_TEST_TYPE,
+            "metadata": {FUNCTION_NAME_KEY: function_name},
         }
     raise ValueError(f"Unsupported LCB test-case type: {test_type!r}.")
 
 
-def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[CanonicalCodeCase]:
     inputs = ground_truth.get("inputs")
     outputs = ground_truth.get("outputs")
     if not isinstance(inputs, list) or not isinstance(outputs, list):
@@ -146,7 +154,7 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[dict[str, Any
         raise ValueError("APPS ground_truth requires equally sized, non-empty input and output lists.")
 
     function_name = ground_truth.get("fn_name")
-    test_type = _FUNCTIONAL_TEST_TYPE if function_name is not None else _STDIN_TEST_TYPE
+    test_type = FUNCTIONAL_TEST_TYPE if function_name is not None else STDIN_TEST_TYPE
     return [
         _canonical_code_case(
             {
@@ -160,7 +168,7 @@ def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[dict[str, Any
     ]
 
 
-def _normalize_code(ground_truth: Any) -> str:
+def _normalize_code(ground_truth: CodeGroundTruth) -> str:
     parsed = _parse_code_ground_truth(ground_truth)
     if isinstance(parsed, Mapping) and "test_cases" in parsed:
         if parsed.get("language") not in {None, "python"}:
@@ -172,6 +180,8 @@ def _normalize_code(ground_truth: Any) -> str:
         cases = parsed
     if not isinstance(cases, list) or not cases:
         raise ValueError("LCB ground_truth must contain at least one test case.")
+    if not all(isinstance(case, Mapping) for case in cases):
+        raise TypeError("LCB test cases must be mappings.")
     return json.dumps([_canonical_code_case(case) for case in cases], sort_keys=True)
 
 
