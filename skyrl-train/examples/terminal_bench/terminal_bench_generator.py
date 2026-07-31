@@ -27,6 +27,7 @@ from skyrl_train.generators.utils import (
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
+from skyrl_train.utils.harbor_errors import ErrorTreatment, classify_exception_type
 from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
@@ -1337,39 +1338,19 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         exception_type = type(exception).__name__
 
+        return self._classify_exception_type(exception_type)
+
+    def _classify_exception_type(self, exception_type: str) -> tuple[bool | object, str]:
+        """Translate a persisted Harbor exception name into the legacy treatment shape."""
+
         # If error classification is disabled, treat all errors as agent failures
         if not self._error_handling_config.get("enable_error_classification", False):
             return False, exception_type
 
-        passthrough_exceptions = self._error_handling_config.get("passthrough_exceptions", set())
-        mask_exceptions = self._error_handling_config.get("mask_exceptions", set())
-        zero_exceptions = self._error_handling_config.get("zero_exceptions", set())
-        default_treatment = self._error_handling_config.get("default_error_treatment", "zero")
-
-        # Check if this exception type should be passed through (use verifier reward)
-        if exception_type in passthrough_exceptions:
-            logger.debug(f"Exception {exception_type} classified as PASSTHROUGH (use verifier reward)")
+        treatment = classify_exception_type(exception_type, self._error_handling_config)
+        if treatment is ErrorTreatment.PASSTHROUGH:
             return self._PASSTHROUGH, exception_type
-
-        # Check if this exception type should be masked (excluded from baseline)
-        if exception_type in mask_exceptions:
-            logger.debug(f"Exception {exception_type} classified as MASK (infrastructure failure)")
-            return True, exception_type
-
-        # Check if this exception type should be zeroed (included in baseline)
-        if exception_type in zero_exceptions:
-            logger.debug(f"Exception {exception_type} classified as ZERO (agent failure)")
-            return False, exception_type
-
-        # Default treatment for unclassified exceptions
-        if default_treatment == "passthrough":
-            logger.debug(f"Exception {exception_type} not in config, using default: PASSTHROUGH")
-            return self._PASSTHROUGH, exception_type
-        exclude = default_treatment == "mask"
-        logger.debug(
-            f"Exception {exception_type} not in config, using default treatment: {'MASK' if exclude else 'ZERO'}"
-        )
-        return exclude, exception_type
+        return treatment is ErrorTreatment.MASK, exception_type
 
     def _should_preserve_timeout_trajectory(self, result) -> bool:
         """Whether to KEEP a fully-generated trajectory whose POST-generation step
@@ -1629,12 +1610,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             elif hasattr(exception_info, "__class__"):
                 exception_type = type(exception_info).__name__
 
-            # Create a mock exception to classify
-            class MockException(Exception):
-                pass
-
-            MockException.__name__ = exception_type
-            treatment, _ = self._classify_exception(MockException())
+            treatment, _ = self._classify_exception_type(exception_type)
 
             # Passthrough: ignore the exception and fall through to normal
             # verifier processing. The agent hit a soft limit (timeout, context

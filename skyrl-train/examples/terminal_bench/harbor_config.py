@@ -319,10 +319,8 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
 # - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
 # - "zero" exceptions: Included in baseline with reward=0 (agent failures)
 #
-# Default classification:
-# - Infrastructure failures (mask): DaytonaError, NetworkError, EnvironmentStartTimeoutError
-# - Agent failures (zero): AgentTimeoutError, ContextLengthExceededError
-# - Ambiguous (configurable): VerifierTimeoutError, RewardFileNotFoundError
+# Default classification comes from the pinned harbor-config taxonomy. Lists
+# here are explicit campaign overrides and therefore default empty.
 ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={
         # Enable RLOO-N style error handling (exclude infrastructure failures from baseline)
@@ -335,23 +333,13 @@ ERROR_HANDLING_SCHEMA = SectionSchema(
         # These are treated as "neutral" - infrastructure issues, not agent failures
         "mask_exceptions": FieldMapping(
             "mask_exceptions",
-            default=[
-                "DaytonaError",
-                "EnvironmentStartTimeoutError",
-                "NetworkError",
-                "ConnectionError",
-                "RewardFileNotFoundError",
-                "RewardFileEmptyError",
-            ],
+            default=[],
         ),
         # Exceptions to zero (include in baseline with reward=0)
         # These are treated as agent failures - the model should learn to avoid them
         "zero_exceptions": FieldMapping(
             "zero_exceptions",
-            default=[
-                "AgentTimeoutError",
-                "ContextLengthExceededError",
-            ],
+            default=[],
         ),
         # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
         "default_error_treatment": FieldMapping("default_error_treatment", default="zero"),
