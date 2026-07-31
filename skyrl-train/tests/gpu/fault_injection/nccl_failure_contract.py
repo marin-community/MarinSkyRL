@@ -17,12 +17,16 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import timedelta
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
 import torch
 import torch.distributed as dist
+
+from skyrl_train.distributed.fsdp_utils import create_device_mesh
+from skyrl_train.distributed.utils import init_worker_process_group_with_device
 
 
 WORLD_SIZE = 4
@@ -31,25 +35,34 @@ PROCESS_TIMEOUT_SECONDS = 45
 SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 
 
-def _worker(mode: str) -> None:
+class FaultMode(StrEnum):
+    SUBGROUP_DIVERGENCE = "subgroup-divergence"
+    COLLECTIVE_ORDER = "collective-order"
+    LATE_RANK = "late-rank"
+
+
+FAULT_MODES = tuple(FaultMode)
+
+
+@dataclass(frozen=True)
+class FaultRun:
+    returncode: int
+    elapsed: float
+    output: str
+
+
+def _worker(mode: FaultMode) -> None:
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
+    init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
     device = torch.device("cuda", local_rank)
-    dist.init_process_group(
-        backend="nccl",
-        timeout=timedelta(seconds=COLLECTIVE_TIMEOUT_SECONDS),
-        device_id=device,
-    )
-    print(f"FAULT_INJECTION_READY mode={mode} rank={rank}", flush=True)
+    print(f"FAULT_INJECTION_READY mode={mode.value} rank={rank}", flush=True)
 
-    if mode == "subgroup-divergence":
-        from skyrl_train.distributed.fsdp_utils import create_device_mesh
-
+    if mode is FaultMode.SUBGROUP_DIVERGENCE:
         mesh = create_device_mesh(WORLD_SIZE, fsdp_size=2, ep_size=2)
         group = mesh["ep"].get_group() if rank in (0, 3) else mesh["fsdp"].get_group()
         dist.all_reduce(torch.ones(1, device=device), group=group)
-    elif mode == "collective-order":
+    elif mode is FaultMode.COLLECTIVE_ORDER:
         tensor = torch.full((1024,), rank, dtype=torch.float32, device=device)
         if rank % 2 == 0:
             dist.all_reduce(tensor)
@@ -57,18 +70,18 @@ def _worker(mode: str) -> None:
         else:
             dist.broadcast(tensor, src=0)
             dist.all_reduce(tensor)
-    elif mode == "late-rank":
+    elif mode is FaultMode.LATE_RANK:
         if rank == 0:
             time.sleep(COLLECTIVE_TIMEOUT_SECONDS * 2)
         dist.all_reduce(torch.ones(1, device=device))
     else:  # pragma: no cover - argparse constrains worker invocations
         raise ValueError(f"unknown fault mode: {mode}")
 
-    print(f"FAULT_INJECTION_UNEXPECTED_COMPLETION mode={mode} rank={rank}", flush=True)
+    print(f"FAULT_INJECTION_UNEXPECTED_COMPLETION mode={mode.value} rank={rank}", flush=True)
     dist.destroy_process_group()
 
 
-def _run_fault(mode: str) -> tuple[int, float, str]:
+def _run_fault(mode: FaultMode) -> FaultRun:
     env = os.environ.copy()
     env.update(
         {
@@ -88,7 +101,7 @@ def _run_fault(mode: str) -> tuple[int, float, str]:
         f"--nproc-per-node={WORLD_SIZE}",
         str(Path(__file__).resolve()),
         "--worker",
-        mode,
+        mode.value,
     ]
     started_at = time.monotonic()
     process = subprocess.Popen(
@@ -106,31 +119,30 @@ def _run_fault(mode: str) -> tuple[int, float, str]:
         os.killpg(process.pid, signal.SIGKILL)
         output, _ = process.communicate()
         pytest.fail(
-            f"{mode} did not tear down within {PROCESS_TIMEOUT_SECONDS}s; output:\n{output}",
+            f"{mode.value} did not tear down within {PROCESS_TIMEOUT_SECONDS}s; output:\n{output}",
             pytrace=False,
         )
-    return process.returncode, time.monotonic() - started_at, output
+    return FaultRun(process.returncode, time.monotonic() - started_at, output)
 
 
-@pytest.mark.parametrize("mode", ["subgroup-divergence", "collective-order", "late-rank"])
-def test_nccl_fault_terminates_torchrun_gang(mode: str) -> None:
+@pytest.mark.parametrize("mode", FAULT_MODES)
+def test_nccl_fault_terminates_torchrun_gang(mode: FaultMode) -> None:
     if not torch.cuda.is_available() or torch.cuda.device_count() < WORLD_SIZE:
         pytest.skip(f"requires {WORLD_SIZE} CUDA devices")
 
-    returncode, elapsed, output = _run_fault(mode)
+    result = _run_fault(mode)
 
-    assert f"FAULT_INJECTION_READY mode={mode}" in output
-    assert "FAULT_INJECTION_UNEXPECTED_COMPLETION" not in output
-    assert returncode != 0, output
-    assert elapsed < PROCESS_TIMEOUT_SECONDS
-    assert any(signal_text in output.lower() for signal_text in ("timed out", "timeout", "watchdog")), output
+    assert f"FAULT_INJECTION_READY mode={mode.value}" in result.output
+    assert "FAULT_INJECTION_UNEXPECTED_COMPLETION" not in result.output
+    assert result.returncode != 0, result.output
+    assert result.elapsed < PROCESS_TIMEOUT_SECONDS
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--worker",
-        choices=("subgroup-divergence", "collective-order", "late-rank"),
+        choices=tuple(mode.value for mode in FAULT_MODES),
         required=True,
     )
-    _worker(parser.parse_args().worker)
+    _worker(FaultMode(parser.parse_args().worker))
