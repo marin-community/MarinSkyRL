@@ -11,8 +11,7 @@ without materializing dense sequence-by-sequence scores or masks.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Never
 
 import torch
 import torch.nn.functional as F
@@ -20,26 +19,34 @@ from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel, initialization as init
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
-try:
-    from flash_attn import flash_attn_func as _flash_attn_func
-    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis as _index_first_axis
-    from flash_attn.bert_padding import pad_input as _pad_input
-    from flash_attn.bert_padding import unpad_input as _unpad_input
-except ImportError as error:
-    _FLASH_ATTN_IMPORT_ERROR: ImportError | None = error
-    _flash_attn_func: Callable[..., torch.Tensor] | None = None
-    _flash_attn_varlen_func: Callable[..., torch.Tensor] | None = None
-    _index_first_axis: Callable[..., torch.Tensor] | None = None
-    _pad_input: Callable[..., torch.Tensor] | None = None
-    _unpad_input: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]] | None = None
-else:
-    _FLASH_ATTN_IMPORT_ERROR = None
-
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
 )
+
+try:
+    from flash_attn import flash_attn_func
+    from flash_attn import flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis as flash_index_first_axis
+    from flash_attn.bert_padding import pad_input as flash_pad_input
+    from flash_attn.bert_padding import unpad_input as flash_unpad_input
+except ImportError as error:
+    _FLASH_ATTN_IMPORT_ERROR: ImportError | None = error
+
+    def _flash_attn_missing(*_args: object, **_kwargs: object) -> Never:
+        raise ImportError(
+            "flash-attn is not installed but a FlashAttention-only code path was invoked"
+        ) from _FLASH_ATTN_IMPORT_ERROR
+
+    flash_attn_func = _flash_attn_missing
+    flash_attn_varlen_func = _flash_attn_missing
+    flash_index_first_axis = _flash_attn_missing
+    flash_pad_input = _flash_attn_missing
+    flash_unpad_input = _flash_attn_missing
+else:
+    _FLASH_ATTN_IMPORT_ERROR = None
+
+FLASH_ATTN_AVAILABLE = _FLASH_ATTN_IMPORT_ERROR is None
 
 
 GRUG_MOE_MODEL_TYPE = "grug_moe"
@@ -543,6 +550,8 @@ class GrugMoeAttention(nn.Module):
         *,
         is_long: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the fused output and GQA-expanded value used by XSA."""
+
         if _FLASH_ATTN_IMPORT_ERROR is not None:
             raise ImportError(
                 "Grug FlashAttention was requested, but the flash-attn CUDA extension could not be imported"
@@ -552,7 +561,7 @@ class GrugMoeAttention(nn.Module):
         softmax_scale = 1.0 / math.sqrt(self.config.head_dim)
         if attention_mask is None:
             return (
-                _flash_attn_func(
+                flash_attn_func(
                     query,
                     key,
                     value,
@@ -566,10 +575,10 @@ class GrugMoeAttention(nn.Module):
 
         batch, seq_len = attention_mask.shape
         valid = attention_mask.to(torch.bool)
-        unpadded_query, indices, cu_seqlens, max_seqlen, _ = _unpad_input(query, valid)
-        unpadded_key = _index_first_axis(key.flatten(0, 1), indices)
-        unpadded_value = _index_first_axis(value.flatten(0, 1), indices)
-        unpadded_output = _flash_attn_varlen_func(
+        unpadded_query, indices, cu_seqlens, max_seqlen, _ = flash_unpad_input(query, valid)
+        unpadded_key = flash_index_first_axis(key.flatten(0, 1), indices)
+        unpadded_value = flash_index_first_axis(value.flatten(0, 1), indices)
+        unpadded_output = flash_attn_varlen_func(
             unpadded_query,
             unpadded_key,
             unpadded_value,
@@ -582,7 +591,7 @@ class GrugMoeAttention(nn.Module):
             causal=True,
             window_size=window_size,
         )
-        return _pad_input(unpadded_output, indices, batch, seq_len), value_for_xsa
+        return flash_pad_input(unpadded_output, indices, batch, seq_len), value_for_xsa
 
 
 class GrugMoeDecoderLayer(nn.Module):

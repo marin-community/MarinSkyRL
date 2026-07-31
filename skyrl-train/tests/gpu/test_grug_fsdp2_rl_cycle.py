@@ -31,7 +31,7 @@ from skyrl_train.models.grug_moe import (
 )
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import get_ray_pg_ready_with_timeout, initialize_ray
-from tests.gpu.grug_test_utils import require_hoppers
+from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 

@@ -28,42 +28,16 @@ from skyrl_train.distributed.cp_utils import (
 )
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from skyrl_train.models.grug_moe import (
+    FLASH_ATTN_AVAILABLE,
     GRUG_MOE_MODEL_TYPE,
     GRUG_SUPPORTED_ATTENTION_BACKENDS,
+    flash_pad_input as pad_input,
+    flash_unpad_input as unpad_input,
     validate_grug_training_strategy,
 )
 from packaging.version import Version
 
-# --- Stage 2 (FSDP2 CP): guarded flash-attn import ---------------------------
-# The CP path runs through SDPA ring attention, not flash-attn varlen, so the
-# environment that loads the model need NOT have flash-attn installed. Previously
-# `from flash_attn.bert_padding import pad_input, unpad_input` was an
-# unconditional module-level import that broke `import model_wrapper` in any
-# env without flash-attn. We make it lazy: try the import; if it fails, bind
-# `pad_input`/`unpad_input` to shims that raise ONLY if actually called (every
-# call site is gated on `attn_implementation == "flash_attention_2"` or
-# `use_sample_packing`, both of which are off on the sdpa/CP path). `_HAS_FLASH`
-# records availability for tests / diagnostics.
-try:
-    from flash_attn.bert_padding import pad_input, unpad_input  # noqa: F401
-
-    _HAS_FLASH = True
-except ImportError:  # flash-attn not installed (e.g. the CP/sdpa-only env)
-    _HAS_FLASH = False
-
-    def _flash_missing(*args, **kwargs):
-        raise ImportError(
-            "flash_attn is not installed but a flash-attn-only code path "
-            "(sample packing / pad_input / unpad_input) was invoked. Install "
-            "flash-attn, or use attn_backend='sdpa'/'flex' with "
-            "use_sample_packing=false (the CP path)."
-        )
-
-    def pad_input(*args, **kwargs):  # noqa: F811
-        return _flash_missing(*args, **kwargs)
-
-    def unpad_input(*args, **kwargs):  # noqa: F811
-        return _flash_missing(*args, **kwargs)
+_HAS_FLASH = FLASH_ATTN_AVAILABLE
 
 
 # Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now

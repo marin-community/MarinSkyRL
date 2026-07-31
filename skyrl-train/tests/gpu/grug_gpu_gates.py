@@ -1,4 +1,4 @@
-"""Shared hardware gates for Grug GPU tests."""
+"""Hardware admission gates shared by Grug GPU tests."""
 
 import pytest
 import torch

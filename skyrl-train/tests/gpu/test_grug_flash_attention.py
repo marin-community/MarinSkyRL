@@ -7,7 +7,7 @@ from copy import deepcopy
 import torch
 
 from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig
-from tests.gpu.grug_test_utils import require_hoppers
+from tests.gpu.grug_gpu_gates import require_hoppers
 
 
 OUTPUT_MAX_ERROR = 1e-2
@@ -225,8 +225,12 @@ def test_grug_flash_attention_sliding_window_peak_memory() -> None:
 
     peak_bytes = torch.cuda.max_memory_allocated()
     peak_gib = peak_bytes / GIB
+    config = attention.config
     print(
-        f"Grug FlashAttention B=1 S={PRODUCTION_SEQUENCE_LENGTH} Hq=20 Hkv=5 D=128 window=2048 peak={peak_gib:.3f} GiB"
+        "Grug FlashAttention "
+        f"B={hidden_states.shape[0]} S={hidden_states.shape[1]} "
+        f"Hq={config.num_attention_heads} Hkv={config.num_key_value_heads} "
+        f"D={config.head_dim} window={config.sliding_window} peak={peak_gib:.3f} GiB"
     )
     assert peak_bytes < MEMORY_CEILING_GIB * GIB
     assert torch.isfinite(output).all()
