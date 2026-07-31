@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 
+from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
 
 RENDEZVOUS_FILENAME = "ray_head.json"
@@ -258,10 +259,10 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     huggingface_hub caches HF_HUB_OFFLINE into a module constant at import). The
     ranks' env is untouched.
     """
-    if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")) or os.path.isdir(model_path):
-        # Nothing to pre-download: empty, an object-store URI (handled elsewhere),
-        # or already a local directory the ranks read directly.
-        _log(f"stage_model: skip (model_path={model_path!r} is empty/local/cloud)")
+    if is_object_store_model_path(model_path):
+        raise ValueError(unsupported_model_path_message(model_path))
+    if not model_path or os.path.isdir(model_path):
+        _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")
         return
 
     # WARM PATH: if a seeded in-region CW-S3 source exists, sync the weights from
@@ -363,10 +364,6 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
         RuntimeError: if the override does not take, or a required think-protocol token
             (``<|start_think|>`` / ``<|end_think|>``) is not a single registered token.
     """
-    if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")):
-        _log(f"apply_policy_chat_template: skip (model_path={model_path!r} is empty/cloud)")
-        return
-
     template_path = resolve_repo_path(template_repo_rel)
     delphi = template_path.read_text()
 
@@ -1412,8 +1409,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
-        help="HF repo-id of the policy model to pre-download into the node-local HF "
-        "cache on EVERY node before Ray starts. Set by the launcher when the config "
+        help="HF repo ID of the policy model to pre-download into the node-local HF "
+        "cache on EVERY node before Ray starts. Object-store URIs are unsupported; "
+        "use --model-warm-source for an S3 mirror. Set by the launcher when the config "
         "runs HF_HUB_OFFLINE=1, so the FSDP ranks load from a warm node-local cache "
         "instead of each racing HF Hub at init.",
     )

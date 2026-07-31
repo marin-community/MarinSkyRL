@@ -48,8 +48,8 @@ Re-run this **only** when a pin/ABI in the cache key changes.
 source ~/secrets.env
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u <user> --password-stdin
 ./docker/build_and_push.sh gpu-rl
-# capture the pushed @sha256 digest from the immutable :gpu-rl-<gitsha> tag:
-docker buildx imagetools inspect ghcr.io/marin-community/marinskyrl:gpu-rl-<gitsha>
+# capture the pushed @sha256 digest from the immutable :gpu-rl-<full-sha> tag:
+docker buildx imagetools inspect ghcr.io/marin-community/marinskyrl:gpu-rl-<full-sha>
 ```
 
 The `rl` stage's default `WHEEL_SOURCE=prebuilt-wheelhouse` COPYs
@@ -69,12 +69,12 @@ docker buildx build -f docker/Dockerfile.gpu-rl \
 in-build `wheel-builder` stage (compiled fresh; buildx layer-caches it for the
 next rebuild on the same builder). Equivalent result, but pays the nvcc cost.
 
-## After a rebuild — bump the launcher digest
+## After a rebuild — register the digest
 
 The image is pinned by **immutable `@sha256:` digest** in
-`rl/cloud/launch_rl_iris.py` (`DEFAULT_RL_DOCKER_IMAGE`). After pushing, set it
-to the new digest (the `:gpu-rl-<gitsha>` tag's digest, never the floating
-`:gpu-rl`) and update the provenance comment.
+`cloud/iris/gpu_rl_images.py`. After pushing, register the digest from the
+`:gpu-rl-<full-sha>` tag, never the floating `:gpu-rl` tag, together with its
+source and Harbor revisions.
 
 ## What proves the build is good
 

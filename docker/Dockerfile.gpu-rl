@@ -12,6 +12,11 @@
 # (docker/build_gpu_rl_kaniko.sh) — the Mac cannot build it (arm64 + linux/amd64
 # CUDA). See the build-gpu-rl-image-iris skill in the iris launcher repo.
 #
+# The GB200 cluster cw-us-east-08a is aarch64 and cannot run this image at all.
+# Its counterpart is docker/Dockerfile.gpu-rl-arm64, which differs in the CUDA
+# arch list, the wheel MANIFEST platform and how Megatron is installed. A change
+# here is usually a change there too.
+#
 # =============================================================================
 # WHEEL-CACHE BUILD (fast rebuilds)
 # =============================================================================
@@ -73,14 +78,10 @@ ARG WHEEL_SOURCE=prebuilt-wheelhouse
 # INSTALL_MEGATRON=1 to build the megatron variant (adds the `megatron` extra to
 # the uv sync). All megatron deps are linux/x86_64-gated in the lock.
 ARG INSTALL_MEGATRON=0
-# Harbor (agentic rollout) is installed after the trainer lock.
-# Keep this in step with what production actually bakes. It lagged at 01c736a6 while every
-# shipped image carried 772e20f7 (harbor#39, the verifier-teardown deadline), so a build that
-# did not pass an explicit override would have silently reverted harbor by one release.
-# 74d76ecb is harbor#47: VerifierResult now carries the test script's stdout and stderr.
-# Reward shapers read `verifier_result.stdout`; on 772e20f7 the attribute does not exist, so
-# every shaped run fell back to binary reward without logging anything.
-ARG HARBOR_COMMIT=74d76ecb
+# Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
+# than overriding it at build time. This revision includes the artifact-upload fixes and setup-file
+# upload support through harbor#51.
+ARG HARBOR_COMMIT=f2dd505f609021611eb85521a097e6dff384d12d
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
@@ -191,6 +192,10 @@ ARG OTEL_EXPORTER_VERSION
 # MarinSkyRL commit this image is built from — recorded in the baked /opt/skyrl
 # git tree (see the git-init step below) for provenance.
 ARG GITSHA=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/marin-community/MarinSkyRL" \
+      org.opencontainers.image.revision="${GITSHA}" \
+      org.marin.harbor-commit="${HARBOR_COMMIT}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 # InfiniBand / RDMA userspace (rdma-core) — REQUIRED for NCCL's built-in IB
@@ -479,11 +484,14 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # fsspec 2026.4.0, so without the extra a second conflict appears and the plain
 # build fails. The extra's `datasets>=4.4.1` resolves to a release whose cap
 # clears 2026.4.0.
+COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
         "harbor[analysis,datasets,daytona] @ git+https://github.com/marin-community/harbor.git@${HARBOR_COMMIT}" && \
     ${RL_ENV_DIR}/bin/python -c "import harbor, importlib.metadata as m; assert m.version('fastapi') == '${FASTAPI_VERSION}'; assert m.version('opentelemetry-exporter-otlp') == '${OTEL_EXPORTER_VERSION}'; print('harbor', m.version('harbor'))" && \
+    ${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py && \
+    rm /tmp/validate_harbor_artifact_writer.py && \
     if uv pip check --python ${RL_ENV_DIR}/bin/python > /tmp/rl-pip-check 2>&1; then \
       echo "expected the known aiobotocore/botocore metadata conflict"; \
       exit 1; \

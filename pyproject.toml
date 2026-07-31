@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=83.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -17,8 +17,17 @@ requires-python = ">=3.12"
 packages = []
 
 [dependency-groups]
+analysis = [
+    "matplotlib",
+    "pandas",
+]
 dev = [
+    "boto3",
+    "fsspec",
+    "huggingface-hub",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
+    "pytest",
+    "universal-pathlib",
 ]
 
 [tool.marin-style]

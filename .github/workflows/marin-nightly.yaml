@@ -31,12 +31,12 @@ jobs:
       JOB_NAME: marinskyrl-nightly-gsm8k-${{ github.run_id }}-${{ github.run_attempt }}
       TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Trim the Iris bundle
         run: git rm -r --cached --quiet skyrl-train/docs skyrl-agent
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -60,7 +60,7 @@ jobs:
           set -o pipefail
           IRIS_PYTHON="$(uv tool dir)/marin-core/bin/python"
           RL_IMAGE="$("$IRIS_PYTHON" -c \
-            'from cloud.iris.launch_rl_iris import DEFAULT_RL_DOCKER_IMAGE; print(DEFAULT_RL_DOCKER_IMAGE)')"
+            'import os; from cloud.iris.gpu_rl_images import image_for_cluster; print(image_for_cluster(os.environ["TARGET_CLUSTER"], None).reference)')"
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
             --job-name "$JOB_NAME" \
@@ -78,7 +78,7 @@ jobs:
         if: always()
         run: iris --cluster marin job stop "/runner/$JOB_NAME" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: nightly-run-log

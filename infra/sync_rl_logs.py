@@ -22,12 +22,12 @@ Ray-log layouts:
   same URI you launched with, or let the tool auto-derive it from the finelog (the launcher prints
   `Rendezvous: <uri>`), so non-agentic jobs sync with no extra flags as long as the finelog is fetched.
 
-Ray logs land in the marin-us-east-02a bucket for BOTH east and rno2a jobs (it's east's LOTA store),
-so the object-store creds always come from the EAST kubeconfig; the finelog is fetched per the job's
-own cluster. trace_jobs is written under the job SLUG (run-independent), unlike ray_session_logs.
+Ray logs land in the marin-us-east-02a bucket for every supported CoreWeave cluster, so the object-store
+creds always come from the east-02a store; the finelog is fetched from the job's own cluster. trace_jobs
+is written under the job SLUG (run-independent), unlike ray_session_logs.
 
 Usage:
-  sync_rl_logs.py /benjaminfeuer/<job> [--cluster cw-us-east-02a|cw-rno2a]
+  sync_rl_logs.py /benjaminfeuer/<job> [--cluster cw-us-east-02a|cw-us-east-08a|cw-rno2a]
                   [--run run-<ts>] [--rendezvous-dir URI] [--dest DIR] [--finelog-lines N]
                   [--no-ray] [--no-finelog] [--trace-jobs] [--trace-jobs-no-gzip]
 
@@ -39,18 +39,31 @@ Re-runnable: existing same-size ray files are skipped, so re-syncing a live job 
 import argparse
 import base64
 import io
+import json
 import os
 import re
 import subprocess
 import sys
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-BUCKET = "marin-us-east-02a"  # ray logs + trace_jobs land here for BOTH east + rno2a (east LOTA store)
-ENDPOINT = "https://cwobject.com"
-EAST_KUBECONFIG = os.path.expanduser("~/.kube/coreweave-iris")  # holds iris-task-env + the bucket
-KCFG = {"cw-us-east-02a": "~/.kube/coreweave-iris", "cw-rno2a": "~/.kube/coreweave-iris"}
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from scripts.iris.coreweave_clusters import (  # noqa: E402
+    CLUSTERS as COREWEAVE_CLUSTERS,
+    COREWEAVE_KUBECONFIG,
+    COREWEAVE_OBJECT_ENDPOINT,
+)
+
+BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
+ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
+DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
+LOG_SUFFIXES = (".log", ".out", ".err", ".jsonl", ".txt")
 IRIS_CANDIDATES = [
     "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
     "/Users/benjaminfeuer/Documents/marin/.venv/bin/iris",
@@ -78,8 +91,8 @@ def s3client():
     return boto3.client(
         "s3",
         endpoint_url=ENDPOINT,
-        aws_access_key_id=_secret("AWS_ACCESS_KEY_ID", EAST_KUBECONFIG),
-        aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY", EAST_KUBECONFIG),
+        aws_access_key_id=_secret("AWS_ACCESS_KEY_ID", str(COREWEAVE_KUBECONFIG)),
+        aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY", str(COREWEAVE_KUBECONFIG)),
         config=Config(s3={"addressing_style": "virtual"}, max_pool_connections=32),
     )
 
@@ -232,7 +245,47 @@ def sync_ray(s3, prefix, dest):
     return len(keys)
 
 
-def sync_trace_jobs(s3, slug, dest, gzip=True):
+def _is_log_object(key):
+    path = key.lower()
+    filename = path.rsplit("/", 1)[-1]
+    return any(filename.endswith(suffix) for suffix in LOG_SUFFIXES) or "/logs/" in path or path.startswith("logs/")
+
+
+def trace_object_batches(objects, *, batch_bytes, max_non_log_bytes):
+    """Partition trace objects into bounded download batches.
+
+    Non-log payloads above the monitor's 100 MiB guard are reported for the
+    manifest instead of being silently retained in an unbounded executor batch.
+    A single large log remains eligible as a batch of one because it carries
+    diagnostic evidence that the monitor also preserves.
+    """
+    batches = []
+    skipped = []
+    batch = []
+    batch_size = 0
+    for key, size in objects:
+        if max_non_log_bytes and size > max_non_log_bytes and not _is_log_object(key):
+            skipped.append({"key": key, "size": size, "reason": "non_log_size_limit"})
+            continue
+        if batch and batch_size + size > batch_bytes:
+            batches.append(batch)
+            batch = []
+            batch_size = 0
+        batch.append((key, size))
+        batch_size += size
+    if batch:
+        batches.append(batch)
+    return batches, skipped
+
+
+def sync_trace_jobs(
+    s3,
+    slug,
+    dest,
+    gzip=True,
+    batch_bytes=DEFAULT_TRACE_BATCH_BYTES,
+    max_non_log_bytes=DEFAULT_MAX_NON_LOG_BYTES,
+):
     """Stream every object under iris/<slug>/trace_jobs/ into ONE local tar[.gz].
 
     trace_jobs is the Harbor rollout-artifact tree (per trial: config.json, result.json,
@@ -256,21 +309,40 @@ def sync_trace_jobs(s3, slug, dest, gzip=True):
         return 0
     ext = "tar.gz" if gzip else "tar"
     tar_path = os.path.join(dest, f"{slug}_trace_jobs.{ext}")
-    batch = 512  # cap in-flight bodies -> bounded memory
+    batches, skipped = trace_object_batches(keys, batch_bytes=batch_bytes, max_non_log_bytes=max_non_log_bytes)
+    if skipped:
+        print(f"[trace] WARNING: skipped {len(skipped)} non-log objects above {max_non_log_bytes / 1_048_576:.0f} MiB")
     total_bytes = 0
 
     def _body(item):
         return s3.get_object(Bucket=BUCKET, Key=item[0])["Body"].read()
 
     with tarfile.open(tar_path, "w:gz" if gzip else "w") as tar, ThreadPoolExecutor(max_workers=24) as ex:
-        for i in range(0, len(keys), batch):
-            chunk = keys[i : i + batch]
+        archived = 0
+        for chunk in batches:
             for (k, sz), body in zip(chunk, ex.map(_body, chunk)):
                 ti = tarfile.TarInfo(name=k[len(pfx) :])  # path relative to trace_jobs/
                 ti.size = len(body)
                 tar.addfile(ti, io.BytesIO(body))
                 total_bytes += len(body)
-            print(f"[trace]   archived {min(i + batch, len(keys))}/{len(keys)} ...", end="\r", flush=True)
+            archived += len(chunk)
+            print(f"[trace]   archived {archived}/{len(keys) - len(skipped)} ...", end="\r", flush=True)
+    manifest_path = os.path.join(dest, f"{slug}_trace_sync_manifest.json")
+    with open(manifest_path, "w") as manifest_file:
+        json.dump(
+            {
+                "source_prefix": pfx,
+                "objects_listed": len(keys),
+                "objects_archived": len(keys) - len(skipped),
+                "objects_skipped": skipped,
+                "batch_bytes": batch_bytes,
+                "max_non_log_bytes": max_non_log_bytes,
+            },
+            manifest_file,
+            indent=2,
+            sort_keys=True,
+        )
+        manifest_file.write("\n")
     print(
         f"\n[trace] {len(keys)} objects, {total_bytes / 1e6:.1f} MB uncompressed -> {tar_path} "
         f"({os.path.getsize(tar_path) / 1e6:.1f} MB on disk)"
@@ -279,8 +351,8 @@ def sync_trace_jobs(s3, slug, dest, gzip=True):
 
 
 def sync_finelog(job, cluster, dest, lines):
-    kcfg = os.path.expanduser(KCFG[cluster])
-    env = {**os.environ, "KUBECONFIG": kcfg}
+    kubeconfig = COREWEAVE_CLUSTERS[cluster].kubeconfig
+    env = {**os.environ, "KUBECONFIG": str(kubeconfig)}
     iris = next((c for c in IRIS_CANDIDATES if c == "iris" or os.path.exists(c)), "iris")
     out_path = os.path.join(dest, "finelog.log")
     print(f"[finelog] {job} via {os.path.basename(iris)} --cluster={cluster} --no-tail --max-lines {lines} ...")
@@ -300,10 +372,10 @@ def sync_finelog(job, cluster, dest, lines):
     return n
 
 
-def main():
+def argument_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Sync an Iris RL job's ray_session_logs + finelog (+ trace_jobs) locally.")
     ap.add_argument("job", help="full job id, e.g. /benjaminfeuer/rl-tasktrove-keep1-ncclnet")
-    ap.add_argument("--cluster", default="cw-us-east-02a", choices=list(KCFG))
+    ap.add_argument("--cluster", default="cw-us-east-02a", choices=list(COREWEAVE_CLUSTERS))
     ap.add_argument("--run", default=None, help="agentic rendezvous run-<ts> (default: newest under the job prefix)")
     ap.add_argument(
         "--rendezvous-dir",
@@ -328,7 +400,27 @@ def main():
         action="store_true",
         help="with --trace-jobs, write an uncompressed .tar instead of .tar.gz",
     )
-    a = ap.parse_args()
+    ap.add_argument(
+        "--trace-batch-bytes",
+        type=int,
+        default=DEFAULT_TRACE_BATCH_BYTES,
+        help="with --trace-jobs, cap fetched object bodies per tar batch (default: 64 MiB)",
+    )
+    ap.add_argument(
+        "--trace-max-non-log-bytes",
+        type=int,
+        default=DEFAULT_MAX_NON_LOG_BYTES,
+        help="with --trace-jobs, skip non-log objects above this size (default: 100 MiB; 0 disables)",
+    )
+    return ap
+
+
+def main():
+    a = argument_parser().parse_args()
+    if a.trace_batch_bytes <= 0:
+        raise ValueError("--trace-batch-bytes must be positive")
+    if a.trace_max_non_log_bytes < 0:
+        raise ValueError("--trace-max-non-log-bytes must be non-negative")
     slug = a.job.rstrip("/").split("/")[-1]
     s3 = s3client()
 
@@ -363,7 +455,14 @@ def main():
             )
         sync_ray(s3, prefix, dest)
     if a.trace_jobs:
-        sync_trace_jobs(s3, slug, dest, gzip=not a.trace_jobs_no_gzip)
+        sync_trace_jobs(
+            s3,
+            slug,
+            dest,
+            gzip=not a.trace_jobs_no_gzip,
+            batch_bytes=a.trace_batch_bytes,
+            max_non_log_bytes=a.trace_max_non_log_bytes,
+        )
     print(f"\nDONE -> {dest}")
 
 

@@ -19,6 +19,12 @@ import re
 from typing import Optional, Dict, Any
 
 
+BOXED_ANSWER_INSTRUCTION = (
+    " Please reason step by step. At the very end, output your final answer on its "
+    "own line in the exact format: 'Answer: \\boxed{ANSWER}'."
+)
+
+
 def last_boxed_only_string(string: str) -> Optional[str]:
     """Extract the last LaTeX boxed expression from a string.
 
