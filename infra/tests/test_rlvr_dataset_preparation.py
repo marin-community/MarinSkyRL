@@ -37,21 +37,32 @@ class FakeContract:
         return normalized
 
 
-def test_preparation_skips_a_majority_of_malformed_rows_with_provenance() -> None:
-    examples = [
+def _mostly_malformed_rlvr_math_examples():
+    return [
         {"messages": [{"role": "user", "content": "Question: bad one"}], "ground_truth": ""},
         {"messages": [{"role": "user", "content": "Question: 2 + 2"}], "ground_truth": "4"},
         {"messages": [{"role": "user", "content": "Question: bad two"}], "ground_truth": ""},
     ]
 
+
+def _prepare_mostly_malformed_rlvr_math(minimum_yield_fraction=None):
+    return prepare_artifact(
+        rlvr_math_source(),
+        _mostly_malformed_rlvr_math_examples(),
+        FakeContract("aime", " Answer: \\boxed{ANSWER}"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(
+            source_revision="fixture",
+            max_prompt_tokens=20,
+            minimum_unique_rows=1,
+            minimum_yield_fraction=minimum_yield_fraction,
+        ),
+    )
+
+
+def test_preparation_skips_a_majority_of_malformed_rows_with_provenance() -> None:
     with pytest.warns(UserWarning, match=r"skipped 2 of 3 rows"):
-        artifact = prepare_artifact(
-            rlvr_math_source(),
-            examples,
-            FakeContract("aime", " Answer: \\boxed{ANSWER}"),
-            token_count=lambda text: len(text.split()),
-            options=PreparationOptions(source_revision="fixture", max_prompt_tokens=20, minimum_unique_rows=1),
-        )
+        artifact = _prepare_mostly_malformed_rlvr_math()
 
     assert len(artifact.rows) == 1
     assert artifact.provenance["counts"]["malformed_rows_skipped"] == 2
@@ -62,26 +73,9 @@ def test_preparation_skips_a_majority_of_malformed_rows_with_provenance() -> Non
 
 
 def test_preparation_can_require_a_minimum_conversion_yield() -> None:
-    examples = [
-        {"messages": [{"role": "user", "content": "Question: bad one"}], "ground_truth": ""},
-        {"messages": [{"role": "user", "content": "Question: 2 + 2"}], "ground_truth": "4"},
-        {"messages": [{"role": "user", "content": "Question: bad two"}], "ground_truth": ""},
-    ]
-
     with pytest.warns(UserWarning, match=r"skipped 2 of 3 rows"):
         with pytest.raises(ValueError, match=r"conversion yield 1/3 .* below minimum_yield_fraction=0.5"):
-            prepare_artifact(
-                rlvr_math_source(),
-                examples,
-                FakeContract("aime", " Answer: \\boxed{ANSWER}"),
-                token_count=lambda text: len(text.split()),
-                options=PreparationOptions(
-                    source_revision="fixture",
-                    max_prompt_tokens=20,
-                    minimum_unique_rows=1,
-                    minimum_yield_fraction=0.5,
-                ),
-            )
+            _prepare_mostly_malformed_rlvr_math(minimum_yield_fraction=0.5)
 
 
 @pytest.mark.parametrize("minimum_yield_fraction", [-0.01, 1.01])
