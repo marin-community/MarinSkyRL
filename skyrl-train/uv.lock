@@ -16,7 +16,7 @@ overrides = [
     { name = "flashinfer-jit-cache", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.12", index = "https://flashinfer.ai/whl/cu129" },
     { name = "flashinfer-jit-cache", marker = "sys_platform == 'linux' and extra != 'vllm'", specifier = "==0.6.12" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.12" },
-    { name = "fsspec", marker = "sys_platform == 'linux'", specifier = "==2026.4.0" },
+    { name = "fsspec", specifier = "==2026.4.0" },
     { name = "humming-kernels", extras = ["cu12"], marker = "sys_platform == 'linux'", specifier = "==0.1.4" },
     { name = "nvidia-cutlass-dsl", marker = "sys_platform == 'linux'", specifier = ">=4.5.2,<4.6" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
@@ -839,7 +839,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dill" },
     { name = "filelock" },
-    { name = "fsspec", marker = "sys_platform == 'linux'" },
+    { name = "fsspec" },
     { name = "huggingface-hub" },
     { name = "multiprocess" },
     { name = "numpy" },
@@ -1705,7 +1705,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "filelock" },
-    { name = "fsspec", marker = "sys_platform == 'linux'" },
+    { name = "fsspec" },
     { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "httpx" },
     { name = "packaging" },
@@ -5535,6 +5535,7 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "filelock" },
+    { name = "fsspec" },
     { name = "jinja2" },
     { name = "networkx" },
     { name = "setuptools", version = "79.0.1", source = { registry = "https://pypi.org/simple" } },
@@ -5557,7 +5558,7 @@ dependencies = [
     { name = "cuda-bindings", marker = "sys_platform == 'linux'" },
     { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "sys_platform == 'linux'" },
     { name = "filelock" },
-    { name = "fsspec", marker = "sys_platform == 'linux'" },
+    { name = "fsspec" },
     { name = "jinja2" },
     { name = "networkx" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux'" },
@@ -5622,7 +5623,7 @@ version = "0.1.0"
 source = { git = "https://github.com/pytorch/torchtitan?rev=a1fdd7e#a1fdd7e43694bbfeff5d6ad8ac738c067bb90d41" }
 dependencies = [
     { name = "datasets" },
-    { name = "fsspec", marker = "sys_platform == 'linux'" },
+    { name = "fsspec" },
     { name = "tensorboard" },
     { name = "tokenizers" },
     { name = "tomli" },

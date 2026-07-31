@@ -10,9 +10,13 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
 GPU_RL_ARM64_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl-arm64"
+GPU_RL_DOCKERFILES = (
+    GPU_RL_DOCKERFILE,
+    GPU_RL_ARM64_DOCKERFILE,
+)
 
 
-@pytest.mark.parametrize("dockerfile_path", [GPU_RL_DOCKERFILE, GPU_RL_ARM64_DOCKERFILE])
+@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
 def test_runtime_image_exposes_source_and_harbor_provenance(dockerfile_path: Path) -> None:
     dockerfile = dockerfile_path.read_text()
 
@@ -27,6 +31,19 @@ def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
 
     assert "--no-install-package flash-attn" in sync_command
     assert "uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/flash_attn-*.whl" in dockerfile
+
+
+def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
+    dockerfiles = [path.read_text() for path in GPU_RL_DOCKERFILES]
+    harbor_commits = {
+        next(line for line in dockerfile.splitlines() if line.startswith("ARG HARBOR_COMMIT="))
+        for dockerfile in dockerfiles
+    }
+
+    assert len(harbor_commits) == 1
+    for dockerfile in dockerfiles:
+        assert "COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py" in dockerfile
+        assert "${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py" in dockerfile
 
 
 def test_arm64_plain_image_accepts_only_known_pip_check_findings(tmp_path: Path) -> None:

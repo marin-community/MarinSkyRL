@@ -39,11 +39,45 @@ pending retries that belong to this run before reading mutable checkpoint direct
 3. **Export or consolidate.** Determine the checkpoint format before converting. Follow
    `.agents/ops/checkpoint-consolidation.md` and verify that the result contains complete
    safetensors, configuration, and tokenizer metadata.
-4. **Publish the model.** Follow the consolidation runbook's canonical staging, secret-scan,
-   additive-upload, and remote-verification procedure.
-5. **Publish traces.** Run `infra/rl_cleanup/make_and_upload_trace_dataset.py` over the complete
-   trial set. Keep its hygiene transforms, do not subsample, and verify the dataset before linking it
-   from the model card.
+4. **Publish the model.** Assemble the metric surface, trainer log, and relevant per-step logs under
+   `<staging>/training_logs/` before upload. Add a `## Training Traces` section to the model card with
+   the companion Hugging Face dataset URL; this is a model-publication requirement even when trace
+   publication finishes in a later pass. Redact the complete staging tree before upload:
+
+   ```bash
+   python -m infra.rl_cleanup.secret_redaction "$STAGING_ROOT"
+   hf upload <namespace>/<model> "$STAGING_ROOT" --repo-type model
+   hf download <namespace>/<model> --repo-type model --local-dir "$VERIFY_ROOT"
+   python -m infra.rl_cleanup.secret_redaction "$VERIFY_ROOT" --check
+   python -m infra.rl_cleanup.publication_checks "$VERIFY_ROOT"
+   ```
+
+   Keep staging until the fresh download passes both checks. The first check fails if credential-shaped
+   text remains; the second fails unless `training_logs/` is nonempty and the card links a Hugging Face
+   dataset under `## Training Traces`.
+5. **Publish traces.** The monitor's `trace_jobs/` directory is an evidence sample by default; it
+   mirrors only the newest 500 traces across the fleet. Rebuild the dataset from the full durable
+   object-store tree instead:
+
+   ```bash
+   python infra/sync_rl_logs.py /benjaminfeuer/<job> --cluster <cluster> --dest "$TRACE_ROOT" \
+     --no-ray --no-finelog --trace-jobs --trace-jobs-no-gzip
+   mkdir -p "$TRACE_ROOT/trace_jobs"
+   tar -xf "$TRACE_ROOT/<job>_trace_jobs.tar" -C "$TRACE_ROOT/trace_jobs"
+   python -m infra.rl_cleanup.make_and_upload_trace_dataset \
+     --job_dir "$TRACE_ROOT/trace_jobs" --repo_id <namespace>/<dataset> --episodes last --filter none \
+     --skip_register --single_commit
+   ```
+
+   `--trace-jobs` is the source of record for this rebuild. It writes a tar plus a sync manifest;
+   inspect `objects_skipped` before export. A full monitor mirror requires `--trace-sync-limit 0`,
+   but remains evidence-only when its size guard skips objects. Inspect
+   `trace_export_manifest.json`: `result_coverage` is dataset rows divided by source
+   `result.json` files and defaults to a 95% gate. The staged tree has deterministic shard names
+   and replaces stale `train-*.parquet` shards on rerun. `--single_commit` stages then replaces the
+   complete remote shard set. Use `--stage-only "$STAGING_ROOT"` to retain that staged tree locally
+   for inspection or offline tests; it does not write to Hugging Face. Verify the remote shard list
+   and manifest before reporting the trace destination to the model-publication step.
 6. **Register if authorized.** Use the campaign's schema, explicit RL training type, exact base-model
    lineage, and only records the operator owns. Stop on foreign-key or ownership ambiguity.
 7. **Reclaim only if separately authorized.** Retain staging and source artifacts until all remote
@@ -61,4 +95,7 @@ pending retries that belong to this run before reading mutable checkpoint direct
 
 Report terminal state, source revision, selected checkpoint and rationale, export provenance,
 published model and trace destinations, registration result, preserved metrics, verification
-evidence, storage reclaimed under authority, and all remaining work.
+evidence, storage reclaimed under authority, and all remaining work. For each required model artifact,
+state `present`, `absent`, or `not applicable`: weights, tokenizer/configuration, `training_logs/`,
+and the model-card `Training Traces` link. A model is incomplete until every applicable artifact is
+`present`.

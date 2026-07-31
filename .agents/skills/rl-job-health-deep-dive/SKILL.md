@@ -13,6 +13,17 @@ Inspect one job and return a recommendation to its supervisor. Read
 `.agents/ops/coreweave.md` for access and capture procedures and
 `.agents/ops/rl-diagnostics.md` for signal interpretation before probing.
 
+## Diagnostic mode
+
+Declare `MODE: agentic` or `MODE: standard` from the launched configuration before collecting
+mode-specific evidence. Agentic runs use Harbor, Daytona, terminal-bench, or another sandboxed
+agent harness. Standard runs use dataset rows and programmatic rewards without an agent harness.
+Do not infer the mode from whether `trace_jobs/` happens to exist.
+
+Use `infra/rl_cleanup/parse_skyrl_metrics.py --format agentic` for agentic runs and `--format
+standard` for standard runs. A parser that returns no usable metrics is a failed probe; confirm the
+mode and format before classifying the dynamics gate.
+
 ## Role boundary
 
 - Do not create a worktree or edit repository files, configurations, skills, or ops documents.
@@ -39,11 +50,15 @@ unreconciled. Missing evidence is not a conservative `NO-KILL`.
 2. **Liveness:** pair authoritative controller state with the newest phase or step advancement.
 3. **Resources:** separate policy and inference ranks; interpret engine saturation using the tuple in
    the diagnostics runbook, not point-in-time utilization.
-4. **Rollouts:** inspect actual rewards, outputs, verifier results, and exception artifacts.
+4. **Rollouts:** use the mode-specific evidence in the diagnostics runbook. Agentic runs require
+   trial outputs, rewards, verifier results, stop reasons, and exception artifacts. Standard runs
+   use trainer reward metrics and histograms, generation-token metrics, and verifier exceptions in
+   trainer logs; they do not require trial artifacts or a `trace_jobs/` prefix.
 5. **Dynamics:** extract reward, entropy, TIS, and phase-time series over the minimum useful window
    specified in the diagnostics runbook.
-6. **Optional duty cycle:** measure bounded per-trial timings only when attribution between
-   generation, tools, and sandbox lifecycle changes the recommendation.
+6. **Duty cycle:** for agentic runs, optionally measure bounded per-trial timings when attribution
+   between generation, tools, and sandbox lifecycle changes the recommendation. Report `N/A` for
+   standard runs; their `timing/*` phase metrics belong in the dynamics gate.
 
 Each of the four core gates is `PASS`, `FAIL`, or `ERROR`. Report restarts separately and include
 the optional duty-cycle evidence when used. Quote the evidence supporting every classification.
@@ -68,12 +83,14 @@ RL-JOB-HEALTH — <job-id> — captured <timestamp> at <evidence-dir>
 
 VERDICT: KILL | NO-KILL | ERROR
 CONFIDENCE: high | medium | low
+MODE: agentic | standard
 RESTARTS: <count and interpretation>
 
 LIVENESS:  PASS | FAIL | ERROR — <quoted evidence>
 RESOURCES: PASS | FAIL | ERROR — <quoted evidence>
 ROLLOUTS:  PASS | FAIL | ERROR — <quoted evidence>
 DYNAMICS:  PASS | FAIL | ERROR — <metric window and phase table>
+DUTY CYCLE: <bounded agentic evidence | N/A for standard>
 
 REASONING: <load-bearing evidence and mechanism>
 NEXT ACTION: <supervisor job action or implementation handoff>

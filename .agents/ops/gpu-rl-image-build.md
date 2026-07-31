@@ -54,6 +54,10 @@ Architecture is derived from the build host. It selects the Dockerfile, crane/ka
 wheel platform, cache repository, and arm64 tag suffix. Do not override those as an architecture
 selection mechanism.
 
+The driver retries transient registry downloads, filesystem extraction, and pushes within the same
+task. Keep the Iris task retry policy focused on whole-task failures; do not disable the shared cache
+to recover from a transport reset.
+
 Use `WHEEL_SOURCE=wheel-builder` for arm64. On amd64, use `prebuilt-wheelhouse` only when the operator
 supplies an artifact URI and digest whose manifest matches the Dockerfile; otherwise use
 `wheel-builder`. That mode preserves the compiled wheel stage under `wheels-<full-sha><arch-suffix>` and

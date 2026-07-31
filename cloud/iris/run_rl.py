@@ -35,6 +35,7 @@ from cloud.iris.rl_config_translation import (
     apply_context_budget_overrides,
     build_skyrl_hydra_args,
     get_skyrl_command_preview,
+    materialize_rl_config,
     parse_rl_config,
     write_resolved_context_budget,
 )
@@ -187,8 +188,9 @@ class LocalRLRunner:
         """Execute the RL training job. Returns an exit code (0 for success)."""
         self.print_banner()
 
+        rl_config_path = materialize_rl_config(self.config.rl_config_path)
         parsed = parse_rl_config(
-            self.config.rl_config_path,
+            rl_config_path,
             model_override=self.config.model_path,
         )
         parsed, skyrl_overrides = apply_context_budget_overrides(parsed, self.config.skyrl_overrides)
