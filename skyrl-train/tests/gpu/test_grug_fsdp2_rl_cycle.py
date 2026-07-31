@@ -87,7 +87,7 @@ def _config(
     cfg.trainer.policy.model.path = model_path
     cfg.trainer.critic.model.path = ""
     cfg.trainer.strategy = "fsdp2"
-    cfg.trainer.flash_attn = False
+    cfg.trainer.flash_attn = True
     cfg.trainer.attn_backend = "auto"
     cfg.trainer.gradient_checkpointing = True
     cfg.trainer.gradient_checkpointing_use_reentrant = False

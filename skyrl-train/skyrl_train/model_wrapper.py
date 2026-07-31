@@ -129,7 +129,7 @@ def validate_grug_training_options(
     if model_type != GRUG_MOE_MODEL_TYPE:
         return
     unsupported = {
-        "attention backend": attn_implementation != "eager",
+        "attention backend": attn_implementation not in {"eager", "flash_attention_2"},
         "sample packing": use_sample_packing,
         "LoRA": lora_rank > 0,
         "4-bit loading": load_in_4bit,

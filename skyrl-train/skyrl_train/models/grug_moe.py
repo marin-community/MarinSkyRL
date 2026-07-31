@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 NovaSkyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Canonical, correctness-first PyTorch implementation of Grug MoE.
+"""PyTorch Grug MoE policy-training implementation.
 
-The module deliberately uses ordinary PyTorch operations. It is the FSDP2
-training/reference implementation; optimized expert and attention kernels can
-be checked against it later without changing the checkpoint contract.
+The eager attention path remains the correctness reference. The supported
+FlashAttention path preserves the same checkpoint and Snowball semantics
+without materializing dense sequence-by-sequence scores or masks.
 """
 
 from __future__ import annotations
@@ -18,6 +18,16 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel, initialization as init
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+
+try:
+    from flash_attn import flash_attn_func as _flash_attn_func
+    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+except ImportError as error:
+    _FLASH_ATTN_IMPORT_ERROR: ImportError | None = error
+    _flash_attn_func: Any = None
+    _flash_attn_varlen_func: Any = None
+else:
+    _FLASH_ATTN_IMPORT_ERROR = None
 
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
@@ -450,14 +460,48 @@ class GrugMoeAttention(nn.Module):
         scale = self.config.qk_mult * (self.config.qk_mult_long_scale if is_long else 1.0)
         q = q * scale
 
+        attn_implementation = self.config._attn_implementation
+        if attn_implementation == "eager":
+            attn_output, v_for_xsa = self._eager_attention(q, k, v, attention_mask, is_long=is_long)
+        elif attn_implementation == "flash_attention_2":
+            attn_output = self._flash_attention(q, k, v, attention_mask, is_long=is_long)
+            v_for_xsa = self._repeat_value_heads(v)
+        else:
+            raise ValueError(f"unsupported Grug attention backend {attn_implementation!r}")
+
+        dot = (attn_output * v_for_xsa).sum(dim=-1, keepdim=True)
+        v_norm_sq = v_for_xsa.square().sum(dim=-1, keepdim=True)
+        attn_output = attn_output - (dot / (v_norm_sq + 1e-6)) * v_for_xsa
+        gate = 2.0 * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
+        attn_output = attn_output * gate.to(attn_output.dtype)
+        return self.o_proj(attn_output.reshape(batch, seq_len, -1))
+
+    def _repeat_value_heads(self, value: torch.Tensor) -> torch.Tensor:
+        repeats = self.config.num_attention_heads // self.config.num_key_value_heads
+        return value if repeats == 1 else value.repeat_interleave(repeats, dim=2)
+
+    def _eager_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        *,
+        is_long: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         repeats = self.config.num_attention_heads // self.config.num_key_value_heads
         if repeats != 1:
-            k = k.repeat_interleave(repeats, dim=2)
-            v = v.repeat_interleave(repeats, dim=2)
+            key = key.repeat_interleave(repeats, dim=2)
+            value = value.repeat_interleave(repeats, dim=2)
 
-        scores = torch.einsum("bqhd,bkhd->bhqk", q.float() / math.sqrt(self.config.head_dim), k.float())
-        query_pos = torch.arange(seq_len, device=hidden_states.device).view(seq_len, 1)
-        key_pos = torch.arange(seq_len, device=hidden_states.device).view(1, seq_len)
+        seq_len = query.shape[1]
+        scores = torch.einsum(
+            "bqhd,bkhd->bhqk",
+            query.float() / math.sqrt(self.config.head_dim),
+            key.float(),
+        )
+        query_pos = torch.arange(seq_len, device=query.device).view(seq_len, 1)
+        key_pos = torch.arange(seq_len, device=query.device).view(1, seq_len)
         allowed = key_pos <= query_pos
         if not is_long:
             allowed = allowed & (key_pos >= query_pos - (self.config.sliding_window - 1))
@@ -465,15 +509,63 @@ class GrugMoeAttention(nn.Module):
         if attention_mask is not None:
             allowed = allowed & attention_mask[:, None, None, :].to(torch.bool)
         scores = torch.where(allowed, scores, torch.tensor(-1e9, dtype=scores.dtype, device=scores.device))
-        weights = torch.softmax(scores, dim=-1).to(v.dtype)
-        attn_output = torch.einsum("bhqk,bkhd->bqhd", weights, v)
+        weights = torch.softmax(scores, dim=-1).to(value.dtype)
+        return torch.einsum("bhqk,bkhd->bqhd", weights, value), value
 
-        dot = (attn_output * v).sum(dim=-1, keepdim=True)
-        v_norm_sq = v.square().sum(dim=-1, keepdim=True)
-        attn_output = attn_output - (dot / (v_norm_sq + 1e-6)) * v
-        gate = 2.0 * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
-        attn_output = attn_output * gate.to(attn_output.dtype)
-        return self.o_proj(attn_output.reshape(batch, seq_len, -1))
+    def _flash_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        *,
+        is_long: bool,
+    ) -> torch.Tensor:
+        if _FLASH_ATTN_IMPORT_ERROR is not None:
+            raise ImportError(
+                "Grug FlashAttention was requested, but the flash-attn CUDA extension could not be imported"
+            ) from _FLASH_ATTN_IMPORT_ERROR
+        window_size = (-1, -1) if is_long else (self.config.sliding_window - 1, 0)
+        softmax_scale = 1.0 / math.sqrt(self.config.head_dim)
+        if attention_mask is None:
+            return _flash_attn_func(
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=True,
+                window_size=window_size,
+            )
+
+        batch, seq_len = attention_mask.shape
+        valid = attention_mask.to(torch.bool)
+        indices = torch.nonzero(valid.flatten(), as_tuple=False).flatten()
+        lengths = valid.sum(dim=-1, dtype=torch.int32)
+        cu_seqlens = F.pad(lengths.cumsum(dim=0, dtype=torch.int32), (1, 0))
+        flat_query = query.flatten(0, 1)
+        flat_key = key.flatten(0, 1)
+        flat_value = value.flatten(0, 1)
+        unpadded_output = _flash_attn_varlen_func(
+            flat_query.index_select(0, indices),
+            flat_key.index_select(0, indices),
+            flat_value.index_select(0, indices),
+            cu_seqlens,
+            cu_seqlens,
+            seq_len,
+            seq_len,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=window_size,
+        )
+        output = torch.zeros_like(query)
+        output.view(batch * seq_len, self.config.num_attention_heads, self.config.head_dim).index_copy_(
+            0,
+            indices,
+            unpadded_output,
+        )
+        return output
 
 
 class GrugMoeDecoderLayer(nn.Module):
@@ -506,7 +598,7 @@ class GrugMoePreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["GrugMoeDecoderLayer"]
     _supports_sdpa = False
-    _supports_flash_attn = False
+    _supports_flash_attn = True
 
     def _init_weights(self, module: nn.Module) -> None:
         std = self.config.initializer_range
