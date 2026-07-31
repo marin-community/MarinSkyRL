@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -6,6 +7,8 @@ from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.lcb.livecodebench import compute_score
+
+logger = logging.getLogger(__name__)
 
 
 class LCBEnv(BaseTextEnv):
@@ -27,12 +30,8 @@ class LCBEnv(BaseTextEnv):
         except json.JSONDecodeError:
             tests = None
         self.tests = tests if isinstance(tests, list) and tests else None
-
-    def _get_reward(self, action: str) -> float:
         if self.tests is None:
-            return 0.0
-        _, reward = compute_score(action, self.tests)
-        return reward
+            logger.error("lcb: invalid reward_model.ground_truth; scoring 0.")
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         if self.tests is None:

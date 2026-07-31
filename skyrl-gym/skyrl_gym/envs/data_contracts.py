@@ -17,6 +17,7 @@ from skyrl_gym import error
 from skyrl_gym.envs.aime import utils as aime_utils
 from skyrl_gym.envs.gsm8k import utils as gsm8k_utils
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
+from skyrl_gym.envs.lcb.livecodebench import compute_score
 from skyrl_gym.envs.registration import spec
 
 NormalizeGroundTruth = Callable[[Any], str]
@@ -170,8 +171,6 @@ def _normalize_code(ground_truth: Any) -> str:
 
 
 def _code_is_correct(response: str, ground_truth: str) -> bool:
-    from skyrl_gym.envs.lcb.livecodebench import compute_score
-
     _, reward = compute_score(response, json.loads(ground_truth))
     return reward == 1.0
 

@@ -114,7 +114,7 @@ def test_compute_score_under_spawn():
         {"reward_model": {"ground_truth": "[]"}},
     ],
 )
-def test_malformed_reward_model_scores_zero(extras):
+def test_malformed_reward_model_scores_zero(extras, caplog):
     env = skyrl_gym.make(
         "lcb",
         env_config=DictConfig({"env_class": "lcb"}),
@@ -125,3 +125,4 @@ def test_malformed_reward_model_scores_zero(extras):
 
     assert output["reward"] == 0.0
     assert output["metadata"]["verifier_error"] == "invalid reward_model.ground_truth"
+    assert "invalid reward_model.ground_truth; scoring 0" in caplog.text

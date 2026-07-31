@@ -25,6 +25,7 @@ HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
 _DAPO_TRAILING_MARKERS = ("Remember to put your answer", "The last line of your response")
+_NEGATIVE_CODE_PREFLIGHT = "```python\nraise RuntimeError('negative verifier preflight')\n```"
 
 
 PreparedRow = dict[str, Any]
@@ -225,7 +226,7 @@ def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: V
     normalized = contract.validate_example(
         verification_info,
         _fenced_python(solution),
-        "```python\nraise RuntimeError('negative verifier preflight')\n```",
+        _NEGATIVE_CODE_PREFLIGHT,
     )
     return {
         "data_source": source.dataset_id,
@@ -260,7 +261,7 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
     normalized = contract.validate_example(
         input_output,
         _fenced_python(solutions[0]),
-        "```python\nraise RuntimeError('negative verifier preflight')\n```",
+        _NEGATIVE_CODE_PREFLIGHT,
     )
     return {
         "data_source": source.dataset_id,
