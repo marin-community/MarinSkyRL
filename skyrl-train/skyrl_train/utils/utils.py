@@ -1145,7 +1145,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     except (TypeError, ValueError):
         _cfg_nccl_timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
     env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(_cfg_nccl_timeout)
-    _requested_heartbeat_timeout = get_nccl_monitor_heartbeat_timeout()
+    _requested_heartbeat_timeout = get_nccl_monitor_heartbeat_timeout(
+        os.environ.get("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC")
+    )
     _monitor_heartbeat_timeout = min(_requested_heartbeat_timeout, _cfg_nccl_timeout)
     if _monitor_heartbeat_timeout != _requested_heartbeat_timeout:
         logger.warning(
