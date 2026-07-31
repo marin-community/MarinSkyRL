@@ -1,5 +1,11 @@
 import asyncio
+import gzip
+import hashlib
+import io
 import os
+import shutil
+import tempfile
+import time
 from dataclasses import dataclass
 
 from loguru import logger
@@ -10,7 +16,6 @@ import torch.distributed
 from transformers import AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
-import io
 
 try:
     # for torch 2.5+
@@ -37,6 +42,7 @@ from skyrl_train.weight_sync.weight_extractor import (
     weight_sync_dtype,
 )
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+from skyrl_train.workers.worker_utils import BatchIterator
 
 
 @dataclass(frozen=True)
@@ -371,6 +377,450 @@ class FSDPWeightExtractor(WeightExtractor):
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
+    @staticmethod
+    def _grug_benchmark_local_tensor(tensor):
+        """Return the rank-local storage for a plain tensor or DTensor."""
+
+        return tensor.to_local() if isinstance(tensor, DTensor) else tensor
+
+    @classmethod
+    def _grug_benchmark_state_hash(cls, state):
+        """Hash exact local model state without gathering any FSDP shards."""
+
+        digest = hashlib.sha256()
+        for name, tensor in sorted(state.items()):
+            local = cls._grug_benchmark_local_tensor(tensor).detach().to("cpu").contiguous()
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(local.dtype).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(str(tuple(local.shape)).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(local.view(torch.uint8).numpy().tobytes())
+        return digest.hexdigest()
+
+    def _grug_benchmark_phase(self, action: str, name: str):
+        """Record benchmark-only CUDA events without synchronizing the loop."""
+
+        events = getattr(self, "_grug_benchmark_phase_events", None)
+        if events is None:
+            return
+        if action == "begin":
+            if getattr(self, "_grug_benchmark_open_phase", None) is not None:
+                raise RuntimeError("nested Grug benchmark phases are not supported")
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            annotation = None
+            if getattr(self, "_grug_benchmark_profile_enabled", False):
+                annotation = torch.profiler.record_function(f"grug::{name}")
+                annotation.__enter__()
+            self._grug_benchmark_open_phase = (name, event, annotation)
+            return
+        if action != "end":
+            raise ValueError(f"unknown Grug benchmark phase action: {action}")
+        opened = getattr(self, "_grug_benchmark_open_phase", None)
+        if opened is None or opened[0] != name:
+            raise RuntimeError(f"Grug benchmark phase mismatch: open={opened}, closing={name}")
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        events.setdefault(name, []).append((opened[1], event))
+        if opened[2] is not None:
+            opened[2].__exit__(None, None, None)
+        self._grug_benchmark_open_phase = None
+
+    def _grug_benchmark_start_profile(self, enabled: bool):
+        """Start one rank-zero profiler for a bounded, non-headline run."""
+
+        self._grug_benchmark_profile_enabled = bool(enabled and torch.distributed.get_rank() == 0)
+        if not self._grug_benchmark_profile_enabled:
+            return None
+        profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=False,
+            profile_memory=True,
+            with_stack=False,
+        )
+        profiler.__enter__()
+        return profiler
+
+    def _grug_benchmark_finish_profile(self, profiler):
+        """Stop and return a compressed Chrome trace from rank zero."""
+
+        self._grug_benchmark_profile_enabled = False
+        if profiler is None:
+            return None
+        profiler.__exit__(None, None, None)
+        with tempfile.TemporaryDirectory(prefix="grug-torch-profile-") as directory:
+            trace_path = os.path.join(directory, "trace.json")
+            compressed_path = trace_path + ".gz"
+            profiler.export_chrome_trace(trace_path)
+            with open(trace_path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=1) as target:
+                shutil.copyfileobj(source, target, length=16 * 1024 * 1024)
+            with open(compressed_path, "rb") as source:
+                return source.read()
+
+    def grug_benchmark_stage_batch(self, batch: TrainingInputBatch):
+        """Stage one rank-local fixed replay shard outside the timed update.
+
+        The benchmark driver sends one already-sharded batch directly to every
+        policy actor. The stored batch is the exact shard that ``ppo_train``
+        consumes. Per-field hashes prove row identity without moving it again.
+        """
+
+        self._grug_benchmark_batch = batch
+        field_hashes = {}
+        field_shapes = {}
+        for name, tensor in sorted(batch.items()):
+            if tensor is None:
+                field_hashes[name] = None
+                field_shapes[name] = None
+                continue
+            cpu_tensor = tensor.detach().to("cpu").contiguous()
+            field_hashes[name] = hashlib.sha256(cpu_tensor.numpy().tobytes()).hexdigest()
+            field_shapes[name] = list(cpu_tensor.shape)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "batch_size": int(batch.batch_size),
+            "field_hashes": field_hashes,
+            "field_shapes": field_shapes,
+            "allocated_tokens": int(batch["attention_mask"].numel()),
+            "nonpad_tokens": int(batch["attention_mask"].sum().item()),
+            "loss_tokens": int(batch["loss_mask"].sum().item()),
+        }
+
+    def grug_benchmark_reset_peak_memory(self):
+        """Reset CUDA peak accounting after model and replay staging."""
+
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+        }
+
+    def grug_benchmark_warmup_and_restore(self):
+        """Warm kernels and optimizer allocation, then restore the exact start state.
+
+        The timed update must not include lazy optimizer-state allocation or first-use
+        kernels.  A one-row production training step warms both.  We snapshot each
+        rank's local FSDP shard, then restore it byte-for-byte, reset every Adam state
+        tensor to zero (the mathematical state before AdamW step 1), restore the LR
+        scheduler and RNG, and verify the model-state hash.
+        """
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before warmup")
+        if self.cfg.trainer.strategy != "fsdp2":
+            raise RuntimeError("the fixed-replay warmup restoration is implemented only for FSDP2")
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        state = self.model.state_dict()
+        state_hash_before = self._grug_benchmark_state_hash(state)
+        state_snapshot = {
+            name: self._grug_benchmark_local_tensor(tensor).detach().to("cpu", copy=True)
+            for name, tensor in state.items()
+        }
+        scheduler_state = self.scheduler.state_dict()
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state()
+
+        warm_batch = self._grug_benchmark_batch[:1]
+        experience = BatchIterator.batch_to_experience(warm_batch)
+        causal_lm = self._grug_causal_lm()
+        if causal_lm is None:
+            raise RuntimeError("the fixed-replay benchmark requires a Grug policy model")
+        self._begin_grug_query_bias_window(causal_lm, int(warm_batch["attention_mask"].sum().item()))
+        warm_status = self.training_step(experience, warm_batch.metadata.get("global_step", 0), 0, 1)
+        if not self.strategy.last_optimizer_step_succeeded:
+            raise RuntimeError("the warmup optimizer step was skipped")
+        self.strategy.all_reduce(warm_status)
+        torch.cuda.synchronize()
+
+        with torch.no_grad():
+            restored_state = self.model.state_dict()
+            if set(restored_state) != set(state_snapshot):
+                raise RuntimeError("model state keys changed during benchmark warmup")
+            for name, tensor in restored_state.items():
+                local = self._grug_benchmark_local_tensor(tensor)
+                local.copy_(state_snapshot[name].to(device=local.device, dtype=local.dtype))
+
+        optimizer_state_tensors = 0
+        optimizer_state_numel = 0
+        for parameter_state in self.optimizer.state.values():
+            for key, value in parameter_state.items():
+                if torch.is_tensor(value):
+                    value.zero_()
+                    optimizer_state_tensors += 1
+                    optimizer_state_numel += value.numel()
+                elif isinstance(value, (int, float)):
+                    parameter_state[key] = type(value)(0)
+                else:
+                    raise TypeError(f"cannot reset optimizer state {key!r} of type {type(value)}")
+        if optimizer_state_tensors == 0:
+            raise RuntimeError("warmup did not materialize optimizer state")
+
+        self.scheduler.load_state_dict(scheduler_state)
+        self.optimizer.zero_grad(set_to_none=True)
+        self.strategy.last_optimizer_step_succeeded = False
+        torch.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state)
+        for name in (
+            "_grug_query_bias_accumulator",
+            "_grug_query_bias_candidate_count",
+            "_ratio_diag_acc",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        state_hash_after = self._grug_benchmark_state_hash(self.model.state_dict())
+        if state_hash_after != state_hash_before:
+            raise RuntimeError(
+                "warmup restoration changed the local model state: "
+                f"before={state_hash_before}, after={state_hash_after}"
+            )
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash_before": state_hash_before,
+            "state_hash_after": state_hash_after,
+            "optimizer_state_tensors": optimizer_state_tensors,
+            "optimizer_state_numel": optimizer_state_numel,
+            "scheduler_last_epoch": int(self.scheduler.last_epoch),
+        }
+
+    def _grug_benchmark_matched_ce(self, batch: TrainingInputBatch):
+        """Run the benchmark's common token-weighted next-token CE backward.
+
+        The replay ``loss_mask`` is aligned to SkyRL's action-log-probability
+        slice.  Multiplying each rank-local loss sum by world_size/global_tokens
+        compensates for FSDP's DP gradient averaging, so the resulting gradient
+        is the gradient of one global token mean over the fixed logical batch.
+        This intentionally omits PPO diagnostics, entropy, Grug query-bias
+        capture, gradient clipping, and the optimizer boundary.
+        """
+
+        global_loss_tokens = int(batch.metadata["grug_benchmark_global_loss_tokens"])
+        if global_loss_tokens <= 0:
+            raise RuntimeError("matched CE needs a positive global loss-token count")
+
+        world_size = torch.distributed.get_world_size()
+        local_loss_sum = torch.zeros((), dtype=torch.float64, device=torch.cuda.current_device())
+        local_loss_tokens = torch.zeros((), dtype=torch.int64, device=torch.cuda.current_device())
+        microbatches = 0
+        self.model.train()
+        for experience in BatchIterator(batch, sample_batch_size=1, drop_last=False):
+            experience.to_device(torch.cuda.current_device())
+            phase = getattr(self, "_grug_benchmark_phase", None)
+            if phase is not None:
+                phase("begin", "matched_model_forward")
+            with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                action_log_probs = self.model(
+                    experience.sequences,
+                    experience.num_actions,
+                    attention_mask=experience.attention_mask,
+                    temperature=1.0,
+                    return_output=False,
+                    compute_entropy=False,
+                    rollout_routed_experts=None,
+                )
+                if phase is not None:
+                    phase("end", "matched_model_forward")
+                    phase("begin", "matched_ce_loss")
+                loss_mask = experience.loss_mask.to(torch.float32)
+                microbatch_loss_sum = (-action_log_probs.to(torch.float32) * loss_mask).sum()
+                loss = microbatch_loss_sum * (world_size / global_loss_tokens)
+            if phase is not None:
+                phase("end", "matched_ce_loss")
+                phase("begin", "matched_backward")
+            self.strategy.backward(loss, self.model, self.optimizer)
+            if phase is not None:
+                phase("end", "matched_backward")
+            teardown_replay = getattr(self.model, "teardown_router_replay", None)
+            if teardown_replay is not None:
+                teardown_replay()
+            local_loss_sum += microbatch_loss_sum.detach().to(torch.float64)
+            local_loss_tokens += loss_mask.sum(dtype=torch.int64)
+            microbatches += 1
+
+        return local_loss_sum, int(local_loss_tokens.item()), microbatches
+
+    def grug_benchmark_warmup_matched_ce(self):
+        """Warm the common forward/backward path without changing model state."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before warmup")
+        if self.cfg.trainer.strategy != "fsdp2":
+            raise RuntimeError("the fixed-replay warmup is implemented only for FSDP2")
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        state_hash_before = self._grug_benchmark_state_hash(self.model.state_dict())
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state()
+        self.optimizer.zero_grad(set_to_none=True)
+        warm_batch = self._grug_benchmark_batch[:1]
+        _, warm_loss_tokens, microbatches = self._grug_benchmark_matched_ce(warm_batch)
+        if warm_loss_tokens <= 0 or microbatches != 1:
+            raise RuntimeError("matched CE warmup did not exercise one nonempty microbatch")
+        gradient_tensors = sum(parameter.grad is not None for parameter in self.model.parameters())
+        if gradient_tensors == 0:
+            raise RuntimeError("matched CE warmup produced no gradients")
+        self.optimizer.zero_grad(set_to_none=True)
+        torch.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        state_hash_after = self._grug_benchmark_state_hash(self.model.state_dict())
+        if state_hash_after != state_hash_before:
+            raise RuntimeError(
+                f"matched CE warmup changed the local model state: before={state_hash_before}, after={state_hash_after}"
+            )
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash_before": state_hash_before,
+            "state_hash_after": state_hash_after,
+            "gradient_tensors": gradient_tensors,
+            "warmup_loss_tokens": warm_loss_tokens,
+        }
+
+    def grug_benchmark_identity(self):
+        """Return the exact policy path selected by this benchmark rank."""
+
+        config = getattr(self.model.model, "config", None)
+        if getattr(config, "model_type", None) != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("the fixed-replay benchmark requires a Grug policy model")
+        first_layer = self.model.model.model.layers[0]
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "model_type": config.model_type,
+            "model_revision": getattr(config, "_commit_hash", None),
+            "cuda_device_name": torch.cuda.get_device_name(),
+            "cuda_total_memory_bytes": int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory),
+            "cuda_compute_capability": list(torch.cuda.get_device_capability()),
+            "attention_backend": config._attn_implementation,
+            "attention_module": type(first_layer.self_attn).__qualname__,
+            "moe_module": type(first_layer.mlp).__qualname__,
+            "strategy": type(self.strategy).__qualname__,
+            "optimizer": type(self.optimizer).__qualname__,
+            "scheduler": type(self.scheduler).__qualname__,
+            "gradient_checkpointing": bool(self.cfg.trainer.gradient_checkpointing),
+            "sample_packing": bool(self.cfg.trainer.use_sample_packing),
+            "fsdp_size": int(self.cfg.trainer.policy.fsdp_config.fsdp_size),
+            "expert_parallel_size": int(self.cfg.trainer.policy.fsdp_config.expert_model_parallel_size),
+            "grouped_moe": bool(self.cfg.trainer.policy.fsdp_config.moe_grouped_gemm),
+            "micro_batch_size": int(self.cfg.trainer.micro_train_batch_size_per_gpu),
+            "mini_batch_size_per_gpu": int(self.policy_mini_batch_size_per_gpu),
+        }
+
+    def grug_benchmark_run_staged_ppo(self, profile: bool = False):
+        """Time one production PPO update on the previously staged replay shard."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before the timed update")
+        self._grug_benchmark_phase_events = {}
+        self._grug_benchmark_open_phase = None
+        profiler = self._grug_benchmark_start_profile(profile)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        output = self.ppo_train(self._grug_benchmark_batch)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        if self._grug_benchmark_open_phase is not None:
+            raise RuntimeError(f"unclosed Grug benchmark phase: {self._grug_benchmark_open_phase[0]}")
+        phase_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in spans) / 1000.0
+            for name, spans in self._grug_benchmark_phase_events.items()
+        }
+        self._grug_benchmark_phase_events = None
+        profile_artifact_gzip = self._grug_benchmark_finish_profile(profiler)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "elapsed_seconds": elapsed,
+            "phase_seconds": phase_seconds,
+            "train_status": output.metadata["train_status"],
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+            "profile_artifact_gzip": profile_artifact_gzip,
+        }
+
+    def grug_benchmark_run_staged_matched_ce(self, profile: bool = False):
+        """Time the common fixed-replay CE forward and backward, without Adam."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before the timed update")
+        self._grug_benchmark_phase_events = {}
+        self._grug_benchmark_open_phase = None
+        profiler = self._grug_benchmark_start_profile(profile)
+        self.optimizer.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        local_loss_sum, local_loss_tokens, microbatches = self._grug_benchmark_matched_ce(self._grug_benchmark_batch)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        if self._grug_benchmark_open_phase is not None:
+            raise RuntimeError(f"unclosed Grug benchmark phase: {self._grug_benchmark_open_phase[0]}")
+        phase_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in spans) / 1000.0
+            for name, spans in self._grug_benchmark_phase_events.items()
+        }
+        self._grug_benchmark_phase_events = None
+        profile_artifact_gzip = self._grug_benchmark_finish_profile(profiler)
+        peak_allocated_bytes = int(torch.cuda.max_memory_allocated())
+        peak_reserved_bytes = int(torch.cuda.max_memory_reserved())
+
+        gradient_tensors = 0
+        gradient_numel = 0
+        nonfinite_gradient_tensors = 0
+        for parameter in self.model.parameters():
+            if parameter.grad is None:
+                continue
+            gradient = self._grug_benchmark_local_tensor(parameter.grad)
+            gradient_tensors += 1
+            gradient_numel += gradient.numel()
+            if not bool(torch.isfinite(gradient).all().item()):
+                nonfinite_gradient_tensors += 1
+        self.optimizer.zero_grad(set_to_none=True)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "elapsed_seconds": elapsed,
+            "phase_seconds": phase_seconds,
+            "local_loss_sum": float(local_loss_sum.item()),
+            "local_loss_tokens": local_loss_tokens,
+            "microbatches": microbatches,
+            "gradient_tensors": gradient_tensors,
+            "gradient_numel": gradient_numel,
+            "nonfinite_gradient_tensors": nonfinite_gradient_tensors,
+            "peak_allocated_bytes": peak_allocated_bytes,
+            "peak_reserved_bytes": peak_reserved_bytes,
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+            "profile_artifact_gzip": profile_artifact_gzip,
+        }
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
@@ -662,7 +1112,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
         return out
 
-    def init_model(self, model_path, num_training_steps: int = None):
+    def init_model(self, model_path, num_training_steps: int = None, model_revision: str | None = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
@@ -686,7 +1136,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            revision=model_revision,
+        )
         if getattr(model_config, "model_type", None) == GRUG_MOE_MODEL_TYPE:
             if getattr(strategy, "ep_size", 1) != 1:
                 raise ValueError("Grug FSDP2 policy training requires expert_model_parallel_size=1")
@@ -720,6 +1174,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 cp_mesh=self.cp_mesh,
                 cp_rotate_method=str(self.cfg.trainer.policy.fsdp_config.get("cp_rotate_method", "allgather")),
                 training_strategy=self.cfg.trainer.strategy,
+                revision=model_revision,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
