@@ -2,9 +2,13 @@
 
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import types
+from contextlib import contextmanager
+from datetime import timedelta
 
+import torch.distributed as dist
 from skyrl_train.config.utils import get_default_config
 from omegaconf import OmegaConf
 
@@ -49,6 +53,25 @@ def example_dummy_config():
     OmegaConf.update(cfg, "generator", generator_overrides)
 
     return cfg
+
+
+@contextmanager
+def gloo_process_group(rank: int, world_size: int, port: int, *, timeout_seconds: int = 10):
+    """Initialize and reliably tear down a local Gloo process group."""
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    dist.init_process_group(
+        backend="gloo",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=timeout_seconds),
+    )
+    try:
+        yield
+    finally:
+        dist.destroy_process_group()
 
 
 def stub_megatron_modules() -> None:

@@ -1097,9 +1097,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # async error handling alone cannot recover a wedged watchdog thread.
     #
     # These are propagated to EVERY Ray worker (policy/ref/inference) via the
-    # ray runtime env, the same path as RAY_USE_UVLOOP above. The flight recorder
-    # is diagnostic; monitoring is an active failure bound that terminates a
-    # worker whose watchdog stops heartbeating. (NCCL_DEBUG / NCCL_DEBUG_SUBSYS are forced to INFO AFTER
+    # ray runtime env, the same path as RAY_USE_UVLOOP above. (NCCL_DEBUG /
+    # NCCL_DEBUG_SUBSYS are forced to INFO AFTER
     # the launcher-env forwarding loop below -- see the override there -- because
     # the OT-Agent launcher exports NCCL_DEBUG=WARN, which the forwarding loop
     # would otherwise copy in and clobber an INFO set here.)
