@@ -7,6 +7,7 @@ import math
 import random
 import shutil
 import tempfile
+import warnings
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,7 @@ from infra.rl_data.sources import PreparedRow, Source
 
 TokenCount = Callable[[str], int]
 ParquetWriter = Callable[[list[PreparedRow], Path], None]
-PREPARATION_VERSION = 1
+PREPARATION_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class PreparationOptions:
     seed: int = 42
     subsample_n: int | None = None
     unique_cap: int | None = None
+    minimum_yield_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -97,19 +99,28 @@ def prepare_artifact(
         raise ValueError("max_prompt_tokens must be positive.")
     if options.minimum_unique_rows <= 0:
         raise ValueError("minimum_unique_rows must be positive.")
+    if options.minimum_yield_fraction is not None and not 0 <= options.minimum_yield_fraction <= 1:
+        raise ValueError("minimum_yield_fraction must be between 0 and 1.")
     if options.artifact_split not in {"train", "validation"}:
         raise ValueError("artifact_split must be 'train' or 'validation'.")
     if options.unique_cap is not None and options.unique_cap < options.minimum_unique_rows:
         raise ValueError("unique_cap cannot be smaller than minimum_unique_rows.")
 
     raw_rows = 0
+    converted_rows = 0
+    conversion_failures: list[dict[str, int | str]] = []
     unique_rows: list[PreparedRow] = []
     seen_prompts: set[str] = set()
     for index, example in enumerate(examples):
         raw_rows += 1
-        row = source.prepare_row(example, index, contract)
-        row["extra_info"]["split"] = options.artifact_split
-        _validate_row(row, source)
+        try:
+            row = source.prepare_row(example, index, contract)
+            row["extra_info"]["split"] = options.artifact_split
+            _validate_row(row, source)
+        except (TypeError, ValueError) as error:
+            conversion_failures.append({"index": index, "error": f"{type(error).__name__}: {error}"})
+            continue
+        converted_rows += 1
         prompt = _prompt_content(row)
         if prompt in seen_prompts:
             continue
@@ -118,7 +129,29 @@ def prepare_artifact(
         if options.unique_cap is not None and len(unique_rows) >= options.unique_cap:
             break
 
+    if conversion_failures and unique_rows:
+        indices = [failure["index"] for failure in conversion_failures]
+        warnings.warn(
+            f"{source.name} skipped {len(conversion_failures)} of {raw_rows} rows after conversion failures; "
+            f"indices={indices}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    yield_fraction = converted_rows / raw_rows if raw_rows else 0.0
+    if options.minimum_yield_fraction is not None and yield_fraction < options.minimum_yield_fraction:
+        raise ValueError(
+            f"{source.name} conversion yield {converted_rows}/{raw_rows} ({yield_fraction:.1%}) is below "
+            f"minimum_yield_fraction={options.minimum_yield_fraction}; "
+            f"failed indices={[failure['index'] for failure in conversion_failures]}."
+        )
+
     if not unique_rows:
+        if conversion_failures:
+            first = conversion_failures[0]
+            raise ValueError(
+                f"{source.name} produced no unique rows; first conversion failure at row "
+                f"{first['index']}: {first['error']}."
+            )
         raise ValueError(f"{source.name} produced no unique rows.")
     if len(unique_rows) < options.minimum_unique_rows:
         raise ValueError(
@@ -160,10 +193,18 @@ def prepare_artifact(
             "subsample_n": options.subsample_n,
             "max_prompt_tokens": options.max_prompt_tokens,
             "minimum_unique_rows": options.minimum_unique_rows,
+            "minimum_yield_fraction": options.minimum_yield_fraction,
             "unique_cap": options.unique_cap,
             "artifact_split": options.artifact_split,
         },
-        "counts": {"raw_rows": raw_rows, "unique_rows": len(unique_rows), "emitted_rows": len(rows)},
+        "counts": {
+            "raw_rows": raw_rows,
+            "converted_rows": converted_rows,
+            "malformed_rows_skipped": len(conversion_failures),
+            "unique_rows": len(unique_rows),
+            "emitted_rows": len(rows),
+        },
+        "conversion_failures": conversion_failures,
         "prompt_tokens": token_summary,
         "verification": source.verification,
     }

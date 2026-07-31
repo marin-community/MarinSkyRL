@@ -12,6 +12,7 @@ from infra.rl_data.sources import (
     hh_rlhf_source,
     kto_mix_source,
     openscience_source,
+    rlvr_math_source,
     rlvr_ifeval_source,
     verifiable_code_source,
 )
@@ -34,6 +35,70 @@ class FakeContract:
         if normalized not in positive_response or negative_response:
             raise ValueError("invalid verifier examples")
         return normalized
+
+
+def test_preparation_skips_a_majority_of_malformed_rows_with_provenance() -> None:
+    examples = [
+        {"messages": [{"role": "user", "content": "Question: bad one"}], "ground_truth": ""},
+        {"messages": [{"role": "user", "content": "Question: 2 + 2"}], "ground_truth": "4"},
+        {"messages": [{"role": "user", "content": "Question: bad two"}], "ground_truth": ""},
+    ]
+
+    with pytest.warns(UserWarning, match=r"skipped 2 of 3 rows"):
+        artifact = prepare_artifact(
+            rlvr_math_source(),
+            examples,
+            FakeContract("aime", " Answer: \\boxed{ANSWER}"),
+            token_count=lambda text: len(text.split()),
+            options=PreparationOptions(source_revision="fixture", max_prompt_tokens=20, minimum_unique_rows=1),
+        )
+
+    assert len(artifact.rows) == 1
+    assert artifact.provenance["counts"]["malformed_rows_skipped"] == 2
+    assert artifact.provenance["conversion_failures"] == [
+        {"index": 0, "error": "ValueError: empty ground truth"},
+        {"index": 2, "error": "ValueError: empty ground truth"},
+    ]
+
+
+def test_preparation_can_require_a_minimum_conversion_yield() -> None:
+    examples = [
+        {"messages": [{"role": "user", "content": "Question: bad one"}], "ground_truth": ""},
+        {"messages": [{"role": "user", "content": "Question: 2 + 2"}], "ground_truth": "4"},
+        {"messages": [{"role": "user", "content": "Question: bad two"}], "ground_truth": ""},
+    ]
+
+    with pytest.warns(UserWarning, match=r"skipped 2 of 3 rows"):
+        with pytest.raises(ValueError, match=r"conversion yield 1/3 .* below minimum_yield_fraction=0.5"):
+            prepare_artifact(
+                rlvr_math_source(),
+                examples,
+                FakeContract("aime", " Answer: \\boxed{ANSWER}"),
+                token_count=lambda text: len(text.split()),
+                options=PreparationOptions(
+                    source_revision="fixture",
+                    max_prompt_tokens=20,
+                    minimum_unique_rows=1,
+                    minimum_yield_fraction=0.5,
+                ),
+            )
+
+
+@pytest.mark.parametrize("minimum_yield_fraction", [-0.01, 1.01])
+def test_preparation_rejects_an_invalid_minimum_yield_fraction(minimum_yield_fraction) -> None:
+    with pytest.raises(ValueError, match="minimum_yield_fraction must be between 0 and 1"):
+        prepare_artifact(
+            rlvr_math_source(),
+            [{"messages": [{"role": "user", "content": "Question: 2 + 2"}], "ground_truth": "4"}],
+            FakeContract("aime", " Answer: \\boxed{ANSWER}"),
+            token_count=lambda text: len(text.split()),
+            options=PreparationOptions(
+                source_revision="fixture",
+                max_prompt_tokens=20,
+                minimum_unique_rows=1,
+                minimum_yield_fraction=minimum_yield_fraction,
+            ),
+        )
 
 
 class SchemaOnlyCodeContract:
@@ -84,7 +149,13 @@ def test_dapo_preparation_strips_boilerplate_deduplicates_and_records_provenance
             "extra_info": {"split": "train", "index": 0},
         }
     ]
-    assert artifact.provenance["counts"] == {"raw_rows": 2, "unique_rows": 1, "emitted_rows": 1}
+    assert artifact.provenance["counts"] == {
+        "raw_rows": 2,
+        "converted_rows": 2,
+        "malformed_rows_skipped": 0,
+        "unique_rows": 1,
+        "emitted_rows": 1,
+    }
     assert artifact.provenance["verification"] == "two_sided"
 
 

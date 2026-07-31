@@ -31,6 +31,7 @@ def _options(args: argparse.Namespace, source_name: str, revision: str) -> Prepa
         seed=args.seed,
         subsample_n=args.subsample_n,
         unique_cap=unique_cap,
+        minimum_yield_fraction=args.minimum_yield_fraction,
     )
 
 
@@ -46,6 +47,11 @@ def main() -> None:
     parser.add_argument("--tokenizer", required=True, help="Tokenizer used by the planned training run.")
     parser.add_argument("--max-prompt-tokens", type=int, required=True)
     parser.add_argument("--minimum-unique-rows", type=int)
+    parser.add_argument(
+        "--minimum-yield-fraction",
+        type=float,
+        help="Optional minimum fraction of source rows that must convert successfully (0 to 1).",
+    )
     parser.add_argument("--unique-cap", type=int, help="Stop streaming after this many unique rows.")
     parser.add_argument("--subsample-n", type=int, help="Optional deterministic train-row cap recorded in provenance.")
     parser.add_argument("--seed", type=int, default=42)
