@@ -1,4 +1,11 @@
-from infra.rl_analysis.training_metrics import parse_training_metrics
+from infra.rl_analysis.training_metrics import (
+    ENTROPY_KEYS,
+    GRAD_NORM_KEYS,
+    POLICY_LOSS_KEYS,
+    REWARD_KEYS,
+    metric_value,
+    parse_training_metrics_result,
+)
 from scripts.iris.watch_coreweave_rl import parse_metrics
 
 
@@ -14,15 +21,15 @@ def test_parse_training_metrics_extracts_standard_rl_status_fields() -> None:
         ]
     )
 
-    records = parse_training_metrics(log)
+    records = parse_training_metrics_result(log).records
 
     assert len(records) == 1
     assert records[0].step == 7
     assert records[0].metrics["trainer/global_step"] == 7
-    assert records[0].reward == -0.9194
-    assert records[0].policy_loss == 2.77e-09
-    assert records[0].grad_norm == 0.0371
-    assert records[0].entropy == 1.178
+    assert metric_value(records[0].metrics, *REWARD_KEYS) == -0.9194
+    assert metric_value(records[0].metrics, *POLICY_LOSS_KEYS) == 2.77e-09
+    assert metric_value(records[0].metrics, *GRAD_NORM_KEYS) == 0.0371
+    assert metric_value(records[0].metrics, *ENTROPY_KEYS) == 1.178
 
 
 def test_watcher_uses_the_shared_latest_training_record(tmp_path) -> None:

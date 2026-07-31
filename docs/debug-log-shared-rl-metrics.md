@@ -7,9 +7,9 @@ step, reward, policy loss, and gradient norm for standard and agentic jobs.
 
 The watcher owns a one-record `WANDB_MIRROR` parser and metric aliases, while
 `infra.rl_cleanup.parse_skyrl_metrics` owns a separate standard-run parser. The offline
-`infra.rl_analysis` pipeline shells out to the latter. The live job cited in the report had
-not emitted a completed step when the status table was captured; its first complete
-`WANDB_MIRROR` record appeared later and contains all four requested fields.
+`infra.rl_analysis` pipeline shells out to the latter. Before a job emits its first completed
+training event, the watcher can report progress only from the progress-bar fallback; a
+complete event carries the status fields.
 
 ## Hypothesis 1
 

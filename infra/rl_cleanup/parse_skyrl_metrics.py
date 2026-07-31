@@ -40,7 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from infra.rl_analysis.training_metrics import parse_training_metrics_result
+from infra.rl_analysis.training_metrics import parse_training_metrics_result, strip_ansi
 
 
 @dataclass(frozen=True)
@@ -58,12 +58,6 @@ class CheckpointSelection:
 class CheckpointInventory:
     available_exports: list[int]
     cap_step: int | None
-
-
-def strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
-    return ansi_pattern.sub("", text)
 
 
 def extract_metrics_blocks(log_content: str) -> list[dict[str, Any]]:
@@ -162,12 +156,10 @@ def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
     """
     Extract per-step training metrics from a STANDARD (non-agentic) GRPO log.
 
-    Standard SkyRL runs with logger=console emit one line per train step of the form:
+    Standard SkyRL runs with logger=console emit one JSON event per train step:
         (skyrl_entrypoint pid=...)<ANSI> ... WANDB_MIRROR kind=train step=N metrics={...}<ANSI>
-    where the metrics dict is DOUBLE-QUOTED JSON. We strip ANSI codes + the Ray
-    actor prefix, then json.loads the dict. ALL present keys are kept (no
-    hardcoded pass@k key — standard runs use reward/avg_pass_at_16, but the
-    suffix is n_samples_per_prompt-dependent).
+    Parsing is shared with the live Iris watcher. All present keys are retained;
+    the pass@k suffix remains dependent on n_samples_per_prompt.
 
     Returns a list of dicts (one per train step), each carrying every key in the JSON dict
     (e.g. trainer/global_step, reward/avg_raw_reward, reward/avg_pass_at_*, policy/policy_entropy,

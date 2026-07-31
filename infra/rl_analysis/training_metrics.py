@@ -32,22 +32,6 @@ class TrainingMetricRecord:
     step: int
     metrics: dict[str, Any]
 
-    @property
-    def reward(self) -> Any | None:
-        return metric_value(self.metrics, *REWARD_KEYS)
-
-    @property
-    def policy_loss(self) -> Any | None:
-        return metric_value(self.metrics, *POLICY_LOSS_KEYS)
-
-    @property
-    def grad_norm(self) -> Any | None:
-        return metric_value(self.metrics, *GRAD_NORM_KEYS)
-
-    @property
-    def entropy(self) -> Any | None:
-        return metric_value(self.metrics, *ENTROPY_KEYS)
-
 
 @dataclass(frozen=True)
 class TrainingMetricsParseResult:
@@ -55,14 +39,19 @@ class TrainingMetricsParseResult:
     malformed_lines: int
 
 
-def parse_training_metrics_result(log_content: str, *, kind: str = "train") -> TrainingMetricsParseResult:
-    """Parse all JSON ``WANDB_MIRROR`` events of ``kind`` from a SkyRL log."""
+def strip_ansi(text: str) -> str:
+    """Remove terminal color escapes from log text."""
+    return _ANSI_PATTERN.sub("", text)
+
+
+def parse_training_metrics_result(log_content: str) -> TrainingMetricsParseResult:
+    """Parse all JSON training ``WANDB_MIRROR`` events from a SkyRL log."""
     records: list[TrainingMetricRecord] = []
     malformed_lines = 0
     for raw_line in log_content.splitlines():
-        line = _ANSI_PATTERN.sub("", raw_line)
+        line = strip_ansi(raw_line)
         match = _MIRROR_PREFIX.search(line)
-        if match is None or match.group("kind") != kind:
+        if match is None or match.group("kind") != "train":
             continue
         try:
             metrics = json.loads(line[match.end() :].strip())
@@ -76,8 +65,3 @@ def parse_training_metrics_result(log_content: str, *, kind: str = "train") -> T
         metrics.setdefault("trainer/global_step", step)
         records.append(TrainingMetricRecord(step=step, metrics=metrics))
     return TrainingMetricsParseResult(tuple(records), malformed_lines)
-
-
-def parse_training_metrics(log_content: str, *, kind: str = "train") -> list[TrainingMetricRecord]:
-    """Parse structured training events, omitting malformed event lines."""
-    return list(parse_training_metrics_result(log_content, kind=kind).records)
