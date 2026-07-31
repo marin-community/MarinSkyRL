@@ -22,12 +22,10 @@ a visible warning, and the CLI option.
 
 ## Results
 
-Both regression tests failed before the change: the first malformed row aborted conversion
-and `PreparationOptions` had no yield control. After the change, the focused preparation
-suite passes 21/21. Majority-malformed input emits a warning and produces one valid row
-with failure details in provenance; the same input fails when a 50% minimum yield is
-requested. Existing all-invalid cases remain hard failures and retain their original
-diagnostic cause.
+Regression coverage establishes two behaviors. Majority-malformed input emits a warning
+and produces every valid row with failure details in provenance. The same input fails when
+a 50% minimum yield is requested. All-invalid inputs remain hard failures and retain the
+first row-level diagnostic cause.
 
 ## Future work
 
