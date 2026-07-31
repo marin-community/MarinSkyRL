@@ -31,8 +31,10 @@ pending retries that belong to this run before reading mutable checkpoint direct
 
 1. **Capture the chain.** Sync every attempt's logs and durable artifacts. Preserve the tracker URL
    when one exists.
-2. **Select a checkpoint.** Use `infra/rl_cleanup/parse_skyrl_metrics.py --format agentic` across the
-   chronological chain to build the metric surface. The tool does not select an agentic checkpoint.
+2. **Select a checkpoint.** Use `infra/rl_cleanup/parse_skyrl_metrics.py` across the chronological
+   chain to build the metric surface, passing `--trace_jobs_dir` when traces are stored elsewhere. The
+   parser detects training-log serialization independently of the agentic harness. The tool does not
+   select an agentic checkpoint.
    Apply the campaign's declared selection rule only to complete saved checkpoints. If no rule is
    declared, report the valid candidates and ask for a choice. When the run ended at a known
    behavioral break, include the last checkpoint whose generating rollouts predate that boundary.

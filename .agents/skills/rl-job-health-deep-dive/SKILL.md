@@ -20,9 +20,10 @@ mode-specific evidence. Agentic runs use Harbor, Daytona, terminal-bench, or ano
 agent harness. Standard runs use dataset rows and programmatic rewards without an agent harness.
 Do not infer the mode from whether `trace_jobs/` happens to exist.
 
-Use `infra/rl_cleanup/parse_skyrl_metrics.py --format agentic` for agentic runs and `--format
-standard` for standard runs. A parser that returns no usable metrics is a failed probe; confirm the
-mode and format before classifying the dynamics gate.
+Use `infra/rl_cleanup/parse_skyrl_metrics.py`; it detects training-log serialization independently of
+the declared mode. Pass `--trace_jobs_dir` when agentic traces are not adjacent to the logs. A parser
+that returns no usable metrics is a failed probe; inspect the log serialization before classifying the
+dynamics gate.
 
 ## Role boundary
 

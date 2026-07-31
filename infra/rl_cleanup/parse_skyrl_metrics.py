@@ -13,14 +13,12 @@ Outputs:
 - A reward/errors vs steps plot
 
 Usage:
-    # Agentic (default):
+    # Log serialization is detected automatically for standard and agentic runs:
     python parse_skyrl_metrics.py <log_folder> <output_folder>
     python parse_skyrl_metrics.py /path/to/logs /path/to/results --trace_jobs_dir /path/to/trace_jobs
 
-    # Standard (non-agentic) GRPO: double-quoted WANDB_MIRROR JSON lines, no trace_jobs.
-    # Both formats emit a trailing-5-EMA best-checkpoint selection over parsed rewards;
-    # --run_dir additionally intersects candidates with exports present on disk.
-    python parse_skyrl_metrics.py <log_file_or_dir> <output_folder> --format standard \
+    # Checkpoint selection optionally intersects metrics with exports on disk:
+    python parse_skyrl_metrics.py <log_file_or_dir> <output_folder> \
         --run_dir $WORK/rl_ckpts/<RUN_NAME> --save_every 20
 """
 
@@ -31,6 +29,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -58,6 +57,19 @@ class CheckpointSelection:
 class CheckpointInventory:
     available_exports: list[int]
     cap_step: int | None
+
+
+class MetricSerialization(StrEnum):
+    WANDB_JSON = "wandb-json"
+    PYTHON_DICT = "python-dict"
+
+
+@dataclass(frozen=True)
+class ProcessedLog:
+    name: str
+    metrics: list[dict[str, Any]]
+    vllm_metrics: list[dict[str, Any]]
+    serialization: MetricSerialization
 
 
 def extract_metrics_blocks(log_content: str) -> list[dict[str, Any]]:
@@ -152,11 +164,11 @@ def parse_metrics_block(block: str) -> dict[str, Any] | None:
             return None
 
 
-def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
+def extract_wandb_json_metrics(log_content: str) -> list[dict[str, Any]]:
     """
-    Extract per-step training metrics from a STANDARD (non-agentic) GRPO log.
+    Extract per-step training metrics from JSON ``WANDB_MIRROR`` events.
 
-    Standard SkyRL runs with logger=console emit one JSON event per train step:
+    Current standard and agentic SkyRL runs emit one JSON event per train step:
         (skyrl_entrypoint pid=...)<ANSI> ... WANDB_MIRROR kind=train step=N metrics={...}<ANSI>
     All present keys are retained; the pass@k suffix remains dependent on
     n_samples_per_prompt.
@@ -281,10 +293,10 @@ def select_best_checkpoint(
     return CheckpointSelection(rewards, ema, best, available, cap_step, eligible, reason)
 
 
-def print_best_checkpoint(selection: CheckpointSelection, save_every: int, fmt: str) -> None:
+def print_best_checkpoint(selection: CheckpointSelection, save_every: int) -> None:
     """Pretty-print the best-checkpoint selector output (EMA table + chosen step)."""
     print("\n" + "=" * 60)
-    print(f"BEST-CHECKPOINT SELECTOR ({fmt} GRPO, trailing-5 EMA)")
+    print("BEST-CHECKPOINT SELECTOR (GRPO, trailing-5 EMA)")
     print("=" * 60)
 
     rewards = selection.rewards
@@ -458,6 +470,16 @@ def find_trace_jobs_dir(log_folder: Path) -> Path | None:
                     if candidate.is_dir():
                         return candidate
     return None
+
+
+def resolve_trace_jobs_dir(log_folder: Path, requested_dir: str | None) -> Path | None:
+    """Resolve an adjacent trace directory, rejecting a missing explicit path."""
+    if requested_dir:
+        candidate = Path(requested_dir)
+        if not candidate.is_dir():
+            raise ValueError(f"Explicit trace_jobs directory does not exist: {candidate}")
+        return candidate
+    return find_trace_jobs_dir(log_folder)
 
 
 def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
@@ -751,29 +773,24 @@ def generate_vllm_summary(vllm_metrics: list[dict[str, Any]], aggregated: list[d
     return summary
 
 
-def process_log_file(log_path: Path, fmt: str = "agentic") -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Process a single log file and return its name, training metrics, and vLLM metrics.
-
-    fmt="agentic" (default): single-quoted py-dict metric blocks + batch-error merge.
-    fmt="standard": double-quoted WANDB_MIRROR JSON lines; no batch-error/trace pipeline.
-    vLLM extraction is identical in both modes (extract_vllm_metrics is format-agnostic).
-    """
+def process_log_file(log_path: Path) -> ProcessedLog:
+    """Parse current JSON and retained Python-dictionary training logs."""
     with open(log_path, "r", errors="replace") as f:
         content = f.read()
 
     vllm_metrics = extract_vllm_metrics(content)
 
-    if fmt == "standard":
-        # Standard GRPO: per-step double-quoted JSON; trace/batch-error emitters no-op.
-        metrics = extract_standard_metrics(content)
-    else:
+    metrics = extract_wandb_json_metrics(content)
+    serialization = MetricSerialization.WANDB_JSON
+    if not metrics:
         metrics = extract_metrics_blocks(content)
-        batch_errors = extract_batch_errors(content)
-        # Merge batch error stats into training metrics
-        for m in metrics:
-            step = m.get("trainer/global_step")
-            if step is not None and step in batch_errors:
-                m.update(batch_errors[step])
+        serialization = MetricSerialization.PYTHON_DICT
+
+    batch_errors = extract_batch_errors(content)
+    for metric in metrics:
+        step = metric.get("trainer/global_step")
+        if step is not None and step in batch_errors:
+            metric.update(batch_errors[step])
 
     # Extract a short name from the filename
     name = log_path.stem
@@ -793,7 +810,12 @@ def process_log_file(log_path: Path, fmt: str = "agentic") -> tuple[str, list[di
         else:
             short_name = name[-30:]
 
-    return short_name, metrics, vllm_metrics
+    return ProcessedLog(
+        name=short_name,
+        metrics=metrics,
+        vllm_metrics=vllm_metrics,
+        serialization=serialization,
+    )
 
 
 def create_summary_statistics(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -878,7 +900,7 @@ def generate_markdown_report(
             f.write("\n\n")
 
         # Per-log progression
-        f.write("## Training Progression by Log\n\n")
+        f.write("## Training Progression (stability signals)\n\n")
 
         for log_name, metrics in all_data.items():
             if not metrics:
@@ -886,21 +908,32 @@ def generate_markdown_report(
 
             f.write(f"### {log_name}\n\n")
 
-            # Key metrics over time
-            f.write("| Step | Reward | Pass@8 | KL | Loss | Step Time (s) | Gen Wait (s) |\n")
-            f.write("|------|--------|--------|-----|------|---------------|-------------|\n")
+            pass_key = _find_pass_at_key(metrics)
+            pass_label = pass_key.split("/")[-1] if pass_key else "pass@k"
+            f.write(
+                f"| Step | Epoch | Reward | {pass_label} | Entropy | GradNorm | PPOClip | "
+                f"PolicyLoss | logRatio_mean | Step Time (s) |\n"
+            )
+            f.write(
+                "|------|-------|--------|--------|---------|----------|---------|"
+                "------------|---------------|---------------|\n"
+            )
 
             for m in metrics:
                 step = m.get("trainer/global_step", 0)
-                reward = m.get("reward/avg_raw_reward", 0)
-                pass_at_8 = m.get("reward/avg_pass_at_8", 0)
-                kl = m.get("policy/policy_kl", 0)
-                loss = m.get("policy/final_loss", 0)
-                step_time = m.get("timing/step", 0)
-                gen_wait = m.get("timing/wait_for_generation_buffer", 0)
-
+                epoch = m.get("trainer/epoch", "")
+                reward = m.get("reward/avg_raw_reward", float("nan"))
+                passk = m.get(pass_key, float("nan")) if pass_key else float("nan")
+                entropy = m.get("policy/policy_entropy", float("nan"))
+                grad_norm = m.get("policy/raw_grad_norm", float("nan"))
+                clip_ratio = m.get("policy/ppo_clip_ratio", float("nan"))
+                policy_loss = m.get("policy/policy_loss", float("nan"))
+                log_ratio_mean = m.get("policy/log_ratio_abs_mean", float("nan"))
+                step_time = m.get("timing/step", float("nan"))
                 f.write(
-                    f"| {step} | {reward:.4f} | {pass_at_8:.4f} | {kl:.6f} | {loss:.4f} | {step_time:.1f} | {gen_wait:.1f} |\n"
+                    f"| {step} | {epoch} | {reward:.4f} | {passk:.4f} | {entropy:.4f} | "
+                    f"{grad_norm:.4f} | {clip_ratio:.5f} | {policy_loss:.5f} | "
+                    f"{log_ratio_mean:.5f} | {step_time:.1f} |\n"
                 )
 
             f.write("\n")
@@ -1095,72 +1128,6 @@ def generate_markdown_report(
                 f.write(f"- Trials with reward data: {reward_stats['count']}\n\n")
 
 
-def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
-    """Generate a plot of average reward and batch errors vs training step."""
-    fig, (ax_reward, ax_timeout, ax_ctx) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-
-    colors = {}
-    for log_name, metrics in all_data.items():
-        if not metrics:
-            continue
-
-        steps = [m.get("trainer/global_step", i) for i, m in enumerate(metrics)]
-        rewards = [m.get("reward/avg_raw_reward", 0) for m in metrics]
-        timeouts = [m.get("batch_errors/avg_AgentTimeoutError", 0) for m in metrics]
-        ctx_errs = [m.get("batch_errors/avg_ContextLengthExceededError", 0) for m in metrics]
-
-        if not steps:
-            continue
-
-        single = len(steps) == 1
-        marker = "o" if single else None
-        markersize = 8 if single else None
-
-        # Reward subplot
-        raw_series = pd.Series(rewards, index=steps)
-        ema_series = raw_series.ewm(span=5).mean()
-        color = ax_reward.plot(
-            steps, ema_series.values, label=log_name, linewidth=2, marker=marker, markersize=markersize
-        )[0].get_color()
-        ax_reward.plot(steps, rewards, color=color, alpha=0.2, linewidth=1)
-        colors[log_name] = color
-
-        # Timeout errors subplot
-        ts = pd.Series(timeouts, index=steps)
-        ts_ema = ts.ewm(span=5).mean()
-        ax_timeout.plot(
-            steps, ts_ema.values, label=log_name, linewidth=2, color=color, marker=marker, markersize=markersize
-        )
-        ax_timeout.plot(steps, timeouts, color=color, alpha=0.2, linewidth=1)
-
-        # Context length errors subplot
-        cs = pd.Series(ctx_errs, index=steps)
-        cs_ema = cs.ewm(span=5).mean()
-        ax_ctx.plot(
-            steps, cs_ema.values, label=log_name, linewidth=2, color=color, marker=marker, markersize=markersize
-        )
-        ax_ctx.plot(steps, ctx_errs, color=color, alpha=0.2, linewidth=1)
-
-    ax_reward.set_ylabel("Avg Raw Reward")
-    ax_reward.set_title("Average Reward vs Training Step")
-    ax_reward.legend(loc="best", fontsize="small")
-    ax_reward.grid(True, alpha=0.3)
-
-    ax_timeout.set_ylabel("Avg Timeout Errors / Batch")
-    ax_timeout.set_title("AgentTimeoutError per Batch (averaged per step)")
-    ax_timeout.grid(True, alpha=0.3)
-
-    ax_ctx.set_xlabel("Training Step")
-    ax_ctx.set_ylabel("Avg Context Length Errors / Batch")
-    ax_ctx.set_title("ContextLengthExceededError per Batch (averaged per step)")
-    ax_ctx.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved reward plot to: {output_path}")
-
-
 def _find_pass_at_key(metrics_list: list[dict[str, Any]]) -> str | None:
     """Return the first reward/avg_pass_at_<k> key present (k is n_samples-dependent)."""
     for m in metrics_list:
@@ -1170,113 +1137,16 @@ def _find_pass_at_key(metrics_list: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def generate_standard_report(
-    all_data: dict[str, list[dict[str, Any]]],
-    output_path: Path,
-    df: pd.DataFrame,
-    vllm_data: dict[str, dict[str, Any]] | None = None,
-    selection: CheckpointSelection | None = None,
-) -> None:
-    """Generate a markdown report for STANDARD (non-agentic) GRPO logs."""
-    with open(output_path, "w") as f:
-        f.write("# SkyRL Standard-GRPO Training Metrics Analysis\n\n")
-        f.write(f"Generated from {len(all_data)} log file(s) (`--format standard`)\n\n")
-
-        # Overview
-        f.write("## Overview\n\n")
-        f.write("| Log File | Max Step | Train Steps | Final Reward | Max Reward | Final Entropy |\n")
-        f.write("|----------|----------|-------------|--------------|------------|---------------|\n")
-        for log_name, metrics in all_data.items():
-            if not metrics:
-                continue
-            global_steps = [m.get("trainer/global_step", 0) for m in metrics]
-            total_steps = max(global_steps) if global_steps else 0
-            rewards = [m.get("reward/avg_raw_reward", 0) for m in metrics]
-            ents = [m.get("policy/policy_entropy") for m in metrics if m.get("policy/policy_entropy") is not None]
-            final_reward = rewards[-1] if rewards else 0
-            max_reward = max(rewards) if rewards else 0
-            final_ent = ents[-1] if ents else float("nan")
-            f.write(
-                f"| {log_name} | {total_steps} | {len(metrics)} | "
-                f"{final_reward:.4f} | {max_reward:.4f} | {final_ent:.4f} |\n"
-            )
-        f.write("\n")
-
-        # Detailed stats by category (reuses the agentic helper)
-        summaries = create_summary_statistics(df)
-        for category, summary in summaries.items():
-            f.write(f"## {category.title()} Metrics\n\n")
-            f.write(summary.to_markdown())
-            f.write("\n\n")
-
-        # Per-step progression (collapse signals)
-        f.write("## Training Progression (collapse signals)\n\n")
-        for log_name, metrics in all_data.items():
-            if not metrics:
-                continue
-            pass_key = _find_pass_at_key(metrics)
-            pass_label = pass_key.split("/")[-1] if pass_key else "pass@k"
-            f.write(f"### {log_name}\n\n")
-            f.write(
-                f"| Step | Epoch | Reward | {pass_label} | Entropy | GradNorm | PPOClip | "
-                f"PolicyLoss | logRatio_mean | Step Time (s) |\n"
-            )
-            f.write(
-                "|------|-------|--------|--------|---------|----------|---------|"
-                "------------|---------------|---------------|\n"
-            )
-            for m in metrics:
-                step = m.get("trainer/global_step", 0)
-                epoch = m.get("trainer/epoch", "")
-                reward = m.get("reward/avg_raw_reward", float("nan"))
-                passk = m.get(pass_key, float("nan")) if pass_key else float("nan")
-                ent = m.get("policy/policy_entropy", float("nan"))
-                gn = m.get("policy/raw_grad_norm", float("nan"))
-                clip = m.get("policy/ppo_clip_ratio", float("nan"))
-                ploss = m.get("policy/policy_loss", float("nan"))
-                lr_mean = m.get("policy/log_ratio_abs_mean", float("nan"))
-                step_time = m.get("timing/step", float("nan"))
-                f.write(
-                    f"| {step} | {epoch} | {reward:.4f} | {passk:.4f} | {ent:.4f} | "
-                    f"{gn:.4f} | {clip:.5f} | {ploss:.5f} | {lr_mean:.5f} | {step_time:.1f} |\n"
-                )
-            f.write("\n")
-
-        # vLLM analysis (reuse agentic table format via a compact inline summary)
-        if vllm_data:
-            f.write("## vLLM Inference Engine Analysis (per-engine)\n\n")
-            f.write("| Log | Avg Running/Engine | Avg Gen Throughput/Engine | Avg KV Cache % | Avg Prefix Hit % |\n")
-            f.write("|-----|-------------------|--------------------------|----------------|------------------|\n")
-            for log_name, data in vllm_data.items():
-                s = data.get("summary", {})
-                if not s:
-                    continue
-                f.write(
-                    f"| {log_name} | {s.get('avg_running_per_engine', 0):.1f} | "
-                    f"{s.get('avg_generation_throughput_per_engine', 0):.1f} tok/s | "
-                    f"{s.get('avg_kv_cache_usage_pct', 0):.1f}% | "
-                    f"{s.get('avg_prefix_cache_hit_rate_pct', 0):.1f}% |\n"
-                )
-            f.write("\n")
-
-        if selection is not None:
-            _write_best_checkpoint_report(f, selection)
-
-
-def generate_standard_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
-    """
-    Standard-mode plot: reward curve + entropy & grad_norm overlay (collapse signals)
-    + a TIS / log-ratio panel when those keys exist.
-    """
-    # Decide whether a log-ratio panel is warranted.
+def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
+    """Plot reward and available stability, TIS, and batch-error metrics."""
     has_logratio = any(any("policy/log_ratio_abs" in k for k in m) for metrics in all_data.values() for m in metrics)
-    n_panels = 3 if has_logratio else 2
+    has_batch_errors = any(any(k.startswith("batch_errors/") for k in m) for metrics in all_data.values() for m in metrics)
+    n_panels = 2 + int(has_logratio) + int(has_batch_errors)
     fig, axes = plt.subplots(n_panels, 1, figsize=(10, 4 * n_panels), sharex=True)
-    if n_panels == 1:
-        axes = [axes]
     ax_reward = axes[0]
     ax_collapse = axes[1]
     ax_lr = axes[2] if has_logratio else None
+    ax_errors = axes[2 + int(has_logratio)] if has_batch_errors else None
 
     for log_name, metrics in all_data.items():
         if not metrics:
@@ -1324,6 +1194,19 @@ def generate_standard_reward_plot(all_data: dict[str, list[dict[str, Any]]], out
                 steps, lr_max, color=color, linewidth=1, linestyle="--", alpha=0.5, label=f"{log_name} |logr| max"
             )
 
+        if ax_errors is not None:
+            timeouts = [m.get("batch_errors/avg_AgentTimeoutError", 0) for m in metrics]
+            context_errors = [m.get("batch_errors/avg_ContextLengthExceededError", 0) for m in metrics]
+            ax_errors.plot(steps, timeouts, color=color, linewidth=2, label=f"{log_name} timeouts")
+            ax_errors.plot(
+                steps,
+                context_errors,
+                color=color,
+                linewidth=1.5,
+                linestyle="--",
+                label=f"{log_name} context length",
+            )
+
     ax_reward.set_ylabel("Avg Raw Reward")
     ax_reward.set_title("Average Reward vs Training Step (EMA solid, raw faint)")
     ax_reward.legend(loc="best", fontsize="small")
@@ -1342,11 +1225,17 @@ def generate_standard_reward_plot(all_data: dict[str, list[dict[str, Any]]], out
         ax_lr.grid(True, alpha=0.3)
         ax_lr.legend(loc="best", fontsize="small")
 
+    if ax_errors is not None:
+        ax_errors.set_ylabel("Errors / Batch")
+        ax_errors.set_title("Agent Timeout and Context-Length Errors")
+        ax_errors.grid(True, alpha=0.3)
+        ax_errors.legend(loc="best", fontsize="small")
+
     axes[-1].set_xlabel("Training Step")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
-    print(f"Saved standard reward/collapse plot to: {output_path}")
+    print(f"Saved training reward/collapse plot to: {output_path}")
 
 
 def generate_turn_count_plot(trials: list[dict[str, Any]], output_path: Path) -> None:
@@ -1415,15 +1304,7 @@ def main():
         type=str,
         default=None,
         help="Path to trace_jobs directory for per-trial analysis. "
-        "Auto-discovered from log_folder if not specified. (agentic only)",
-    )
-    parser.add_argument(
-        "--format",
-        choices=["agentic", "standard"],
-        default="agentic",
-        help="Log format. 'agentic' (default): single-quoted py-dict metric blocks + "
-        "trace_jobs pipeline (UNCHANGED). 'standard': non-agentic GRPO, double-quoted "
-        "WANDB_MIRROR JSON lines; trace/batch-error emitters no-op.",
+        "Auto-discovered from log_folder if not specified.",
     )
     parser.add_argument(
         "--run_dir",
@@ -1440,8 +1321,6 @@ def main():
     )
 
     args = parser.parse_args()
-    fmt = args.format
-
     log_folder = Path(args.log_folder)
     output_folder = Path(args.output_folder)
 
@@ -1462,52 +1341,54 @@ def main():
         print(f"No log files matching '{args.pattern}' found in {log_folder}")
         sys.exit(1)
 
-    print(f"Found {len(log_files)} log file(s) (format={fmt})")
+    print(f"Found {len(log_files)} log file(s)")
 
     # Process each log file
     all_data = {}
     all_rows = []
     all_vllm_data = {}
     all_vllm_rows = []
-
     for log_path in sorted(log_files):
         print(f"Processing: {log_path.name}")
-        log_name, metrics, vllm_metrics = process_log_file(log_path, fmt=fmt)
+        processed_log = process_log_file(log_path)
 
-        if not metrics and not vllm_metrics:
+        if not processed_log.metrics and not processed_log.vllm_metrics:
             print(f"  Warning: No metrics found in {log_path.name}")
             continue
 
-        if metrics:
-            print(f"  Found {len(metrics)} training metric blocks")
-            all_data[log_name] = metrics
+        if processed_log.metrics:
+            print(f"  Detected training metric serialization: {processed_log.serialization}")
+            print(f"  Found {len(processed_log.metrics)} training metric blocks")
+            all_data[processed_log.name] = processed_log.metrics
 
             # Add to combined rows
-            for m in metrics:
-                row = {"log_file": log_name}
+            for m in processed_log.metrics:
+                row = {"log_file": processed_log.name}
                 row.update(m)
                 all_rows.append(row)
 
-        if vllm_metrics:
-            print(f"  Found {len(vllm_metrics)} vLLM stat logger entries")
-            aggregated = aggregate_vllm_metrics(vllm_metrics)
-            summary = generate_vllm_summary(vllm_metrics, aggregated)
+        if processed_log.vllm_metrics:
+            print(f"  Found {len(processed_log.vllm_metrics)} vLLM stat logger entries")
+            aggregated = aggregate_vllm_metrics(processed_log.vllm_metrics)
+            summary = generate_vllm_summary(processed_log.vllm_metrics, aggregated)
 
-            all_vllm_data[log_name] = {
-                "raw": vllm_metrics,
+            all_vllm_data[processed_log.name] = {
+                "raw": processed_log.vllm_metrics,
                 "aggregated": aggregated,
                 "summary": summary,
             }
 
             # Add aggregated to combined rows
             for a in aggregated:
-                row = {"log_file": log_name}
+                row = {"log_file": processed_log.name}
                 row.update(a)
                 all_vllm_rows.append(row)
 
     if not all_rows and not all_vllm_rows:
         print("Error: No metrics found in any log files")
         sys.exit(1)
+
+    trace_jobs_dir = resolve_trace_jobs_dir(log_folder, args.trace_jobs_dir)
 
     # Timestamp prefix for all output files
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1524,11 +1405,9 @@ def main():
         csv_path = output_folder / f"{ts}_metrics_table.csv"
         df.to_csv(csv_path, index=False)
         print(f"\nSaved training metrics table to: {csv_path}")
-        if fmt == "standard":
-            # Canonical name for the standard-cleanup workflow (one row/step).
-            std_csv = output_folder / "metrics.csv"
-            df.to_csv(std_csv, index=False)
-            print(f"Saved standard metrics.csv to: {std_csv}")
+        canonical_csv = output_folder / "metrics.csv"
+        df.to_csv(canonical_csv, index=False)
+        print(f"Saved canonical metrics.csv to: {canonical_csv}")
 
         # Save per-log CSVs
         for log_name, metrics in all_data.items():
@@ -1546,10 +1425,9 @@ def main():
         vllm_csv_path = output_folder / f"{ts}_vllm_metrics_table.csv"
         vllm_df.to_csv(vllm_csv_path, index=False)
         print(f"\nSaved vLLM metrics table to: {vllm_csv_path}")
-        if fmt == "standard":
-            std_vllm_csv = output_folder / "vllm_metrics.csv"
-            vllm_df.to_csv(std_vllm_csv, index=False)
-            print(f"Saved standard vllm_metrics.csv to: {std_vllm_csv}")
+        canonical_vllm_csv = output_folder / "vllm_metrics.csv"
+        vllm_df.to_csv(canonical_vllm_csv, index=False)
+        print(f"Saved canonical vllm_metrics.csv to: {canonical_vllm_csv}")
 
         # Save per-log vLLM CSVs
         for log_name, data in all_vllm_data.items():
@@ -1560,72 +1438,46 @@ def main():
                 log_vllm_df.to_csv(log_vllm_csv_path, index=False)
                 print(f"Saved per-log vLLM metrics to: {log_vllm_csv_path}")
 
-    # Parse per-trial result.json files
+    # Parse per-trial result.json files. Trace availability describes the
+    # harness; it is independent of the training metric serialization.
     trial_data = []
     trial_stats_result = None
 
-    if fmt == "standard":
-        # Standard GRPO has NO trace_jobs/ and NO trainer_log.jsonl — the trace-dependent
-        # emitters (trial_stats.csv, batch_errors/*) cleanly no-op here.
-        print("\n[standard] Skipping trace_jobs / per-trial analysis (none in standard GRPO runs)")
+    if trace_jobs_dir:
+        print(f"\nParsing result.json files from: {trace_jobs_dir}")
+        trial_data = parse_result_files(trace_jobs_dir)
+        if trial_data:
+            print(f"  Parsed {len(trial_data)} trial results")
+            trial_stats_result = compute_trial_stats(trial_data)
+
+            trial_df = pd.DataFrame(trial_data)
+            trial_csv_path = output_folder / f"{ts}_trial_results.csv"
+            trial_df.to_csv(trial_csv_path, index=False)
+            print(f"Saved trial results to: {trial_csv_path}")
+        else:
+            print("  No trial results found")
     else:
-        if args.trace_jobs_dir:
-            trace_jobs_dir = Path(args.trace_jobs_dir)
-        else:
-            trace_jobs_dir = find_trace_jobs_dir(log_folder)
-
-        if trace_jobs_dir and trace_jobs_dir.is_dir():
-            print(f"\nParsing result.json files from: {trace_jobs_dir}")
-            trial_data = parse_result_files(trace_jobs_dir)
-            if trial_data:
-                print(f"  Parsed {len(trial_data)} trial results")
-                trial_stats_result = compute_trial_stats(trial_data)
-
-                # Save trial data CSV
-                trial_df = pd.DataFrame(trial_data)
-                trial_csv_path = output_folder / f"{ts}_trial_results.csv"
-                trial_df.to_csv(trial_csv_path, index=False)
-                print(f"Saved trial results to: {trial_csv_path}")
-            else:
-                print("  No trial results found")
-        else:
-            print("\nNo trace_jobs directory found; skipping per-trial analysis")
+        print("\nNo trace_jobs directory found; skipping per-trial analysis")
 
     run_dir = Path(args.run_dir) if args.run_dir else None
     selection = select_best_checkpoint(all_rows, run_dir=run_dir, save_every=args.save_every)
-    print_best_checkpoint(selection, args.save_every, fmt)
+    print_best_checkpoint(selection, args.save_every)
 
-    # Generate markdown report
-    if fmt == "standard":
-        md_path = output_folder / "report.md"
-        generate_standard_report(
-            all_data,
-            md_path,
-            df,
-            vllm_data=all_vllm_data if all_vllm_data else None,
-            selection=selection,
-        )
-        print(f"Saved standard report to: {md_path}")
-    else:
-        md_path = output_folder / f"{ts}_metrics_report.md"
-        generate_markdown_report(
-            all_data,
-            md_path,
-            df,
-            vllm_data=all_vllm_data if all_vllm_data else None,
-            trial_stats=trial_stats_result,
-            selection=selection,
-        )
-        print(f"Saved markdown report to: {md_path}")
+    md_path = output_folder / "report.md"
+    generate_markdown_report(
+        all_data,
+        md_path,
+        df,
+        vllm_data=all_vllm_data if all_vllm_data else None,
+        trial_stats=trial_stats_result,
+        selection=selection,
+    )
+    print(f"Saved markdown report to: {md_path}")
 
     # Generate reward vs steps plot
     if all_data:
-        if fmt == "standard":
-            plot_path = output_folder / "reward_plot.png"
-            generate_standard_reward_plot(all_data, plot_path)
-        else:
-            plot_path = output_folder / f"{ts}_reward_vs_steps.png"
-            generate_reward_plot(all_data, plot_path)
+        plot_path = output_folder / "reward_plot.png"
+        generate_reward_plot(all_data, plot_path)
 
     # Generate turn count plot
     if trial_data:

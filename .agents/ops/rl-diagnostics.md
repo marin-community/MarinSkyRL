@@ -11,9 +11,9 @@ Determine the mode from the launched configuration before choosing probes.
 - **Standard:** dataset-backed rewards without an agent harness. These runs have no per-trial
   sandbox artifacts; absence of `trace_jobs/` is expected and is not an evidence error.
 
-Parse synchronized metrics with `infra/rl_cleanup/parse_skyrl_metrics.py --format agentic` for
-agentic runs and `--format standard` for standard runs. Treat empty parser output as a failed probe
-and verify the selected mode and format.
+Parse synchronized metrics with `infra/rl_cleanup/parse_skyrl_metrics.py`; it detects the training-log
+serialization independently of the diagnostic mode. Pass `--trace_jobs_dir` when agentic traces are
+not adjacent to the logs. Treat empty parser output as a failed probe and inspect the log serialization.
 
 ## Progress
 
