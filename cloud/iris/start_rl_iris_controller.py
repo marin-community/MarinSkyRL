@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 
+from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
 
 RENDEZVOUS_FILENAME = "ray_head.json"
@@ -258,10 +259,10 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     huggingface_hub caches HF_HUB_OFFLINE into a module constant at import). The
     ranks' env is untouched.
     """
-    if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")) or os.path.isdir(model_path):
-        # Nothing to pre-download: empty, an object-store URI (handled elsewhere),
-        # or already a local directory the ranks read directly.
-        _log(f"stage_model: skip (model_path={model_path!r} is empty/local/cloud)")
+    if is_object_store_model_path(model_path):
+        raise ValueError(unsupported_model_path_message(model_path))
+    if not model_path or os.path.isdir(model_path):
+        _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")
         return
 
     # WARM PATH: if a seeded in-region CW-S3 source exists, sync the weights from
@@ -363,10 +364,6 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
         RuntimeError: if the override does not take, or a required think-protocol token
             (``<|start_think|>`` / ``<|end_think|>``) is not a single registered token.
     """
-    if not model_path or model_path.startswith(("s3://", "gs://", "gcs://")):
-        _log(f"apply_policy_chat_template: skip (model_path={model_path!r} is empty/cloud)")
-        return
-
     template_path = resolve_repo_path(template_repo_rel)
     delphi = template_path.read_text()
 
@@ -485,8 +482,12 @@ def _iface_for_ip(ip: str) -> str | None:
     return None
 
 
-def pin_socket_ifname() -> None:
+def pin_socket_ifname() -> str | None:
     """Derive GLOO_SOCKET_IFNAME from the address iris advertises for this task.
+
+    Returns the interface name derived on THIS node, or None when nothing was
+    derived (an operator already set the variable, or no interface holds the
+    node's IP).
 
     Gloo carries the DP-rank-0 optimizer gather at checkpoint save (the megatron
     strategy picks ``fully_reshardable`` + mem_efficient precisely so that gather
@@ -503,22 +504,49 @@ def pin_socket_ifname() -> None:
     address whose interface the collectives must bind. Whatever interface holds
     it is correct on this node by construction.
 
+    iris runs this same entrypoint on every node of the gang, so every node
+    derives its own name before its own ``ray start`` and Ray's workers inherit
+    it. The name is only ever correct for the node that derived it.
+
     Fail-safe by design: an existing value is never overridden, and any failure to
     resolve leaves the environment untouched and the previous behaviour intact.
     """
     if os.environ.get("GLOO_SOCKET_IFNAME"):
         _log("[fabric] GLOO_SOCKET_IFNAME already set; leaving it alone")
-        return
+        return None
     ip = _own_ip()
     if not ip or ip == "127.0.0.1":
         _log("[fabric] no routable IP; not pinning GLOO_SOCKET_IFNAME")
-        return
+        return None
     iface = _iface_for_ip(ip)
     if not iface:
         _log(f"[fabric] no interface holds {ip}; not pinning GLOO_SOCKET_IFNAME")
-        return
+        return None
     os.environ["GLOO_SOCKET_IFNAME"] = iface
     _log(f"[fabric] GLOO_SOCKET_IFNAME={iface} (derived from {ip})")
+    return iface
+
+
+def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
+    """Environment for the rank-0 training driver subprocess.
+
+    Strips a GLOO_SOCKET_IFNAME that ``pin_socket_ifname`` derived on this node.
+    skyrl-train forwards GLOO_SOCKET_IFNAME from the driver's environment into
+    ``ray.init``'s job-level ``runtime_env``, which pushes ONE value to the actors
+    on EVERY node. NIC names are not uniform across this gang: job
+    20260729-102429-52af30 had the head derive ``enp90s0np0`` while 10.168.206.93
+    names its NIC ``enp90s0f0np0``, so megatron's gloo group creation on that node
+    died with ``Unable to find address for: enp90s0np0``. Each node's own
+    controller already derived the right name before its ``ray start``.
+
+    A value an operator set explicitly (via the launcher or the config's
+    ``extra_env``) reaches every pod already and is passed through untouched.
+    """
+    env = os.environ.copy()
+    if derived_gloo_ifname is not None and env.get("GLOO_SOCKET_IFNAME") == derived_gloo_ifname:
+        del env["GLOO_SOCKET_IFNAME"]
+        _log(f"[fabric] withholding node-derived GLOO_SOCKET_IFNAME={derived_gloo_ifname} from the training driver")
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -1182,7 +1210,7 @@ def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Ev
     return stop
 
 
-def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
+def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
     head_ip = _own_ip()
     ray_port = args.ray_port
@@ -1257,7 +1285,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str]) -> int:
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
-    env = os.environ.copy()
+    env = training_driver_env(derived_gloo_ifname)
     env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -1381,8 +1409,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
-        help="HF repo-id of the policy model to pre-download into the node-local HF "
-        "cache on EVERY node before Ray starts. Set by the launcher when the config "
+        help="HF repo ID of the policy model to pre-download into the node-local HF "
+        "cache on EVERY node before Ray starts. Object-store URIs are unsupported; "
+        "use --model-warm-source for an S3 mirror. Set by the launcher when the config "
         "runs HF_HUB_OFFLINE=1, so the FSDP ranks load from a warm node-local cache "
         "instead of each racing HF Hub at init.",
     )
@@ -1440,8 +1469,10 @@ def main() -> None:
     _pin_boto3_s3_addressing_style()
     # Derive GLOO_SOCKET_IFNAME from the pod IP BEFORE any torch/gloo init, on head
     # and every worker. Must precede `ray start`: Ray actors inherit this env, and
-    # the gloo mesh is built long after, at the first checkpoint save.
-    pin_socket_ifname()
+    # the gloo mesh is built long after, at the first checkpoint save. The derived
+    # name is node-local; training_driver_env keeps it out of the driver, which
+    # would otherwise broadcast the head's name to every node.
+    derived_gloo_ifname = pin_socket_ifname()
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
@@ -1465,7 +1496,7 @@ def main() -> None:
         apply_policy_chat_template(args.prestage_model, args.policy_chat_template)
     rank = _rank()
     if rank == 0:
-        exit_code = run_head(args, train_argv)
+        exit_code = run_head(args, train_argv, derived_gloo_ifname)
     else:
         exit_code = run_worker(args)
     if exit_code != 0:

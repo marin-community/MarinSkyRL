@@ -23,17 +23,12 @@ and lib/iris/src/iris/cli/job.py):
   - ``--replicas N`` (the `--help` text: "Number of tasks for gang scheduling")
     requests N such tasks.
   - For GPUs with replicas>1, ``resolve_multinode_defaults`` returns
-    ``CoschedulingConfig(group_by="leafgroup")`` — the H100/InfiniBand
-    colocation level — so all N replicas are co-scheduled together on the same
-    IB leaf fabric, all-or-nothing.
-  - The cw-us-east-02a cluster config enables **Kueue gang admission**
-    (``kueue.cluster_queue: iris-cq``, ``host_network: true`` for NCCL/IB), so
-    the N-task gang is admitted atomically: either all N whole nodes are
-    granted or the job queues — true exclusive, co-scheduled multi-node.
+    ``CoschedulingConfig(group_by="leafgroup")`` so all N replicas are
+    co-scheduled on the selected cluster's GPU fabric, all-or-nothing.
 
-So this launcher requests ``--num-nodes N`` whole H100x8 nodes EXCLUSIVELY: one
-iris task per node (``replicas=N``), each holding all 8 GPUs of its node (no
-co-tenants), coscheduled by leafgroup. The RL topology (one cross-node Ray
+This launcher requests ``--num-nodes N`` whole GPU nodes exclusively: one Iris
+task per node (``replicas=N``), holding the selected node shape's GPUs with no
+co-tenants. The RL topology (one cross-node Ray
 cluster, NCCL over IB) is wired by an in-container controller
 (``cloud/iris/start_rl_iris_controller.py``): rank 0 starts the Ray head and
 publishes its IP to a shared rendezvous; ranks 1..N-1 join; then rank 0 runs the
@@ -55,7 +50,9 @@ Usage
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -64,6 +61,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 from urllib.parse import urlparse
@@ -71,397 +69,16 @@ from urllib.parse import urlparse
 import yaml
 
 from cloud.iris.paths import PROJECT_ROOT
+from cloud.iris.gpu_rl_images import image_for_cluster
+from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
+from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 
-# Defaults for the CoreWeave H100 GPU cluster.
+# Default cluster and GPU shape. Memory and disk requests are resolved from the
+# selected cluster's live nodes after CLI parsing.
 DEFAULT_CLUSTER = "cw-us-east-02a"
-# Pin the RL image by IMMUTABLE DIGEST, not the floating ``:gpu-rl`` tag.
-#
-# WHY (the floating-tag stale-cache trap): the iris k8s backend always stamps
-# the task pod with ``imagePullPolicy: IfNotPresent``
-# (marin lib/iris .../backends/k8s/tasks.py) and we cannot override it from here.
-# With a FLOATING tag, IfNotPresent means a node that already has *some* image
-# under that tag name will NOT re-pull when the tag is later retagged to new
-# bytes — so a node that cached an OLD ``:gpu-rl`` keeps running stale code
-# (observed: a launcher run executed MarinSkyRL 4c668f4 with NO flash_attn_2_cuda
-# while the freshly-retagged ``:gpu-rl`` pointed at the good build).
-#
-# A content-addressed ``@sha256:`` reference is self-verifying: IfNotPresent only
-# treats the cache as a hit when the cached bytes hash to exactly this digest, so
-# it always runs the intended image regardless of node cache state — sidestepping
-# the stale-tag problem entirely without needing imagePullPolicy: Always.
-#
-# This digest == the immutable gitsha tag ``:gpu-rl-44c06ea8`` (OT-Agent commit
-# 44c06ea8, "bump gpu-rl SKYRL_COMMIT 2d9feef -> 78d83a5"): flash_attn 2.8.3 +
-# flash_attn_2_cuda present, /opt/skyrl baked at MarinSkyRL 78d83a5 — which ADDS
-# the two fixes that deterministically crashed CoreWeave RL at build_models:
-# 518179d (default norm_topk_prob=True for Qwen3.5/3.6 MoE) + 0b2b05b (retry around
-# rank-0 HF weight-index resolution). Also still includes 2d9feef's trials_dir
-# raw-str fix; harbor BAKED at 342729d5 (reward-zeroing trial.paths.trial_dir fix).
-# When the gpu-rl image is rebuilt, bump this digest (use the immutable
-# ``:gpu-rl-<gitsha>`` tag's digest, never the floating ``:gpu-rl``).
-#
-# This digest BAKES torchtitan a1fdd7e (+ tyro): the `ExpertParallel` import-assert
-# (step-4a of Dockerfile.gpu-rl) PASSED in-build → the EP>1 MoE unblock is proven.
-# The CoreWeave EP=8 RL jobs (30B-A3B 131k, 35B) no longer hit
-# `ModuleNotFoundError: torchtitan`. Also baked: vLLM-fork 76259c63 + flash-attn
-# 2.8.3 (flash_attn_2_cuda present) + MarinSkyRL 39faff7d + harbor 342729d5.
-# MarinSkyRL 39faff7d (bumped from 78d83a5) carries the VALIDATED MoE forward-spill
-# fix + deterministic-dtype hardening. In-build asserts ran green: flash_attn_2_cuda
-# OK (from cached wheel), torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a /
-# skyrl_train import OK, torchtitan ExpertParallel import OK, baked MarinSkyRL HEAD
-# == 39faff7d.
-#
-# BUILT IN-CLUSTER ON COREWEAVE (not the arm64 Mac): the image is amd64 + a
-# from-source x86 CUDA build QEMU/Docker-Desktop can't do locally, and iris has NO
-# in-cluster build primitive (`iris build` = LOCAL buildx). The build ran as an iris
-# job with KANIKO (BuildKit needs CAP_SYS_ADMIN/bind-mounts the cluster denies —
-# privileged is silently downgraded; nodes run gVisor). Context = the iris-synced
-# /app bundle (cpu48/mem512GB/disk400GB). FAST no-nvcc PREBUILT-WHEELHOUSE path: the
-# kaniko script (docker/build_gpu_rl_kaniko.sh) fetched the prebuilt vLLM-fork +
-# flash-attn wheels (from laion/gpu-rl-build-wheels) into the context and ran with
-# WHEEL_SOURCE=prebuilt-wheelhouse + --skip-unused-stages → ZERO nvcc (~minutes, not
-# ~3h); the SKYRL_COMMIT-only bump did not change the wheel cache-key, so the wheels
-# stayed ABI-correct. ghcr push via the GitHub PAT (`gh auth token`, write:packages),
-# NOT the Docker-Hub DOCKER_TOKEN in secrets.env.
-#
-# Single-platform linux/amd64 manifest, 13 layers ~21.5 GB. The floating :gpu-rl
-# tag resolves to the same digest. When the image is rebuilt, bump this digest
-# (use the immutable :gpu-rl-<gitsha> tag's digest, never the floating :gpu-rl).
-DEFAULT_RL_DOCKER_IMAGE = (
-    "ghcr.io/marin-community/marinskyrl"
-    # gpu-rl-efd77b98 (built 2026-07-03, kaniko job gpurl-kaniko-efd77b98): the PULLABLE re-layering of
-    # gpu-rl-69634c0b (@sha256:d9c7e604…, harbor 0729a3e9 = poll fix + tmux-bake). Same baked contents
-    # (harbor 0729a3e9, MarinSkyRL 39faff7d, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128,
-    # rl env pinned via rl_env_constraints.txt) but built with SINGLE_SNAPSHOT=0 (per-instruction layers)
-    # + torch's nvidia-CUDA deps split into 3 pre-install RUNs, so the MAX layer is 3.46 GB (was one
-    # 16.6 GB --single-snapshot layer). WHY: the 16.6 GB single layer CANNOT be pulled over the
-    # CoreWeave→ghcr egress — containerd restarts the single-blob GET from 0 and it dies at 8-11 GB every
-    # attempt (diagnosed restart-from-0 across all 8 r4 pods → ImagePullBackOff; the incremental-base
-    # rebuild ALSO failed because the build pod had to pull the same 16.6 GB base). 48 small layers each
-    # pull+retry independently. Build asserts green (baked harbor 0.8.0 @ 0729a3e9). Digest below.
-    # gpu-rl-a003838c (built 2026-07-03, kaniko job gpurl-kaniko-a003838c): HARBOR_COMMIT-only bump →
-    # harbor 9416d5f3 "default-OFF episode logging" (descends from a4957ef1, so keeps 1ms poll + tmux-bake
-    # + persistent exec session, AND gates the 3 big synchronous per-turn S3 writes — debug.json + prompt
-    # + response — behind default-OFF enable_episode_logging, the real throughput lever py-spy found: a
-    # sync S3 write per LLM call blocking the shared asyncio loop). Same PULLABLE recipe (SINGLE_SNAPSHOT=0
-    # + torch nvidia-CUDA split, max layer 3.46 GB, 48 layers). Everything else unchanged (MarinSkyRL
-    # 39faff7d baked, vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128).
-    # gpu-rl-722fec34 (built 2026-07-04, kaniko gpurl-kaniko-722fec34): harbor 2e42d312 (cheap reaper
-    # DEFAULT-ON — fixes the n=384 O(N) coordinator-reaper bottleneck py-spy found; opt out via
-    # HARBOR_CHEAP_REAPER=0) + skyrl 3caeb79f (TIS served-id splice, now baked-default — no runtime source
-    # override needed for 35B). Same PULLABLE recipe; vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
-    # gpu-rl-dc56d265 (built 2026-07-05, kaniko gpurl-kaniko-dc56d265): harbor 2e42d312 (unchanged, cheap
-    # reaper DEFAULT-ON) + skyrl 7b7d627b (load-aware power-of-two-choices inference-engine routing — fixes
-    # the sticky hash-at-birth session routing that pinned agentic-RL rollout load onto one vLLM engine
-    # while siblings idled at n=384; preserves per-session stickiness for prefix-cache reuse). Same PULLABLE
-    # recipe (SINGLE_SNAPSHOT=0, max layer <8 GB; pull-verified 4m0s, 22.5 GB, skyrl HEAD=7b7d627b in-pod).
-    # vLLM-fork 76259c63, flash-attn 2.8.3, torch 2.11.0+cu128 unchanged.
-    # gpu-rl-bd888d27 (built 2026-07-05, kaniko gpurl-kaniko-bd888d27): HARBOR_COMMIT-only bump → harbor
-    # d58043c3, TWO Daytona fixes: (1) connection-pool cap 250→2048 (fleet knob
-    # HARBOR_DAYTONA_CONNECTION_POOL_MAXSIZE) — the SDK's 250-connection aiohttp pool starved the verifier's
-    # upload/exec/download round-trip for a socket at n_concurrent>>250 → 100% VerifierTimeoutError on the slow
-    # 35B (verifier isn't slow; its HTTP calls can't get a connection). 2048 lets the grid run clean at n=768.
-    # (2) auto_stop_interval_mins 0→5 — killed-job orphaned sandboxes idle-stop then auto-delete (self-clean)
-    # instead of leaking forever. Same PULLABLE recipe; skyrl 7b7d627b, vLLM-fork 76259c63, flash-attn 2.8.3,
-    # torch 2.11.0+cu128 unchanged (harbor-only bump — wheels + rl_env_constraints untouched).
-    # gpu-rl-2712998d (built 2026-07-05, kaniko gpurl-kaniko-2712998d): PULLABLE re-layer of bd888d27 —
-    # bd888d27 (@sha256:a8f76d48…) baked identical contents but with --single-snapshot → one 16.6 GB layer that
-    # EOFs on the CoreWeave→ghcr pull (ImagePullBackOff + whiteout conflict). This is SINGLE_SNAPSHOT=0
-    # (48 layers, max 3.5 GB), same baked harbor d58043c3 + wheels. Verified pullable; pods reached Running.
-    # gpu-rl-4e505a4e (built 2026-07-06, kaniko gpurl-kaniko-4e505a4e, SINGLE_SNAPSHOT=0 pullable): SKYRL_COMMIT
-    # bump 7b7d627b→cdca0b3a = EPDIAG per-phase fwd/modelfwd instrumentation (LOGGING-ONLY, EPDIAG-gated, no
-    # routing/correctness change) for the EP16-vs-EP8 fwd-op diagnostic (FINDING #2). Strict superset of 861656ba
-    # (instrumentation is a no-op when EPDIAG unset). wheels + harbor d58043c3 + rl_env_constraints unchanged.
-    # gpu-rl-f9806065 (built 2026-07-06, kaniko gpurl-kaniko-f9806065, SINGLE_SNAPSHOT=0 pullable): SKYRL_COMMIT
-    # bump cdca0b3a→b2ff8bf2 = abort_generation DRAIN fix — drains the vLLM engine (poll has_unfinished_requests
-    # until idle, bounded 60s fail-loud) before the caller meta-izes params in the layerwise weight-sync reload.
-    # Fixes the _C::rms_norm meta-tensor crash on eager decode (grid-30b-c) + the masked stale-weight read under
-    # cudagraph replay (BOTH 35B rungs died at gs1's weight sync on 84ffafac). wheels + harbor d58043c3 +
-    # rl_env_constraints unchanged (skyrl-only, prebuilt-wheelhouse).
-    # NOTE: gpu-rl-f9806065 @sha256:37cdc3e6 was UN-PULLABLE (built --single-snapshot by DEFAULT = one 16 GB
-    # layer -> ImagePullBackOff on CoreWeave). gpu-rl-addb348e below is the SINGLE_SNAPSHOT=0 re-layer (48
-    # layers, max 3.5 GB, pull-verified) with IDENTICAL contents (SKYRL b2ff8bf2 drain fix).
-    # gpu-rl-cf1ecea6 (built 2026-07-07, kaniko gpurl-kaniko-cf1ecea6, SINGLE_SNAPSHOT=0 pullable):
-    # SKYRL_COMMIT bump 613e225d->822221a0 = engine-readiness gate in ray_wrapped_inference_engine.py
-    # (already-validated; previously runtime-only via a source override, now baked-default). Parent is exactly
-    # 613e225d, so this ADDS one commit and preserves everything baked in gpu-rl-1a32669c. wheels + harbor
-    # + rl_env_constraints UNCHANGED (skyrl-only, prebuilt-wheelhouse). Pull-verified: 48 layers, max 3.46
-    # GB, 22.6 GB total. Build asserts green (skyrl_train/vllm/flash_attn/torchtitan.ExpertParallel import).
-    # gpu-rl-7d15b25a (built 2026-07-08, kaniko gpurl-kaniko-7d15b25a, SINGLE_SNAPSHOT=0 pullable): the
-    # InfiniBand ENABLE image. Adds `rdma-core ibverbs-providers libibverbs1 librdmacm1 ibverbs-utils` to the
-    # rl-stage apt-get so NCCL's built-in IB transport can DLOPEN libibverbs.so.1 + the libmlx5 provider at
-    # runtime — WITHOUT it (all prior images) NCCL silently disabled IB and fell back to NET/Socket (TCP over
-    # enp157s0np0), the cross-node throughput bottleneck. Diagnosed in a live grid-30b-c-cp4-timing-v5 pod:
-    # CoreWeave exposes the RDMA devices (/dev/infiniband/{uverbs0..8,rdma_cm}, 9x mlx5 ports ACTIVE @ 100Gb/s
-    # EDR) but the image shipped NO verbs userspace (`find / -name libibverbs*` empty, `ibv_devices` not found).
-    # NO external libnccl-net.so/OFI plugin is needed on Mellanox IB. Also SKYRL_COMMIT 822221a0->272bf011
-    # (penfever/working HEAD, direct child: CP>1 _C::rms_norm Meta-kernel fix) so a runtime 272bf011 pin is a
-    # no-op safety belt. wheels + harbor d58043c3 + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse,
-    # NO nvcc). Pull-verified: 48 layers, max 3.46 GB, 22.66 GB total. Build asserts green (flash_attn_2_cuda /
-    # skyrl_train / vllm / torchtitan.ExpertParallel; baked MarinSkyRL HEAD == 272bf011; harbor 0.8.0). Expected
-    # next-launch signal (NCCL_DEBUG=INFO): `NET/IB : Using [0]mlx5_0:1/IB` + `GPU Direct RDMA Enabled`.
-    # gpu-rl-19bd8c5e (built 2026-07-13, kaniko gpurl-kaniko-19bd8c5e, SINGLE_SNAPSHOT=0 pullable): SKYRL_COMMIT
-    # bump 272bf011->de40d31c (penfever/working HEAD, linear descendant — safe superset). Substantive change: a
-    # LOG-CAPTURE-SAFE tqdm fallback (skyrl_train/utils/progress.py). On a non-TTY stderr (CoreWeave/Iris captured
-    # container logs, SLURM) every SkyRL progress bar (Generation Buffer / Training Step / Generating Trajectories /
-    # Evaluation) now emits THROTTLED newline-terminated loguru lines instead of invisible \r-in-place frames, so
-    # progress finally shows up in the captured job logs; delegates to real tqdm on a TTY (auto-gated by
-    # sys.stderr.isatty(), no launcher env wiring needed). wheels + harbor + rl_env_constraints UNCHANGED (fast
-    # prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max 3.46 GB. Build asserts green (flash_attn_2_cuda /
-    # skyrl_train / vllm / torchtitan.ExpertParallel). NOTE: floating :gpu-rl tag was deliberately NOT moved
-    # (PUSH_FLOATING=0) — promote it after a live smoke: `crane tag ...@sha256:98adaa38... gpu-rl`.
-    # gpu-rl-318e18ce (built 2026-07-14, kaniko gpurl-kaniko-318e18ce, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
-    # bump -> 793ff3fb (round-2 per-turn coordinator-offload harbor fix). ALSO unbreaks the base build: reverts
-    # docker/rl_env_constraints.txt tilelang 0.1.8->0.1.9. Commit 291cfef3 had wrongly pinned the BASE constraint
-    # to 0.1.8 ("tilelang is FlashQLA-only"), but the vLLM fork's requirements/cuda.txt REQUIRES tilelang==0.1.9,
-    # so the rl-stage `uv pip install -r requirements/cuda.txt` under UV_CONSTRAINT died "tilelang==0.1.9 and
-    # tilelang==0.1.8 unsatisfiable" (first attempt gpurl-kaniko-6697dd20 FAILED here). The 0.1.8 pin belongs ONLY
-    # in the FlashQLA incremental layer (clears UV_CONSTRAINT + re-downgrades on top). SKYRL de40d31c (baked,
-    # unchanged vs 19bd8c5e). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max
-    # 3.46 GB. Build asserts green (flash_attn_2_cuda / skyrl_train / vllm / torchtitan.ExpertParallel; baked harbor
-    # 0.8.1 commit 793ff3fb; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1).
-    # gpu-rl-f9110c79 (built 2026-07-14, kaniko job gpurl-kaniko-f9110c79, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
-    # bump 793ff3fb -> 35fbdbcc (round-3 per-turn coordinator-offload harbor fix; linear descendant of round-2 793ff3fb).
-    # 3rd incremental harbor bump in a row (round-1 55ae9e66 -> round-2 793ff3fb=318e18ce -> round-3 35fbdbcc). SKYRL
-    # de40d31c (baked, unchanged vs 318e18ce). wheels + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse, NO nvcc;
-    # KANIKO_CACHE=1 reused the base apt/uv/venv layers). Pull-verified: 48 layers, max 3.46 GB, 22.71 GB total. Build
-    # asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan
-    # ExpertParallel; baked harbor 0.8.1 commit 35fbdbcc; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved (PUSH_FLOATING=1).
-    # gpu-rl-d0e4a9b8 (built 2026-07-14, kaniko job gpurl-kaniko-d0e4a9b8, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
-    # bump 35fbdbcc -> d81b2f32 (round-4: async /tokenize probe OFF the coordinator loop; linear descendant of round-3 35fbdbcc).
-    # 4th incremental harbor bump in a row (round-1 55ae9e66 -> round-2 793ff3fb=318e18ce -> round-3 35fbdbcc=f9110c79 ->
-    # round-4 d81b2f32). SKYRL de40d31c (baked, unchanged vs f9110c79). wheels + rl_env_constraints UNCHANGED (fast
-    # prebuilt-wheelhouse, NO nvcc; KANIKO_CACHE=1 reused the base apt/uv/venv + torch/vLLM/flash-attn layers). Pull-verified:
-    # 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 /
-    # vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan ExpertParallel; baked harbor commit d81b2f32; baked MarinSkyRL
-    # HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1). Build wall-clock ~20m (15:48->16:09).
-    # gpu-rl-b397b82a (built 2026-07-14, kaniko job gpurl-kaniko-b397b82a, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
-    # bump d81b2f32 -> 101b1400 (round-5: 645d1074 global-caches the vLLM context-limit /v1/models probe [kills the
-    # per-instance sync GET on the coordinator loop — the dominant v0j saturation blocker] + 101b1400 replaces litellm
-    # with openai.AsyncOpenAI on the completions hot path [executor-free; retires ~440 LOC of FD-leak monkeypatches];
-    # linear descendant of round-4 d81b2f32). 5th incremental harbor bump in a row (round-1 55ae9e66 -> round-2
-    # 793ff3fb=318e18ce -> round-3 35fbdbcc=f9110c79 -> round-4 d81b2f32=d0e4a9b8 -> round-5 101b1400). SKYRL de40d31c
-    # (baked, unchanged vs d0e4a9b8). wheels + rl_env_constraints UNCHANGED (fast prebuilt-wheelhouse, NO nvcc;
-    # KANIKO_CACHE=1 reused the base apt/uv/venv + torch/vLLM/flash-attn layers). litellm is RETAINED (==1.90.0) for
-    # harbor's off-path utilities — it is no longer on the completions hot path, so the harbor install still succeeds.
-    # Pull-verified: 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts green (flash_attn_2_cuda /
-    # torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a / skyrl_train / torchtitan ExpertParallel; baked harbor commit
-    # 101b1400; harbor==0.8.1; baked MarinSkyRL HEAD de40d31c). Floating :gpu-rl tag WAS moved to this build (PUSH_FLOATING=1). Build wall-clock ~20m.
-    # gpu-rl-e03896b7 (built 2026-07-15, kaniko job gpurl-kaniko-e03896b7, SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT
-    # bump 101b1400 -> f4a6b1a0 (round-6: offload the AsyncOpenAI raw-JSON parse OFF the coordinator asyncio loop —
-    # orjson + asyncio.to_thread in lite_llm._acreate_chat_raw). Live py-spy on the running 30B v0k coordinator pinned
-    # inline json.loads of the raw vLLM body at 84% of GIL-held samples as the batch-of-8 rollout-supply SAWTOOTH root
-    # cause (TIS forces logprobs+return_token_ids so vLLM echoes prompt_token_ids every turn -> O(context) parse/turn,
-    # ~10-30ms GIL-hold that stalls every co-resident trial's dispatch -> engines drain). Fix: orjson (3-10x faster,
-    # shrinks the hold) parsed via to_thread (interleaves per-trial parses). orjson is now an EXPLICIT rl-image dep
-    # (added `uv pip install orjson`; harbor installs --no-deps so it must be added here) — harbor falls back to stdlib
-    # json when orjson is absent (non-RL images) or when it rejects a body (non-finite -Infinity logprobs), so
-    # byte-fidelity is preserved and non-RL harbor is a no-op. Scoped to the OpenAI-compat _acreate_chat_raw path only;
-    # native litellm fallback untouched. SKYRL de40d31c (baked, unchanged). wheels + rl_env_constraints UNCHANGED (fast
-    # prebuilt-wheelhouse, NO nvcc). Pull-verified: 48 layers, max 3.46 GB (top: 3.46/3.2/3.0/2.71/2.07). Build asserts
-    # green (kaniko state=succeeded exit 0, ~25m; asserts run inside the build so success == flash_attn_2_cuda /
-    # skyrl_train / vllm / torchtitan.ExpertParallel import OK). baked harbor commit f4a6b1a0.
-    # gpu-rl-f4f25bae (built 2026-07-17, kaniko job gpurl-kaniko-f4f25bae, SINGLE_SNAPSHOT=0 pullable):
-    # HARBOR_COMMIT bump to c872216e (harbor main HEAD = opencode RL literal bridge: HARBOR_MODEL_ENDPOINT
-    # baseURL fix + correlated rollout_details). Baking it eliminates the former runtime Harbor override.
-    # ALSO adds boto3 + smart_open to skyrl-train deps (the Dockerfile build assert required them but they
-    # were only transitives of litellm via harbor, installed after the assert). SKYRL 2861eaef (cu128 lock,
-    # PR #19). wheels UNCHANGED (fast prebuilt-wheelhouse, NO nvcc). Pull-verified: 32 layers, max 6.56 GB.
-    # Build asserts green (flash_attn_2_cuda / torch 2.11.0+cu128 / vllm / skyrl_train / torchtitan
-    # ExpertParallel / boto3 import OK). baked harbor c872216e.
-    # gpu-rl-megatron-a1e7a363 (built 2026-07-20, kaniko job gpurl-kaniko-a1e7a363, INSTALL_MEGATRON=1,
-    # SINGLE_SNAPSHOT=0 pullable): HARBOR_COMMIT bump to 5efac6fa (harbor main HEAD = the Daytona keepalive,
-    # PR #19 — background refresh_activity() so opencode trials don't idle-reap at auto_stop=30). Baking it
-    # lets ALL RL launches use the baked Harbor (a merged branch auto-deletes, and the
-    # runtime uv reinstall then dies state-5 at bring-up — this happened to the keep6 -e1 pair). Megatron
-    # variant = the weight-sync het-bootstrap fix (PR #71, 79432f4a) + all d0016149 contents. HARBOR_COMMIT
-    # plumbed through build_gpu_rl_kaniko.sh via MarinSkyRL PR #74. Pull-verified: 35 layers, max 7.48 GB.
-    # gpu-rl-4d289ed3 (verified 2026-07-24): canonical result of successful
-    # gpurl-kaniko-4d289ed3. It bakes marin-community/vllm 8672c71e with
-    # FlashAttention 2.8.3; Harbor remains baked at 1319eb29.
-    # gpu-rl-d48445f7 (built 2026-07-25, kaniko job gpurl-kaniko-d48445f7): SKYRL source bump to
-    # d48445f7 — bakes the checkpoint-resume fix chain (#118 download nesting, #122 resume-path
-    # URI preservation, #127 upload nesting + trailing-slash resume_path). vLLM fork 8672c71e,
-    # FlashAttention 2.8.3, and Harbor 1319eb29 unchanged (fast prebuilt-wheelhouse, full kaniko
-    # cache hit, ~3 min). Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
-    # gpu-rl-0acfe947 (built 2026-07-25, kaniko job gpurl-kaniko-0acfe947): HARBOR_COMMIT bump
-    # 1319eb29 -> 01c736a6 (harbor#36: bounded background artifact writer — routes hot-path
-    # trajectory/exception/config writes off the shared executor with local spool +
-    # flush-on-finalize; per-trial dump cadence default; fixes the trajectory-dump S3 backlog
-    # that collapsed rollout throughput ~6.7x). SKYRL 0acfe947 also carries #131 (download
-    # separator applied after _strip_protocol — the fix that made from_path s3 resume actually
-    # work; validated live on rl-tasktrove-dq-sweep-30b-terminus2-qwen-20260725-121011-d6637e,
-    # global_step_23 resume clean) and #132 (megatron pip-check build gate, fixes #130).
-    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
-    # gpu-rl-d7ba00ff (built 2026-07-26): HARBOR_COMMIT bump 01c736a6 -> 772e20f7, which carries
-    # harbor#39 (a 300 s ENVIRONMENT_STOP_TIMEOUT_SEC deadline on verifier teardown, and
-    # CancelledError classified non-retryable) and harbor#40. Before #39 a hung verifier exec had
-    # no deadline: durations reached 5,050-34,832 s with exception_info=None, and the rollout was
-    # lost. The deadline now fires, the trial survives at reward 0, and its logprobs stay
-    # TIS-valid. SKYRL d7ba00ff also carries #137 (literal-log byte-span indexing, which fixed the
-    # ~85 GiB/h RolloutCoordinator growth) and #138 (TIS diagnostics on both backends).
-    # gpu-rl-ac5a9c65 (built 2026-07-27): a SKYRL-source-only bump, d7ba00ff -> ac5a9c65. No baked
-    # dependency moved: same harbor 772e20f7, same vLLM source 8672c71e with the 4b555913 native
-    # donor, flash-attn 2.8.3, torch 2.11.0+cu128, and the same skyrl-train/uv.lock. It bakes the
-    # reward-signal work merged as #154 (truncation penalty for cap-truncated trials), #155
-    # (default-off pre-flight reward gate) and #156 (the three reward signals combined, enabled for
-    # the sweep). The rebuild is REQUIRED for those PRs to take effect: cloud/iris/run_rl.py runs
-    # the SkyRL entrypoint with cwd=/opt/skyrl/skyrl-train, and `python -m` puts the cwd ahead of
-    # PYTHONPATH, so skyrl_train and examples.terminal_bench import from the BAKED tree, not the
-    # synced /app workspace. Hydra follows the same path: config_dir in
-    # skyrl_train/entrypoints/main_base.py is derived from __file__, so it loads the baked
-    # ppo_base_config.yaml. Three sweep jobs on the previous image died with
-    # `Key 'preflight_gate' is not in struct` for exactly this reason.
-    # Pull-verified: 37 layers, max 3.61 GB, 19.32 GB total.
-    # gpu-rl-f2b44d4a (built 2026-07-27, kaniko job gpurl-kaniko-f2b44d4a): no baked dependency
-    # moved. The build echoed every pin it read from docker/Dockerfile.gpu-rl -- harbor 772e20f7,
-    # vLLM fork 8672c71e with the 4b555913 native donor, flash-attn 2.8.3, torch 2.11.0+cu128 --
-    # and the same skyrl-train/uv.lock resolved. The image now bakes cloudpickle 3.1.2, py-spy
-    # 0.4.2 and memray (#167), which iris used to install during its setup phase. That is the
-    # prerequisite for setup_scripts=[]: with the packages baked, turning the setup phase off no
-    # longer removes the profiler from every task, and the /app/.venv shadow venv it created goes
-    # away. Also baked: the 131k/16k/90 context budget (#164), the OpenCode context budget with
-    # YAML/TOML comment stripping (#165), and the truncation penalty keyed on the per-turn cap
-    # rather than trajectory-level stop_reason (#166). Those live under skyrl-train/, so they are
-    # inert until the image ships them.
-    # Pull-verified: 38 layers, max 3.61 GB, 19.35 GB total.
-    # gpu-rl-90072ada (built 2026-07-27, kaniko job gpurl-kaniko-90072ada): no baked pin moved. The
-    # build echoed each one it read from docker/Dockerfile.gpu-rl -- harbor 772e20f7, vLLM fork
-    # 8672c71e with the 4b555913 native donor, flash-attn 2.8.3, torch 2.11.0+cu128. Two baked
-    # changes under skyrl-train/ make the rebuild necessary. First, ppo_base_config.yaml sets
-    # ckpt_interval 5 (#173); the per-config restatements were removed from cloud/iris/configs, so
-    # every config inherits the base value, and the previous image still baked 10. The pushed image
-    # was checked directly: ckpt_interval is 5. Second, uv.lock moves accelerate 1.11.0 -> 1.14.0,
-    # which is what makes FSDP2 meta loading work under Transformers 5 (#110). Build asserts green,
-    # including cloudpickle 3.1.2, py-spy 0.4.2 and memray -- the launcher runs with
-    # setup_scripts=[], so the image is the only source of the profiler.
-    # Pull-verified: 38 layers, max 3.61 GB, 19.35 GB total.
-    # gpu-rl-7f97d057 (built 2026-07-28, kaniko job gpurl-kaniko-plain-7f97d057): the fsdp2 variant
-    # of the first Blackwell image, built from the same source and the same pins as
-    # gpu-rl-megatron-2b14abd3. TORCH_CUDA_ARCH_LIST is "8.0;9.0;10.0", so the vLLM fork and
-    # flash-attn carry sm_100 kernels for GB200 alongside the A100 and Hopper ones. Adding 10.0
-    # turns on the fork's Blackwell kernel set, one of which static-asserts CUDA >= 12.9, so the
-    # whole closure moved: base nvidia/cuda:12.9.2 and torch 2.11.0+cu129 from the pytorch-cu129
-    # index. torch and torchvision keep their versions; only the build tag moved. Harbor 772e20f7.
-    # Its wheels came from the cached wheel-builder layers the megatron build had already compiled,
-    # so this cost no nvcc time. The rl-stage assert that requires EXACTLY ONE pip-check conflict
-    # when INSTALL_MEGATRON != 1 passed, so the cu129 closure adds no new dependency conflict.
-    # ALSO the first plain image in the marin-community registry — the repository string above
-    # changed with this entry, so every (prev: ...) digest below lives under the old org.
-    # Pull-verified: 41 layers, max 4.07 GB, 21.63 GB total.
-    "@sha256:0f4f916a92de4d2ba2ffc6943f5ced75182e3c97cb433ea3c85426eacabb30fa"  # noqa: E501
-    # (prev: gpu-rl-90072ada @sha256:43372633, old org, CUDA 12.8, no Blackwell)
-    # (prev: gpu-rl-f2b44d4a @sha256:c7e05af3, Harbor 772e20f7 + the baked profiler)
-    # (prev: gpu-rl-ac5a9c65 @sha256:96848c50, Harbor 772e20f7 + the three reward signals)
-    # (prev: gpu-rl-d7ba00ff @sha256:1879c801, Harbor 772e20f7 + verifier-teardown deadline)
-    # (prev: gpu-rl-0acfe947 @sha256:625d7577, Harbor 01c736a6 + background artifact writer)
-    # (prev: gpu-rl-d48445f7 @sha256:eb854128, Harbor 1319eb29 + resume-fix chain)
-    # (prev: gpu-rl-4d289ed3 @sha256:fd8792ef, vllm 8672c71e + Harbor 1319eb29)
-    # (prev: gpu-rl-0dda3d68 @sha256:bb1b01ba, Harbor baked)
-    # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041, same Harbor)
-    # (prev: gpu-rl-megatron-a1e7a363 @sha256:570e9cc1, Harbor 5efac6fa)
-    # (prev: gpu-rl-f4f25bae @sha256:7bbc17b6 harbor c872216e literal bridge; gpu-rl-e03896b7 @sha256:e8b48241b harbor f4a6b1a0 round-6 orjson parse-offload; gpu-rl-b397b82a @sha256:bac11e44 harbor 101b1400 round-5; gpu-rl-d0e4a9b8 @sha256:0fbf41e5 harbor d81b2f32 round-4; gpu-rl-f9110c79 @sha256:5e211fbf harbor 35fbdbcc round-3; gpu-rl-318e18ce @sha256:35fbf815 harbor 793ff3fb round-2)
-)
-
-# The Megatron sibling of DEFAULT_RL_DOCKER_IMAGE, built from the same source and the same baked
-# harbor with INSTALL_MEGATRON=1. A `trainer.strategy: megatron` config CANNOT run on the plain
-# image, which has no megatron package, so `resolve_launch_defaults` selects this one from the
-# config. Rebuild BOTH images together and bump BOTH digests, or a strategy switch silently
-# crosses a harbor-version boundary.
-DEFAULT_RL_MEGATRON_DOCKER_IMAGE = (
-    "ghcr.io/marin-community/marinskyrl"
-    # gpu-rl-megatron-d7ba00ff (built 2026-07-26): the megatron variant of gpu-rl-d7ba00ff, so it
-    # carries the same harbor 772e20f7 (#39 verifier-teardown deadline, #40) and the same SKYRL
-    # d7ba00ff (#137 coordinator-growth fix, #138 TIS diagnostics on both backends). Verified live
-    # on all four tasktrove-dq-sweep arms relaunched 2026-07-26 14:40 UTC.
-    # gpu-rl-megatron-ac5a9c65 (built 2026-07-27): the megatron variant of gpu-rl-ac5a9c65, built
-    # from the same source in the same pass with the same harbor 772e20f7. This is the image the
-    # tasktrove-dq sweep actually uses, because its config sets trainer.strategy=megatron.
-    # Pull-verified: 39 layers, max 3.61 GB, 22.02 GB total.
-    # gpu-rl-megatron-f2b44d4a (built 2026-07-27, kaniko job gpurl-kaniko-mega-f2b44d4a): the
-    # megatron variant of gpu-rl-f2b44d4a, built from the same source in the same pass with the
-    # same pins. Its build asserts add megatron.core + megatron.bridge + transformer_engine. This
-    # is the image the tasktrove-dq sweep uses, because its config sets trainer.strategy=megatron.
-    # Pull-verified: 40 layers, max 3.61 GB, 22.05 GB total.
-    # gpu-rl-megatron-90072ada (built 2026-07-27, kaniko job gpurl-kaniko-mega-90072ada): the
-    # megatron variant of gpu-rl-90072ada, built from the same source in the same pass with the same
-    # pins, so it carries the same baked ckpt_interval 5 and the same accelerate 1.14.0. Its build
-    # asserts add megatron.core + megatron.bridge + transformer_engine. This is the image the
-    # tasktrove-dq sweep uses, because its config sets trainer.strategy=megatron.
-    # Pull-verified: 40 layers, max 3.61 GB, 22.05 GB total.
-    # gpu-rl-megatron-2b14abd3 (built 2026-07-28, kaniko job gpurl-kaniko-mega-2b14abd3): the first
-    # image that runs on Blackwell. TORCH_CUDA_ARCH_LIST is "8.0;9.0;10.0", so the vLLM fork and
-    # flash-attn carry sm_100 kernels for the GB200 nodes on cw-us-east-08a, alongside the A100 and
-    # Hopper kernels the H100 clusters use. Adding 10.0 turns on the fork's Blackwell kernel set,
-    # one of which static-asserts CUDA >= 12.9, so the whole closure moved with it: base
-    # nvidia/cuda:12.9.2, and torch 2.11.0+cu129 from the pytorch-cu129 index rather than cu128.
-    # torch and torchvision keep their versions; only the build tag moved. Same harbor 772e20f7.
-    # ALSO the first image in the marin-community registry — the repository string above changed
-    # with this entry, so every earlier (prev: ...) digest below lives under the old org.
-    # Build asserts passed including megatron.core + megatron.bridge + transformer_engine import OK.
-    # Pull-verified: 43 layers, max 4.07 GB, 24.33 GB total.
-    "@sha256:283cf2af3fc1e29865f42f0a8102d5c2c7bc3ddaa9e72c36366ea36001bf75fd"  # noqa: E501
-    # (prev: gpu-rl-megatron-90072ada @sha256:27a94ceb, old org, CUDA 12.8, no Blackwell)
-    # (prev: gpu-rl-megatron-f2b44d4a @sha256:a374dd04, Harbor 772e20f7)
-    # (prev: gpu-rl-megatron-ac5a9c65 @sha256:0a6cea7d, Harbor 772e20f7)
-    # (prev: gpu-rl-megatron-d7ba00ff @sha256:107e4933, Harbor 772e20f7)
-    # (prev: gpu-rl-megatron-87ff3f6b @sha256:e1e62927, Harbor 01c736a6)
-    # (prev: gpu-rl-megatron-b063514b @sha256:6c2c0041; gpu-rl-megatron-a1e7a363 @sha256:570e9cc1)
-)
-
-_MEGATRON_STRATEGY = "megatron"
-
-_SUPERSEDED_RL_IMAGES = (
-    # gpu-rl-69634c0b (built 2026-07-02, kaniko job gpurl-kaniko-69634c0b): a HARBOR_COMMIT-ONLY bump
-    # of the prior gpu-rl-1af0ae2d (@sha256:d77b34dd…) — baked harbor f7f51f13 → 0729a3e9, which sits
-    # on top of ef42e75e and carries BOTH Daytona throughput fixes: (1) ef42e75e "replace 1s exec poll
-    # with 1ms+jitter" (per-exec runtime+RTT vs ceil(runtime)+1s → feeds the RL engines faster), and
-    # (2) 0729a3e9 "bake tmux+asciinema into every snapshot at BUILD time" (terminus-2 per-episode
-    # tmux install short-circuits → kills the ~401s agent_setup / 63% AgentSetupTimeout; takes effect
-    # only on a FRESH snapshot mint). Everything else is unchanged: MarinSkyRL 39faff7d (baked),
-    # vLLM-fork 76259c63 (compiled) + flash-attn 2.8.3 + torch 2.11.0+cu128, and the rl env stays
-    # PINNED to the gpu-rl-81045a29 known-good freeze via docker/rl_env_constraints.txt (UV_CONSTRAINT)
-    # — so the NCCL regression of the deleted gpu-rl-00220aac cannot recur. Harbor is a --no-deps
-    # source-only swap, so the wheel cache-key is untouched → the prebuilt vLLM-fork + flash-attn
-    # wheels (laion/gpu-rl-build-wheels) stayed ABI-correct → FAST no-nvcc prebuilt-wheelhouse path.
-    # Build asserts ran green: flash_attn_2_cuda OK, torch 2.11.0+cu128 / vllm 0.1.dev16611+g76259c63a
-    # / skyrl_train import OK, torchtitan ExpertParallel import OK (EP>1 MoE unblock),
-    # baked harbor 0.8.0 @ commit 0729a3e9, baked MarinSkyRL HEAD == 39faff7d.
-    "@sha256:d9c7e6046e8392f3bb50567fa46e8ef3d39e49bd7fdc34409bf40f380a8596a2"
-)
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
-# These H100 nodes are requested WHOLE-NODE-EXCLUSIVE (no co-tenants) — so request ALL the
-# node's allocatable resources; don't under-request (wasted capacity + a too-low --memory
-# caused a container-cgroup OOM at FSDP weight-load on the 30B run). Node allocatable ≈ 128
-# CPU / ~2014 GiB mem / 8 GPU.
-#   - CPU 48 (NOT 64): ~64-68 of the 128 cores are persistent daemonset reservation, so a
-#     request >~60 FAILS the single-IB-leaf gang admission (observed: 64 unplaceable, 48 admits).
-#   - MEMORY 1700GB (≈1583 GiB cgroup) — RAISED from 1400GB on 2026-07-11 because 1400 was
-#     UNDER-allocating. It must clear TWO opposing footguns:
-#     (a) too LOW → container-cgroup OOM at the training forward. The old 512GB OOM'd at FSDP
-#         weight-load; and 1400GB (≈1303 GiB cgroup) sits RIGHT AT the ~1303 GiB forward peak
-#         at 8 ranks/node (the 80B cp1 128-GPU EP8×FSDP8 geometry) — the r2 rankspread run
-#         measured a 1028 GiB forward peak at only 4 ranks/node (2026-07-11 diagnosis), so at
-#         8 ranks/node the peak clears 1400's cgroup → no headroom = OOM risk; and
-#     (b) too HIGH (1800GB ≈ 1676 GiB) → sits so close to node-allocatable (~2014 GiB) that
-#         after daemonset/persistent-reservation overhead a leafgroup gang (all-or-nothing,
-#         one IB leaf) can't fit all pods → Kueue SchedulingGated stall (cost multiple
-#         60-120min stalls overnight 2026-06-26, on a 1-GPU probe AND 8-node gangs).
-#     1700GB fits with headroom (≈1583 GiB < 2014 GiB allocatable) AND clears the forward
-#     peak. Lower toward the real need on an admission stall; do NOT raise toward 1800.
-#     (1000-1200GB suffices for 2-node smokes.) See .claude/ops/iris/coreweave_gpu_ops.md.
-#   - DISK defaults to "auto" = 80% of the node's live allocatable ephemeral-storage (~27.2 TiB
-#     → ~21 TiB). WHY NOT the old 512GB: the long MoE training step's Ray object store spills to
-#     /tmp (a metered emptyDir that counts against the --disk ephemeral-storage limit), growing
-#     to >1.6 TB and EVICTING the pod (2026-06-28). Whole-node-exclusive gangs have NO co-tenants,
-#     so reserving disk is pure waste — claim ~80%. (R2 object-spilling, the durable fix, is also
-#     on; this headroom is belt-and-suspenders.) Pass --disk explicitly to override.
-# A whole H100 node exposes 128 CPUs in the Iris cluster configuration, but the
-# CoreWeave scheduler leaves daemonset headroom. Requests above 48 have proven
-# unplaceable, so use the cluster's advertised capacity only to reduce this
-# safe ceiling for smaller future node types.
 MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
@@ -475,73 +92,274 @@ DAYTONA_RL_SECRET_VERSION = "1"
 DAYTONA_RL_SNAPSHOT_QUOTA = 40
 HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
 STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
-DEFAULT_MEMORY_PER_NODE = "1700GB"
-# --disk "auto" → DISK_FRACTION of the GPU node's live allocatable ephemeral-storage at launch
-# (FALLBACK_DISK_GIB iff the node query fails). See _resolve_default_disk().
-DEFAULT_DISK_PER_NODE = "auto"
-DISK_FRACTION = 0.80
-FALLBACK_DISK_GIB = 21800  # ~80% of the h100-8x ~27.2 TiB allocatable, used only if kubectl is unavailable
+AUTOMATIC_RESOURCE_REQUEST = "auto"
+MEMORY_RESOURCE = "memory"
+DISK_RESOURCE = "ephemeral-storage"
+# Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
+# and filesystem overhead.
+NODE_RESOURCE_FRACTION = 0.80
 DEFAULT_PRIORITY = "interactive"
+PRIORITY_NAMES = ("production", "interactive", "batch")
 
 
 def _parse_quantity_to_gib(q: str) -> float:
-    """Parse a k8s resource quantity (plain bytes, or Ki/Mi/Gi/Ti binary / k/M/G/T decimal suffix) to GiB."""
+    """Parse a Kubernetes or Iris byte quantity to GiB."""
     q = q.strip()
     for suf, mult in (("Ki", 2**10), ("Mi", 2**20), ("Gi", 2**30), ("Ti", 2**40), ("Pi", 2**50)):
         if q.endswith(suf):
             return float(q[: -len(suf)]) * mult / 2**30
-    for suf, mult in (("k", 1e3), ("M", 1e6), ("G", 1e9), ("T", 1e12), ("P", 1e15)):
+    for suf, mult in (
+        ("KB", 1e3),
+        ("MB", 1e6),
+        ("GB", 1e9),
+        ("TB", 1e12),
+        ("PB", 1e15),
+        ("k", 1e3),
+        ("M", 1e6),
+        ("G", 1e9),
+        ("T", 1e12),
+        ("P", 1e15),
+    ):
         if q.endswith(suf):
             return float(q[: -len(suf)]) * mult / 2**30
     return float(q) / 2**30  # plain bytes
 
 
-def _resolve_default_disk(fraction: float = DISK_FRACTION) -> str:
-    """``fraction`` of the GPU node's LIVE allocatable ephemeral-storage, as a ``"<N>Gi"`` string.
+@dataclass(frozen=True)
+class ResourceQuantities:
+    """Per-node memory and disk quantities in GiB."""
 
-    Whole-node-exclusive gangs have no co-tenants, so claim most of the node NVMe (the old fixed
-    512GB default evicted long MoE steps once Ray's object store spilled to the metered /tmp).
-    Queries kubectl for the MIN allocatable across 8-GPU nodes (never over-request a smaller node);
-    falls back to FALLBACK_DISK_GIB if kubectl is unavailable (requires KUBECONFIG)."""
+    memory_gib: float
+    disk_gib: float
+
+
+@dataclass(frozen=True)
+class NodeResourceBudget:
+    """Live headroom and policy-capped automatic requests for one node."""
+
+    headroom: ResourceQuantities
+    automatic: ResourceQuantities
+
+
+@dataclass(frozen=True)
+class ClusterResourceSnapshot:
+    """Available matching nodes observed in one Kubernetes query."""
+
+    context: str
+    gpu_variant: str
+    gpus_per_node: int
+    nodes: tuple[NodeResourceBudget, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedResourceRequests:
+    """Per-node memory and disk requests ready for Iris submission."""
+
+    memory: str
+    disk: str
+
+
+def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
+    """Return the scheduler-effective request for one pod resource."""
+    spec = pod.get("spec", {})
+
+    def request(container: dict[str, Any]) -> float:
+        quantity = container.get("resources", {}).get("requests", {}).get(resource)
+        return _parse_quantity_to_gib(quantity) if isinstance(quantity, str) else 0.0
+
+    application_request = sum(request(container) for container in spec.get("containers", []))
+    init_request = max((request(container) for container in spec.get("initContainers", [])), default=0.0)
+    overhead = spec.get("overhead", {}).get(resource)
+    overhead_request = _parse_quantity_to_gib(overhead) if isinstance(overhead, str) else 0.0
+    return max(application_request, init_request) + overhead_request
+
+
+def _node_is_ready(node: dict[str, Any]) -> bool:
+    conditions = node.get("status", {}).get("conditions", [])
+    return any(condition.get("type") == "Ready" and condition.get("status") == "True" for condition in conditions)
+
+
+def _node_resource_budgets(
+    items: list[dict[str, Any]],
+    *,
+    gpu_variant: str,
+    gpus_per_node: int,
+) -> list[NodeResourceBudget]:
+    """Return live headroom and automatic request budgets for matching Ready nodes."""
+    pod_requests: dict[str, ResourceQuantities] = {}
+    for item in items:
+        if item.get("kind") != "Pod" or item.get("status", {}).get("phase") in {"Succeeded", "Failed"}:
+            continue
+        node_name = item.get("spec", {}).get("nodeName")
+        if not isinstance(node_name, str):
+            continue
+        requested = pod_requests.get(node_name, ResourceQuantities(memory_gib=0.0, disk_gib=0.0))
+        pod_requests[node_name] = ResourceQuantities(
+            memory_gib=requested.memory_gib + _pod_resource_request_gib(item, MEMORY_RESOURCE),
+            disk_gib=requested.disk_gib + _pod_resource_request_gib(item, DISK_RESOURCE),
+        )
+
+    available = []
+    for item in items:
+        if item.get("kind") != "Node" or item.get("spec", {}).get("unschedulable") or not _node_is_ready(item):
+            continue
+        metadata = item.get("metadata", {})
+        allocatable = item.get("status", {}).get("allocatable", {})
+        product = metadata.get("labels", {}).get("nvidia.com/gpu.product", "")
+        if allocatable.get("nvidia.com/gpu") != str(gpus_per_node) or gpu_variant.lower() not in product.lower():
+            continue
+        node_name = metadata.get("name")
+        if not isinstance(node_name, str):
+            continue
+        memory_allocatable = _parse_quantity_to_gib(allocatable[MEMORY_RESOURCE])
+        disk_allocatable = _parse_quantity_to_gib(allocatable[DISK_RESOURCE])
+        requested = pod_requests.get(node_name, ResourceQuantities(memory_gib=0.0, disk_gib=0.0))
+        headroom = ResourceQuantities(
+            memory_gib=memory_allocatable - requested.memory_gib,
+            disk_gib=disk_allocatable - requested.disk_gib,
+        )
+        available.append(
+            NodeResourceBudget(
+                headroom=headroom,
+                automatic=ResourceQuantities(
+                    memory_gib=min(memory_allocatable * NODE_RESOURCE_FRACTION, headroom.memory_gib),
+                    disk_gib=min(disk_allocatable * NODE_RESOURCE_FRACTION, headroom.disk_gib),
+                ),
+            )
+        )
+    return available
+
+
+def _inspect_cluster_resources(
+    cluster_config_path: str, *, gpu_variant: str, gpus_per_node: int
+) -> ClusterResourceSnapshot:
+    """Read one live node-and-pod resource snapshot from the selected cluster."""
+    cluster_config = _load_cluster_config(cluster_config_path)
+    platform = cluster_config.get("platform")
+    coreweave = platform.get("coreweave") if isinstance(platform, dict) else None
+    kubeconfig = coreweave.get("kubeconfig_path") if isinstance(coreweave, dict) else None
+    context = coreweave.get("kube_context") if isinstance(coreweave, dict) else None
+    if not isinstance(kubeconfig, str) or not isinstance(context, str):
+        raise SystemExit(
+            "The selected cluster config needs platform.coreweave.kubeconfig_path and kube_context "
+            "to derive automatic memory and disk requests; pass both explicitly."
+        )
+
     try:
         out = subprocess.run(
             [
                 "kubectl",
+                "--kubeconfig",
+                str(Path(kubeconfig).expanduser()),
+                "--context",
+                context,
                 "get",
-                "nodes",
+                "nodes,pods",
+                "--all-namespaces",
                 "-o",
-                r'jsonpath={range .items[*]}{.status.capacity.nvidia\.com/gpu}{" "}'
-                r'{.status.allocatable.ephemeral-storage}{"\n"}{end}',
+                "json",
             ],
             capture_output=True,
             text=True,
             timeout=20,
             check=True,
         ).stdout
-        allocs = [
-            _parse_quantity_to_gib(p[1])
-            for p in (line.split() for line in out.splitlines())
-            if len(p) == 2 and p[0] == "8"
-        ]
-        if allocs:
-            gib = int(min(allocs) * fraction)
-            print(
-                f"[rl-iris] --disk auto: {fraction:.0%} of node allocatable "
-                f"(min {min(allocs):.0f}GiB across {len(allocs)} GPU nodes) = {gib}Gi",
-                flush=True,
-            )
-            return f"{gib}Gi"
-        print(
-            f"[rl-iris] --disk auto: no 8-GPU nodes returned by kubectl; using fallback {FALLBACK_DISK_GIB}Gi",
-            flush=True,
+    except Exception as exc:  # noqa: BLE001 - convert cluster/tool failures into launch guidance
+        raise SystemExit(
+            f"Could not inspect {gpus_per_node}x{gpu_variant} nodes in kube context {context!r}: {exc}. "
+            "Pass explicit --memory and --disk values."
+        ) from exc
+    items = json.loads(out)["items"]
+    if not isinstance(items, list):
+        raise ValueError("kubectl node-and-pod snapshot has a non-list items field")
+    nodes = _node_resource_budgets(items, gpu_variant=gpu_variant, gpus_per_node=gpus_per_node)
+    return ClusterResourceSnapshot(
+        context=context,
+        gpu_variant=gpu_variant,
+        gpus_per_node=gpus_per_node,
+        nodes=tuple(nodes),
+    )
+
+
+def _resource_request_is_automatic(request: str) -> bool:
+    return request.strip().lower() == AUTOMATIC_RESOURCE_REQUEST
+
+
+def _resolve_gang_resource_requests(
+    snapshot: ClusterResourceSnapshot,
+    *,
+    num_nodes: int,
+    memory_request: str,
+    disk_request: str,
+) -> ResolvedResourceRequests:
+    """Select one resource pair that fits the requested gang in a live snapshot."""
+    automatic_memory = _resource_request_is_automatic(memory_request)
+    automatic_disk = _resource_request_is_automatic(disk_request)
+    requested_memory_gib = None if automatic_memory else _parse_quantity_to_gib(memory_request)
+    requested_disk_gib = None if automatic_disk else _parse_quantity_to_gib(disk_request)
+    candidates = [
+        resources
+        for resources in snapshot.nodes
+        if (requested_memory_gib is None or resources.headroom.memory_gib >= requested_memory_gib)
+        and (requested_disk_gib is None or resources.headroom.disk_gib >= requested_disk_gib)
+    ]
+    if len(candidates) < num_nodes:
+        raise SystemExit(
+            f"Automatic resources need {num_nodes} Ready, schedulable "
+            f"{snapshot.gpus_per_node}x{snapshot.gpu_variant} nodes, "
+            f"but only {len(candidates)} of {len(snapshot.nodes)} matching nodes in kube context "
+            f"{snapshot.context!r} fit the constraints memory={memory_request}, disk={disk_request}; "
+            "adjust the resource requests."
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort; fall back rather than block a launch
-        print(
-            f"[rl-iris] --disk auto: kubectl node query failed ({type(exc).__name__}: {exc}); "
-            f"using fallback {FALLBACK_DISK_GIB}Gi",
-            flush=True,
+
+    if automatic_memory:
+        selected = sorted(candidates, key=lambda resources: resources.automatic.memory_gib, reverse=True)[:num_nodes]
+    else:
+        selected = sorted(candidates, key=lambda resources: resources.automatic.disk_gib, reverse=True)[:num_nodes]
+    memory_gib = int(min(resources.automatic.memory_gib for resources in selected))
+    disk_gib = int(min(resources.automatic.disk_gib for resources in selected))
+    if (automatic_memory and memory_gib < 1) or (automatic_disk and disk_gib < 1):
+        automatic_resources = " and ".join(
+            resource for resource, automatic in (("memory", automatic_memory), ("disk", automatic_disk)) if automatic
         )
-    return f"{FALLBACK_DISK_GIB}Gi"
+        raise SystemExit(
+            f"No positive automatic {automatic_resources} request fits {num_nodes} "
+            f"{snapshot.gpus_per_node}x{snapshot.gpu_variant} nodes "
+            f"in kube context {snapshot.context!r}; pass explicit --memory and --disk values."
+        )
+    resolved_memory = f"{memory_gib}Gi" if automatic_memory else memory_request
+    resolved_disk = f"{disk_gib}Gi" if automatic_disk else disk_request
+    return ResolvedResourceRequests(memory=resolved_memory, disk=resolved_disk)
+
+
+def resolve_node_resource_requests(
+    cluster_config_path: str,
+    *,
+    gpu_variant: str,
+    gpus_per_node: int,
+    num_nodes: int,
+    memory_request: str,
+    disk_request: str,
+) -> ResolvedResourceRequests:
+    """Return live admission-aware resource requests for a GPU gang."""
+    snapshot = _inspect_cluster_resources(
+        cluster_config_path,
+        gpu_variant=gpu_variant,
+        gpus_per_node=gpus_per_node,
+    )
+    resolved = _resolve_gang_resource_requests(
+        snapshot,
+        num_nodes=num_nodes,
+        memory_request=memory_request,
+        disk_request=disk_request,
+    )
+    print(
+        f"[rl-iris] automatic node resources: largest requests with live headroom on {num_nodes} of "
+        f"{len(snapshot.nodes)} matching nodes, capped at {NODE_RESOURCE_FRACTION:.0%} allocatable = "
+        f"memory {resolved.memory}, disk {resolved.disk}",
+        flush=True,
+    )
+    return resolved
 
 
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
@@ -549,10 +367,34 @@ RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
 # In-container source sync target. iris syncs the launcher's `workspace`
 # (this MarinSkyRL repo, PROJECT_ROOT — see IrisClient.remote(..., workspace=PROJECT_ROOT))
-# to /app and sets IRIS_WORKDIR=/app; putting /app first on PYTHONPATH makes the live
-# synced cloud.iris + skyrl-train code win over the image's baked copies. The runtime is
-# self-contained here (cloud.iris.*) — no OpenThoughts-Agent workspace is required in-pod.
+# to /app and sets IRIS_WORKDIR=/app. The runtime is self-contained here (cloud.iris.*) —
+# no OpenThoughts-Agent workspace is required in-pod.
+#
+# The bundle wins for `cloud.iris.*` ONLY. It does NOT win for `skyrl_train.*`, even though
+# PYTHONPATH lists /app/skyrl-train ahead of /opt/skyrl/skyrl-train: run_rl.py launches the
+# trainer with `subprocess.Popen(cmd, cwd=$SKYRL_HOME/skyrl-train)`, and `python -m` puts the
+# CWD first on sys.path, ahead of PYTHONPATH. So `skyrl_train.*` and `examples.terminal_bench.*`
+# always resolve to the BAKED image tree.
+#
+# Path test: edited skyrl-train/ -> image rebuild required. Edited cloud/iris/ -> no rebuild.
+# See .agents/ops/gpu-rl-image-build.md. An earlier version of this comment claimed the bundle
+# also won for skyrl-train, and that cost a wasted 48-GPU launch.
 APP_DIR = "/app"
+
+
+@dataclass(frozen=True)
+class RlConfigLaunch:
+    """Task path and optional environment payload for one RL config."""
+
+    task_path: str
+    payload: str | None
+
+    def task_environment(self) -> dict[str, str]:
+        """Return the environment needed to materialize an external config."""
+        if self.payload is None:
+            return {}
+        return {RL_CONFIG_PAYLOAD_ENV: self.payload}
+
 
 # marin-iris wheel installed into the RL venv at pod bootstrap for the controller-ingress
 # registration path (GAP D). The gpu-rl image bakes ONLY MarinSkyRL + harbor, never iris (a
@@ -658,14 +500,9 @@ def _cluster_gpu_cpu_capacity(cluster_config: dict[str, Any], *, gpu_variant: st
     )
 
 
-def _resolve_daytona_rl_api_key() -> str:
-    """Read the pinned RL Daytona key from Secret Manager on the launch host.
-
-    Iris task environments currently carry literal values, not secret references; the
-    ``gcp-secret://`` resolver applies to Iris controller config only.  Resolve the
-    canonical pinned secret here, retain it only in process memory, and let the existing
-    Iris job-secret path inject it.  Do not include the value in diagnostics.
-    """
+def _daytona_rl_api_key_from_secret_manager() -> Optional[str]:
+    """The pinned RL Daytona key from Secret Manager, or ``None`` if gcloud is
+    missing/denied or the secret is empty. Never logged."""
     command = [
         "gcloud",
         "secrets",
@@ -677,18 +514,37 @@ def _resolve_daytona_rl_api_key() -> str:
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise SystemExit(
-            "[rl-iris] could not resolve the canonical DAYTONA_RL_API_KEY from Google Secret Manager; "
-            "authenticate gcloud for the Marin project and retry."
-        ) from exc
-    value = result.stdout.strip()
-    if not value:
-        raise SystemExit(
-            "[rl-iris] canonical DAYTONA_RL_API_KEY resolved empty from Google Secret Manager; "
-            "check the pinned secret version."
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _resolve_daytona_rl_api_key() -> str:
+    """The canonical Secret Manager key, else a ``DAYTONA_API_KEY`` already in the
+    environment (e.g. from ``--secrets-env``) when Secret Manager is unreachable, else exit.
+    Lets an operator without Secret Manager access launch with a key they already hold; the
+    value is injected through the usual job-secret path."""
+    value = _daytona_rl_api_key_from_secret_manager()
+    if value:
+        print(
+            "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
+            f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
+            flush=True,
         )
-    return value
+        return value
+    env_key = os.environ.get("DAYTONA_API_KEY")
+    if env_key:
+        print(
+            "[rl-iris] Daytona: canonical Google Secret Manager key unavailable; using the "
+            "DAYTONA_API_KEY already in the environment (from --secrets-env).",
+            flush=True,
+        )
+        return env_key
+    raise SystemExit(
+        "[rl-iris] no Daytona RL key available: Google Secret Manager was unreachable and no "
+        "DAYTONA_API_KEY is set. Authenticate gcloud for the Marin project, or provide "
+        "DAYTONA_API_KEY via --secrets-env, then retry."
+    )
 
 
 def _daytona_client(api_key: str) -> Any:
@@ -874,9 +730,11 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
 
     if args.task_image is None:
         strategy = _rl_training_strategy(args)
-        args.task_image = (
-            DEFAULT_RL_MEGATRON_DOCKER_IMAGE if strategy == _MEGATRON_STRATEGY else DEFAULT_RL_DOCKER_IMAGE
-        )
+        execution_cluster = args.target_cluster or args.cluster
+        try:
+            args.task_image = image_for_cluster(execution_cluster, strategy).reference
+        except ValueError as error:
+            raise SystemExit(f"{error}; pass --task-image explicitly.") from error
 
 
 def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
@@ -1137,14 +995,17 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rl_config",
         required=True,
-        help="Path to SkyRL/MarinSkyRL config YAML (repo-relative or absolute).",
+        help=(
+            "Path to a SkyRL/MarinSkyRL config YAML. Repo-relative paths are synced under /app; "
+            "absolute host paths outside the repo are uploaded for the task."
+        ),
     )
     parser.add_argument("--rl-config", dest="rl_config", help=argparse.SUPPRESS)
 
     parser.add_argument(
         "--model_path",
         required=True,
-        help="Model path or HuggingFace ID (e.g., Qwen/Qwen3-8B).",
+        help="Hugging Face repo ID (e.g., Qwen/Qwen3-8B) or a directory available inside every task.",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
 
@@ -1200,8 +1061,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="num_nodes",
         type=int,
         default=1,
-        help="Number of WHOLE H100 nodes to request EXCLUSIVELY, gang/co-scheduled "
-        "(one iris task per node, all 8 GPUs each, coscheduled by leafgroup/IB).",
+        help="Number of whole GPU nodes to request exclusively and co-schedule as one gang.",
     )
     parser.add_argument(
         "--gpus-per-node",
@@ -1209,7 +1069,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="gpus_per_node",
         type=int,
         default=DEFAULT_GPUS_PER_NODE,
-        help="GPUs per node (CoreWeave nodes are 8x H100).",
+        help="GPUs per node. Must match a GPU scale group in the selected cluster config.",
     )
     parser.add_argument(
         "--gpu-variant",
@@ -1227,16 +1087,17 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--memory",
-        default=DEFAULT_MEMORY_PER_NODE,
-        help="Memory per node.",
+        default=AUTOMATIC_RESOURCE_REQUEST,
+        help=f"Memory per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected "
+        "GPU node's allocatable memory, reduced as needed to fit the requested gang after current pod requests.",
     )
     parser.add_argument(
         "--disk",
-        default=DEFAULT_DISK_PER_NODE,
-        help=f"Ephemeral disk per node. Default 'auto' = {int(DISK_FRACTION * 100)}%% of the GPU "
-        "node's live allocatable ephemeral-storage (whole-node-exclusive gangs have no "
-        "co-tenants, so claim most of the node NVMe — keeps Ray object-spill / checkpoints "
-        "clear of the ephemeral-storage eviction). Pass an explicit value (e.g. 4000GB) to override.",
+        default=AUTOMATIC_RESOURCE_REQUEST,
+        help=f"Ephemeral disk per node. Default 'auto' = {int(NODE_RESOURCE_FRACTION * 100)}%% of the selected GPU "
+        "node's allocatable ephemeral-storage, reduced as needed to fit the requested gang after current pod "
+        "requests. The remaining headroom protects Ray object spill and checkpoints from "
+        "ephemeral-storage eviction. Pass an explicit value (e.g. 4000GB) to override.",
     )
     parser.add_argument(
         "--ray-port",
@@ -1308,8 +1169,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--docker-image",
         dest="task_image",
         default=None,
-        help="Container image. Default: selected from the config's trainer.strategy — "
-        f"{DEFAULT_RL_MEGATRON_DOCKER_IMAGE} for megatron, {DEFAULT_RL_DOCKER_IMAGE} otherwise.",
+        help="Container image. Default: select an immutable digest from the execution cluster "
+        "and the config's trainer.strategy.",
     )
     parser.add_argument(
         "--job-name",
@@ -1321,7 +1182,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--priority",
         default=DEFAULT_PRIORITY,
-        choices=["production", "interactive", "batch"],
+        choices=PRIORITY_NAMES,
         help="Iris priority band.",
     )
     parser.add_argument(
@@ -1764,32 +1625,29 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
 
 
 def normalize(args: argparse.Namespace) -> None:
-    """Validate + normalize. Keep rl_config repo-relative so it resolves on /app."""
-    # Resolve rl_config to a repo-relative path (it must exist on the synced
-    # /app workspace, NOT be an absolute host path).
-    rl_cfg = Path(args.rl_config)
-    if rl_cfg.is_absolute():
-        try:
-            args.rl_config = str(rl_cfg.resolve().relative_to(PROJECT_ROOT))
-        except ValueError:
-            raise SystemExit(
-                f"--rl_config {args.rl_config!r} is absolute and not under the repo "
-                f"({PROJECT_ROOT}); pass a repo-relative path so it resolves on /app."
-            )
-    # Verify it exists locally (so we fail fast before submitting).
-    if not (PROJECT_ROOT / args.rl_config).exists():
-        # Fall back to cloud/iris/configs/<name>[.yaml].
-        yaml_dir = Path("cloud/iris/configs")
-        for cand in (yaml_dir / args.rl_config, yaml_dir / f"{args.rl_config}.yaml"):
-            if (PROJECT_ROOT / cand).exists():
-                args.rl_config = str(cand)
-                break
-        else:
-            print(
-                f"[rl-iris] WARNING: --rl_config {args.rl_config!r} not found under "
-                f"{PROJECT_ROOT}; the worker will error if it isn't on /app.",
-                file=sys.stderr,
-            )
+    """Resolve the RL config and validate the requested worker topology."""
+    if is_object_store_model_path(args.model_path):
+        raise SystemExit(unsupported_model_path_message(args.model_path))
+
+    try:
+        source = resolve_rl_config_path(args.rl_config)
+    except FileNotFoundError as error:
+        raise SystemExit(str(error)) from error
+
+    try:
+        relative_path = source.relative_to(PROJECT_ROOT)
+    except ValueError:
+        contents = source.read_bytes()
+        digest = hashlib.sha256(contents).hexdigest()[:16]
+        suffix = source.suffix or ".yaml"
+        args.rl_config = str(source)
+        args.rl_config_launch = RlConfigLaunch(
+            task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
+            payload=base64.b64encode(contents).decode("ascii"),
+        )
+    else:
+        args.rl_config = str(relative_path)
+        args.rl_config_launch = RlConfigLaunch(task_path=str(relative_path), payload=None)
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -1817,12 +1675,16 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
 
     # The MarinSkyRL training command rank 0 runs (run_rl.py owns config parse,
     # hydra-arg build, HF data resolution, and the SkyRL entrypoint launch).
+    rl_config_launch = args.rl_config_launch
+    if not isinstance(rl_config_launch, RlConfigLaunch):
+        raise RuntimeError("normalize() must resolve --rl_config before building the task command")
+    task_rl_config = rl_config_launch.task_path
     train_cmd: List[str] = [
         RL_PYTHON,
         "-m",
         "cloud.iris.run_rl",
         "--rl_config",
-        args.rl_config,
+        task_rl_config,
         "--model_path",
         args.model_path,
         "--job_name",
@@ -1955,7 +1817,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # A policy_chat_template override rewrites the node-local tokenizer cache, so it REQUIRES
     # a prestage even when the config is not offline (nothing to rewrite otherwise).
     if _offline or _policy_chat_template:
-        if args.model_path and not args.model_path.startswith(("s3://", "gs://", "gcs://")):
+        if args.model_path:
             controller_cmd.extend(["--prestage-model", args.model_path])
             # In-region warm source. Default = auto-derive the CW-S3 convention path from
             # the repo id; a seed job (mirror_hf_to_s3.py) populates it once and every node
@@ -2132,23 +1994,30 @@ def main() -> int:
     if _rl_config_is_agentic(args.rl_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
-        print(
-            "[rl-iris] Daytona: agentic run uses canonical Google Secret Manager "
-            f"{DAYTONA_RL_SECRET_NAME} version {DAYTONA_RL_SECRET_VERSION}.",
-            flush=True,
-        )
-        _purge_stale_daytona_snapshots(daytona_api_key)
+        # The purge deletes stale snapshots across the shared RL org, so skip it on a
+        # --dry-run — with the --secrets-env fallback above, a dry-run now reaches this
+        # point instead of exiting at the Secret Manager call.
+        if not args.dry_run:
+            _purge_stale_daytona_snapshots(daytona_api_key)
 
     command = build_task_command(args)
 
-    # Per-task resources: a WHOLE node (8 H100 + IB), one task per node.
+    # Per-task resources: one whole selected GPU node per task.
     gpu_spec = f"{args.gpu_variant}x{args.gpus_per_node}"
 
-    # Resolve the "auto" disk default to ~80% of the node's live allocatable ephemeral-storage.
-    # (Whole-node-exclusive gangs have no co-tenants → reserving disk is wasted; a too-low fixed
-    # default evicted long MoE steps once Ray spilled to the metered /tmp. See _resolve_default_disk.)
-    if str(args.disk).strip().lower() == "auto":
-        args.disk = _resolve_default_disk()
+    automatic_memory = _resource_request_is_automatic(str(args.memory))
+    automatic_disk = _resource_request_is_automatic(str(args.disk))
+    if automatic_memory or automatic_disk:
+        resolved_resources = resolve_node_resource_requests(
+            args.cluster_config,
+            gpu_variant=args.gpu_variant,
+            gpus_per_node=args.gpus_per_node,
+            num_nodes=args.num_nodes,
+            memory_request=str(args.memory),
+            disk_request=str(args.disk),
+        )
+        args.memory = resolved_resources.memory
+        args.disk = resolved_resources.disk
 
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
     print(f"[rl-iris] Job:        /{user}/{args.job_name}", flush=True)
@@ -2222,11 +2091,7 @@ def main() -> int:
         target_cluster=args.target_cluster,
     )
 
-    priority_band = {
-        "production": job_pb2.PRIORITY_BAND_PRODUCTION,
-        "interactive": job_pb2.PRIORITY_BAND_INTERACTIVE,
-        "batch": job_pb2.PRIORITY_BAND_BATCH,
-    }.get(args.priority, job_pb2.PRIORITY_BAND_UNSPECIFIED)
+    priority_band = job_pb2.PriorityBand.Value(f"PRIORITY_BAND_{args.priority.upper()}")
 
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
@@ -2246,6 +2111,7 @@ def main() -> int:
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
+    env_vars.update(args.rl_config_launch.task_environment())
     # ── Per-cluster infra-env DEFAULTS (fill-gap belt for cluster-specific footguns) ──────────
     # Some clusters need a specific network/NCCL interface that a cluster-AGNOSTIC RL config
     # won't (and shouldn't) carry. Fill it in here, keyed on --target-cluster, ONLY if neither
@@ -2488,6 +2354,15 @@ def main() -> int:
 
         if args.no_wait:
             return 0
+        print(
+            f"[rl-iris] Now streaming logs for {full_job_id}. This process runs until the job ends.\n"
+            "[rl-iris] Ctrl-C or SIGINT TERMINATES the job. It does not detach from it.\n"
+            "[rl-iris] Use --no-wait to submit and return instead.\n"
+            "[rl-iris] To stop a backgrounded launcher and keep the job alive, use kill or kill -9. "
+            "Never use kill -2.",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             status = job.wait(stream_logs=True, timeout=float("inf"))
             exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1

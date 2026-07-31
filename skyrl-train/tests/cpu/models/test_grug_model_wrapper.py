@@ -22,7 +22,7 @@ _SUPPORTED_OPTIONS = {
 @pytest.mark.parametrize(
     ("option", "value", "label"),
     [
-        ("attn_implementation", "flash_attention_2", "attention backend"),
+        ("attn_implementation", "sdpa", "attention backend"),
         ("use_sample_packing", True, "sample packing"),
         ("lora_rank", 8, "LoRA"),
         ("load_in_4bit", True, "4-bit loading"),
@@ -41,8 +41,12 @@ def test_grug_training_options_reject_each_unsupported_feature(option, value, la
         validate_grug_training_options(**options)
 
 
-def test_grug_training_options_accept_supported_defaults_and_ignore_other_models():
-    validate_grug_training_options(**_SUPPORTED_OPTIONS)
+@pytest.mark.parametrize("attn_implementation", ["eager", "flash_attention_2"])
+def test_grug_training_options_accept_supported_attention(attn_implementation):
+    validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "attn_implementation": attn_implementation})
+
+
+def test_grug_training_options_ignore_other_models():
     validate_grug_training_options(
         **{
             **_SUPPORTED_OPTIONS,

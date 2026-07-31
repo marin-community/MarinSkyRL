@@ -1,75 +1,35 @@
 # Iris operator scripts
 
-`scripts/iris/` holds the operator tooling for Iris job lifecycle and CoreWeave RL evidence
-capture. Run them from the repo root; each inserts the repo root on `sys.path` itself, so a
-direct invocation works.
+Run the tools under `scripts/iris/` from the repository root.
 
-| script | what it is for |
+| script | purpose |
 |---|---|
-| `iris_ops.py` | Poll the authoritative job lifecycle state and exit on the terminal verdict. Shared helpers for the rest. |
-| `list_iris_jobs.py` | List jobs across clusters with state and age. |
-| `watch_coreweave_rl.py` | Capture the durable local evidence bundle for a running RL job. |
-| `analyze_coreweave_rl_job.py` | Read that bundle and report. `--local-only` makes no remote calls. |
-| `analyze_coreweave_rl_job_live.sh` | Capture and analyze in one pass against a live job. |
+| `iris_ops.py` | poll authoritative lifecycle state and wait for a terminal verdict |
+| `list_iris_jobs.py` | list jobs across configured clusters |
+| `watch_coreweave_rl.py` | capture a durable local evidence bundle |
+| `analyze_coreweave_rl_job.py` | analyze a captured bundle; `--local-only` makes no remote calls |
+| `analyze_coreweave_rl_job_live.sh` | capture and analyze one live job |
 
-## Interpreter and credentials
+## Runtime and state
 
-- Python and `iris`: `/Users/benjaminfeuer/miniconda3/envs/otagent/bin/{python,iris}`. That env
-  ships `iris`, a working `kubernetes`, and `boto3`. The marin checkout's `.venv/bin/iris` cannot
-  drive CoreWeave.
-- `export KUBECONFIG=~/.kube/coreweave-iris` in the same shell. Without it the calls report
-  misleading empty results rather than failing.
-- `IRIS_BIN` overrides the iris binary if you need a different one.
+Set `IRIS_BIN` when the operator's Iris installation differs from the helper's configured default.
+Select and verify Kubernetes access as described in `coreweave.md`.
 
-## Job state
-
-`iris_ops.py` polls state, not log content. The controller keeps terminal job records after pods
-are reaped, so a job that has vanished from Kubernetes still reports its real terminal state.
-Numeric states, from `lib/iris/src/iris/rpc/job.proto`:
-
-```
-0 UNSPECIFIED  1 PENDING  2 BUILDING  3 RUNNING
-4 SUCCEEDED    5 FAILED   6 KILLED    7 WORKER_FAILED  8 UNSCHEDULABLE
-```
-
-Judge liveness from this and from checkpoint or trial artifacts. A raw `iris job logs` tail
-interleaves ranks, and `--no-tail` returns startup lines, so neither shows whether a job is
-progressing.
-
-Example — watch a build until it reaches a terminal state:
+Use the lifecycle states and interpretation rules in `coreweave.md`; `iris_ops.py` owns their numeric
+mapping.
 
 ```bash
-PY=/Users/benjaminfeuer/miniconda3/envs/otagent/bin/python
-export KUBECONFIG=~/.kube/coreweave-iris
-$PY scripts/iris/iris_ops.py /benjaminfeuer/<job> --cluster cw-us-east-02a --interval 60
+python scripts/iris/iris_ops.py <job-id> --cluster <cluster> --interval 60
 ```
 
-`--once` polls a single time and exits, which is what a monitor or cron wants.
+Use `--once` for automation.
 
-## Reading the CoreWeave object store from a laptop
+## CoreWeave object storage
 
-Do not launch an iris job to list or read `s3://marin-us-east-02a`. It is reachable directly:
+Read the external object-store endpoint from the current Iris cluster configuration. Obtain access
+through the cluster-approved secret mechanism; do not source unrelated cloud credentials or copy
+secret values into commands or docs. Use virtual-hosted bucket addressing and the region setting
+declared by the cluster.
 
-- Endpoint `https://cwobject.com` — the `external_object_storage_endpoint` in the cluster config.
-  `http://cwlota.com` is the in-cluster LOTA cache and does not resolve from outside.
-- Credentials come from the `iris-task-env` Secret in namespace `iris`, not from the laptop:
-
-  ```bash
-  kubectl --context marin-gpu_US-EAST-02A -n iris get secret iris-task-env \
-    -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d
-  ```
-
-  Neither `~/.aws/credentials` nor the `AWS_*` in `secrets.env` works: `secrets.env` sets
-  `AWS_ACCESS_KEY_ID=$LAION_ACCESS_KEY`, a different account, so sourcing it makes every call fail
-  with `The access key ID you provided does not exist in our records`.
-- Buckets use virtual-hosted addressing. With fsspec pass
-  `config_kwargs={'s3': {'addressing_style': 'virtual'}}` and `client_kwargs={'region_name': 'auto'}`.
-
-The same credential rule applies in reverse inside a job: a task pod already receives these through
-`envFrom`, and passing `AWS_*` explicitly overrides them and retargets the call at real AWS S3.
-
-## Provenance
-
-Ported from the OpenThoughts-Agent checkout, where `iris_ops.py` had been renamed from
-`watch_job_state.py`. MarinSkyRL does not depend on that repo; these are copies, and changes
-belong here.
+Inside Iris task pods, prefer the credentials injected by `envFrom`. Explicit `AWS_*` values can
+override the correct object-store identity and redirect requests to the wrong provider.

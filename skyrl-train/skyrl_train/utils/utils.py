@@ -24,6 +24,7 @@ from .constants import (
     DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
     get_worker_nccl_timeout_s,
 )
+from .logging_utils import format_exception_text
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
@@ -1249,9 +1250,17 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # actually reach the policy/vLLM workers. Pure passthrough: a no-op unless
     # the var is set in the launcher environment, so the production/default path
     # is unchanged.
+    #
+    # GLOO_SOCKET_IFNAME is deliberately NOT in this list. runtime_env is
+    # job-level, so it pushes one value to every node, and gloo reads the value as
+    # a literal interface name with no `^exclude` form. NIC names are not uniform
+    # across a gang: job 20260729-102429-52af30 broadcast the head's `enp90s0np0`
+    # to a node naming its NIC `enp90s0f0np0` and megatron's gloo group creation
+    # there died with `Unable to find address for: enp90s0np0`. Set it per node
+    # instead (the iris controller derives it from each pod's own IP before that
+    # node's `ray start`, which the node's Ray workers inherit).
     for _net_env in (
         "NCCL_SOCKET_IFNAME",
-        "GLOO_SOCKET_IFNAME",
         "NCCL_IB_HCA",
         "NCCL_IB_DISABLE",
         "NCCL_NET",
@@ -1330,7 +1339,10 @@ def configure_ray_worker_logging() -> None:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+            message = record.getMessage()
+            if record.exc_info is not None and record.exc_info[1] is not None:
+                message = f"{message}\n{format_exception_text(record.exc_info[1])}"
+            logger.opt(depth=6).log(level, message)
 
     logging.root.handlers = [_InterceptHandler()]
     level = getattr(logging, level_name, logging.INFO)

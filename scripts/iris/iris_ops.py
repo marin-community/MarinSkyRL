@@ -59,28 +59,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Mapping, Sequence, TypeVar
 
-
-# The operational helpers deliberately validate identifiers with the current
-# Iris implementation from Marin main, not a copy vendored into this repo.
-MARIN_MAIN_ROOT = Path(os.environ.get("MARIN_MAIN_ROOT", "/Users/benjaminfeuer/Documents/marin"))
-MARIN_IRIS_SOURCE = MARIN_MAIN_ROOT / "lib" / "iris" / "src"
-if MARIN_IRIS_SOURCE.exists() and str(MARIN_IRIS_SOURCE) not in sys.path:
-    sys.path.insert(0, str(MARIN_IRIS_SOURCE))
-try:
-    from iris.cluster.types import JobName  # noqa: E402
-except ModuleNotFoundError as exc:
-    raise RuntimeError(
-        "Marin Iris is unavailable: install the locked dev dependency or provide "
-        f"MARIN_MAIN_ROOT (looked for {MARIN_IRIS_SOURCE})."
-    ) from exc
-
 # --- iris invocation ------------------------------------------------------
 # The CoreWeave GPU (k8s) backend needs a `kubernetes` install that the bare
 # marin `.venv` lacks; the otagent env has it AND ships the iris CLI, so use
 # that binary by default. Override with $IRIS_BIN if it ever moves.
 IRIS_BIN = os.environ.get("IRIS_BIN", "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris")
 DEFAULT_CLUSTER = "cw-us-east-02a"  # the GPU RL cluster; use "marin" for TPU jobs
-DEFAULT_BUNDLE_ROOT = Path("/Users/benjaminfeuer/Documents/experiments/active/iris-job-bundles")
+DEFAULT_BUNDLE_ROOT = Path.home() / "Documents" / "iris-job-bundles"
 
 # JobState int -> friendly name (lib/iris/src/iris/rpc/job.proto).
 STATE_NAMES = {
@@ -375,11 +360,13 @@ class JobBundle:
 
 
 def job_id_parts(job_id: str) -> tuple[str, ...]:
-    """Validate an Iris id and return its safe local path components."""
-    name = JobName.from_string(job_id)
-    if not name.is_root:
+    """Validate a canonical root Iris id and return safe path components."""
+    if not job_id.startswith("/"):
         raise ValueError(f"Expected root Iris job id '/<user>/<job>', got {job_id!r}.")
-    return (name.user, name.name)
+    parts = tuple(job_id[1:].split("/"))
+    if len(parts) != 2 or any(not part.strip() or part in {".", ".."} for part in parts):
+        raise ValueError(f"Expected root Iris job id '/<user>/<job>', got {job_id!r}.")
+    return parts
 
 
 def job_bundle(bundle_root: Path, cluster: str, job_id: str) -> JobBundle:

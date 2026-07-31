@@ -1,289 +1,58 @@
 ---
 name: experiment-status-artifact
-description: >-
-  Render a fleet of experiment runs as a published status Artifact — an instrument readout, not
-  a document. Use when someone asks for an overview, status table, or dashboard across a set of
-  runs, arms, or datasets and wants it rendered rather than printed to the terminal. Produces a
-  board that is scanned and operated. Load the artifact-design skill first; this specializes it.
+description: Render a fleet of experiment runs as a compact, operational status artifact. Use when a user needs a dashboard or overview across multiple runs, arms, datasets, or configurations rather than a prose report.
 ---
 
-# Experiment status artifact
+# Experiment fleet status artifact
 
-A status board is **scanned and operated, not read top to bottom**. The craft is information
-design rather than typography: surface the summary before the detail, and encode state in
-*form* as well as number so what needs attention reads at a glance.
+Build an instrument panel for scanning and acting on a fleet. Derive facts from the supplied run
+records and current evidence; do not invent state or preserve campaign facts in this skill.
 
-The treatment is deliberately **utilitarian** — no hero, no scroll animation, no display serif.
-`artifact-design` governs; this narrows it to one page type.
+## Design the board
 
-## The rule that makes this format worth building
+1. Put the fleet-level answer first: counts by health, capacity or progress summary, and the most
+   urgent actionable condition.
+2. Use one row or card per comparable unit. Keep identity, state, progress, throughput, quality,
+   resource use, and next action in consistent positions.
+3. Encode state redundantly with text, shape/icon, and restrained color. Never rely on color alone.
+4. Separate observed facts from inference. Label stale, missing, estimated, or conflicting inputs.
+5. Show trends only when the time window and denominator are known. Prefer a small sparkline or
+   delta to a decorative chart.
+6. Keep controls operational: sort, filter, group, and link to evidence. Avoid controls that do not
+   change the view.
 
-**Find the single quantity that decides each run's outcome, and give it a visual axis.**
+## Information hierarchy
 
-Everything else on the page is a table. That one column is why the page exists, because a
-reader scanning down it sees the campaign's finding directly — which runs sit inside the range
-where the method can work and which sit outside it — and that is not recoverable from a column
-of numbers.
+- **Header:** scope, capture time, data freshness, and source links.
+- **Fleet strip:** total, productive, starting, stalled, terminal, and indeterminate.
+- **Primary table:** stable columns with the identifier frozen or visually anchored.
+- **Exceptions:** blockers and recommended actions, ordered by urgency.
+- **Details:** expandable evidence, configuration, and metric context for a selected row.
 
-If you cannot name that quantity, do not build the artifact yet. Find it first. A status board
-without it is a worse version of a markdown table.
+Use a table when rows share a schema; use cards only when each run needs materially different
+fields. Preserve readable typography, keyboard navigation, visible focus, sufficient contrast, and
+responsive overflow.
 
-The quantity is usually the one a launch decision already turns on: whichever measurement the
-owning policy screens on before committing hardware. Read that policy rather than inventing a
-metric.
+## Data contract
 
-## Structure, in order
+For each unit, carry the smallest useful record:
 
-1. **Header** — eyebrow naming the campaign, an H1 stating scope as a fraction
-   (`N of M attempted`), and a subtitle carrying the fixed parameters plus an explicit
-   **as-of timestamp in UTC**. Readers open these hours later.
-2. **Summary strip** — 4–6 counts. Include at least one that is uncomfortable. A strip of only
-   flattering numbers is decoration, not an instrument.
-3. **Sections by lifecycle state**, most actionable first: running, then finished, then ended
-   early. Not alphabetical, not chronological. Each heading carries a count and a qualifier
-   that says something true about the group.
-4. **The decisive-quantity column**, in every section where it applies.
-5. **Trend columns — direction, not just level.** A gauge answers "where is this run now"; it
-   cannot answer "which way is it going", and for a running experiment that is usually the more
-   decision-relevant question. Two runs at the same value, one climbing and one collapsing, need
-   opposite actions. Carry at least:
-   - **the outcome trend** (reward, accuracy, whatever the campaign optimises), and
-   - **the cost trend** (step time, throughput, or whatever governs whether it finishes).
-
-   Render each as a sparkline plus an arrow and a delta, so the direction reads without arithmetic.
-   Sample at a fixed cadence and say what it is — trends over differently-spaced points mislead.
-   Cost trend earns its place because a run can be learning well and still be doomed: a step time
-   that doubles between ticks changes the completion estimate more than any quality metric does.
-6. **Legend**, only if a gauge is drawn. Explain what the shaded region *means*, not what the
-   colors are.
-7. **Callout** — two or three short paragraphs of what the data establishes. Every claim tied
-   to a number already in the tables above. This is where a reader who scrolled looks for the
-   conclusion.
-8. **Footer** — reconciliation notes: why the run count differs from the subject count, what is
-   retired, anything a careful reader would otherwise flag as inconsistent.
-
-## Content rules
-
-- **Name each row by what it is to the reader** — the dataset, model, or config under test —
-  not by its job id. Put the id in the note only when it is needed to act.
-- **The "why it ended" cell is the most valuable on the page.** Give it real numbers, not
-  categories: a measured collapse with its endpoints beats the word "collapse". Cap it near
-  44ch so it stays scannable.
-- **Distinguish failure kinds with different pills, and make the taxonomy load-bearing.**
-  Causes that imply different fixes need different labels. A single generic "failed" pill
-  throws away the reason the board is useful.
-- **State progress as a fraction with a bar**, never a bare percentage.
-- Bold the one load-bearing number inside each note.
-- Pull every figure in a single pass so rows cannot silently disagree about as-of time.
-
-## Design tokens
-
-Cool-biased neutrals, one accent, and semantic state colors **kept separate from the accent** —
-good/warning/critical must not be the brand hue. Type is system stacks used deliberately: sans
-for labels, monospace with `tabular-nums` for every figure. Do not link a webfont; the Artifact
-CSP blocks font CDNs and the page would silently fall back.
-
-```css
-:root{
-  --bg:#FBFBFD; --panel:#FFFFFF; --ink:#14171D; --ink-2:#3D4552; --muted:#6B7484;
-  --line:#E3E6EC; --line-2:#EFF1F5;
-  --accent:#2D7D8A;                                /* instrument teal, not a brand hue */
-  --live:#1F8F63; --done:#2D6E8A;                  /* semantic, independent of accent  */
-  --warn:#B4682F; --crit:#9E3A57; --neutral:#6B7484;
-  --band:#DCE6E8;                                  /* the healthy region of the gauge   */
-  --shadow:0 1px 2px rgba(16,20,28,.05), 0 4px 14px rgba(16,20,28,.04);
-}
-@media (prefers-color-scheme: dark){
-  :root{
-    --bg:#0F1216; --panel:#161A20; --ink:#E7EBF1; --ink-2:#B4BCC9; --muted:#818B9B;
-    --line:#252B34; --line-2:#1D222A;
-    --accent:#5FB3BF;
-    --live:#42B98A; --done:#5FA3C4; --warn:#D68B4F; --crit:#C96A85; --neutral:#818B9B;
-    --band:#232C31; --shadow:none;
-  }
-}
-/* The viewer's theme toggle stamps data-theme on :root and MUST beat the media query in
-   BOTH directions, so repeat each palette verbatim below. Style components through the
-   tokens only — never place component rules inside the media query, or the toggle cannot
-   override them. */
-:root[data-theme="dark"]{ /* identical to the dark block above */ }
-:root[data-theme="light"]{ /* identical to the light block above */ }
+```text
+id, group, state, stage, progress, freshness,
+throughput, quality, resources, evidence_url, next_action
 ```
 
-Type: `ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif` for prose;
-`ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace` with
-`font-variant-numeric: tabular-nums` for figures. Body 15px/1.55; H1 27px/1.2 at weight 640 and
-`letter-spacing:-.015em`; section labels 12px uppercase at `letter-spacing:.12em`.
+Omit unavailable values or mark them unknown. Do not convert absence into zero. Normalize units and
+timestamps before comparison, and expose the capture time used for every freshness calculation.
 
-## The gauge — the component that carries the page
+## Delivery checks
 
-A fixed-width track with the healthy band shaded and one tick per row, colored by which side of
-the band it falls on. `left:` is the value as a percentage of the axis, so rescale if the
-quantity is not already 0–1.
+- The top-level status agrees with the row data.
+- Sorting and filters preserve all records and deterministic ordering.
+- Links open the evidence they label.
+- Empty, loading, error, stale, and partial-data states are visible.
+- The board remains usable at narrow widths and without hover.
+- If the artifact is refreshed repeatedly, publish to the same user-approved path so its URL stays
+  stable.
 
-```html
-<div class="gwrap">
-  <div class="gauge">
-    <div class="track"></div>
-    <div class="safe"></div>                        <!-- healthy band -->
-    <div class="tick ok" style="left:36.6%"></div>  <!-- .ok | .lo | .hi -->
-  </div><span class="gval mono">0.366</span>
-</div>
-```
-
-```css
-.gauge{position:relative;width:132px;height:16px;flex:none}
-.gauge .track{position:absolute;inset:6px 0 auto;height:4px;border-radius:2px;background:var(--line)}
-.gauge .safe {position:absolute;top:6px;height:4px;left:25%;width:50%;border-radius:2px;background:var(--band)}
-.gauge .tick {position:absolute;top:2px;width:2px;height:12px;border-radius:1px;background:var(--ink)}
-.gauge .tick.lo{background:var(--warn)}     /* below the band */
-.gauge .tick.hi{background:var(--crit)}     /* above the band */
-.gauge .tick.ok{background:var(--live)}     /* inside         */
-.gval{font-size:12px;color:var(--ink-2);margin-left:7px}
-.gwrap{display:flex;align-items:center}
-```
-
-Set `.safe`'s `left` and `width` from the actual bounds the owning policy screens on, and pick
-each tick's class by comparing to those same bounds in code. Never place a tick by eye.
-
-## The trend cell — sparkline, arrow, delta
-
-Canvas rather than hand-authored SVG paths, per `artifact-design`. One tiny chart per row, drawn
-from the same sampled series the table reports, with the final point emphasised so the current
-value reads first.
-
-```html
-<div class="trend">
-  <canvas class="spark" width="120" height="26" data-series="0.64,0.71,0.77,0.81,0.84"></canvas>
-  <span class="delta up">▲ +0.20</span>
-</div>
-```
-
-```css
-.trend{display:flex;align-items:center;gap:8px;white-space:nowrap}
-.spark{width:120px;height:26px;display:block}
-.delta{font-size:12px;font-variant-numeric:tabular-nums}
-.delta.up{color:var(--live)}      /* improving on this metric   */
-.delta.down{color:var(--warn)}    /* degrading                  */
-.delta.flat{color:var(--muted)}   /* inside noise — say so       */
-```
-
-```js
-// Direction is semantic, not visual: for reward, up is good; for step time, up is bad.
-// Pass the polarity in rather than inferring it from the slope.
-document.querySelectorAll(".spark").forEach((c) => {
-  const pts = c.dataset.series.split(",").map(Number).filter((n) => !Number.isNaN(n));
-  if (pts.length < 2) return;
-  const css = getComputedStyle(document.documentElement);
-  const ink = css.getPropertyValue("--accent").trim() || "#2D7D8A";
-  const dpr = window.devicePixelRatio || 1;
-  const w = c.width, h = c.height;
-  c.width = w * dpr; c.height = h * dpr;
-  const ctx = c.getContext("2d");
-  ctx.scale(dpr, dpr);
-  const lo = Math.min(...pts), hi = Math.max(...pts), span = hi - lo || 1;
-  const x = (i) => (i / (pts.length - 1)) * (w - 4) + 2;
-  const y = (v) => h - 3 - ((v - lo) / span) * (h - 6);
-  ctx.beginPath();
-  pts.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
-  ctx.strokeStyle = ink; ctx.lineWidth = 1.5; ctx.lineJoin = "round"; ctx.stroke();
-  ctx.beginPath();                                   // emphasise the current value
-  ctx.arc(x(pts.length - 1), y(pts.at(-1)), 2.5, 0, Math.PI * 2);
-  ctx.fillStyle = ink; ctx.fill();
-});
-```
-
-Rules that keep the cell honest:
-
-- **Polarity is per metric.** Rising reward is good; rising step time is not. Colour the delta by
-  whether the metric improved, never by the sign of the slope.
-- **Call a flat trend flat.** If the change is inside the metric's own step-to-step noise, label it
-  flat rather than drawing an arrow. A confident arrow on noise is worse than no arrow.
-- **Redraw on theme change** if the page has a toggle, since the stroke colour is read from a token
-  at draw time.
-- **Two points are not a trend.** Render the value alone until there are enough samples to justify
-  a line, and say how many there are.
-
-## A run is usually several jobs — plot the whole lineage, not the last leg
-
-A long run gets resumed. Each resume is a **new job id**, and the later job routinely writes into the
-*earlier* job's checkpoint directory, so the job that owns the artifacts and the job that produced
-them are different. A trend drawn from whichever job id you were handed shows the tail of the run and
-silently misrepresents it: a plateau looks like the whole story, and an early peak is invisible.
-
-This is not hypothetical. On one campaign, plotting only the named job would have shown a run
-starting mid-curve; recovering a missing middle link **changed which checkpoint the selection rule
-picked**.
-
-**Reconstruct the chain before plotting.** Four independent signals, in decreasing order of
-reliability:
-
-1. **The `ckpt_path` / `resume_path` overrides in each job's launch command.** A job whose `ckpt_path`
-   points at another job's directory is a later link. This is the definitive edge.
-2. **The step directories present in that checkpoint prefix**, plus whatever file records the latest
-   step. Gaps and overlaps tell you which links are missing.
-3. **Per-step checkpoint mtimes.** A discontinuity in write time — or a size change in the trainer
-   state — marks a handover between processes.
-4. **The tracker's per-run records**, which give you the run URLs to confirm against.
-
-Cross-check with the dataset each job trained on; sibling jobs in a sweep share long name prefixes
-and are easy to confuse. Match full job ids, never prefixes.
-
-**Then stitch the series in step order, not job order**, and de-duplicate overlapping steps with
-first-seen-wins. Resumes replay a step or two, so a naive concatenation produces a sawtooth that is an
-artifact of stitching rather than anything the run did.
-
-**Say in the footer how many jobs a plotted run spans.** A reader comparing two rows deserves to know
-that one is a single job and the other is four. Where a lineage genuinely has a hole — a link whose
-logs are gone — render the gap rather than interpolating across it, and mark it. An honest missing
-segment is worth more than a smooth line that implies data you do not have.
-
-**A resumed lineage often has no step 1**, so it has no opening value to gauge. Leave that cell empty
-rather than gauging the first step you happen to have; a run resumed at step 22 did not open at
-step 22, and a tick placed there is simply wrong.
-
-## Supporting components
-
-```css
-/* state pill — one class per failure KIND, never one generic "failed" */
-.pill{display:inline-block;font-size:10.5px;font-weight:640;letter-spacing:.05em;
-      text-transform:uppercase;padding:2.5px 7px;border-radius:4px;white-space:nowrap}
-.p-live{color:var(--live);background:color-mix(in srgb,var(--live) 13%,transparent)}
-.p-warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
-
-/* progress — fraction plus bar, never a bare percentage */
-.prog{display:flex;align-items:center;gap:8px;white-space:nowrap}
-.prog .bar{width:52px;height:4px;border-radius:2px;background:var(--line);overflow:hidden;flex:none}
-.prog .fill{height:100%;background:var(--accent);display:block}
-
-/* wide content scrolls inside its own container so the page body never scrolls sideways */
-.tbl{overflow-x:auto;background:var(--panel);border:1px solid var(--line);
-     border-radius:8px;box-shadow:var(--shadow)}
-table{border-collapse:collapse;width:100%;min-width:900px}
-```
-
-## Publishing
-
-Write the page to the session scratchpad, then call `Artifact` with `file_path`, a
-one-sentence `description`, and a `favicon`. Put a `<title>` in the HTML. Do **not** emit
-`<!DOCTYPE>`, `<html>`, `<head>`, or `<body>` — the content is wrapped at publish time.
-
-Keep the favicon stable across redeploys; readers find the tab by its icon. To update,
-republish **the same file path** from the same conversation and the URL is preserved; from a
-different conversation, pass the previous URL as `url` or a new one is minted.
-
-## Failure modes
-
-- **Building before the decisive quantity is known.** The result is a wide table nobody reads.
-- **Mixing as-of times.** Pull every figure in one pass and print the timestamp, or rows
-  silently disagree.
-- **One generic "failed" pill.** Collapses the taxonomy that makes the board worth rendering.
-- **Component rules inside the dark-mode media query.** The viewer's toggle can then no longer
-  override them. Redefine tokens only.
-- **A summary strip of only flattering counts.** That is a poster, not an instrument.
-- **A gauge on a quantity the campaign does not actually gate on.** The axis has to be the one
-  a decision turns on, or it is decoration with tick marks.
-- **A trend drawn from two points, or from unevenly spaced ones.** Both manufacture a direction
-  the data does not support. Render the bare value until there are enough samples.
-- **Colouring a delta by the sign of the slope.** Rising step time is not good news. Polarity is a
-  property of the metric and has to be passed in.
+Return the artifact link or file plus a one-sentence summary of the most important current finding.

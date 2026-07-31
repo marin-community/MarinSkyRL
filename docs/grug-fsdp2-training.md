@@ -2,16 +2,25 @@
 
 This is a policy-only, EP1 FSDP2 implementation. The trainer uses the
 canonical PyTorch model in `skyrl_train.models.grug_moe`; vLLM serves the same
-HF checkpoint. Packing, FlashAttention, trainer EP/CP, R3/router
-replay, grouped MoE, LoRA/4-bit loading, and PKO are intentionally rejected.
+HF checkpoint. Eager attention remains the correctness reference. Policy
+training also supports `flash_attention_2`, selected with
+`trainer.flash_attn=true` or `trainer.attn_backend=flash_attention_2`.
+Unsupported fused requests fail instead of falling back to eager attention.
+
+The fused path requires BF16 or FP16 on a supported CUDA GPU. It preserves
+Grug's 20-query/5-KV-head GQA, half-RoPE on local layers, full causal long
+layers, 2,048-token local window, QK scaling, XSA, and per-head gating. Dense
+unpacked batches may contain left or right padding; FlashAttention unpads valid
+tokens, and model outputs are defined at valid query positions. Sample packing,
+trainer EP/CP, R3/router replay, grouped MoE, LoRA/4-bit loading, and PKO remain
+unsupported.
 
 ## Runtime image
 
-Grug serving requires the Marin vLLM fork at commit `4b55591306c9`. The shared
-`DEFAULT_RL_DOCKER_IMAGE` does not yet include that fork and must not be used for
-Grug. Until a Grug-capable image is published and pinned by immutable digest,
-launches must pass an explicit verified image. Check the launcher constant when
-this release constraint changes.
+Grug serving requires the Marin vLLM fork at commit `4b55591306c9`. Resolve the
+cluster's standard image from `cloud/iris/gpu_rl_images.py` and verify that it
+contains this fork. If it does not, pass an explicit verified image by immutable
+digest.
 
 ## Query bias
 

@@ -13,6 +13,7 @@
 import json
 import logging
 import re
+from collections.abc import Mapping
 from typing import Any, Callable, Dict
 
 logger = logging.getLogger(__name__)
@@ -305,6 +306,29 @@ _FUNC_ARG_NAMES: Dict[str, tuple] = {
     "validate_quotation": (),
     "validate_no_commas": (),
 }
+
+
+def normalize_ground_truth(ground_truth: Mapping[str, Any]) -> str:
+    """Validate and canonicalize an IFEval constraint for dataset preparation.
+
+    Runtime scoring deliberately treats malformed examples as incorrect instead of
+    crashing a rollout. Dataset builders should use this stricter boundary before
+    writing an artifact so that malformed or incomplete constraints cannot silently
+    become permanently unlearnable rows.
+    """
+    raw_spec = dict(ground_truth)
+
+    func_name = raw_spec.get("func_name")
+    if func_name not in IF_FUNCTIONS_MAP:
+        raise ValueError(f"Unknown IFEval func_name: {func_name!r}.")
+
+    normalized = {"func_name": func_name}
+    for argument in _FUNC_ARG_NAMES[func_name]:
+        if argument not in raw_spec or raw_spec[argument] is None:
+            raise ValueError(f"IFeval {func_name!r} requires non-null {argument!r}.")
+        normalized[argument] = raw_spec[argument]
+
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
 def check_constraint(response: str, ground_truth: str) -> bool:
