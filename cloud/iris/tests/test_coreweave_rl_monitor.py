@@ -136,22 +136,9 @@ def test_job_id_parts_rejects_noncanonical_or_unsafe_ids(job_id):
         job_id_parts(job_id)
 
 
-@pytest.mark.parametrize(
-    ("job_id", "label", "pod_name"),
-    [
-        (
-            "/benjaminfeuer/grug-agentic-eval-v2-65k-harbor394c-r3",
-            "benjaminfeuer.grug-agentic-eval-v2-65k-harbor394c-r3",
-            "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0",
-        ),
-        (
-            "/benjaminfeuer/glm52-datagen-r11-45-mix-h2-language-balanced-retry",
-            "benjaminfeuer.glm52-datagen-r11-45-mix-h2-language-balanced-ret",
-            "iris-benjaminfeuer-glm52-datagen-r1-7390cd90-0-1547b9c722a7aaa4",
-        ),
-    ],
-)
-def test_find_pod_uses_exact_or_truncated_iris_job_label(monkeypatch, job_id, label, pod_name):
+def test_find_pod_uses_exact_iris_job_label(monkeypatch):
+    job_id = "/benjaminfeuer/grug-agentic-eval-v2-65k-harbor394c-r3"
+    pod_name = "iris-benjaminfeuer-grug-agentic-eval-v2-65k-harbor39-c309bb6c-0"
     monkeypatch.setattr(
         coreweave_ops,
         "command",
@@ -161,7 +148,7 @@ def test_find_pod_uses_exact_or_truncated_iris_job_label(monkeypatch, job_id, la
                     {
                         "metadata": {
                             "name": pod_name,
-                            "labels": {"iris.job_id": label},
+                            "labels": {"iris.job_id": "benjaminfeuer.grug-agentic-eval-v2-65k-harbor394c-r3"},
                         },
                         "status": {"phase": "Running"},
                     }
@@ -171,6 +158,75 @@ def test_find_pod_uses_exact_or_truncated_iris_job_label(monkeypatch, job_id, la
     )
 
     assert coreweave_ops.find_pod(["kubectl"], SimpleNamespace(job=job_id, pod=None)) == pod_name
+
+
+def test_find_pod_disambiguates_colliding_truncated_job_labels_with_pod_group(monkeypatch):
+    job_id = "/benjaminfeuer/rl-tasktrove-dq-sweep-30b-gb200-qwen3-co-20260730-103953-9fed75"
+    truncated_label = "benjaminfeuer.rl-tasktrove-dq-sweep-30b-gb200-qwen3-co-20260730"
+    target_pod = "iris-benjaminfeuer-rl-tasktrove-dq-80d56912-0-2c1f55e27f6f9556"
+    sibling_pod = "iris-benjaminfeuer-rl-tasktrove-dq-a4983364-0-4c4098b97cc5a138"
+    monkeypatch.setattr(
+        coreweave_ops,
+        "command",
+        lambda _args: json.dumps(
+            {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": sibling_pod,
+                            "labels": {
+                                "iris.job_id": truncated_label,
+                                "kueue.x-k8s.io/pod-group-name": "iris-pg-f5f5efdf484bc2a9-0",
+                            },
+                        },
+                        "status": {"phase": "Running"},
+                    },
+                    {
+                        "metadata": {
+                            "name": target_pod,
+                            "labels": {
+                                "iris.job_id": truncated_label,
+                                "kueue.x-k8s.io/pod-group-name": "iris-pg-cf44f3e17dd34832-0",
+                            },
+                        },
+                        "status": {"phase": "Running"},
+                    },
+                ]
+            }
+        ),
+    )
+
+    assert coreweave_ops.find_pod(["kubectl"], SimpleNamespace(job=job_id, pod=None)) == target_pod
+
+
+def test_rl_job_pods_discovers_hashed_names_by_pod_group(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-us-east-08a", Path("/tmp/kubeconfig"), None)
+    job = watch_coreweave_rl.RlJob(
+        cluster,
+        "/benjaminfeuer/rl-tasktrove-dq-sweep-30b-gb200-qwen3-co-20260730-103953-9fed75",
+        "running",
+        0,
+        "",
+    )
+    target_pod = "iris-benjaminfeuer-rl-tasktrove-dq-80d56912-0-2c1f55e27f6f9556"
+    payload = {
+        "items": [
+            {
+                "metadata": {
+                    "name": target_pod,
+                    "labels": {"kueue.x-k8s.io/pod-group-name": "iris-pg-cf44f3e17dd34832-0"},
+                },
+                "status": {"phase": "Running"},
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        watch_coreweave_rl.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr=""),
+    )
+
+    assert watch_coreweave_rl.job_pods(job) == [(target_pod, "Running")]
 
 
 class CapturingInput(BytesIO):
@@ -384,6 +440,34 @@ def _rl_report_row(tmp_path, finelog: str = "", state: str = "running", artifact
     return watch_coreweave_rl.report_row(job, artifacts, tmp_path)
 
 
+def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_path):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", "running", 0, "", dataset="DCAgent/tasks")
+    calls: list[list[str]] = []
+
+    def fake_run_iris(_cluster, arguments, **_kwargs):
+        calls.append(arguments)
+        step, reward = (16, 0.91) if "--tail" in arguments else (4, 0.8003)
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=(
+                f"Training Step Progress: {step} / 80\n"
+                f'WANDB_MIRROR kind=train step={step} metrics={{"reward/avg_raw_reward": {reward}}}\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(watch_coreweave_rl, "run_iris", fake_run_iris)
+
+    artifacts, directory = watch_coreweave_rl.sync_job(job, tmp_path, scope="status")
+    row = watch_coreweave_rl.report_row(job, artifacts, directory)
+
+    assert len(calls) == 1
+    assert row[3] == "16/80"
+    assert row[4] == "0.91"
+
+
 def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
     artifacts = watch_coreweave_rl.ArtifactResult(
         "unavailable",
@@ -447,7 +531,7 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
             filter=[],
             bundle_root=tmp_path,
             quiet_progress=True,
-            no_sync=True,
+            status_only=True,
         ),
     )
     monkeypatch.setattr(watch_coreweave_rl, "CLUSTERS", (cluster,))

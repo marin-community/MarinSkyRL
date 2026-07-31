@@ -34,14 +34,14 @@ class GpuRlImage:
         return f"{IMAGE_REPOSITORY}@{self.digest}"
 
 
-SOURCE_COMMIT = "2f281a199b700fb61d83378b209baffa46c6d71c"
+SOURCE_COMMIT = "dec8f94176cacf9f891aab720488782260ae3c28"
 HARBOR_COMMIT = "f2dd505f609021611eb85521a097e6dff384d12d"
 
 GPU_RL_IMAGES = {
     (ImageArchitecture.AMD64, ImageVariant.STANDARD): GpuRlImage(
         architecture=ImageArchitecture.AMD64,
         variant=ImageVariant.STANDARD,
-        digest="sha256:b0220be3badbc408e902b2800ce6718208935904b35b42daa1db4702ac9e9bae",
+        digest="sha256:39fcb3aff359d423fc7ac822173ffb6193d818357f5970cdf7ded889a14c295b",
         tag=f"gpu-rl-{SOURCE_COMMIT}",
         source_commit=SOURCE_COMMIT,
         harbor_commit=HARBOR_COMMIT,
@@ -49,7 +49,7 @@ GPU_RL_IMAGES = {
     (ImageArchitecture.AMD64, ImageVariant.MEGATRON): GpuRlImage(
         architecture=ImageArchitecture.AMD64,
         variant=ImageVariant.MEGATRON,
-        digest="sha256:5f1291fb453d7439d96375eb103f535c815674ebf40a7c40324c2fcde589af4a",
+        digest="sha256:d473ac28c59fd101ba32200b6ac056a6353a326597c6e34130081d1473bd88cc",
         tag=f"gpu-rl-megatron-{SOURCE_COMMIT}",
         source_commit=SOURCE_COMMIT,
         harbor_commit=HARBOR_COMMIT,
@@ -57,7 +57,7 @@ GPU_RL_IMAGES = {
     (ImageArchitecture.ARM64, ImageVariant.STANDARD): GpuRlImage(
         architecture=ImageArchitecture.ARM64,
         variant=ImageVariant.STANDARD,
-        digest="sha256:36a0d327aed94d26dba411864332cc88d29bc593d769b6544719000f8174d412",
+        digest="sha256:fa879139e5f3ed523891d06533277a3da5d03b87b374cf167d852ae2e836a215",
         tag=f"gpu-rl-{SOURCE_COMMIT}-arm64",
         source_commit=SOURCE_COMMIT,
         harbor_commit=HARBOR_COMMIT,
@@ -65,7 +65,7 @@ GPU_RL_IMAGES = {
     (ImageArchitecture.ARM64, ImageVariant.MEGATRON): GpuRlImage(
         architecture=ImageArchitecture.ARM64,
         variant=ImageVariant.MEGATRON,
-        digest="sha256:50a5c9584be412a0bb5657ea9c0be28d2689c5a587351ed815ef0f73fb30aac4",
+        digest="sha256:8c16dfd5266cb894dd48d11ab6a1ab72a804390c0155eccd45a054fff5c5c57c",
         tag=f"gpu-rl-megatron-{SOURCE_COMMIT}-arm64",
         source_commit=SOURCE_COMMIT,
         harbor_commit=HARBOR_COMMIT,

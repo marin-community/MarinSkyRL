@@ -1,5 +1,9 @@
 import os
 import sys
 
-# infra/ is not an installed package; put it on the path so `import sync_rl_logs` works.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Keep legacy top-level infra imports working and expose namespace packages such
+# as ``infra.rl_analysis`` exactly as they are invoked from the repository root.
+INFRA_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPOSITORY_ROOT = os.path.dirname(INFRA_ROOT)
+sys.path.insert(0, REPOSITORY_ROOT)
+sys.path.insert(0, INFRA_ROOT)

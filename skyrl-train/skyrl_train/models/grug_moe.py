@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 NovaSkyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Canonical, correctness-first PyTorch implementation of Grug MoE.
+"""PyTorch Grug MoE policy-training implementation.
 
-The module deliberately uses ordinary PyTorch operations. It is the FSDP2
-training/reference implementation; optimized expert and attention kernels can
-be checked against it later without changing the checkpoint contract.
+The eager attention path remains the correctness reference. The supported
+FlashAttention path preserves the same checkpoint and Snowball semantics
+without materializing dense sequence-by-sequence scores or masks.
 """
 
 from __future__ import annotations
@@ -23,6 +23,14 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
 )
+from skyrl_train.utils.flash_attention import (
+    FLASH_ATTN_IMPORT_ERROR,
+    flash_attn_func,
+    flash_attn_varlen_func,
+    flash_index_first_axis,
+    flash_pad_input,
+    flash_unpad_input,
+)
 
 
 GRUG_MOE_MODEL_TYPE = "grug_moe"
@@ -30,6 +38,9 @@ GRUG_ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
 GRUG_MOE_ARCHITECTURE = "GrugMoeForCausalLM"
 GRUG_MOE_ATTENTION_MODE = "production"
 GRUG_MOE_ARTIFACT_SCHEMA_VERSION = 1
+GRUG_EAGER_ATTENTION_BACKEND = "eager"
+GRUG_FLASH_ATTENTION_BACKEND = "flash_attention_2"
+GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRUG_FLASH_ATTENTION_BACKEND})
 _GATED_NORM_RANK = 128
 _ROUTING_RENORM_SUM = 2.5
 _QK_RMS_NORM_EPS = 1e-6
@@ -46,6 +57,19 @@ def validate_grug_training_strategy(model_type: str | None, training_strategy: s
 
     if model_type == GRUG_MOE_MODEL_TYPE and training_strategy != "fsdp2":
         raise ValueError("Grug policy training requires trainer.strategy=fsdp2")
+
+
+def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:
+    valid = attention_mask.to(torch.bool)
+    torch._assert_async(
+        valid.any(dim=-1).all(),
+        "Grug FlashAttention requires at least one valid token in each attention-mask row",
+    )
+    transitions = (valid[:, 1:] != valid[:, :-1]).sum(dim=-1)
+    torch._assert_async(
+        (transitions <= 1).all(),
+        "Grug FlashAttention supports only dense, left-padded, or right-padded attention-mask rows",
+    )
 
 
 def _jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -450,14 +474,47 @@ class GrugMoeAttention(nn.Module):
         scale = self.config.qk_mult * (self.config.qk_mult_long_scale if is_long else 1.0)
         q = q * scale
 
-        repeats = self.config.num_attention_heads // self.config.num_key_value_heads
-        if repeats != 1:
-            k = k.repeat_interleave(repeats, dim=2)
-            v = v.repeat_interleave(repeats, dim=2)
+        attn_implementation = self.config._attn_implementation
+        if attn_implementation == GRUG_EAGER_ATTENTION_BACKEND:
+            attn_output, v_for_xsa = self._eager_attention(q, k, v, attention_mask, is_long=is_long)
+        elif attn_implementation == GRUG_FLASH_ATTENTION_BACKEND:
+            attn_output, v_for_xsa = self._flash_attention(q, k, v, attention_mask, is_long=is_long)
+        else:
+            raise ValueError(f"unsupported Grug attention backend {attn_implementation!r}")
 
-        scores = torch.einsum("bqhd,bkhd->bhqk", q.float() / math.sqrt(self.config.head_dim), k.float())
-        query_pos = torch.arange(seq_len, device=hidden_states.device).view(seq_len, 1)
-        key_pos = torch.arange(seq_len, device=hidden_states.device).view(1, seq_len)
+        dot = (attn_output * v_for_xsa).sum(dim=-1, keepdim=True)
+        v_norm_sq = v_for_xsa.square().sum(dim=-1, keepdim=True)
+        attn_output = attn_output - (dot / (v_norm_sq + 1e-6)) * v_for_xsa
+        gate = 2.0 * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
+        attn_output = attn_output * gate.to(attn_output.dtype)
+        return self.o_proj(attn_output.reshape(batch, seq_len, -1))
+
+    def _repeat_kv_heads(self, states: torch.Tensor) -> torch.Tensor:
+        repeats = self.config.num_attention_heads // self.config.num_key_value_heads
+        return states if repeats == 1 else states.repeat_interleave(repeats, dim=2)
+
+    def _eager_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        *,
+        is_long: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the attention output and GQA-expanded value used by XSA."""
+
+        key = self._repeat_kv_heads(key)
+        value = self._repeat_kv_heads(value)
+
+        seq_len = query.shape[1]
+        scores = torch.einsum(
+            "bqhd,bkhd->bhqk",
+            query.float() / math.sqrt(self.config.head_dim),
+            key.float(),
+        )
+        query_pos = torch.arange(seq_len, device=query.device).view(seq_len, 1)
+        key_pos = torch.arange(seq_len, device=query.device).view(1, seq_len)
         allowed = key_pos <= query_pos
         if not is_long:
             allowed = allowed & (key_pos >= query_pos - (self.config.sliding_window - 1))
@@ -465,15 +522,60 @@ class GrugMoeAttention(nn.Module):
         if attention_mask is not None:
             allowed = allowed & attention_mask[:, None, None, :].to(torch.bool)
         scores = torch.where(allowed, scores, torch.tensor(-1e9, dtype=scores.dtype, device=scores.device))
-        weights = torch.softmax(scores, dim=-1).to(v.dtype)
-        attn_output = torch.einsum("bhqk,bkhd->bqhd", weights, v)
+        weights = torch.softmax(scores, dim=-1).to(value.dtype)
+        return torch.einsum("bhqk,bkhd->bqhd", weights, value), value
 
-        dot = (attn_output * v).sum(dim=-1, keepdim=True)
-        v_norm_sq = v.square().sum(dim=-1, keepdim=True)
-        attn_output = attn_output - (dot / (v_norm_sq + 1e-6)) * v
-        gate = 2.0 * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
-        attn_output = attn_output * gate.to(attn_output.dtype)
-        return self.o_proj(attn_output.reshape(batch, seq_len, -1))
+    def _flash_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        *,
+        is_long: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the fused output and GQA-expanded value used by XSA."""
+
+        if FLASH_ATTN_IMPORT_ERROR is not None:
+            raise ImportError(
+                "Grug FlashAttention was requested, but the flash-attn CUDA extension could not be imported"
+            ) from FLASH_ATTN_IMPORT_ERROR
+        value_for_xsa = self._repeat_kv_heads(value)
+        window_size = (-1, -1) if is_long else (self.config.sliding_window - 1, 0)
+        softmax_scale = 1.0 / math.sqrt(self.config.head_dim)
+        if attention_mask is None:
+            return (
+                flash_attn_func(
+                    query,
+                    key,
+                    value,
+                    dropout_p=0.0,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    window_size=window_size,
+                ),
+                value_for_xsa,
+            )
+
+        batch, seq_len = attention_mask.shape
+        valid = attention_mask.to(torch.bool)
+        unpadded_query, indices, cu_seqlens, max_seqlen, _ = flash_unpad_input(query, valid)
+        unpadded_key = flash_index_first_axis(key.flatten(0, 1), indices)
+        unpadded_value = flash_index_first_axis(value.flatten(0, 1), indices)
+        unpadded_output = flash_attn_varlen_func(
+            unpadded_query,
+            unpadded_key,
+            unpadded_value,
+            cu_seqlens,
+            cu_seqlens,
+            max_seqlen,
+            max_seqlen,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=window_size,
+        )
+        return flash_pad_input(unpadded_output, indices, batch, seq_len), value_for_xsa
 
 
 class GrugMoeDecoderLayer(nn.Module):
@@ -506,7 +608,7 @@ class GrugMoePreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["GrugMoeDecoderLayer"]
     _supports_sdpa = False
-    _supports_flash_attn = False
+    _supports_flash_attn = True
 
     def _init_weights(self, module: nn.Module) -> None:
         std = self.config.initializer_range
@@ -583,6 +685,8 @@ class GrugMoeModel(GrugMoePreTrainedModel):
             else:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 0)
+        if attention_mask is not None and self.config._attn_implementation == GRUG_FLASH_ATTENTION_BACKEND:
+            _validate_flash_attention_mask(attention_mask)
         if tuple(position_ids.shape) != (batch, seq_len):
             raise ValueError(f"position_ids must have shape {(batch, seq_len)}, got {tuple(position_ids.shape)}")
 

@@ -49,7 +49,14 @@ Before publication:
    result.
 3. Load the staged model metadata, and the model itself when feasible.
 4. Copy model files to the staging root; place resolved configuration and logs under stable names.
-5. Scan the complete staging tree for credentials and URL-embedded capability tokens.
+5. Redact the complete staging tree before upload:
+
+   ```bash
+   python -m infra.rl_cleanup.secret_redaction <staging>
+   ```
+
+   Retain the emitted findings with the publication record. Redaction is required for trainer logs
+   and applies recursively to all UTF-8 staging files.
 
 ## Publish safely
 
@@ -62,5 +69,13 @@ hf upload <namespace>/<repo> <staging-directory> --repo-type model
 - Use additive upload behavior. Do not use a client mode that deletes remote files absent locally.
 - Long uploads belong in a resumable terminal session.
 - Derive size and lineage from the artifact and resolved configuration, not names.
-- Verify the remote repository lists weights and training logs before reclaiming any source or
-  staging storage.
+- Download the published repository into a fresh directory, then run both checks before reclaiming
+  any source or staging storage:
+
+  ```bash
+  python -m infra.rl_cleanup.secret_redaction <fresh-download> --check
+  python -m infra.rl_cleanup.publication_checks <fresh-download>
+  ```
+
+  The model check requires weights, a nonempty `training_logs/` directory, and a `Training Traces`
+  model-card link to the companion Hugging Face dataset.
