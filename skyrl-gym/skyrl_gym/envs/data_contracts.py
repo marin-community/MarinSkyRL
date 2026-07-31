@@ -85,21 +85,95 @@ def _gsm8k_is_correct(response: str, ground_truth: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# LCB / code (schema-only — execution happens at runtime)
+# LCB / code
 # ---------------------------------------------------------------------------
 
 
+def _parse_code_ground_truth(ground_truth: Any) -> Any:
+    if not isinstance(ground_truth, str):
+        return ground_truth
+    try:
+        return json.loads(ground_truth)
+    except json.JSONDecodeError as exc:
+        raise ValueError("LCB ground_truth must be valid JSON.") from exc
+
+
+def _canonical_code_case(case: Any) -> dict[str, Any]:
+    if not isinstance(case, Mapping):
+        raise TypeError("LCB test cases must be mappings.")
+    test_input = case.get("input")
+    expected_output = case.get("output")
+
+    test_type = case.get("testtype", case.get("type"))
+    if test_type in {"stdin", "stdin_stdout"}:
+        if not isinstance(test_input, str) or not isinstance(expected_output, str):
+            raise TypeError("Standard-input LCB test-case input and output must be strings.")
+        return {"input": test_input, "output": expected_output, "testtype": "stdin"}
+    if test_type in {"functional", "call_based"}:
+        function_name = case.get("fn_name")
+        metadata = case.get("metadata")
+        if function_name is None and isinstance(metadata, Mapping):
+            function_name = metadata.get("func_name")
+        if not isinstance(function_name, str) or not function_name:
+            raise ValueError("Functional LCB test cases require a function name.")
+        if isinstance(test_input, list):
+            test_input = "\n".join(json.dumps(argument) for argument in test_input)
+        elif not isinstance(test_input, str):
+            raise TypeError("Functional LCB test-case input must be a list of arguments or an encoded string.")
+        if not isinstance(expected_output, str):
+            expected_output = json.dumps(expected_output)
+        return {
+            "input": test_input,
+            "output": expected_output,
+            "testtype": "functional",
+            "metadata": {"func_name": function_name},
+        }
+    raise ValueError(f"Unsupported LCB test-case type: {test_type!r}.")
+
+
+def _canonical_apps_cases(ground_truth: Mapping[str, Any]) -> list[dict[str, Any]]:
+    inputs = ground_truth.get("inputs")
+    outputs = ground_truth.get("outputs")
+    if not isinstance(inputs, list) or not isinstance(outputs, list):
+        raise TypeError("APPS ground_truth requires input and output lists.")
+    if not inputs or len(inputs) != len(outputs):
+        raise ValueError("APPS ground_truth requires equally sized, non-empty input and output lists.")
+
+    function_name = ground_truth.get("fn_name")
+    test_type = "functional" if function_name is not None else "stdin"
+    return [
+        _canonical_code_case(
+            {
+                "input": test_input,
+                "output": expected_output,
+                "testtype": test_type,
+                "fn_name": function_name,
+            }
+        )
+        for test_input, expected_output in zip(inputs, outputs)
+    ]
+
+
 def _normalize_code(ground_truth: Any) -> str:
-    if isinstance(ground_truth, (list, dict)):
-        return json.dumps(ground_truth, sort_keys=True)
-    normalized = str(ground_truth)
-    if not normalized:
-        raise ValueError("code ground_truth must be non-empty.")
-    return normalized
+    parsed = _parse_code_ground_truth(ground_truth)
+    if isinstance(parsed, Mapping) and "test_cases" in parsed:
+        if parsed.get("language") not in {None, "python"}:
+            raise ValueError("LCB supports only Python verification specs.")
+        cases = parsed["test_cases"]
+    elif isinstance(parsed, Mapping):
+        cases = _canonical_apps_cases(parsed)
+    else:
+        cases = parsed
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("LCB ground_truth must contain at least one test case.")
+    return json.dumps([_canonical_code_case(case) for case in cases], sort_keys=True)
 
 
 def _code_is_correct(response: str, ground_truth: str) -> bool:
-    return True
+    from skyrl_gym.envs.lcb.livecodebench import compute_score
+
+    _, reward = compute_score(response, json.loads(ground_truth))
+    return reward == 1.0
 
 
 # ---------------------------------------------------------------------------

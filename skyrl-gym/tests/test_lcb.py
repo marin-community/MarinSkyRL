@@ -73,7 +73,7 @@ def test_compute_score(model_response, tests, expected_reward):
     env = skyrl_gym.make(
         "lcb",
         env_config=DictConfig({"env_class": "lcb"}),
-        extras={"reward_spec": {"method": "rule", "ground_truth": tests}},
+        extras={"reward_model": {"method": "rule", "ground_truth": tests}},
     )
     # Skip init() since it's not used in this test
     step_output = env.step(model_response)
@@ -96,10 +96,32 @@ def test_compute_score_under_spawn():
         "lcb",
         env_config=DictConfig({"env_class": "lcb"}),
         extras={
-            "reward_spec": {
+            "reward_model": {
                 "method": "rule",
                 "ground_truth": json.dumps([{"input": "4\n8 2 5 1\n", "output": "3\n", "testtype": "stdin"}]),
             }
         },
     )
     assert env.step(SECOND_LARGEST_SOLUTION)["reward"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        {},
+        {"reward_model": {}},
+        {"reward_model": {"ground_truth": "not JSON"}},
+        {"reward_model": {"ground_truth": "[]"}},
+    ],
+)
+def test_malformed_reward_model_scores_zero(extras):
+    env = skyrl_gym.make(
+        "lcb",
+        env_config=DictConfig({"env_class": "lcb"}),
+        extras=extras,
+    )
+
+    output = env.step(SECOND_LARGEST_SOLUTION)
+
+    assert output["reward"] == 0.0
+    assert output["metadata"]["verifier_error"] == "invalid reward_model.ground_truth"

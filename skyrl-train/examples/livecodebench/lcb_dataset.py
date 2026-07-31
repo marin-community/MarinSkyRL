@@ -110,7 +110,8 @@ def process_example(example: Dict[str, Any], idx: int, dataset_name: str, split:
         "data_source": dataset_name,
         "prompt": [{"role": "user", "content": question}],
         "ability": "code",
-        "reward_spec": {"method": "rule", "ground_truth": tests},
+        "env_class": "lcb",
+        "reward_model": {"method": "rule", "ground_truth": tests},
         "extra_info": {
             "split": split,
             "index": idx,

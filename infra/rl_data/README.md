@@ -1,7 +1,7 @@
 # RLVR dataset preparation
 
 `python -m infra.rl_data` turns a pinned RLVR source into a local SkyRL train/validation
-artifact. It supports `rlvr_math`, `rlvr_ifeval`, `dapo_math`, and `math500`.
+artifact. Run `python -m infra.rl_data --help` for the current source list.
 
 Run it from the repository root in the `skyrl-train` environment so the selected tokenizer,
 `datasets`, and `skyrl-gym` verifier contracts are available:
@@ -21,7 +21,9 @@ finish. It will not overwrite an existing artifact.
 `provenance.json` records source revisions, source and verifier identifiers, prompt-token
 statistics, raw/unique/emitted counts, dedup and subsampling limits, and verifier-preflight
 coverage. AIME sources use two-sided verifier checks. IFEval validates the constraint schema;
-the source does not carry canonical satisfying responses for arbitrary constraints.
+the source does not carry canonical satisfying responses for arbitrary constraints. Code sources
+normalize their source-specific tests into the LiveCodeBench runtime schema and execute both a
+canonical solution and a deliberately incorrect response before publishing an artifact.
 
 The DAPO adapter streams by default and stops after 20,000 unique prompts unless
 `--unique-cap` overrides it. DAPO's default minimum of 1,000 unique prompts catches cleanup

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -199,22 +201,32 @@ def _prepare_gsm8k(example: Mapping[str, Any], index: int, contract: VerifierDat
 # ---------------------------------------------------------------------------
 
 
+def _fenced_python(solution: str) -> str:
+    stripped = solution.strip()
+    return stripped if stripped.startswith("```") else f"```python\n{stripped}\n```"
+
+
 def _prepare_verifiable_code(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = verifiable_code_source()
     problem = example.get("problem_statement")
+    solution = example.get("gold_standard_solution")
     verification_info = example.get("verification_info")
     if not isinstance(problem, str):
         raise TypeError("verifiable-coding-problems row problem_statement must be a string.")
+    if not isinstance(solution, str) or not solution.strip():
+        raise TypeError("verifiable-coding-problems row gold_standard_solution must be a non-empty string.")
     if verification_info is None:
         raise ValueError("verifiable-coding-problems row is missing verification_info.")
     if isinstance(verification_info, str):
-        import ast
-
         try:
             verification_info = ast.literal_eval(verification_info)
         except (ValueError, SyntaxError) as exc:
             raise ValueError("verification_info string could not be parsed.") from exc
-    normalized = contract.normalize_ground_truth(verification_info)
+    normalized = contract.validate_example(
+        verification_info,
+        _fenced_python(solution),
+        "```python\nraise RuntimeError('negative verifier preflight')\n```",
+    )
     return {
         "data_source": source.dataset_id,
         "prompt": [{"role": "user", "content": problem}],
@@ -228,18 +240,28 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
     source = apps_source()
     problem = example.get("question")
     input_output = example.get("input_output")
+    solutions = example.get("solutions")
     if not isinstance(problem, str):
         raise TypeError("APPS row question must be a string.")
     if input_output is None:
         raise ValueError("APPS row is missing input_output.")
     if isinstance(input_output, str):
-        import json as _json
-
         try:
-            input_output = _json.loads(input_output)
-        except _json.JSONDecodeError as exc:
+            input_output = json.loads(input_output)
+        except json.JSONDecodeError as exc:
             raise ValueError("APPS input_output string is not valid JSON.") from exc
-    normalized = contract.normalize_ground_truth(input_output)
+    if isinstance(solutions, str):
+        try:
+            solutions = json.loads(solutions)
+        except json.JSONDecodeError as exc:
+            raise ValueError("APPS solutions string is not valid JSON.") from exc
+    if not isinstance(solutions, list) or not solutions or not isinstance(solutions[0], str):
+        raise TypeError("APPS row solutions must contain at least one string.")
+    normalized = contract.validate_example(
+        input_output,
+        _fenced_python(solutions[0]),
+        "```python\nraise RuntimeError('negative verifier preflight')\n```",
+    )
     return {
         "data_source": source.dataset_id,
         "prompt": [{"role": "user", "content": problem}],
@@ -403,12 +425,12 @@ def gsm8k_source() -> Source:
 
 def verifiable_code_source() -> Source:
     return Source(
-        "verifiable_code", VERIFIABLE_CODE_DATASET, "lcb", "train", False, "schema_only", _prepare_verifiable_code
+        "verifiable_code", VERIFIABLE_CODE_DATASET, "lcb", "train", False, "two_sided", _prepare_verifiable_code
     )
 
 
 def apps_source() -> Source:
-    return Source("apps", APPS_DATASET, "lcb", "train", False, "schema_only", _prepare_apps)
+    return Source("apps", APPS_DATASET, "lcb", "train", False, "two_sided", _prepare_apps)
 
 
 def gpqa_source() -> Source:
