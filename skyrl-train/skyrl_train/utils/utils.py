@@ -22,7 +22,7 @@ from .constants import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
     DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
-    get_nccl_monitor_heartbeat_timeout_s,
+    get_nccl_monitor_heartbeat_timeout,
     get_worker_nccl_timeout_s,
 )
 from .logging_utils import format_exception_text
@@ -1146,7 +1146,14 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     except (TypeError, ValueError):
         _cfg_nccl_timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
     env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(_cfg_nccl_timeout)
-    _monitor_heartbeat_timeout = min(get_nccl_monitor_heartbeat_timeout_s(), _cfg_nccl_timeout)
+    _requested_heartbeat_timeout = get_nccl_monitor_heartbeat_timeout()
+    _monitor_heartbeat_timeout = min(_requested_heartbeat_timeout, _cfg_nccl_timeout)
+    if _monitor_heartbeat_timeout != _requested_heartbeat_timeout:
+        logger.warning(
+            "Capping TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC from {} to the {}-second collective timeout",
+            _requested_heartbeat_timeout,
+            _cfg_nccl_timeout,
+        )
     env_vars["TORCH_NCCL_ENABLE_MONITORING"] = "1"
     env_vars["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] = str(_monitor_heartbeat_timeout)
 

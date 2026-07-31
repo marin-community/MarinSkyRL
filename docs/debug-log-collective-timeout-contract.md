@@ -50,10 +50,6 @@ The runtime environment now enables the independent monitor for every Ray worker
 heartbeat deadline, capped by the collective timeout. The standard `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` remains
 the override so existing launch configurations retain their intended heartbeat budget.
 
-The complete CPU suite finished with 883 passing and 19 skipped tests. Its two failures reproduce on the
-unchanged `main` commit: the generator-output field inventory and the pre-EP configuration golden file both
-lag fields already present on `main`.
-
 ## Future work
 
 - [ ] Run the same intentional mismatch with ProcessGroupNCCL in GPU CI; Gloo validates group scoping and timeout
