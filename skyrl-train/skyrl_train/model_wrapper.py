@@ -380,6 +380,7 @@ class HFModelWrapper(nn.Module):
         cp_mesh=None,
         cp_rotate_method: str = "allgather",
         training_strategy: str | None = None,
+        revision: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -411,7 +412,11 @@ class HFModelWrapper(nn.Module):
             )
 
         if isinstance(pretrain_or_model, str):
-            local_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            local_config = AutoConfig.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+                revision=revision,
+            )
             model_type = getattr(local_config, "model_type", None)
             validate_grug_training_strategy(model_type, training_strategy)
             validate_grug_training_options(
@@ -488,6 +493,7 @@ class HFModelWrapper(nn.Module):
                 lambda: model_class.from_pretrained(
                     pretrain_or_model,
                     trust_remote_code=True,
+                    revision=revision,
                     attn_implementation=self.attn_implementation,
                     quantization_config=nf4_config,
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
