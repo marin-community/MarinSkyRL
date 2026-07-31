@@ -39,6 +39,12 @@ class TrainingMetricsParseResult:
     malformed_lines: int
 
 
+def training_metrics_parse_error(malformed_lines: int) -> str | None:
+    if malformed_lines == 0:
+        return None
+    return f"{malformed_lines} WANDB_MIRROR train lines failed JSON parse"
+
+
 def strip_ansi(text: str) -> str:
     return _ANSI_PATTERN.sub("", text)
 

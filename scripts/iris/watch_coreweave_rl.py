@@ -47,6 +47,7 @@ from infra.rl_metrics import (  # noqa: E402
     REWARD_KEYS,
     metric_value,
     parse_training_metrics_result,
+    training_metrics_parse_error,
 )
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
@@ -704,30 +705,36 @@ def sync_trace_inventory(
     )
 
 
-def parse_metrics(finelog: Path) -> tuple[int | None, int | None, dict[str, Any], str | None]:
+@dataclass(frozen=True)
+class ParsedMetrics:
+    step: int | None
+    total: int | None
+    metrics: dict[str, Any]
+    error: str | None
+
+
+def parse_metrics(finelog: Path) -> ParsedMetrics:
     if not finelog.exists():
-        return None, None, {}, None
+        return ParsedMetrics(None, None, {}, None)
     try:
         text = finelog.read_text(errors="replace")
     except OSError as error:
-        return None, None, {}, f"could not read finelog: {error}"
+        return ParsedMetrics(None, None, {}, f"could not read finelog: {error}")
     progress = PROGRESS_PATTERN.findall(text)
     step = int(progress[-1][0]) if progress else None
     total = int(progress[-1][1]) if progress else None
     result = parse_training_metrics_result(text)
     if result.records:
         latest = result.records[-1]
-        parse_error = (
-            f"{result.malformed_lines} WANDB_MIRROR train lines failed JSON parse" if result.malformed_lines else None
+        return ParsedMetrics(
+            latest.step,
+            total,
+            latest.metrics,
+            training_metrics_parse_error(result.malformed_lines),
         )
-        return latest.step, total, latest.metrics, parse_error
     if result.malformed_lines:
-        return step, total, {}, f"{result.malformed_lines} WANDB_MIRROR train lines failed JSON parse"
-    return step, total, {}, None
-
-
-def metric(metrics: dict[str, Any], *names: str) -> Any | None:
-    return metric_value(metrics, *names)
+        return ParsedMetrics(step, total, {}, training_metrics_parse_error(result.malformed_lines))
+    return ParsedMetrics(step, total, {}, None)
 
 
 def display_metric(value: Any | None, precision: int = 4) -> str:
@@ -747,7 +754,7 @@ def tis_ratio_summary(metrics: dict[str, Any]) -> str:
     That legacy value is useful, but it is not mean absolute log-ratio, so keep
     the label distinct.
     """
-    log_ratio = metric(
+    log_ratio = metric_value(
         metrics,
         "policy/tis/log_ratio_abs_mean",
         "tis/log_ratio_abs_mean",
@@ -757,7 +764,7 @@ def tis_ratio_summary(metrics: dict[str, Any]) -> str:
     if log_ratio is not None:
         return f"TIS |log r|={display_metric(log_ratio)}"
 
-    importance_ratio = metric(
+    importance_ratio = metric_value(
         metrics,
         "policy/tis/imp_ratio_mean",
         "tis/imp_ratio_mean",
@@ -821,12 +828,13 @@ def job_filter_values(job: RlJob, *, now_ms: int) -> dict[str, str]:
 
 def report_row(job: RlJob, artifacts: ArtifactResult, directory: Path) -> list[object]:
     """Build one status row; monitor failures belong in the separate error report."""
-    step, total, metrics, _parse_error = parse_metrics(directory / "finelog.log")
+    parsed = parse_metrics(directory / "finelog.log")
+    step, total, metrics = parsed.step, parsed.total, parsed.metrics
     step_display = "—" if step is None else f"{step}/{total if total is not None else '—'}"
-    reward = metric(metrics, *REWARD_KEYS)
-    policy_loss = metric(metrics, *POLICY_LOSS_KEYS)
-    grad_norm = metric(metrics, *GRAD_NORM_KEYS)
-    entropy = metric(metrics, *ENTROPY_KEYS)
+    reward = metric_value(metrics, *REWARD_KEYS)
+    policy_loss = metric_value(metrics, *POLICY_LOSS_KEYS)
+    grad_norm = metric_value(metrics, *GRAD_NORM_KEYS)
+    entropy = metric_value(metrics, *ENTROPY_KEYS)
     signal = terminal_signal(directory / "finelog.log")
     trend = f"entropy={display_metric(entropy)}; {tis_ratio_summary(metrics)}"
     if signal:
@@ -1082,9 +1090,9 @@ def main() -> int:
     for job, artifacts, directory in synced_jobs:
         scope = f"{job.cluster.name}/{job.job_id}"
         errors.extend(_monitor_error(scope, "artifact sync", error) for error in artifacts.errors)
-        _step, _total, _metrics, parse_error = parse_metrics(directory / "finelog.log")
-        if parse_error:
-            errors.append(_monitor_error(scope, "Finelog parse", parse_error))
+        parsed_metrics = parse_metrics(directory / "finelog.log")
+        if parsed_metrics.error:
+            errors.append(_monitor_error(scope, "Finelog parse", parsed_metrics.error))
         signal = terminal_signal(directory / "finelog.log")
         if signal:
             errors.append(_monitor_error(scope, "workload signal", signal))

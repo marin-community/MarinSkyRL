@@ -40,7 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from infra.rl_metrics import parse_training_metrics_result, strip_ansi
+from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
 
 
 @dataclass(frozen=True)
@@ -167,8 +167,8 @@ def extract_standard_metrics(log_content: str) -> list[dict[str, Any]]:
     policy/n_tokens_dp_gt_*pct, loss/avg_raw_advantages, timing/*, ...).
     """
     result = parse_training_metrics_result(log_content)
-    if result.malformed_lines:
-        print(f"  Warning: {result.malformed_lines} WANDB_MIRROR train lines failed JSON parse")
+    if parse_error := training_metrics_parse_error(result.malformed_lines):
+        print(f"  Warning: {parse_error}")
     return [record.metrics for record in result.records]
 
 
