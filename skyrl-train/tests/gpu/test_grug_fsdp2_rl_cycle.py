@@ -31,7 +31,8 @@ from skyrl_train.models.grug_moe import (
 )
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import get_ray_pg_ready_with_timeout, initialize_ray
-from tests.gpu.utils import get_available_gpus, get_test_actor_config, init_worker_with_type
+from tests.gpu.grug_test_utils import require_hoppers
+from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 
 POLICY_WORLD_SIZE = 2
@@ -183,22 +184,15 @@ def _engine_client(cfg, model_path: str, shared_pg) -> InferenceEngineClient:
     return InferenceEngineClient(engines, tokenizer, cfg)
 
 
-def _require_hoppers(count: int) -> None:
-    if len(get_available_gpus()) < count:
-        pytest.skip(f"Grug FSDP2 RL cycle requires {count} H100s")
-    if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 9:
-        pytest.skip("Grug FSDP2 RL cycle is locked to Hopper")
-
-
 def _snapshot(policy, names=()):
     snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
-    rank0 = next(snapshot for snapshot in snapshots if snapshot["rank"] == 0)
-    return rank0["weights"]
+    rank0 = next(snapshot for snapshot in snapshots if snapshot.rank == 0)
+    return rank0.weights
 
 
 def _assert_policy_attention_backend(policy, expected: str) -> None:
     snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot"))
-    assert {snapshot["attention_backend"] for snapshot in snapshots} == {expected}
+    assert {snapshot.attention_backend for snapshot in snapshots} == {expected}
 
 
 def _representative_names(model_path: str) -> _RepresentativeNames:
@@ -354,7 +348,7 @@ def _run_full_cycle(
 
 @pytest.mark.vllm
 def test_grug_two_h100_rollout_train_sync_rollout(tmp_path):
-    _require_hoppers(COLOCATED_NUM_GPUS)
+    require_hoppers(COLOCATED_NUM_GPUS)
 
     _write_tiny_checkpoint(tmp_path)
     _run_full_cycle(str(tmp_path), tmp_path)
@@ -364,7 +358,7 @@ def test_grug_two_h100_rollout_train_sync_rollout(tmp_path):
 def test_grug_four_h100_disaggregated_rollout_train_broadcast_rollout(tmp_path):
     """Exercise mixed-dtype Grug sync with trainer and rollout on disjoint GPUs."""
 
-    _require_hoppers(DISAGGREGATED_NUM_GPUS)
+    require_hoppers(DISAGGREGATED_NUM_GPUS)
 
     _write_tiny_checkpoint(tmp_path)
     _run_full_cycle(str(tmp_path), tmp_path, colocate_all=False)

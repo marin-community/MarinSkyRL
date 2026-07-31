@@ -1,5 +1,6 @@
 import asyncio
 import os
+from dataclasses import dataclass
 
 from loguru import logger
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
@@ -36,6 +37,15 @@ from skyrl_train.weight_sync.weight_extractor import (
     weight_sync_dtype,
 )
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+
+
+@dataclass(frozen=True)
+class GrugValidationSnapshot:
+    """Test-only snapshot of one policy rank's loaded Grug state."""
+
+    rank: int
+    attention_backend: str
+    weights: dict[str, torch.Tensor]
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -414,11 +424,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             tensor = self.weight_extractor._gather_tensor(state[name])
             if is_rank0:
                 weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
-        return {
-            "rank": torch.distributed.get_rank(),
-            "attention_backend": config._attn_implementation,
-            "weights": weights,
-        }
+        return GrugValidationSnapshot(
+            rank=torch.distributed.get_rank(),
+            attention_backend=config._attn_implementation,
+            weights=weights,
+        )
 
     def diag_ep8_geometry(self):
         """TEST-ONLY (EP=8 cross-node diag): return this rank's mesh geometry +

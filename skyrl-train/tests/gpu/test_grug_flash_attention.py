@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-import pytest
 import torch
 
 from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig
+from tests.gpu.grug_test_utils import require_hoppers
 
 
 OUTPUT_MAX_ERROR = 1e-2
@@ -20,21 +20,15 @@ PARITY_HIDDEN_SIZE = 256
 LEFT_PADDING_LENGTHS = (7, 3)
 RIGHT_PADDING_LENGTHS = (7, 3)
 PRODUCTION_SEQUENCE_LENGTH = 16_384
+PRODUCTION_HIDDEN_SIZE = 2560
 MEMORY_CEILING_GIB = 12
 GIB = 1024**3
-
-
-def _require_hopper() -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("Grug FlashAttention tests require an H100")
-    if torch.cuda.get_device_properties(0).major != 9:
-        pytest.skip("Grug FlashAttention tests are locked to Hopper")
 
 
 def _attention_config(
     attn_implementation: str,
     *,
-    hidden_size: int = 256,
+    hidden_size: int = PARITY_HIDDEN_SIZE,
     sliding_window: int = 2048,
 ) -> GrugMoeConfig:
     config = GrugMoeConfig(
@@ -92,7 +86,7 @@ def _difference(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, fl
 
 
 def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
-    _require_hopper()
+    require_hoppers(1)
     torch.manual_seed(17)
     eager = GrugMoeAttention(_attention_config("eager", sliding_window=8)).cuda().to(torch.bfloat16)
     fused = deepcopy(eager)
@@ -200,13 +194,17 @@ def test_grug_flash_attention_sliding_window_peak_memory() -> None:
     eager implementation.
     """
 
-    _require_hopper()
+    require_hoppers(1)
     torch.manual_seed(29)
-    attention = GrugMoeAttention(_attention_config("flash_attention_2", hidden_size=2560)).cuda().to(torch.bfloat16)
+    attention = (
+        GrugMoeAttention(_attention_config("flash_attention_2", hidden_size=PRODUCTION_HIDDEN_SIZE))
+        .cuda()
+        .to(torch.bfloat16)
+    )
     hidden_states = torch.randn(
         1,
         PRODUCTION_SEQUENCE_LENGTH,
-        2560,
+        PRODUCTION_HIDDEN_SIZE,
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,

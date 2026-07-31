@@ -24,7 +24,7 @@ The RL-cycle test enabled FlashAttention in configuration but did not observe th
 
 ## Changes to make
 
-Read the loaded attention backend from every policy rank during the RL cycle. Gate maximum and mean output and QKV-gradient errors using ceilings below the measured H100 errors, and cover right-padded parity.
+Read the loaded attention backend from every policy rank during the RL cycle. Gate maximum and mean output and QKV-gradient errors using ceilings above the measured H100 errors but tight enough to catch meaningful drift, and cover right-padded parity.
 
 ## Results
 
