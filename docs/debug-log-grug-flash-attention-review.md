@@ -32,4 +32,4 @@ CPU coverage observes invalid-mask rejection and production backend selection is
 
 ## Future work
 
-- [ ] Run the updated H100 parity, memory, and four-GPU RL-cycle checks.
+- [x] Run the updated H100 parity, memory, and four-GPU RL-cycle checks. All passed from the reviewed source: four attention cases passed their numerical gates, the 16K case used 1.744 GiB, and the disaggregated RL cycle passed.
