@@ -1,9 +1,17 @@
 import json
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from rl_cleanup import parse_skyrl_metrics
+
+
+def write_trial_result(trace_jobs_dir: Path, result: dict[str, Any]) -> None:
+    trial_dir = trace_jobs_dir / result["trial_name"]
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(json.dumps(result))
 
 
 def test_default_parser_reads_agentic_wandb_json(tmp_path):
@@ -124,6 +132,77 @@ def test_missing_explicit_trace_directory_fails_loudly(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match=str(missing_trace_dir)):
         parse_skyrl_metrics.main()
+
+
+def test_parsed_trial_reports_a_duration_for_every_harbor_phase(tmp_path):
+    trace_jobs_dir = tmp_path / "trace_jobs"
+    write_trial_result(
+        trace_jobs_dir,
+        {
+            "task_name": "task-1",
+            "trial_name": "trial-1",
+            "environment_setup": {
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:01:18Z",
+            },
+            "agent_setup": {
+                "started_at": "2026-01-01T00:01:18Z",
+                "finished_at": "2026-01-01T00:01:39Z",
+            },
+            "agent_execution": {
+                "started_at": "2026-01-01T00:01:39Z",
+                "finished_at": "2026-01-01T00:02:12Z",
+            },
+            "verifier": {
+                "started_at": "2026-01-01T00:02:12Z",
+                "finished_at": "2026-01-01T00:02:13Z",
+            },
+        },
+    )
+
+    (trial,) = parse_skyrl_metrics.parse_result_files(trace_jobs_dir)
+
+    assert trial["environment_setup_duration"] == 78.0
+    assert trial["agent_setup_duration"] == 21.0
+    assert trial["agent_execution_duration"] == 33.0
+    assert trial["verifier_duration"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "environment_setup_field",
+    [
+        pytest.param({}, id="phase-absent"),
+        pytest.param({"environment_setup": None}, id="phase-null"),
+        pytest.param(
+            {"environment_setup": {"started_at": "2026-01-01T00:00:00Z"}},
+            id="phase-never-finished",
+        ),
+        pytest.param(
+            {"environment_setup": {"started_at": "just after lunch", "finished_at": "2026-01-01T00:01:18Z"}},
+            id="phase-unparseable-timestamp",
+        ),
+    ],
+)
+def test_unusable_phase_timing_leaves_the_duration_empty(tmp_path, environment_setup_field):
+    trace_jobs_dir = tmp_path / "trace_jobs"
+    write_trial_result(
+        trace_jobs_dir,
+        {
+            "task_name": "task-1",
+            "trial_name": "trial-1",
+            "agent_execution": {
+                "started_at": "2026-01-01T00:01:39Z",
+                "finished_at": "2026-01-01T00:02:12Z",
+            },
+            **environment_setup_field,
+        },
+    )
+
+    (trial,) = parse_skyrl_metrics.parse_result_files(trace_jobs_dir)
+
+    assert trial["environment_setup_duration"] is None
+    # A phase that cannot be timed must not cost the trial its other phases.
+    assert trial["agent_execution_duration"] == 33.0
 
 
 def test_checkpoint_selection_calculates_trailing_five_ema():

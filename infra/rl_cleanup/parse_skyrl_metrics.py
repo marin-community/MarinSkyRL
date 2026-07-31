@@ -41,6 +41,9 @@ import pandas as pd
 
 from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
 
+# Harbor writes one TimingInfo block per phase on every trial result, in execution order.
+TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier")
+
 
 @dataclass(frozen=True)
 class CheckpointSelection:
@@ -482,6 +485,20 @@ def resolve_trace_jobs_dir(log_folder: Path, requested_dir: str | None) -> Path 
     return find_trace_jobs_dir(log_folder)
 
 
+def phase_duration(phase: dict[str, Any]) -> float | None:
+    """Return the seconds spanned by one harbor TimingInfo block, or None when it cannot be measured."""
+    started_at = phase.get("started_at")
+    finished_at = phase.get("finished_at")
+    if not started_at or not finished_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at.rstrip("Z"))
+        end = datetime.fromisoformat(finished_at.rstrip("Z"))
+    except (ValueError, TypeError):
+        return None
+    return (end - start).total_seconds()
+
+
 def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
     """
     Parse all result.json files in trace_jobs directory.
@@ -492,7 +509,7 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
       - exception_type (or None if no exception)
       - reward (or None)
       - n_input_tokens, n_output_tokens
-      - agent execution duration
+      - a duration for each phase in TRIAL_PHASES
 
     Robust to individual missing or malformed files.
 
@@ -537,16 +554,8 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
         trial["reward"] = rewards.get("reward")
 
         # Timing
-        agent_exec = data.get("agent_execution") or {}
-        if agent_exec.get("started_at") and agent_exec.get("finished_at"):
-            try:
-                start = datetime.fromisoformat(agent_exec["started_at"].rstrip("Z"))
-                end = datetime.fromisoformat(agent_exec["finished_at"].rstrip("Z"))
-                trial["agent_duration_sec"] = (end - start).total_seconds()
-            except (ValueError, TypeError):
-                trial["agent_duration_sec"] = None
-        else:
-            trial["agent_duration_sec"] = None
+        for phase_name in TRIAL_PHASES:
+            trial[f"{phase_name}_duration"] = phase_duration(data.get(phase_name) or {})
 
         results.append(trial)
 
