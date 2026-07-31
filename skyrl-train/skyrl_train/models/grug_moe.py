@@ -67,6 +67,19 @@ def validate_grug_training_strategy(model_type: str | None, training_strategy: s
         raise ValueError("Grug policy training requires trainer.strategy=fsdp2")
 
 
+def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:
+    valid = attention_mask.to(torch.bool)
+    torch._assert_async(
+        valid.any(dim=-1).all(),
+        "Grug FlashAttention requires at least one valid token in each attention-mask row",
+    )
+    transitions = (valid[:, 1:] != valid[:, :-1]).sum(dim=-1)
+    torch._assert_async(
+        (transitions <= 1).all(),
+        "Grug FlashAttention supports only dense, left-padded, or right-padded attention-mask rows",
+    )
+
+
 def _jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Return JAX-compatible top-k results, including its lower-index tie rule."""
 
@@ -675,6 +688,8 @@ class GrugMoeModel(GrugMoePreTrainedModel):
             else:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 0)
+        if attention_mask is not None and self.config._attn_implementation == GRUG_FLASH_ATTENTION_BACKEND:
+            _validate_flash_attention_mask(attention_mask)
         if tuple(position_ids.shape) != (batch, seq_len):
             raise ValueError(f"position_ids must have shape {(batch, seq_len)}, got {tuple(position_ids.shape)}")
 

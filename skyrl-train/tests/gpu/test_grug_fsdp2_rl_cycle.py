@@ -196,6 +196,11 @@ def _snapshot(policy, names=()):
     return rank0["weights"]
 
 
+def _assert_policy_attention_backend(policy, expected: str) -> None:
+    snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot"))
+    assert {snapshot["attention_backend"] for snapshot in snapshots} == {expected}
+
+
 def _representative_names(model_path: str) -> _RepresentativeNames:
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=False, local_files_only=True)
     assert config.model_type == GRUG_MOE_MODEL_TYPE
@@ -295,6 +300,7 @@ def _run_full_cycle(
             num_nodes=1,
             cfg=cfg,
         )
+        _assert_policy_attention_backend(policy, "flash_attention_2")
         training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
         sync_names = [*training.bias_names, training.representative_name, training.bf16_sentinel_name]
 

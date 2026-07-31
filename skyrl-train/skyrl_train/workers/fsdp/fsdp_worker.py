@@ -415,6 +415,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
         return {
             "rank": torch.distributed.get_rank(),
+            "attention_backend": config._attn_implementation,
             "weights": weights,
         }
 

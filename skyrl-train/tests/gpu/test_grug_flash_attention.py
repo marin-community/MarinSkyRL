@@ -10,6 +10,10 @@ import torch
 from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig
 
 
+OUTPUT_MAX_ERROR = 1e-2
+OUTPUT_MEAN_ERROR = 2e-3
+QKV_GRAD_MAX_ERROR = 2e-2
+QKV_GRAD_MEAN_ERROR = 5e-3
 OUTPUT_ATOL = 2e-2
 QKV_GRAD_ATOL = 7e-2
 RTOL = 5e-2
@@ -94,12 +98,23 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
 
     cases = (
         (
-            "local-padded",
+            "local-left-padded",
             False,
             torch.tensor(
                 [
                     [0] * 7 + [1] * 25,
                     [0] * 3 + [1] * 29,
+                ],
+                device="cuda",
+            ),
+        ),
+        (
+            "local-right-padded",
+            False,
+            torch.tensor(
+                [
+                    [1] * 25 + [0] * 7,
+                    [1] * 29 + [0] * 3,
                 ],
                 device="cuda",
             ),
@@ -141,6 +156,8 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
         output_valid = valid_queries.expand_as(eager_output)
         output_max, output_mean = _difference(fused_output[output_valid], eager_output[output_valid])
         print(f"{label} output max_abs={output_max:.8g} mean_abs={output_mean:.8g}")
+        assert output_max <= OUTPUT_MAX_ERROR
+        assert output_mean <= OUTPUT_MEAN_ERROR
         torch.testing.assert_close(
             fused_output[output_valid],
             eager_output[output_valid],
@@ -154,6 +171,8 @@ def test_grug_flash_attention_matches_eager_outputs_and_qkv_gradients() -> None:
                 eager_gradients[name][gradient_valid],
             )
             print(f"{label} {name} gradient max_abs={gradient_max:.8g} mean_abs={gradient_mean:.8g}")
+            assert gradient_max <= QKV_GRAD_MAX_ERROR
+            assert gradient_mean <= QKV_GRAD_MEAN_ERROR
             torch.testing.assert_close(
                 fused_gradients[name][gradient_valid],
                 eager_gradients[name][gradient_valid],
