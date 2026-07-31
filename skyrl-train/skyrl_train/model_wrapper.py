@@ -27,7 +27,11 @@ from skyrl_train.distributed.cp_utils import (
     cp_load_balance_indices,
 )
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
+from skyrl_train.models.grug_moe import (
+    GRUG_MOE_MODEL_TYPE,
+    GRUG_SUPPORTED_ATTENTION_BACKENDS,
+    validate_grug_training_strategy,
+)
 from packaging.version import Version
 
 # --- Stage 2 (FSDP2 CP): guarded flash-attn import ---------------------------
@@ -129,7 +133,7 @@ def validate_grug_training_options(
     if model_type != GRUG_MOE_MODEL_TYPE:
         return
     unsupported = {
-        "attention backend": attn_implementation not in {"eager", "flash_attention_2"},
+        "attention backend": attn_implementation not in GRUG_SUPPORTED_ATTENTION_BACKENDS,
         "sample packing": use_sample_packing,
         "LoRA": lora_rank > 0,
         "4-bit loading": load_in_4bit,

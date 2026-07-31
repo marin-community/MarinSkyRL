@@ -173,9 +173,7 @@ def test_grug_flash_attention_sliding_window_peak_memory() -> None:
 
     _require_hopper()
     torch.manual_seed(29)
-    attention = (
-        GrugMoeAttention(_attention_config("flash_attention_2", hidden_size=2560)).cuda().to(torch.bfloat16)
-    )
+    attention = GrugMoeAttention(_attention_config("flash_attention_2", hidden_size=2560)).cuda().to(torch.bfloat16)
     hidden_states = torch.randn(
         1,
         PRODUCTION_SEQUENCE_LENGTH,
@@ -201,8 +199,7 @@ def test_grug_flash_attention_sliding_window_peak_memory() -> None:
     peak_bytes = torch.cuda.max_memory_allocated()
     peak_gib = peak_bytes / GIB
     print(
-        f"Grug FlashAttention B=1 S={PRODUCTION_SEQUENCE_LENGTH} Hq=20 Hkv=5 D=128 "
-        f"window=2048 peak={peak_gib:.3f} GiB"
+        f"Grug FlashAttention B=1 S={PRODUCTION_SEQUENCE_LENGTH} Hq=20 Hkv=5 D=128 window=2048 peak={peak_gib:.3f} GiB"
     )
     assert peak_bytes < MEMORY_CEILING_GIB * GIB
     assert torch.isfinite(output).all()

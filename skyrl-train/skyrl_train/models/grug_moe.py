@@ -22,10 +22,16 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 try:
     from flash_attn import flash_attn_func as _flash_attn_func
     from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis as _index_first_axis
+    from flash_attn.bert_padding import pad_input as _pad_input
+    from flash_attn.bert_padding import unpad_input as _unpad_input
 except ImportError as error:
     _FLASH_ATTN_IMPORT_ERROR: ImportError | None = error
     _flash_attn_func: Any = None
     _flash_attn_varlen_func: Any = None
+    _index_first_axis: Any = None
+    _pad_input: Any = None
+    _unpad_input: Any = None
 else:
     _FLASH_ATTN_IMPORT_ERROR = None
 
@@ -40,6 +46,9 @@ GRUG_ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
 GRUG_MOE_ARCHITECTURE = "GrugMoeForCausalLM"
 GRUG_MOE_ATTENTION_MODE = "production"
 GRUG_MOE_ARTIFACT_SCHEMA_VERSION = 1
+GRUG_EAGER_ATTENTION_BACKEND = "eager"
+GRUG_FLASH_ATTENTION_BACKEND = "flash_attention_2"
+GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRUG_FLASH_ATTENTION_BACKEND})
 _GATED_NORM_RANK = 128
 _ROUTING_RENORM_SUM = 2.5
 _QK_RMS_NORM_EPS = 1e-6
@@ -461,11 +470,11 @@ class GrugMoeAttention(nn.Module):
         q = q * scale
 
         attn_implementation = self.config._attn_implementation
-        if attn_implementation == "eager":
+        if attn_implementation == GRUG_EAGER_ATTENTION_BACKEND:
             attn_output, v_for_xsa = self._eager_attention(q, k, v, attention_mask, is_long=is_long)
-        elif attn_implementation == "flash_attention_2":
+        elif attn_implementation == GRUG_FLASH_ATTENTION_BACKEND:
             attn_output = self._flash_attention(q, k, v, attention_mask, is_long=is_long)
-            v_for_xsa = self._repeat_value_heads(v)
+            v_for_xsa = self._repeat_kv_heads(v)
         else:
             raise ValueError(f"unsupported Grug attention backend {attn_implementation!r}")
 
@@ -476,9 +485,9 @@ class GrugMoeAttention(nn.Module):
         attn_output = attn_output * gate.to(attn_output.dtype)
         return self.o_proj(attn_output.reshape(batch, seq_len, -1))
 
-    def _repeat_value_heads(self, value: torch.Tensor) -> torch.Tensor:
+    def _repeat_kv_heads(self, states: torch.Tensor) -> torch.Tensor:
         repeats = self.config.num_attention_heads // self.config.num_key_value_heads
-        return value if repeats == 1 else value.repeat_interleave(repeats, dim=2)
+        return states if repeats == 1 else states.repeat_interleave(repeats, dim=2)
 
     def _eager_attention(
         self,
@@ -489,10 +498,10 @@ class GrugMoeAttention(nn.Module):
         *,
         is_long: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        repeats = self.config.num_attention_heads // self.config.num_key_value_heads
-        if repeats != 1:
-            key = key.repeat_interleave(repeats, dim=2)
-            value = value.repeat_interleave(repeats, dim=2)
+        """Return the attention output and GQA-expanded value used by XSA."""
+
+        key = self._repeat_kv_heads(key)
+        value = self._repeat_kv_heads(value)
 
         seq_len = query.shape[1]
         scores = torch.einsum(
@@ -540,32 +549,23 @@ class GrugMoeAttention(nn.Module):
 
         batch, seq_len = attention_mask.shape
         valid = attention_mask.to(torch.bool)
-        indices = torch.nonzero(valid.flatten(), as_tuple=False).flatten()
-        lengths = valid.sum(dim=-1, dtype=torch.int32)
-        cu_seqlens = F.pad(lengths.cumsum(dim=0, dtype=torch.int32), (1, 0))
-        flat_query = query.flatten(0, 1)
-        flat_key = key.flatten(0, 1)
-        flat_value = value.flatten(0, 1)
+        unpadded_query, indices, cu_seqlens, max_seqlen, _ = _unpad_input(query, valid)
+        unpadded_key = _index_first_axis(key.flatten(0, 1), indices)
+        unpadded_value = _index_first_axis(value.flatten(0, 1), indices)
         unpadded_output = _flash_attn_varlen_func(
-            flat_query.index_select(0, indices),
-            flat_key.index_select(0, indices),
-            flat_value.index_select(0, indices),
+            unpadded_query,
+            unpadded_key,
+            unpadded_value,
             cu_seqlens,
             cu_seqlens,
-            seq_len,
-            seq_len,
+            max_seqlen,
+            max_seqlen,
             dropout_p=0.0,
             softmax_scale=softmax_scale,
             causal=True,
             window_size=window_size,
         )
-        output = torch.zeros_like(query)
-        output.view(batch * seq_len, self.config.num_attention_heads, self.config.head_dim).index_copy_(
-            0,
-            indices,
-            unpadded_output,
-        )
-        return output
+        return _pad_input(unpadded_output, indices, batch, seq_len)
 
 
 class GrugMoeDecoderLayer(nn.Module):
