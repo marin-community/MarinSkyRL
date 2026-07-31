@@ -14,11 +14,25 @@ Timeout for allocating the placement group for different actors in SkyRL
 # no-op there and only protects a config that forgot the line. Env var is the
 # override (env > default); set it lower for a quick test.
 DEFAULT_WORKER_NCCL_TIMEOUT_IN_S = 1800
+DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT = 300
 
 
 def get_worker_nccl_timeout_s() -> int:
     """Resolve the worker NCCL-collective timeout (seconds): env override, else default."""
     return int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S", DEFAULT_WORKER_NCCL_TIMEOUT_IN_S))
+
+
+def get_nccl_monitor_heartbeat_timeout_s() -> int:
+    """Resolve how long the NCCL monitor tolerates a silent watchdog thread."""
+    timeout = int(
+        os.environ.get(
+            "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
+            DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT,
+        )
+    )
+    if timeout <= 0:
+        raise ValueError("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC must be positive")
+    return timeout
 
 
 SKYRL_WORKER_NCCL_TIMEOUT_IN_S = get_worker_nccl_timeout_s()

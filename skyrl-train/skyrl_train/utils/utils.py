@@ -22,6 +22,7 @@ from .constants import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
     DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
+    get_nccl_monitor_heartbeat_timeout_s,
     get_worker_nccl_timeout_s,
 )
 from .logging_utils import format_exception_text
@@ -1089,14 +1090,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # process down on a stuck collective, and with no flight recorder there is
     # no per-rank stuck-collective trace.
     #
-    # These vars (1) enable the torch NCCL flight recorder so the next hang
-    # dumps the exact stuck collective name + ranks per worker, and (2) make
-    # the watchdog actually abort + dump on timeout. The *finite* timeout
-    # itself is plumbed below via SKYRL_WORKER_NCCL_TIMEOUT_IN_S, which is read
-    # by init_process_group in worker.py (and the EP/FSDP sub-meshes created by
-    # init_device_mesh inherit the default PG's timeout). We raise it to 20 min
-    # so a genuinely-stuck EP collective aborts with a flight-recorder dump
-    # instead of spinning silently for hours.
+    # These vars enable the flight recorder and two independent failure bounds:
+    # the process-group watchdog times out an unfinished collective, while the
+    # monitor terminates the process if that watchdog itself stops heartbeating
+    # inside a CUDA/NCCL call. The latter is required for a hard liveness bound;
+    # async error handling alone cannot recover a wedged watchdog thread.
     #
     # These are propagated to EVERY Ray worker (policy/ref/inference) via the
     # ray runtime env, the same path as RAY_USE_UVLOOP above. Pure diagnostic
@@ -1137,7 +1135,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # get_worker_nccl_timeout_s: env override, else DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
     # = 1800). Read back by constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
     # torch.distributed.init_process_group(timeout=...) in worker.py; the EP / FSDP
-    # device-mesh sub-groups inherit this default-PG timeout. Raised (was constants
+    # device-mesh sub-groups receive the same timeout explicitly in
+    # fsdp_utils.py. Raised (was constants
     # default 600 / here a 1200 floor) to 1800 so a stuck EP all-to-all or a slow
     # 80B first-step forward / rank-0 full-state-dict materialize aborts (with a
     # flight recorder dump) rather than SIGABRTing on the old watchdog. A config
@@ -1147,6 +1146,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     except (TypeError, ValueError):
         _cfg_nccl_timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
     env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(_cfg_nccl_timeout)
+    _monitor_heartbeat_timeout = min(get_nccl_monitor_heartbeat_timeout_s(), _cfg_nccl_timeout)
+    env_vars["TORCH_NCCL_ENABLE_MONITORING"] = "1"
+    env_vars["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] = str(_monitor_heartbeat_timeout)
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
