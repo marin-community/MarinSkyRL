@@ -13,12 +13,14 @@ def test_error_handling_mapping_is_validated_at_config_boundary():
         {
             "enable_error_classification": True,
             "mask_exceptions": ["CampaignInfrastructureError"],
+            "zero_exceptions": "FirstAgentError, SecondAgentError",
             "default_error_treatment": "passthrough",
         }
     )
 
     assert config.enable_error_classification is True
     assert config.mask_exceptions == frozenset({"CampaignInfrastructureError"})
+    assert config.zero_exceptions == frozenset({"FirstAgentError", "SecondAgentError"})
     assert config.default_error_treatment is ErrorTreatment.PASSTHROUGH
 
 

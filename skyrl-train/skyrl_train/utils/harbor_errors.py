@@ -17,6 +17,12 @@ class ErrorTreatment(StrEnum):
 DEFAULT_ERROR_TREATMENT = ErrorTreatment.ZERO
 
 
+def _exception_names(value: Any) -> frozenset[str]:
+    if isinstance(value, str):
+        return frozenset(name.strip() for name in value.split(",") if name.strip())
+    return frozenset(value)
+
+
 @dataclass(frozen=True)
 class ErrorHandlingConfig:
     """Typed training treatment for Harbor trial failures."""
@@ -31,14 +37,26 @@ class ErrorHandlingConfig:
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "ErrorHandlingConfig":
         """Validate the schema-derived mapping at the terminal-bench boundary."""
+        defaults = DEFAULT_ERROR_HANDLING_CONFIG
         return cls(
-            enable_error_classification=bool(config.get("enable_error_classification", False)),
-            passthrough_exceptions=frozenset(config.get("passthrough_exceptions", ())),
-            mask_exceptions=frozenset(config.get("mask_exceptions", ())),
-            zero_exceptions=frozenset(config.get("zero_exceptions", ())),
-            default_error_treatment=ErrorTreatment(config.get("default_error_treatment", DEFAULT_ERROR_TREATMENT)),
-            preserve_logprobs_on_timeout=bool(config.get("preserve_logprobs_on_timeout", True)),
+            enable_error_classification=bool(
+                config.get("enable_error_classification", defaults.enable_error_classification)
+            ),
+            passthrough_exceptions=_exception_names(
+                config.get("passthrough_exceptions", defaults.passthrough_exceptions)
+            ),
+            mask_exceptions=_exception_names(config.get("mask_exceptions", defaults.mask_exceptions)),
+            zero_exceptions=_exception_names(config.get("zero_exceptions", defaults.zero_exceptions)),
+            default_error_treatment=ErrorTreatment(
+                config.get("default_error_treatment", defaults.default_error_treatment)
+            ),
+            preserve_logprobs_on_timeout=bool(
+                config.get("preserve_logprobs_on_timeout", defaults.preserve_logprobs_on_timeout)
+            ),
         )
+
+
+DEFAULT_ERROR_HANDLING_CONFIG = ErrorHandlingConfig()
 
 
 _CATEGORY_TREATMENTS = {

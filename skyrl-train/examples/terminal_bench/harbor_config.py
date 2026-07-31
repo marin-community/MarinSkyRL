@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.utils.harbor_errors import DEFAULT_ERROR_TREATMENT, ErrorHandlingConfig
+from skyrl_train.utils.harbor_errors import DEFAULT_ERROR_HANDLING_CONFIG, ErrorHandlingConfig
 
 from harbor.models.trial.config import (
     TrialConfig,
@@ -325,26 +325,38 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
 ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={
         # Enable RLOO-N style error handling (exclude infrastructure failures from baseline)
-        "enable_error_classification": FieldMapping("enable_error_classification", default=False),
+        "enable_error_classification": FieldMapping(
+            "enable_error_classification",
+            default=DEFAULT_ERROR_HANDLING_CONFIG.enable_error_classification,
+        ),
         # Exceptions to pass through (ignore exception, use verifier reward normally).
         # The verifier still runs after these errors in Harbor, so we get a real reward.
         # Use for soft limits like timeout/context-length where partial work is evaluated.
-        "passthrough_exceptions": FieldMapping("passthrough_exceptions", default=[]),
+        "passthrough_exceptions": FieldMapping(
+            "passthrough_exceptions",
+            default=list(DEFAULT_ERROR_HANDLING_CONFIG.passthrough_exceptions),
+        ),
         # Exceptions to mask (exclude from baseline, no gradient contribution)
         # These are treated as "neutral" - infrastructure issues, not agent failures
         "mask_exceptions": FieldMapping(
             "mask_exceptions",
-            default=[],
+            default=list(DEFAULT_ERROR_HANDLING_CONFIG.mask_exceptions),
         ),
         # Exceptions to zero (include in baseline with reward=0)
         # These are treated as agent failures - the model should learn to avoid them
         "zero_exceptions": FieldMapping(
             "zero_exceptions",
-            default=[],
+            default=list(DEFAULT_ERROR_HANDLING_CONFIG.zero_exceptions),
         ),
         # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
-        "default_error_treatment": FieldMapping("default_error_treatment", default=DEFAULT_ERROR_TREATMENT.value),
-        "preserve_logprobs_on_timeout": FieldMapping("preserve_logprobs_on_timeout", default=True),
+        "default_error_treatment": FieldMapping(
+            "default_error_treatment",
+            default=DEFAULT_ERROR_HANDLING_CONFIG.default_error_treatment.value,
+        ),
+        "preserve_logprobs_on_timeout": FieldMapping(
+            "preserve_logprobs_on_timeout",
+            default=DEFAULT_ERROR_HANDLING_CONFIG.preserve_logprobs_on_timeout,
+        ),
     }
 )
 
@@ -771,12 +783,6 @@ class HarborConfigBuilder:
         for yaml_key, mapping in ERROR_HANDLING_SCHEMA.fields.items():
             value = self._get_field_value(yaml_key, mapping, self._cfg)
             if value is not None:
-                # Convert lists to sets for faster lookup
-                if yaml_key in ("passthrough_exceptions", "mask_exceptions", "zero_exceptions"):
-                    if isinstance(value, (list, tuple)):
-                        value = set(value)
-                    elif isinstance(value, str):
-                        value = {s.strip() for s in value.split(",") if s.strip()}
                 config[yaml_key] = value
 
         return ErrorHandlingConfig.from_mapping(config)
