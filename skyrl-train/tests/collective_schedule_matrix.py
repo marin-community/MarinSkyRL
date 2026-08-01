@@ -35,6 +35,7 @@ COLLECTIVE_SCHEDULE_CASES = (
 )
 
 DEFAULT_COLLECTIVE_SCHEDULE_CASE = "checkpoint-replay-hot"
+COLLECTIVE_SCHEDULE_SUCCESS_MARKER = "MODEL_COLLECTIVE_SCHEDULE_OK"
 
 
 def collective_schedule_case(name: str) -> CollectiveScheduleCase:

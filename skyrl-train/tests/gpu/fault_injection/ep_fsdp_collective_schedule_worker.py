@@ -15,10 +15,6 @@ The default case uses concentrated router replay and reentrant checkpointing.
 Pass ``--case`` with one of the choices reported by ``--help`` to select another
 matrix case.
 
-The worker enables ``TORCH_NCCL_ENABLE_TIMING=1`` before process-group
-initialization because ProcessGroupNCCL completion hooks require start and end
-event recording.
-
 Pass ``--ep-size 4 --fsdp-size 3`` after the script path when launching a
 twelve-rank gang to exercise an EP4/FSDP3 topology.
 """
@@ -48,6 +44,7 @@ from tests.collective_schedule import (
 )
 from tests.collective_schedule_matrix import (
     COLLECTIVE_SCHEDULE_CASES,
+    COLLECTIVE_SCHEDULE_SUCCESS_MARKER,
     DEFAULT_COLLECTIVE_SCHEDULE_CASE,
     CheckpointMode,
     CollectiveScheduleCase,
@@ -314,7 +311,7 @@ def _run_ep_fsdp_collective_schedule_case(
 
     if rank == 0:
         print(
-            "MODEL_COLLECTIVE_SCHEDULE_OK "
+            f"{COLLECTIVE_SCHEDULE_SUCCESS_MARKER} "
             f"case={case.name} world={world_size} ep={ep_size} fsdp={fsdp_size} layers={NUM_LAYERS} "
             f"ep_ops={len(schedule.events['ep'])} fsdp_ops={len(schedule.events['fsdp'])}"
         )

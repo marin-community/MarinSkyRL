@@ -16,7 +16,11 @@ import os
 
 import pytest
 
-from tests.collective_schedule_matrix import COLLECTIVE_SCHEDULE_CASES, CollectiveScheduleCase
+from tests.collective_schedule_matrix import (
+    COLLECTIVE_SCHEDULE_CASES,
+    COLLECTIVE_SCHEDULE_SUCCESS_MARKER,
+    CollectiveScheduleCase,
+)
 from tests.gpu.fault_injection.single_node_runtime import (
     REAP_TIMEOUT_SECONDS,
     REQUIRES_FOUR_CUDA_DEVICES,
@@ -59,4 +63,4 @@ def test_model_collective_schedule_survives_matrix_case(case: CollectiveSchedule
     result = _run_case(case)
 
     assert result.returncode == 0, result.output
-    assert result.output.count(f"MODEL_COLLECTIVE_SCHEDULE_OK case={case.name}") == 1, result.output
+    assert result.output.count(f"{COLLECTIVE_SCHEDULE_SUCCESS_MARKER} case={case.name}") == 1, result.output
