@@ -2,8 +2,7 @@
 
 Run on an otherwise idle node with at least four GPUs::
 
-    uv run --isolated --extra dev --extra ep \
-        pytest -s tests/gpu/fault_injection/ep_fsdp_collective_matrix.py
+    python -m pytest -s tests/gpu/fault_injection/ep_fsdp_collective_matrix.py
 
 Each case receives a fresh torchrun gang. The matrix covers live and replayed
 routing, spread and concentrated replay targets, reentrant activation

@@ -28,8 +28,16 @@ late at a model-layer boundary.
 ## Results
 
 The shared schedule comparison passes 3 CPU contracts. The matrix controller, existing fault-injection suite,
-and model worker collect together on macOS: all 12 accelerator cases skip because CUDA is unavailable. The
-four-GPU matrix remains the acceptance gate before merge.
+and model worker collect together on macOS: all 12 accelerator cases skip because CUDA is unavailable.
+
+All six matrix cases passed on four GH200 GPUs at `b833cfae` in 121.96 seconds. Each case used a fresh four-rank
+gang, and bounded cleanup left no process group behind. The run used the policy image's installed pytest and
+CUDA stack.
+
+The previously documented isolated `uv` command could not run on the air-gapped compute node because the lock
+contains a direct GitHub URL for `harbor-config`. Resolving it on a networked login node selected a CUDA 12.9
+Torch build instead of the image's CUDA 13.0 aarch64 build. The GPU documentation now uses the installed image
+environment; isolated resolution is not evidence about the built runtime.
 
 The standalone model contract in #270 passed EP2/FSDP2 on four GH200 GPUs before this matrix was added. That
 result recorded 24 EP operations and 21 FSDP operations with reentrant checkpointing and concentrated replay
