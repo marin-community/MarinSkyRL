@@ -42,7 +42,7 @@ class DeviceMeshStrategy(Protocol):
 
 @runtime_checkable
 class DeviceMeshWorker(Protocol):
-    strategy: object
+    strategy: DeviceMeshStrategy
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ def enabled() -> bool:
     return os.environ.get(_ENV, "0") == "1"
 
 
-def diagnostic_device_mesh(worker: object) -> DeviceMeshLike | None:
+def diagnostic_device_mesh(worker: DeviceMeshWorker) -> DeviceMeshLike | None:
     """Return a worker's strategy mesh when diagnostics are enabled."""
     if not enabled():
         return None
@@ -196,8 +196,8 @@ def log_phase(phase: str) -> CollectivePhaseRecord | None:
         return None
 
 
-def log_moe_phase_enter(phase: str) -> CollectivePhaseRecord | None:
-    """Start a phase with a fresh first-MoE-boundary guard and log its entry."""
+def start_phase(phase: str) -> CollectivePhaseRecord | None:
+    """Start a phase, reset its first-MoE guard, and log its entry."""
     if not enabled():
         return None
     context = _region.get()

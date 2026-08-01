@@ -975,7 +975,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        _phase_diagnostics.log_moe_phase_enter("forward_impl_enter")
+        _phase_diagnostics.start_phase("forward_impl_enter")
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
