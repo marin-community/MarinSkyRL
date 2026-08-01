@@ -55,13 +55,6 @@ class GeneratedOutputGroup:
     global_step_when_scheduled: int
 
 
-async def _put_and_record_rollout_buffer(
-    buffer: asyncio.Queue[GeneratedOutputGroup], output_group: GeneratedOutputGroup
-) -> None:
-    await buffer.put(output_group)
-    record_rollout_buffer(buffer.qsize(), buffer.maxsize)
-
-
 @dataclass
 class _RolloutStat:
     """
@@ -1039,14 +1032,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # the group is actually buffered, which is exactly correct. If the worker
                 # is cancelled while blocked in put(), slot_acquired is still True so the
                 # CancelledError handler below reconciles submitted/running.
-                await _put_and_record_rollout_buffer(
-                    generation_output_group_buffer,
+                await generation_output_group_buffer.put(
                     GeneratedOutputGroup(
                         generator_output=cur_generator_output,
                         uid=uids[0],
                         global_step_when_scheduled=staleness_step,
                     ),
                 )
+                record_rollout_buffer(generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:
