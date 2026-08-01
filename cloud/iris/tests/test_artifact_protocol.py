@@ -12,6 +12,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
+from cloud.iris import artifact_protocol  # noqa: E402
 from cloud.iris.artifact_protocol import (  # noqa: E402
     ArtifactLaunchEnvelope,
     AttemptState,
@@ -22,6 +23,7 @@ from cloud.iris.artifact_protocol import (  # noqa: E402
     RuntimeIdentity,
     SkyRLLaunchRequest,
     SkyRLOutputPaths,
+    SkyRLTerminalResponse,
     SkyRLTopology,
     _launcher_argv,
     launch_artifact,
@@ -260,3 +262,32 @@ def test_task_bundle_contains_controller_without_training_environment() -> None:
     assert (workspace / "cloud" / "iris" / "start_rl_iris_controller.py").is_file()
     assert not (workspace / "skyrl-train").exists()
     assert not (workspace / "cloud" / "iris" / "tests").exists()
+
+
+def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, capsys) -> None:
+    envelope = _envelope(tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(asdict(envelope)))
+
+    def fake_launch(_envelope: ArtifactLaunchEnvelope, *, dry_run: bool) -> SkyRLTerminalResponse:
+        assert dry_run
+        print("human launcher log")
+        return SkyRLTerminalResponse(
+            run_id=envelope.request.run_id,
+            attempt_id=envelope.request.attempt_id,
+            state=AttemptState.PREPARED,
+            iris_job_id=None,
+            iris_job_state=None,
+            runtime=envelope.request.runtime,
+            model=None,
+            failure=None,
+        )
+
+    monkeypatch.setattr(artifact_protocol, "launch_artifact", fake_launch)
+
+    exit_code = artifact_protocol.main(["iris", "launch", "--request", str(request_path), "--dry-run"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["state"] == "prepared"
+    assert "human launcher log" in captured.err

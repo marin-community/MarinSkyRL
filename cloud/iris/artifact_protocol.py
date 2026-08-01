@@ -463,7 +463,8 @@ def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
     with open(args.request) as source:
         envelope = launch_envelope(json.load(source))
-    response = launch_artifact(envelope, dry_run=args.dry_run)
+    with contextlib.redirect_stdout(sys.stderr):
+        response = launch_artifact(envelope, dry_run=args.dry_run)
     json.dump(asdict(response), sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
     return 0 if response.state in (AttemptState.PREPARED, AttemptState.SUCCEEDED) else 1
