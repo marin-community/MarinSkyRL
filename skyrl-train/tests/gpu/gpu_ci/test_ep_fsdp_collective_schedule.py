@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 
@@ -41,6 +42,14 @@ from tests.collective_schedule import (
     RankCollectiveSchedule,
     assert_collective_schedules_match,
 )
+from tests.collective_schedule_matrix import (
+    COLLECTIVE_SCHEDULE_CASES,
+    DEFAULT_COLLECTIVE_SCHEDULE_CASE,
+    CheckpointMode,
+    CollectiveScheduleCase,
+    RoutingMode,
+    collective_schedule_case,
+)
 
 
 pytestmark = [pytest.mark.gpu]
@@ -55,12 +64,32 @@ SEQUENCE_LENGTH = 16
 SEED = 1701
 DEFAULT_EP_SIZE = 2
 NCCL_TIMING_ENV = "TORCH_NCCL_ENABLE_TIMING"
+DELAY_BOUNDARY = "layer1:original:enter"
+RANK_DELAY_SECONDS = 2.0
+
+
+class BoundaryDelay:
+    def __init__(self, rank: int, delayed_rank: int | None) -> None:
+        self._rank = rank
+        self._delayed_rank = delayed_rank
+        self.was_applied = False
+
+    def apply(self, label: str) -> None:
+        if self._rank != self._delayed_rank or label != DELAY_BOUNDARY:
+            return
+        if self.was_applied:
+            raise AssertionError(f"delay boundary {DELAY_BOUNDARY!r} occurred more than once")
+        self.was_applied = True
+        # The delay is the injected condition: peers enter the next real EP/FSDP
+        # collective while this rank remains outside it.
+        time.sleep(RANK_DELAY_SECONDS)
 
 
 class TinyMoEBlock(torch.nn.Module):
-    def __init__(self, layer_index: int) -> None:
+    def __init__(self, layer_index: int, checkpoint_mode: CheckpointMode) -> None:
         super().__init__()
         self.layer_index = layer_index
+        self.checkpoint_mode = checkpoint_mode
         self.norm = torch.nn.LayerNorm(DIM)
         self.mlp = GroupedMoEShim(
             MoE(
@@ -76,7 +105,9 @@ class TinyMoEBlock(torch.nn.Module):
         self._record_boundary: Callable[[str], None] | None = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        phase = "recompute" if torch.is_grad_enabled() else "original"
+        phase = (
+            "recompute" if self.checkpoint_mode is CheckpointMode.REENTRANT and torch.is_grad_enabled() else "original"
+        )
         if self._record_boundary is not None:
             self._record_boundary(f"layer{self.layer_index}:{phase}:enter")
         output = hidden_states + self.mlp(self.norm(hidden_states))
@@ -85,16 +116,20 @@ class TinyMoEBlock(torch.nn.Module):
         return output
 
 
-class TinyCheckpointedMoE(torch.nn.Module):
-    def __init__(self) -> None:
+class TinyMoEModel(torch.nn.Module):
+    def __init__(self, checkpoint_mode: CheckpointMode) -> None:
         super().__init__()
-        self.layers = torch.nn.ModuleList(TinyMoEBlock(index) for index in range(NUM_LAYERS))
+        self.checkpoint_mode = checkpoint_mode
+        self.layers = torch.nn.ModuleList(TinyMoEBlock(index, checkpoint_mode) for index in range(NUM_LAYERS))
         self.output = torch.nn.Linear(DIM, DIM, bias=False)
         self.config = SimpleNamespace(tie_word_embeddings=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
-            hidden_states = checkpoint(layer, hidden_states, use_reentrant=True, preserve_rng_state=True)
+            if self.checkpoint_mode is CheckpointMode.REENTRANT:
+                hidden_states = checkpoint(layer, hidden_states, use_reentrant=True, preserve_rng_state=True)
+            else:
+                hidden_states = layer(hidden_states)
         return self.output(hidden_states)
 
 
@@ -108,30 +143,39 @@ def _mesh_sizes(world_size: int, ep_size: int, fsdp_size: int | None) -> tuple[i
     return ep_size, fsdp_size
 
 
-def _expected_boundaries() -> tuple[str, ...]:
+def _expected_boundaries(checkpoint_mode: CheckpointMode) -> tuple[str, ...]:
     original = tuple(f"layer{layer}:original:{edge}" for layer in range(NUM_LAYERS) for edge in ("enter", "exit"))
+    if checkpoint_mode is CheckpointMode.NONE:
+        return original
     recompute = tuple(
         f"layer{layer}:recompute:{edge}" for layer in reversed(range(NUM_LAYERS)) for edge in ("enter", "exit")
     )
     return original + recompute
 
 
-def _replay_targets(fsdp_coordinate: int, device: torch.device) -> list[torch.Tensor]:
+def _replay_targets(
+    fsdp_coordinate: int,
+    routing_mode: RoutingMode,
+    device: torch.device,
+) -> list[torch.Tensor]:
     targets = []
     for layer in range(NUM_LAYERS):
         first_expert = (fsdp_coordinate * NUM_LAYERS + layer * TOP_K) % NUM_EXPERTS
         selected = torch.empty(BATCH_SIZE * SEQUENCE_LENGTH, TOP_K, dtype=torch.long, device=device)
-        for slot in range(TOP_K):
-            selected[:, slot] = (first_expert + slot) % NUM_EXPERTS
+        for token in range(BATCH_SIZE * SEQUENCE_LENGTH):
+            token_offset = token * TOP_K if routing_mode is RoutingMode.REPLAY_SPREAD else 0
+            for slot in range(TOP_K):
+                selected[token, slot] = (first_expert + token_offset + slot) % NUM_EXPERTS
         targets.append(selected)
     return targets
 
 
-def _assert_operation_families(schedule: RankCollectiveSchedule) -> None:
+def _assert_operation_families(schedule: RankCollectiveSchedule, checkpoint_mode: CheckpointMode) -> None:
     ep_operations = tuple(event.operation.upper() for event in schedule.events["ep"])
-    assert len(ep_operations) == NUM_LAYERS * 8, (
-        f"each checkpointed MoE layer must issue 3 original-forward, 3 recompute-forward, "
-        f"and 2 backward EP all-to-alls; observed {len(ep_operations)} operations"
+    operations_per_layer = 8 if checkpoint_mode is CheckpointMode.REENTRANT else 5
+    assert len(ep_operations) == NUM_LAYERS * operations_per_layer, (
+        f"expected {operations_per_layer} EP all-to-alls per layer for checkpoint_mode={checkpoint_mode.value}; "
+        f"observed {len(ep_operations)} operations"
     )
     assert all("ALLTOALL" in operation for operation in ep_operations), ep_operations
 
@@ -140,9 +184,13 @@ def _assert_operation_families(schedule: RankCollectiveSchedule) -> None:
     assert any("REDUCE_SCATTER" in operation for operation in fsdp_operations), fsdp_operations
 
 
-def _build_sharded_model(device: torch.device, device_mesh: DeviceMesh) -> TinyCheckpointedMoE:
+def _build_sharded_model(
+    device: torch.device,
+    device_mesh: DeviceMesh,
+    checkpoint_mode: CheckpointMode,
+) -> TinyMoEModel:
     torch.manual_seed(SEED)
-    model = TinyCheckpointedMoE().to(device=device, dtype=torch.bfloat16)
+    model = TinyMoEModel(checkpoint_mode).to(device=device, dtype=torch.bfloat16)
     for module in model.modules():
         if isinstance(module, MoE):
             module.init_weights(0.02)
@@ -159,17 +207,29 @@ def _build_sharded_model(device: torch.device, device_mesh: DeviceMesh) -> TinyC
     return model
 
 
-def _install_schedule_recorder(model: TinyCheckpointedMoE, device_mesh: DeviceMesh) -> NcclCollectiveRecorder:
+def _install_schedule_recorder(
+    model: TinyMoEModel,
+    device_mesh: DeviceMesh,
+    case: CollectiveScheduleCase,
+    rank: int,
+) -> tuple[NcclCollectiveRecorder, BoundaryDelay]:
     recorder = NcclCollectiveRecorder(device_mesh, ("ep", "fsdp"))
+    delay = BoundaryDelay(rank, case.delayed_rank)
+
+    def record_boundary(label: str) -> None:
+        delay.apply(label)
+        recorder.record_boundary_snapshot(label)
+
     for layer in model.layers:
-        layer._record_boundary = recorder.record_boundary_snapshot
-    return recorder
+        layer._record_boundary = record_boundary
+    return recorder, delay
 
 
-def _run_replayed_step(
-    model: TinyCheckpointedMoE,
+def _run_training_step(
+    model: TinyMoEModel,
     fsdp_coordinate: int,
     device: torch.device,
+    routing_mode: RoutingMode,
 ) -> None:
     torch.manual_seed(SEED + fsdp_coordinate)
     hidden_states = torch.randn(
@@ -180,20 +240,26 @@ def _run_replayed_step(
         dtype=torch.bfloat16,
         requires_grad=True,
     )
-    replay = RouterReplay()
-    replay.begin_replay()
-    replay.set_microbatch_targets(
-        _replay_targets(fsdp_coordinate, device),
-        torch.ones(BATCH_SIZE * SEQUENCE_LENGTH, dtype=torch.bool, device=device),
-    )
-    set_active_replay(replay)
+    replay = None
+    if routing_mode is not RoutingMode.LIVE:
+        replay = RouterReplay()
+        replay.begin_replay()
+        targets = _replay_targets(fsdp_coordinate, routing_mode, device)
+        expected_experts = NUM_EXPERTS if routing_mode is RoutingMode.REPLAY_SPREAD else TOP_K
+        assert all(torch.unique(layer_targets).numel() == expected_experts for layer_targets in targets)
+        replay.set_microbatch_targets(
+            targets,
+            torch.ones(BATCH_SIZE * SEQUENCE_LENGTH, dtype=torch.bool, device=device),
+        )
+        set_active_replay(replay)
     try:
         loss = model(hidden_states).float().square().mean()
         loss.backward()
         assert torch.isfinite(loss)
     finally:
         set_active_replay(None)
-        replay.clear()
+        if replay is not None:
+            replay.clear()
 
     local_grad_sums = []
     for parameter in model.parameters():
@@ -207,11 +273,12 @@ def _run_replayed_step(
 def _finish_local_schedule(
     recorder: NcclCollectiveRecorder,
     rank: int,
+    checkpoint_mode: CheckpointMode,
 ) -> RankCollectiveSchedule:
     torch.cuda.synchronize()
     schedule = recorder.finish(rank=rank)
-    assert tuple(boundary.label for boundary in schedule.boundaries) == _expected_boundaries()
-    _assert_operation_families(schedule)
+    assert tuple(boundary.label for boundary in schedule.boundaries) == _expected_boundaries(checkpoint_mode)
+    _assert_operation_families(schedule, checkpoint_mode)
     return schedule
 
 
@@ -222,7 +289,11 @@ def _compare_rank_schedules(schedule: RankCollectiveSchedule, world_size: int) -
     assert_collective_schedules_match(schedules, "fsdp")
 
 
-def _run_ep_fsdp_replay_checkpoint_collective_schedule(ep_size: int, fsdp_size: int | None) -> None:
+def _run_ep_fsdp_replay_checkpoint_collective_schedule(
+    ep_size: int,
+    fsdp_size: int | None,
+    case: CollectiveScheduleCase,
+) -> None:
     os.environ[NCCL_TIMING_ENV] = "1"
     init_worker_process_group_with_device(timeout_seconds=120)
     rank = dist.get_rank()
@@ -233,17 +304,18 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule(ep_size: int, fsdp_size: 
     mesh_dim_names = tuple(device_mesh.mesh_dim_names)
     fsdp_coordinate = tuple(device_mesh.get_coordinate())[mesh_dim_names.index("fsdp")]
 
-    model = _build_sharded_model(device, device_mesh)
+    model = _build_sharded_model(device, device_mesh, case.checkpoint_mode)
     dist.barrier()
-    recorder = _install_schedule_recorder(model, device_mesh)
-    _run_replayed_step(model, fsdp_coordinate, device)
-    schedule = _finish_local_schedule(recorder, rank)
+    recorder, delay = _install_schedule_recorder(model, device_mesh, case, rank)
+    _run_training_step(model, fsdp_coordinate, device, case.routing_mode)
+    assert delay.was_applied is (rank == case.delayed_rank)
+    schedule = _finish_local_schedule(recorder, rank, case.checkpoint_mode)
     _compare_rank_schedules(schedule, world_size)
 
     if rank == 0:
         print(
             "MODEL_COLLECTIVE_SCHEDULE_OK "
-            f"world={world_size} ep={ep_size} fsdp={fsdp_size} layers={NUM_LAYERS} "
+            f"case={case.name} world={world_size} ep={ep_size} fsdp={fsdp_size} layers={NUM_LAYERS} "
             f"ep_ops={len(schedule.events['ep'])} fsdp_ops={len(schedule.events['fsdp'])}"
         )
 
@@ -253,7 +325,11 @@ def test_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
         pytest.skip("NCCL collective schedule contract requires CUDA")
 
     try:
-        _run_ep_fsdp_replay_checkpoint_collective_schedule(DEFAULT_EP_SIZE, None)
+        _run_ep_fsdp_replay_checkpoint_collective_schedule(
+            DEFAULT_EP_SIZE,
+            None,
+            collective_schedule_case(DEFAULT_COLLECTIVE_SCHEDULE_CASE),
+        )
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -263,9 +339,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ep-size", type=int, default=DEFAULT_EP_SIZE)
     parser.add_argument("--fsdp-size", type=int)
+    parser.add_argument(
+        "--case",
+        choices=tuple(case.name for case in COLLECTIVE_SCHEDULE_CASES),
+        default=DEFAULT_COLLECTIVE_SCHEDULE_CASE,
+    )
     arguments = parser.parse_args()
     try:
-        _run_ep_fsdp_replay_checkpoint_collective_schedule(arguments.ep_size, arguments.fsdp_size)
+        _run_ep_fsdp_replay_checkpoint_collective_schedule(
+            arguments.ep_size,
+            arguments.fsdp_size,
+            collective_schedule_case(arguments.case),
+        )
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

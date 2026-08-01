@@ -30,6 +30,7 @@ import torch.distributed as dist
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
+from tests.torchrun_process import kill_and_reap_torchrun, read_process_output
 
 
 WORLD_SIZE = 4
@@ -237,26 +238,6 @@ def _worker(mode: RunMode) -> None:
     dist.destroy_process_group()
 
 
-def _kill_and_reap_torchrun(process: subprocess.Popen[str]) -> bool:
-    """Kill the subprocess group and report whether its leader was reaped."""
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            # torchrun may finish between poll() and killpg(); wait() below
-            # still reaps its leader and records the teardown result.
-            pass
-    try:
-        process.wait(timeout=REAP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        return False
-    return True
-
-
-def _read_output(log_path: Path) -> str:
-    return log_path.read_text(errors="replace") if log_path.exists() else ""
-
-
 def _wait_for_all_ranks_ready(process: subprocess.Popen[str], control_dir: Path, log_path: Path) -> None:
     deadline = time.monotonic() + SETUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -267,15 +248,15 @@ def _wait_for_all_ranks_ready(process: subprocess.Popen[str], control_dir: Path,
             return
         if process.poll() is not None:
             pytest.fail(
-                f"torchrun exited during setup with code {process.returncode}; output:\n{_read_output(log_path)}",
+                f"torchrun exited during setup with code {process.returncode}; output:\n{read_process_output(log_path)}",
                 pytrace=False,
             )
         time.sleep(CONTROL_POLL_SECONDS)
 
-    reaped = _kill_and_reap_torchrun(process)
+    reaped = kill_and_reap_torchrun(process, REAP_TIMEOUT_SECONDS)
     pytest.fail(
         f"not all ranks completed setup within {SETUP_TIMEOUT_SECONDS}s; "
-        f"process group reaped={reaped}; output:\n{_read_output(log_path)}",
+        f"process group reaped={reaped}; output:\n{read_process_output(log_path)}",
         pytrace=False,
     )
 
@@ -326,13 +307,13 @@ def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> RunResult:
             try:
                 returncode = process.wait(timeout=RUN_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
-                reaped = _kill_and_reap_torchrun(process)
+                reaped = kill_and_reap_torchrun(process, REAP_TIMEOUT_SECONDS)
                 pytest.fail(
                     f"{mode.value} did not finish within {RUN_TIMEOUT_SECONDS}s after setup; "
-                    f"process group reaped={reaped}; output:\n{_read_output(log_path)}",
+                    f"process group reaped={reaped}; output:\n{read_process_output(log_path)}",
                     pytrace=False,
                 )
-        return RunResult(returncode, _read_output(log_path))
+        return RunResult(returncode, read_process_output(log_path))
 
 
 @pytest.mark.parametrize("mode", FAULT_MODES)
