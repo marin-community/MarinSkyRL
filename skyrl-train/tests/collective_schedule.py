@@ -19,7 +19,7 @@ class CollectiveEvent:
 @dataclass(frozen=True)
 class CollectiveBoundary:
     label: str
-    sequence_numbers: Mapping[str, int]
+    sequence_counts: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,13 @@ class CollectiveScheduleDivergence:
     actual: str
 
 
+@dataclass(frozen=True)
+class SequenceDifference:
+    index: int
+    expected: str
+    actual: str
+
+
 def _group_key(schedule: RankCollectiveSchedule, group_dimension: str) -> tuple[tuple[str, int], ...]:
     return tuple(
         (name, coordinate)
@@ -64,19 +71,19 @@ def _normalized_boundaries(
 ) -> tuple[str, ...]:
     if not schedule.boundaries:
         return ()
-    initial = schedule.boundaries[0].sequence_numbers[group_dimension]
+    initial = schedule.boundaries[0].sequence_counts[group_dimension]
     return tuple(
-        f"{boundary.label} at sequence +{boundary.sequence_numbers[group_dimension] - initial}"
+        f"{boundary.label} at sequence +{boundary.sequence_counts[group_dimension] - initial}"
         for boundary in schedule.boundaries
     )
 
 
-def _first_difference(reference: Sequence[str], candidate: Sequence[str]) -> tuple[int, str, str] | None:
+def _first_difference(reference: Sequence[str], candidate: Sequence[str]) -> SequenceDifference | None:
     for index in range(max(len(reference), len(candidate))):
         expected = reference[index] if index < len(reference) else "<end>"
         actual = candidate[index] if index < len(candidate) else "<end>"
         if expected != actual:
-            return index, expected, actual
+            return SequenceDifference(index, expected, actual)
     return None
 
 
@@ -119,16 +126,15 @@ def find_first_collective_divergence(
                 difference = _first_difference(expected_sequence, actual_sequence)
                 if difference is None:
                     continue
-                index, expected, actual = difference
                 return CollectiveScheduleDivergence(
                     group_dimension,
                     fixed_coordinate,
                     reference.rank,
                     candidate.rank,
                     sequence_kind,
-                    index,
-                    expected,
-                    actual,
+                    difference.index,
+                    difference.expected,
+                    difference.actual,
                 )
     return None
 

@@ -81,8 +81,6 @@ class TinyMoEBlock(torch.nn.Module):
 
 
 class TinyCheckpointedMoE(torch.nn.Module):
-    _no_split_modules = ["TinyMoEBlock"]
-
     def __init__(self) -> None:
         super().__init__()
         self.layers = torch.nn.ModuleList(TinyMoEBlock(index) for index in range(NUM_LAYERS))
