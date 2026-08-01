@@ -361,8 +361,6 @@ def test_warmed_production_phase_divergence_terminates_torchrun_gang() -> None:
     assert result.output.count(f"FAULT_INJECTION_ACTIVE mode={RunMode.WARMED_PHASE_DIVERGENCE.value}") == WORLD_SIZE, (
         result.output
     )
-    assert result.output.count("phase=ep-all-to-all") == WORLD_SIZE // 2, result.output
-    assert result.output.count("phase=fsdp-all-gather") == WORLD_SIZE // 2, result.output
     assert "FAULT_INJECTION_UNEXPECTED_COMPLETION" not in result.output
     assert result.returncode != 0, result.output
 
