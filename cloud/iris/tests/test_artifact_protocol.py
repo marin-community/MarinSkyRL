@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import pytest
 
-from cloud.iris.artifact_protocol import (
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from cloud.iris.artifact_protocol import (  # noqa: E402
     ArtifactLaunchEnvelope,
     AttemptState,
     DataLocator,
@@ -21,10 +26,10 @@ from cloud.iris.artifact_protocol import (
     _launcher_argv,
     launch_artifact,
 )
-from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant
-from cloud.iris.launch_rl_iris import IrisLaunchOutcome
-from cloud.iris.start_rl_iris_controller import materialize_model_export
-from cloud.iris.task_bundle import build_task_bundle
+from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant  # noqa: E402
+from cloud.iris.launch_rl_iris import IrisLaunchOutcome  # noqa: E402
+from cloud.iris.start_rl_iris_controller import materialize_model_export  # noqa: E402
+from cloud.iris.task_bundle import build_task_bundle  # noqa: E402
 
 
 @dataclass(frozen=True)
