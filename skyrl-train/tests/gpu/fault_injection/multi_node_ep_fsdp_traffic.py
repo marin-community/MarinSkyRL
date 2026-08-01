@@ -11,7 +11,6 @@ Launch one torchrun agent per node with torchrun's ``--module`` mode. See
 
 from __future__ import annotations
 
-import argparse
 import os
 import socket
 import time
@@ -202,7 +201,6 @@ def _run_with_process_group() -> None:
     init_worker_process_group_with_device(timeout_seconds=PROCESS_GROUP_TIMEOUT_SECONDS)
     try:
         local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
         mesh = create_device_mesh(WORLD_SIZE, fsdp_size=FSDP_SIZE, ep_size=EP_SIZE)
         placement = _validate_mesh_placement(mesh)
@@ -235,6 +233,4 @@ def _run() -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.parse_args()
     _run()

@@ -32,7 +32,7 @@ The first direct CLI check found that importing a helper from the repository's
 `tests` package depended on `PYTHONPATH`; installing `skyrl_train` alone does not
 make that package importable. The documented launcher now uses torchrun's
 `--module` mode from `skyrl-train/`, which makes the test utilities importable
-without duplicating their environment policy. The module's `--help` path succeeds
+without duplicating their environment policy. The module imports and compiles
 from a clean environment.
 
 The collective schedule and device-mesh timeout CPU tests pass (4 tests). Ruff
