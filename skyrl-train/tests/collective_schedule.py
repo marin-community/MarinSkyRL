@@ -188,13 +188,16 @@ class NcclCollectiveRecorder:
 
         return record
 
-    def boundary(self, label: str) -> None:
-        sequences = {
+    def _sequence_counts(self) -> dict[str, int]:
+        return {
             name: int(group._get_sequence_number_for_group()) - self._initial_sequences[name]
             for name, group in self._groups.items()
         }
+
+    def boundary(self, label: str) -> None:
+        sequence_counts = self._sequence_counts()
         with self._condition:
-            self._boundaries.append(CollectiveBoundary(label, sequences))
+            self._boundaries.append(CollectiveBoundary(label, sequence_counts))
 
     def finish(
         self,
@@ -202,10 +205,7 @@ class NcclCollectiveRecorder:
         rank: int,
         timeout_seconds: float = 30,
     ) -> RankCollectiveSchedule:
-        expected_counts = {
-            name: int(group._get_sequence_number_for_group()) - self._initial_sequences[name]
-            for name, group in self._groups.items()
-        }
+        expected_counts = self._sequence_counts()
         deadline = time.monotonic() + timeout_seconds
         with self._condition:
             while not self._errors and any(
