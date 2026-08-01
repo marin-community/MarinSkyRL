@@ -19,4 +19,10 @@ A tiny grouped MoE can preserve the production process-group topology and orderi
 
 ## Results
 
-The pure schedule comparison is covered on CPU, including independent EP/FSDP grouping, a missing EP combine, and layer-boundary sequence drift. All 72 distributed CPU tests pass, with one existing platform skip. The GPU module imports and collects with the locked EP dependencies, then skips because CUDA is unavailable. The four-rank and optional twelve-rank NCCL contract still requires a GPU run before merge.
+The pure schedule comparison is covered on CPU, including independent EP/FSDP grouping, a missing EP combine,
+and layer-boundary sequence drift. All 72 distributed CPU tests pass, with one existing platform skip.
+
+The four-rank NCCL contract passed on GH200 with EP2/FSDP2 and recorded 24 EP operations plus 21 FSDP
+operations. The first invocation exposed a harness dependency: ProcessGroupNCCL rejected the completion hook
+until `TORCH_NCCL_ENABLE_TIMING=1` was present. The test now sets that required variable before process-group
+initialization. The optional twelve-rank EP4/FSDP3 topology remains untested.

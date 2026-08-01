@@ -10,6 +10,10 @@ Run the compact topology on one four-GPU node::
 
     torchrun --nproc-per-node=4 tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py
 
+The worker enables ``TORCH_NCCL_ENABLE_TIMING=1`` before process-group
+initialization because ProcessGroupNCCL completion hooks require start and end
+event recording.
+
 Set ``SKYRL_TEST_EP_SIZE=4`` and ``SKYRL_TEST_FSDP_SIZE=3`` when launching a
 twelve-rank gang to match the production EP4/FSDP3 topology.
 """
@@ -50,6 +54,7 @@ SEED = 1701
 EP_SIZE_ENV = "SKYRL_TEST_EP_SIZE"
 FSDP_SIZE_ENV = "SKYRL_TEST_FSDP_SIZE"
 DEFAULT_EP_SIZE = 2
+NCCL_TIMING_ENV = "TORCH_NCCL_ENABLE_TIMING"
 
 
 class TinyMoEBlock(torch.nn.Module):
@@ -220,6 +225,7 @@ def _compare_rank_schedules(schedule: RankCollectiveSchedule, world_size: int) -
 
 
 def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
+    os.environ[NCCL_TIMING_ENV] = "1"
     init_worker_process_group_with_device(timeout_seconds=120)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
