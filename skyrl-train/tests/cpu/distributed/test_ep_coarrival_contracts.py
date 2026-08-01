@@ -17,10 +17,18 @@ class EntryBarrierReached(RuntimeError):
 
 
 @pytest.mark.parametrize(
-    ("world_size", "context_parallel_size", "expert_parallel_size", "data_parallel_size"),
+    ("world_size", "context_parallel_size", "expert_parallel_size", "expected_replication_groups"),
     [
-        (32, 2, 8, 2),
-        (12, 1, 4, 3),
+        (
+            32,
+            2,
+            8,
+            (
+                (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+                (16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31),
+            ),
+        ),
+        (12, 1, 4, ((0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11))),
     ],
 )
 def test_worker_replicates_dispatch_data_across_ep_and_cp_ranks(
@@ -28,7 +36,7 @@ def test_worker_replicates_dispatch_data_across_ep_and_cp_ranks(
     world_size,
     context_parallel_size,
     expert_parallel_size,
-    data_parallel_size,
+    expected_replication_groups,
 ):
     monkeypatch.setattr(worker_module, "init_worker_process_group_with_device", lambda **_kwargs: None)
     monkeypatch.setattr(torch.distributed.device_mesh, "init_device_mesh", lambda *_args, **_kwargs: object())
@@ -55,11 +63,15 @@ def test_worker_replicates_dispatch_data_across_ep_and_cp_ranks(
         worker.init_worker_process_group()
         mesh_ranks.append(worker.mesh_rank)
 
-    replication_width = context_parallel_size * expert_parallel_size
-    assert [rank.dp for rank in mesh_ranks] == [rank // replication_width for rank in range(world_size)]
-    assert [rank.sp for rank in mesh_ranks] == [rank % replication_width for rank in range(world_size)]
-    assert {rank.dp_size for rank in mesh_ranks} == {data_parallel_size}
-    assert [rank.dp for rank in mesh_ranks if rank.is_collection_dp_rank()] == list(range(data_parallel_size))
+    actual_replication_groups = {}
+    for global_rank, mesh_rank in enumerate(mesh_ranks):
+        actual_replication_groups.setdefault(mesh_rank.dp, []).append(global_rank)
+
+    assert tuple(tuple(group) for group in actual_replication_groups.values()) == expected_replication_groups
+    assert {rank.dp_size for rank in mesh_ranks} == {len(expected_replication_groups)}
+    assert [global_rank for global_rank, rank in enumerate(mesh_ranks) if rank.is_collection_dp_rank()] == [
+        group[0] for group in expected_replication_groups
+    ]
 
 
 @pytest.mark.asyncio
@@ -165,9 +177,7 @@ def test_decentralized_router_replay_training_enters_barrier_before_training(mon
     worker = object.__new__(PolicyWorkerBase)
     worker._rank = 0
     worker._world_size = 2
-    training_input = TrainingInputBatch(
-        {"rollout_routed_experts": torch.zeros((1, 1, 1, 1), dtype=torch.int16)}
-    )
+    training_input = TrainingInputBatch({"rollout_routed_experts": torch.zeros((1, 1, 1, 1), dtype=torch.int16)})
 
     with pytest.raises(EntryBarrierReached):
         worker.ppo_train(training_input)
