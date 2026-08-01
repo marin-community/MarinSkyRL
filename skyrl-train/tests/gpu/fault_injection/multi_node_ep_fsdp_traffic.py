@@ -25,7 +25,11 @@ from torch.distributed.tensor import DeviceMesh
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
-from tests.gpu.fault_injection.collective_payloads import run_verified_all_gather, run_verified_all_to_all
+from tests.gpu.fault_injection.collective_payloads import (
+    CollectiveGroup,
+    run_verified_all_gather,
+    run_verified_all_to_all,
+)
 from tests.torchrun_process import disable_nccl_communicator_nonblocking
 
 
@@ -48,14 +52,6 @@ class MeshPlacement:
     fsdp_coordinate: int
     ep_ranks: tuple[int, ...]
     fsdp_ranks: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class CollectiveGroup:
-    process_group: dist.ProcessGroup
-    ranks: tuple[int, ...]
-    rank: int
-    device: torch.device
 
 
 @dataclass(frozen=True)
@@ -154,17 +150,12 @@ def _run_traffic(
     placement: MeshPlacement,
     device: torch.device,
 ) -> PhaseTimings:
-    ep = CollectiveGroup(mesh["ep"].get_group(), placement.ep_ranks, placement.rank, device)
-    fsdp = CollectiveGroup(mesh["fsdp"].get_group(), placement.fsdp_ranks, placement.rank, device)
+    ep = CollectiveGroup.from_process_group(mesh["ep"].get_group(), placement.rank, device)
+    fsdp = CollectiveGroup.from_process_group(mesh["fsdp"].get_group(), placement.rank, device)
 
     phase_start = time.monotonic()
     for size in PAYLOAD_MIB:
-        run_verified_all_gather(
-            fsdp.process_group,
-            fsdp.rank,
-            fsdp.device,
-            _numel_for_mib(size, torch.int64),
-        )
+        run_verified_all_gather(fsdp, _numel_for_mib(size, torch.int64))
         _fsdp_reduce_scatter(fsdp, size)
         _fsdp_all_reduce(fsdp, size)
     torch.cuda.synchronize(device)
@@ -173,25 +164,11 @@ def _run_traffic(
     phase_start = time.monotonic()
     for round_index in range(CONTENTION_ROUNDS):
         size = PAYLOAD_MIB[round_index % len(PAYLOAD_MIB)]
-        run_verified_all_to_all(
-            ep.process_group,
-            ep.rank,
-            ep.device,
-            _numel_for_mib(size, torch.int64),
-        )
-        run_verified_all_gather(
-            fsdp.process_group,
-            fsdp.rank,
-            fsdp.device,
-            _numel_for_mib(size, torch.int64),
-        )
-        run_verified_all_to_all(
-            ep.process_group,
-            ep.rank,
-            ep.device,
-            _numel_for_mib(size, torch.int64),
-        )
+        run_verified_all_to_all(ep, _numel_for_mib(size, torch.int64))
+        run_verified_all_gather(fsdp, _numel_for_mib(size, torch.int64))
+        run_verified_all_to_all(ep, _numel_for_mib(size, torch.int64))
         _fsdp_reduce_scatter(fsdp, size)
+        _fsdp_all_reduce(fsdp, size)
     torch.cuda.synchronize(device)
     alternating_seconds = time.monotonic() - phase_start
 
@@ -201,12 +178,7 @@ def _run_traffic(
         # One rank in every inter-node FSDP group arrives late. The delay is the
         # input under test, not a readiness mechanism.
         time.sleep(ARRIVAL_SKEW_SECONDS)
-    run_verified_all_gather(
-        fsdp.process_group,
-        fsdp.rank,
-        fsdp.device,
-        _numel_for_mib(max(PAYLOAD_MIB), torch.int64),
-    )
+    run_verified_all_gather(fsdp, _numel_for_mib(max(PAYLOAD_MIB), torch.int64))
     _fsdp_reduce_scatter(fsdp, max(PAYLOAD_MIB))
     torch.cuda.synchronize(device)
     return PhaseTimings(
