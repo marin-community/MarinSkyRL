@@ -975,7 +975,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        _phase_diagnostics.log_phase("forward_impl_enter", reset_moe_boundary=True)
+        _phase_diagnostics.log_moe_phase_enter("forward_impl_enter")
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
@@ -1048,9 +1048,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         diagnostic_metadata = {
             name: metadata[name] for name in ("global_step", "actual_global_step") if name in metadata
         }
-        device_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
         with _phase_diagnostics.region(
-            device_mesh,
+            _phase_diagnostics.diagnostic_device_mesh(self),
             kind="policy_inference_forward",
             rank=self._rank,
             metadata=diagnostic_metadata,

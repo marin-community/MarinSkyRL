@@ -73,14 +73,14 @@ def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkey
     messages: list[str] = []
     monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
     with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0) as region_id:
-        collective_phase_diagnostics.log_phase("model_forward_enter", reset_moe_boundary=True)
+        collective_phase_diagnostics.log_moe_phase_enter("model_forward_enter")
 
         async def record_forward_boundary() -> None:
             await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
             await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
 
         asyncio.run(record_forward_boundary())
-        collective_phase_diagnostics.log_phase("backward_enter", reset_moe_boundary=True)
+        collective_phase_diagnostics.log_moe_phase_enter("backward_enter")
         collective_phase_diagnostics.log_moe_ep_boundary_once()
         collective_phase_diagnostics.log_moe_ep_boundary_once()
 

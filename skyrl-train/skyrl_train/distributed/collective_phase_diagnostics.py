@@ -40,6 +40,11 @@ class DeviceMeshStrategy(Protocol):
     device_mesh: DeviceMeshLike | None
 
 
+@runtime_checkable
+class DeviceMeshWorker(Protocol):
+    strategy: object
+
+
 @dataclass(frozen=True)
 class CollectivePhaseRecord:
     region_id: int
@@ -78,6 +83,18 @@ _region: ContextVar[_RegionContext | None] = ContextVar("collective_phase_region
 
 def enabled() -> bool:
     return os.environ.get(_ENV, "0") == "1"
+
+
+def diagnostic_device_mesh(worker: object) -> DeviceMeshLike | None:
+    """Return a worker's strategy mesh when diagnostics are enabled."""
+    if not enabled():
+        return None
+    if not isinstance(worker, DeviceMeshWorker):
+        raise ValueError("enabled collective phase diagnostics require a worker with a strategy")
+    strategy = worker.strategy
+    if not isinstance(strategy, DeviceMeshStrategy) or strategy.device_mesh is None:
+        raise ValueError("enabled collective phase diagnostics require a strategy with a device mesh")
+    return strategy.device_mesh
 
 
 def _default_process_group() -> ProcessGroupLike:
@@ -161,15 +178,13 @@ def format_log_record(record: CollectivePhaseRecord) -> str:
     return LOG_PREFIX + json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
 
 
-def log_phase(phase: str, *, reset_moe_boundary: bool = False) -> CollectivePhaseRecord | None:
+def log_phase(phase: str) -> CollectivePhaseRecord | None:
     """Log counters, or return ``None`` when disabled, unscoped, or capture fails."""
     if not enabled():
         return None
     context = _region.get()
     if context is None:
         return None
-    if reset_moe_boundary:
-        context.moe_boundary_logged = False
     try:
         record = _capture_record(context, phase)
         logger.info(format_log_record(record))
@@ -179,6 +194,17 @@ def log_phase(phase: str, *, reset_moe_boundary: bool = False) -> CollectivePhas
         # Every failed boundary remains visible rather than becoming a null counter.
         logger.warning(f"Collective phase diagnostic failed in region={context.region_id} phase={phase}: {error!r}")
         return None
+
+
+def log_moe_phase_enter(phase: str) -> CollectivePhaseRecord | None:
+    """Start a phase with a fresh first-MoE-boundary guard and log its entry."""
+    if not enabled():
+        return None
+    context = _region.get()
+    if context is None:
+        return None
+    context.moe_boundary_logged = False
+    return log_phase(phase)
 
 
 def log_moe_ep_boundary_once() -> CollectivePhaseRecord | None:

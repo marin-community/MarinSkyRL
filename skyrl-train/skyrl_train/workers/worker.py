@@ -1155,13 +1155,8 @@ class PolicyWorkerBase(Worker):
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])
                     self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
-                device_mesh = None
-                if _phase_diagnostics.enabled():
-                    strategy = self.strategy
-                    if isinstance(strategy, _phase_diagnostics.DeviceMeshStrategy):
-                        device_mesh = strategy.device_mesh
                 with _phase_diagnostics.region(
-                    device_mesh,
+                    _phase_diagnostics.diagnostic_device_mesh(self),
                     kind="policy_training_step",
                     rank=self._rank,
                     metadata={"global_step": global_step, "local_step": local_step},
@@ -1272,7 +1267,7 @@ class PolicyWorkerBase(Worker):
         policy_loss_mask = build_think_weighted_loss_mask(loss_mask, response_span_tags, think_token_weight)
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
-        _phase_diagnostics.log_phase("model_forward_enter", reset_moe_boundary=True)
+        _phase_diagnostics.log_moe_phase_enter("model_forward_enter")
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -1359,7 +1354,7 @@ class PolicyWorkerBase(Worker):
         # such method (non-HF wrappers).
         _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
         _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
-        _phase_diagnostics.log_phase("backward_enter", reset_moe_boundary=True)
+        _phase_diagnostics.log_moe_phase_enter("backward_enter")
         with _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase("backward_exit")
