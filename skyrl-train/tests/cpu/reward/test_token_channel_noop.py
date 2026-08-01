@@ -1,9 +1,8 @@
-"""Stage B (F5/F4) flag-off byte-identical guarantee — the gating invariant.
+"""Flag-off contract for the per-token reward channel.
 
-Mirrors tests/cpu/test_ep_config_noop.py and the routed_experts no-op test: with
-the per-token reward channel DISABLED, (1) the config key defaults to false and is
-purely additive, (2) the collator returns tensors byte-identical to the pre-Stage-B
-call and emits NO new tensors, (3) the TrainingInputBatch keyset is unchanged.
+With the channel disabled, the config key defaults to false, the collator leaves
+the existing tensors unchanged and emits no channel tensors, and the
+`TrainingInputBatch` key set is unchanged.
 
 Run:
     pytest tests/cpu/reward/test_token_channel_noop.py
