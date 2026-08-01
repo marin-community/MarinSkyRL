@@ -29,15 +29,15 @@ the event order across `asyncio.to_thread` without issuing a collective.
 - Reset the first-MoE marker for the original forward and backward recompute.
 - Emit stable JSON records whose event index and subgroup counters preserve the
   evidence needed to locate the first mismatch after a failure.
-- Preserve a zero-touch disabled path and warn without interrupting training if
-  an enabled capture cannot inspect its mesh.
+- Preserve a zero-touch disabled path and fail explicitly if an enabled capture
+  cannot inspect its mesh.
 
 ## Results
 
 The red tests showed that the original module had no subgroup record,
 cross-thread region, or training-phase boundaries. Four focused CPU contracts
 now pass for structured capture, cross-thread event ordering and phase resets,
-disabled behavior, explicit region cleanup, and capture failure. Adjacent
+disabled behavior, explicit region cleanup, and capture-failure propagation. Adjacent
 policy-worker and launcher tests remain green. The complete trainer CPU suite
 passes with 905 tests and 19 skips; the Iris launcher suite passes with 137
 tests and one skip.

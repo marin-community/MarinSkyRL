@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from skyrl_train.distributed import collective_phase_diagnostics
 
 
@@ -41,30 +43,24 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
         rank=2,
         metadata=collective_phase_diagnostics.CollectiveRegionMetadata(global_step=3, local_step=7),
-    ) as region_id:
+    ):
         messages: list[str] = []
         monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
-        record = collective_phase_diagnostics.log_phase(
-            collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER
-        )
-
-        assert record is not None
-        assert record.region_id == region_id
-        assert record.kind is collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP
-        assert record.rank == 2
-        assert record.phase is collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER
-        assert record.metadata == collective_phase_diagnostics.CollectiveRegionMetadata(global_step=3, local_step=7)
-        assert record.snapshot.mesh_dim_names == ("fsdp", "ep")
-        assert record.snapshot.mesh_shape == (2, 2)
-        assert record.snapshot.mesh_coordinate == (1, 0)
-        assert record.snapshot.sequence_numbers == {"world": 31, "fsdp": 17, "ep": 23}
+        collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
 
         payload = json.loads(messages[0].removeprefix(collective_phase_diagnostics.LOG_PREFIX))
-        assert payload["region_id"] == region_id
+        assert payload["region_id"] > 0
+        assert payload["kind"] == "policy_training_step"
+        assert payload["rank"] == 2
+        assert payload["phase"] == "model_forward_enter"
         assert payload["metadata"] == {"global_step": 3, "local_step": 7}
+        assert payload["snapshot"]["mesh_dim_names"] == ["fsdp", "ep"]
+        assert payload["snapshot"]["mesh_shape"] == [2, 2]
+        assert payload["snapshot"]["mesh_coordinate"] == [1, 0]
         assert payload["snapshot"]["sequence_numbers"] == {"world": 31, "fsdp": 17, "ep": 23}
 
-    assert collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.FORWARD_EXIT) is None
+    collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.FORWARD_EXIT)
+    assert len(messages) == 1
 
 
 def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkeypatch):
@@ -79,7 +75,7 @@ def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkey
         mesh,
         kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
         rank=0,
-    ) as region_id:
+    ):
         collective_phase_diagnostics.start_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
 
         async def record_forward_boundary() -> None:
@@ -99,7 +95,7 @@ def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkey
         "moe_ep_a2a_first",
     ]
     assert [payload["event_index"] for payload in payloads] == [0, 1, 2, 3]
-    assert {payload["region_id"] for payload in payloads} == {region_id}
+    assert len({payload["region_id"] for payload in payloads}) == 1
 
 
 def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
@@ -116,19 +112,15 @@ def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
         mesh,
         kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
         rank=0,
-    ) as region_id:
-        assert region_id is None
-        assert (
-            collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
-            is None
-        )
-        assert collective_phase_diagnostics.log_moe_ep_boundary_once() is None
+    ):
+        collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
+        collective_phase_diagnostics.log_moe_ep_boundary_once()
 
     assert [world.reads, fsdp.reads, ep.reads] == [0, 0, 0]
     assert messages == []
 
 
-def test_capture_failures_do_not_interrupt_training(monkeypatch):
+def test_enabled_capture_failure_propagates(monkeypatch):
     monkeypatch.setenv("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", "1")
     mesh = FakeDeviceMesh(FakeProcessGroup(2), FakeProcessGroup(3))
     monkeypatch.setattr(mesh, "get_coordinate", lambda: (_ for _ in ()).throw(RuntimeError("coordinate lost")))
@@ -139,6 +131,5 @@ def test_capture_failures_do_not_interrupt_training(monkeypatch):
         kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
         rank=0,
     ):
-        assert (
-            collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.BACKWARD_ENTER) is None
-        )
+        with pytest.raises(RuntimeError, match="coordinate lost"):
+            collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)

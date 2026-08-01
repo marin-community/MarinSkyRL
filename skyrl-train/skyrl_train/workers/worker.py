@@ -1227,9 +1227,9 @@ class PolicyWorkerBase(Worker):
     def training_step(
         self,
         experience: Experience,
-        global_step,
-        local_step,
-        accumulation_steps,
+        global_step: int,
+        local_step: int,
+        accumulation_steps: int,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.

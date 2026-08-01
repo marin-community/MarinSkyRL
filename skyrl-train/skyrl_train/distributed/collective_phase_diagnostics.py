@@ -127,10 +127,10 @@ def region(
     kind: CollectiveRegionKind,
     rank: int,
     metadata: CollectiveRegionMetadata | None = None,
-) -> Iterator[int | None]:
-    """Scope one policy operation, yielding ``None`` when diagnostics are disabled."""
+) -> Iterator[None]:
+    """Scope one policy operation when diagnostics are enabled."""
     if not enabled():
-        yield None
+        yield
         return
     if device_mesh is None:
         raise ValueError("enabled collective phase diagnostics require a device mesh")
@@ -146,7 +146,7 @@ def region(
         )
     )
     try:
-        yield region_id
+        yield
     finally:
         _region.reset(token)
 
@@ -172,40 +172,33 @@ def _active_region() -> _RegionContext | None:
     return _region.get()
 
 
-def _log_phase(context: _RegionContext, phase: CollectivePhase) -> CollectivePhaseRecord | None:
-    try:
-        record = _capture_record(context, phase)
-        payload = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
-        logger.info(LOG_PREFIX + payload)
-        return record
-    except Exception as error:
-        # This opt-in diagnostic must not replace the original training failure.
-        # Every failed boundary remains visible rather than becoming a null counter.
-        logger.warning(f"Collective phase diagnostic failed in region={context.region_id} phase={phase}: {error!r}")
-        return None
+def _log_phase(context: _RegionContext, phase: CollectivePhase) -> None:
+    record = _capture_record(context, phase)
+    payload = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
+    logger.info(LOG_PREFIX + payload)
 
 
-def log_phase(phase: CollectivePhase) -> CollectivePhaseRecord | None:
-    """Log counters, or return ``None`` when disabled, unscoped, or capture fails."""
+def log_phase(phase: CollectivePhase) -> None:
+    """Log counters when diagnostics are enabled inside a region."""
     context = _active_region()
     if context is None:
-        return None
-    return _log_phase(context, phase)
+        return
+    _log_phase(context, phase)
 
 
-def start_phase(phase: CollectivePhase) -> CollectivePhaseRecord | None:
+def start_phase(phase: CollectivePhase) -> None:
     """Start a phase, reset its first-MoE guard, and log its entry."""
     context = _active_region()
     if context is None:
-        return None
+        return
     context.moe_boundary_logged = False
-    return _log_phase(context, phase)
+    _log_phase(context, phase)
 
 
-def log_moe_ep_boundary_once() -> CollectivePhaseRecord | None:
-    """Log the first MoE boundary, or return ``None`` when inactive or already logged."""
+def log_moe_ep_boundary_once() -> None:
+    """Log the first MoE boundary when a diagnostic phase is active."""
     context = _active_region()
     if context is None or context.moe_boundary_logged:
-        return None
+        return
     context.moe_boundary_logged = True
-    return _log_phase(context, CollectivePhase.MOE_EP_A2A_FIRST)
+    _log_phase(context, CollectivePhase.MOE_EP_A2A_FIRST)
