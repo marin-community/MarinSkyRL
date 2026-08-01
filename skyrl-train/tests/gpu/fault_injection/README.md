@@ -16,6 +16,8 @@ Each case launches a disposable four-rank `torchrun` gang. One checks a healthy 
 using production communicator settings and validates the values exchanged by every rank. The other cases
 deliberately violate a collective contract:
 
+- all ranks warm their EP `all_to_all_single` and FSDP `all_gather_into_tensor` communicators before ranks 0 and
+  3 enter EP dispatch while ranks 1 and 2 enter FSDP gather under production communicator settings;
 - one member never enters an EP-subgroup collective built through the production device-mesh path;
 - one rank never enters a WORLD collective;
 - one rank exits while its peers are blocked in a WORLD collective.
@@ -26,8 +28,23 @@ On either deadline it kills and reaps only that subprocess group under a second 
 the captured torchrun output. These tests disrupt their worker processes by design; do not run them inside
 another distributed job or on a node serving unrelated work.
 
-The failure cases explicitly enable NCCL's nonblocking communicator mode because it makes communicator-level
-non-arrival abortable. Production workers deliberately do not enable that mode: NCCL permits ordinary calls to
-return `ncclInProgress`, and PyTorch's EP `all_to_all_single` path does not handle that result. Keeping the
-healthy all-to-all and fault teardown checks together prevents a fault-only result from being mistaken for a
+Run only the warmed production divergence experiment with:
+
+```bash
+cd skyrl-train
+uv run --isolated --extra dev --extra vllm \
+  pytest -s tests/gpu/fault_injection/nccl_collective_contract.py \
+  -k warmed_production_phase_divergence
+```
+
+The test is red if the production watchdog stack leaves the gang alive beyond 45 seconds. The controller then
+kills and reaps the disposable subprocess group and includes the complete torchrun log in the failure. A pass
+requires three successful EP/FSDP warmup rounds on every rank, all four ranks entering the mismatched phase, no
+collective completing, and torchrun exiting nonzero before the controller deadline.
+
+The cold non-arrival cases explicitly enable NCCL's nonblocking communicator mode because it makes
+communicator-level non-arrival abortable. The warmed phase-divergence case uses blocking production settings.
+Production workers deliberately do not enable communicator nonblocking: NCCL permits ordinary calls to return
+`ncclInProgress`, and PyTorch's EP `all_to_all_single` path does not handle that result. Keeping the healthy
+all-to-all and fault teardown checks together prevents a fault-only result from being mistaken for a
 training-safe runtime default.

@@ -6,7 +6,7 @@ Run on an otherwise idle node with at least four GPUs:
         pytest -s tests/gpu/fault_injection/nccl_collective_contract.py
 
 The controller launches disposable torchrun gangs for one healthy EP collective
-and three expected failures. This file intentionally does not match pytest's
+and four expected failures. This file intentionally does not match pytest's
 default ``test_*.py`` pattern.
 """
 
@@ -33,6 +33,8 @@ from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
 
 
 WORLD_SIZE = 4
+WARMUP_ROUNDS = 3
+EP_METADATA_VALUES = 128
 COLLECTIVE_TIMEOUT_SECONDS = 8
 SETUP_TIMEOUT_SECONDS = 180
 RUN_TIMEOUT_SECONDS = 45
@@ -51,6 +53,7 @@ SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 
 class RunMode(StrEnum):
     EP_ALL_TO_ALL = "ep-all-to-all"
+    WARMED_PHASE_DIVERGENCE = "warmed-phase-divergence"
     SUBGROUP_NONARRIVAL = "subgroup-nonarrival"
     WORLD_NONARRIVAL = "world-nonarrival"
     RANK_EXIT = "rank-exit"
@@ -93,7 +96,8 @@ def _wait_for_peer_activity(control_dir: Path) -> None:
 def _run_ep_all_to_all(subgroup: dist.ProcessGroup, rank: int, device: torch.device) -> None:
     group_ranks = dist.get_process_group_ranks(subgroup)
     group_rank = group_ranks.index(rank)
-    values_per_peer = 2
+    assert EP_METADATA_VALUES % len(group_ranks) == 0
+    values_per_peer = EP_METADATA_VALUES // len(group_ranks)
     input_values = (
         torch.arange(
             len(group_ranks) * values_per_peer,
@@ -116,6 +120,32 @@ def _run_ep_all_to_all(subgroup: dist.ProcessGroup, rank: int, device: torch.dev
     torch.testing.assert_close(output_values, expected_values)
 
 
+def _run_fsdp_all_gather(subgroup: dist.ProcessGroup, rank: int, device: torch.device) -> None:
+    group_ranks = dist.get_process_group_ranks(subgroup)
+    input_values = torch.tensor([rank * 100, rank * 100 + 1], device=device, dtype=torch.int64)
+    output_values = torch.empty(len(group_ranks) * input_values.numel(), device=device, dtype=torch.int64)
+    dist.all_gather_into_tensor(output_values, input_values, group=subgroup)
+    expected_values = torch.tensor(
+        [value for source_rank in group_ranks for value in (source_rank * 100, source_rank * 100 + 1)],
+        device=device,
+        dtype=torch.int64,
+    )
+    torch.testing.assert_close(output_values, expected_values)
+
+
+def _warm_ep_and_fsdp_communicators(
+    ep_group: dist.ProcessGroup,
+    fsdp_group: dist.ProcessGroup,
+    rank: int,
+    device: torch.device,
+) -> None:
+    for _ in range(WARMUP_ROUNDS):
+        _run_ep_all_to_all(ep_group, rank, device)
+        _run_fsdp_all_gather(fsdp_group, rank, device)
+    dist.barrier()
+    print(f"COMMUNICATOR_WARMUP_COMPLETED rank={rank} rounds={WARMUP_ROUNDS}", flush=True)
+
+
 def _worker(mode: RunMode) -> None:
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -123,10 +153,14 @@ def _worker(mode: RunMode) -> None:
 
     init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
     device = torch.device("cuda", local_rank)
-    subgroup = None
-    if mode in (RunMode.EP_ALL_TO_ALL, RunMode.SUBGROUP_NONARRIVAL):
+    ep_group = None
+    fsdp_group = None
+    if mode in (RunMode.EP_ALL_TO_ALL, RunMode.WARMED_PHASE_DIVERGENCE, RunMode.SUBGROUP_NONARRIVAL):
         mesh = create_device_mesh(WORLD_SIZE, fsdp_size=2, ep_size=2)
-        subgroup = mesh["ep"].get_group()
+        ep_group = mesh["ep"].get_group()
+        if mode is RunMode.WARMED_PHASE_DIVERGENCE:
+            fsdp_group = mesh["fsdp"].get_group()
+            _warm_ep_and_fsdp_communicators(ep_group, fsdp_group, rank, device)
 
     print(
         f"FAULT_INJECTION_READY mode={mode.value} rank={rank} "
@@ -137,16 +171,29 @@ def _worker(mode: RunMode) -> None:
     _wait_for_start(control_dir)
 
     if mode is RunMode.EP_ALL_TO_ALL:
-        assert subgroup is not None
-        _run_ep_all_to_all(subgroup, rank, device)
+        assert ep_group is not None
+        _run_ep_all_to_all(ep_group, rank, device)
         print(f"EP_ALL_TO_ALL_COMPLETED rank={rank}", flush=True)
         dist.destroy_process_group()
         return
-    if mode is RunMode.SUBGROUP_NONARRIVAL:
+    if mode is RunMode.WARMED_PHASE_DIVERGENCE:
+        assert ep_group is not None
+        assert fsdp_group is not None
+        if rank in (0, 3):
+            group_ranks = dist.get_process_group_ranks(ep_group)
+            assert not set(group_ranks).issubset({0, 3})
+            print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=ep-all-to-all", flush=True)
+            _run_ep_all_to_all(ep_group, rank, device)
+        else:
+            group_ranks = dist.get_process_group_ranks(fsdp_group)
+            assert not set(group_ranks).issubset({1, 2})
+            print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=fsdp-all-gather", flush=True)
+            _run_fsdp_all_gather(fsdp_group, rank, device)
+    elif mode is RunMode.SUBGROUP_NONARRIVAL:
         if rank == 0:
-            assert subgroup is not None
+            assert ep_group is not None
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
-            dist.all_reduce(torch.ones(1, device=device), group=subgroup)
+            dist.all_reduce(torch.ones(1, device=device), group=ep_group)
         else:
             _hold_out(mode, rank)
     elif mode is RunMode.WORLD_NONARRIVAL:
@@ -289,6 +336,22 @@ def test_ep_all_to_all_completes_with_production_communicator_mode() -> None:
 
     assert result.output.count("EP_ALL_TO_ALL_COMPLETED") == WORLD_SIZE, result.output
     assert result.returncode == 0, result.output
+
+
+def test_warmed_production_phase_divergence_terminates_torchrun_gang() -> None:
+    if not torch.cuda.is_available() or torch.cuda.device_count() < WORLD_SIZE:
+        pytest.skip(f"requires {WORLD_SIZE} CUDA devices")
+
+    result = _run(RunMode.WARMED_PHASE_DIVERGENCE, communicator_mode=CommunicatorMode.BLOCKING)
+
+    assert result.output.count("COMMUNICATOR_WARMUP_COMPLETED") == WORLD_SIZE, result.output
+    assert result.output.count(f"FAULT_INJECTION_ACTIVE mode={RunMode.WARMED_PHASE_DIVERGENCE.value}") == WORLD_SIZE, (
+        result.output
+    )
+    assert result.output.count("phase=ep-all-to-all") == WORLD_SIZE // 2, result.output
+    assert result.output.count("phase=fsdp-all-gather") == WORLD_SIZE // 2, result.output
+    assert "FAULT_INJECTION_UNEXPECTED_COMPLETION" not in result.output
+    assert result.returncode != 0, result.output
 
 
 if __name__ == "__main__":
