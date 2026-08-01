@@ -259,6 +259,12 @@ def make_config(args: argparse.Namespace, sequence_length: int):
     cfg.trainer.policy.optimizer_config.offload_after_step = True
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
+    # Eight-way FSDP leaves too little HBM for AdamW's faster CUDA foreach
+    # temporaries on this 67B model.  The one-node preflight only proves the
+    # operational boundary, so use AdamW's equivalent low-memory loop there.
+    # The 32-GPU headline keeps the faster default implementation.
+    if args.mode == "preflight":
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"foreach": False}
     cfg.generator.n_samples_per_prompt = 1 if args.mode == "preflight" else 16
     cfg.generator.sampling_params.temperature = 1.0
     cfg.generator.weight_sync_backend = "nccl"
