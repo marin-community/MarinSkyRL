@@ -27,7 +27,6 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed import collective_phase_diag as _phase_diag
-from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -1216,7 +1215,11 @@ class PolicyWorkerBase(Worker):
         return output
 
     def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
-        if not _phase_diag.enabled() or not isinstance(self.strategy, FSDPStrategy):
+        if (
+            not _phase_diag.enabled()
+            or not isinstance(self.strategy, _phase_diag.DeviceMeshStrategy)
+            or self.strategy.device_mesh is None
+        ):
             return self._training_step_impl(experience, global_step, local_step, accumulation_steps)
         _phase_diag.begin_region(
             self.strategy.device_mesh,

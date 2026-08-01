@@ -27,22 +27,23 @@ the event order across `asyncio.to_thread` without issuing a collective.
 - Start distinct regions for inference forwards and policy-training
   microbatches, including global and local step metadata.
 - Reset the first-MoE marker for the original forward and backward recompute.
-- Parse the records and report the earliest missing rank, phase mismatch, or
-  process-group sequence mismatch.
+- Emit stable JSON records whose event index and subgroup counters preserve the
+  evidence needed to locate the first mismatch after a failure.
 - Preserve a zero-touch disabled path and warn without interrupting training if
   an enabled capture cannot inspect its mesh.
 
 ## Results
 
-The red tests showed that the original module had no subgroup record, structured
-parser, cross-thread region, or first-divergence comparison. Seven focused CPU
-contracts now pass for capture, serialization, cross-thread ordering, phase
-resets, disabled behavior, capture failure, matching schedules, subgroup
-divergence, and missing-rank detection. Adjacent policy-worker and launcher
-tests remain green. The complete trainer CPU suite passes with 908 tests and 19
-skips.
+The red tests showed that the original module had no subgroup record,
+cross-thread region, or training-phase boundaries. Four focused CPU contracts
+now pass for structured capture, cross-thread event ordering and phase resets,
+disabled behavior, explicit region cleanup, and capture failure. Adjacent
+policy-worker and launcher tests remain green. The complete trainer CPU suite
+passes with 908 tests and 19 skips.
 
 ## Future work
 
 - [ ] Validate the emitted sequence records during an on-demand multi-node
   EP/FSDP training step before enabling the diagnostic in a long run.
+- [ ] Add an offline analysis command after real logs establish the grouping and
+  partial-record cases it must handle.
