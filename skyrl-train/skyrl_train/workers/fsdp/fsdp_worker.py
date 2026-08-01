@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import hashlib
 import io
+import math
 import os
 import shutil
 import tempfile
@@ -497,6 +498,66 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             "rank": int(torch.distributed.get_rank()),
             "allocated_bytes": int(torch.cuda.memory_allocated()),
             "reserved_bytes": int(torch.cuda.memory_reserved()),
+        }
+
+    @classmethod
+    def _grug_benchmark_finite_tensor_counts(cls, tensor):
+        """Count local values without gathering an FSDP or optimizer shard."""
+
+        local = cls._grug_benchmark_local_tensor(tensor).detach()
+        if not (torch.is_floating_point(local) or torch.is_complex(local)):
+            return local.numel(), 0
+        nonfinite = int((~torch.isfinite(local)).sum().item())
+        return local.numel(), nonfinite
+
+    def grug_benchmark_validate_finite_state(self):
+        """Prove the timed optimizer boundary left finite local state.
+
+        This runs in a separate actor call after timing and therefore cannot
+        inflate the measured update wall or peak-memory boundary.
+        """
+
+        model_tensors = 0
+        model_numel = 0
+        nonfinite_model_tensors = 0
+        nonfinite_model_elements = 0
+        for tensor in self.model.state_dict().values():
+            numel, nonfinite = self._grug_benchmark_finite_tensor_counts(tensor)
+            model_tensors += 1
+            model_numel += numel
+            nonfinite_model_tensors += int(nonfinite > 0)
+            nonfinite_model_elements += nonfinite
+
+        optimizer_tensors = 0
+        optimizer_numel = 0
+        nonfinite_optimizer_tensors = 0
+        nonfinite_optimizer_elements = 0
+        nonfinite_optimizer_scalars = 0
+        for parameter_state in self.optimizer.state.values():
+            for value in parameter_state.values():
+                if torch.is_tensor(value) or isinstance(value, DTensor):
+                    numel, nonfinite = self._grug_benchmark_finite_tensor_counts(value)
+                    optimizer_tensors += 1
+                    optimizer_numel += numel
+                    nonfinite_optimizer_tensors += int(nonfinite > 0)
+                    nonfinite_optimizer_elements += nonfinite
+                elif isinstance(value, (int, float)):
+                    nonfinite_optimizer_scalars += int(not math.isfinite(value))
+                else:
+                    raise TypeError(f"cannot validate optimizer state value of type {type(value)}")
+
+        torch.cuda.synchronize()
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "model_tensors": model_tensors,
+            "model_numel": model_numel,
+            "nonfinite_model_tensors": nonfinite_model_tensors,
+            "nonfinite_model_elements": nonfinite_model_elements,
+            "optimizer_tensors": optimizer_tensors,
+            "optimizer_numel": optimizer_numel,
+            "nonfinite_optimizer_tensors": nonfinite_optimizer_tensors,
+            "nonfinite_optimizer_elements": nonfinite_optimizer_elements,
+            "nonfinite_optimizer_scalars": nonfinite_optimizer_scalars,
         }
 
     def grug_benchmark_warmup_and_restore(self):

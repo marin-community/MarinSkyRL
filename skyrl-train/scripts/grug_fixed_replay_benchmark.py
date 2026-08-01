@@ -465,7 +465,19 @@ def main() -> None:
                         raise RuntimeError(f"rank {item['rank']} skipped the optimizer boundary: {status}")
                     if status.get("policy_update_steps") != 1.0:
                         raise RuntimeError(f"rank {item['rank']} completed the wrong number of updates: {status}")
+                post_step_state = ray.get(
+                    policy.async_run_ray_method("pass_through", "grug_benchmark_validate_finite_state")
+                )
+                for item in post_step_state:
+                    if item["model_tensors"] <= 0 or item["model_numel"] <= 0:
+                        raise RuntimeError(f"rank returned no post-step model state: {item}")
+                    if item["optimizer_tensors"] <= 0 or item["optimizer_numel"] <= 0:
+                        raise RuntimeError(f"rank returned no post-step optimizer state: {item}")
+                    nonfinite_counts = {name: value for name, value in item.items() if name.startswith("nonfinite_")}
+                    if any(nonfinite_counts.values()):
+                        raise RuntimeError(f"rank {item['rank']} retained non-finite state: {nonfinite_counts}")
             else:
+                post_step_state = []
                 expected_microbatches = 1 if args.mode == "preflight" else 128
                 for item in timed:
                     if item["microbatches"] != expected_microbatches:
@@ -477,7 +489,7 @@ def main() -> None:
 
             elapsed_values = [item["elapsed_seconds"] for item in timed]
             synchronized_wall = max(elapsed_values)
-            critical = max(timed, key=lambda item: sum(item["phase_seconds"].values()))
+            critical = max(timed, key=lambda item: item["elapsed_seconds"])
             phase_sum = sum(critical["phase_seconds"].values())
             phase_residual = synchronized_wall - phase_sum
             allocated_tokens = sum(item["allocated_tokens"] for item in staged)
@@ -505,7 +517,7 @@ def main() -> None:
                 "phase_residual_seconds": phase_residual,
                 "phase_residual_definition": (
                     "synchronized worker wall minus the sum of mutually exclusive CUDA-stream "
-                    "events on the rank with the largest event sum; includes Python/launch/barrier gaps"
+                    "events on the rank that set synchronized wall; includes Python/launch/barrier gaps"
                 ),
                 "peak_allocated_bytes_max": max(item["peak_allocated_bytes"] for item in timed),
                 "peak_reserved_bytes_max": max(item["peak_reserved_bytes"] for item in timed),
@@ -545,6 +557,7 @@ def main() -> None:
                 "warmup_restore": warmup,
                 "memory_before_timing": memory_before,
                 "timed_workers": timed,
+                "post_step_finite_state": post_step_state,
                 "profile_in_timed_sample": args.profile_s3_uri is not None,
                 "profile_artifacts": profile_artifacts,
                 "headline_eligible": args.profile_s3_uri is None,
