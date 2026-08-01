@@ -4879,6 +4879,70 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
+name = "harbor-config"
+version = "0.1.0"
+source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "shortuuid" },
+    { name = "toml" },
+    { name = "universal-pathlib" },
+]
+wheels = [
+    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:c3327e1d53bf5c61a8fd7f5e72bf17aa5510e608a20a7d95124445ffeed43d9b" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "shortuuid", specifier = ">=1.0.13" },
+    { name = "toml", specifier = ">=0.10.2" },
+    { name = "universal-pathlib", specifier = ">=0.2.6" },
+]
+
+[[package]]
+name = "pathlib-abc"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/cb/448649d7f25d228bf0be3a04590ab7afa77f15e056f8fa976ed05ec9a78f/pathlib_abc-0.5.2.tar.gz", hash = "sha256:fcd56f147234645e2c59c7ae22808b34c364bb231f685ddd9f96885aed78a94c", size = 33342, upload-time = "2025-10-10T18:37:20.524Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/29/c028a0731e202035f0e2e0bfbf1a3e46ad6c628cbb17f6f1cc9eea5d9ff1/pathlib_abc-0.5.2-py3-none-any.whl", hash = "sha256:4c9d94cf1b23af417ce7c0417b43333b06a106c01000b286c99de230d95eefbb", size = 19070, upload-time = "2025-10-10T18:37:19.437Z" },
+]
+
+[[package]]
+name = "shortuuid"
+version = "1.0.13"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/e2/bcf761f3bff95856203f9559baf3741c416071dd200c0fc19fad7f078f86/shortuuid-1.0.13.tar.gz", hash = "sha256:3bb9cf07f606260584b1df46399c0b87dd84773e7b25912b7e391e30797c5e72", size = 9662, upload-time = "2024-03-11T20:11:06.879Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/44/21d6bf170bf40b41396480d8d49ad640bca3f2b02139cd52aa1e272830a5/shortuuid-1.0.13-py3-none-any.whl", hash = "sha256:a482a497300b49b4953e15108a7913244e1bb0d41f9d332f5e9925dba33a3c5a", size = 10529, upload-time = "2024-03-11T20:11:04.807Z" },
+]
+
+[[package]]
+name = "toml"
+version = "0.10.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/be/ba/1f744cdc819428fc6b5084ec34d9b30660f6f9daaf70eead706e3203ec3c/toml-0.10.2.tar.gz", hash = "sha256:b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f", size = 22253, upload-time = "2020-11-01T01:40:22.204Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/6f/7120676b6d73228c96e17f1f794d8ab046fc910d781c8d151120c3f1569e/toml-0.10.2-py2.py3-none-any.whl", hash = "sha256:806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b", size = 16588, upload-time = "2020-11-01T01:40:20.672Z" },
+]
+
+[[package]]
+name = "universal-pathlib"
+version = "0.3.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fsspec" },
+    { name = "pathlib-abc" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3d/6e/d997a70ee8f4c61f9a7e2f4f8af721cf072a3326848fc881b05187e52558/universal_pathlib-0.3.10.tar.gz", hash = "sha256:4487cbc90730a48cfb64f811d99e14b6faed6d738420cd5f93f59f48e6930bfb", size = 261110, upload-time = "2026-02-22T14:40:58.87Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/1a/5d9a402b39ec892d856bbdd9db502ff73ce28cdf4aff72eb1ce1d6843506/universal_pathlib-0.3.10-py3-none-any.whl", hash = "sha256:dfaf2fb35683d2eb1287a3ed7b215e4d6016aa6eaf339c607023d22f90821c66", size = 83528, upload-time = "2026-02-22T14:40:57.316Z" },
+]
+
+[[package]]
 name = "skyrl-train"
 version = "0.3.0"
 source = { editable = "." }
@@ -4890,6 +4954,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "flash-attn", marker = "sys_platform != 'darwin'" },
     { name = "func-timeout" },
+    { name = "harbor-config" },
     { name = "hf-transfer" },
     { name = "hydra-core" },
     { name = "jaxtyping" },
@@ -4990,6 +5055,7 @@ requires-dist = [
     { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.12", index = "https://flashinfer.ai/whl/cu129" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.12" },
     { name = "func-timeout" },
+    { name = "harbor-config", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "hf-transfer" },
     { name = "hydra-core", specifier = "==1.3.2" },
     { name = "jaxtyping" },

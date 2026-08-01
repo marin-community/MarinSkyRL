@@ -17,10 +17,8 @@ Run::
     # or directly (no pytest): python tests/cpu/distributed/test_ep_mesh.py
 """
 
-import os
-
-import torch.distributed as dist
 import torch.multiprocessing as mp
+from tests.cpu.util import gloo_process_group
 
 try:
     import pytest
@@ -60,12 +58,7 @@ def test_ep_mesh_divisibility_asserts():
 
 
 def _mesh_worker(rank, world_size):
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29555"
-    os.environ.setdefault("RANK", str(rank))
-    os.environ.setdefault("WORLD_SIZE", str(world_size))
-    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    try:
+    with gloo_process_group(rank, world_size, 29555):
         # G4-1: ep_size=2, fsdp_size=2 on 4 ranks → (ddp=1, fsdp=2, ep=2).
         # fsdp precedes ep so the composed 2-D expert DTensor slices ascending.
         mesh = create_device_mesh(world_size=4, fsdp_size=2, ep_size=2, device_type="cpu")
@@ -90,8 +83,6 @@ def _mesh_worker(rank, world_size):
         if rank == 0:
             print("[G4-1] 3-D mesh (1,2,2) names ['ddp','fsdp','ep'] + submeshes: PASS")
             print("[G4-0-mesh] ep_size=1 byte-identical 2-D/1-D mesh: PASS")
-    finally:
-        dist.destroy_process_group()
 
 
 def test_ep_mesh_shape_and_names():

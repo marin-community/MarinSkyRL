@@ -20,6 +20,8 @@ import types
 
 import pytest
 
+from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+
 _EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 if _EXAMPLES not in sys.path:
     sys.path.insert(0, _EXAMPLES)
@@ -37,7 +39,7 @@ def _fake_self(*, preserve: bool = True, classification: bool = True):
     """Minimal stand-in exposing only what the gate helper reads."""
     return types.SimpleNamespace(
         _preserve_logprobs_on_timeout=preserve,
-        _error_handling_config={"enable_error_classification": classification},
+        _error_handling_config=ErrorHandlingConfig(enable_error_classification=classification),
     )
 
 
