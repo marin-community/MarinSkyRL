@@ -975,16 +975,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        # Collective-count diagnostic (default OFF): mark this forward region so the
-        # MoE-EP boundary logs only its FIRST all-to-all, and record the default-PG
-        # count BEFORE the root-module unshard all_gather (the gs1 wedge site).
-        _ccdiag.begin_forward_region()
-        _ccdiag.log_phase("forward_impl_enter", rank=self._rank)
+        _ccdiag.log_phase("forward_impl_enter", reset_moe_boundary=True)
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
-        _ccdiag.log_phase("forward_impl_exit", rank=self._rank)
+        _ccdiag.log_phase("forward_impl_exit")
         return output
 
     async def forward(
@@ -1048,10 +1044,18 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # body). Pre-fix only rank 0 reached the forward; with this fix every dispatched
         # rank's coroutine task is scheduled, so all 32 must log this.
         logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
-        # Collective-count diagnostic (default OFF): bracket the whole forward so a
-        # per-rank default-PG count is logged at entry AND exit — the enter/exit diff
-        # localizes an EP-group that issues an extra/fewer default-PG collective.
-        _ccdiag.log_phase("forward_enter", rank=self._rank)
+        if _ccdiag.enabled():
+            metadata = data.metadata or {}
+            diagnostic_metadata = {
+                name: metadata[name] for name in ("global_step", "actual_global_step") if name in metadata
+            }
+            _ccdiag.begin_region(
+                self.strategy.device_mesh,
+                kind="policy_inference_forward",
+                rank=self._rank,
+                metadata=diagnostic_metadata,
+            )
+        _ccdiag.log_phase("forward_enter")
         try:
             if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
                 return self._forward_impl(data)
@@ -1062,7 +1066,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # unshard collective cannot re-occupy the loop (head-of-line-block a peer).
             return await asyncio.to_thread(self._forward_impl, data)
         finally:
-            _ccdiag.log_phase("forward_exit", rank=self._rank)
+            _ccdiag.log_phase("forward_exit")
 
 
 class FSDPCriticWorkerBase(CriticWorkerBase):

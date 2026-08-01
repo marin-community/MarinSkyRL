@@ -558,10 +558,9 @@ class MoE(nn.Module):
         Returns:
             (bs, slen, dim).
         """
-        # Collective-count diagnostic (default OFF): log this rank's default-PG count
-        # at the FIRST MoE-EP all-to-all of the current forward region (the torch-EP
-        # dispatch/combine fires inside the experts call below). Rate-limited to once
-        # per forward -> O(1), not O(MoE layers). See distributed/collective_count_diag.
+        # The optional phase diagnostic snapshots process-group counters at the first
+        # MoE boundary in each forward or backward phase. It reads existing counters
+        # without issuing a collective.
         from skyrl_train.distributed import collective_count_diag as _ccdiag
 
         _ccdiag.log_moe_ep_boundary_once()

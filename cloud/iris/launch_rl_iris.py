@@ -1444,13 +1444,12 @@ def create_parser() -> argparse.ArgumentParser:
         dest="collective_count_diag",
         choices=["on", "off"],
         default=None,
-        help="GC-proof per-rank default-PG collective-count instrumentation "
-        "(SKYRL_COLLECTIVE_COUNT_DIAG), a DIAGNOSTIC knob for the 80B gs1 NCCL "
-        "desync. Logs each policy rank's default-PG collective count at forward "
-        "phase boundaries (forward/_forward_impl enter+exit + the first MoE-EP "
-        "all-to-all per forward) to the finelog, which survives pod GC — diffing "
-        "the counts across ranks at the wedge localizes the divergent EP group. "
-        "O(phases), reads torch's own PG seq counter (no perturbation). "
+        help="Record each policy rank's world and device-mesh process-group sequence "
+        "numbers at inference and training phase boundaries "
+        "(SKYRL_COLLECTIVE_COUNT_DIAG). The structured log records survive worker "
+        "teardown and localize the first rank or subgroup that stops following the "
+        "shared collective schedule. Recording reads existing counters and does not "
+        "issue additional collectives. "
         "Default: unset = off.",
     )
 
