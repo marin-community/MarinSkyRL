@@ -21,7 +21,7 @@ Add behavior-level CPU contracts through the production entry points:
 
 ## Results
 
-All six contracts pass against current `main`. The topology cases cover both the earlier 32-rank CP2/EP8 geometry and the 12-rank CP1/EP4 geometry from the recent incident. The ordering cases confirm that the fully asynchronous trainer awaits the drain before forward, the worker drain executes CUDA synchronization before the world barrier on a background thread, the FSDP inference body leaves the actor event-loop thread, and decentralized router-replay training reaches its entry barrier before later training state.
+All six contracts pass against current `main`. The topology cases cover the 32-rank CP2/EP8 and 12-rank CP1/EP4 geometries. The ordering cases confirm that the fully asynchronous trainer awaits the drain before forward, the worker drain executes CUDA synchronization before the world barrier on a background thread, the FSDP inference body leaves the actor event-loop thread, and decentralized router-replay training reaches its entry barrier before later training state.
 
 The full CPU suite completed with 897 passes, 19 skips, and two failures. Both failures reproduce unchanged on an untouched `main`: `test_generator_output_concatenation` has a stale expected field list, and `test_all_defaults_is_structurally_identical_to_pre_ep` has a stale golden configuration. The new contract file passes all six tests, and the adjacent dispatch, EP mesh, CP mesh, and trainer tests pass all 24 tests.
 
