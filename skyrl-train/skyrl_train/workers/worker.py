@@ -62,7 +62,10 @@ def _grug_query_bias_virtual_shard_mask(
     ep_size: int,
     ep_rank: int,
 ) -> torch.Tensor:
-    """Select this EP coordinate's deterministic share of an optimizer window."""
+    """Select this EP coordinate's deterministic share of an optimizer window.
+
+    The optimizer-window row count must be divisible by ``ep_size``.
+    """
 
     if attention_mask.ndim != 2:
         raise ValueError(f"attention_mask must be 2-D, got shape={tuple(attention_mask.shape)}")

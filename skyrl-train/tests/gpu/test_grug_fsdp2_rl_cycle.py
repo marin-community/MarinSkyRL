@@ -251,19 +251,20 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
     )
 
 
-def _assert_fp32_training_contract(snapshots, names: _RepresentativeNames) -> None:
-    expected_states = {
-        names.parameter_names[0]: {"momentum_buffer": "float32"},
-        names.parameter_names[1]: {"momentum_buffer": "float32"},
-        names.parameter_names[2]: {"step": "torch.int64", "exp_avg": "float32", "exp_avg_sq": "float32"},
-        names.parameter_names[3]: {"step": "float32", "exp_avg": "float32", "exp_avg_sq": "float32"},
-        names.wire_bf16_sentinel_name: {
-            "step": "float32",
-            "exp_avg": "float32",
-            "exp_avg_sq": "float32",
-        },
-    }
+def _assert_fp32_training_contract(snapshots, names: _RepresentativeNames, optimizer_name: str) -> None:
     stored_names = [*names.parameter_names, names.wire_bf16_sentinel_name]
+    adamw_state = {"step": "float32", "exp_avg": "float32", "exp_avg_sq": "float32"}
+    if optimizer_name == "AdamW":
+        expected_states = {name: adamw_state for name in stored_names}
+    else:
+        assert optimizer_name == "MuonH"
+        expected_states = {
+            names.parameter_names[0]: {"momentum_buffer": "float32"},
+            names.parameter_names[1]: {"momentum_buffer": "float32"},
+            names.parameter_names[2]: {"step": "torch.int64", "exp_avg": "float32", "exp_avg_sq": "float32"},
+            names.parameter_names[3]: adamw_state,
+            names.wire_bf16_sentinel_name: adamw_state,
+        }
     for snapshot in snapshots:
         assert snapshot.forward_dtype == "bfloat16"
         assert {name: snapshot.parameter_dtypes[name] for name in stored_names} == {
@@ -273,7 +274,7 @@ def _assert_fp32_training_contract(snapshots, names: _RepresentativeNames) -> No
         assert snapshot.optimizer_state_dtypes == expected_states
 
 
-def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _TrainingSnapshot:
+def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str, optimizer_name: str) -> _TrainingSnapshot:
     names = _representative_names(model_path)
     before = _snapshot(policy, names.parameter_names)
     train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
@@ -287,7 +288,7 @@ def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _
     assert status["peak_gpu_memory_gib"] > 0
     snapshot_names = [*names.parameter_names, names.wire_bf16_sentinel_name, *names.bias_names]
     snapshots = _validation_snapshots(policy, snapshot_names)
-    _assert_fp32_training_contract(snapshots, names)
+    _assert_fp32_training_contract(snapshots, names, optimizer_name)
     weights = next(snapshot.weights for snapshot in snapshots if snapshot.rank == 0)
     for name in names.parameter_names:
         assert not torch.equal(weights[name], before[name]), f"{name} did not update"
@@ -307,6 +308,7 @@ def _assert_checkpoint_resume_next_step(
     mutation_batch: TrainingInputBatch,
     checkpoint_path: str,
     model_path: str,
+    optimizer_name: str,
     names: list[str],
     expected_weights: dict[str, torch.Tensor],
 ) -> _TrainingSnapshot:
@@ -315,12 +317,12 @@ def _assert_checkpoint_resume_next_step(
         policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer)
     )
     mutation_batch.metadata["global_step"] = 1
-    expected_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
+    expected_next_step = _train_and_snapshot(policy, mutation_batch, model_path, optimizer_name)
     ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
     resumed = _snapshot(policy, names)
     for name in names:
         torch.testing.assert_close(resumed[name], expected_weights[name], rtol=0, atol=0)
-    resumed_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
+    resumed_next_step = _train_and_snapshot(policy, mutation_batch, model_path, optimizer_name)
     for name in names:
         torch.testing.assert_close(
             resumed_next_step.weights[name],
@@ -448,7 +450,8 @@ def _run_full_cycle(
             assert all(item["mesh_dim_names"] == ["ddp", "fsdp", "ep"] for item in geometry)
             assert all(tuple(item["mesh_shape"]) == (1, 2, 2) for item in geometry)
             assert {item["ep_coord"] for item in geometry} == {0, 1}
-        training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
+        optimizer_name = cfg.trainer.policy.optimizer_config.optimizer
+        training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path, optimizer_name)
         checkpoint_names = [
             *training.bias_names,
             *training.parameter_names,
@@ -461,6 +464,7 @@ def _run_full_cycle(
             _training_batch(prompts, first_rollout),
             checkpoint_path,
             model_path,
+            optimizer_name,
             checkpoint_names,
             training.weights,
         )
