@@ -25,7 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
-from tests.cpu.config_test_utils import TRAINER_MODEL_ROLES, assert_role_fsdp_defaults
+from tests.cpu.fsdp_config_assertions import TRAINER_MODEL_ROLES, assert_role_fsdp_defaults
 
 # The baseline snapshots `get_default_config()` without the intentionally additive
 # CP, grouped-mm, attention-backend, and DCP fields. Keeping the remaining defaults
