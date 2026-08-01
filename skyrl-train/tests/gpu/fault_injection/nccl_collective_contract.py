@@ -26,7 +26,7 @@ import torch.distributed as dist
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
-from tests.gpu.fault_injection.collective_payloads import RANK_VALUE_STRIDE, run_verified_all_to_all
+from tests.gpu.fault_injection.collective_payloads import run_verified_all_gather, run_verified_all_to_all
 from tests.gpu.fault_injection.single_node_runtime import (
     REAP_TIMEOUT_SECONDS,
     REQUIRES_FOUR_CUDA_DEVICES,
@@ -94,25 +94,6 @@ def _wait_for_peer_activity(control_dir: Path) -> None:
         time.sleep(CONTROL_POLL_SECONDS)
 
 
-def _run_fsdp_all_gather(subgroup: dist.ProcessGroup, rank: int, device: torch.device) -> None:
-    group_ranks = dist.get_process_group_ranks(subgroup)
-    input_values = torch.tensor(
-        [rank * RANK_VALUE_STRIDE, rank * RANK_VALUE_STRIDE + 1], device=device, dtype=torch.int64
-    )
-    output_values = torch.empty(len(group_ranks) * input_values.numel(), device=device, dtype=torch.int64)
-    dist.all_gather_into_tensor(output_values, input_values, group=subgroup)
-    expected_values = torch.tensor(
-        [
-            value
-            for source_rank in group_ranks
-            for value in (source_rank * RANK_VALUE_STRIDE, source_rank * RANK_VALUE_STRIDE + 1)
-        ],
-        device=device,
-        dtype=torch.int64,
-    )
-    torch.testing.assert_close(output_values, expected_values)
-
-
 def _warm_ep_and_fsdp_communicators(
     *,
     ep_group: dist.ProcessGroup,
@@ -122,7 +103,7 @@ def _warm_ep_and_fsdp_communicators(
 ) -> None:
     for _ in range(WARMUP_ROUNDS):
         run_verified_all_to_all(ep_group, rank, device, EP_ALL_TO_ALL_VALUES)
-        _run_fsdp_all_gather(fsdp_group, rank, device)
+        run_verified_all_gather(fsdp_group, rank, device, total_values=2)
     dist.barrier()
     print(f"COMMUNICATOR_WARMUP_COMPLETED rank={rank} rounds={WARMUP_ROUNDS}", flush=True)
 
@@ -174,7 +155,7 @@ def _worker(mode: RunMode) -> None:
             group_ranks = dist.get_process_group_ranks(fsdp_group)
             assert not set(group_ranks).issubset(DIVERGENT_FSDP_RANKS)
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=fsdp-all-gather", flush=True)
-            _run_fsdp_all_gather(fsdp_group, rank, device)
+            run_verified_all_gather(fsdp_group, rank, device, total_values=2)
     elif mode is RunMode.SUBGROUP_NONARRIVAL:
         if rank == 0:
             assert ep_group is not None

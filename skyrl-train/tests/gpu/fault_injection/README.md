@@ -76,7 +76,8 @@ its filename deliberately remains outside pytest's default `test_*.py` discovery
 each node, and FSDP4 across nodes. It rejects an allocation whose physical placement does not match that
 contract. It then verifies FSDP all-gather, reduce-scatter, and all-reduce payloads at several sizes; alternates
 those operations with node-local EP all-to-all; and repeats the cross-node traffic with one late-arriving rank
-per node. Timings are evidence, not a performance gate.
+per node. The fixed workload uses 1, 8, and 32 MiB payloads, 32 alternating rounds, and two seconds of arrival
+skew. Timings are evidence, not a performance gate.
 
 Launch one torchrun agent on each node. For a four-node Slurm allocation, set a rendezvous address reachable
 from every node and run:

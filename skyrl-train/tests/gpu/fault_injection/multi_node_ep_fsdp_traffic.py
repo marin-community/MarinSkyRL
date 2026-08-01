@@ -25,7 +25,7 @@ from torch.distributed.tensor import DeviceMesh
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
-from tests.gpu.fault_injection.collective_payloads import run_verified_all_to_all
+from tests.gpu.fault_injection.collective_payloads import run_verified_all_gather, run_verified_all_to_all
 from tests.torchrun_process import disable_nccl_communicator_nonblocking
 
 
@@ -35,9 +35,9 @@ WORLD_SIZE = EXPECTED_NODES * GPUS_PER_NODE
 EP_SIZE = GPUS_PER_NODE
 FSDP_SIZE = EXPECTED_NODES
 PROCESS_GROUP_TIMEOUT_SECONDS = 180
-DEFAULT_PAYLOAD_MIB = (1, 8, 32)
-DEFAULT_CONTENTION_ROUNDS = 32
-DEFAULT_ARRIVAL_SKEW_SECONDS = 2.0
+PAYLOAD_MIB = (1, 8, 32)
+CONTENTION_ROUNDS = 32
+ARRIVAL_SKEW_SECONDS = 2.0
 SUCCESS_MARKER = "MULTI_NODE_EP_FSDP_TRAFFIC_OK"
 
 
@@ -63,13 +63,6 @@ class PhaseTimings:
     fsdp_only_seconds: float
     alternating_seconds: float
     skewed_arrival_seconds: float
-
-
-def _parse_payload_mib(value: str) -> tuple[int, ...]:
-    sizes = tuple(int(item) for item in value.split(","))
-    if not sizes or any(size <= 0 for size in sizes):
-        raise argparse.ArgumentTypeError("payload sizes must be positive comma-separated MiB values")
-    return sizes
 
 
 def _group_ranks(group: dist.ProcessGroup) -> tuple[int, ...]:
@@ -129,19 +122,6 @@ def _assert_constant(tensor: torch.Tensor, expected: float, description: str) ->
         )
 
 
-def _fsdp_all_gather(
-    collective: CollectiveGroup,
-    payload_mib: int,
-) -> None:
-    numel = _numel_for_mib(payload_mib, torch.float32)
-    input_values = torch.full((numel,), float(collective.rank), device=collective.device)
-    output_values = torch.empty(numel * len(collective.ranks), dtype=input_values.dtype, device=collective.device)
-    dist.all_gather_into_tensor(output_values, input_values, group=collective.process_group)
-    for group_index, source_rank in enumerate(collective.ranks):
-        segment = output_values[group_index * numel : (group_index + 1) * numel]
-        _assert_constant(segment, float(source_rank), f"FSDP all-gather source rank {source_rank}")
-
-
 def _fsdp_reduce_scatter(
     collective: CollectiveGroup,
     payload_mib: int,
@@ -173,31 +153,38 @@ def _run_traffic(
     mesh: DeviceMesh,
     placement: MeshPlacement,
     device: torch.device,
-    payload_mib: tuple[int, ...],
-    contention_rounds: int,
-    arrival_skew_seconds: float,
 ) -> PhaseTimings:
     ep = CollectiveGroup(mesh["ep"].get_group(), placement.ep_ranks, placement.rank, device)
     fsdp = CollectiveGroup(mesh["fsdp"].get_group(), placement.fsdp_ranks, placement.rank, device)
 
     phase_start = time.monotonic()
-    for size in payload_mib:
-        _fsdp_all_gather(fsdp, size)
+    for size in PAYLOAD_MIB:
+        run_verified_all_gather(
+            fsdp.process_group,
+            fsdp.rank,
+            fsdp.device,
+            _numel_for_mib(size, torch.int64),
+        )
         _fsdp_reduce_scatter(fsdp, size)
         _fsdp_all_reduce(fsdp, size)
     torch.cuda.synchronize(device)
     fsdp_only_seconds = time.monotonic() - phase_start
 
     phase_start = time.monotonic()
-    for round_index in range(contention_rounds):
-        size = payload_mib[round_index % len(payload_mib)]
+    for round_index in range(CONTENTION_ROUNDS):
+        size = PAYLOAD_MIB[round_index % len(PAYLOAD_MIB)]
         run_verified_all_to_all(
             ep.process_group,
             ep.rank,
             ep.device,
             _numel_for_mib(size, torch.int64),
         )
-        _fsdp_all_gather(fsdp, size)
+        run_verified_all_gather(
+            fsdp.process_group,
+            fsdp.rank,
+            fsdp.device,
+            _numel_for_mib(size, torch.int64),
+        )
         run_verified_all_to_all(
             ep.process_group,
             ep.rank,
@@ -213,9 +200,14 @@ def _run_traffic(
     if placement.fsdp_coordinate == placement.ep_coordinate:
         # One rank in every inter-node FSDP group arrives late. The delay is the
         # input under test, not a readiness mechanism.
-        time.sleep(arrival_skew_seconds)
-    _fsdp_all_gather(fsdp, max(payload_mib))
-    _fsdp_reduce_scatter(fsdp, max(payload_mib))
+        time.sleep(ARRIVAL_SKEW_SECONDS)
+    run_verified_all_gather(
+        fsdp.process_group,
+        fsdp.rank,
+        fsdp.device,
+        _numel_for_mib(max(PAYLOAD_MIB), torch.int64),
+    )
+    _fsdp_reduce_scatter(fsdp, max(PAYLOAD_MIB))
     torch.cuda.synchronize(device)
     return PhaseTimings(
         fsdp_only_seconds,
@@ -238,11 +230,7 @@ def _max_timings(local_timings: PhaseTimings, device: torch.device) -> PhaseTimi
     return PhaseTimings(*values.cpu().tolist())
 
 
-def _run_with_process_group(
-    payload_mib: tuple[int, ...],
-    contention_rounds: int,
-    arrival_skew_seconds: float,
-) -> None:
+def _run_with_process_group() -> None:
     init_worker_process_group_with_device(timeout_seconds=PROCESS_GROUP_TIMEOUT_SECONDS)
     try:
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -252,14 +240,14 @@ def _run_with_process_group(
         placement = _validate_mesh_placement(mesh)
         dist.barrier()
         timings = _max_timings(
-            _run_traffic(mesh, placement, device, payload_mib, contention_rounds, arrival_skew_seconds),
+            _run_traffic(mesh, placement, device),
             device,
         )
         if placement.rank == 0:
             print(
                 f"{SUCCESS_MARKER} world={WORLD_SIZE} nodes={EXPECTED_NODES} gpus_per_node={GPUS_PER_NODE} "
-                f"ep={EP_SIZE} fsdp={FSDP_SIZE} payload_mib={','.join(map(str, payload_mib))} "
-                f"rounds={contention_rounds} max_phase_seconds={timings}",
+                f"ep={EP_SIZE} fsdp={FSDP_SIZE} payload_mib={','.join(map(str, PAYLOAD_MIB))} "
+                f"rounds={CONTENTION_ROUNDS} max_phase_seconds={timings}",
                 flush=True,
             )
     finally:
@@ -267,7 +255,7 @@ def _run_with_process_group(
             dist.destroy_process_group()
 
 
-def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seconds: float) -> None:
+def _run() -> None:
     disable_nccl_communicator_nonblocking(os.environ)
     # Device-mesh subgroups are created after WORLD initialization and consume
     # the production timeout environment variable, not the WORLD timeout arg.
@@ -275,17 +263,10 @@ def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seco
         os.environ,
         {"SKYRL_WORKER_NCCL_TIMEOUT_IN_S": str(PROCESS_GROUP_TIMEOUT_SECONDS)},
     ):
-        _run_with_process_group(payload_mib, contention_rounds, arrival_skew_seconds)
+        _run_with_process_group()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--payload-mib", type=_parse_payload_mib, default=DEFAULT_PAYLOAD_MIB)
-    parser.add_argument("--contention-rounds", type=int, default=DEFAULT_CONTENTION_ROUNDS)
-    parser.add_argument("--arrival-skew-seconds", type=float, default=DEFAULT_ARRIVAL_SKEW_SECONDS)
-    arguments = parser.parse_args()
-    if arguments.contention_rounds <= 0:
-        parser.error("--contention-rounds must be positive")
-    if arguments.arrival_skew_seconds < 0:
-        parser.error("--arrival-skew-seconds must be non-negative")
-    _run(arguments.payload_mib, arguments.contention_rounds, arguments.arrival_skew_seconds)
+    parser.parse_args()
+    _run()
