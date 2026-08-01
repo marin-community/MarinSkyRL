@@ -38,6 +38,7 @@ FAULT_TIMEOUT_SECONDS = 45
 REAP_TIMEOUT_SECONDS = 10
 CONTROL_POLL_SECONDS = 0.1
 START_SENTINEL = "start"
+WITHHELD_RELEASE_SENTINEL = "release-withheld-ranks"
 READY_SENTINEL_PREFIX = "ready-"
 ACTIVE_SENTINEL_PREFIX = "active-"
 CONTROL_DIRECTORY_ENV_VAR = "SKYRL_FAULT_CONTROL_DIR"
@@ -59,15 +60,15 @@ class FaultRun:
     output: str
 
 
-def _wait_for_start(control_dir: Path) -> None:
-    start_path = control_dir / START_SENTINEL
-    while not start_path.exists():
+def _wait_for_sentinel(control_dir: Path, sentinel: str) -> None:
+    sentinel_path = control_dir / sentinel
+    while not sentinel_path.exists():
         time.sleep(CONTROL_POLL_SECONDS)
 
 
-def _hold_out(mode: FaultMode, rank: int) -> None:
+def _hold_out(mode: FaultMode, rank: int, control_dir: Path) -> None:
     print(f"FAULT_INJECTION_WITHHELD mode={mode.value} rank={rank}", flush=True)
-    time.sleep(FAULT_TIMEOUT_SECONDS * 2)
+    _wait_for_sentinel(control_dir, WITHHELD_RELEASE_SENTINEL)
 
 
 def _wait_for_peer_activity(control_dir: Path) -> None:
@@ -93,17 +94,17 @@ def _worker(mode: FaultMode) -> None:
         flush=True,
     )
     (control_dir / f"{READY_SENTINEL_PREFIX}{rank}").touch()
-    _wait_for_start(control_dir)
+    _wait_for_sentinel(control_dir, START_SENTINEL)
 
     if mode is FaultMode.SUBGROUP_NONARRIVAL:
         if rank == 0:
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
             dist.all_reduce(torch.ones(1, device=device), group=subgroup)
         else:
-            _hold_out(mode, rank)
+            _hold_out(mode, rank, control_dir)
     elif mode is FaultMode.WORLD_NONARRIVAL:
         if rank == 0:
-            _hold_out(mode, rank)
+            _hold_out(mode, rank, control_dir)
         else:
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
             dist.all_reduce(torch.ones(1, device=device))
@@ -123,7 +124,7 @@ def _worker(mode: FaultMode) -> None:
     dist.destroy_process_group()
 
 
-def _terminate_process_group(process: subprocess.Popen[str]) -> bool:
+def _kill_and_reap_torchrun(process: subprocess.Popen[str]) -> bool:
     """Kill the subprocess group and report whether its leader was reaped."""
     if process.poll() is None:
         try:
@@ -156,7 +157,7 @@ def _wait_for_all_ranks_ready(process: subprocess.Popen[str], control_dir: Path,
             )
         time.sleep(CONTROL_POLL_SECONDS)
 
-    reaped = _terminate_process_group(process)
+    reaped = _kill_and_reap_torchrun(process)
     pytest.fail(
         f"not all ranks completed setup within {SETUP_TIMEOUT_SECONDS}s; "
         f"process group reaped={reaped}; output:\n{_read_output(log_path)}",
@@ -206,7 +207,7 @@ def _run_fault(mode: FaultMode) -> FaultRun:
             try:
                 returncode = process.wait(timeout=FAULT_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
-                reaped = _terminate_process_group(process)
+                reaped = _kill_and_reap_torchrun(process)
                 pytest.fail(
                     f"{mode.value} did not tear down within {FAULT_TIMEOUT_SECONDS}s after setup; "
                     f"process group reaped={reaped}; output:\n{_read_output(log_path)}",
