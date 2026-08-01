@@ -39,21 +39,22 @@ POLICY_WORLD_SIZE = 2
 COLOCATED_NUM_GPUS = POLICY_WORLD_SIZE
 DISAGGREGATED_NUM_GPUS = POLICY_WORLD_SIZE * 2
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-@dataclass(frozen=True)
-class _TrainingSnapshot:
-    bias_names: list[str]
-    representative_name: str
-    bf16_sentinel_name: str
-    weights: dict[str, torch.Tensor]
+STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
+SERVING_EXPERT_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
+LM_HEAD_NAME = "lm_head.weight"
 
 
 @dataclass(frozen=True)
 class _RepresentativeNames:
     bias_names: list[str]
-    trainable_name: str
-    bf16_sentinel_name: str
+    parameter_names: list[str]
+    sync_parameter_names: list[str]
+    wire_bf16_sentinel_name: str
+
+
+@dataclass(frozen=True)
+class _TrainingSnapshot(_RepresentativeNames):
+    weights: dict[str, torch.Tensor]
 
 
 def _write_tiny_checkpoint(path) -> None:
@@ -109,7 +110,20 @@ def _config(
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.fsdp_config.moe_grouped_gemm = False
     cfg.trainer.policy.fsdp_config.use_grouped_mm = False
-    cfg.trainer.policy.optimizer_config.lr = 1.0e-3
+    cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+    cfg.trainer.policy.optimizer_config.lr = 3.0e-2
+    cfg.trainer.policy.optimizer_config.weight_decay = 123.0
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
+    cfg.trainer.policy.optimizer_config.optimizer_kwargs = {
+        "adam_lr": 4.0e-3,
+        "momentum": 0.95,
+        "nesterov": True,
+        "backend_steps": 5,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "epsilon": 1.0e-8,
+        "muon_epsilon": 1.0e-8,
+    }
     cfg.generator.backend = "vllm"
     cfg.generator.async_engine = True
     cfg.generator.weight_sync_backend = "nccl"
@@ -184,14 +198,18 @@ def _engine_client(cfg, model_path: str, shared_pg) -> InferenceEngineClient:
     return InferenceEngineClient(engines, tokenizer, cfg)
 
 
+def _validation_snapshots(policy, names=()):
+    return ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
+
+
 def _snapshot(policy, names=()):
-    snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
+    snapshots = _validation_snapshots(policy, names)
     rank0 = next(snapshot for snapshot in snapshots if snapshot.rank == 0)
     return rank0.weights
 
 
 def _assert_policy_attention_backend(policy, expected: str) -> None:
-    snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot"))
+    snapshots = _validation_snapshots(policy)
     assert {snapshot.attention_backend for snapshot in snapshots} == {expected}
 
 
@@ -199,46 +217,130 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=False, local_files_only=True)
     assert config.model_type == GRUG_MOE_MODEL_TYPE
     biases = [f"model.layers.{idx}{GRUG_ROUTER_BIAS_SUFFIX}" for idx in range(config.num_hidden_layers)]
+    parameter_names = [
+        "model.layers.0.self_attn.q_proj.weight",
+        STACKED_EXPERT_NAME,
+        LM_HEAD_NAME,
+        "model.layers.0.mlp.router.weight",
+    ]
     return _RepresentativeNames(
         bias_names=biases,
-        trainable_name="model.layers.0.mlp.router.weight",
-        bf16_sentinel_name="model.layers.0.input_layernorm.weight",
+        parameter_names=parameter_names,
+        sync_parameter_names=[parameter_names[0], SERVING_EXPERT_NAME, parameter_names[2], parameter_names[3]],
+        wire_bf16_sentinel_name="model.layers.0.input_layernorm.weight",
     )
+
+
+def _assert_fp32_training_contract(snapshots, names: _RepresentativeNames) -> None:
+    expected_states = {
+        names.parameter_names[0]: {"momentum_buffer": "float32"},
+        names.parameter_names[1]: {"momentum_buffer": "float32"},
+        names.parameter_names[2]: {"step": "torch.int64", "exp_avg": "float32", "exp_avg_sq": "float32"},
+        names.parameter_names[3]: {"step": "float32", "exp_avg": "float32", "exp_avg_sq": "float32"},
+        names.wire_bf16_sentinel_name: {
+            "step": "float32",
+            "exp_avg": "float32",
+            "exp_avg_sq": "float32",
+        },
+    }
+    stored_names = [*names.parameter_names, names.wire_bf16_sentinel_name]
+    for snapshot in snapshots:
+        assert snapshot.forward_dtype == "bfloat16"
+        assert {name: snapshot.parameter_dtypes[name] for name in stored_names} == {
+            name: "float32" for name in stored_names
+        }
+        assert snapshot.gradient_dtypes == {name: "float32" for name in names.parameter_names}
+        assert snapshot.optimizer_state_dtypes == expected_states
 
 
 def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _TrainingSnapshot:
     names = _representative_names(model_path)
-    before = _snapshot(policy, [names.trainable_name])
+    before = _snapshot(policy, names.parameter_names)
     train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
-    assert math.isfinite(status["raw_grad_norm"])
-    assert status["raw_grad_norm"] > 0
+    # Marin's recipe disables clipping, so the worker deliberately omits this
+    # clipping-only metric.
+    assert "raw_grad_norm" not in status
     assert status["optimizer_step_succeeded"] == 1.0
-    weights = _snapshot(policy, [names.trainable_name, names.bf16_sentinel_name, *names.bias_names])
-    assert not torch.equal(weights[names.trainable_name], before[names.trainable_name])
+    assert status["optimizer_step_seconds"] > 0
+    assert status["peak_gpu_memory_gib"] > 0
+    snapshot_names = [*names.parameter_names, names.wire_bf16_sentinel_name, *names.bias_names]
+    snapshots = _validation_snapshots(policy, snapshot_names)
+    _assert_fp32_training_contract(snapshots, names)
+    weights = next(snapshot.weights for snapshot in snapshots if snapshot.rank == 0)
+    for name in names.parameter_names:
+        assert not torch.equal(weights[name], before[name]), f"{name} did not update"
+        assert (weights[name] - before[name]).dtype == torch.float32
     assert all(torch.count_nonzero(weights[name]).item() > 0 for name in names.bias_names)
-    return _TrainingSnapshot(names.bias_names, names.trainable_name, names.bf16_sentinel_name, weights)
+    return _TrainingSnapshot(
+        bias_names=names.bias_names,
+        parameter_names=names.parameter_names,
+        sync_parameter_names=names.sync_parameter_names,
+        wire_bf16_sentinel_name=names.wire_bf16_sentinel_name,
+        weights=weights,
+    )
 
 
-def _assert_checkpoint_restores_biases(
+def _assert_checkpoint_resume_next_step(
     policy,
     mutation_batch: TrainingInputBatch,
     checkpoint_path: str,
     model_path: str,
-    bias_names: list[str],
+    names: list[str],
     expected_weights: dict[str, torch.Tensor],
-) -> None:
+) -> _TrainingSnapshot:
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     ray.get(
         policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer)
     )
     mutation_batch.metadata["global_step"] = 1
-    ray.get(policy.async_run_ray_method("pass_through", "ppo_train", mutation_batch))
+    expected_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
     ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
-    resumed = _snapshot(policy, bias_names)
-    for name in bias_names:
+    resumed = _snapshot(policy, names)
+    for name in names:
         torch.testing.assert_close(resumed[name], expected_weights[name], rtol=0, atol=0)
+    resumed_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
+    for name in names:
+        torch.testing.assert_close(
+            resumed_next_step.weights[name],
+            expected_next_step.weights[name],
+            rtol=0,
+            atol=0,
+        )
+    return resumed_next_step
+
+
+def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot) -> None:
+    found = {name: False for name in names}
+    for engine in client.engines:
+        per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(names, False))
+        if isinstance(per_rank, dict):
+            per_rank = [per_rank]
+        for rank_values in per_rank:
+            for name in names:
+                entry = rank_values[name]
+                if entry.get("skip"):
+                    continue
+                assert entry["found"], (name, entry)
+                found[name] = True
+                expected_dtype = (
+                    "float32" if name in training.bias_names or name.endswith(".mlp.router.weight") else "bfloat16"
+                )
+                assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
+                expected = (
+                    training.weights[STACKED_EXPERT_NAME][0] if name == SERVING_EXPERT_NAME else training.weights[name]
+                )
+                actual = entry["tensor"]
+                if name not in training.bias_names:
+                    expected = expected.to(torch.bfloat16).to(actual.dtype)
+                if name == LM_HEAD_NAME:
+                    # vLLM aligns the vocabulary dimension (151665 -> 151680
+                    # for this tokenizer). The HF weight occupies the prefix.
+                    assert actual.shape[0] >= expected.shape[0], (actual.shape, expected.shape)
+                    actual = actual[: expected.shape[0]]
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert all(found.values()), found
 
 
 def _run_full_cycle(
@@ -295,18 +397,36 @@ def _run_full_cycle(
             cfg=cfg,
         )
         _assert_policy_attention_backend(policy, "flash_attention_2")
+        representative_names = _representative_names(model_path)
+        traced_ranks = ray.get(
+            policy.async_run_ray_method(
+                "pass_through",
+                "grug_validation_enable_gradient_trace",
+                representative_names.parameter_names,
+            )
+        )
+        assert sorted(traced_ranks) == list(range(POLICY_WORLD_SIZE))
         training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
-        sync_names = [*training.bias_names, training.representative_name, training.bf16_sentinel_name]
+        checkpoint_names = [
+            *training.bias_names,
+            *training.parameter_names,
+            training.wire_bf16_sentinel_name,
+        ]
 
         checkpoint_path = str(tmp_path / "resume-checkpoint")
-        _assert_checkpoint_restores_biases(
+        training = _assert_checkpoint_resume_next_step(
             policy,
             _training_batch(prompts, first_rollout),
             checkpoint_path,
             model_path,
-            training.bias_names,
+            checkpoint_names,
             training.weights,
         )
+        sync_names = [
+            *training.bias_names,
+            *training.sync_parameter_names,
+            training.wire_bf16_sentinel_name,
+        ]
 
         if colocate_all:
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
@@ -315,17 +435,7 @@ def _run_full_cycle(
             asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        for engine in client.engines:
-            per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(sync_names, False))
-            if isinstance(per_rank, dict):
-                per_rank = [per_rank]
-            for rank_values in per_rank:
-                for name in sync_names:
-                    entry = rank_values[name]
-                    assert entry["found"], (name, entry)
-                    expected_dtype = "bfloat16" if name == training.bf16_sentinel_name else "float32"
-                    assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
-                    torch.testing.assert_close(entry["tensor"], training.weights[name], rtol=0, atol=0)
+        _assert_engine_weights(client, sync_names, training)
 
         if colocate_all:
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)

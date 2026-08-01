@@ -36,6 +36,7 @@ _CONFIGS = {
     "64GPU_qwen3_6_35b_a3b.yaml": (131072, 16384, 999999),
     "delphi_math_rl.yaml": (4096, 3584, 1),
     "delphi_math_rl_ifeval.yaml": (4096, 3584, 1),
+    "grug_67b_4k_p4_optimizer_assurance.yaml": (4096, 2560, 1),
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
     "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),

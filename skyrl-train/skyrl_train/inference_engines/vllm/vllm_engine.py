@@ -252,6 +252,49 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
             logger.warning(f"setup_envvars_for_vllm: NUMA affinity setup failed: {e}")
 
 
+@dataclass(frozen=True)
+class _FusedMoELookup:
+    w13: torch.Tensor
+    w2: torch.Tensor
+    module: Any | None
+    expert_map: torch.Tensor | None
+
+
+def _find_fused_moe(model, all_params, prefix: str, global_expert: int | None = None) -> _FusedMoELookup | None:
+    """Return fused weights and their live expert map, preferring a requested expert's owner."""
+    module_base = f"{prefix}.experts"
+    weight_base = module_base
+    w13 = all_params.get(f"{module_base}.w13_weight")
+    w2 = all_params.get(f"{module_base}.w2_weight")
+    if w13 is None or w2 is None:
+        weight_base = f"{module_base}.routed_experts"
+        w13 = all_params.get(f"{weight_base}.w13_weight")
+        w2 = all_params.get(f"{weight_base}.w2_weight")
+    if w13 is None or w2 is None:
+        return None
+
+    mapped_modules = []
+    for name, module in model.named_modules():
+        if name != module_base and not name.startswith(f"{module_base}."):
+            continue
+        manager = getattr(module, "expert_map_manager", None)
+        expert_map = getattr(manager, "expert_map", None)
+        if expert_map is None:
+            expert_map = getattr(module, "_expert_map", None)
+        if expert_map is None:
+            expert_map = getattr(module, "expert_map", None)
+        if expert_map is None:
+            continue
+        mapped_modules.append((module, expert_map))
+        if global_expert is not None and global_expert < len(expert_map) and int(expert_map[global_expert]) >= 0:
+            return _FusedMoELookup(w13, w2, module, expert_map)
+
+    if mapped_modules:
+        module, expert_map = mapped_modules[0]
+        return _FusedMoELookup(w13, w2, module, expert_map)
+    return _FusedMoELookup(w13, w2, None, None)
+
+
 class WorkerWrap:
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
@@ -755,12 +798,10 @@ class WorkerWrap:
                 m = expert_re.match(name)
                 if m is not None:
                     prefix, gj, proj = m.group(1), int(m.group(2)), m.group(3)
-                    # vLLM FusedMoE stores w13_weight [n_local_experts, 2*I, H] and
-                    # w2_weight [n_local_experts, H, I]. Local experts are a contiguous
-                    # EP slice: global expert gj lives on ep_rank == gj // n_local.
-                    w13 = all_params.get(f"{prefix}.experts.w13_weight")
-                    w2 = all_params.get(f"{prefix}.experts.w2_weight")
-                    if w13 is None or w2 is None:
+                    # vLLM FusedMoE stores w13_weight [n_local_experts, 2*I, H]
+                    # and w2_weight [n_local_experts, H, I].
+                    fused = _find_fused_moe(model, all_params, prefix, gj)
+                    if fused is None:
                         # Fallback: scan for any experts.*weight tensor under this prefix.
                         cand = {
                             k: v
@@ -770,22 +811,24 @@ class WorkerWrap:
                         entry = {"found": False, "note": f"no w13/w2; candidates={list(cand.keys())}"}
                         out[name] = entry
                         continue
-                    n_local = w13.shape[0]
-                    owner_ep = gj // n_local
-                    if owner_ep != ep_rank:
-                        entry = {"found": False, "mode": "expert", "owner_ep": owner_ep, "skip": True}
+                    if fused.expert_map is None:
+                        entry = {"found": False, "note": "FusedMoE has no expert map"}
                         out[name] = entry
                         continue
-                    local_e = gj - owner_ep * n_local
+                    local_e = int(fused.expert_map[gj])
+                    if local_e < 0:
+                        entry = {"found": False, "mode": "expert", "ep_rank": ep_rank, "skip": True}
+                        out[name] = entry
+                        continue
                     if proj == "down_proj":
-                        t = w2[local_e]
+                        t = fused.w2[local_e]
                     else:
-                        inter = w13.shape[1] // 2
-                        t = w13[local_e, :inter] if proj == "gate_proj" else w13[local_e, inter:]
+                        inter = fused.w13.shape[1] // 2
+                        t = fused.w13[local_e, :inter] if proj == "gate_proj" else fused.w13[local_e, inter:]
                     entry = {
                         "found": True,
                         "mode": "expert",
-                        "owner_ep": owner_ep,
+                        "ep_rank": ep_rank,
                         "local_e": local_e,
                         "dtype": torch_dtype_to_str(t.dtype),
                         "tensor": _cpu(t),
@@ -801,17 +844,15 @@ class WorkerWrap:
         return out
 
     def read_expert_slots_raw(self, layer_idx: int):
-        """TEST-ONLY (D1/D2 disaggregated-receive diag): return THIS engine worker's
+        """TEST-ONLY disaggregated-receive diagnostic: return this engine worker's
         RAW per-local-slot FusedMoE expert weights + the engine's OWN expert_map for
         ``layer_idx``, with NO assumption about global<->local placement.
 
-        Unlike ``read_named_weights`` (which maps a requested HF expert ``gj`` to a slot
-        via ``gj // n_local`` — a CONTIGUOUS-linear assumption that would HIDE a
-        receive-side placement bug), this dumps every local slot's bytes AS-IS plus the
-        engine's authoritative ``_expert_map`` (global->local, -1 if absent). The driver
-        then does a NON-circular cross-expert nearest-match vs the DISK base checkpoint,
-        so a slot carrying the wrong global expert (D2 placement) surfaces as m!=j even
-        though a per-name readback could not see it.
+        Unlike ``read_named_weights``, this dumps every local slot's bytes AS-IS plus
+        the engine's authoritative ``_expert_map`` (global->local, -1 if absent). The
+        driver then does a NON-circular cross-expert nearest-match vs the DISK base
+        checkpoint, so a slot carrying the wrong global expert surfaces
+        as m!=j even though a per-name readback could not see it.
 
         Returns dict:
           __ranks__        : {tp_rank, tp_size, ep_rank, ep_size}
@@ -843,38 +884,31 @@ class WorkerWrap:
 
         out = {"__ranks__": {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}}
         prefix = f"model.layers.{layer_idx}.mlp"
-        w13 = all_params.get(f"{prefix}.experts.w13_weight")
-        w2 = all_params.get(f"{prefix}.experts.w2_weight")
-        if w13 is None or w2 is None:
+        fused = _find_fused_moe(model, all_params, prefix)
+        if fused is None:
             cand = [k for k in all_params if k.startswith(f"{prefix}.experts.") and k.endswith("weight")]
             out["error"] = f"no w13/w2 under {prefix}; candidates={cand}"
             return out
 
-        # Find the FusedMoE module to read its authoritative expert_map + counts.
-        emap = None
-        local_num = int(w13.shape[0])
+        # Read counts and placement from the module selected by _find_fused_moe.
+        local_num = int(fused.w13.shape[0])
         global_num = None
         placement = None
-        for mod_name, mod in model.named_modules():
-            if mod_name == f"{prefix}.experts" or mod_name.endswith(f"layers.{layer_idx}.mlp.experts"):
-                emap = getattr(mod, "_expert_map", None)
-                if emap is None:
-                    emap = getattr(mod, "expert_map", None)
-                local_num = int(getattr(mod, "local_num_experts", local_num))
-                global_num = getattr(mod, "global_num_experts", None)
-                placement = getattr(mod, "expert_placement_strategy", None)
-                break
+        if fused.module is not None:
+            local_num = int(getattr(fused.module, "local_num_experts", local_num))
+            global_num = getattr(fused.module, "global_num_experts", None)
+            placement = getattr(fused.module, "expert_placement_strategy", None)
 
         # global->local slot map (the engine's OWN authority on placement).
-        if emap is not None:
-            emap_list = [int(x) for x in emap.detach().cpu().tolist()]
+        if fused.expert_map is not None:
+            emap_list = [int(x) for x in fused.expert_map.detach().cpu().tolist()]
         else:
             emap_list = None
         out["expert_map"] = emap_list
         out["local_num_experts"] = local_num
         out["global_num_experts"] = int(global_num) if global_num is not None else None
         out["placement_strategy"] = str(placement) if placement is not None else None
-        out["w13_inter_half"] = int(w13.shape[1] // 2)
+        out["w13_inter_half"] = int(fused.w13.shape[1] // 2)
 
         # Inverse: local slot -> global expert (per the engine's expert_map).
         slot_to_global = [-1] * local_num
@@ -887,8 +921,8 @@ class WorkerWrap:
         slots = {}
         for s in range(local_num):
             slots[s] = {
-                "w13": w13[s].detach().to("cpu", dtype=_torch.float32).contiguous(),
-                "w2": w2[s].detach().to("cpu", dtype=_torch.float32).contiguous(),
+                "w13": fused.w13[s].detach().to("cpu", dtype=_torch.float32).contiguous(),
+                "w2": fused.w2[s].detach().to("cpu", dtype=_torch.float32).contiguous(),
             }
         out["slots"] = slots
         return out

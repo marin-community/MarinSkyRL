@@ -45,7 +45,11 @@ class GrugValidationSnapshot:
 
     rank: int
     attention_backend: str
+    forward_dtype: str
     weights: dict[str, torch.Tensor]
+    parameter_dtypes: dict[str, str]
+    gradient_dtypes: dict[str, str]
+    optimizer_state_dtypes: dict[str, dict[str, str]]
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -424,11 +428,43 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             tensor = self.weight_extractor._gather_tensor(state[name])
             if is_rank0:
                 weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
+        parameters = dict(self.model.model.named_parameters())
+        optimizer_state_dtypes = {}
+        for name in names:
+            parameter = parameters.get(name)
+            if parameter is None or parameter not in self.optimizer.state:
+                continue
+            optimizer_state_dtypes[name] = {
+                key: torch_dtype_to_str(value.dtype)
+                for key, value in self.optimizer.state[parameter].items()
+                if isinstance(value, torch.Tensor)
+            }
         return GrugValidationSnapshot(
             rank=torch.distributed.get_rank(),
             attention_backend=config._attn_implementation,
+            forward_dtype=torch_dtype_to_str(self.strategy._mixed_precision_param_dtype),
             weights=weights,
+            parameter_dtypes={name: torch_dtype_to_str(state[name].dtype) for name in names},
+            gradient_dtypes={
+                name: dtype
+                for name, dtype in getattr(self.strategy, "_validation_gradient_dtypes", {}).items()
+                if name in names
+            },
+            optimizer_state_dtypes=optimizer_state_dtypes,
         )
+
+    def grug_validation_enable_gradient_trace(self, names):
+        """TEST-ONLY: trace optimizer-facing gradient dtypes and return this rank."""
+        config = getattr(self.model.model, "config", None)
+        if getattr(config, "model_type", None) != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("Grug gradient tracing is only valid for Grug models")
+        parameters = dict(self.model.model.named_parameters())
+        missing = set(names).difference(parameters)
+        if missing:
+            raise KeyError(f"missing Grug parameters: {sorted(missing)}")
+        self.strategy._validation_gradient_names = set(names)
+        self.strategy._validation_gradient_dtypes = {}
+        return torch.distributed.get_rank()
 
     def diag_ep8_geometry(self):
         """TEST-ONLY (EP=8 cross-node diag): return this rank's mesh geometry +
@@ -697,9 +733,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             wrapped_model = HFModelWrapper(
                 model_path,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=True,
+                # Marin stores MuonH parameters and optimizer state in FP32;
+                # FSDP2's mixed-precision policy still casts forward compute to BF16.
+                # Every pre-existing optimizer keeps its BF16 load path.
+                bf16=not strategy.is_muonh_optimizer,
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,

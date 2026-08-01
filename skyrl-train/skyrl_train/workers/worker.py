@@ -1118,6 +1118,10 @@ class PolicyWorkerBase(Worker):
         # Clear fragmented GPU memory before training to avoid OOM at step boundaries
         # (matches CriticWorkerBase.ppo_train behavior)
         torch.cuda.empty_cache()
+        cuda_available = torch.cuda.is_available()
+        collect_optimizer_metrics = bool(getattr(self.strategy, "collect_optimizer_metrics", False))
+        if cuda_available and collect_optimizer_metrics:
+            torch.cuda.reset_peak_memory_stats()
 
         micro_batches_per_mini_batch = (
             self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
@@ -1207,6 +1211,12 @@ class PolicyWorkerBase(Worker):
 
         status_mean = reduce_metrics(all_metrics)
         status_mean["policy_update_steps"] = policy_update_steps / accumulation_steps
+        if cuda_available and collect_optimizer_metrics:
+            peak_memory = self.strategy.all_reduce(
+                torch.tensor(torch.cuda.max_memory_allocated(), device=torch.cuda.current_device()),
+                op="max",
+            )
+            status_mean["peak_gpu_memory_gib"] = float(peak_memory.item()) / 2**30
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
@@ -1384,6 +1394,7 @@ class PolicyWorkerBase(Worker):
         ratio_diag = {}
         spike_diag = {}
         optimizer_step_succeeded = False
+        optimizer_step_seconds = None
         if (local_step + 1) % accumulation_steps == 0:
             # StaleClip: read rolling entropy from prior steps' history; decide LR scale
             # for THIS step's optimizer.step(). The current micro-batch entropy is pushed
@@ -1405,6 +1416,7 @@ class PolicyWorkerBase(Worker):
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
             )
+            optimizer_step_seconds = getattr(self.strategy, "last_optimizer_step_seconds", None)
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
 
@@ -1472,6 +1484,8 @@ class PolicyWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         if grug_causal_lm is not None and (local_step + 1) % accumulation_steps == 0:
             status["optimizer_step_succeeded"] = float(optimizer_step_succeeded)
+        if optimizer_step_seconds is not None:
+            status["optimizer_step_seconds"] = optimizer_step_seconds
 
         for k, v in experience.info.items():
             if k == "kl":

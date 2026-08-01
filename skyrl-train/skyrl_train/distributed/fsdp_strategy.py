@@ -1,6 +1,7 @@
 import os
 import copy
 import random
+import time
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
@@ -17,9 +18,11 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl_train.distributed.grug_muonh import build_grug_muonh
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
+from skyrl_train.utils import torch_dtype_to_str
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -77,6 +80,16 @@ class FSDPStrategy(DistributedStrategy):
         self.seed = seed
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
+        self.last_optimizer_step_seconds: Optional[float] = None
+        self.optimizer_name = optimizer_config.get("optimizer", "AdamW") if optimizer_config is not None else None
+        self.is_muonh_optimizer = self.optimizer_name == "MuonH"
+        # MuonH always reports its production optimizer boundary. Other
+        # optimizers stay untouched unless a controlled comparison opts in.
+        self.collect_optimizer_metrics = self.is_muonh_optimizer or bool(
+            optimizer_config.get("collect_optimizer_metrics", False) if optimizer_config is not None else False
+        )
+        self._validation_gradient_names: set[str] | None = None
+        self._validation_gradient_dtypes: dict[str, str] = {}
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
@@ -205,12 +218,21 @@ class FSDPStrategy(DistributedStrategy):
             restored. Used by StaleClip for predictive LR damping.
         """
         self.last_optimizer_step_succeeded = False
+        self.last_optimizer_step_seconds = None
         z_clip = kwargs.get("z_clip", None)
         stale_clip_lr_scale = float(kwargs.get("stale_clip_lr_scale", 1.0))
 
         grad_norm = None
         if isinstance(model, HFModelWrapper):
             model = model.model
+
+        validation_gradient_names = self._validation_gradient_names
+        if validation_gradient_names is not None:
+            self._validation_gradient_dtypes = {
+                parameter_name: torch_dtype_to_str(parameter.grad.dtype)
+                for parameter_name, parameter in model.named_parameters()
+                if parameter_name in validation_gradient_names and parameter.grad is not None
+            }
 
         if self.max_norm > 0:
             # NOTE (sumanthrh): All `grad_norm`s returned here are the original grad norms before clipping.
@@ -258,7 +280,16 @@ class FSDPStrategy(DistributedStrategy):
             for pg in optimizer.param_groups:
                 pg["lr"] = pg["lr"] * stale_clip_lr_scale
 
-        optimizer.step()
+        if self.collect_optimizer_metrics:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            started_at = time.perf_counter()
+            optimizer.step()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self.last_optimizer_step_seconds = time.perf_counter() - started_at
+        else:
+            optimizer.step()
 
         if original_lrs is not None:
             for pg, lr in zip(optimizer.param_groups, original_lrs):
@@ -302,6 +333,7 @@ class FSDPStrategy(DistributedStrategy):
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
+        self._mixed_precision_param_dtype = param_dtype
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
@@ -467,7 +499,8 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            optimizer_name = optim_config.get("optimizer", "AdamW")
+            optimizer_name = self.optimizer_name
+            assert optimizer_name is not None
             if optimizer_name == "Muon":
                 # Hybrid Muon recipe: Muon on the 2-D hidden matmul weights,
                 # AdamW on embeddings / final head / norms / biases / 1-D params.
@@ -488,6 +521,21 @@ class FSDPStrategy(DistributedStrategy):
                     f"(lr={optim_config.lr}). Muon params (first 6): "
                     f"{new_optimizer._muon_param_names[:6]}"
                 )
+            elif optimizer_name == "MuonH":
+                # Exact Grug production recipe. This is deliberately separate
+                # from the generic "Muon" ablation above.
+                ep_size = int(self.fsdp_config.get("expert_model_parallel_size", 1))
+                if ep_size != 1:
+                    raise ValueError(f"MuonH currently requires expert_model_parallel_size=1, got {ep_size}")
+                new_optimizer = build_grug_muonh(fsdp_module.named_parameters(), optim_config)
+                logger.info(
+                    f"[MuonH] Grug optimizer: {len(new_optimizer._muonh_param_names)} params -> MuonH, "
+                    f"{len(new_optimizer._adamh_param_names)} params -> AdamH, "
+                    f"{len(new_optimizer._adam_param_names)} params -> Adam; "
+                    f"shared lr={new_optimizer.muonh.param_groups[0]['lr']}, "
+                    f"Adam lr={new_optimizer.adam.param_groups[0]['lr'] if new_optimizer.adam else 'n/a'}, "
+                    "weight decay=0 for every group"
+                )
             else:
                 # Resolve optimizer class dynamically from torch.optim
                 optimizer_cls = getattr(optim, optimizer_name, None)
@@ -496,7 +544,8 @@ class FSDPStrategy(DistributedStrategy):
                 ):
                     raise ValueError(
                         f"Unknown optimizer '{optimizer_name}'. "
-                        f"Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop) or 'Muon'."
+                        "Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop), "
+                        "'Muon', or 'MuonH'."
                     )
 
                 optimizer_kwargs = {"lr": optim_config.lr, "weight_decay": optim_config.weight_decay}
@@ -712,7 +761,8 @@ class FSDPStrategy(DistributedStrategy):
 
         # Final barrier to ensure all operations complete
         dist.barrier()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_checkpoint(
