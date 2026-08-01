@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ class DataLocator:
     uri: str
     identity: str
     local_path: str
+    relative_path: str
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,13 @@ def _data_locator(value: dict[str, Any]) -> DataLocator:
     return DataLocator(**value)
 
 
+def _resolved_data_path(locator: DataLocator) -> str:
+    relative = Path(locator.relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Data relative_path must stay below its source root: {locator.relative_path!r}")
+    return os.path.join(locator.local_path, *relative.parts)
+
+
 def launch_envelope(value: dict[str, Any]) -> ArtifactLaunchEnvelope:
     """Parse one JSON-compatible launch envelope."""
     request = value["request"]
@@ -237,7 +246,7 @@ def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
     policy_uri = f"{request.output.export_root.rstrip('/')}/global_step_{global_step}/policy"
     filesystem, policy_path = fsspec.core.url_to_fs(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
-    names = {path.removeprefix(policy_path.rstrip('/') + '/') for path in files}
+    names = {path.removeprefix(policy_path.rstrip("/") + "/") for path in files}
     if "config.json" not in names:
         raise ValueError(f"Terminal policy export is missing config.json: {policy_uri}")
     if not any(name.endswith((".safetensors", ".bin")) for name in names):
@@ -268,9 +277,9 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
         "--model-source-identity",
         request.model.identity,
         "--train-data",
-        json.dumps([locator.local_path for locator in request.train_data]),
+        json.dumps([_resolved_data_path(locator) for locator in request.train_data]),
         "--val-data",
-        json.dumps([locator.local_path for locator in request.validation_data]),
+        json.dumps([_resolved_data_path(locator) for locator in request.validation_data]),
         "--data-sources-json",
         json.dumps(data_sources, sort_keys=True),
         "--num-nodes",
@@ -315,9 +324,7 @@ def _attempt_uri(request: SkyRLLaunchRequest) -> str:
     return f"{request.output.attempts_root.rstrip('/')}/{request.attempt_id}.json"
 
 
-def _manifest_payload(
-    envelope: ArtifactLaunchEnvelope, response: SkyRLTerminalResponse
-) -> dict[str, Any]:
+def _manifest_payload(envelope: ArtifactLaunchEnvelope, response: SkyRLTerminalResponse) -> dict[str, Any]:
     return {
         "request": asdict(envelope.request),
         "execution": asdict(envelope.execution),

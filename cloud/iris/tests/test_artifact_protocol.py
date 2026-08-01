@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,7 @@ from cloud.iris.artifact_protocol import (
     SkyRLLaunchRequest,
     SkyRLOutputPaths,
     SkyRLTopology,
+    _launcher_argv,
     launch_artifact,
 )
 from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant
@@ -89,6 +90,7 @@ def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
                     uri=(tmp_path / "input-data").as_uri(),
                     identity="gsm8k@e53f048:first-1024",
                     local_path="/tmp/iceball-gsm8k",
+                    relative_path="train.parquet",
                 ),
             ),
             validation_data=(),
@@ -156,6 +158,31 @@ def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> Non
     assert terminal["request"]["runtime"] == asdict(envelope.request.runtime)
     attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
     assert json.loads(attempt.read_text()) == terminal
+
+
+def test_launcher_resolves_data_entries_below_staged_source_root(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+
+    argv = _launcher_argv(envelope, "config.yaml")
+
+    assert json.loads(argv[argv.index("--train-data") + 1]) == ["/tmp/iceball-gsm8k/train.parquet"]
+
+
+def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    locator = DataLocator(
+        uri=envelope.request.train_data[0].uri,
+        identity="bad",
+        local_path="/tmp/iceball-gsm8k",
+        relative_path="../escape.parquet",
+    )
+    envelope = ArtifactLaunchEnvelope(
+        request=replace(envelope.request, train_data=(locator,)),
+        execution=envelope.execution,
+    )
+
+    with pytest.raises(ValueError, match="stay below"):
+        _launcher_argv(envelope, "config.yaml")
 
 
 def test_launch_artifact_failure_records_attempt_without_terminal_model(tmp_path: Path) -> None:
