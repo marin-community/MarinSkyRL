@@ -25,16 +25,13 @@ the phase split with communicator nonblocking disabled and require torchrun to e
 
 ## Results
 
-The four pre-existing cases pass on a GH200 node with the production Titan overlay: three destructive cases
-terminate under nonblocking diagnostic settings, and the blocking EP all-to-all completes with correct values.
-This validates the harness baseline but does not exercise a warmed, blocking phase divergence.
-
-The expanded module collects on a CPU host and skips all five cases because four CUDA devices are required. The
-new contract has not run on an NVIDIA node. Its bounded controller will kill and reap the disposable torchrun
-process group if production settings reproduce the wedge.
+CPU hosts collect and skip the suite because four CUDA devices are required. On a CUDA host, setup completes
+only after every rank finishes three value-checked warmup rounds. The controller then starts a separate
+45-second fault deadline and kills and reaps only its disposable torchrun process group if that deadline
+expires. This keeps a reproduced process-group wedge from wedging the test runner.
 
 ## Future work
 
-- [ ] Run the warmed production divergence case on a dedicated four-GPU node.
-- [ ] If it exceeds the harness deadline, add an out-of-process phase-progress watchdog and use this case as its
-      red-to-green contract.
+- [ ] Record dedicated-node GPU results in the pull request or linked execution artifact.
+- [ ] If production settings exceed the harness deadline, add an out-of-process phase-progress watchdog and use
+      this case as its red-to-green contract.

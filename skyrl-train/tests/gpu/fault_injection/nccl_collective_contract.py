@@ -147,6 +147,7 @@ def _run_fsdp_all_gather(subgroup: dist.ProcessGroup, rank: int, device: torch.d
 
 
 def _warm_ep_and_fsdp_communicators(
+    *,
     ep_group: dist.ProcessGroup,
     fsdp_group: dist.ProcessGroup,
     rank: int,
@@ -173,7 +174,12 @@ def _worker(mode: RunMode) -> None:
         ep_group = mesh["ep"].get_group()
         if mode is RunMode.WARMED_PHASE_DIVERGENCE:
             fsdp_group = mesh["fsdp"].get_group()
-            _warm_ep_and_fsdp_communicators(ep_group, fsdp_group, rank, device)
+            _warm_ep_and_fsdp_communicators(
+                ep_group=ep_group,
+                fsdp_group=fsdp_group,
+                rank=rank,
+                device=device,
+            )
 
     print(
         f"FAULT_INJECTION_READY mode={mode.value} rank={rank} "

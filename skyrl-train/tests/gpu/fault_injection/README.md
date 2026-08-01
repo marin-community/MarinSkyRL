@@ -42,8 +42,8 @@ kills and reaps the disposable subprocess group and includes the complete torchr
 requires three successful EP/FSDP warmup rounds on every rank, all four ranks entering the mismatched phase, no
 collective completing, and torchrun exiting nonzero before the controller deadline.
 
-The three original destructive cases explicitly enable NCCL's nonblocking communicator mode. The warmed
-phase-divergence case uses blocking production settings. Production workers deliberately do not enable
-communicator nonblocking: NCCL permits ordinary calls to return `ncclInProgress`, and PyTorch's EP
-`all_to_all_single` path does not handle that result. Keeping the healthy all-to-all and fault teardown checks
-together prevents a fault-only result from being mistaken for a training-safe runtime default.
+The EP-subgroup non-arrival, WORLD non-arrival, and rank-exit cases explicitly enable NCCL's nonblocking
+communicator mode. The warmed phase-divergence case uses blocking production settings. Production workers
+deliberately do not enable communicator nonblocking: NCCL permits ordinary calls to return `ncclInProgress`,
+and PyTorch's EP `all_to_all_single` path does not handle that result. Keeping the healthy all-to-all and fault
+teardown checks together prevents a fault-only result from being mistaken for a training-safe runtime default.
