@@ -324,20 +324,28 @@ def _run_ep_fsdp_collective_schedule_case(
         )
 
 
-def test_ep_fsdp_default_collective_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("NCCL collective schedule contract requires CUDA")
-
-    monkeypatch.setenv(NCCL_TIMING_ENV, "1")
+def _execute_collective_schedule_case(
+    ep_size: int,
+    fsdp_size: int | None,
+    case: CollectiveScheduleCase,
+) -> None:
+    os.environ[NCCL_TIMING_ENV] = "1"
     try:
-        _run_ep_fsdp_collective_schedule_case(
-            DEFAULT_EP_SIZE,
-            None,
-            collective_schedule_case(DEFAULT_COLLECTIVE_SCHEDULE_CASE),
-        )
+        _run_ep_fsdp_collective_schedule_case(ep_size, fsdp_size, case)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
+
+
+def test_ep_fsdp_default_collective_schedule() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("NCCL collective schedule contract requires CUDA")
+
+    _execute_collective_schedule_case(
+        DEFAULT_EP_SIZE,
+        None,
+        collective_schedule_case(DEFAULT_COLLECTIVE_SCHEDULE_CASE),
+    )
 
 
 if __name__ == "__main__":
@@ -350,13 +358,8 @@ if __name__ == "__main__":
         default=DEFAULT_COLLECTIVE_SCHEDULE_CASE,
     )
     arguments = parser.parse_args()
-    os.environ[NCCL_TIMING_ENV] = "1"
-    try:
-        _run_ep_fsdp_collective_schedule_case(
-            arguments.ep_size,
-            arguments.fsdp_size,
-            collective_schedule_case(arguments.case),
-        )
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    _execute_collective_schedule_case(
+        arguments.ep_size,
+        arguments.fsdp_size,
+        collective_schedule_case(arguments.case),
+    )
