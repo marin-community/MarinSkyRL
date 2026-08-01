@@ -7,8 +7,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
-from torch._C._distributed_c10d import WorkInfo
 from torch.distributed import ProcessGroup
 from torch.distributed.tensor import DeviceMesh
 
@@ -16,6 +16,15 @@ from torch.distributed.tensor import DeviceMesh
 class CollectiveSequenceKind(StrEnum):
     OPERATION = "operation"
     BOUNDARY = "boundary"
+
+
+class CollectiveOperationType(Protocol):
+    name: str
+
+
+class CollectiveWorkInfo(Protocol):
+    op_type: CollectiveOperationType
+    seq: int
 
 
 @dataclass(frozen=True)
@@ -189,8 +198,8 @@ class NcclCollectiveRecorder:
         for name, group in self._groups.items():
             group._register_on_completion_hook(self._make_hook(name))
 
-    def _make_hook(self, group_name: str) -> Callable[[WorkInfo], None]:
-        def record(work_info: WorkInfo) -> None:
+    def _make_hook(self, group_name: str) -> Callable[[CollectiveWorkInfo], None]:
+        def record(work_info: CollectiveWorkInfo) -> None:
             try:
                 event = CollectiveEvent(work_info.op_type.name, int(work_info.seq))
                 with self._condition:
