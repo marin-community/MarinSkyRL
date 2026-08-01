@@ -1,8 +1,8 @@
 """Flag-off contract for the per-token reward channel.
 
 With the channel disabled, the config key defaults to false, the collator leaves
-the existing tensors unchanged and emits no channel tensors, and the
-`TrainingInputBatch` key set is unchanged.
+the existing tensors unchanged and emits no channel tensors, and concatenation
+does not add channel keys.
 
 Run:
     pytest tests/cpu/reward/test_token_channel_noop.py
