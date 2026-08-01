@@ -26,7 +26,8 @@ from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_
 from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
-from skyrl_train.distributed import collective_count_diag as _ccdiag
+from skyrl_train.distributed import collective_phase_diag as _phase_diag
+from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -1215,18 +1216,30 @@ class PolicyWorkerBase(Worker):
         return output
 
     def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+        if not _phase_diag.enabled() or not isinstance(self.strategy, FSDPStrategy):
+            return self._training_step_impl(experience, global_step, local_step, accumulation_steps)
+        _phase_diag.begin_region(
+            self.strategy.device_mesh,
+            kind="policy_training_step",
+            rank=self._rank,
+            metadata={"global_step": global_step, "local_step": local_step},
+        )
+        try:
+            return self._training_step_impl(experience, global_step, local_step, accumulation_steps)
+        finally:
+            _phase_diag.end_region()
+
+    def _training_step_impl(
+        self,
+        experience: Experience,
+        global_step,
+        local_step,
+        accumulation_steps,
+    ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        device_mesh = getattr(self.strategy, "device_mesh", None)
-        if device_mesh is not None:
-            _ccdiag.begin_region(
-                device_mesh,
-                kind="policy_training_step",
-                rank=self._rank,
-                metadata={"global_step": global_step, "local_step": local_step},
-            )
-            _ccdiag.log_phase("training_step_enter")
+        _phase_diag.log_phase("training_step_enter")
         self.model.train()
         experience.to_device(torch.cuda.current_device())
 
@@ -1263,7 +1276,7 @@ class PolicyWorkerBase(Worker):
         policy_loss_mask = build_think_weighted_loss_mask(loss_mask, response_span_tags, think_token_weight)
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
-        _ccdiag.log_phase("model_forward_enter", reset_moe_boundary=True)
+        _phase_diag.log_phase("model_forward_enter", reset_moe_boundary=True)
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -1292,7 +1305,7 @@ class PolicyWorkerBase(Worker):
                 loss_mask=policy_loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
-        _ccdiag.log_phase("model_forward_exit")
+        _phase_diag.log_phase("model_forward_exit")
 
         # TIS importance-ratio diagnostics. Emitted on EVERY rank with an
         # identical key set whenever use_tis is on, so the per-key
@@ -1350,10 +1363,10 @@ class PolicyWorkerBase(Worker):
         # such method (non-HF wrappers).
         _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
         _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
-        _ccdiag.log_phase("backward_enter", reset_moe_boundary=True)
+        _phase_diag.log_phase("backward_enter", reset_moe_boundary=True)
         with _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
-        _ccdiag.log_phase("backward_exit")
+        _phase_diag.log_phase("backward_exit")
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
         # teardown to here (after backward) so gradient-checkpoint recompute still
@@ -1495,7 +1508,7 @@ class PolicyWorkerBase(Worker):
                 status[k] = v.mean().item() if isinstance(v, torch.Tensor) else v
 
         status["response_length"] = num_actions
-        _ccdiag.log_phase("training_step_exit")
+        _phase_diag.log_phase("training_step_exit")
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
