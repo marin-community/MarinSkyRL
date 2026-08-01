@@ -1,5 +1,6 @@
 from tests.cpu.util import example_dummy_config
 
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import _build_inference_engine_runtime_env
 from skyrl_train.utils.utils import prepare_runtime_environment
 
 
@@ -26,3 +27,14 @@ def test_monitor_heartbeat_is_capped_by_collective_timeout(monkeypatch):
 
     assert env["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] == "30"
     assert env["TORCH_NCCL_NONBLOCKING_TIMEOUT"] == "30"
+
+
+def test_inference_engine_forwards_communicator_timeout(monkeypatch):
+    monkeypatch.setenv("TORCH_NCCL_USE_COMM_NONBLOCKING", "1")
+    monkeypatch.setenv("TORCH_NCCL_NONBLOCKING_TIMEOUT", "47")
+
+    runtime_env = _build_inference_engine_runtime_env()
+
+    assert runtime_env is not None
+    assert runtime_env["env_vars"]["TORCH_NCCL_USE_COMM_NONBLOCKING"] == "1"
+    assert runtime_env["env_vars"]["TORCH_NCCL_NONBLOCKING_TIMEOUT"] == "47"

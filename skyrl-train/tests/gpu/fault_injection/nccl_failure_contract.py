@@ -59,9 +59,9 @@ class FaultRun:
     output: str
 
 
-def _wait_for_sentinel(control_dir: Path, sentinel: str) -> None:
-    sentinel_path = control_dir / sentinel
-    while not sentinel_path.exists():
+def _wait_for_start(control_dir: Path) -> None:
+    start_path = control_dir / START_SENTINEL
+    while not start_path.exists():
         time.sleep(CONTROL_POLL_SECONDS)
 
 
@@ -93,7 +93,7 @@ def _worker(mode: FaultMode) -> None:
         flush=True,
     )
     (control_dir / f"{READY_SENTINEL_PREFIX}{rank}").touch()
-    _wait_for_sentinel(control_dir, START_SENTINEL)
+    _wait_for_start(control_dir)
 
     if mode is FaultMode.SUBGROUP_NONARRIVAL:
         if rank == 0:
