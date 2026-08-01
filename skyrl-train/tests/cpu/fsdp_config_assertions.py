@@ -9,6 +9,4 @@ def assert_role_fsdp_defaults(cfg, expected_defaults):
         fsdp = cfg.trainer[role].fsdp_config
         for field, expected in expected_defaults.items():
             assert field in fsdp, f"trainer.{role}.fsdp_config missing {field}"
-            assert fsdp[field] == expected, (
-                f"trainer.{role}.fsdp_config.{field}={fsdp[field]!r}, expected {expected!r}"
-            )
+            assert fsdp[field] == expected, f"trainer.{role}.fsdp_config.{field}={fsdp[field]!r}, expected {expected!r}"
