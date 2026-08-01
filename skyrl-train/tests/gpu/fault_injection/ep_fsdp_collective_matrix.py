@@ -17,7 +17,12 @@ import os
 import pytest
 
 from tests.collective_schedule_matrix import COLLECTIVE_SCHEDULE_CASES, CollectiveScheduleCase
-from tests.gpu.fault_injection.topology import REQUIRES_FOUR_CUDA_DEVICES, SKYRL_TRAIN_ROOT, WORLD_SIZE
+from tests.gpu.fault_injection.topology import (
+    REAP_TIMEOUT_SECONDS,
+    REQUIRES_FOUR_CUDA_DEVICES,
+    SKYRL_TRAIN_ROOT,
+    WORLD_SIZE,
+)
 from tests.torchrun_process import (
     TorchrunResult,
     TorchrunTimeoutError,
@@ -27,7 +32,6 @@ from tests.torchrun_process import (
 
 
 RUN_TIMEOUT_SECONDS = 240
-REAP_TIMEOUT_SECONDS = 10
 WORKER_PATH = SKYRL_TRAIN_ROOT / "tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py"
 
 

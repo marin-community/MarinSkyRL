@@ -299,7 +299,6 @@ def _run_ep_fsdp_collective_schedule_case(
     fsdp_size: int | None,
     case: CollectiveScheduleCase,
 ) -> None:
-    os.environ[NCCL_TIMING_ENV] = "1"
     init_worker_process_group_with_device(timeout_seconds=120)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -325,10 +324,11 @@ def _run_ep_fsdp_collective_schedule_case(
         )
 
 
-def test_ep_fsdp_default_collective_schedule() -> None:
+def test_ep_fsdp_default_collective_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("NCCL collective schedule contract requires CUDA")
 
+    monkeypatch.setenv(NCCL_TIMING_ENV, "1")
     try:
         _run_ep_fsdp_collective_schedule_case(
             DEFAULT_EP_SIZE,
@@ -350,6 +350,7 @@ if __name__ == "__main__":
         default=DEFAULT_COLLECTIVE_SCHEDULE_CASE,
     )
     arguments = parser.parse_args()
+    os.environ[NCCL_TIMING_ENV] = "1"
     try:
         _run_ep_fsdp_collective_schedule_case(
             arguments.ep_size,

@@ -26,7 +26,12 @@ import torch.distributed as dist
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
-from tests.gpu.fault_injection.topology import REQUIRES_FOUR_CUDA_DEVICES, SKYRL_TRAIN_ROOT, WORLD_SIZE
+from tests.gpu.fault_injection.topology import (
+    REAP_TIMEOUT_SECONDS,
+    REQUIRES_FOUR_CUDA_DEVICES,
+    SKYRL_TRAIN_ROOT,
+    WORLD_SIZE,
+)
 from tests.torchrun_process import (
     TorchrunGang,
     TorchrunResult,
@@ -45,7 +50,6 @@ DIVERGENT_FSDP_RANKS = frozenset(range(WORLD_SIZE)) - DIVERGENT_EP_RANKS
 COLLECTIVE_TIMEOUT_SECONDS = 8
 SETUP_TIMEOUT_SECONDS = 180
 RUN_TIMEOUT_SECONDS = 45
-REAP_TIMEOUT_SECONDS = 10
 CONTROL_POLL_SECONDS = 0.1
 START_SENTINEL = "start"
 READY_SENTINEL_PREFIX = "ready-"
