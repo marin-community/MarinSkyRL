@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, DeviceMesh
 from torch.utils.checkpoint import checkpoint
 
 from skyrl_train.distributed.fsdp_utils import apply_ep, apply_fsdp2, create_device_mesh
@@ -30,7 +30,11 @@ from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.models.layers.moe import MoE
 from skyrl_train.models.layers.moe_swap import GroupedMoEShim
 from skyrl_train.models.router_replay import RouterReplay, set_active_replay
-from tests.gpu.collective_schedule import NcclCollectiveRecorder, assert_collective_schedules_match
+from tests.collective_schedule import (
+    NcclCollectiveRecorder,
+    RankCollectiveSchedule,
+    assert_collective_schedules_match,
+)
 
 
 pytestmark = [pytest.mark.gpu]
@@ -43,6 +47,9 @@ NUM_LAYERS = 3
 BATCH_SIZE = 1
 SEQUENCE_LENGTH = 16
 SEED = 1701
+EP_SIZE_ENV = "SKYRL_TEST_EP_SIZE"
+FSDP_SIZE_ENV = "SKYRL_TEST_FSDP_SIZE"
+DEFAULT_EP_SIZE = 2
 
 
 class TinyMoEBlock(torch.nn.Module):
@@ -89,28 +96,20 @@ class TinyCheckpointedMoE(torch.nn.Module):
 
 
 def _mesh_sizes(world_size: int) -> tuple[int, int]:
-    ep_size = int(os.environ.get("SKYRL_TEST_EP_SIZE", "2"))
-    fsdp_size = int(os.environ.get("SKYRL_TEST_FSDP_SIZE", str(world_size // ep_size)))
+    ep_size = int(os.environ.get(EP_SIZE_ENV, str(DEFAULT_EP_SIZE)))
+    fsdp_size = int(os.environ.get(FSDP_SIZE_ENV, str(world_size // ep_size)))
     if ep_size * fsdp_size != world_size:
-        raise ValueError(
-            f"test requires world_size == EP * FSDP; got {world_size} != {ep_size} * {fsdp_size}"
-        )
+        raise ValueError(f"test requires world_size == EP * FSDP; got {world_size} != {ep_size} * {fsdp_size}")
     experts_per_ep_rank = NUM_EXPERTS // ep_size
     if NUM_EXPERTS % ep_size or experts_per_ep_rank % fsdp_size:
-        raise ValueError(
-            f"NUM_EXPERTS={NUM_EXPERTS} must divide evenly over EP={ep_size} and FSDP={fsdp_size}"
-        )
+        raise ValueError(f"NUM_EXPERTS={NUM_EXPERTS} must divide evenly over EP={ep_size} and FSDP={fsdp_size}")
     return ep_size, fsdp_size
 
 
 def _expected_boundaries() -> tuple[str, ...]:
-    original = tuple(
-        f"layer{layer}:original:{edge}" for layer in range(NUM_LAYERS) for edge in ("enter", "exit")
-    )
+    original = tuple(f"layer{layer}:original:{edge}" for layer in range(NUM_LAYERS) for edge in ("enter", "exit"))
     recompute = tuple(
-        f"layer{layer}:recompute:{edge}"
-        for layer in reversed(range(NUM_LAYERS))
-        for edge in ("enter", "exit")
+        f"layer{layer}:recompute:{edge}" for layer in reversed(range(NUM_LAYERS)) for edge in ("enter", "exit")
     )
     return original + recompute
 
@@ -126,7 +125,7 @@ def _replay_targets(fsdp_coordinate: int, device: torch.device) -> list[torch.Te
     return targets
 
 
-def _assert_operation_families(schedule) -> None:
+def _assert_operation_families(schedule: RankCollectiveSchedule) -> None:
     ep_operations = tuple(event.operation.upper() for event in schedule.events["ep"])
     assert len(ep_operations) == NUM_LAYERS * 8, (
         f"each checkpointed MoE layer must issue 3 original-forward, 3 recompute-forward, "
@@ -139,17 +138,7 @@ def _assert_operation_families(schedule) -> None:
     assert any("REDUCE_SCATTER" in operation for operation in fsdp_operations), fsdp_operations
 
 
-def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
-    init_worker_process_group_with_device(timeout_seconds=120)
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    device = torch.device("cuda", torch.cuda.current_device())
-    ep_size, fsdp_size = _mesh_sizes(world_size)
-    device_mesh = create_device_mesh(world_size, fsdp_size=fsdp_size, ep_size=ep_size)
-    mesh_coordinate = tuple(device_mesh.get_coordinate())
-    mesh_dim_names = tuple(device_mesh.mesh_dim_names)
-    fsdp_coordinate = mesh_coordinate[mesh_dim_names.index("fsdp")]
-
+def _build_sharded_model(device: torch.device, device_mesh: DeviceMesh) -> TinyCheckpointedMoE:
     torch.manual_seed(SEED)
     model = TinyCheckpointedMoE().to(device=device, dtype=torch.bfloat16)
     for module in model.modules():
@@ -165,8 +154,10 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
         {"wrap_policy": {"transformer_layer_cls_to_wrap": ["TinyMoEBlock"]}},
     )
     assert all(isinstance(layer.mlp.moe.experts.w1, DTensor) for layer in model.layers)
+    return model
 
-    dist.barrier()
+
+def _install_schedule_recorder(model: TinyCheckpointedMoE, device_mesh: DeviceMesh) -> NcclCollectiveRecorder:
     recorder = NcclCollectiveRecorder(
         {
             "ep": device_mesh.get_group("ep"),
@@ -175,7 +166,15 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
     )
     for layer in model.layers:
         layer._record_boundary = recorder.boundary
+    return recorder
 
+
+def _run_replayed_step(
+    model: TinyCheckpointedMoE,
+    recorder: NcclCollectiveRecorder,
+    fsdp_coordinate: int,
+    device: torch.device,
+) -> None:
     torch.manual_seed(SEED + fsdp_coordinate)
     hidden_states = torch.randn(
         BATCH_SIZE,
@@ -209,6 +208,15 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
         local_grad_sums.append(gradient.float().abs().sum())
     assert local_grad_sums and torch.stack(local_grad_sums).sum().item() > 0
 
+
+def _finish_local_schedule(
+    recorder: NcclCollectiveRecorder,
+    rank: int,
+    device_mesh: DeviceMesh,
+) -> RankCollectiveSchedule:
+    mesh_dim_names = tuple(device_mesh.mesh_dim_names)
+    mesh_coordinate = tuple(device_mesh.get_coordinate())
+
     torch.cuda.synchronize()
     schedule = recorder.finish(
         rank=rank,
@@ -218,11 +226,32 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
     )
     assert tuple(boundary.label for boundary in schedule.boundaries) == _expected_boundaries()
     _assert_operation_families(schedule)
+    return schedule
 
+
+def _compare_rank_schedules(schedule: RankCollectiveSchedule, world_size: int) -> None:
     schedules = [None] * world_size
     dist.all_gather_object(schedules, schedule)
     assert_collective_schedules_match(schedules, "ep")
     assert_collective_schedules_match(schedules, "fsdp")
+
+
+def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
+    init_worker_process_group_with_device(timeout_seconds=120)
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = torch.device("cuda", torch.cuda.current_device())
+    ep_size, fsdp_size = _mesh_sizes(world_size)
+    device_mesh = create_device_mesh(world_size, fsdp_size=fsdp_size, ep_size=ep_size)
+    mesh_dim_names = tuple(device_mesh.mesh_dim_names)
+    fsdp_coordinate = tuple(device_mesh.get_coordinate())[mesh_dim_names.index("fsdp")]
+
+    model = _build_sharded_model(device, device_mesh)
+    dist.barrier()
+    recorder = _install_schedule_recorder(model, device_mesh)
+    _run_replayed_step(model, recorder, fsdp_coordinate, device)
+    schedule = _finish_local_schedule(recorder, rank, device_mesh)
+    _compare_rank_schedules(schedule, world_size)
 
     if rank == 0:
         print(

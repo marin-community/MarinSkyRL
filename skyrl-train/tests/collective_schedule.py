@@ -5,7 +5,9 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Mapping, Sequence
+
+from torch.distributed import ProcessGroup
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,8 @@ class CollectiveScheduleDivergence:
     fixed_coordinate: tuple[tuple[str, int], ...]
     reference_rank: int
     divergent_rank: int
-    operation_index: int
+    sequence_kind: str
+    sequence_index: int
     expected: str
     actual: str
 
@@ -56,13 +59,23 @@ def _normalized_events(schedule: RankCollectiveSchedule, group_dimension: str) -
 def _normalized_boundaries(
     schedule: RankCollectiveSchedule,
     group_dimension: str,
-) -> tuple[tuple[str, int], ...]:
+) -> tuple[str, ...]:
     if not schedule.boundaries:
         return ()
     initial = schedule.boundaries[0].sequence_numbers[group_dimension]
     return tuple(
-        (boundary.label, boundary.sequence_numbers[group_dimension] - initial) for boundary in schedule.boundaries
+        f"{boundary.label} at sequence +{boundary.sequence_numbers[group_dimension] - initial}"
+        for boundary in schedule.boundaries
     )
+
+
+def _first_difference(reference: Sequence[str], candidate: Sequence[str]) -> tuple[int, str, str] | None:
+    for index in range(max(len(reference), len(candidate))):
+        expected = reference[index] if index < len(reference) else "<end>"
+        actual = candidate[index] if index < len(candidate) else "<end>"
+        if expected != actual:
+            return index, expected, actual
+    return None
 
 
 def find_first_collective_divergence(
@@ -96,35 +109,25 @@ def find_first_collective_divergence(
         reference_operations = _normalized_events(reference, group_dimension)
         reference_boundaries = _normalized_boundaries(reference, group_dimension)
         for candidate in members[1:]:
-            candidate_operations = _normalized_events(candidate, group_dimension)
-            for index in range(max(len(reference_operations), len(candidate_operations))):
-                expected = reference_operations[index] if index < len(reference_operations) else "<end>"
-                actual = candidate_operations[index] if index < len(candidate_operations) else "<end>"
-                if expected != actual:
-                    return CollectiveScheduleDivergence(
-                        group_dimension,
-                        fixed_coordinate,
-                        reference.rank,
-                        candidate.rank,
-                        index,
-                        expected,
-                        actual,
-                    )
-
-            candidate_boundaries = _normalized_boundaries(candidate, group_dimension)
-            for index in range(max(len(reference_boundaries), len(candidate_boundaries))):
-                expected = reference_boundaries[index] if index < len(reference_boundaries) else ("<end>", -1)
-                actual = candidate_boundaries[index] if index < len(candidate_boundaries) else ("<end>", -1)
-                if expected != actual:
-                    return CollectiveScheduleDivergence(
-                        group_dimension,
-                        fixed_coordinate,
-                        reference.rank,
-                        candidate.rank,
-                        index,
-                        f"boundary {expected[0]} at sequence +{expected[1]}",
-                        f"boundary {actual[0]} at sequence +{actual[1]}",
-                    )
+            comparisons = (
+                ("operation", reference_operations, _normalized_events(candidate, group_dimension)),
+                ("boundary", reference_boundaries, _normalized_boundaries(candidate, group_dimension)),
+            )
+            for sequence_kind, expected_sequence, actual_sequence in comparisons:
+                difference = _first_difference(expected_sequence, actual_sequence)
+                if difference is None:
+                    continue
+                index, expected, actual = difference
+                return CollectiveScheduleDivergence(
+                    group_dimension,
+                    fixed_coordinate,
+                    reference.rank,
+                    candidate.rank,
+                    sequence_kind,
+                    index,
+                    expected,
+                    actual,
+                )
     return None
 
 
@@ -137,7 +140,7 @@ def assert_collective_schedules_match(
         return
     raise AssertionError(
         f"{divergence.group_dimension} collective schedule diverged for "
-        f"{dict(divergence.fixed_coordinate)} at operation {divergence.operation_index}: "
+        f"{dict(divergence.fixed_coordinate)} at {divergence.sequence_kind} {divergence.sequence_index}: "
         f"rank {divergence.reference_rank}={divergence.expected}, "
         f"rank {divergence.divergent_rank}={divergence.actual}"
     )
@@ -146,7 +149,7 @@ def assert_collective_schedules_match(
 class NcclCollectiveRecorder:
     """Record completed work and sequence counters without adding collectives."""
 
-    def __init__(self, groups: Mapping[str, Any]) -> None:
+    def __init__(self, groups: Mapping[str, ProcessGroup]) -> None:
         self._groups = dict(groups)
         self._initial_sequences = {
             name: int(group._get_sequence_number_for_group()) for name, group in self._groups.items()

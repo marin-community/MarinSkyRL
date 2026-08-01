@@ -1,4 +1,4 @@
-from tests.gpu.collective_schedule import (
+from tests.collective_schedule import (
     CollectiveBoundary,
     CollectiveEvent,
     RankCollectiveSchedule,
@@ -51,7 +51,8 @@ def test_collective_schedule_reports_first_missing_operation():
     assert divergence.fixed_coordinate == (("fsdp", 0),)
     assert divergence.reference_rank == 0
     assert divergence.divergent_rank == 1
-    assert divergence.operation_index == 2
+    assert divergence.sequence_kind == "operation"
+    assert divergence.sequence_index == 2
     assert divergence.expected == "COMBINE"
     assert divergence.actual == "<end>"
 
@@ -67,6 +68,7 @@ def test_collective_schedule_reports_layer_boundary_sequence_drift():
     divergence = find_first_collective_divergence(schedules, "ep")
 
     assert divergence is not None
-    assert divergence.operation_index == 1
-    assert divergence.expected == "boundary layer0:original:exit at sequence +3"
-    assert divergence.actual == "boundary layer0:original:exit at sequence +4"
+    assert divergence.sequence_kind == "boundary"
+    assert divergence.sequence_index == 1
+    assert divergence.expected == "layer0:original:exit at sequence +3"
+    assert divergence.actual == "layer0:original:exit at sequence +4"
