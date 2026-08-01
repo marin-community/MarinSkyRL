@@ -69,3 +69,30 @@ completion and matching schedules without asserting a narrow runtime.
 Every case must emit one `MODEL_COLLECTIVE_SCHEDULE_OK` record and exit zero within four minutes. A timeout kills
 and reaps only that case's subprocess group and reports its complete captured output. This matrix is opt-in and
 its filename deliberately remains outside pytest's default `test_*.py` discovery.
+
+## Four-node EP/FSDP traffic
+
+`multi_node_ep_fsdp_traffic.py` is a direct torchrun worker for a 16-rank mesh: four ranks per node, EP4 within
+each node, and FSDP4 across nodes. It rejects an allocation whose physical placement does not match that
+contract. It then verifies FSDP all-gather, reduce-scatter, and all-reduce payloads at several sizes; alternates
+those operations with node-local EP all-to-all; and repeats the cross-node traffic with one late-arriving rank
+per node. The fixed workload uses 1, 8, and 32 MiB payloads, 32 alternating rounds, and two seconds of arrival
+skew. Timings are evidence, not a performance gate.
+
+Launch one torchrun agent on each node. For a four-node Slurm allocation, set a rendezvous address reachable
+from every node and run:
+
+```bash
+export MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
+export MASTER_PORT=29571
+srun --nodes=4 --ntasks=4 --ntasks-per-node=1 bash -c '
+  torchrun --nnodes=4 --nproc-per-node=4 \
+    --node-rank="$SLURM_NODEID" \
+    --master-addr="$MASTER_ADDR" --master-port="$MASTER_PORT" \
+    --module tests.gpu.fault_injection.multi_node_ep_fsdp_traffic
+'
+```
+
+Run from `skyrl-train/` in the same image and environment used by policy workers. The run passes only when one
+rank prints `MULTI_NODE_EP_FSDP_TRAFFIC_OK` and every torchrun agent exits zero. A hang is a failure; the
+process-group timeout is three minutes, so the enclosing cluster job needs a longer independent deadline.
