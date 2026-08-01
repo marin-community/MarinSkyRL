@@ -30,6 +30,7 @@ import os
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -324,24 +325,24 @@ def _run_ep_fsdp_collective_schedule_case(
         )
 
 
-def _execute_collective_schedule_case(
+def _run_collective_schedule_with_managed_process_group(
     ep_size: int,
     fsdp_size: int | None,
     case: CollectiveScheduleCase,
 ) -> None:
-    os.environ[NCCL_TIMING_ENV] = "1"
-    try:
-        _run_ep_fsdp_collective_schedule_case(ep_size, fsdp_size, case)
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    with patch.dict(os.environ, {NCCL_TIMING_ENV: "1"}):
+        try:
+            _run_ep_fsdp_collective_schedule_case(ep_size, fsdp_size, case)
+        finally:
+            if dist.is_initialized():
+                dist.destroy_process_group()
 
 
 def test_ep_fsdp_default_collective_schedule() -> None:
     if not torch.cuda.is_available():
         pytest.skip("NCCL collective schedule contract requires CUDA")
 
-    _execute_collective_schedule_case(
+    _run_collective_schedule_with_managed_process_group(
         DEFAULT_EP_SIZE,
         None,
         collective_schedule_case(DEFAULT_COLLECTIVE_SCHEDULE_CASE),
@@ -358,7 +359,7 @@ if __name__ == "__main__":
         default=DEFAULT_COLLECTIVE_SCHEDULE_CASE,
     )
     arguments = parser.parse_args()
-    _execute_collective_schedule_case(
+    _run_collective_schedule_with_managed_process_group(
         arguments.ep_size,
         arguments.fsdp_size,
         collective_schedule_case(arguments.case),

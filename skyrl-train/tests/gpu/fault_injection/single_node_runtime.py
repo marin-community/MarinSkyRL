@@ -1,4 +1,4 @@
-"""Shared topology for the single-node NCCL fault suites."""
+"""Shared runtime settings for single-node distributed GPU suites."""
 
 from pathlib import Path
 

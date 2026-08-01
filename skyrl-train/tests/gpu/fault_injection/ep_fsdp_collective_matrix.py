@@ -17,7 +17,7 @@ import os
 import pytest
 
 from tests.collective_schedule_matrix import COLLECTIVE_SCHEDULE_CASES, CollectiveScheduleCase
-from tests.gpu.fault_injection.topology import (
+from tests.gpu.fault_injection.single_node_runtime import (
     REAP_TIMEOUT_SECONDS,
     REQUIRES_FOUR_CUDA_DEVICES,
     SKYRL_TRAIN_ROOT,
