@@ -194,7 +194,7 @@ class NcclCollectiveRecorder:
             for name, group in self._groups.items()
         }
 
-    def boundary(self, label: str) -> None:
+    def record_boundary_snapshot(self, label: str) -> None:
         sequence_counts = self._sequence_counts()
         with self._condition:
             self._boundaries.append(CollectiveBoundary(label, sequence_counts))

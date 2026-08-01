@@ -26,3 +26,6 @@ The four-rank NCCL contract passed on GH200 with EP2/FSDP2 and recorded 24 EP op
 operations. The first invocation exposed a harness dependency: ProcessGroupNCCL rejected the completion hook
 until `TORCH_NCCL_ENABLE_TIMING=1` was present. The test now sets that required variable before process-group
 initialization. The optional twelve-rank EP4/FSDP3 topology remains untested.
+
+The topology is an explicit script argument. The ordinary four-rank test uses EP2/FSDP2; the optional
+twelve-rank invocation passes `--ep-size 4 --fsdp-size 3` instead of mutating ambient test state.

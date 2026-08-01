@@ -14,12 +14,13 @@ The worker enables ``TORCH_NCCL_ENABLE_TIMING=1`` before process-group
 initialization because ProcessGroupNCCL completion hooks require start and end
 event recording.
 
-Set ``SKYRL_TEST_EP_SIZE=4`` and ``SKYRL_TEST_FSDP_SIZE=3`` when launching a
+Pass ``--ep-size 4 --fsdp-size 3`` after the script path when launching a
 twelve-rank gang to match the production EP4/FSDP3 topology.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 from types import SimpleNamespace
 
@@ -51,8 +52,6 @@ NUM_LAYERS = 3
 BATCH_SIZE = 1
 SEQUENCE_LENGTH = 16
 SEED = 1701
-EP_SIZE_ENV = "SKYRL_TEST_EP_SIZE"
-FSDP_SIZE_ENV = "SKYRL_TEST_FSDP_SIZE"
 DEFAULT_EP_SIZE = 2
 NCCL_TIMING_ENV = "TORCH_NCCL_ENABLE_TIMING"
 
@@ -98,9 +97,8 @@ class TinyCheckpointedMoE(torch.nn.Module):
         return self.output(hidden_states)
 
 
-def _mesh_sizes(world_size: int) -> tuple[int, int]:
-    ep_size = int(os.environ.get(EP_SIZE_ENV, str(DEFAULT_EP_SIZE)))
-    fsdp_size = int(os.environ.get(FSDP_SIZE_ENV, str(world_size // ep_size)))
+def _mesh_sizes(world_size: int, ep_size: int, fsdp_size: int | None) -> tuple[int, int]:
+    fsdp_size = world_size // ep_size if fsdp_size is None else fsdp_size
     if ep_size * fsdp_size != world_size:
         raise ValueError(f"test requires world_size == EP * FSDP; got {world_size} != {ep_size} * {fsdp_size}")
     experts_per_ep_rank = NUM_EXPERTS // ep_size
@@ -163,7 +161,7 @@ def _build_sharded_model(device: torch.device, device_mesh: DeviceMesh) -> TinyC
 def _install_schedule_recorder(model: TinyCheckpointedMoE, device_mesh: DeviceMesh) -> NcclCollectiveRecorder:
     recorder = NcclCollectiveRecorder(device_mesh, ("ep", "fsdp"))
     for layer in model.layers:
-        layer._record_boundary = recorder.boundary
+        layer._record_boundary = recorder.record_boundary_snapshot
     return recorder
 
 
@@ -224,13 +222,13 @@ def _compare_rank_schedules(schedule: RankCollectiveSchedule, world_size: int) -
     assert_collective_schedules_match(schedules, "fsdp")
 
 
-def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
+def _run_ep_fsdp_replay_checkpoint_collective_schedule(ep_size: int, fsdp_size: int | None) -> None:
     os.environ[NCCL_TIMING_ENV] = "1"
     init_worker_process_group_with_device(timeout_seconds=120)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     device = torch.device("cuda", torch.cuda.current_device())
-    ep_size, fsdp_size = _mesh_sizes(world_size)
+    ep_size, fsdp_size = _mesh_sizes(world_size, ep_size, fsdp_size)
     device_mesh = create_device_mesh(world_size, fsdp_size=fsdp_size, ep_size=ep_size)
     mesh_dim_names = tuple(device_mesh.mesh_dim_names)
     fsdp_coordinate = tuple(device_mesh.get_coordinate())[mesh_dim_names.index("fsdp")]
@@ -255,11 +253,19 @@ def test_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
         pytest.skip("NCCL collective schedule contract requires CUDA")
 
     try:
-        _run_ep_fsdp_replay_checkpoint_collective_schedule()
+        _run_ep_fsdp_replay_checkpoint_collective_schedule(DEFAULT_EP_SIZE, None)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    test_ep_fsdp_replay_checkpoint_collective_schedule()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ep-size", type=int, default=DEFAULT_EP_SIZE)
+    parser.add_argument("--fsdp-size", type=int)
+    arguments = parser.parse_args()
+    try:
+        _run_ep_fsdp_replay_checkpoint_collective_schedule(arguments.ep_size, arguments.fsdp_size)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
