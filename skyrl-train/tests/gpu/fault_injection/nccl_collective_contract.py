@@ -34,7 +34,7 @@ from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
 
 WORLD_SIZE = 4
 WARMUP_ROUNDS = 3
-EP_METADATA_VALUES = 128
+EP_ALL_TO_ALL_VALUES = 128
 RANK_VALUE_STRIDE = 100
 DIVERGENT_EP_RANKS = frozenset({0, 3})
 DIVERGENT_FSDP_RANKS = frozenset(range(WORLD_SIZE)) - DIVERGENT_EP_RANKS
@@ -103,8 +103,8 @@ def _wait_for_peer_activity(control_dir: Path) -> None:
 def _run_ep_all_to_all(subgroup: dist.ProcessGroup, rank: int, device: torch.device) -> None:
     group_ranks = dist.get_process_group_ranks(subgroup)
     group_rank = group_ranks.index(rank)
-    assert EP_METADATA_VALUES % len(group_ranks) == 0
-    values_per_peer = EP_METADATA_VALUES // len(group_ranks)
+    assert EP_ALL_TO_ALL_VALUES % len(group_ranks) == 0
+    values_per_peer = EP_ALL_TO_ALL_VALUES // len(group_ranks)
     input_values = (
         torch.arange(
             len(group_ranks) * values_per_peer,
