@@ -32,7 +32,7 @@ from tests.torchrun_process import (
 
 
 RUN_TIMEOUT_SECONDS = 240
-WORKER_PATH = SKYRL_TRAIN_ROOT / "tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py"
+WORKER_PATH = SKYRL_TRAIN_ROOT / "tests/gpu/fault_injection/ep_fsdp_collective_schedule_worker.py"
 
 
 def _run_case(case: CollectiveScheduleCase) -> TorchrunResult:

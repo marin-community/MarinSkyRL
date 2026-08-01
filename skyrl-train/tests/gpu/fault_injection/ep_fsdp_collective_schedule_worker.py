@@ -9,7 +9,7 @@ process-group sequence counters.
 
 Run the compact topology on one four-GPU node::
 
-    torchrun --nproc-per-node=4 tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py
+    torchrun --nproc-per-node=4 tests/gpu/fault_injection/ep_fsdp_collective_schedule_worker.py
 
 The default case uses concentrated router replay and reentrant checkpointing.
 Pass ``--case`` with one of the choices reported by ``--help`` to select another
@@ -31,7 +31,6 @@ import time
 from collections.abc import Callable
 from unittest.mock import patch
 
-import pytest
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, DeviceMesh
@@ -56,8 +55,6 @@ from tests.collective_schedule_matrix import (
     collective_schedule_case,
 )
 
-
-pytestmark = [pytest.mark.gpu]
 
 DIM = 64
 HIDDEN_DIM = 64
@@ -334,17 +331,6 @@ def _run_collective_schedule_with_managed_process_group(
         finally:
             if dist.is_initialized():
                 dist.destroy_process_group()
-
-
-def test_ep_fsdp_default_collective_schedule() -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("NCCL collective schedule contract requires CUDA")
-
-    _run_collective_schedule_with_managed_process_group(
-        DEFAULT_EP_SIZE,
-        None,
-        collective_schedule_case(DEFAULT_COLLECTIVE_SCHEDULE_CASE),
-    )
 
 
 if __name__ == "__main__":
