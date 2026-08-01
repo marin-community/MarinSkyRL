@@ -341,6 +341,82 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
 
 
+def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[dict[str, int | str]]:
+    """Copy one object-store tree and return its verified file inventory."""
+    import fsspec
+
+    filesystem, source_path = fsspec.core.url_to_fs(source_uri)
+    files = sorted(path for path in filesystem.find(source_path) if not filesystem.isdir(path))
+    if not files:
+        raise ValueError(f"Object-store source contains no files: {source_uri}")
+
+    target = os.path.abspath(local_path)
+    os.makedirs(target, exist_ok=True)
+    source_prefix = source_path.rstrip("/") + "/"
+    copied: list[dict[str, int | str]] = []
+    for source_file in files:
+        relative = source_file.removeprefix(source_prefix)
+        destination = os.path.join(target, relative)
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        expected_size = int(filesystem.info(source_file)["size"])
+        if not os.path.exists(destination) or os.path.getsize(destination) != expected_size:
+            filesystem.get_file(source_file, destination)
+        actual_size = os.path.getsize(destination)
+        if actual_size != expected_size:
+            raise ValueError(f"Staging size mismatch for {relative}: expected {expected_size}, found {actual_size}")
+        copied.append({"path": relative, "size": actual_size})
+
+    return copied
+
+
+def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store HF export on this allocated node."""
+    copied = _materialize_object_store_tree(source_uri, local_path)
+    names = {entry["path"] for entry in copied}
+    if "config.json" not in names:
+        raise ValueError(f"Staged model is missing config.json: {source_uri}")
+    if not any(str(name).endswith((".safetensors", ".bin")) for name in names):
+        raise ValueError(f"Staged model has no weight shards: {source_uri}")
+    if not any(str(name).startswith("tokenizer") or str(name).endswith(".model") for name in names):
+        raise ValueError(f"Staged model has no tokenizer files: {source_uri}")
+
+    manifest = {
+        "source_uri": source_uri,
+        "source_identity": source_identity,
+        "files": copied,
+    }
+    target = os.path.abspath(local_path)
+    with open(os.path.join(target, ".marinskyrl-source.json"), "w") as destination:
+        json.dump(manifest, destination, sort_keys=True)
+    _log(
+        f"Model export staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {target} "
+        f"({len(copied)} files, identity={source_identity})"
+    )
+
+
+def materialize_data_sources(data_sources_json: str) -> None:
+    """Copy immutable training-data locators onto this allocated node."""
+    sources = json.loads(data_sources_json)
+    if not isinstance(sources, list):
+        raise ValueError("--data-sources-json must contain a JSON list")
+    for source in sources:
+        source_uri = source["uri"]
+        local_path = source["local_path"]
+        source_identity = source["identity"]
+        copied = _materialize_object_store_tree(source_uri, local_path)
+        manifest = {
+            "source_uri": source_uri,
+            "source_identity": source_identity,
+            "files": copied,
+        }
+        with open(os.path.join(local_path, ".marinskyrl-source.json"), "w") as destination:
+            json.dump(manifest, destination, sort_keys=True)
+        _log(
+            f"Training data staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+            f"({len(copied)} files, identity={source_identity})"
+        )
+
+
 # Special tokens the delphi_v0 reasoning protocol depends on; asserted present in the
 # tokenizer's vocab after the override so a lossy SFT export (fragmented-to-bytes tokens)
 # fails loud here instead of silently collapsing reward at the first rollout.
@@ -1407,6 +1483,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "rollouts on a multi-node slice with no shared filesystem.",
     )
     parser.add_argument(
+        "--data-sources-json",
+        default=os.environ.get("MARINSKYRL_DATA_SOURCES_JSON", ""),
+        help="Immutable object-store data locators to materialize before Ray starts.",
+    )
+    parser.add_argument(
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
         help="HF repo ID of the policy model to pre-download into the node-local HF "
@@ -1425,6 +1506,21 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "in-datacenter) instead of pulling them from HF Hub. Missing/empty/incomplete "
         "source -> clean fallback to the HF snapshot_download prestage. Set by the "
         "launcher (auto-derived from the repo id).",
+    )
+    parser.add_argument(
+        "--model-source-uri",
+        default=os.environ.get("MARINSKYRL_MODEL_SOURCE_URI", ""),
+        help="Object-store HF export to materialize on every node before Ray starts.",
+    )
+    parser.add_argument(
+        "--model-local-path",
+        default=os.environ.get("MARINSKYRL_MODEL_LOCAL_PATH", ""),
+        help="Deterministic node-local directory for --model-source-uri.",
+    )
+    parser.add_argument(
+        "--model-source-identity",
+        default=os.environ.get("MARINSKYRL_MODEL_SOURCE_IDENTITY", ""),
+        help="Immutable producer identity recorded beside the staged export.",
     )
     parser.add_argument(
         "--policy-chat-template",
@@ -1481,6 +1577,12 @@ def main() -> None:
     # with FileNotFoundError on task.toml. See stage_train_data docstring.
     if args.train_data:
         stage_train_data(args.train_data)
+    if args.data_sources_json:
+        materialize_data_sources(args.data_sources_json)
+    if args.model_source_uri:
+        if not args.model_local_path or not args.model_source_identity:
+            raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
+        materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:

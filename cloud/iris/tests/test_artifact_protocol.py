@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+import pytest
+
+from cloud.iris.artifact_protocol import (
+    ArtifactLaunchEnvelope,
+    AttemptState,
+    DataLocator,
+    IrisLaunchOptions,
+    LaunchBackend,
+    ModelLocator,
+    RuntimeIdentity,
+    SkyRLLaunchRequest,
+    SkyRLOutputPaths,
+    SkyRLTopology,
+    launch_artifact,
+)
+from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant
+from cloud.iris.launch_rl_iris import IrisLaunchOutcome
+from cloud.iris.start_rl_iris_controller import materialize_model_export
+from cloud.iris.task_bundle import build_task_bundle
+
+
+@dataclass(frozen=True)
+class FakeLaunchBackend(LaunchBackend):
+    outcome: IrisLaunchOutcome
+
+    def launch(self, argv: list[str]) -> IrisLaunchOutcome:
+        return self.outcome
+
+
+def _repository_commit() -> str:
+    root = Path(__file__).resolve().parents[3]
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _cluster_config(tmp_path: Path) -> Path:
+    config = tmp_path / "cluster.yaml"
+    config.write_text(
+        """
+name: cw-us-east-08a
+storage:
+  remote_state_dir: s3://example/iris/state
+scale_groups:
+  gb200:
+    resources:
+      device_type: gpu
+      device_variant: GB200
+      device_count: 4
+      cpu: 64
+""".strip()
+    )
+    return config
+
+
+def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
+    image = GPU_RL_IMAGES[(ImageArchitecture.ARM64, ImageVariant.STANDARD)]
+    output = tmp_path / "output"
+    return ArtifactLaunchEnvelope(
+        request=SkyRLLaunchRequest(
+            run_id="iceball-test",
+            attempt_id="attempt-1",
+            config_yaml="trainer:\n  strategy: fsdp2\n  placement:\n    colocate_all: true\n",
+            runtime=RuntimeIdentity(
+                launcher_commit=_repository_commit(),
+                task_image=image.reference,
+                trainer_commit=image.source_commit,
+            ),
+            model=ModelLocator(
+                uri=(tmp_path / "input-model").as_uri(),
+                identity="sft-step@abc123",
+                local_path="/tmp/iceball-input-model",
+                tokenizer_uri="Qwen/Qwen3-0.6B-Base",
+                tokenizer_revision="da87bfb",
+            ),
+            train_data=(
+                DataLocator(
+                    uri=(tmp_path / "input-data").as_uri(),
+                    identity="gsm8k@e53f048:first-1024",
+                    local_path="/tmp/iceball-gsm8k",
+                ),
+            ),
+            validation_data=(),
+            topology=SkyRLTopology(
+                num_nodes=1,
+                gpus_per_node=4,
+                gpu_variant="GB200",
+                role_plan={"colocate_all": True, "policy_gpus": 4, "inference_engines": 4},
+            ),
+            output=SkyRLOutputPaths(
+                checkpoint_root=(output / "checkpoints").as_uri(),
+                export_root=(output / "exports").as_uri(),
+                attempts_root=(output / "attempts").as_uri(),
+                resolved_config_uri=(output / "resolved-skyrl.json").as_uri(),
+                terminal_manifest_uri=(output / "terminal.json").as_uri(),
+            ),
+            seed=17,
+            overrides=("++trainer.max_steps=8",),
+        ),
+        execution=IrisLaunchOptions(
+            cluster="cw-us-east-08a",
+            cluster_config=str(_cluster_config(tmp_path)),
+            target_cluster=None,
+            parent_cluster_config=None,
+            priority="interactive",
+            max_retries=3,
+            job_name="iceball-test-attempt-1",
+        ),
+    )
+
+
+def _write_terminal_training_outputs(envelope: ArtifactLaunchEnvelope) -> None:
+    output = Path(envelope.request.output.checkpoint_root.removeprefix("file://"))
+    output.mkdir(parents=True)
+    (output / "latest_ckpt_global_step.txt").write_text("8")
+    export = Path(envelope.request.output.export_root.removeprefix("file://")) / "global_step_8" / "policy"
+    export.mkdir(parents=True)
+    (export / "config.json").write_text("{}")
+    (export / "model.safetensors").write_bytes(b"weights")
+    (export / "tokenizer.json").write_text("{}")
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+
+
+def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    _write_terminal_training_outputs(envelope)
+    backend = FakeLaunchBackend(
+        IrisLaunchOutcome(
+            job_id="01KTEST",
+            job_state="succeeded",
+            exit_code=0,
+            task_image=envelope.request.runtime.task_image,
+        )
+    )
+
+    response = launch_artifact(envelope, backend=backend)
+
+    assert response.state == AttemptState.SUCCEEDED
+    assert response.model is not None
+    assert response.model.global_step == 8
+    terminal = json.loads(Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).read_text())
+    assert terminal["response"] == asdict(response)
+    assert terminal["request"]["runtime"] == asdict(envelope.request.runtime)
+    attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
+    assert json.loads(attempt.read_text()) == terminal
+
+
+def test_launch_artifact_failure_records_attempt_without_terminal_model(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    backend = FakeLaunchBackend(
+        IrisLaunchOutcome(
+            job_id="01KFAILED",
+            job_state="failed",
+            exit_code=1,
+            task_image=envelope.request.runtime.task_image,
+        )
+    )
+
+    response = launch_artifact(envelope, backend=backend)
+
+    assert response.state == AttemptState.FAILED
+    assert response.model is None
+    assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
+    attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
+    assert json.loads(attempt.read_text())["response"]["iris_job_state"] == "failed"
+
+
+def test_launch_artifact_rejects_overwriting_terminal_manifest(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    terminal = Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://"))
+    terminal.parent.mkdir(parents=True)
+    terminal.write_text("{}")
+
+    with pytest.raises(ValueError, match="immutable and already exists"):
+        launch_artifact(envelope, dry_run=True)
+
+
+def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_bytes(b"weights")
+    (source / "tokenizer.json").write_text("{}")
+    destination = tmp_path / "destination"
+
+    materialize_model_export(source.as_uri(), str(destination), "sft-step@abc123")
+
+    assert (destination / "model.safetensors").read_bytes() == b"weights"
+    manifest = json.loads((destination / ".marinskyrl-source.json").read_text())
+    assert manifest["source_identity"] == "sft-step@abc123"
+    assert {entry["path"] for entry in manifest["files"]} == {
+        "config.json",
+        "model.safetensors",
+        "tokenizer.json",
+    }
+
+
+def test_task_bundle_contains_controller_without_training_environment() -> None:
+    workspace = build_task_bundle()
+
+    assert (workspace / "cloud" / "iris" / "start_rl_iris_controller.py").is_file()
+    assert not (workspace / "skyrl-train").exists()
+    assert not (workspace / "cloud" / "iris" / "tests").exists()

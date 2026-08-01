@@ -73,6 +73,7 @@ from cloud.iris.gpu_rl_images import image_for_cluster
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
+from cloud.iris.task_bundle import build_task_bundle
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
 # selected cluster's live nodes after CLI parsing.
@@ -157,6 +158,16 @@ class ResolvedResourceRequests:
 
     memory: str
     disk: str
+
+
+@dataclass(frozen=True)
+class IrisLaunchOutcome:
+    """Terminal result of one Iris submission attempt."""
+
+    job_id: str
+    job_state: str
+    exit_code: int
+    task_image: str
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -1010,6 +1021,17 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
 
     parser.add_argument(
+        "--model-source-uri",
+        default=None,
+        help="Object-store HF export copied onto every allocated node before Ray starts.",
+    )
+    parser.add_argument(
+        "--model-source-identity",
+        default=None,
+        help="Immutable producer identity recorded with the staged model.",
+    )
+
+    parser.add_argument(
         "--model-warm-source",
         "--model_warm_source",
         dest="model_warm_source",
@@ -1031,6 +1053,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
     )
     parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--data-sources-json",
+        default=None,
+        help="JSON locators materialized onto every node before Ray starts.",
+    )
 
     parser.add_argument(
         "--val_data",
@@ -1053,6 +1080,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="In-container experiments output dir (on the synced /app workspace).",
     )
     parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--resolved-config-uri",
+        default=None,
+        help="Durable JSON destination for the exact SkyRL entry point and Hydra arguments.",
+    )
 
     # --- Resource / topology args (GPU multi-node) ---
     parser.add_argument(
@@ -1699,6 +1731,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    if args.resolved_config_uri:
+        train_cmd.extend(["--resolved-config-uri", args.resolved_config_uri])
     if args.train_data and args.train_data != "[]":
         train_cmd.extend(["--train_data", args.train_data])
     if args.val_data and args.val_data != "[]":
@@ -1800,8 +1834,21 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # on EVERY node before Ray starts, populating the identical node-local path on
     # all pods. Idempotent (on_exist=skip) — rank-0's later run_rl re-resolve is a
     # cheap no-op.
-    if args.train_data and args.train_data != "[]":
+    if args.train_data and args.train_data != "[]" and not args.data_sources_json:
         controller_cmd.extend(["--train-data", args.train_data])
+    if args.data_sources_json:
+        controller_cmd.extend(["--data-sources-json", args.data_sources_json])
+    if args.model_source_uri:
+        controller_cmd.extend(
+            [
+                "--model-source-uri",
+                args.model_source_uri,
+                "--model-local-path",
+                args.model_path,
+                "--model-source-identity",
+                args.model_source_identity,
+            ]
+        )
     # Per-NODE model pre-staging, coupled to HF_HUB_OFFLINE. A config that runs the
     # FSDP ranks offline (extra_env HF_HUB_OFFLINE=1) has NO warm cache unless the
     # weights are pulled first; without pre-staging each of the N*8 ranks would race
@@ -1957,9 +2004,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     return ["bash", "-c", bash]
 
 
-def main() -> int:
+def resolved_launch_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse and normalize one standalone or programmatic launch request."""
     parser = create_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Resolve the cluster YAML from --cluster when not explicitly given, so
     # `--cluster cw-rno2a` targets the 512xH100 RNO2A cluster (the delphi pilot's
@@ -1980,6 +2028,11 @@ def main() -> int:
     # (opencode never reaches vLLM on CoreWeave via a directly-submitted job). The
     # default direct path returns immediately (byte-identical).
     validate_controller_ingress_reachability(args)
+    return args
+
+
+def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
+    """Submit a normalized request and wait for its Iris job terminal state."""
     parent_credentials_json = prepare_federated_parent_credentials(args)
 
     if not args.job_name:
@@ -2285,6 +2338,8 @@ def main() -> int:
         )
     from contextlib import contextmanager as _contextmanager
 
+    workspace = build_task_bundle()
+
     @_contextmanager
     def _direct_client():
         # Direct submission to --cluster's own controller. On CoreWeave the loopback SSH
@@ -2299,7 +2354,7 @@ def main() -> int:
                 iris_config.controller
             )
         with bundle.controller.tunnel(address=controller_address) as controller_url:
-            yield IrisClient.remote(controller_url, workspace=PROJECT_ROOT)
+            yield IrisClient.remote(controller_url, workspace=workspace)
 
     if args.target_cluster:
         # Federated submission MUST carry the IAP *user* identity: the controller rejects
@@ -2312,7 +2367,7 @@ def main() -> int:
         # Requires a completed `iris --cluster=marin login` (@openathena.ai).
         from iris.cli.connect import open_iris_client
 
-        client_cm = open_iris_client(config_file=Path(submit_cluster_config), workspace=PROJECT_ROOT)
+        client_cm = open_iris_client(config_file=Path(submit_cluster_config), workspace=workspace)
     else:
         client_cm = _direct_client()
 
@@ -2352,7 +2407,12 @@ def main() -> int:
         )
 
         if args.no_wait:
-            return 0
+            return IrisLaunchOutcome(
+                job_id=full_job_id,
+                job_state="submitted",
+                exit_code=0,
+                task_image=args.task_image,
+            )
         print(
             f"[rl-iris] Now streaming logs for {full_job_id}. This process runs until the job ends.\n"
             "[rl-iris] Ctrl-C or SIGINT TERMINATES the job. It does not detach from it.\n"
@@ -2365,12 +2425,24 @@ def main() -> int:
         try:
             status = job.wait(stream_logs=True, timeout=float("inf"))
             exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1
+            job_state = job_pb2.JobState.Name(status.state).removeprefix("JOB_STATE_").lower()
         except KeyboardInterrupt:
             print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
             client.terminate_job(job.job_id)
             exit_code = 130
+            job_state = "cancelled"
         print(f"[rl-iris] Job exit: {exit_code}", flush=True)
-        return exit_code
+        return IrisLaunchOutcome(
+            job_id=full_job_id,
+            job_state=job_state,
+            exit_code=exit_code,
+            task_image=args.task_image,
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    outcome = launch(resolved_launch_args(argv))
+    return outcome.exit_code
 
 
 def _seconds_to_duration(secs: int):

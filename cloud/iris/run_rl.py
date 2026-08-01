@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -29,6 +30,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
+
+import fsspec
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.rl_config_translation import (
@@ -57,6 +60,7 @@ class LocalRLConfig:
     train_data: List[str] = field(default_factory=list)
     val_data: List[str] = field(default_factory=list)
     experiments_dir: str = "experiments"
+    resolved_config_uri: str | None = None
     gpus: int = 4
     cpus: int = 0  # 0 = auto-detect
     # Multi-node placement. The external controller has already bootstrapped one
@@ -215,6 +219,18 @@ class LocalRLRunner:
 
         if skyrl_overrides:
             hydra_args.extend(skyrl_overrides)
+
+        if self.config.resolved_config_uri:
+            with fsspec.open(self.config.resolved_config_uri, "w") as destination:
+                json.dump(
+                    {
+                        "entrypoint": parsed.entrypoint,
+                        "hydra_args": hydra_args,
+                        "source_config": str(parsed.config_path),
+                    },
+                    destination,
+                    sort_keys=True,
+                )
 
         if self.config.dry_run:
             print("\n[DRY RUN] Would execute SkyRL with:")
@@ -545,6 +561,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Directory for experiment outputs.",
     )
     parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--resolved-config-uri",
+        default=None,
+        help="Durable JSON destination for the exact SkyRL entry point and Hydra arguments.",
+    )
 
     parser.add_argument("--dry_run", action="store_true", help="Print config and command without running.")
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", help=argparse.SUPPRESS)
@@ -613,6 +634,7 @@ def main() -> None:
         train_data=train_data,
         val_data=val_data,
         experiments_dir=args.experiments_dir,
+        resolved_config_uri=args.resolved_config_uri,
         gpus=args.gpus,
         cpus=args.cpus,
         num_nodes=int(args.num_nodes),
