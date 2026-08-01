@@ -25,7 +25,8 @@ and layer-boundary sequence drift. All 72 distributed CPU tests pass, with one e
 The four-rank NCCL contract passed on GH200 with EP2/FSDP2 and recorded 24 EP operations plus 21 FSDP
 operations. The first invocation exposed a harness dependency: ProcessGroupNCCL rejected the completion hook
 until `TORCH_NCCL_ENABLE_TIMING=1` was present. The test now sets that required variable before process-group
-initialization. The optional twelve-rank EP4/FSDP3 topology remains untested.
+initialization. The optional twelve-rank EP4/FSDP3 topology remains untested; it is not the four-node
+EP4/FSDP4 geometry from the Jupiter incident.
 
 The topology is an explicit script argument. The ordinary four-rank test uses EP2/FSDP2; the optional
 twelve-rank invocation passes `--ep-size 4 --fsdp-size 3` instead of mutating ambient test state.

@@ -15,7 +15,7 @@ initialization because ProcessGroupNCCL completion hooks require start and end
 event recording.
 
 Pass ``--ep-size 4 --fsdp-size 3`` after the script path when launching a
-twelve-rank gang to match the production EP4/FSDP3 topology.
+twelve-rank gang to exercise an EP4/FSDP3 topology.
 """
 
 from __future__ import annotations
