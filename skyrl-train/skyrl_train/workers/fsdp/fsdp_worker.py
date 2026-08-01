@@ -24,7 +24,7 @@ from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
-from skyrl_train.distributed import collective_phase_diag as _phase_diag
+from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     CriticWorkerBase,
@@ -975,12 +975,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        _phase_diag.log_phase("forward_impl_enter", reset_moe_boundary=True)
+        _phase_diagnostics.log_phase("forward_impl_enter", reset_moe_boundary=True)
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
-        _phase_diag.log_phase("forward_impl_exit")
+        _phase_diagnostics.log_phase("forward_impl_exit")
         return output
 
     async def forward(
@@ -1044,30 +1044,29 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # body). Pre-fix only rank 0 reached the forward; with this fix every dispatched
         # rank's coroutine task is scheduled, so all 32 must log this.
         logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
-        if _phase_diag.enabled():
-            metadata = data.metadata or {}
-            diagnostic_metadata = {
-                name: metadata[name] for name in ("global_step", "actual_global_step") if name in metadata
-            }
-            _phase_diag.begin_region(
-                self.strategy.device_mesh,
-                kind="policy_inference_forward",
-                rank=self._rank,
-                metadata=diagnostic_metadata,
-            )
-        _phase_diag.log_phase("forward_enter")
-        try:
-            if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
-                return self._forward_impl(data)
-            # Yield so this dispatched coroutine is guaranteed a loop turn and is scheduled
-            # even if it arrived while the loop was mid-cycle servicing another coroutine.
-            await asyncio.sleep(0)
-            # Run the heavy sync FSDP forward off the event-loop thread so the blocking
-            # unshard collective cannot re-occupy the loop (head-of-line-block a peer).
-            return await asyncio.to_thread(self._forward_impl, data)
-        finally:
-            _phase_diag.log_phase("forward_exit")
-            _phase_diag.end_region()
+        metadata = data.metadata or {}
+        diagnostic_metadata = {
+            name: metadata[name] for name in ("global_step", "actual_global_step") if name in metadata
+        }
+        device_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
+        with _phase_diagnostics.region(
+            device_mesh,
+            kind="policy_inference_forward",
+            rank=self._rank,
+            metadata=diagnostic_metadata,
+        ):
+            _phase_diagnostics.log_phase("forward_enter")
+            try:
+                if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
+                    return self._forward_impl(data)
+                # Yield so this dispatched coroutine is guaranteed a loop turn and is scheduled
+                # even if it arrived while the loop was mid-cycle servicing another coroutine.
+                await asyncio.sleep(0)
+                # Run the heavy sync FSDP forward off the event-loop thread so the blocking
+                # unshard collective cannot re-occupy the loop (head-of-line-block a peer).
+                return await asyncio.to_thread(self._forward_impl, data)
+            finally:
+                _phase_diagnostics.log_phase("forward_exit")
 
 
 class FSDPCriticWorkerBase(CriticWorkerBase):

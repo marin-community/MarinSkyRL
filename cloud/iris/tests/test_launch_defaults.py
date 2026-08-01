@@ -254,9 +254,9 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
 
 
 def test_collective_phase_diagnostic_flag_sets_worker_environment(tmp_path):
-    args = _args(tmp_path, "opencode", ["--collective-phase-diag", "on"])
+    args = _args(tmp_path, "opencode", ["--collective-phase-diagnostics", "on"])
 
-    assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAG"] == "1"
+    assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
 
 
 def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):

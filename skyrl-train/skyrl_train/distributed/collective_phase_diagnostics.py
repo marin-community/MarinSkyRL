@@ -6,15 +6,18 @@ import itertools
 import json
 import os
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol, runtime_checkable
+from functools import wraps
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import torch.distributed as dist
 from loguru import logger
 
-_ENV = "SKYRL_COLLECTIVE_PHASE_DIAG"
-LOG_PREFIX = "COLLECTIVE_PHASE_DIAG "
+_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
+LOG_PREFIX = "COLLECTIVE_PHASE_DIAGNOSTICS "
 WORLD_GROUP = "world"
 _region_ids = itertools.count(1)
 _region_ids_lock = threading.Lock()
@@ -64,6 +67,7 @@ class _RegionContext:
 
 
 _region: ContextVar[_RegionContext | None] = ContextVar("collective_phase_region", default=None)
+_ReturnT = TypeVar("_ReturnT")
 
 
 def enabled() -> bool:
@@ -76,19 +80,23 @@ def _default_process_group() -> ProcessGroupLike:
     return dist.distributed_c10d._get_default_group()
 
 
-def begin_region(
-    device_mesh: DeviceMeshLike,
+@contextmanager
+def region(
+    device_mesh: DeviceMeshLike | None,
     *,
     kind: str,
     rank: int,
     metadata: dict[str, Any] | None = None,
-) -> int | None:
-    """Start one policy operation region and return its process-local identifier."""
+) -> Iterator[int | None]:
+    """Scope one policy operation, yielding ``None`` when diagnostics are disabled."""
     if not enabled():
-        return None
+        yield None
+        return
+    if device_mesh is None:
+        raise ValueError("enabled collective phase diagnostics require a device mesh")
     with _region_ids_lock:
         region_id = next(_region_ids)
-    _region.set(
+    token = _region.set(
         _RegionContext(
             region_id=region_id,
             kind=kind,
@@ -97,12 +105,29 @@ def begin_region(
             device_mesh=device_mesh,
         )
     )
-    return region_id
+    try:
+        yield region_id
+    finally:
+        _region.reset(token)
 
 
-def end_region() -> None:
-    """Clear the active diagnostic region in the current execution context."""
-    _region.set(None)
+def with_policy_training_region(function: Callable[..., _ReturnT]) -> Callable[..., _ReturnT]:
+    """Run a policy training-step method inside an optional diagnostic region."""
+
+    @wraps(function)
+    def wrapped(worker, experience, global_step, local_step, accumulation_steps):
+        strategy = worker.strategy
+        if not enabled() or not isinstance(strategy, DeviceMeshStrategy) or strategy.device_mesh is None:
+            return function(worker, experience, global_step, local_step, accumulation_steps)
+        with region(
+            strategy.device_mesh,
+            kind="policy_training_step",
+            rank=worker._rank,
+            metadata={"global_step": global_step, "local_step": local_step},
+        ):
+            return function(worker, experience, global_step, local_step, accumulation_steps)
+
+    return wrapped
 
 
 def _capture_record(context: _RegionContext, phase: str) -> CollectivePhaseRecord:
@@ -132,7 +157,7 @@ def format_log_record(record: CollectivePhaseRecord) -> str:
 
 
 def log_phase(phase: str, *, reset_moe_boundary: bool = False) -> CollectivePhaseRecord | None:
-    """Log the active region's process-group counters without issuing a collective."""
+    """Log counters, or return ``None`` when disabled, unscoped, or capture fails."""
     if not enabled():
         return None
     context = _region.get()
@@ -152,7 +177,7 @@ def log_phase(phase: str, *, reset_moe_boundary: bool = False) -> CollectivePhas
 
 
 def log_moe_ep_boundary_once() -> CollectivePhaseRecord | None:
-    """Log the first MoE boundary after the most recent phase reset."""
+    """Log the first MoE boundary, or return ``None`` when inactive or already logged."""
     if not enabled():
         return None
     context = _region.get()

@@ -48,7 +48,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from skyrl_train.distributed import collective_phase_diag as _phase_diag
+from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 
 # torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
 # does the DTensor->local convert + generate_permute_indices (cross-rank
@@ -563,7 +563,7 @@ class MoE(nn.Module):
         # The optional phase diagnostic snapshots process-group counters at the first
         # MoE boundary in each forward or backward phase. It reads existing counters
         # without issuing a collective.
-        _phase_diag.log_moe_ep_boundary_once()
+        _phase_diagnostics.log_moe_ep_boundary_once()
 
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
