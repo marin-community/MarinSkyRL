@@ -98,7 +98,17 @@ def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
                 num_nodes=1,
                 gpus_per_node=4,
                 gpu_variant="GB200",
-                role_plan={"colocate_all": True, "policy_gpus": 4, "inference_engines": 4},
+                role_plan={
+                    "colocate_all": True,
+                    "policy_num_nodes": 1,
+                    "policy_num_gpus_per_node": 4,
+                    "num_inference_engines": 4,
+                    "inference_engine_tensor_parallel_size": 1,
+                    "train_batch_size": 16,
+                    "policy_mini_batch_size": 16,
+                    "micro_train_batch_size_per_gpu": 1,
+                    "n_samples_per_prompt": 4,
+                },
             ),
             output=SkyRLOutputPaths(
                 checkpoint_root=(output / "checkpoints").as_uri(),
@@ -166,6 +176,10 @@ def test_launcher_resolves_data_entries_below_staged_source_root(tmp_path: Path)
     argv = _launcher_argv(envelope, "config.yaml")
 
     assert json.loads(argv[argv.index("--train-data") + 1]) == ["/tmp/iceball-gsm8k/train.parquet"]
+    overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
+    assert "++trainer.placement.policy_num_gpus_per_node=4" in overrides
+    assert "++generator.num_inference_engines=4" in overrides
+    assert "++trainer.train_batch_size=16" in overrides
 
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:

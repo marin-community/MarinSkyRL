@@ -267,6 +267,32 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
     request = envelope.request
     execution = envelope.execution
     data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
+    role_plan = request.topology.role_plan
+    required_role_fields = {
+        "colocate_all",
+        "policy_num_nodes",
+        "policy_num_gpus_per_node",
+        "num_inference_engines",
+        "inference_engine_tensor_parallel_size",
+        "train_batch_size",
+        "policy_mini_batch_size",
+        "micro_train_batch_size_per_gpu",
+        "n_samples_per_prompt",
+    }
+    missing_role_fields = required_role_fields - set(role_plan)
+    if missing_role_fields:
+        raise ValueError(f"SkyRL role plan is missing fields: {sorted(missing_role_fields)}")
+    role_overrides = (
+        f"++trainer.placement.colocate_all={str(role_plan['colocate_all']).lower()}",
+        f"++trainer.placement.policy_num_nodes={role_plan['policy_num_nodes']}",
+        f"++trainer.placement.policy_num_gpus_per_node={role_plan['policy_num_gpus_per_node']}",
+        f"++generator.num_inference_engines={role_plan['num_inference_engines']}",
+        f"++generator.inference_engine_tensor_parallel_size={role_plan['inference_engine_tensor_parallel_size']}",
+        f"++trainer.train_batch_size={role_plan['train_batch_size']}",
+        f"++trainer.policy_mini_batch_size={role_plan['policy_mini_batch_size']}",
+        f"++trainer.micro_train_batch_size_per_gpu={role_plan['micro_train_batch_size_per_gpu']}",
+        f"++generator.n_samples_per_prompt={role_plan['n_samples_per_prompt']}",
+    )
     argv = [
         "--rl-config",
         config_path,
@@ -311,6 +337,8 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
         "--skyrl-override",
         f"++seed={request.seed}",
     ]
+    for override in role_overrides:
+        argv.extend(["--skyrl-override", override])
     if execution.target_cluster:
         argv.extend(["--target-cluster", execution.target_cluster])
     if execution.parent_cluster_config:
