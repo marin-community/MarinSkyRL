@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -72,7 +73,7 @@ class TinyMoEBlock(torch.nn.Module):
             ),
             returns_tuple=False,
         )
-        self._record_boundary = None
+        self._record_boundary: Callable[[str], None] | None = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         phase = "recompute" if torch.is_grad_enabled() else "original"
@@ -215,7 +216,7 @@ def _finish_local_schedule(
 
 
 def _compare_rank_schedules(schedule: RankCollectiveSchedule, world_size: int) -> None:
-    schedules = [None] * world_size
+    schedules = [schedule for _ in range(world_size)]
     dist.all_gather_object(schedules, schedule)
     assert_collective_schedules_match(schedules, "ep")
     assert_collective_schedules_match(schedules, "fsdp")

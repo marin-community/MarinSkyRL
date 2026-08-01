@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from enum import StrEnum
+from typing import Protocol
 
 from torch.distributed import ProcessGroup
 from torch.distributed.tensor import DeviceMesh
+
+
+class CollectiveSequenceKind(StrEnum):
+    OPERATION = "operation"
+    BOUNDARY = "boundary"
+
+
+class CollectiveOperationType(Protocol):
+    name: str
+
+
+class CollectiveWorkInfo(Protocol):
+    op_type: CollectiveOperationType
+    seq: int
 
 
 @dataclass(frozen=True)
@@ -39,7 +55,7 @@ class CollectiveScheduleDivergence:
     fixed_coordinate: tuple[tuple[str, int], ...]
     reference_rank: int
     divergent_rank: int
-    sequence_kind: str
+    sequence_kind: CollectiveSequenceKind
     sequence_index: int
     expected: str
     actual: str
@@ -120,8 +136,16 @@ def find_first_collective_divergence(
         reference_boundaries = _normalized_boundaries(reference, group_dimension)
         for candidate in members[1:]:
             comparisons = (
-                ("operation", reference_operations, _normalized_events(candidate, group_dimension)),
-                ("boundary", reference_boundaries, _normalized_boundaries(candidate, group_dimension)),
+                (
+                    CollectiveSequenceKind.OPERATION,
+                    reference_operations,
+                    _normalized_events(candidate, group_dimension),
+                ),
+                (
+                    CollectiveSequenceKind.BOUNDARY,
+                    reference_boundaries,
+                    _normalized_boundaries(candidate, group_dimension),
+                ),
             )
             for sequence_kind, expected_sequence, actual_sequence in comparisons:
                 difference = _first_difference(expected_sequence, actual_sequence)
@@ -174,8 +198,8 @@ class NcclCollectiveRecorder:
         for name, group in self._groups.items():
             group._register_on_completion_hook(self._make_hook(name))
 
-    def _make_hook(self, group_name: str):
-        def record(work_info) -> None:
+    def _make_hook(self, group_name: str) -> Callable[[CollectiveWorkInfo], None]:
+        def record(work_info: CollectiveWorkInfo) -> None:
             try:
                 event = CollectiveEvent(work_info.op_type.name, int(work_info.seq))
                 with self._condition:
