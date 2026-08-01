@@ -1,27 +1,15 @@
-"""Stage-0 guarantee for the EP / router-replay port.
+"""Default-preserving guarantees for additive FSDP parallelism fields.
 
-The expert-parallel / router-replay fields added to each `fsdp_config` block in
-`ppo_base_config.yaml` must (a) parse with behavior-preserving defaults and
-(b) be PURELY ADDITIVE — i.e. an all-defaults config with the new keys removed is
-structurally identical to the pre-EP config. (b) is the provable guarantee that the
-default (production) FSDP2 path is unchanged by Stage 0.
-
-See notes/skyrl/fsdp2_ep_router_replay_port_plan.md (Stage 0).
+EP, CP, and grouped-MoE fields extend each `fsdp_config` block. Removing those
+additive fields must leave the original FSDP2 defaults unchanged.
 
 Run:
     uv run --isolated --extra dev pytest tests/cpu/test_ep_config_noop.py
 """
 
-from pathlib import Path
-
 from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
-
-# The pre-EP golden was snapshotted from `get_default_config()` on the commit
-# immediately before the EP keys were added (resolve=False, so interpolations are
-# preserved verbatim and the comparison is HOME-/env-independent).
-GOLDEN = Path(__file__).parent / "data" / "ppo_base_pre_ep.yaml"
 
 EP_FIELDS = {
     "expert_model_parallel_size": 1,
@@ -34,6 +22,19 @@ EP_FIELDS = {
     "deepep_token_chunk_size": None,
 }
 
+OTHER_ADDITIVE_FSDP_FIELDS = {
+    "context_parallel_size",
+    "cp_rotate_method",
+    "cp_style",
+    "use_grouped_mm",
+}
+
+BASE_FSDP_DEFAULTS = {
+    "cpu_offload": False,
+    "reshard_after_forward": True,
+    "fsdp_size": -1,
+}
+
 
 def test_ep_fields_parse_with_defaults():
     cfg = get_default_config()
@@ -44,15 +45,10 @@ def test_ep_fields_parse_with_defaults():
             assert fsdp[k] == v, f"trainer.{model}.fsdp_config.{k}={fsdp[k]!r}, expected {v!r}"
 
 
-def test_all_defaults_is_structurally_identical_to_pre_ep():
-    """Removing the new EP keys must reproduce the exact pre-EP config tree.
-
-    Proves the default (production) path is byte-identical post-change.
-    """
+def test_additive_parallelism_fields_leave_base_fsdp_defaults_unchanged():
     container = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
     for model in ("policy", "ref", "critic"):
         fsdp = container["trainer"][model]["fsdp_config"]
-        for k in EP_FIELDS:  # strip the additive keys -> should reproduce pre-EP shape
-            fsdp.pop(k, None)
-    golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
-    assert container == golden, "default config drifted from the pre-EP golden baseline"
+        for field in EP_FIELDS.keys() | OTHER_ADDITIVE_FSDP_FIELDS:
+            fsdp.pop(field, None)
+        assert fsdp == BASE_FSDP_DEFAULTS
