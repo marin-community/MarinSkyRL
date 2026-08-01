@@ -25,7 +25,7 @@ except ImportError:
     from torch.distributed._tensor import DTensor
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, GrugMoeExperts
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -416,6 +416,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 annotation = torch.profiler.record_function(f"grug::{name}")
                 annotation.__enter__()
             self._grug_benchmark_open_phase = (name, event, annotation)
+            self._grug_benchmark_parent_phase = name
             return
         if action != "end":
             raise ValueError(f"unknown Grug benchmark phase action: {action}")
@@ -428,6 +429,87 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if opened[2] is not None:
             opened[2].__exit__(None, None, None)
         self._grug_benchmark_open_phase = None
+        self._grug_benchmark_parent_phase = None
+
+    def _grug_benchmark_install_expert_hooks(self):
+        """Time disjoint eager routed-expert spans on the current CUDA stream.
+
+        Forward hooks run only inside the outer model-forward phase. During
+        gradient-checkpoint recompute the outer phase is ``matched_backward``;
+        those forward hooks are deliberately ignored because the enclosing
+        module-backward hook already includes recompute. This makes the two
+        reported categories nonoverlapping.
+        """
+
+        modules = [module for module in self.model.modules() if isinstance(module, GrugMoeExperts)]
+        if not modules:
+            raise RuntimeError("expert attribution found no GrugMoeExperts modules")
+        self._grug_benchmark_expert_events = {"forward": [], "backward": []}
+        self._grug_benchmark_open_expert_span = None
+
+        def begin(kind: str):
+            parent = getattr(self, "_grug_benchmark_parent_phase", None)
+            expected = "matched_model_forward" if kind == "forward" else "matched_backward"
+            if parent != expected:
+                return
+            if self._grug_benchmark_open_expert_span is not None:
+                raise RuntimeError(
+                    f"nested Grug expert attribution spans: {self._grug_benchmark_open_expert_span}, {kind}"
+                )
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            self._grug_benchmark_open_expert_span = (kind, event)
+
+        def end(kind: str):
+            parent = getattr(self, "_grug_benchmark_parent_phase", None)
+            expected = "matched_model_forward" if kind == "forward" else "matched_backward"
+            if parent != expected:
+                return
+            opened = self._grug_benchmark_open_expert_span
+            if opened is None or opened[0] != kind:
+                raise RuntimeError(f"Grug expert attribution span mismatch: open={opened}, closing={kind}")
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            self._grug_benchmark_expert_events[kind].append((opened[1], event))
+            self._grug_benchmark_open_expert_span = None
+
+        handles = []
+        for module in modules:
+            handles.extend(
+                (
+                    module.register_forward_pre_hook(lambda _module, _args: begin("forward")),
+                    module.register_forward_hook(lambda _module, _args, _output: end("forward")),
+                    module.register_full_backward_pre_hook(lambda _module, _grad_output: begin("backward")),
+                    module.register_full_backward_hook(
+                        lambda _module, _grad_input, _grad_output: end("backward")
+                    ),
+                )
+            )
+        return handles, len(modules)
+
+    def _grug_benchmark_finish_expert_hooks(self, handles, module_count: int):
+        for handle in handles:
+            handle.remove()
+        if self._grug_benchmark_open_expert_span is not None:
+            raise RuntimeError(f"unclosed Grug expert attribution span: {self._grug_benchmark_open_expert_span[0]}")
+        events = self._grug_benchmark_expert_events
+        self._grug_benchmark_expert_events = None
+        phase_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in spans) / 1000.0
+            for name, spans in events.items()
+        }
+        call_counts = {name: len(spans) for name, spans in events.items()}
+        if any(count == 0 for count in call_counts.values()):
+            raise RuntimeError(f"expert attribution missed a required phase: {call_counts}")
+        return {
+            "module_count": module_count,
+            "phase_seconds": phase_seconds,
+            "call_counts": call_counts,
+            "boundary": (
+                "CUDA-stream time inside GrugMoeExperts initial forwards plus full module backward spans; "
+                "backward spans include checkpoint recompute; layer-level FSDP communication is excluded"
+            ),
+        }
 
     def _grug_benchmark_start_profile(self, enabled: bool):
         """Start one rank-zero profiler for a bounded, non-headline run."""
@@ -822,14 +904,19 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             "profile_artifact_gzip": profile_artifact_gzip,
         }
 
-    def grug_benchmark_run_staged_matched_ce(self, profile: bool = False):
+    def grug_benchmark_run_staged_matched_ce(self, profile: bool = False, expert_attribution: bool = False):
         """Time the common fixed-replay CE forward and backward, without Adam."""
 
         if not hasattr(self, "_grug_benchmark_batch"):
             raise RuntimeError("call grug_benchmark_stage_batch before the timed update")
         self._grug_benchmark_phase_events = {}
         self._grug_benchmark_open_phase = None
+        self._grug_benchmark_parent_phase = None
         profiler = self._grug_benchmark_start_profile(profile)
+        expert_handles = []
+        expert_module_count = 0
+        if expert_attribution:
+            expert_handles, expert_module_count = self._grug_benchmark_install_expert_hooks()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
         if torch.distributed.is_initialized():
@@ -849,6 +936,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             for name, spans in self._grug_benchmark_phase_events.items()
         }
         self._grug_benchmark_phase_events = None
+        expert_evidence = (
+            self._grug_benchmark_finish_expert_hooks(expert_handles, expert_module_count)
+            if expert_attribution
+            else None
+        )
         profile_artifact_gzip = self._grug_benchmark_finish_profile(profiler)
         peak_allocated_bytes = int(torch.cuda.max_memory_allocated())
         peak_reserved_bytes = int(torch.cuda.max_memory_reserved())
@@ -875,6 +967,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             "gradient_tensors": gradient_tensors,
             "gradient_numel": gradient_numel,
             "nonfinite_gradient_tensors": nonfinite_gradient_tensors,
+            "expert_attribution": expert_evidence,
             "peak_allocated_bytes": peak_allocated_bytes,
             "peak_reserved_bytes": peak_reserved_bytes,
             "allocated_bytes": int(torch.cuda.memory_allocated()),

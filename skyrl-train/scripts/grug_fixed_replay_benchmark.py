@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--result-s3-uri", required=True)
     parser.add_argument("--sample", type=int, required=True)
     parser.add_argument("--profile-s3-uri")
+    parser.add_argument("--expert-attribution", action="store_true")
     parser.add_argument("--pg-timeout-seconds", type=int, default=900)
     return parser.parse_args()
 
@@ -341,6 +342,8 @@ def main() -> None:
     args = parse_args()
     if args.profile_s3_uri is not None and args.mode != "preflight":
         raise ValueError("profiling is restricted to bounded preflight runs")
+    if args.expert_attribution and args.objective != "matched_ce":
+        raise ValueError("expert attribution is defined only for the matched_ce boundary")
     world_size = 8 if args.mode == "preflight" else 32
     client = s3_client()
     with tempfile.TemporaryDirectory(prefix="grug-fixed-replay-") as work:
@@ -433,11 +436,14 @@ def main() -> None:
                 if args.objective == "operational"
                 else "grug_benchmark_run_staged_matched_ce"
             )
+            timed_args = [args.profile_s3_uri is not None]
+            if args.objective == "matched_ce":
+                timed_args.append(args.expert_attribution)
             timed = ray.get(
                 policy.async_run_ray_method(
                     "pass_through",
                     timed_method,
-                    args.profile_s3_uri is not None,
+                    *timed_args,
                 )
             )
             rpc_elapsed = time.perf_counter() - rpc_started
@@ -492,6 +498,12 @@ def main() -> None:
                         raise RuntimeError(f"rank produced no matched gradients: {item}")
                     if item["nonfinite_gradient_tensors"] != 0:
                         raise RuntimeError(f"rank produced non-finite matched gradients: {item}")
+                    if args.expert_attribution:
+                        evidence = item["expert_attribution"]
+                        if evidence is None or evidence["module_count"] != 26:
+                            raise RuntimeError(f"rank did not instrument all 26 expert modules: {item}")
+                        if evidence["call_counts"] != {"forward": 26 * expected_microbatches, "backward": 26 * expected_microbatches}:
+                            raise RuntimeError(f"rank returned unexpected expert call counts: {item}")
 
             elapsed_values = [item["elapsed_seconds"] for item in timed]
             synchronized_wall = max(elapsed_values)
@@ -528,6 +540,26 @@ def main() -> None:
                 "peak_allocated_bytes_max": max(item["peak_allocated_bytes"] for item in timed),
                 "peak_reserved_bytes_max": max(item["peak_reserved_bytes"] for item in timed),
             }
+            if args.expert_attribution:
+                expert_phase_seconds = critical["expert_attribution"]["phase_seconds"]
+                expert_seconds = sum(expert_phase_seconds.values())
+                expert_residual = synchronized_wall - expert_seconds
+                if expert_residual < 0:
+                    raise RuntimeError(
+                        f"expert spans overlap or exceed synchronized wall: expert={expert_seconds}, wall={synchronized_wall}"
+                    )
+                metrics.update(
+                    {
+                        "critical_rank_expert_seconds": expert_seconds,
+                        "critical_rank_expert_phase_seconds": expert_phase_seconds,
+                        "critical_rank_nonexpert_seconds": expert_residual,
+                        "critical_rank_expert_fraction": expert_seconds / synchronized_wall,
+                        "expert_partition_definition": (
+                            "synchronized wall partitions into routed-expert CUDA-stream spans on the critical rank "
+                            "and a nonnegative remainder containing every other operation, communication, and idle gap"
+                        ),
+                    }
+                )
             if args.objective == "matched_ce":
                 timed_loss_tokens = sum(item["local_loss_tokens"] for item in timed)
                 if timed_loss_tokens != global_loss_tokens or timed_loss_tokens != loss_tokens:
@@ -565,6 +597,7 @@ def main() -> None:
                 "timed_workers": timed,
                 "post_step_finite_state": post_step_state,
                 "profile_in_timed_sample": args.profile_s3_uri is not None,
+                "expert_attribution_in_timed_sample": args.expert_attribution,
                 "profile_artifacts": profile_artifacts,
                 "headline_eligible": args.profile_s3_uri is None,
                 "metrics": metrics,
