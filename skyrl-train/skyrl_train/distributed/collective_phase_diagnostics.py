@@ -10,7 +10,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from typing import Protocol, runtime_checkable
+from enum import StrEnum
+from typing import Protocol
 
 import torch.distributed as dist
 from loguru import logger
@@ -35,14 +36,23 @@ class DeviceMeshLike(Protocol):
     def get_group(self, name: str) -> ProcessGroupLike: ...
 
 
-@runtime_checkable
-class DeviceMeshStrategy(Protocol):
-    device_mesh: DeviceMeshLike | None
+class CollectiveRegionKind(StrEnum):
+    POLICY_TRAINING_STEP = "policy_training_step"
+    POLICY_INFERENCE_FORWARD = "policy_inference_forward"
 
 
-@runtime_checkable
-class DeviceMeshWorker(Protocol):
-    strategy: DeviceMeshStrategy
+class CollectivePhase(StrEnum):
+    TRAINING_STEP_ENTER = "training_step_enter"
+    MODEL_FORWARD_ENTER = "model_forward_enter"
+    MODEL_FORWARD_EXIT = "model_forward_exit"
+    BACKWARD_ENTER = "backward_enter"
+    BACKWARD_EXIT = "backward_exit"
+    TRAINING_STEP_EXIT = "training_step_exit"
+    FORWARD_ENTER = "forward_enter"
+    FORWARD_IMPL_ENTER = "forward_impl_enter"
+    MOE_EP_A2A_FIRST = "moe_ep_a2a_first"
+    FORWARD_IMPL_EXIT = "forward_impl_exit"
+    FORWARD_EXIT = "forward_exit"
 
 
 @dataclass(frozen=True)
@@ -63,9 +73,9 @@ class MeshCollectiveSnapshot:
 class CollectivePhaseRecord:
     region_id: int
     event_index: int
-    kind: str
+    kind: CollectiveRegionKind
     rank: int
-    phase: str
+    phase: CollectivePhase
     metadata: CollectiveRegionMetadata
     snapshot: MeshCollectiveSnapshot
 
@@ -73,7 +83,7 @@ class CollectivePhaseRecord:
 @dataclass
 class _RegionContext:
     region_id: int
-    kind: str
+    kind: CollectiveRegionKind
     rank: int
     metadata: CollectiveRegionMetadata
     device_mesh: DeviceMeshLike
@@ -86,18 +96,6 @@ _region: ContextVar[_RegionContext | None] = ContextVar("collective_phase_region
 
 def enabled() -> bool:
     return os.environ.get(_ENV, "0") == "1"
-
-
-def diagnostic_device_mesh(worker: DeviceMeshWorker) -> DeviceMeshLike | None:
-    """Return a worker's strategy mesh when diagnostics are enabled."""
-    if not enabled():
-        return None
-    if not isinstance(worker, DeviceMeshWorker):
-        raise ValueError("enabled collective phase diagnostics require a worker with a strategy")
-    strategy = worker.strategy
-    if not isinstance(strategy, DeviceMeshStrategy) or strategy.device_mesh is None:
-        raise ValueError("enabled collective phase diagnostics require a strategy with a device mesh")
-    return strategy.device_mesh
 
 
 def _default_process_group() -> ProcessGroupLike:
@@ -126,7 +124,7 @@ def capture_mesh_snapshot(
 def region(
     device_mesh: DeviceMeshLike | None,
     *,
-    kind: str,
+    kind: CollectiveRegionKind,
     rank: int,
     metadata: CollectiveRegionMetadata | None = None,
 ) -> Iterator[int | None]:
@@ -153,7 +151,7 @@ def region(
         _region.reset(token)
 
 
-def _capture_record(context: _RegionContext, phase: str) -> CollectivePhaseRecord:
+def _capture_record(context: _RegionContext, phase: CollectivePhase) -> CollectivePhaseRecord:
     snapshot = capture_mesh_snapshot(context.device_mesh)
     event_index = context.next_event_index
     context.next_event_index += 1
@@ -174,7 +172,7 @@ def _active_region() -> _RegionContext | None:
     return _region.get()
 
 
-def _log_phase(context: _RegionContext, phase: str) -> CollectivePhaseRecord | None:
+def _log_phase(context: _RegionContext, phase: CollectivePhase) -> CollectivePhaseRecord | None:
     try:
         record = _capture_record(context, phase)
         payload = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
@@ -187,7 +185,7 @@ def _log_phase(context: _RegionContext, phase: str) -> CollectivePhaseRecord | N
         return None
 
 
-def log_phase(phase: str) -> CollectivePhaseRecord | None:
+def log_phase(phase: CollectivePhase) -> CollectivePhaseRecord | None:
     """Log counters, or return ``None`` when disabled, unscoped, or capture fails."""
     context = _active_region()
     if context is None:
@@ -195,7 +193,7 @@ def log_phase(phase: str) -> CollectivePhaseRecord | None:
     return _log_phase(context, phase)
 
 
-def start_phase(phase: str) -> CollectivePhaseRecord | None:
+def start_phase(phase: CollectivePhase) -> CollectivePhaseRecord | None:
     """Start a phase, reset its first-MoE guard, and log its entry."""
     context = _active_region()
     if context is None:
@@ -210,4 +208,4 @@ def log_moe_ep_boundary_once() -> CollectivePhaseRecord | None:
     if context is None or context.moe_boundary_logged:
         return None
     context.moe_boundary_logged = True
-    return _log_phase(context, "moe_ep_a2a_first")
+    return _log_phase(context, CollectivePhase.MOE_EP_A2A_FIRST)

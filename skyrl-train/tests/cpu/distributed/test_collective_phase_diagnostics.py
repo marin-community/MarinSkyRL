@@ -38,19 +38,21 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
 
     with collective_phase_diagnostics.region(
         mesh,
-        kind="policy_training_step",
+        kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
         rank=2,
         metadata=collective_phase_diagnostics.CollectiveRegionMetadata(global_step=3, local_step=7),
     ) as region_id:
         messages: list[str] = []
         monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
-        record = collective_phase_diagnostics.log_phase("model_forward_enter")
+        record = collective_phase_diagnostics.log_phase(
+            collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER
+        )
 
         assert record is not None
         assert record.region_id == region_id
-        assert record.kind == "policy_training_step"
+        assert record.kind is collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP
         assert record.rank == 2
-        assert record.phase == "model_forward_enter"
+        assert record.phase is collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER
         assert record.metadata == collective_phase_diagnostics.CollectiveRegionMetadata(global_step=3, local_step=7)
         assert record.snapshot.mesh_dim_names == ("fsdp", "ep")
         assert record.snapshot.mesh_shape == (2, 2)
@@ -62,7 +64,7 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         assert payload["metadata"] == {"global_step": 3, "local_step": 7}
         assert payload["snapshot"]["sequence_numbers"] == {"world": 31, "fsdp": 17, "ep": 23}
 
-    assert collective_phase_diagnostics.log_phase("stale_phase") is None
+    assert collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.FORWARD_EXIT) is None
 
 
 def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkeypatch):
@@ -73,15 +75,19 @@ def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkey
 
     messages: list[str] = []
     monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
-    with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0) as region_id:
-        collective_phase_diagnostics.start_phase("model_forward_enter")
+    with collective_phase_diagnostics.region(
+        mesh,
+        kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+        rank=0,
+    ) as region_id:
+        collective_phase_diagnostics.start_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
 
         async def record_forward_boundary() -> None:
             await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
             await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
 
         asyncio.run(record_forward_boundary())
-        collective_phase_diagnostics.start_phase("backward_enter")
+        collective_phase_diagnostics.start_phase(collective_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
         collective_phase_diagnostics.log_moe_ep_boundary_once()
         collective_phase_diagnostics.log_moe_ep_boundary_once()
 
@@ -106,9 +112,16 @@ def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
 
     messages: list[str] = []
     monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
-    with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0) as region_id:
+    with collective_phase_diagnostics.region(
+        mesh,
+        kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+        rank=0,
+    ) as region_id:
         assert region_id is None
-        assert collective_phase_diagnostics.log_phase("model_forward_enter") is None
+        assert (
+            collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
+            is None
+        )
         assert collective_phase_diagnostics.log_moe_ep_boundary_once() is None
 
     assert [world.reads, fsdp.reads, ep.reads] == [0, 0, 0]
@@ -121,5 +134,11 @@ def test_capture_failures_do_not_interrupt_training(monkeypatch):
     monkeypatch.setattr(mesh, "get_coordinate", lambda: (_ for _ in ()).throw(RuntimeError("coordinate lost")))
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: FakeProcessGroup(1))
 
-    with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0):
-        assert collective_phase_diagnostics.log_phase("backward_enter") is None
+    with collective_phase_diagnostics.region(
+        mesh,
+        kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+        rank=0,
+    ):
+        assert (
+            collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.BACKWARD_ENTER) is None
+        )

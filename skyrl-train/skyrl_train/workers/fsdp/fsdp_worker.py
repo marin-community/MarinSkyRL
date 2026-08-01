@@ -975,12 +975,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        _phase_diagnostics.start_phase("forward_impl_enter")
+        _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.FORWARD_IMPL_ENTER)
         output = super().forward(data)
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
-        _phase_diagnostics.log_phase("forward_impl_exit")
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.FORWARD_IMPL_EXIT)
         return output
 
     async def forward(
@@ -1046,13 +1046,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
         metadata = data.metadata or {}
         diagnostic_metadata = _phase_diagnostics.CollectiveRegionMetadata(global_step=metadata.get("global_step"))
+        diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
         with _phase_diagnostics.region(
-            _phase_diagnostics.diagnostic_device_mesh(self),
-            kind="policy_inference_forward",
+            diagnostic_mesh,
+            kind=_phase_diagnostics.CollectiveRegionKind.POLICY_INFERENCE_FORWARD,
             rank=self._rank,
             metadata=diagnostic_metadata,
         ):
-            _phase_diagnostics.log_phase("forward_enter")
+            _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.FORWARD_ENTER)
             try:
                 if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
                     return self._forward_impl(data)
@@ -1063,7 +1064,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 # unshard collective cannot re-occupy the loop (head-of-line-block a peer).
                 return await asyncio.to_thread(self._forward_impl, data)
             finally:
-                _phase_diagnostics.log_phase("forward_exit")
+                _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.FORWARD_EXIT)
 
 
 class FSDPCriticWorkerBase(CriticWorkerBase):
