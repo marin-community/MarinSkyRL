@@ -39,7 +39,8 @@ cross-thread region, or training-phase boundaries. Four focused CPU contracts
 now pass for structured capture, cross-thread event ordering and phase resets,
 disabled behavior, explicit region cleanup, and capture failure. Adjacent
 policy-worker and launcher tests remain green. The complete trainer CPU suite
-passes with 908 tests and 19 skips.
+passes with 905 tests and 19 skips; the Iris launcher suite passes with 137
+tests and one skip.
 
 ## Future work
 

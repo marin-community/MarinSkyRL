@@ -174,20 +174,17 @@ def _capture_record(context: _RegionContext, phase: str) -> CollectivePhaseRecor
     )
 
 
-def format_log_record(record: CollectivePhaseRecord) -> str:
-    return LOG_PREFIX + json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
-
-
-def log_phase(phase: str) -> CollectivePhaseRecord | None:
-    """Log counters, or return ``None`` when disabled, unscoped, or capture fails."""
+def _active_region() -> _RegionContext | None:
     if not enabled():
         return None
-    context = _region.get()
-    if context is None:
-        return None
+    return _region.get()
+
+
+def _log_phase(context: _RegionContext, phase: str) -> CollectivePhaseRecord | None:
     try:
         record = _capture_record(context, phase)
-        logger.info(format_log_record(record))
+        payload = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
+        logger.info(LOG_PREFIX + payload)
         return record
     except Exception as error:
         # This opt-in diagnostic must not replace the original training failure.
@@ -196,23 +193,27 @@ def log_phase(phase: str) -> CollectivePhaseRecord | None:
         return None
 
 
+def log_phase(phase: str) -> CollectivePhaseRecord | None:
+    """Log counters, or return ``None`` when disabled, unscoped, or capture fails."""
+    context = _active_region()
+    if context is None:
+        return None
+    return _log_phase(context, phase)
+
+
 def start_phase(phase: str) -> CollectivePhaseRecord | None:
     """Start a phase, reset its first-MoE guard, and log its entry."""
-    if not enabled():
-        return None
-    context = _region.get()
+    context = _active_region()
     if context is None:
         return None
     context.moe_boundary_logged = False
-    return log_phase(phase)
+    return _log_phase(context, phase)
 
 
 def log_moe_ep_boundary_once() -> CollectivePhaseRecord | None:
     """Log the first MoE boundary, or return ``None`` when inactive or already logged."""
-    if not enabled():
-        return None
-    context = _region.get()
+    context = _active_region()
     if context is None or context.moe_boundary_logged:
         return None
     context.moe_boundary_logged = True
-    return log_phase("moe_ep_a2a_first")
+    return _log_phase(context, "moe_ep_a2a_first")
