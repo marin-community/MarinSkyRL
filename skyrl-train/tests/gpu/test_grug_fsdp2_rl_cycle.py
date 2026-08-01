@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import ray
 import torch
+from omegaconf import OmegaConf
 from ray.util.placement_group import placement_group
 from transformers import AutoConfig, AutoTokenizer
 
@@ -121,6 +122,7 @@ def _config(
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     if expert_model_parallel_size > 1:
         cfg.trainer.policy.optimizer_config.optimizer = "AdamW"
+        OmegaConf.update(cfg, "trainer.policy.optimizer_config.collect_optimizer_metrics", True, force_add=True)
         cfg.trainer.policy.optimizer_config.lr = 4.0e-3
         cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
         cfg.trainer.policy.optimizer_config.weight_decay = 1.0e-2
