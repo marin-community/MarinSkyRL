@@ -26,16 +26,17 @@ import torch.distributed as dist
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
+from tests.gpu.fault_injection.topology import REQUIRES_FOUR_CUDA_DEVICES, SKYRL_TRAIN_ROOT, WORLD_SIZE
 from tests.torchrun_process import (
     TorchrunGang,
     TorchrunResult,
     TorchrunTimeoutError,
+    disable_nccl_communicator_nonblocking,
     launch_torchrun,
     nccl_communicator_nonblocking_environment,
 )
 
 
-WORLD_SIZE = 4
 WARMUP_ROUNDS = 3
 EP_ALL_TO_ALL_VALUES = 128
 RANK_VALUE_STRIDE = 100
@@ -51,11 +52,6 @@ READY_SENTINEL_PREFIX = "ready-"
 ACTIVE_SENTINEL_PREFIX = "active-"
 CONTROL_DIRECTORY_ENV_VAR = "SKYRL_FAULT_CONTROL_DIR"
 COMMUNICATOR_NONBLOCKING_ENVIRONMENT = nccl_communicator_nonblocking_environment(COLLECTIVE_TIMEOUT_SECONDS)
-SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
-REQUIRES_FOUR_CUDA_DEVICES = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() < WORLD_SIZE,
-    reason=f"requires {WORLD_SIZE} CUDA devices",
-)
 
 
 class RunMode(StrEnum):
@@ -270,8 +266,7 @@ def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> TorchrunResul
     if communicator_mode is CommunicatorMode.NONBLOCKING:
         env.update(COMMUNICATOR_NONBLOCKING_ENVIRONMENT)
     else:
-        for variable in COMMUNICATOR_NONBLOCKING_ENVIRONMENT:
-            env.pop(variable, None)
+        disable_nccl_communicator_nonblocking(env)
     with launch_torchrun(
         script=Path(__file__).resolve(),
         arguments=("--worker", mode.value),

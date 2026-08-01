@@ -13,35 +13,27 @@ checkpointing, and one controlled rank delay at a model-layer boundary.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
-import torch
 
 from tests.collective_schedule_matrix import COLLECTIVE_SCHEDULE_CASES, CollectiveScheduleCase
+from tests.gpu.fault_injection.topology import REQUIRES_FOUR_CUDA_DEVICES, SKYRL_TRAIN_ROOT, WORLD_SIZE
 from tests.torchrun_process import (
-    NCCL_COMMUNICATOR_NONBLOCKING_VARIABLES,
     TorchrunResult,
     TorchrunTimeoutError,
+    disable_nccl_communicator_nonblocking,
     launch_torchrun,
 )
 
 
-WORLD_SIZE = 4
 RUN_TIMEOUT_SECONDS = 240
 REAP_TIMEOUT_SECONDS = 10
-SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 WORKER_PATH = SKYRL_TRAIN_ROOT / "tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py"
-REQUIRES_FOUR_CUDA_DEVICES = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() < WORLD_SIZE,
-    reason=f"requires {WORLD_SIZE} CUDA devices",
-)
 
 
 def _run_case(case: CollectiveScheduleCase) -> TorchrunResult:
     environment = os.environ.copy()
-    for variable in NCCL_COMMUNICATOR_NONBLOCKING_VARIABLES:
-        environment.pop(variable, None)
+    disable_nccl_communicator_nonblocking(environment)
     with launch_torchrun(
         script=WORKER_PATH,
         arguments=("--case", case.name),

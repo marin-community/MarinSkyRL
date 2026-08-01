@@ -7,25 +7,31 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 
-NCCL_COMMUNICATOR_NONBLOCKING_VARIABLES = (
-    "TORCH_NCCL_USE_COMM_NONBLOCKING",
-    "TORCH_NCCL_NONBLOCKING_TIMEOUT",
-)
+_NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT = {
+    "TORCH_NCCL_USE_COMM_NONBLOCKING": "1",
+    "TORCH_NCCL_NONBLOCKING_TIMEOUT": "",
+}
 
 
 def nccl_communicator_nonblocking_environment(timeout_seconds: float) -> dict[str, str]:
     """Return NCCL communicator-nonblocking settings for an explicit timeout."""
 
-    return {
-        "TORCH_NCCL_USE_COMM_NONBLOCKING": "1",
-        "TORCH_NCCL_NONBLOCKING_TIMEOUT": str(timeout_seconds),
-    }
+    environment = dict(_NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT)
+    environment["TORCH_NCCL_NONBLOCKING_TIMEOUT"] = str(timeout_seconds)
+    return environment
+
+
+def disable_nccl_communicator_nonblocking(environment: MutableMapping[str, str]) -> None:
+    """Remove communicator-nonblocking settings from a worker environment."""
+
+    for variable in _NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT:
+        environment.pop(variable, None)
 
 
 @dataclass(frozen=True)

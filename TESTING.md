@@ -5,28 +5,9 @@ This file defines MarinSkyRL's package commands and accelerator-test boundaries.
 
 ## Package suites
 
-MarinSkyRL has four independent Python packages and no root `uv` workspace. Run each package's tests from its
-own directory:
-
-```bash
-# Trainer
-(cd skyrl-train && uv sync --frozen --extra dev && uv run --frozen pytest tests/cpu/)
-
-# Environments
-(cd skyrl-gym && uv sync --frozen --extra dev && uv run --frozen pytest tests/)
-
-# JAX engine
-(cd skyrl-tx && uv run --extra tinker --extra dev pytest --forked -s tests)
-
-# Root infrastructure and Iris launcher
-uv run --no-project --with pytest --with pandas --with matplotlib --with tabulate pytest infra/tests/ -q
-uv run --no-project \
-  --with pytest --with pyyaml --with fsspec --with huggingface_hub --with universal-pathlib --with boto3 \
-  pytest cloud/iris/tests/ -q
-```
-
-The workflow files under `.github/workflows/` are authoritative for exact CI commands. Do not add a root
-workspace or run one package through another package's environment.
+Use the package-specific commands in [`AGENTS.md`](AGENTS.md#install-and-test). MarinSkyRL has no root `uv`
+workspace; run each package in its own environment. The workflow files under `.github/workflows/` are
+authoritative for exact CI commands.
 
 ## GPU suites
 
