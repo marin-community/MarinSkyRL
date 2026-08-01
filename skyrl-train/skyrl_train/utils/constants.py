@@ -31,6 +31,16 @@ def get_nccl_monitor_heartbeat_timeout(value: str | int | None = None) -> int:
     return timeout
 
 
+def nccl_communicator_timeout_environment(timeout_seconds: int) -> dict[str, str]:
+    """Build the NCCL communicator-level timeout environment."""
+    if timeout_seconds <= 0:
+        raise ValueError("NCCL communicator timeout must be positive")
+    return {
+        "TORCH_NCCL_USE_COMM_NONBLOCKING": "1",
+        "TORCH_NCCL_NONBLOCKING_TIMEOUT": str(timeout_seconds),
+    }
+
+
 SKYRL_WORKER_NCCL_TIMEOUT_IN_S = get_worker_nccl_timeout_s()
 """
 Timeout for initializing the NCCL process group for the worker, defaults to 30 minutes.

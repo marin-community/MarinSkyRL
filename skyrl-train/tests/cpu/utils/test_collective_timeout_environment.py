@@ -13,6 +13,8 @@ def test_runtime_environment_arms_independent_nccl_monitor(monkeypatch):
     assert env["TORCH_NCCL_ENABLE_MONITORING"] == "1"
     assert env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] == "1"
     assert env["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] == "300"
+    assert env["TORCH_NCCL_USE_COMM_NONBLOCKING"] == "1"
+    assert env["TORCH_NCCL_NONBLOCKING_TIMEOUT"] == "1800"
 
 
 def test_monitor_heartbeat_is_capped_by_collective_timeout(monkeypatch):
@@ -23,3 +25,4 @@ def test_monitor_heartbeat_is_capped_by_collective_timeout(monkeypatch):
     env = prepare_runtime_environment(example_dummy_config())
 
     assert env["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] == "30"
+    assert env["TORCH_NCCL_NONBLOCKING_TIMEOUT"] == "30"

@@ -25,6 +25,7 @@ from .constants import (
     DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
     get_nccl_monitor_heartbeat_timeout,
     get_worker_nccl_timeout_s,
+    nccl_communicator_timeout_environment,
 )
 from .logging_utils import format_exception_text
 
@@ -1146,6 +1147,10 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     except (TypeError, ValueError):
         _cfg_nccl_timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
     env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(_cfg_nccl_timeout)
+    # A rank can block in NCCL communicator setup before ProcessGroupNCCL has a
+    # WorkNCCL for its watchdog to inspect. Make those communicator calls
+    # abortable under the same deadline as ordinary collectives.
+    env_vars.update(nccl_communicator_timeout_environment(_cfg_nccl_timeout))
     _requested_heartbeat_timeout = get_nccl_monitor_heartbeat_timeout(
         os.environ.get("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC")
     )
