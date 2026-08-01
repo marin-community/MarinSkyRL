@@ -559,7 +559,7 @@ class GrugMoeAttention(nn.Module):
 
         batch, seq_len = attention_mask.shape
         valid = attention_mask.to(torch.bool)
-        unpadded_query, indices, cu_seqlens, max_seqlen, _ = flash_unpad_input(query, valid)
+        unpadded_query, indices, cu_seqlens, max_seqlen, *_ = flash_unpad_input(query, valid)
         unpadded_key = flash_index_first_axis(key.flatten(0, 1), indices)
         unpadded_value = flash_index_first_axis(value.flatten(0, 1), indices)
         unpadded_output = flash_attn_varlen_func(
