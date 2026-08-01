@@ -58,10 +58,6 @@ class PhaseTimings:
     skewed_arrival_seconds: float
 
 
-def _group_ranks(group: dist.ProcessGroup) -> tuple[int, ...]:
-    return tuple(dist.get_process_group_ranks(group))
-
-
 def _validate_mesh_placement(mesh: DeviceMesh) -> MeshPlacement:
     rank = dist.get_rank()
     local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
@@ -83,8 +79,8 @@ def _validate_mesh_placement(mesh: DeviceMesh) -> MeshPlacement:
             f"expected {EXPECTED_NODES} hosts with {GPUS_PER_NODE} ranks each, got {dict(host_counts)}"
         )
 
-    ep_ranks = _group_ranks(mesh["ep"].get_group())
-    fsdp_ranks = _group_ranks(mesh["fsdp"].get_group())
+    ep_ranks = tuple(dist.get_process_group_ranks(mesh["ep"].get_group()))
+    fsdp_ranks = tuple(dist.get_process_group_ranks(mesh["fsdp"].get_group()))
     coordinates = dict(zip(mesh.mesh_dim_names, mesh.get_coordinate(), strict=True))
     ep_hosts = {resolved_hostnames[group_rank] for group_rank in ep_ranks}
     fsdp_hosts = {resolved_hostnames[group_rank] for group_rank in fsdp_ranks}

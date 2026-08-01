@@ -49,6 +49,7 @@ from tests.torchrun_process import (
 
 WARMUP_ROUNDS = 3
 EP_ALL_TO_ALL_VALUES = 128
+FSDP_ALL_GATHER_VALUES = 2
 DIVERGENT_EP_RANKS = frozenset({0, 3})
 DIVERGENT_FSDP_RANKS = frozenset(range(WORLD_SIZE)) - DIVERGENT_EP_RANKS
 COLLECTIVE_TIMEOUT_SECONDS = 8
@@ -105,7 +106,7 @@ def _warm_ep_and_fsdp_communicators(
 ) -> None:
     for _ in range(WARMUP_ROUNDS):
         run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
-        run_verified_all_gather(fsdp, input_values_per_rank=2)
+        run_verified_all_gather(fsdp, input_values_per_rank=FSDP_ALL_GATHER_VALUES)
     dist.barrier()
     print(f"COMMUNICATOR_WARMUP_COMPLETED rank={ep.rank} rounds={WARMUP_ROUNDS}", flush=True)
 
@@ -153,7 +154,7 @@ def _worker(mode: RunMode) -> None:
         else:
             assert not set(fsdp.ranks).issubset(DIVERGENT_FSDP_RANKS)
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=fsdp-all-gather", flush=True)
-            run_verified_all_gather(fsdp, input_values_per_rank=2)
+            run_verified_all_gather(fsdp, input_values_per_rank=FSDP_ALL_GATHER_VALUES)
     elif mode is RunMode.SUBGROUP_NONARRIVAL:
         if rank == 0:
             assert ep is not None
