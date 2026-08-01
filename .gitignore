@@ -52,6 +52,7 @@ uv.lock
 
 # build directories
 /_build*
+/.git-worktrees/
 # gpu-rl prebuilt wheelhouse (fetched at build time, not committed)
 docker/wheelhouse/*.whl
 docker/wheelhouse/MANIFEST
