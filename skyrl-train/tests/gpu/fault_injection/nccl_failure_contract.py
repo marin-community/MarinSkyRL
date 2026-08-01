@@ -129,6 +129,8 @@ def _kill_and_reap_torchrun(process: subprocess.Popen[str]) -> bool:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # torchrun may finish between poll() and killpg(); wait() below
+            # still reaps its leader and records the teardown result.
             pass
     try:
         process.wait(timeout=REAP_TIMEOUT_SECONDS)
