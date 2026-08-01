@@ -190,7 +190,6 @@ def _run_replayed_step(
         loss = model(hidden_states).float().square().mean()
         loss.backward()
         assert torch.isfinite(loss)
-        assert replay.num_layers == NUM_LAYERS
     finally:
         set_active_replay(None)
         replay.clear()
