@@ -14,7 +14,7 @@ The historical mechanisms work as described, but can regress without failing cur
 
 Add behavior-level CPU contracts through the production entry points:
 
-- derive every worker's dispatch rank for the incident EP/CP topologies and verify one shared data shard per replication group;
+- derive every worker's dispatch rank for the 32-rank CP2/EP8 and 12-rank CP1/EP4 topologies and verify one shared data shard per replication group;
 - require the fully asynchronous training step to finish its drain before policy forward begins;
 - require the worker drain barrier and FSDP inference forward to move blocking work off the actor event-loop thread;
 - require decentralized router-replay training to synchronize CUDA and then enter the world barrier before touching the training loop.
