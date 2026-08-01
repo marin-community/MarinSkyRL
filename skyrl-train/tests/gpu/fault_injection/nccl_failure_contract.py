@@ -38,7 +38,6 @@ FAULT_TIMEOUT_SECONDS = 45
 REAP_TIMEOUT_SECONDS = 10
 CONTROL_POLL_SECONDS = 0.1
 START_SENTINEL = "start"
-WITHHELD_RELEASE_SENTINEL = "release-withheld-ranks"
 READY_SENTINEL_PREFIX = "ready-"
 ACTIVE_SENTINEL_PREFIX = "active-"
 CONTROL_DIRECTORY_ENV_VAR = "SKYRL_FAULT_CONTROL_DIR"
@@ -66,9 +65,9 @@ def _wait_for_sentinel(control_dir: Path, sentinel: str) -> None:
         time.sleep(CONTROL_POLL_SECONDS)
 
 
-def _hold_out(mode: FaultMode, rank: int, control_dir: Path) -> None:
+def _hold_out(mode: FaultMode, rank: int) -> None:
     print(f"FAULT_INJECTION_WITHHELD mode={mode.value} rank={rank}", flush=True)
-    _wait_for_sentinel(control_dir, WITHHELD_RELEASE_SENTINEL)
+    signal.pause()
 
 
 def _wait_for_peer_activity(control_dir: Path) -> None:
@@ -101,10 +100,10 @@ def _worker(mode: FaultMode) -> None:
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
             dist.all_reduce(torch.ones(1, device=device), group=subgroup)
         else:
-            _hold_out(mode, rank, control_dir)
+            _hold_out(mode, rank)
     elif mode is FaultMode.WORLD_NONARRIVAL:
         if rank == 0:
-            _hold_out(mode, rank, control_dir)
+            _hold_out(mode, rank)
         else:
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
             dist.all_reduce(torch.ones(1, device=device))
