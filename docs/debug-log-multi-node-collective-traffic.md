@@ -1,46 +1,29 @@
-# Debugging log for multi-node EP/FSDP traffic
+# Multi-node EP/FSDP collective traffic contract
 
-Build an opt-in GPU contract for the production-shaped four-node policy mesh. The
-test must prove that EP traffic is node-local and FSDP traffic crosses all four
-nodes before interpreting any collective result.
+The opt-in GPU worker exercises a four-node policy mesh with 16 ranks. It verifies
+the physical topology before interpreting collective results: every EP4 group must
+occupy one host, and every FSDP4 group must span four hosts.
 
-## Initial status
+## Failure contract
 
-The existing schedule tests use one four-GPU node. They validate collective
-ordering and bounded teardown, but their EP2/FSDP2 process groups cannot exercise
-the four-node path observed in the Jupiter incident. The incident directly sampled
-11 ranks in EP all-to-all and one rank in FSDP all-gather; the unsampled ranks do
-not justify a 15-to-1 claim.
+The worker verifies the contents of FSDP all-gather, reduce-scatter, and all-reduce
+payloads at 1, 8, and 32 MiB. It then runs 32 rounds that alternate those cross-node
+operations with node-local EP all-to-all. A final phase delays one member of every
+FSDP group by two seconds before another gather and reduce-scatter.
 
-## Hypothesis 1
+Any placement mismatch, corrupted payload, collective timeout, or nonzero torchrun
+agent exit fails the run. The worker applies a three-minute timeout to WORLD and
+device-mesh process groups. The enclosing cluster job must provide its own longer
+deadline because no controller process can reap torchrun agents on other nodes.
 
-A four-node worker can isolate the physical path without a full trainer by using
-the same `create_device_mesh` topology and real NCCL collectives. Hostname
-inventory makes the path an asserted precondition: EP4 must remain on one host,
-while FSDP4 must include four hosts.
+## Scope
 
-## Changes to make
+This contract isolates healthy NCCL traffic and bounded arrival skew. It does not
+inject permanent rank divergence, run the full policy model, set a performance
+threshold, or identify the cause of a production straggler. A pass establishes
+that the selected image and allocation can execute the measured topology and
+traffic patterns without corruption or a hang.
 
-Add a direct torchrun worker outside default pytest discovery. Exercise FSDP
-all-gather, reduce-scatter, and all-reduce at multiple payload sizes, interleave
-them with EP all-to-all, and add bounded arrival skew. Verify every payload and
-print one structured success marker. Document a generic four-node Slurm launch.
-
-## Results
-
-The first direct CLI check found that importing a helper from the repository's
-`tests` package depended on `PYTHONPATH`; installing `skyrl_train` alone does not
-make that package importable. The documented launcher now uses torchrun's
-`--module` mode from `skyrl-train/`, which makes the test utilities importable
-without duplicating their environment policy. The module imports and compiles
-from a clean environment.
-
-The collective schedule and device-mesh timeout CPU tests pass (4 tests). Ruff
-check and format pass. The behavioral result still requires a four-node,
-four-GPU-per-node allocation.
-
-## Future work
-
-- [ ] Run the exact branch revision on four GH200 nodes in the policy image.
-- [ ] Add an exact-topology divergence case only after the healthy traffic
-      contract distinguishes code failure from fabric or placement failure.
+Run the worker only through torchrun's module mode, as documented in
+`skyrl-train/tests/gpu/fault_injection/README.md`. Module mode keeps shared test
+utilities importable without depending on an ambient `PYTHONPATH`.
