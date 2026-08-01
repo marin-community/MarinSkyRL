@@ -33,12 +33,13 @@ For every optimizer window, each rank counts non-padding tokens and uses
 `q = max(1, floor(tokens * top_k / num_experts))`. Under EP, the repeated local
 batch is divided into deterministic virtual row shards, one per EP coordinate,
 so the observation has the same logical rank geometry as EP1. Routing and loss
-still use the full local batch. Each router retains only its per-expert top-q
-values of `unbiased_logit - biased_(K+1)th_logit`; concatenating and top-k
-reducing these candidates is exactly equivalent to retaining the full
-token-by-expert matrix. The q-th values are averaged across ranks. After a real
-optimizer step, the next persistent FP32 bias is `center(-beta)`. A skipped
-non-finite step discards the observation and preserves the previous bias.
+still use the full local batch. The per-rank optimizer-window row count must be
+divisible by the EP size. Each router retains only its per-expert top-q values
+of `unbiased_logit - biased_(K+1)th_logit`; concatenating and top-k reducing
+these candidates is exactly equivalent to retaining the full token-by-expert
+matrix. The q-th values are averaged across ranks. After a real optimizer step,
+the next persistent FP32 bias is `center(-beta)`. A skipped non-finite step
+discards the observation and preserves the previous bias.
 
 This padding exclusion is the RL adaptation of Levanter's fixed, padding-free
 batch geometry. The strict cross-framework fixture is padding-free.
