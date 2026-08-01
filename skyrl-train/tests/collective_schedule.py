@@ -53,7 +53,9 @@ def _group_key(schedule: RankCollectiveSchedule, group_dimension: str) -> tuple[
 
 
 def _normalized_events(schedule: RankCollectiveSchedule, group_dimension: str) -> tuple[str, ...]:
-    return tuple(event.operation for event in sorted(schedule.events[group_dimension], key=lambda event: event.sequence_number))
+    return tuple(
+        event.operation for event in sorted(schedule.events[group_dimension], key=lambda event: event.sequence_number)
+    )
 
 
 def _normalized_boundaries(
@@ -165,8 +167,7 @@ class NcclCollectiveRecorder:
     def _make_hook(self, group_name: str):
         def record(work_info) -> None:
             try:
-                operation = getattr(work_info.op_type, "name", str(work_info.op_type))
-                event = CollectiveEvent(str(operation), int(work_info.seq))
+                event = CollectiveEvent(work_info.op_type.name, int(work_info.seq))
                 with self._condition:
                     self._events[group_name].append(event)
                     self._condition.notify_all()

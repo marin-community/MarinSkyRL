@@ -171,7 +171,6 @@ def _install_schedule_recorder(model: TinyCheckpointedMoE, device_mesh: DeviceMe
 
 def _run_replayed_step(
     model: TinyCheckpointedMoE,
-    recorder: NcclCollectiveRecorder,
     fsdp_coordinate: int,
     device: torch.device,
 ) -> None:
@@ -249,7 +248,7 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
     model = _build_sharded_model(device, device_mesh)
     dist.barrier()
     recorder = _install_schedule_recorder(model, device_mesh)
-    _run_replayed_step(model, recorder, fsdp_coordinate, device)
+    _run_replayed_step(model, fsdp_coordinate, device)
     schedule = _finish_local_schedule(recorder, rank, device_mesh)
     _compare_rank_schedules(schedule, world_size)
 
