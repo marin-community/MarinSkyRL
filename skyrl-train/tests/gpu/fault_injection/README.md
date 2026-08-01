@@ -59,9 +59,9 @@ uv run --isolated --extra dev --extra ep \
 ```
 
 The six cases launch serially in fresh four-rank gangs. They compose the real TorchTitan EP hooks and FSDP2
-wrapping while varying live versus replayed routing, spread versus concentrated expert selection, reentrant
-activation checkpointing, and a two-second delay on rank 0 before layer 1. The delay case observes eventual
-completion and matching schedules; it does not assert a narrow runtime.
+wrapping while varying live versus replayed routing, spread versus concentrated expert selection, and reentrant
+activation checkpointing. The final case adds a two-second delay on rank 0 before layer 1; it observes eventual
+completion and matching schedules without asserting a narrow runtime.
 
 Every case must emit one `MODEL_COLLECTIVE_SCHEDULE_OK` record and exit zero within four minutes. A timeout kills
 and reaps only that case's subprocess group and reports its complete captured output. This matrix is opt-in and
