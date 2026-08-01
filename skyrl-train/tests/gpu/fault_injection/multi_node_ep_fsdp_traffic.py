@@ -50,8 +50,6 @@ class MeshPlacement:
     rank: int
     ep_coordinate: int
     fsdp_coordinate: int
-    ep_ranks: tuple[int, ...]
-    fsdp_ranks: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -100,8 +98,6 @@ def _validate_mesh_placement(mesh: DeviceMesh) -> MeshPlacement:
         rank,
         coordinates["ep"],
         coordinates["fsdp"],
-        ep_ranks,
-        fsdp_ranks,
     )
 
 

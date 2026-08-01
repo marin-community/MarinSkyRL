@@ -117,17 +117,13 @@ def _worker(mode: RunMode) -> None:
 
     init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
     device = torch.device("cuda", local_rank)
-    ep_group = None
-    fsdp_group = None
     ep = None
     fsdp = None
     if mode in (RunMode.EP_ALL_TO_ALL, RunMode.WARMED_PHASE_DIVERGENCE, RunMode.SUBGROUP_NONARRIVAL):
         mesh = create_device_mesh(WORLD_SIZE, fsdp_size=2, ep_size=2)
-        ep_group = mesh["ep"].get_group()
-        ep = CollectiveGroup.from_process_group(ep_group, rank, device)
+        ep = CollectiveGroup.from_process_group(mesh["ep"].get_group(), rank, device)
         if mode is RunMode.WARMED_PHASE_DIVERGENCE:
-            fsdp_group = mesh["fsdp"].get_group()
-            fsdp = CollectiveGroup.from_process_group(fsdp_group, rank, device)
+            fsdp = CollectiveGroup.from_process_group(mesh["fsdp"].get_group(), rank, device)
             _warm_ep_and_fsdp_communicators(
                 ep=ep,
                 fsdp=fsdp,
@@ -142,32 +138,27 @@ def _worker(mode: RunMode) -> None:
     _wait_for_start(control_dir)
 
     if mode is RunMode.EP_ALL_TO_ALL:
-        assert ep_group is not None
         assert ep is not None
         run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
         print(f"EP_ALL_TO_ALL_COMPLETED rank={rank}", flush=True)
         dist.destroy_process_group()
         return
     if mode is RunMode.WARMED_PHASE_DIVERGENCE:
-        assert ep_group is not None
-        assert fsdp_group is not None
         assert ep is not None
         assert fsdp is not None
         if rank in DIVERGENT_EP_RANKS:
-            group_ranks = dist.get_process_group_ranks(ep_group)
-            assert not set(group_ranks).issubset(DIVERGENT_EP_RANKS)
+            assert not set(ep.ranks).issubset(DIVERGENT_EP_RANKS)
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=ep-all-to-all", flush=True)
             run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
         else:
-            group_ranks = dist.get_process_group_ranks(fsdp_group)
-            assert not set(group_ranks).issubset(DIVERGENT_FSDP_RANKS)
+            assert not set(fsdp.ranks).issubset(DIVERGENT_FSDP_RANKS)
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=fsdp-all-gather", flush=True)
             run_verified_all_gather(fsdp, total_values=2)
     elif mode is RunMode.SUBGROUP_NONARRIVAL:
         if rank == 0:
-            assert ep_group is not None
+            assert ep is not None
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
-            dist.all_reduce(torch.ones(1, device=device), group=ep_group)
+            dist.all_reduce(torch.ones(1, device=device), group=ep.process_group)
         else:
             _hold_out(mode, rank)
     elif mode is RunMode.WORLD_NONARRIVAL:
