@@ -17,6 +17,7 @@ import socket
 import time
 from collections import Counter
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -24,6 +25,7 @@ from torch.distributed.tensor import DeviceMesh
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from tests.gpu.fault_injection.collective_payloads import run_verified_all_to_all
 from tests.torchrun_process import disable_nccl_communicator_nonblocking
 
 
@@ -36,7 +38,6 @@ PROCESS_GROUP_TIMEOUT_SECONDS = 180
 DEFAULT_PAYLOAD_MIB = (1, 8, 32)
 DEFAULT_CONTENTION_ROUNDS = 32
 DEFAULT_ARRIVAL_SKEW_SECONDS = 2.0
-RANK_VALUE_STRIDE = 100
 SUCCESS_MARKER = "MULTI_NODE_EP_FSDP_TRAFFIC_OK"
 
 
@@ -168,33 +169,6 @@ def _fsdp_all_reduce(
     _assert_constant(values, float(sum(collective.ranks)), f"FSDP all-reduce rank {collective.rank}")
 
 
-def _ep_all_to_all(
-    collective: CollectiveGroup,
-    payload_mib: int,
-) -> None:
-    numel = _numel_for_mib(payload_mib, torch.float32)
-    values_per_peer = max(1, numel // len(collective.ranks))
-    group_rank = collective.ranks.index(collective.rank)
-    chunks = [
-        torch.full(
-            (values_per_peer,),
-            float(collective.rank * RANK_VALUE_STRIDE + destination_index),
-            device=collective.device,
-        )
-        for destination_index in range(len(collective.ranks))
-    ]
-    input_values = torch.cat(chunks)
-    output_values = torch.empty_like(input_values)
-    dist.all_to_all_single(output_values, input_values, group=collective.process_group)
-    for source_index, source_rank in enumerate(collective.ranks):
-        segment = output_values[source_index * values_per_peer : (source_index + 1) * values_per_peer]
-        _assert_constant(
-            segment,
-            float(source_rank * RANK_VALUE_STRIDE + group_rank),
-            f"EP all-to-all source rank {source_rank}",
-        )
-
-
 def _run_traffic(
     mesh: DeviceMesh,
     placement: MeshPlacement,
@@ -217,9 +191,19 @@ def _run_traffic(
     phase_start = time.monotonic()
     for round_index in range(contention_rounds):
         size = payload_mib[round_index % len(payload_mib)]
-        _ep_all_to_all(ep, size)
+        run_verified_all_to_all(
+            ep.process_group,
+            ep.rank,
+            ep.device,
+            _numel_for_mib(size, torch.int64),
+        )
         _fsdp_all_gather(fsdp, size)
-        _ep_all_to_all(ep, size)
+        run_verified_all_to_all(
+            ep.process_group,
+            ep.rank,
+            ep.device,
+            _numel_for_mib(size, torch.int64),
+        )
         _fsdp_reduce_scatter(fsdp, size)
     torch.cuda.synchronize(device)
     alternating_seconds = time.monotonic() - phase_start
@@ -254,9 +238,11 @@ def _max_timings(local_timings: PhaseTimings, device: torch.device) -> PhaseTimi
     return PhaseTimings(*values.cpu().tolist())
 
 
-def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seconds: float) -> None:
-    disable_nccl_communicator_nonblocking(os.environ)
-    os.environ["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(PROCESS_GROUP_TIMEOUT_SECONDS)
+def _run_with_process_group(
+    payload_mib: tuple[int, ...],
+    contention_rounds: int,
+    arrival_skew_seconds: float,
+) -> None:
     init_worker_process_group_with_device(timeout_seconds=PROCESS_GROUP_TIMEOUT_SECONDS)
     try:
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -279,6 +265,17 @@ def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seco
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
+
+
+def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seconds: float) -> None:
+    disable_nccl_communicator_nonblocking(os.environ)
+    # Device-mesh subgroups are created after WORLD initialization and consume
+    # the production timeout environment variable, not the WORLD timeout arg.
+    with patch.dict(
+        os.environ,
+        {"SKYRL_WORKER_NCCL_TIMEOUT_IN_S": str(PROCESS_GROUP_TIMEOUT_SECONDS)},
+    ):
+        _run_with_process_group(payload_mib, contention_rounds, arrival_skew_seconds)
 
 
 if __name__ == "__main__":

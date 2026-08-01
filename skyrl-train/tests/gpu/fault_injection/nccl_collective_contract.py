@@ -26,6 +26,7 @@ import torch.distributed as dist
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
+from tests.gpu.fault_injection.collective_payloads import RANK_VALUE_STRIDE, run_verified_all_to_all
 from tests.gpu.fault_injection.single_node_runtime import (
     REAP_TIMEOUT_SECONDS,
     REQUIRES_FOUR_CUDA_DEVICES,
@@ -44,7 +45,6 @@ from tests.torchrun_process import (
 
 WARMUP_ROUNDS = 3
 EP_ALL_TO_ALL_VALUES = 128
-RANK_VALUE_STRIDE = 100
 DIVERGENT_EP_RANKS = frozenset({0, 3})
 DIVERGENT_FSDP_RANKS = frozenset(range(WORLD_SIZE)) - DIVERGENT_EP_RANKS
 COLLECTIVE_TIMEOUT_SECONDS = 8
@@ -94,33 +94,6 @@ def _wait_for_peer_activity(control_dir: Path) -> None:
         time.sleep(CONTROL_POLL_SECONDS)
 
 
-def _run_ep_all_to_all(subgroup: dist.ProcessGroup, rank: int, device: torch.device) -> None:
-    group_ranks = dist.get_process_group_ranks(subgroup)
-    group_rank = group_ranks.index(rank)
-    assert EP_ALL_TO_ALL_VALUES % len(group_ranks) == 0
-    values_per_peer = EP_ALL_TO_ALL_VALUES // len(group_ranks)
-    input_values = (
-        torch.arange(
-            len(group_ranks) * values_per_peer,
-            device=device,
-            dtype=torch.int64,
-        )
-        + rank * RANK_VALUE_STRIDE
-    )
-    output_values = torch.empty_like(input_values)
-    dist.all_to_all_single(output_values, input_values, group=subgroup)
-    expected_values = torch.tensor(
-        [
-            source_rank * RANK_VALUE_STRIDE + group_rank * values_per_peer + offset
-            for source_rank in group_ranks
-            for offset in range(values_per_peer)
-        ],
-        device=device,
-        dtype=torch.int64,
-    )
-    torch.testing.assert_close(output_values, expected_values)
-
-
 def _run_fsdp_all_gather(subgroup: dist.ProcessGroup, rank: int, device: torch.device) -> None:
     group_ranks = dist.get_process_group_ranks(subgroup)
     input_values = torch.tensor(
@@ -148,7 +121,7 @@ def _warm_ep_and_fsdp_communicators(
     device: torch.device,
 ) -> None:
     for _ in range(WARMUP_ROUNDS):
-        _run_ep_all_to_all(ep_group, rank, device)
+        run_verified_all_to_all(ep_group, rank, device, EP_ALL_TO_ALL_VALUES)
         _run_fsdp_all_gather(fsdp_group, rank, device)
     dist.barrier()
     print(f"COMMUNICATOR_WARMUP_COMPLETED rank={rank} rounds={WARMUP_ROUNDS}", flush=True)
@@ -185,7 +158,7 @@ def _worker(mode: RunMode) -> None:
 
     if mode is RunMode.EP_ALL_TO_ALL:
         assert ep_group is not None
-        _run_ep_all_to_all(ep_group, rank, device)
+        run_verified_all_to_all(ep_group, rank, device, EP_ALL_TO_ALL_VALUES)
         print(f"EP_ALL_TO_ALL_COMPLETED rank={rank}", flush=True)
         dist.destroy_process_group()
         return
@@ -196,7 +169,7 @@ def _worker(mode: RunMode) -> None:
             group_ranks = dist.get_process_group_ranks(ep_group)
             assert not set(group_ranks).issubset(DIVERGENT_EP_RANKS)
             print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=ep-all-to-all", flush=True)
-            _run_ep_all_to_all(ep_group, rank, device)
+            run_verified_all_to_all(ep_group, rank, device, EP_ALL_TO_ALL_VALUES)
         else:
             group_ranks = dist.get_process_group_ranks(fsdp_group)
             assert not set(group_ranks).issubset(DIVERGENT_FSDP_RANKS)
