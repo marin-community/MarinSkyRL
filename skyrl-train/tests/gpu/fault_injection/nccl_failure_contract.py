@@ -37,6 +37,8 @@ SETUP_TIMEOUT_SECONDS = 180
 FAULT_TIMEOUT_SECONDS = 45
 REAP_TIMEOUT_SECONDS = 10
 CONTROL_POLL_SECONDS = 0.1
+START_SENTINEL = "start"
+READY_SENTINEL_PREFIX = "ready-"
 SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 
 
@@ -56,7 +58,7 @@ class FaultRun:
 
 
 def _wait_for_start(control_dir: Path) -> None:
-    start_path = control_dir / "start"
+    start_path = control_dir / START_SENTINEL
     while not start_path.exists():
         time.sleep(CONTROL_POLL_SECONDS)
 
@@ -83,7 +85,7 @@ def _worker(mode: FaultMode) -> None:
         f"requested_timeout={COLLECTIVE_TIMEOUT_SECONDS} backend={dist.get_backend()}",
         flush=True,
     )
-    (control_dir / f"ready-{rank}").touch()
+    (control_dir / f"{READY_SENTINEL_PREFIX}{rank}").touch()
     _wait_for_start(control_dir)
 
     if mode is FaultMode.SUBGROUP_NONARRIVAL:
@@ -113,6 +115,7 @@ def _worker(mode: FaultMode) -> None:
 
 
 def _terminate_process_group(process: subprocess.Popen[str]) -> bool:
+    """Kill the subprocess group and report whether its leader was reaped."""
     if process.poll() is None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -132,7 +135,9 @@ def _read_output(log_path: Path) -> str:
 def _wait_for_all_ranks_ready(process: subprocess.Popen[str], control_dir: Path, log_path: Path) -> None:
     deadline = time.monotonic() + SETUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        ready_ranks = {path.name.removeprefix("ready-") for path in control_dir.glob("ready-*")}
+        ready_ranks = {
+            path.name.removeprefix(READY_SENTINEL_PREFIX) for path in control_dir.glob(f"{READY_SENTINEL_PREFIX}*")
+        }
         if len(ready_ranks) == WORLD_SIZE:
             return
         if process.poll() is not None:
@@ -189,7 +194,7 @@ def _run_fault(mode: FaultMode) -> FaultRun:
                 start_new_session=True,
             )
             _wait_for_all_ranks_ready(process, control_dir, log_path)
-            (control_dir / "start").touch()
+            (control_dir / START_SENTINEL).touch()
             try:
                 returncode = process.wait(timeout=FAULT_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
@@ -209,7 +214,6 @@ def test_nccl_fault_terminates_torchrun_gang(mode: FaultMode) -> None:
 
     result = _run_fault(mode)
 
-    assert result.output.count(f"FAULT_INJECTION_READY mode={mode.value}") == WORLD_SIZE, result.output
     assert f"FAULT_INJECTION_ACTIVE mode={mode.value}" in result.output
     assert "FAULT_INJECTION_UNEXPECTED_COMPLETION" not in result.output
     assert result.returncode != 0, result.output
