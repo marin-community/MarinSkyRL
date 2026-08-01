@@ -85,7 +85,7 @@ srun --nodes=4 --ntasks=4 --ntasks-per-node=1 bash -c '
   torchrun --nnodes=4 --nproc-per-node=4 \
     --node-rank="$SLURM_NODEID" \
     --master-addr="$MASTER_ADDR" --master-port="$MASTER_PORT" \
-    tests/gpu/fault_injection/multi_node_ep_fsdp_traffic.py
+    --module tests.gpu.fault_injection.multi_node_ep_fsdp_traffic
 '
 ```
 

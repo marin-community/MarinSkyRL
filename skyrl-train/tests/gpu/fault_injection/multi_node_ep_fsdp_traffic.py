@@ -5,8 +5,8 @@ traffic: each EP group must occupy one host, and every FSDP group must span four
 hosts. It then verifies payloads for FSDP all-gather, reduce-scatter, and
 all-reduce traffic, both alone and interleaved with node-local EP all-to-all.
 
-Launch one torchrun agent per node. See ``README.md`` in this directory for a
-generic four-node Slurm command.
+Launch one torchrun agent per node with torchrun's ``--module`` mode. See
+``README.md`` in this directory for a generic four-node Slurm command.
 """
 
 from __future__ import annotations
@@ -14,11 +14,9 @@ from __future__ import annotations
 import argparse
 import os
 import socket
-import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -26,6 +24,7 @@ from torch.distributed.tensor import DeviceMesh
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from tests.torchrun_process import disable_nccl_communicator_nonblocking
 
 
 EXPECTED_NODES = 4
@@ -37,6 +36,7 @@ PROCESS_GROUP_TIMEOUT_SECONDS = 180
 DEFAULT_PAYLOAD_MIB = (1, 8, 32)
 DEFAULT_CONTENTION_ROUNDS = 32
 DEFAULT_ARRIVAL_SKEW_SECONDS = 2.0
+RANK_VALUE_STRIDE = 100
 SUCCESS_MARKER = "MULTI_NODE_EP_FSDP_TRAFFIC_OK"
 
 
@@ -120,71 +120,79 @@ def _numel_for_mib(payload_mib: int, dtype: torch.dtype) -> int:
     return payload_mib * 1024 * 1024 // element_size
 
 
-def _assert_constant(tensor: torch.Tensor, expected: float, context: str) -> None:
+def _assert_constant(tensor: torch.Tensor, expected: float, description: str) -> None:
     minimum, maximum = torch.aminmax(tensor)
     if minimum.item() != expected or maximum.item() != expected:
         raise AssertionError(
-            f"{context}: expected every value to be {expected}, got min={minimum.item()} max={maximum.item()}"
+            f"{description}: expected every value to be {expected}, got min={minimum.item()} max={maximum.item()}"
         )
 
 
 def _fsdp_all_gather(
-    context: CollectiveGroup,
+    collective: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
-    input_values = torch.full((numel,), float(context.rank), device=context.device)
-    output_values = torch.empty(numel * len(context.ranks), dtype=input_values.dtype, device=context.device)
-    dist.all_gather_into_tensor(output_values, input_values, group=context.process_group)
-    for group_index, source_rank in enumerate(context.ranks):
+    input_values = torch.full((numel,), float(collective.rank), device=collective.device)
+    output_values = torch.empty(numel * len(collective.ranks), dtype=input_values.dtype, device=collective.device)
+    dist.all_gather_into_tensor(output_values, input_values, group=collective.process_group)
+    for group_index, source_rank in enumerate(collective.ranks):
         segment = output_values[group_index * numel : (group_index + 1) * numel]
         _assert_constant(segment, float(source_rank), f"FSDP all-gather source rank {source_rank}")
 
 
 def _fsdp_reduce_scatter(
-    context: CollectiveGroup,
+    collective: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
     chunks = [
-        torch.full((numel,), float(context.rank + destination_index), device=context.device)
-        for destination_index in range(len(context.ranks))
+        torch.full((numel,), float(collective.rank + destination_index), device=collective.device)
+        for destination_index in range(len(collective.ranks))
     ]
     input_values = torch.cat(chunks)
-    output_values = torch.empty(numel, dtype=input_values.dtype, device=context.device)
-    dist.reduce_scatter_tensor(output_values, input_values, group=context.process_group)
-    destination_index = context.ranks.index(context.rank)
-    expected = float(sum(context.ranks) + destination_index * len(context.ranks))
-    _assert_constant(output_values, expected, f"FSDP reduce-scatter destination rank {context.rank}")
+    output_values = torch.empty(numel, dtype=input_values.dtype, device=collective.device)
+    dist.reduce_scatter_tensor(output_values, input_values, group=collective.process_group)
+    destination_index = collective.ranks.index(collective.rank)
+    expected = float(sum(collective.ranks) + destination_index * len(collective.ranks))
+    _assert_constant(output_values, expected, f"FSDP reduce-scatter destination rank {collective.rank}")
 
 
 def _fsdp_all_reduce(
-    context: CollectiveGroup,
+    collective: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
-    values = torch.full((numel,), float(context.rank), device=context.device)
-    dist.all_reduce(values, group=context.process_group)
-    _assert_constant(values, float(sum(context.ranks)), f"FSDP all-reduce rank {context.rank}")
+    values = torch.full((numel,), float(collective.rank), device=collective.device)
+    dist.all_reduce(values, group=collective.process_group)
+    _assert_constant(values, float(sum(collective.ranks)), f"FSDP all-reduce rank {collective.rank}")
 
 
 def _ep_all_to_all(
-    context: CollectiveGroup,
+    collective: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
-    values_per_peer = max(1, numel // len(context.ranks))
-    group_rank = context.ranks.index(context.rank)
+    values_per_peer = max(1, numel // len(collective.ranks))
+    group_rank = collective.ranks.index(collective.rank)
     chunks = [
-        torch.full((values_per_peer,), float(context.rank * 100 + destination_index), device=context.device)
-        for destination_index in range(len(context.ranks))
+        torch.full(
+            (values_per_peer,),
+            float(collective.rank * RANK_VALUE_STRIDE + destination_index),
+            device=collective.device,
+        )
+        for destination_index in range(len(collective.ranks))
     ]
     input_values = torch.cat(chunks)
     output_values = torch.empty_like(input_values)
-    dist.all_to_all_single(output_values, input_values, group=context.process_group)
-    for source_index, source_rank in enumerate(context.ranks):
+    dist.all_to_all_single(output_values, input_values, group=collective.process_group)
+    for source_index, source_rank in enumerate(collective.ranks):
         segment = output_values[source_index * values_per_peer : (source_index + 1) * values_per_peer]
-        _assert_constant(segment, float(source_rank * 100 + group_rank), f"EP all-to-all source rank {source_rank}")
+        _assert_constant(
+            segment,
+            float(source_rank * RANK_VALUE_STRIDE + group_rank),
+            f"EP all-to-all source rank {source_rank}",
+        )
 
 
 def _run_traffic(
@@ -246,17 +254,8 @@ def _max_timings(local_timings: PhaseTimings, device: torch.device) -> PhaseTimi
     return PhaseTimings(*values.cpu().tolist())
 
 
-def _disable_nccl_communicator_nonblocking() -> None:
-    skyrl_train_root = Path(__file__).parents[3]
-    if str(skyrl_train_root) not in sys.path:
-        sys.path.insert(0, str(skyrl_train_root))
-    from tests.torchrun_process import disable_nccl_communicator_nonblocking
-
-    disable_nccl_communicator_nonblocking(os.environ)
-
-
 def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seconds: float) -> None:
-    _disable_nccl_communicator_nonblocking()
+    disable_nccl_communicator_nonblocking(os.environ)
     os.environ["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(PROCESS_GROUP_TIMEOUT_SECONDS)
     init_worker_process_group_with_device(timeout_seconds=PROCESS_GROUP_TIMEOUT_SECONDS)
     try:

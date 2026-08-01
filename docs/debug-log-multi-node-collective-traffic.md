@@ -30,8 +30,10 @@ print one structured success marker. Document a generic four-node Slurm launch.
 
 The first direct CLI check found that importing a helper from the repository's
 `tests` package depended on `PYTHONPATH`; installing `skyrl_train` alone does not
-make that package importable. The worker now clears the two communicator-mode
-variables directly and its `--help` path succeeds from a clean environment.
+make that package importable. The documented launcher now uses torchrun's
+`--module` mode from `skyrl-train/`, which makes the test utilities importable
+without duplicating their environment policy. The module's `--help` path succeeds
+from a clean environment.
 
 The collective schedule and device-mesh timeout CPU tests pass (4 tests). Ruff
 check and format pass. The behavioral result still requires a four-node,
