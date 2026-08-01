@@ -54,9 +54,12 @@ Run the healthy model-level matrix separately:
 
 ```bash
 cd skyrl-train
-uv run --isolated --extra dev --extra ep \
-  pytest -s tests/gpu/fault_injection/ep_fsdp_collective_matrix.py
+python -m pytest -s tests/gpu/fault_injection/ep_fsdp_collective_matrix.py
 ```
+
+Run that command inside the policy image so it uses the image's installed Torch, TorchTitan, and CUDA stack.
+An isolated `uv` environment both requires network access to direct-URL dependencies and can resolve a different
+CUDA build, so it is not an image-validation command.
 
 The six cases launch serially in fresh four-rank gangs. They compose the real TorchTitan EP hooks and FSDP2
 wrapping while varying live versus replayed routing, spread versus concentrated expert selection, and reentrant
