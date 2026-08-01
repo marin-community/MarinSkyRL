@@ -14,9 +14,11 @@ from __future__ import annotations
 import argparse
 import os
 import socket
+import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -36,21 +38,30 @@ DEFAULT_PAYLOAD_MIB = (1, 8, 32)
 DEFAULT_CONTENTION_ROUNDS = 32
 DEFAULT_ARRIVAL_SKEW_SECONDS = 2.0
 SUCCESS_MARKER = "MULTI_NODE_EP_FSDP_TRAFFIC_OK"
-NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT = (
-    "TORCH_NCCL_USE_COMM_NONBLOCKING",
-    "TORCH_NCCL_NONBLOCKING_TIMEOUT",
-)
 
 
 @dataclass(frozen=True)
 class MeshPlacement:
     rank: int
-    local_rank: int
-    hostname: str
     ep_coordinate: int
     fsdp_coordinate: int
     ep_ranks: tuple[int, ...]
     fsdp_ranks: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class CollectiveGroup:
+    process_group: dist.ProcessGroup
+    ranks: tuple[int, ...]
+    rank: int
+    device: torch.device
+
+
+@dataclass(frozen=True)
+class PhaseTimings:
+    fsdp_only_seconds: float
+    alternating_seconds: float
+    skewed_arrival_seconds: float
 
 
 def _parse_payload_mib(value: str) -> tuple[int, ...]:
@@ -66,7 +77,6 @@ def _group_ranks(group: dist.ProcessGroup) -> tuple[int, ...]:
 
 def _validate_mesh_placement(mesh: DeviceMesh) -> MeshPlacement:
     rank = dist.get_rank()
-    local_rank = int(os.environ["LOCAL_RANK"])
     local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
     hostname = socket.gethostname()
 
@@ -98,8 +108,6 @@ def _validate_mesh_placement(mesh: DeviceMesh) -> MeshPlacement:
 
     return MeshPlacement(
         rank,
-        local_rank,
-        hostname,
         coordinates["ep"],
         coordinates["fsdp"],
         ep_ranks,
@@ -121,72 +129,60 @@ def _assert_constant(tensor: torch.Tensor, expected: float, context: str) -> Non
 
 
 def _fsdp_all_gather(
-    group: dist.ProcessGroup,
-    group_ranks: tuple[int, ...],
-    rank: int,
-    device: torch.device,
+    context: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
-    input_values = torch.full((numel,), float(rank), device=device)
-    output_values = torch.empty(numel * len(group_ranks), dtype=input_values.dtype, device=device)
-    dist.all_gather_into_tensor(output_values, input_values, group=group)
-    for group_index, source_rank in enumerate(group_ranks):
+    input_values = torch.full((numel,), float(context.rank), device=context.device)
+    output_values = torch.empty(numel * len(context.ranks), dtype=input_values.dtype, device=context.device)
+    dist.all_gather_into_tensor(output_values, input_values, group=context.process_group)
+    for group_index, source_rank in enumerate(context.ranks):
         segment = output_values[group_index * numel : (group_index + 1) * numel]
         _assert_constant(segment, float(source_rank), f"FSDP all-gather source rank {source_rank}")
 
 
 def _fsdp_reduce_scatter(
-    group: dist.ProcessGroup,
-    group_ranks: tuple[int, ...],
-    rank: int,
-    device: torch.device,
+    context: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
     chunks = [
-        torch.full((numel,), float(rank + destination_index), device=device)
-        for destination_index in range(len(group_ranks))
+        torch.full((numel,), float(context.rank + destination_index), device=context.device)
+        for destination_index in range(len(context.ranks))
     ]
     input_values = torch.cat(chunks)
-    output_values = torch.empty(numel, dtype=input_values.dtype, device=device)
-    dist.reduce_scatter_tensor(output_values, input_values, group=group)
-    destination_index = group_ranks.index(rank)
-    expected = float(sum(group_ranks) + destination_index * len(group_ranks))
-    _assert_constant(output_values, expected, f"FSDP reduce-scatter destination rank {rank}")
+    output_values = torch.empty(numel, dtype=input_values.dtype, device=context.device)
+    dist.reduce_scatter_tensor(output_values, input_values, group=context.process_group)
+    destination_index = context.ranks.index(context.rank)
+    expected = float(sum(context.ranks) + destination_index * len(context.ranks))
+    _assert_constant(output_values, expected, f"FSDP reduce-scatter destination rank {context.rank}")
 
 
 def _fsdp_all_reduce(
-    group: dist.ProcessGroup,
-    group_ranks: tuple[int, ...],
-    rank: int,
-    device: torch.device,
+    context: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
-    values = torch.full((numel,), float(rank), device=device)
-    dist.all_reduce(values, group=group)
-    _assert_constant(values, float(sum(group_ranks)), f"FSDP all-reduce rank {rank}")
+    values = torch.full((numel,), float(context.rank), device=context.device)
+    dist.all_reduce(values, group=context.process_group)
+    _assert_constant(values, float(sum(context.ranks)), f"FSDP all-reduce rank {context.rank}")
 
 
 def _ep_all_to_all(
-    group: dist.ProcessGroup,
-    group_ranks: tuple[int, ...],
-    rank: int,
-    device: torch.device,
+    context: CollectiveGroup,
     payload_mib: int,
 ) -> None:
     numel = _numel_for_mib(payload_mib, torch.float32)
-    values_per_peer = max(1, numel // len(group_ranks))
-    group_rank = group_ranks.index(rank)
+    values_per_peer = max(1, numel // len(context.ranks))
+    group_rank = context.ranks.index(context.rank)
     chunks = [
-        torch.full((values_per_peer,), float(rank * 100 + destination_index), device=device)
-        for destination_index in range(len(group_ranks))
+        torch.full((values_per_peer,), float(context.rank * 100 + destination_index), device=context.device)
+        for destination_index in range(len(context.ranks))
     ]
     input_values = torch.cat(chunks)
     output_values = torch.empty_like(input_values)
-    dist.all_to_all_single(output_values, input_values, group=group)
-    for source_index, source_rank in enumerate(group_ranks):
+    dist.all_to_all_single(output_values, input_values, group=context.process_group)
+    for source_index, source_rank in enumerate(context.ranks):
         segment = output_values[source_index * values_per_peer : (source_index + 1) * values_per_peer]
         _assert_constant(segment, float(source_rank * 100 + group_rank), f"EP all-to-all source rank {source_rank}")
 
@@ -198,28 +194,27 @@ def _run_traffic(
     payload_mib: tuple[int, ...],
     contention_rounds: int,
     arrival_skew_seconds: float,
-) -> dict[str, float]:
-    ep_group = mesh["ep"].get_group()
-    fsdp_group = mesh["fsdp"].get_group()
-    timings: dict[str, float] = {}
+) -> PhaseTimings:
+    ep = CollectiveGroup(mesh["ep"].get_group(), placement.ep_ranks, placement.rank, device)
+    fsdp = CollectiveGroup(mesh["fsdp"].get_group(), placement.fsdp_ranks, placement.rank, device)
 
     phase_start = time.monotonic()
     for size in payload_mib:
-        _fsdp_all_gather(fsdp_group, placement.fsdp_ranks, placement.rank, device, size)
-        _fsdp_reduce_scatter(fsdp_group, placement.fsdp_ranks, placement.rank, device, size)
-        _fsdp_all_reduce(fsdp_group, placement.fsdp_ranks, placement.rank, device, size)
+        _fsdp_all_gather(fsdp, size)
+        _fsdp_reduce_scatter(fsdp, size)
+        _fsdp_all_reduce(fsdp, size)
     torch.cuda.synchronize(device)
-    timings["fsdp_only"] = time.monotonic() - phase_start
+    fsdp_only_seconds = time.monotonic() - phase_start
 
     phase_start = time.monotonic()
     for round_index in range(contention_rounds):
         size = payload_mib[round_index % len(payload_mib)]
-        _ep_all_to_all(ep_group, placement.ep_ranks, placement.rank, device, size)
-        _fsdp_all_gather(fsdp_group, placement.fsdp_ranks, placement.rank, device, size)
-        _ep_all_to_all(ep_group, placement.ep_ranks, placement.rank, device, size)
-        _fsdp_reduce_scatter(fsdp_group, placement.fsdp_ranks, placement.rank, device, size)
+        _ep_all_to_all(ep, size)
+        _fsdp_all_gather(fsdp, size)
+        _ep_all_to_all(ep, size)
+        _fsdp_reduce_scatter(fsdp, size)
     torch.cuda.synchronize(device)
-    timings["alternating"] = time.monotonic() - phase_start
+    alternating_seconds = time.monotonic() - phase_start
 
     dist.barrier()
     phase_start = time.monotonic()
@@ -227,23 +222,41 @@ def _run_traffic(
         # One rank in every inter-node FSDP group arrives late. The delay is the
         # input under test, not a readiness mechanism.
         time.sleep(arrival_skew_seconds)
-    _fsdp_all_gather(fsdp_group, placement.fsdp_ranks, placement.rank, device, max(payload_mib))
-    _fsdp_reduce_scatter(fsdp_group, placement.fsdp_ranks, placement.rank, device, max(payload_mib))
+    _fsdp_all_gather(fsdp, max(payload_mib))
+    _fsdp_reduce_scatter(fsdp, max(payload_mib))
     torch.cuda.synchronize(device)
-    timings["skewed_arrival"] = time.monotonic() - phase_start
-    return timings
+    return PhaseTimings(
+        fsdp_only_seconds,
+        alternating_seconds,
+        time.monotonic() - phase_start,
+    )
 
 
-def _max_timings(local_timings: dict[str, float], device: torch.device) -> dict[str, float]:
-    names = tuple(local_timings)
-    values = torch.tensor([local_timings[name] for name in names], dtype=torch.float64, device=device)
+def _max_timings(local_timings: PhaseTimings, device: torch.device) -> PhaseTimings:
+    values = torch.tensor(
+        [
+            local_timings.fsdp_only_seconds,
+            local_timings.alternating_seconds,
+            local_timings.skewed_arrival_seconds,
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
     dist.all_reduce(values, op=dist.ReduceOp.MAX)
-    return dict(zip(names, values.cpu().tolist(), strict=True))
+    return PhaseTimings(*values.cpu().tolist())
+
+
+def _disable_nccl_communicator_nonblocking() -> None:
+    skyrl_train_root = Path(__file__).parents[3]
+    if str(skyrl_train_root) not in sys.path:
+        sys.path.insert(0, str(skyrl_train_root))
+    from tests.torchrun_process import disable_nccl_communicator_nonblocking
+
+    disable_nccl_communicator_nonblocking(os.environ)
 
 
 def _run(payload_mib: tuple[int, ...], contention_rounds: int, arrival_skew_seconds: float) -> None:
-    for variable in NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT:
-        os.environ.pop(variable, None)
+    _disable_nccl_communicator_nonblocking()
     os.environ["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(PROCESS_GROUP_TIMEOUT_SECONDS)
     init_worker_process_group_with_device(timeout_seconds=PROCESS_GROUP_TIMEOUT_SECONDS)
     try:
