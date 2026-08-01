@@ -75,10 +75,7 @@ jobs:
       - name: Run cpu tests
         run: |
           uv run --frozen pytest tests/cpu/ \
-            --deselect tests/cpu/distributed/test_cp_config.py::test_all_defaults_is_structurally_identical_to_pre_cp \
-            --deselect tests/cpu/generators/test_skyrl_gym_generator.py::test_generator_output_concatenation \
             --deselect tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
-            --deselect tests/cpu/test_ep_config_noop.py::test_all_defaults_is_structurally_identical_to_pre_ep \
             --deselect tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
 
   skyrl_train_macos_install:

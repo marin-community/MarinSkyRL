@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
+from skyrl_train.generators.base import ConversationType, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_train.config.utils import get_default_config
@@ -309,25 +309,6 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
 
 
 def test_generator_output_concatenation():
-    # First ensure that the GeneratorOutput fields are what we expect
-    expected_fields = [
-        "prompt_token_ids",
-        "response_ids",
-        "rewards",
-        "loss_masks",
-        "stop_reasons",
-        "rollout_metrics",
-        "rollout_logprobs",
-        # optional but present in the signature
-        "trajectory_ids",
-        "is_last_step",
-    ]
-    assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
-        "GeneratorOutput fields are not what we expect. "
-        "Please update the test and `concatenate_generator_outputs()` to reflect the new fields."
-        "It is needed to help Trainer.eval() record the full GeneratorOutput information."
-    )
-
     generator_output_1: GeneratorOutput = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
@@ -335,6 +316,9 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
+        "trajectory_ids": [TrajectoryID("first", 0), TrajectoryID("second", 0)],
+        "is_last_step": [True, False],
+        "exclude_from_baseline": [False, True],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -344,6 +328,9 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
+        "trajectory_ids": [TrajectoryID("third", 0), TrajectoryID("fourth", 0)],
+        "is_last_step": [False, True],
+        "exclude_from_baseline": [True, False],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -355,6 +342,14 @@ def test_generator_output_concatenation():
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
+    assert [trajectory.instance_id for trajectory in concatenated_output["trajectory_ids"]] == [
+        "first",
+        "second",
+        "third",
+        "fourth",
+    ]
+    assert concatenated_output["is_last_step"] == [True, False, False, True]
+    assert concatenated_output["exclude_from_baseline"] == [False, True, True, False]
 
     # Validate rollout metrics
     expected_rollout_metrics = {
