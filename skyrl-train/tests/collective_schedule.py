@@ -12,6 +12,8 @@ from typing import Protocol
 from torch.distributed import ProcessGroup
 from torch.distributed.tensor import DeviceMesh
 
+from skyrl_train.distributed.collective_phase_diagnostics import capture_mesh_snapshot
+
 
 class CollectiveSequenceKind(StrEnum):
     OPERATION = "operation"
@@ -183,13 +185,14 @@ class NcclCollectiveRecorder:
     """Record completed work and sequence counters without adding collectives."""
 
     def __init__(self, device_mesh: DeviceMesh, group_dimensions: Sequence[str]) -> None:
-        self._mesh_dim_names = tuple(device_mesh.mesh_dim_names)
-        self._mesh_shape = tuple(device_mesh.shape)
-        self._mesh_coordinate = tuple(device_mesh.get_coordinate())
-        self._groups: dict[str, ProcessGroup] = {name: device_mesh.get_group(name) for name in group_dimensions}
-        self._initial_sequences = {
-            name: int(group._get_sequence_number_for_group()) for name, group in self._groups.items()
-        }
+        self._device_mesh = device_mesh
+        self._group_dimensions = tuple(group_dimensions)
+        snapshot = capture_mesh_snapshot(device_mesh, group_names=self._group_dimensions, include_world=False)
+        self._mesh_dim_names = snapshot.mesh_dim_names
+        self._mesh_shape = snapshot.mesh_shape
+        self._mesh_coordinate = snapshot.mesh_coordinate
+        self._groups: dict[str, ProcessGroup] = {name: device_mesh.get_group(name) for name in self._group_dimensions}
+        self._initial_sequences = snapshot.sequence_numbers
         self._events: dict[str, list[CollectiveEvent]] = {name: [] for name in self._groups}
         self._boundaries: list[CollectiveBoundary] = []
         self._errors: list[str] = []
@@ -213,10 +216,12 @@ class NcclCollectiveRecorder:
         return record
 
     def _sequence_counts(self) -> dict[str, int]:
-        return {
-            name: int(group._get_sequence_number_for_group()) - self._initial_sequences[name]
-            for name, group in self._groups.items()
-        }
+        current = capture_mesh_snapshot(
+            self._device_mesh,
+            group_names=self._group_dimensions,
+            include_world=False,
+        ).sequence_numbers
+        return {name: current[name] - self._initial_sequences[name] for name in self._group_dimensions}
 
     def record_boundary_snapshot(self, label: str) -> None:
         sequence_counts = self._sequence_counts()

@@ -6,12 +6,11 @@ import itertools
 import json
 import os
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from functools import wraps
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import torch.distributed as dist
 from loguru import logger
@@ -55,6 +54,14 @@ class CollectivePhaseRecord:
     sequence_numbers: dict[str, int]
 
 
+@dataclass(frozen=True)
+class MeshCollectiveSnapshot:
+    mesh_dim_names: tuple[str, ...]
+    mesh_shape: tuple[int, ...]
+    mesh_coordinate: tuple[int, ...]
+    sequence_numbers: dict[str, int]
+
+
 @dataclass
 class _RegionContext:
     region_id: int
@@ -67,7 +74,6 @@ class _RegionContext:
 
 
 _region: ContextVar[_RegionContext | None] = ContextVar("collective_phase_region", default=None)
-_ReturnT = TypeVar("_ReturnT")
 
 
 def enabled() -> bool:
@@ -78,6 +84,28 @@ def _default_process_group() -> ProcessGroupLike:
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("torch.distributed is not initialized")
     return dist.distributed_c10d._get_default_group()
+
+
+def capture_mesh_snapshot(
+    device_mesh: DeviceMeshLike,
+    *,
+    group_names: tuple[str, ...] | None = None,
+    include_world: bool = True,
+) -> MeshCollectiveSnapshot:
+    """Read mesh geometry and existing process-group counters without synchronization."""
+    dim_names = tuple(device_mesh.mesh_dim_names)
+    selected_groups = group_names if group_names is not None else dim_names
+    sequence_numbers = {}
+    if include_world:
+        sequence_numbers[WORLD_GROUP] = int(_default_process_group()._get_sequence_number_for_group())
+    for name in selected_groups:
+        sequence_numbers[name] = int(device_mesh.get_group(name)._get_sequence_number_for_group())
+    return MeshCollectiveSnapshot(
+        mesh_dim_names=dim_names,
+        mesh_shape=tuple(int(size) for size in device_mesh.shape),
+        mesh_coordinate=tuple(int(coordinate) for coordinate in device_mesh.get_coordinate()),
+        sequence_numbers=sequence_numbers,
+    )
 
 
 @contextmanager
@@ -111,31 +139,8 @@ def region(
         _region.reset(token)
 
 
-def with_policy_training_region(function: Callable[..., _ReturnT]) -> Callable[..., _ReturnT]:
-    """Run a policy training-step method inside an optional diagnostic region."""
-
-    @wraps(function)
-    def wrapped(worker, experience, global_step, local_step, accumulation_steps):
-        strategy = worker.strategy
-        if not enabled() or not isinstance(strategy, DeviceMeshStrategy) or strategy.device_mesh is None:
-            return function(worker, experience, global_step, local_step, accumulation_steps)
-        with region(
-            strategy.device_mesh,
-            kind="policy_training_step",
-            rank=worker._rank,
-            metadata={"global_step": global_step, "local_step": local_step},
-        ):
-            return function(worker, experience, global_step, local_step, accumulation_steps)
-
-    return wrapped
-
-
 def _capture_record(context: _RegionContext, phase: str) -> CollectivePhaseRecord:
-    mesh = context.device_mesh
-    dim_names = tuple(mesh.mesh_dim_names)
-    sequence_numbers = {WORLD_GROUP: int(_default_process_group()._get_sequence_number_for_group())}
-    for name in dim_names:
-        sequence_numbers[name] = int(mesh.get_group(name)._get_sequence_number_for_group())
+    snapshot = capture_mesh_snapshot(context.device_mesh)
     event_index = context.next_event_index
     context.next_event_index += 1
     return CollectivePhaseRecord(
@@ -145,10 +150,10 @@ def _capture_record(context: _RegionContext, phase: str) -> CollectivePhaseRecor
         rank=context.rank,
         phase=phase,
         metadata=dict(context.metadata),
-        mesh_dim_names=dim_names,
-        mesh_shape=tuple(int(size) for size in mesh.shape),
-        mesh_coordinate=tuple(int(coordinate) for coordinate in mesh.get_coordinate()),
-        sequence_numbers=sequence_numbers,
+        mesh_dim_names=snapshot.mesh_dim_names,
+        mesh_shape=snapshot.mesh_shape,
+        mesh_coordinate=snapshot.mesh_coordinate,
+        sequence_numbers=snapshot.sequence_numbers,
     )
 
 

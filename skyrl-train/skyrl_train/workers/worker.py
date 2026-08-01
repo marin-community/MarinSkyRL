@@ -1155,12 +1155,23 @@ class PolicyWorkerBase(Worker):
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])
                     self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
-                status = self.training_step(
-                    experience,
-                    global_step,
-                    local_step,
-                    accumulation_steps,
-                )
+                device_mesh = None
+                if _phase_diagnostics.enabled():
+                    strategy = self.strategy
+                    if isinstance(strategy, _phase_diagnostics.DeviceMeshStrategy):
+                        device_mesh = strategy.device_mesh
+                with _phase_diagnostics.region(
+                    device_mesh,
+                    kind="policy_training_step",
+                    rank=self._rank,
+                    metadata={"global_step": global_step, "local_step": local_step},
+                ):
+                    status = self.training_step(
+                        experience,
+                        global_step,
+                        local_step,
+                        accumulation_steps,
+                    )
                 policy_update_steps += 1
 
                 # for DP
@@ -1214,7 +1225,6 @@ class PolicyWorkerBase(Worker):
         output.metadata = {"train_status": status_mean}
         return output
 
-    @_phase_diagnostics.with_policy_training_region
     def training_step(
         self,
         experience: Experience,

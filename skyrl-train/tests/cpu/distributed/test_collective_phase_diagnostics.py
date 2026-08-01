@@ -1,6 +1,5 @@
 import asyncio
 import json
-from unittest.mock import patch
 
 from skyrl_train.distributed import collective_phase_diagnostics
 
@@ -43,8 +42,9 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         rank=2,
         metadata={"global_step": 3, "local_step": 7},
     ) as region_id:
-        with patch.object(collective_phase_diagnostics.logger, "info") as info:
-            record = collective_phase_diagnostics.log_phase("model_forward_enter")
+        messages: list[str] = []
+        monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
+        record = collective_phase_diagnostics.log_phase("model_forward_enter")
 
         assert record is not None
         assert record.region_id == region_id
@@ -57,7 +57,7 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         assert record.mesh_coordinate == (1, 0)
         assert record.sequence_numbers == {"world": 31, "fsdp": 17, "ep": 23}
 
-        payload = json.loads(info.call_args.args[0].removeprefix(collective_phase_diagnostics.LOG_PREFIX))
+        payload = json.loads(messages[0].removeprefix(collective_phase_diagnostics.LOG_PREFIX))
         assert payload["region_id"] == region_id
         assert payload["sequence_numbers"] == {"world": 31, "fsdp": 17, "ep": 23}
 
@@ -71,18 +71,18 @@ def test_moe_boundary_guard_crosses_asyncio_to_thread_and_resets_by_phase(monkey
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: world)
 
     messages: list[str] = []
+    monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
     with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0) as region_id:
-        with patch.object(collective_phase_diagnostics.logger, "info", messages.append):
-            collective_phase_diagnostics.log_phase("model_forward_enter", reset_moe_boundary=True)
+        collective_phase_diagnostics.log_phase("model_forward_enter", reset_moe_boundary=True)
 
-            async def record_forward_boundary() -> None:
-                await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
-                await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
+        async def record_forward_boundary() -> None:
+            await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
+            await asyncio.to_thread(collective_phase_diagnostics.log_moe_ep_boundary_once)
 
-            asyncio.run(record_forward_boundary())
-            collective_phase_diagnostics.log_phase("backward_enter", reset_moe_boundary=True)
-            collective_phase_diagnostics.log_moe_ep_boundary_once()
-            collective_phase_diagnostics.log_moe_ep_boundary_once()
+        asyncio.run(record_forward_boundary())
+        collective_phase_diagnostics.log_phase("backward_enter", reset_moe_boundary=True)
+        collective_phase_diagnostics.log_moe_ep_boundary_once()
+        collective_phase_diagnostics.log_moe_ep_boundary_once()
 
     payloads = [json.loads(message.removeprefix(collective_phase_diagnostics.LOG_PREFIX)) for message in messages]
     assert [payload["phase"] for payload in payloads] == [
@@ -103,14 +103,15 @@ def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
     mesh = FakeDeviceMesh(fsdp, ep)
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: world)
 
-    with patch.object(collective_phase_diagnostics.logger, "info") as info:
-        with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0) as region_id:
-            assert region_id is None
-            assert collective_phase_diagnostics.log_phase("model_forward_enter") is None
-            assert collective_phase_diagnostics.log_moe_ep_boundary_once() is None
+    messages: list[str] = []
+    monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
+    with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0) as region_id:
+        assert region_id is None
+        assert collective_phase_diagnostics.log_phase("model_forward_enter") is None
+        assert collective_phase_diagnostics.log_moe_ep_boundary_once() is None
 
     assert [world.reads, fsdp.reads, ep.reads] == [0, 0, 0]
-    info.assert_not_called()
+    assert messages == []
 
 
 def test_capture_failures_warn_without_interrupting_training(monkeypatch):
@@ -119,8 +120,10 @@ def test_capture_failures_warn_without_interrupting_training(monkeypatch):
     monkeypatch.setattr(mesh, "get_coordinate", lambda: (_ for _ in ()).throw(RuntimeError("coordinate lost")))
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: FakeProcessGroup(1))
 
+    warnings: list[str] = []
+    monkeypatch.setattr(collective_phase_diagnostics.logger, "warning", warnings.append)
     with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0):
-        with patch.object(collective_phase_diagnostics.logger, "warning") as warning:
-            assert collective_phase_diagnostics.log_phase("backward_enter") is None
+        assert collective_phase_diagnostics.log_phase("backward_enter") is None
 
-    warning.assert_called_once()
+    assert len(warnings) == 1
+    assert "coordinate lost" in warnings[0]
