@@ -253,13 +253,18 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
     )
 
 
-def _assert_fp32_training_contract(snapshots, names: _RepresentativeNames, optimizer_name: str) -> None:
+def _assert_training_dtype_contract(snapshots, names: _RepresentativeNames, optimizer_name: str) -> None:
     stored_names = [*names.parameter_names, names.wire_bf16_sentinel_name]
-    adamw_state = {"step": "float32", "exp_avg": "float32", "exp_avg_sq": "float32"}
     if optimizer_name == "AdamW":
+        parameter_dtype = "bfloat16"
+        gradient_dtype = "bfloat16"
+        adamw_state = {"step": "float32", "exp_avg": "bfloat16", "exp_avg_sq": "bfloat16"}
         expected_states = {name: adamw_state for name in stored_names}
     else:
         assert optimizer_name == "MuonH"
+        parameter_dtype = "float32"
+        gradient_dtype = "float32"
+        adamw_state = {"step": "float32", "exp_avg": "float32", "exp_avg_sq": "float32"}
         expected_states = {
             names.parameter_names[0]: {"momentum_buffer": "float32"},
             names.parameter_names[1]: {"momentum_buffer": "float32"},
@@ -270,9 +275,9 @@ def _assert_fp32_training_contract(snapshots, names: _RepresentativeNames, optim
     for snapshot in snapshots:
         assert snapshot.forward_dtype == "bfloat16"
         assert {name: snapshot.parameter_dtypes[name] for name in stored_names} == {
-            name: "float32" for name in stored_names
+            name: parameter_dtype for name in stored_names
         }
-        assert snapshot.gradient_dtypes == {name: "float32" for name in names.parameter_names}
+        assert snapshot.gradient_dtypes == {name: gradient_dtype for name in names.parameter_names}
         assert snapshot.optimizer_state_dtypes == expected_states
 
 
@@ -290,7 +295,7 @@ def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str, opti
     assert status["peak_gpu_memory_gib"] > 0
     snapshot_names = [*names.parameter_names, names.wire_bf16_sentinel_name, *names.bias_names]
     snapshots = _validation_snapshots(policy, snapshot_names)
-    _assert_fp32_training_contract(snapshots, names, optimizer_name)
+    _assert_training_dtype_contract(snapshots, names, optimizer_name)
     weights = next(snapshot.weights for snapshot in snapshots if snapshot.rank == 0)
     for name in names.parameter_names:
         assert not torch.equal(weights[name], before[name]), f"{name} did not update"
