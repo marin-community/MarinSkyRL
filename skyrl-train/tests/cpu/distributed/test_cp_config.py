@@ -25,6 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
+from tests.cpu.config_test_utils import TRAINER_MODEL_ROLES, assert_role_fsdp_defaults
 
 # The baseline snapshots `get_default_config()` without the intentionally additive
 # CP, grouped-mm, attention-backend, and DCP fields. Keeping the remaining defaults
@@ -67,18 +68,13 @@ STAGE0_DCP_GENERATOR_FIELDS = {
 MOE_FSDP_FIELDS = {
     "use_grouped_mm": False,
 }
-ROLES = ("policy", "ref", "critic")
+ROLES = TRAINER_MODEL_ROLES
 
 
 # ----------------------------------------------------------------------------- G0
 def test_cp_fields_parse_with_defaults():
     """All three CP keys present, with disabled defaults, in every role's fsdp_config."""
-    cfg = get_default_config()
-    for role in ROLES:
-        fsdp = cfg.trainer[role].fsdp_config
-        for k, v in CP_FIELDS.items():
-            assert k in fsdp, f"trainer.{role}.fsdp_config missing {k}"
-            assert fsdp[k] == v, f"trainer.{role}.fsdp_config.{k}={fsdp[k]!r}, expected {v!r}"
+    assert_role_fsdp_defaults(get_default_config(), CP_FIELDS)
 
 
 def test_default_config_validates_noop():

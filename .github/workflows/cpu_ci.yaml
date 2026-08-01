@@ -75,7 +75,6 @@ jobs:
       - name: Run cpu tests
         run: |
           uv run --frozen pytest tests/cpu/ \
-            --deselect tests/cpu/distributed/test_cp_config.py::test_all_defaults_is_structurally_identical_to_pre_cp \
             --deselect tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
             --deselect tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
 
