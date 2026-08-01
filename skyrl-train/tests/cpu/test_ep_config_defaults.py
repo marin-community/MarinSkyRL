@@ -4,7 +4,7 @@ Every trainer role must expose the same disabled EP defaults and base FSDP2
 defaults.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/test_ep_config_noop.py
+    uv run --isolated --extra dev pytest tests/cpu/test_ep_config_defaults.py
 """
 
 from skyrl_train.config.utils import get_default_config
