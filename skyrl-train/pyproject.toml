@@ -38,6 +38,7 @@ dependencies = [
     "datasets>=4.0.0",
     "tensordict",
     "jaxtyping",
+    "nvidia-ml-py",
     "skyrl-gym",
     "flash-attn ; sys_platform != 'darwin'",
     "polars",
