@@ -32,12 +32,7 @@ def get_nccl_monitor_heartbeat_timeout(value: str | int | None = None) -> int:
 
 
 def nccl_communicator_timeout_environment(timeout_seconds: int) -> dict[str, str]:
-    """Enable nonblocking NCCL communicators with a positive timeout in seconds.
-
-    Returns the ``TORCH_NCCL_USE_COMM_NONBLOCKING`` and
-    ``TORCH_NCCL_NONBLOCKING_TIMEOUT`` environment values. Raises ``ValueError``
-    when ``timeout_seconds`` is not positive.
-    """
+    """Return nonblocking NCCL settings; reject non-positive timeouts."""
     if timeout_seconds <= 0:
         raise ValueError("NCCL communicator timeout must be positive")
     return {
