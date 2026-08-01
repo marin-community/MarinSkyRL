@@ -40,7 +40,7 @@ CONTROL_POLL_SECONDS = 0.1
 START_SENTINEL = "start"
 READY_SENTINEL_PREFIX = "ready-"
 ACTIVE_SENTINEL_PREFIX = "active-"
-CONTROL_DIRECTORY_ENVIRONMENT = "SKYRL_FAULT_CONTROL_DIR"
+CONTROL_DIRECTORY_ENV_VAR = "SKYRL_FAULT_CONTROL_DIR"
 SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 
 
@@ -78,7 +78,7 @@ def _wait_for_peer_activity(control_dir: Path) -> None:
 def _worker(mode: FaultMode) -> None:
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    control_dir = Path(os.environ[CONTROL_DIRECTORY_ENVIRONMENT])
+    control_dir = Path(os.environ[CONTROL_DIRECTORY_ENV_VAR])
 
     init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
     device = torch.device("cuda", local_rank)
@@ -191,7 +191,7 @@ def _run_fault(mode: FaultMode) -> FaultRun:
     with tempfile.TemporaryDirectory(prefix=f"skyrl-nccl-{mode.value}-") as temporary_dir:
         control_dir = Path(temporary_dir)
         log_path = control_dir / "torchrun.log"
-        env[CONTROL_DIRECTORY_ENVIRONMENT] = str(control_dir)
+        env[CONTROL_DIRECTORY_ENV_VAR] = str(control_dir)
         with log_path.open("w") as log_file:
             process = subprocess.Popen(
                 command,
