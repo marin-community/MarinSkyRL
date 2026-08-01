@@ -39,7 +39,8 @@ parser, cross-thread region, or first-divergence comparison. Seven focused CPU
 contracts now pass for capture, serialization, cross-thread ordering, phase
 resets, disabled behavior, capture failure, matching schedules, subgroup
 divergence, and missing-rank detection. Adjacent policy-worker and launcher
-tests remain green.
+tests remain green. The complete trainer CPU suite passes with 908 tests and 19
+skips.
 
 ## Future work
 
