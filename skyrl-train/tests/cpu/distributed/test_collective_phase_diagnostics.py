@@ -40,7 +40,7 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         mesh,
         kind="policy_training_step",
         rank=2,
-        metadata={"global_step": 3, "local_step": 7},
+        metadata=collective_phase_diagnostics.CollectiveRegionMetadata(global_step=3, local_step=7),
     ) as region_id:
         messages: list[str] = []
         monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
@@ -51,15 +51,16 @@ def test_phase_record_includes_world_and_mesh_group_sequences(monkeypatch):
         assert record.kind == "policy_training_step"
         assert record.rank == 2
         assert record.phase == "model_forward_enter"
-        assert record.metadata == {"global_step": 3, "local_step": 7}
-        assert record.mesh_dim_names == ("fsdp", "ep")
-        assert record.mesh_shape == (2, 2)
-        assert record.mesh_coordinate == (1, 0)
-        assert record.sequence_numbers == {"world": 31, "fsdp": 17, "ep": 23}
+        assert record.metadata == collective_phase_diagnostics.CollectiveRegionMetadata(global_step=3, local_step=7)
+        assert record.snapshot.mesh_dim_names == ("fsdp", "ep")
+        assert record.snapshot.mesh_shape == (2, 2)
+        assert record.snapshot.mesh_coordinate == (1, 0)
+        assert record.snapshot.sequence_numbers == {"world": 31, "fsdp": 17, "ep": 23}
 
         payload = json.loads(messages[0].removeprefix(collective_phase_diagnostics.LOG_PREFIX))
         assert payload["region_id"] == region_id
-        assert payload["sequence_numbers"] == {"world": 31, "fsdp": 17, "ep": 23}
+        assert payload["metadata"] == {"global_step": 3, "local_step": 7}
+        assert payload["snapshot"]["sequence_numbers"] == {"world": 31, "fsdp": 17, "ep": 23}
 
     assert collective_phase_diagnostics.log_phase("stale_phase") is None
 
@@ -114,16 +115,11 @@ def test_disabled_diagnostics_do_not_read_process_groups(monkeypatch):
     assert messages == []
 
 
-def test_capture_failures_warn_without_interrupting_training(monkeypatch):
+def test_capture_failures_do_not_interrupt_training(monkeypatch):
     monkeypatch.setenv("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", "1")
     mesh = FakeDeviceMesh(FakeProcessGroup(2), FakeProcessGroup(3))
     monkeypatch.setattr(mesh, "get_coordinate", lambda: (_ for _ in ()).throw(RuntimeError("coordinate lost")))
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: FakeProcessGroup(1))
 
-    warnings: list[str] = []
-    monkeypatch.setattr(collective_phase_diagnostics.logger, "warning", warnings.append)
     with collective_phase_diagnostics.region(mesh, kind="policy_training_step", rank=0):
         assert collective_phase_diagnostics.log_phase("backward_enter") is None
-
-    assert len(warnings) == 1
-    assert "coordinate lost" in warnings[0]

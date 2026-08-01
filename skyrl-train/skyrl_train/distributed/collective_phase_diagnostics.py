@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import torch.distributed as dist
 from loguru import logger
@@ -46,17 +46,9 @@ class DeviceMeshWorker(Protocol):
 
 
 @dataclass(frozen=True)
-class CollectivePhaseRecord:
-    region_id: int
-    event_index: int
-    kind: str
-    rank: int
-    phase: str
-    metadata: dict[str, Any]
-    mesh_dim_names: tuple[str, ...]
-    mesh_shape: tuple[int, ...]
-    mesh_coordinate: tuple[int, ...]
-    sequence_numbers: dict[str, int]
+class CollectiveRegionMetadata:
+    global_step: int | None = None
+    local_step: int | None = None
 
 
 @dataclass(frozen=True)
@@ -67,12 +59,23 @@ class MeshCollectiveSnapshot:
     sequence_numbers: dict[str, int]
 
 
+@dataclass(frozen=True)
+class CollectivePhaseRecord:
+    region_id: int
+    event_index: int
+    kind: str
+    rank: int
+    phase: str
+    metadata: CollectiveRegionMetadata
+    snapshot: MeshCollectiveSnapshot
+
+
 @dataclass
 class _RegionContext:
     region_id: int
     kind: str
     rank: int
-    metadata: dict[str, Any]
+    metadata: CollectiveRegionMetadata
     device_mesh: DeviceMeshLike
     moe_boundary_logged: bool = False
     next_event_index: int = 0
@@ -105,17 +108,11 @@ def _default_process_group() -> ProcessGroupLike:
 
 def capture_mesh_snapshot(
     device_mesh: DeviceMeshLike,
-    *,
-    group_names: tuple[str, ...] | None = None,
-    include_world: bool = True,
 ) -> MeshCollectiveSnapshot:
     """Read mesh geometry and existing process-group counters without synchronization."""
     dim_names = tuple(device_mesh.mesh_dim_names)
-    selected_groups = group_names if group_names is not None else dim_names
-    sequence_numbers = {}
-    if include_world:
-        sequence_numbers[WORLD_GROUP] = int(_default_process_group()._get_sequence_number_for_group())
-    for name in selected_groups:
+    sequence_numbers = {WORLD_GROUP: int(_default_process_group()._get_sequence_number_for_group())}
+    for name in dim_names:
         sequence_numbers[name] = int(device_mesh.get_group(name)._get_sequence_number_for_group())
     return MeshCollectiveSnapshot(
         mesh_dim_names=dim_names,
@@ -131,7 +128,7 @@ def region(
     *,
     kind: str,
     rank: int,
-    metadata: dict[str, Any] | None = None,
+    metadata: CollectiveRegionMetadata | None = None,
 ) -> Iterator[int | None]:
     """Scope one policy operation, yielding ``None`` when diagnostics are disabled."""
     if not enabled():
@@ -146,7 +143,7 @@ def region(
             region_id=region_id,
             kind=kind,
             rank=rank,
-            metadata=dict(metadata or {}),
+            metadata=metadata or CollectiveRegionMetadata(),
             device_mesh=device_mesh,
         )
     )
@@ -166,11 +163,8 @@ def _capture_record(context: _RegionContext, phase: str) -> CollectivePhaseRecor
         kind=context.kind,
         rank=context.rank,
         phase=phase,
-        metadata=dict(context.metadata),
-        mesh_dim_names=snapshot.mesh_dim_names,
-        mesh_shape=snapshot.mesh_shape,
-        mesh_coordinate=snapshot.mesh_coordinate,
-        sequence_numbers=snapshot.sequence_numbers,
+        metadata=context.metadata,
+        snapshot=snapshot,
     )
 
 

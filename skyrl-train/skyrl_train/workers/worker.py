@@ -1159,7 +1159,10 @@ class PolicyWorkerBase(Worker):
                     _phase_diagnostics.diagnostic_device_mesh(self),
                     kind="policy_training_step",
                     rank=self._rank,
-                    metadata={"global_step": global_step, "local_step": local_step},
+                    metadata=_phase_diagnostics.CollectiveRegionMetadata(
+                        global_step=global_step,
+                        local_step=local_step,
+                    ),
                 ):
                     status = self.training_step(
                         experience,

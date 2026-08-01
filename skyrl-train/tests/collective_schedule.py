@@ -187,12 +187,12 @@ class NcclCollectiveRecorder:
     def __init__(self, device_mesh: DeviceMesh, group_dimensions: Sequence[str]) -> None:
         self._device_mesh = device_mesh
         self._group_dimensions = tuple(group_dimensions)
-        snapshot = capture_mesh_snapshot(device_mesh, group_names=self._group_dimensions, include_world=False)
+        snapshot = capture_mesh_snapshot(device_mesh)
         self._mesh_dim_names = snapshot.mesh_dim_names
         self._mesh_shape = snapshot.mesh_shape
         self._mesh_coordinate = snapshot.mesh_coordinate
         self._groups: dict[str, ProcessGroup] = {name: device_mesh.get_group(name) for name in self._group_dimensions}
-        self._initial_sequences = snapshot.sequence_numbers
+        self._initial_sequences = {name: snapshot.sequence_numbers[name] for name in self._group_dimensions}
         self._events: dict[str, list[CollectiveEvent]] = {name: [] for name in self._groups}
         self._boundaries: list[CollectiveBoundary] = []
         self._errors: list[str] = []
@@ -216,11 +216,7 @@ class NcclCollectiveRecorder:
         return record
 
     def _sequence_counts(self) -> dict[str, int]:
-        current = capture_mesh_snapshot(
-            self._device_mesh,
-            group_names=self._group_dimensions,
-            include_world=False,
-        ).sequence_numbers
+        current = capture_mesh_snapshot(self._device_mesh).sequence_numbers
         return {name: current[name] - self._initial_sequences[name] for name in self._group_dimensions}
 
     def record_boundary_snapshot(self, label: str) -> None:

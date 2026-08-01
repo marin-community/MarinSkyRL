@@ -1045,7 +1045,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # rank's coroutine task is scheduled, so all 32 must log this.
         logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
         metadata = data.metadata or {}
-        diagnostic_metadata = {"global_step": metadata["global_step"]} if "global_step" in metadata else {}
+        diagnostic_metadata = _phase_diagnostics.CollectiveRegionMetadata(global_step=metadata.get("global_step"))
         with _phase_diagnostics.region(
             _phase_diagnostics.diagnostic_device_mesh(self),
             kind="policy_inference_forward",
