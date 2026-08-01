@@ -29,7 +29,6 @@ import argparse
 import os
 import time
 from collections.abc import Callable
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -128,7 +127,6 @@ class TinyMoEModel(torch.nn.Module):
         self.checkpoint_mode = checkpoint_mode
         self.layers = torch.nn.ModuleList(TinyMoEBlock(index, checkpoint_mode) for index in range(NUM_LAYERS))
         self.output = torch.nn.Linear(DIM, DIM, bias=False)
-        self.config = SimpleNamespace(tie_word_embeddings=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:

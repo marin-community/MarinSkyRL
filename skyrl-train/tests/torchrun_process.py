@@ -20,16 +20,12 @@ _NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT = {
 
 
 def nccl_communicator_nonblocking_environment(timeout_seconds: float) -> dict[str, str]:
-    """Return NCCL communicator-nonblocking settings for an explicit timeout."""
-
     environment = dict(_NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT)
     environment["TORCH_NCCL_NONBLOCKING_TIMEOUT"] = str(timeout_seconds)
     return environment
 
 
 def disable_nccl_communicator_nonblocking(environment: MutableMapping[str, str]) -> None:
-    """Remove communicator-nonblocking settings from a worker environment."""
-
     for variable in _NCCL_COMMUNICATOR_NONBLOCKING_ENVIRONMENT:
         environment.pop(variable, None)
 
