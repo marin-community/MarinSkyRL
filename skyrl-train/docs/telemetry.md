@@ -13,7 +13,7 @@ is always `marinskyrl` and cannot be overridden. `SKYRL_SERVING_JOB_ID` is an
 optional join to a centralized serving job.
 
 The driver and trainer actor each own one exporter lifecycle. Export failures
-are contained, shutdown has a five-second maximum (two seconds by default), and
+are contained, shutdown uses one two-second deadline, and
 telemetry never changes training results or W&B ownership. Before shutdown,
 the adapter polls Rigging's public queued-record status only until that same
 deadline so the pinned exporter's terminal record can leave a later batch.
@@ -120,7 +120,8 @@ ORDER BY timestamp_ms
 - Fabric and hardware probes. Iris, DCGM, and Ray remain authoritative where
   they already cover a source. Rigging NVIDIA/NCCL probes remain disabled until
   a dependency-resolvable published Rigging version contains Marin commit
-  `805dd5e47483e249dd63f12d3da6cf8cd6a29a12`. The telemetry extra is pinned to
+  [`805dd5e47`](https://github.com/marin-community/marin/commit/805dd5e47483e249dd63f12d3da6cf8cd6a29a12).
+  The telemetry extra is pinned to
   the earlier base-exporter release `marin-rigging==0.2.67.dev30673006835`, so
   MarinSkyRL does not copy or activate the newer probe implementation. SkyRL
   imports only `rigging.telemetry` and `rigging.timing`; lock metadata excludes

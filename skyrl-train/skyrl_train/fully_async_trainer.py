@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
-from skyrl_train.telemetry import record_rollout_buffer
+from skyrl_train.telemetry import critical_phase, record_rollout_buffer
 
 
 @dataclass
@@ -55,7 +55,7 @@ class GeneratedOutputGroup:
     global_step_when_scheduled: int
 
 
-async def _put_rollout_with_backpressure(
+async def _put_and_record_rollout_buffer(
     buffer: asyncio.Queue[GeneratedOutputGroup], output_group: GeneratedOutputGroup
 ) -> None:
     await buffer.put(output_group)
@@ -663,7 +663,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings),
-                        self._critical_phase("rollout_or_inference_wait"),
+                        critical_phase("rollout_or_inference_wait"),
                     ):
                         buffer_pbar = tqdm(
                             total=self.mini_batch_size,
@@ -957,7 +957,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model
-        with Timer("train_critic_and_policy", self.all_timings), self._critical_phase("train_step"):
+        with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
@@ -1039,7 +1039,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # the group is actually buffered, which is exactly correct. If the worker
                 # is cancelled while blocked in put(), slot_acquired is still True so the
                 # CancelledError handler below reconciles submitted/running.
-                await _put_rollout_with_backpressure(
+                await _put_and_record_rollout_buffer(
                     generation_output_group_buffer,
                     GeneratedOutputGroup(
                         generator_output=cur_generator_output,

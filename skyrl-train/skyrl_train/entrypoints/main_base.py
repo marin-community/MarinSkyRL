@@ -518,7 +518,7 @@ def skyrl_entrypoint(cfg: DictConfig):
     # through), NOT here -- terminal_bench and other entrypoints use their own
     # skyrl_entrypoint wrappers, so the fix must be on run(). See run() above.
     # make sure that the training loop is not run on the head node.
-    with process_telemetry(cfg, "trainer"):
+    with process_telemetry("trainer"):
         exp = BasePPOExp(cfg)
         exp.run()
 
@@ -537,7 +537,7 @@ def main(cfg: DictConfig) -> None:
 
     initialize_ray(cfg)
 
-    with process_telemetry(cfg, "driver"):
+    with process_telemetry("driver"):
         # Register SIGTERM handler so that cluster preemption / job scheduler
         # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
         def _sigterm_handler(signum, frame):

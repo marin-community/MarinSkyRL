@@ -2,12 +2,12 @@ import contextlib
 import os
 import socket
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
+import ray
 from loguru import logger
-from omegaconf import DictConfig
 
 try:
     from rigging import telemetry as _rigging
@@ -17,25 +17,21 @@ except ImportError:
 
 SERVICE = "marinskyrl"
 ProcessRole = Literal["driver", "trainer"]
+TRAINER_ROLE: ProcessRole = "trainer"
+SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 _active_process: "ProcessTelemetry | None" = None
 
-
-def _instrument(kind: str, name: str, unit: str):
-    if _rigging is None:
-        return None
-    try:
-        return getattr(_rigging, kind)(name, unit=unit)
-    except Exception:
-        return None
-
-
-_WORK_COMPLETED = _instrument("counter", "work_completed", "{item}")
-_PHASE_DURATION_SECONDS = _instrument("histogram", "phase_duration_seconds", "s")
-_PROGRESS_TIME_SECONDS = _instrument("gauge", "progress_time_seconds", "s")
-_POLICY_STEP = _instrument("gauge", "policy_step", "{step}")
-_QUEUE_DEPTH = _instrument("gauge", "queue_depth", "{item}")
-_CAPACITY = _instrument("gauge", "capacity", "{item}")
+if _rigging is None:
+    _WORK_COMPLETED = _PHASE_DURATION_SECONDS = _PROGRESS_TIME_SECONDS = None
+    _POLICY_STEP = _QUEUE_DEPTH = _CAPACITY = None
+else:
+    _WORK_COMPLETED = _rigging.counter("work_completed", unit="{item}")
+    _PHASE_DURATION_SECONDS = _rigging.histogram("phase_duration_seconds", unit="s")
+    _PROGRESS_TIME_SECONDS = _rigging.gauge("progress_time_seconds", unit="s")
+    _POLICY_STEP = _rigging.gauge("policy_step", unit="{step}")
+    _QUEUE_DEPTH = _rigging.gauge("queue_depth", unit="{item}")
+    _CAPACITY = _rigging.gauge("capacity", unit="{item}")
 
 
 @dataclass(frozen=True)
@@ -44,31 +40,19 @@ class TelemetryConfig:
     root_run_uid: str | None = None
     execution_uid: str | None = None
     serving_job_id: str | None = None
-    shutdown_timeout_seconds: float = 2.0
+    shutdown_timeout_seconds: float = SHUTDOWN_TIMEOUT_SECONDS
 
     @classmethod
-    def from_config(cls, cfg: DictConfig | Mapping[str, Any] | None) -> "TelemetryConfig":
-        telemetry_cfg = cfg.get("telemetry", {}) if cfg is not None and hasattr(cfg, "get") else {}
-
-        def text(key: str, environment_name: str) -> str | None:
-            value = telemetry_cfg.get(key) if hasattr(telemetry_cfg, "get") else None
-            if value is None:
-                value = os.environ.get(environment_name)
-            value = str(value).strip() if value is not None else ""
+    def from_environment(cls) -> "TelemetryConfig":
+        def text(environment_name: str) -> str | None:
+            value = os.environ.get(environment_name, "").strip()
             return value or None
 
-        try:
-            shutdown_timeout = float(telemetry_cfg.get("shutdown_timeout_seconds", 2.0))
-        except (TypeError, ValueError):
-            shutdown_timeout = 2.0
-        if not 0 <= shutdown_timeout <= 5:
-            shutdown_timeout = 2.0
         return cls(
-            endpoint=text("endpoint", "SKYRL_TELEMETRY_ENDPOINT"),
-            root_run_uid=text("root_run_uid", "SKYRL_ROOT_RUN_UID"),
-            execution_uid=text("execution_uid", "SKYRL_EXECUTION_UID"),
-            serving_job_id=text("serving_job_id", "SKYRL_SERVING_JOB_ID"),
-            shutdown_timeout_seconds=shutdown_timeout,
+            endpoint=text("SKYRL_TELEMETRY_ENDPOINT"),
+            root_run_uid=text("SKYRL_ROOT_RUN_UID"),
+            execution_uid=text("SKYRL_EXECUTION_UID"),
+            serving_job_id=text("SKYRL_SERVING_JOB_ID"),
         )
 
 
@@ -94,13 +78,12 @@ def _iris_resources() -> dict[str, str]:
 
 
 def _ray_resources() -> dict[str, str]:
+    if not ray.is_initialized():
+        return {}
     try:
-        import ray
-
-        if not ray.is_initialized():
-            return {}
         context = ray.get_runtime_context()
     except Exception:
+        logger.warning("Could not read Ray identity for telemetry; continuing without it")
         return {}
 
     resources: dict[str, str] = {}
@@ -154,7 +137,7 @@ def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"]) ->
                     attributes={
                         "phase": phase,
                         "clock_domain": "critical_path",
-                        "role": "trainer",
+                        "role": TRAINER_ROLE,
                         "outcome": outcome,
                     },
                 )
@@ -163,17 +146,18 @@ def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"]) ->
 
 
 def record_policy_step(policy_step: int) -> None:
+    progress_time = time.time()
     if _active_process is not None:
         _active_process.policy_step = policy_step
-        _active_process.last_progress_time_seconds = time.time()
-    attributes = {"work_kind": "policy_step", "role": "trainer"}
+        _active_process.last_progress_time_seconds = progress_time
+    attributes = {"work_kind": "policy_step", "role": TRAINER_ROLE}
     try:
         if _WORK_COMPLETED is not None:
             _WORK_COMPLETED.add(1, attributes=attributes)
         if _PROGRESS_TIME_SECONDS is not None:
-            _PROGRESS_TIME_SECONDS.set(time.time(), attributes=attributes)
+            _PROGRESS_TIME_SECONDS.set(progress_time, attributes=attributes)
         if _POLICY_STEP is not None:
-            _POLICY_STEP.set(policy_step, attributes={"role": "trainer"})
+            _POLICY_STEP.set(policy_step, attributes={"role": TRAINER_ROLE})
     except Exception:
         pass
 
@@ -182,7 +166,7 @@ def record_rollout_buffer(depth: int, capacity: int) -> None:
     if _active_process is not None:
         _active_process.queue_depth = depth
         _active_process.queue_capacity = capacity
-    attributes = {"queue": "rollout_buffer", "role": "trainer"}
+    attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE}
     try:
         if _QUEUE_DEPTH is not None:
             _QUEUE_DEPTH.set(depth, attributes=attributes)
@@ -206,14 +190,14 @@ class ProcessTelemetry:
     def __enter__(self) -> "ProcessTelemetry":
         global _active_process
 
+        if _active_process is not None:
+            logger.warning("Telemetry already has a process owner; leaving the nested lifecycle inert")
+            return self
         _active_process = self
         if _rigging is None or self.config.endpoint is None:
             return self
         if self.config.root_run_uid is None or self.config.execution_uid is None:
-            try:
-                logger.warning("Telemetry requires root_run_uid and execution_uid; export remains inert")
-            except Exception:
-                pass
+            logger.warning("Telemetry requires root_run_uid and execution_uid; export remains inert")
             return self
         try:
             _rigging.configure(
@@ -223,6 +207,7 @@ class ProcessTelemetry:
             )
             self.configured = bool(_rigging.runtime_status().configured)
         except Exception:
+            logger.warning("Could not configure telemetry; export remains inert")
             self.configured = False
         if self.configured:
             try:
@@ -285,5 +270,5 @@ class ProcessTelemetry:
             pass
 
 
-def process_telemetry(cfg: DictConfig | Mapping[str, Any] | None, role: ProcessRole) -> ProcessTelemetry:
-    return ProcessTelemetry(TelemetryConfig.from_config(cfg), role)
+def process_telemetry(role: ProcessRole) -> ProcessTelemetry:
+    return ProcessTelemetry(TelemetryConfig.from_environment(), role)

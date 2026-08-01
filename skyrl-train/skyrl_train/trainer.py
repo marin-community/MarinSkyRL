@@ -145,9 +145,6 @@ class RayPPOTrainer:
         # Trainer control object for callback coordination
         self._control = TrainerControl()
 
-    def _critical_phase(self, phase: str):
-        return critical_phase(phase)
-
     def _record_policy_progress(self) -> None:
         record_policy_step(self.global_step)
 
@@ -486,7 +483,7 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
-                    with Timer("generate", self.all_timings), self._critical_phase("rollout_or_inference_wait"):
+                    with Timer("generate", self.all_timings), critical_phase("rollout_or_inference_wait"):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
                     if self.cfg.trainer.step_wise_training:
@@ -563,7 +560,7 @@ class RayPPOTrainer:
 
                     # 4. train policy/critic model
                     # Policy model is backloaded to GPU during training
-                    with Timer("train_critic_and_policy", self.all_timings), self._critical_phase("train_step"):
+                    with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
                         status = self.train_critic_and_policy(training_input)
 
                     # 5. sync weights to inference engines (must happen before callbacks)

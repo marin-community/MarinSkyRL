@@ -2,10 +2,10 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from omegaconf import OmegaConf
+import ray
 
 from skyrl_train import fully_async_trainer, telemetry
-from skyrl_train.fully_async_trainer import GeneratedOutputGroup, _put_rollout_with_backpressure
+from skyrl_train.fully_async_trainer import GeneratedOutputGroup, _put_and_record_rollout_buffer
 
 
 class RecordingInstrument:
@@ -79,18 +79,13 @@ def recording_backend(monkeypatch: pytest.MonkeyPatch) -> RecordingBackend:
     return backend
 
 
-def configured() -> OmegaConf:
-    return OmegaConf.create(
-        {
-            "telemetry": {
-                "endpoint": "http://finelog.test/v1/telemetry",
-                "root_run_uid": "root-1",
-                "execution_uid": "execution-2",
-                "serving_job_id": "serving-3",
-                "service": "operator-override-is-ignored",
-                "shutdown_timeout_seconds": 0.03,
-            }
-        }
+def configured() -> telemetry.TelemetryConfig:
+    return telemetry.TelemetryConfig(
+        endpoint="http://finelog.test/v1/telemetry",
+        root_run_uid="root-1",
+        execution_uid="execution-2",
+        serving_job_id="serving-3",
+        shutdown_timeout_seconds=0.03,
     )
 
 
@@ -100,6 +95,7 @@ def test_trainer_lifecycle_uses_canonical_identity_and_signals(
     monkeypatch.setenv("SKYRL_TELEMETRY_ENDPOINT", "http://finelog.test/v1/telemetry")
     monkeypatch.setenv("SKYRL_ROOT_RUN_UID", "root-1")
     monkeypatch.setenv("SKYRL_EXECUTION_UID", "execution-2")
+    monkeypatch.setenv("SKYRL_SERVING_JOB_ID", "serving-3")
     monkeypatch.setattr(telemetry, "_iris_resources", lambda: {"job_id": "/u/job", "attempt": "2"})
     monkeypatch.setattr(
         telemetry,
@@ -107,16 +103,7 @@ def test_trainer_lifecycle_uses_canonical_identity_and_signals(
         lambda: {"ray_job_id": "ray-job", "actor_uid": "actor-1", "node_uid": "node-1"},
     )
 
-    config = OmegaConf.create(
-        {
-            "telemetry": {
-                "serving_job_id": "serving-3",
-                "service": "operator-override-is-ignored",
-                "shutdown_timeout_seconds": 0.03,
-            }
-        }
-    )
-    with telemetry.process_telemetry(config, "trainer"):
+    with telemetry.process_telemetry("trainer"):
         telemetry.record_policy_step(7)
         telemetry.record_rollout_buffer(2, 4)
 
@@ -143,7 +130,7 @@ def test_trainer_lifecycle_uses_canonical_identity_and_signals(
         "export_lost_records": 2,
     }.items() <= recording_backend.events[-1][1].items()
     assert len(recording_backend.shutdown_timeouts) == 1
-    assert 0 < recording_backend.shutdown_timeouts[0] <= 0.03
+    assert 0 < recording_backend.shutdown_timeouts[0] <= telemetry.SHUTDOWN_TIMEOUT_SECONDS
 
     instruments = {(item.name, item.unit): item for item in recording_backend.instruments}
     work = instruments[("work_completed", "{item}")]
@@ -159,7 +146,6 @@ def test_phase_observes_system_exit_and_records_exclusive_clock(
             raise SystemExit(9)
 
     instrument = next(item for item in recording_backend.instruments if item.name == "phase_duration_seconds")
-    assert (instrument.name, instrument.unit) == ("phase_duration_seconds", "s")
     assert {
         "phase": "rollout_or_inference_wait",
         "clock_domain": "critical_path",
@@ -169,7 +155,7 @@ def test_phase_observes_system_exit_and_records_exclusive_clock(
 
 
 def test_unconfigured_export_is_inert(recording_backend: RecordingBackend) -> None:
-    with telemetry.process_telemetry(OmegaConf.create({}), "driver"):
+    with telemetry.ProcessTelemetry(telemetry.TelemetryConfig(), "driver"):
         pass
 
     assert recording_backend.configure_calls == []
@@ -204,12 +190,13 @@ def test_exporter_and_shutdown_failures_do_not_change_application_result(monkeyp
     monkeypatch.setattr(telemetry, "_PHASE_DURATION_SECONDS", backend.histogram("phase_duration_seconds", unit="s"))
     monkeypatch.setattr(telemetry, "_PROGRESS_TIME_SECONDS", backend.gauge("progress_time_seconds", unit="s"))
 
-    with telemetry.process_telemetry(configured(), "trainer"):
-        with telemetry.critical_phase("train_step"):
-            telemetry.record_policy_step(1)
-            result = 17
+    def application() -> int:
+        with telemetry.ProcessTelemetry(configured(), "trainer"):
+            with telemetry.critical_phase("train_step"):
+                telemetry.record_policy_step(1)
+                return 17
 
-    assert result == 17
+    assert application() == 17
     assert telemetry._active_process is None
     assert len(backend.shutdown_timeouts) == 1
 
@@ -238,7 +225,7 @@ def test_shutdown_drains_multiple_event_records_within_one_deadline(monkeypatch:
     monkeypatch.setattr(telemetry.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(telemetry.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
 
-    with telemetry.process_telemetry(configured(), "driver"):
+    with telemetry.ProcessTelemetry(configured(), "driver"):
         pass
 
     assert backend.delivered == ["lifecycle", "terminal"]
@@ -260,8 +247,6 @@ def test_iris_resources_split_task_attempt_and_process(monkeypatch: pytest.Monke
 
 
 def test_actor_restart_preserves_attempt_and_changes_actor_uid(monkeypatch: pytest.MonkeyPatch) -> None:
-    import ray
-
     class Context:
         def __init__(self, actor_uid: str, attempt: int) -> None:
             self.actor_uid = actor_uid
@@ -305,13 +290,15 @@ async def test_rollout_buffer_applies_backpressure_and_reports_capacity(monkeypa
             await super().put(item)
 
     records: list[tuple[int, int]] = []
-    monkeypatch.setattr(fully_async_trainer, "record_rollout_buffer", lambda depth, capacity: records.append((depth, capacity)))
+    monkeypatch.setattr(
+        fully_async_trainer, "record_rollout_buffer", lambda depth, capacity: records.append((depth, capacity))
+    )
     buffer = ObservedQueue(maxsize=1)
     first = GeneratedOutputGroup({}, "first", 1)
     second = GeneratedOutputGroup({}, "second", 1)
     await buffer.put(first)
 
-    blocked_put = asyncio.create_task(_put_rollout_with_backpressure(buffer, second))
+    blocked_put = asyncio.create_task(_put_and_record_rollout_buffer(buffer, second))
     await put_started.wait()
     assert not blocked_put.done()
     assert await buffer.get() is first
