@@ -32,6 +32,7 @@ from typing import List, Optional, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
+from skyrl_train.telemetry import record_rollout_buffer
 
 
 @dataclass
@@ -52,6 +53,13 @@ class GeneratedOutputGroup:
     generator_output: GeneratorOutput
     uid: str
     global_step_when_scheduled: int
+
+
+async def _put_rollout_with_backpressure(
+    buffer: asyncio.Queue[GeneratedOutputGroup], output_group: GeneratedOutputGroup
+) -> None:
+    await buffer.put(output_group)
+    record_rollout_buffer(buffer.qsize(), buffer.maxsize)
 
 
 @dataclass
@@ -653,7 +661,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("step", self.all_timings):
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
-                    with Timer("wait_for_generation_buffer", self.all_timings):
+                    with (
+                        Timer("wait_for_generation_buffer", self.all_timings),
+                        self._critical_phase("rollout_or_inference_wait"),
+                    ):
                         buffer_pbar = tqdm(
                             total=self.mini_batch_size,
                             initial=0,
@@ -668,6 +679,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         while len(cur_generation_group_mini_batch) < self.mini_batch_size:
                             # We do finish-time FIFO here (not schedule-time FIFO)
                             cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                            record_rollout_buffer(
+                                generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize
+                            )
                             buffer_pbar.update(1)
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                         buffer_pbar.close()
@@ -803,6 +817,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 pbar.update(1)
 
                 last_completed_step = self.global_step
+                self._record_policy_progress()
                 self.global_step += 1
 
                 # 9. Notify generation workers that the capacity has increased, unblocking them.
@@ -942,7 +957,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model
-        with Timer("train_critic_and_policy", self.all_timings):
+        with Timer("train_critic_and_policy", self.all_timings), self._critical_phase("train_step"):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
@@ -1024,12 +1039,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # the group is actually buffered, which is exactly correct. If the worker
                 # is cancelled while blocked in put(), slot_acquired is still True so the
                 # CancelledError handler below reconciles submitted/running.
-                await generation_output_group_buffer.put(
+                await _put_rollout_with_backpressure(
+                    generation_output_group_buffer,
                     GeneratedOutputGroup(
                         generator_output=cur_generator_output,
                         uid=uids[0],
                         global_step_when_scheduled=staleness_step,
-                    )
+                    ),
                 )
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration

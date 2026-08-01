@@ -75,6 +75,7 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
+from skyrl_train.telemetry import critical_phase, record_policy_step
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
@@ -143,6 +144,12 @@ class RayPPOTrainer:
 
         # Trainer control object for callback coordination
         self._control = TrainerControl()
+
+    def _critical_phase(self, phase: str):
+        return critical_phase(phase)
+
+    def _record_policy_progress(self) -> None:
+        record_policy_step(self.global_step)
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -479,7 +486,7 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
-                    with Timer("generate", self.all_timings):
+                    with Timer("generate", self.all_timings), self._critical_phase("rollout_or_inference_wait"):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
                     if self.cfg.trainer.step_wise_training:
@@ -556,7 +563,7 @@ class RayPPOTrainer:
 
                     # 4. train policy/critic model
                     # Policy model is backloaded to GPU during training
-                    with Timer("train_critic_and_policy", self.all_timings):
+                    with Timer("train_critic_and_policy", self.all_timings), self._critical_phase("train_step"):
                         status = self.train_critic_and_policy(training_input)
 
                     # 5. sync weights to inference engines (must happen before callbacks)
@@ -652,6 +659,7 @@ class RayPPOTrainer:
                 # 10. Update progress bar and global step
                 pbar.update(1)
                 last_completed_step = self.global_step
+                self._record_policy_progress()
                 self.global_step += 1
 
                 del training_input, generator_output
