@@ -1,14 +1,19 @@
-"""Exercise the model-level EP/FSDP collective schedule on four or twelve GPUs.
+"""Exercise model-level EP/FSDP collective schedules on four or twelve GPUs.
 
-The tiny model uses the production TorchTitan expert-parallel hooks, FSDP2
-wrapping, grouped MoE replay seam, and reentrant activation checkpointing. NCCL
-completion hooks record operation types and sequence numbers for the rank-local
-EP and FSDP process groups without adding collectives. Layer boundaries also
-snapshot both process-group sequence counters.
+Every case uses the production TorchTitan expert-parallel hooks, FSDP2 wrapping,
+and grouped MoE path. ``--case`` selects live or replayed routing, checkpointing,
+routing concentration, and an optional rank delay. NCCL completion hooks record
+operation types and sequence numbers for the rank-local EP and FSDP process
+groups without adding collectives. Layer boundaries also snapshot both
+process-group sequence counters.
 
 Run the compact topology on one four-GPU node::
 
     torchrun --nproc-per-node=4 tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py
+
+The default case uses concentrated router replay and reentrant checkpointing.
+Pass ``--case`` with one of the choices reported by ``--help`` to select another
+matrix case.
 
 The worker enables ``TORCH_NCCL_ENABLE_TIMING=1`` before process-group
 initialization because ProcessGroupNCCL completion hooks require start and end
@@ -289,7 +294,7 @@ def _compare_rank_schedules(schedule: RankCollectiveSchedule, world_size: int) -
     assert_collective_schedules_match(schedules, "fsdp")
 
 
-def _run_ep_fsdp_replay_checkpoint_collective_schedule(
+def _run_ep_fsdp_collective_schedule_case(
     ep_size: int,
     fsdp_size: int | None,
     case: CollectiveScheduleCase,
@@ -320,12 +325,12 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule(
         )
 
 
-def test_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
+def test_ep_fsdp_default_collective_schedule() -> None:
     if not torch.cuda.is_available():
         pytest.skip("NCCL collective schedule contract requires CUDA")
 
     try:
-        _run_ep_fsdp_replay_checkpoint_collective_schedule(
+        _run_ep_fsdp_collective_schedule_case(
             DEFAULT_EP_SIZE,
             None,
             collective_schedule_case(DEFAULT_COLLECTIVE_SCHEDULE_CASE),
@@ -346,7 +351,7 @@ if __name__ == "__main__":
     )
     arguments = parser.parse_args()
     try:
-        _run_ep_fsdp_replay_checkpoint_collective_schedule(
+        _run_ep_fsdp_collective_schedule_case(
             arguments.ep_size,
             arguments.fsdp_size,
             collective_schedule_case(arguments.case),

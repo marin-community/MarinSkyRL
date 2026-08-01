@@ -13,26 +13,23 @@ checkpointing, and one controlled rank delay at a model-layer boundary.
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import torch
 
 from tests.collective_schedule_matrix import COLLECTIVE_SCHEDULE_CASES, CollectiveScheduleCase
-from tests.torchrun_process import kill_and_reap_torchrun, read_process_output
+from tests.torchrun_process import (
+    NCCL_COMMUNICATOR_NONBLOCKING_VARIABLES,
+    TorchrunResult,
+    TorchrunTimeoutError,
+    launch_torchrun,
+)
 
 
 WORLD_SIZE = 4
 RUN_TIMEOUT_SECONDS = 240
 REAP_TIMEOUT_SECONDS = 10
-COMMUNICATOR_NONBLOCKING_VARIABLES = (
-    "TORCH_NCCL_USE_COMM_NONBLOCKING",
-    "TORCH_NCCL_NONBLOCKING_TIMEOUT",
-)
 SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 WORKER_PATH = SKYRL_TRAIN_ROOT / "tests/gpu/gpu_ci/test_ep_fsdp_collective_schedule.py"
 REQUIRES_FOUR_CUDA_DEVICES = pytest.mark.skipif(
@@ -41,47 +38,23 @@ REQUIRES_FOUR_CUDA_DEVICES = pytest.mark.skipif(
 )
 
 
-@dataclass(frozen=True)
-class RunResult:
-    returncode: int
-    output: str
-
-
-def _run_case(case: CollectiveScheduleCase) -> RunResult:
+def _run_case(case: CollectiveScheduleCase) -> TorchrunResult:
     environment = os.environ.copy()
-    for variable in COMMUNICATOR_NONBLOCKING_VARIABLES:
+    for variable in NCCL_COMMUNICATOR_NONBLOCKING_VARIABLES:
         environment.pop(variable, None)
-    command = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--standalone",
-        f"--nproc-per-node={WORLD_SIZE}",
-        str(WORKER_PATH),
-        "--case",
-        case.name,
-    ]
-    with tempfile.TemporaryDirectory(prefix=f"skyrl-collective-matrix-{case.name}-") as temporary_dir:
-        log_path = Path(temporary_dir) / "torchrun.log"
-        with log_path.open("w") as log_file:
-            process = subprocess.Popen(
-                command,
-                cwd=SKYRL_TRAIN_ROOT,
-                env=environment,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            try:
-                returncode = process.wait(timeout=RUN_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                reaped = kill_and_reap_torchrun(process, REAP_TIMEOUT_SECONDS)
-                pytest.fail(
-                    f"collective schedule case {case.name!r} did not finish within {RUN_TIMEOUT_SECONDS}s; "
-                    f"process group reaped={reaped}; output:\n{read_process_output(log_path)}",
-                    pytrace=False,
-                )
-        return RunResult(returncode, read_process_output(log_path))
+    with launch_torchrun(
+        script=WORKER_PATH,
+        arguments=("--case", case.name),
+        world_size=WORLD_SIZE,
+        working_directory=SKYRL_TRAIN_ROOT,
+        environment=environment,
+        temporary_prefix=f"skyrl-collective-matrix-{case.name}-",
+        reap_timeout_seconds=REAP_TIMEOUT_SECONDS,
+    ) as gang:
+        try:
+            return gang.wait(RUN_TIMEOUT_SECONDS)
+        except TorchrunTimeoutError as error:
+            pytest.fail(f"collective schedule case {case.name!r} did not finish: {error}", pytrace=False)
 
 
 @pytest.mark.parametrize("case", COLLECTIVE_SCHEDULE_CASES, ids=lambda case: case.name)

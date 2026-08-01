@@ -15,11 +15,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
-import subprocess
-import sys
-import tempfile
 import time
-from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -30,7 +26,13 @@ import torch.distributed as dist
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
-from tests.torchrun_process import kill_and_reap_torchrun, read_process_output
+from tests.torchrun_process import (
+    TorchrunGang,
+    TorchrunResult,
+    TorchrunTimeoutError,
+    launch_torchrun,
+    nccl_communicator_nonblocking_environment,
+)
 
 
 WORLD_SIZE = 4
@@ -48,10 +50,7 @@ START_SENTINEL = "start"
 READY_SENTINEL_PREFIX = "ready-"
 ACTIVE_SENTINEL_PREFIX = "active-"
 CONTROL_DIRECTORY_ENV_VAR = "SKYRL_FAULT_CONTROL_DIR"
-COMMUNICATOR_NONBLOCKING_ENVIRONMENT = {
-    "TORCH_NCCL_USE_COMM_NONBLOCKING": "1",
-    "TORCH_NCCL_NONBLOCKING_TIMEOUT": str(COLLECTIVE_TIMEOUT_SECONDS),
-}
+COMMUNICATOR_NONBLOCKING_ENVIRONMENT = nccl_communicator_nonblocking_environment(COLLECTIVE_TIMEOUT_SECONDS)
 SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 REQUIRES_FOUR_CUDA_DEVICES = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.device_count() < WORLD_SIZE,
@@ -77,12 +76,6 @@ FAULT_MODES = (
     RunMode.WORLD_NONARRIVAL,
     RunMode.RANK_EXIT,
 )
-
-
-@dataclass(frozen=True)
-class RunResult:
-    returncode: int
-    output: str
 
 
 def _wait_for_start(control_dir: Path) -> None:
@@ -238,30 +231,30 @@ def _worker(mode: RunMode) -> None:
     dist.destroy_process_group()
 
 
-def _wait_for_all_ranks_ready(process: subprocess.Popen[str], control_dir: Path, log_path: Path) -> None:
+def _wait_for_all_ranks_ready(gang: TorchrunGang) -> None:
     deadline = time.monotonic() + SETUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         ready_ranks = {
-            path.name.removeprefix(READY_SENTINEL_PREFIX) for path in control_dir.glob(f"{READY_SENTINEL_PREFIX}*")
+            path.name.removeprefix(READY_SENTINEL_PREFIX) for path in gang.directory.glob(f"{READY_SENTINEL_PREFIX}*")
         }
         if len(ready_ranks) == WORLD_SIZE:
             return
-        if process.poll() is not None:
+        if gang.process.poll() is not None:
             pytest.fail(
-                f"torchrun exited during setup with code {process.returncode}; output:\n{read_process_output(log_path)}",
+                f"torchrun exited during setup with code {gang.process.returncode}; output:\n{gang.output()}",
                 pytrace=False,
             )
         time.sleep(CONTROL_POLL_SECONDS)
 
-    reaped = kill_and_reap_torchrun(process, REAP_TIMEOUT_SECONDS)
+    reaped = gang.kill_and_reap()
     pytest.fail(
         f"not all ranks completed setup within {SETUP_TIMEOUT_SECONDS}s; "
-        f"process group reaped={reaped}; output:\n{read_process_output(log_path)}",
+        f"process group reaped={reaped}; output:\n{gang.output()}",
         pytrace=False,
     )
 
 
-def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> RunResult:
+def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> TorchrunResult:
     env = os.environ.copy()
     env.update(
         {
@@ -279,41 +272,22 @@ def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> RunResult:
     else:
         for variable in COMMUNICATOR_NONBLOCKING_ENVIRONMENT:
             env.pop(variable, None)
-    command = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--standalone",
-        f"--nproc-per-node={WORLD_SIZE}",
-        str(Path(__file__).resolve()),
-        "--worker",
-        mode.value,
-    ]
-    with tempfile.TemporaryDirectory(prefix=f"skyrl-nccl-{mode.value}-") as temporary_dir:
-        control_dir = Path(temporary_dir)
-        log_path = control_dir / "torchrun.log"
-        env[CONTROL_DIRECTORY_ENV_VAR] = str(control_dir)
-        with log_path.open("w") as log_file:
-            process = subprocess.Popen(
-                command,
-                cwd=SKYRL_TRAIN_ROOT,
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            _wait_for_all_ranks_ready(process, control_dir, log_path)
-            (control_dir / START_SENTINEL).touch()
-            try:
-                returncode = process.wait(timeout=RUN_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                reaped = kill_and_reap_torchrun(process, REAP_TIMEOUT_SECONDS)
-                pytest.fail(
-                    f"{mode.value} did not finish within {RUN_TIMEOUT_SECONDS}s after setup; "
-                    f"process group reaped={reaped}; output:\n{read_process_output(log_path)}",
-                    pytrace=False,
-                )
-        return RunResult(returncode, read_process_output(log_path))
+    with launch_torchrun(
+        script=Path(__file__).resolve(),
+        arguments=("--worker", mode.value),
+        world_size=WORLD_SIZE,
+        working_directory=SKYRL_TRAIN_ROOT,
+        environment=env,
+        temporary_prefix=f"skyrl-nccl-{mode.value}-",
+        reap_timeout_seconds=REAP_TIMEOUT_SECONDS,
+        control_directory_environment_variable=CONTROL_DIRECTORY_ENV_VAR,
+    ) as gang:
+        _wait_for_all_ranks_ready(gang)
+        (gang.directory / START_SENTINEL).touch()
+        try:
+            return gang.wait(RUN_TIMEOUT_SECONDS)
+        except TorchrunTimeoutError as error:
+            pytest.fail(f"{mode.value} did not finish after setup: {error}", pytrace=False)
 
 
 @pytest.mark.parametrize("mode", FAULT_MODES)
