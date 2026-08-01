@@ -39,6 +39,8 @@ REAP_TIMEOUT_SECONDS = 10
 CONTROL_POLL_SECONDS = 0.1
 START_SENTINEL = "start"
 READY_SENTINEL_PREFIX = "ready-"
+ACTIVE_SENTINEL_PREFIX = "active-"
+CONTROL_DIRECTORY_ENVIRONMENT = "SKYRL_FAULT_CONTROL_DIR"
 SKYRL_TRAIN_ROOT = Path(__file__).parents[3]
 
 
@@ -68,10 +70,15 @@ def _hold_out(mode: FaultMode, rank: int) -> None:
     time.sleep(FAULT_TIMEOUT_SECONDS * 2)
 
 
+def _wait_for_peer_activity(control_dir: Path) -> None:
+    while len(tuple(control_dir.glob(f"{ACTIVE_SENTINEL_PREFIX}*"))) < WORLD_SIZE - 1:
+        time.sleep(CONTROL_POLL_SECONDS)
+
+
 def _worker(mode: FaultMode) -> None:
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    control_dir = Path(os.environ["SKYRL_FAULT_CONTROL_DIR"])
+    control_dir = Path(os.environ[CONTROL_DIRECTORY_ENVIRONMENT])
 
     init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
     device = torch.device("cuda", local_rank)
@@ -103,10 +110,12 @@ def _worker(mode: FaultMode) -> None:
     elif mode is FaultMode.RANK_EXIT:
         if rank == 0:
             print(f"FAULT_INJECTION_EXIT mode={mode.value} rank={rank}", flush=True)
-            time.sleep(1)
+            _wait_for_peer_activity(control_dir)
             os._exit(17)
         print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
-        dist.all_reduce(torch.ones(1, device=device))
+        work = dist.all_reduce(torch.ones(1, device=device), async_op=True)
+        (control_dir / f"{ACTIVE_SENTINEL_PREFIX}{rank}").touch()
+        work.wait()
     else:  # pragma: no cover - argparse constrains worker invocations
         raise ValueError(f"unknown fault mode: {mode}")
 
@@ -182,7 +191,7 @@ def _run_fault(mode: FaultMode) -> FaultRun:
     with tempfile.TemporaryDirectory(prefix=f"skyrl-nccl-{mode.value}-") as temporary_dir:
         control_dir = Path(temporary_dir)
         log_path = control_dir / "torchrun.log"
-        env["SKYRL_FAULT_CONTROL_DIR"] = str(control_dir)
+        env[CONTROL_DIRECTORY_ENVIRONMENT] = str(control_dir)
         with log_path.open("w") as log_file:
             process = subprocess.Popen(
                 command,
@@ -190,7 +199,6 @@ def _run_fault(mode: FaultMode) -> FaultRun:
                 env=env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                text=True,
                 start_new_session=True,
             )
             _wait_for_all_ranks_ready(process, control_dir, log_path)
