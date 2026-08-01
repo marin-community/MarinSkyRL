@@ -156,12 +156,7 @@ def _build_sharded_model(device: torch.device, device_mesh: DeviceMesh) -> TinyC
 
 
 def _install_schedule_recorder(model: TinyCheckpointedMoE, device_mesh: DeviceMesh) -> NcclCollectiveRecorder:
-    recorder = NcclCollectiveRecorder(
-        {
-            "ep": device_mesh.get_group("ep"),
-            "fsdp": device_mesh.get_group("fsdp"),
-        }
-    )
+    recorder = NcclCollectiveRecorder(device_mesh, ("ep", "fsdp"))
     for layer in model.layers:
         layer._record_boundary = recorder.boundary
     return recorder
@@ -209,18 +204,9 @@ def _run_replayed_step(
 def _finish_local_schedule(
     recorder: NcclCollectiveRecorder,
     rank: int,
-    device_mesh: DeviceMesh,
 ) -> RankCollectiveSchedule:
-    mesh_dim_names = tuple(device_mesh.mesh_dim_names)
-    mesh_coordinate = tuple(device_mesh.get_coordinate())
-
     torch.cuda.synchronize()
-    schedule = recorder.finish(
-        rank=rank,
-        mesh_dim_names=mesh_dim_names,
-        mesh_shape=tuple(device_mesh.shape),
-        mesh_coordinate=mesh_coordinate,
-    )
+    schedule = recorder.finish(rank=rank)
     assert tuple(boundary.label for boundary in schedule.boundaries) == _expected_boundaries()
     _assert_operation_families(schedule)
     return schedule
@@ -247,7 +233,7 @@ def _run_ep_fsdp_replay_checkpoint_collective_schedule() -> None:
     dist.barrier()
     recorder = _install_schedule_recorder(model, device_mesh)
     _run_replayed_step(model, fsdp_coordinate, device)
-    schedule = _finish_local_schedule(recorder, rank, device_mesh)
+    schedule = _finish_local_schedule(recorder, rank)
     _compare_rank_schedules(schedule, world_size)
 
     if rank == 0:

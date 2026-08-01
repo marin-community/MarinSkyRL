@@ -27,10 +27,29 @@ def _schedule(rank, coordinate, *, ep_events, fsdp_events, ep_boundaries=(0, 3),
 
 def test_collective_schedules_match_with_independent_ep_and_fsdp_groups():
     schedules = [
-        _schedule(0, (0, 0), ep_events=("ALLTOALL_BASE",) * 3, fsdp_events=("ALLGATHER", "REDUCE_SCATTER")),
-        _schedule(1, (0, 1), ep_events=("ALLTOALL_BASE",) * 3, fsdp_events=("ALLGATHER", "REDUCE_SCATTER")),
-        _schedule(2, (1, 0), ep_events=("ALLTOALL_BASE",) * 3, fsdp_events=("ALLGATHER", "REDUCE_SCATTER")),
-        _schedule(3, (1, 1), ep_events=("ALLTOALL_BASE",) * 3, fsdp_events=("ALLGATHER", "REDUCE_SCATTER")),
+        _schedule(0, (0, 0), ep_events=("EP0_DISPATCH", "EP0_COMBINE"), fsdp_events=("FSDP0_AG", "FSDP0_RS")),
+        _schedule(
+            1,
+            (0, 1),
+            ep_events=("EP0_DISPATCH", "EP0_COMBINE"),
+            fsdp_events=("FSDP1_AG",),
+            fsdp_boundaries=(0, 2),
+        ),
+        _schedule(
+            2,
+            (1, 0),
+            ep_events=("EP1_COUNTS", "EP1_DISPATCH", "EP1_COMBINE"),
+            fsdp_events=("FSDP0_AG", "FSDP0_RS"),
+            ep_boundaries=(0, 4),
+        ),
+        _schedule(
+            3,
+            (1, 1),
+            ep_events=("EP1_COUNTS", "EP1_DISPATCH", "EP1_COMBINE"),
+            fsdp_events=("FSDP1_AG",),
+            ep_boundaries=(0, 4),
+            fsdp_boundaries=(0, 2),
+        ),
     ]
 
     assert_collective_schedules_match(schedules, "ep")

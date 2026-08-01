@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from torch.distributed import ProcessGroup
+from torch.distributed.tensor import DeviceMesh
 
 
 @dataclass(frozen=True)
@@ -157,8 +158,11 @@ def assert_collective_schedules_match(
 class NcclCollectiveRecorder:
     """Record completed work and sequence counters without adding collectives."""
 
-    def __init__(self, groups: Mapping[str, ProcessGroup]) -> None:
-        self._groups = dict(groups)
+    def __init__(self, device_mesh: DeviceMesh, group_dimensions: Sequence[str]) -> None:
+        self._mesh_dim_names = tuple(device_mesh.mesh_dim_names)
+        self._mesh_shape = tuple(device_mesh.shape)
+        self._mesh_coordinate = tuple(device_mesh.get_coordinate())
+        self._groups: dict[str, ProcessGroup] = {name: device_mesh.get_group(name) for name in group_dimensions}
         self._initial_sequences = {
             name: int(group._get_sequence_number_for_group()) for name, group in self._groups.items()
         }
@@ -196,9 +200,6 @@ class NcclCollectiveRecorder:
         self,
         *,
         rank: int,
-        mesh_dim_names: Sequence[str],
-        mesh_shape: Sequence[int],
-        mesh_coordinate: Sequence[int],
         timeout_seconds: float = 30,
     ) -> RankCollectiveSchedule:
         expected_counts = {
@@ -228,9 +229,9 @@ class NcclCollectiveRecorder:
 
         return RankCollectiveSchedule(
             rank=rank,
-            mesh_dim_names=tuple(mesh_dim_names),
-            mesh_shape=tuple(mesh_shape),
-            mesh_coordinate=tuple(mesh_coordinate),
+            mesh_dim_names=self._mesh_dim_names,
+            mesh_shape=self._mesh_shape,
+            mesh_coordinate=self._mesh_coordinate,
             events=events,
             boundaries=boundaries,
         )
