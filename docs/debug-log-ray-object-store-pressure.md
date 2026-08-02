@@ -45,8 +45,8 @@ scratch directory by default. Durable R2 spill remains available only through an
 
 The controller tests failed because remote R2 was enabled when the opt-in variable was absent and local mode
 emitted no explicit spill directory. The implementation now defaults to launcher-owned local scratch and keeps
-R2 behind `OT_AGENT_RAY_SPILL_TO_R2=1`. Rendezvous data, logs, and termination artifacts remain on durable
-object storage; the policy applies only to Ray's ephemeral object store.
+R2 behind the explicit `--ray-spill-backend r2` launcher option. Rendezvous data, logs, and termination
+artifacts remain on durable object storage; the policy applies only to Ray's ephemeral object store.
 
 ## Future work
 

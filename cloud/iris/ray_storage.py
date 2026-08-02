@@ -1,8 +1,14 @@
 """Ray object-store paths shared by the Iris launcher and node controller."""
 
 import os
+from enum import StrEnum
 
 DEFAULT_RAY_SPILL_DIR = "/tmp/skyrl-ray-spill"
+
+
+class RaySpillBackend(StrEnum):
+    LOCAL = "local"
+    R2 = "r2"
 
 
 def resolve_ray_spill_dir(path: str) -> str:

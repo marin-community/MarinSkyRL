@@ -69,7 +69,7 @@ from urllib.parse import urlparse
 import yaml
 
 from cloud.iris.paths import PROJECT_ROOT
-from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, resolve_ray_spill_dir
+from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, resolve_ray_spill_dir
 from cloud.iris.gpu_rl_images import image_for_cluster
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
@@ -1117,6 +1117,15 @@ def create_parser() -> argparse.ArgumentParser:
         help=f"Node-local Ray object-spill directory (default {DEFAULT_RAY_SPILL_DIR}).",
     )
     parser.add_argument(
+        "--ray-spill-backend",
+        "--ray_spill_backend",
+        dest="ray_spill_backend",
+        type=RaySpillBackend,
+        choices=list(RaySpillBackend),
+        default=RaySpillBackend.LOCAL,
+        help="Ray object-spill backend (default local; r2 requires an s3:// rendezvous directory).",
+    )
+    parser.add_argument(
         "--rendezvous-dir",
         "--rendezvous_dir",
         dest="rendezvous_dir",
@@ -1794,6 +1803,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         str(args.ray_port),
         "--ray-spill-dir",
         args.ray_spill_dir,
+        "--ray-spill-backend",
+        args.ray_spill_backend.value,
     ]
     if args.rendezvous_dir:
         controller_cmd.extend(["--rendezvous-dir", args.rendezvous_dir])

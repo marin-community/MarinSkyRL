@@ -37,7 +37,7 @@ import time
 
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
-from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, resolve_ray_spill_dir
+from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, resolve_ray_spill_dir
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -864,32 +864,26 @@ def _ray_port_flags() -> list[str]:
 # launcher-owned local scratch by default; do not turn a dispatch amplification bug
 # into durable or cross-region object traffic. R2 is an explicit emergency opt-in.
 #
-# Set on the HEAD ONLY. `object_spilling_config` lives in Ray's `_system_config`,
-# which Ray REJECTS on a worker `ray start --address=...` ("System config parameters
-# can only be set on the head node"). The head's config propagates cluster-wide via
-# GCS, and each worker raylet still spills its OWN objects per-node — the smart_open
-# backend appends "_<node_id>" to the prefix so nodes never collide.
-# Gate: OT_AGENT_RAY_SPILL_TO_R2 (default "0" = off); set to "1" only when local
-# scratch cannot safely hold the workload.
+# R2's object_spilling_config is set on the head and propagates through GCS; Ray
+# rejects that system config on workers. Local spill directories are CLI flags
+# passed independently to every node.
 # Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
 # within a run share one prefix without colliding across jobs.
 RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
-_RAY_SPILL_TO_R2_ENV = "OT_AGENT_RAY_SPILL_TO_R2"
 
 
-def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
-    """Per-job R2 spill prefix derived from the rendezvous dir, or None if R2 spilling
-    is disabled or no rendezvous dir is available."""
-    if os.environ.get(_RAY_SPILL_TO_R2_ENV, "0") != "1":
+def _ray_spill_uri(rendezvous_dir: str | None, backend: RaySpillBackend) -> str | None:
+    """Return the per-job R2 spill prefix when the remote backend is selected."""
+    if backend is RaySpillBackend.LOCAL:
         return None
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
-        return None
+        raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
     # Ray's smart_open spill backend imports boto3 directly.
     try:
         import boto3  # noqa: F401
     except ImportError as error:
         raise RuntimeError(
-            f"{_RAY_SPILL_TO_R2_ENV}=1 requires boto3; rebuild the GPU-RL image with boto3 or disable R2 spilling"
+            "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
         ) from error
     return f"{rendezvous_dir.rstrip('/')}/ray_spill"
 
@@ -909,6 +903,17 @@ def _ray_spill_flags(spill_uri: str | None, local_spill_dir: str | None) -> list
     )
     system_config = json.dumps({"object_spilling_config": spilling_config, "min_spilling_size": 0})
     return [f"--system-config={system_config}"]
+
+
+def _resolved_local_spill_dir(spill_uri: str | None, local_spill_dir: str) -> str | None:
+    return None if spill_uri else resolve_ray_spill_dir(local_spill_dir)
+
+
+def _log_ray_spill(spill_uri: str | None, local_spill_dir: str | None) -> None:
+    if spill_uri:
+        _log(f"Ray object spilling -> R2 prefix {spill_uri} (remote backend)")
+    else:
+        _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
 
 
 # --- Ray cgroup-aware memory ----------------------------------------------------
@@ -987,7 +992,7 @@ def ray_start_head(
     spill_uri: str | None = None,
     local_spill_dir: str = DEFAULT_RAY_SPILL_DIR,
 ) -> None:
-    local_spill_dir = None if spill_uri else resolve_ray_spill_dir(local_spill_dir)
+    local_spill_dir = _resolved_local_spill_dir(spill_uri, local_spill_dir)
     cmd = [
         _ray_bin(),
         "start",
@@ -999,10 +1004,7 @@ def ray_start_head(
         *_ray_mem_flags(),
         *_ray_spill_flags(spill_uri, local_spill_dir),
     ]
-    if spill_uri:
-        _log(f"Ray object spilling -> R2 prefix {spill_uri} (remote backend)")
-    else:
-        _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
+    _log_ray_spill(spill_uri, local_spill_dir)
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
     t0 = time.time()
     subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)
@@ -1016,7 +1018,7 @@ def ray_start_worker(
     spill_uri: str | None = None,
     local_spill_dir: str = DEFAULT_RAY_SPILL_DIR,
 ) -> None:
-    local_spill_dir = None if spill_uri else resolve_ray_spill_dir(local_spill_dir)
+    local_spill_dir = _resolved_local_spill_dir(spill_uri, local_spill_dir)
     cmd = [
         _ray_bin(),
         "start",
@@ -1026,10 +1028,7 @@ def ray_start_worker(
         *_ray_mem_flags(),
         *(_ray_spill_flags(None, local_spill_dir) if local_spill_dir else []),
     ]
-    if spill_uri:
-        _log(f"Ray object spilling -> R2 prefix {spill_uri} (remote cluster config from head)")
-    else:
-        _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
+    _log_ray_spill(spill_uri, local_spill_dir)
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
@@ -1263,7 +1262,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     ray_start_head(
         head_ip,
         ray_port,
-        spill_uri=_ray_spill_uri(args.rendezvous_dir),
+        spill_uri=_ray_spill_uri(args.rendezvous_dir, args.ray_spill_backend),
         local_spill_dir=args.ray_spill_dir,
     )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
@@ -1345,7 +1344,7 @@ def run_worker(args: argparse.Namespace) -> int:
         head_ip,
         ray_port,
         node_ip,
-        spill_uri=_ray_spill_uri(args.rendezvous_dir),
+        spill_uri=_ray_spill_uri(args.rendezvous_dir, args.ray_spill_backend),
         local_spill_dir=args.ray_spill_dir,
     )
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
@@ -1401,6 +1400,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         type=resolve_ray_spill_dir,
         default=DEFAULT_RAY_SPILL_DIR,
         help=f"Node-local Ray object-spill directory (default {DEFAULT_RAY_SPILL_DIR}).",
+    )
+    parser.add_argument(
+        "--ray-spill-backend",
+        type=RaySpillBackend,
+        choices=list(RaySpillBackend),
+        default=RaySpillBackend.LOCAL,
+        help="Ray object-spill backend (default local; r2 requires an s3:// rendezvous directory).",
     )
     parser.add_argument(
         "--rendezvous-dir",
