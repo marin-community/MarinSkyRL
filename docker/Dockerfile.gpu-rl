@@ -230,6 +230,7 @@ ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
 # =============================================================================
 ENV SKYRL_HOME=/opt/skyrl
 COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/
+COPY chat_templates ${SKYRL_HOME}/chat_templates
 COPY cloud ${SKYRL_HOME}/cloud
 COPY skyrl-train ${SKYRL_HOME}/skyrl-train
 COPY skyrl-gym ${SKYRL_HOME}/skyrl-gym

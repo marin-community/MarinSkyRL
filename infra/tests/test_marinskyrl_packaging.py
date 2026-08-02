@@ -41,6 +41,7 @@ def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel)
     assert Parser().parsestr(built_wheel.metadata)["Name"] == "marinskyrl"
     assert "marinskyrl = cloud.iris.artifact_protocol:main" in built_wheel.entry_points
     assert "cloud/iris/artifact_protocol.py" in built_wheel.names
+    assert "chat_templates/delphi_v0.jinja2" in built_wheel.names
     assert "skyrl_gym/__init__.py" in built_wheel.names
     assert "skyrl_train/__init__.py" in built_wheel.names
     assert "skyrl_train/config/ppo_base_config.yaml" in built_wheel.names

@@ -16,4 +16,5 @@ def build_task_bundle() -> Path:
         workspace / "cloud" / "iris",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "tests"),
     )
+    shutil.copytree(package_dir.parents[1] / "chat_templates", workspace / "chat_templates")
     return workspace

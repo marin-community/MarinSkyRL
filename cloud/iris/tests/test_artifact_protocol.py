@@ -276,6 +276,7 @@ def test_task_bundle_contains_controller_without_training_environment() -> None:
     workspace = build_task_bundle()
 
     assert (workspace / "cloud" / "iris" / "start_rl_iris_controller.py").is_file()
+    assert (workspace / "chat_templates" / "delphi_v0.jinja2").is_file()
     assert not (workspace / "skyrl-train").exists()
     assert not (workspace / "cloud" / "iris" / "tests").exists()
 

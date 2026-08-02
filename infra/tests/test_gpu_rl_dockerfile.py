@@ -46,6 +46,7 @@ def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -
     ]
 
     assert "COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/" in dockerfile
+    assert "COPY chat_templates ${SKYRL_HOME}/chat_templates" in dockerfile
     assert "--extra train-vllm" in sync_command
     assert megatron_selectors
     assert all('MEG="--extra train-megatron"' in line for line in megatron_selectors)

@@ -16,7 +16,7 @@ Increase only the validator's outer completion deadline from two seconds to ten 
 
 ## Results
 
-The exact pinned Harbor commit passes the validator locally while logging one expected failed upload and a successful follow-up write. Rebuild both architectures and variants from the corrected MarinSkyRL commit to exercise the same gate under native builders.
+The exact pinned Harbor commit passed the validator 20 consecutive times locally while logging one expected failed upload and a successful follow-up write. Rebuild both architectures and variants from the corrected MarinSkyRL commit to exercise the same gate under native builders.
 
 ## Future work
 
