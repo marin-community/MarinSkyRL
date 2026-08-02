@@ -60,7 +60,11 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.models.grug_moe import is_grug_router_bias
-from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs, ensure_token_ids_in_sse_chunk
+from skyrl_train.inference_engines.vllm.utils import (
+    pop_openai_kwargs,
+    ensure_token_ids_in_sse_chunk,
+    prefix_cache_hit_rate_percent,
+)
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
 from packaging import version
@@ -1226,13 +1230,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 current_waiting = getattr(scheduler_stats, "num_waiting_reqs", 0)
                 current_cache_usage = getattr(scheduler_stats, "kv_cache_usage", 0.0) * 100.0  # Convert to percentage
 
-                # Extract prefix cache hit rate from prefix_cache_stats
-                prefix_cache_stats = getattr(scheduler_stats, "prefix_cache_stats", None)
-                if prefix_cache_stats is not None:
-                    hits = getattr(prefix_cache_stats, "hits", 0)
-                    misses = getattr(prefix_cache_stats, "misses", 0)
-                    total = hits + misses
-                    current_prefix_hit = (hits / total * 100.0) if total > 0 else 0.0
+                current_prefix_hit = prefix_cache_hit_rate_percent(scheduler_stats.prefix_cache_stats)
 
             # Extract iteration_stats (second positional arg) for per-request latency data
             iteration_stats = None

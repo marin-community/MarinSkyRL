@@ -1,5 +1,25 @@
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Protocol
+
+
+class PrefixCacheCounts(Protocol):
+    """The token counters vLLM's `PrefixCacheStats` carries for one scheduler iteration."""
+
+    queries: int
+    hits: int
+
+
+def prefix_cache_hit_rate_percent(stats: PrefixCacheCounts) -> float:
+    """Share of queried prefix tokens that were already cached, as a percentage.
+
+    `PrefixCacheStats` counts tokens, not requests: `queries` is how many were looked up and
+    `hits` how many were served from cache. This is the ratio vLLM's `CachingMetrics` uses,
+    applied to a single iteration's delta rather than to its running request window. An
+    iteration that queried no tokens has no rate to report and yields 0.0.
+    """
+    if stats.queries == 0:
+        return 0.0
+    return stats.hits / stats.queries * 100.0
 
 
 def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
