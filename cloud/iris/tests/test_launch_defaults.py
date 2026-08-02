@@ -241,6 +241,8 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
             "s3://custom/rendezvous",
             "--cpu",
             "12",
+            "--ray-spill-dir",
+            "/local/nvme/ray-spill",
             "--no-record-literal",
         ],
     )
@@ -250,6 +252,7 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     assert args.job_name == "chosen-job"
     assert args.rendezvous_dir == "s3://custom/rendezvous"
     assert args.cpu == 12
+    assert args.ray_spill_dir == "/local/nvme/ray-spill"
     assert args.record_literal is False
 
 
@@ -274,6 +277,7 @@ def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
     materialize_rl_config(str(task_copy), launch.task_environment())
     assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
+    assert "--ray-spill-dir /tmp/skyrl-ray-spill" in command[-1]
     assert str(source) not in command[-1]
 
 

@@ -37,6 +37,7 @@ import time
 
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
+from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, resolve_ray_spill_dir
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -873,8 +874,6 @@ def _ray_port_flags() -> list[str]:
 # Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
 # within a run share one prefix without colliding across jobs.
 RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
-DEFAULT_RAY_SPILL_DIR = "/tmp/skyrl-ray-spill"
-_RAY_SPILL_DIR_ENV = "OT_AGENT_RAY_SPILL_DIR"
 _RAY_SPILL_TO_R2_ENV = "OT_AGENT_RAY_SPILL_TO_R2"
 
 
@@ -895,15 +894,8 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
     return f"{rendezvous_dir.rstrip('/')}/ray_spill"
 
 
-def _ray_local_spill_dir() -> str:
-    spill_dir = os.path.expandvars(os.path.expanduser(os.environ.get(_RAY_SPILL_DIR_ENV, DEFAULT_RAY_SPILL_DIR)))
-    if not os.path.isabs(spill_dir) or "://" in spill_dir:
-        raise ValueError(f"{_RAY_SPILL_DIR_ENV} must be an absolute local path, got {spill_dir!r}")
-    return spill_dir
-
-
 def _ray_spill_flags(spill_uri: str | None, local_spill_dir: str | None) -> list[str]:
-    """Build the head-node flag for local scratch or explicit R2 spilling."""
+    """Build Ray start flags for local scratch or head-configured R2 spilling."""
     if not spill_uri:
         assert local_spill_dir is not None
         return [f"--object-spilling-directory={local_spill_dir}"]
@@ -989,8 +981,13 @@ def _ray_mem_flags() -> list[str]:
     return flags
 
 
-def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) -> None:
-    local_spill_dir = None if spill_uri else _ray_local_spill_dir()
+def ray_start_head(
+    head_ip: str,
+    ray_port: int,
+    spill_uri: str | None = None,
+    local_spill_dir: str = DEFAULT_RAY_SPILL_DIR,
+) -> None:
+    local_spill_dir = None if spill_uri else resolve_ray_spill_dir(local_spill_dir)
     cmd = [
         _ray_bin(),
         "start",
@@ -1012,8 +1009,14 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
     _log(f"Ray HEAD subprocess returned (exit 0) in {time.time() - t0:.1f}s")
 
 
-def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str | None = None) -> None:
-    local_spill_dir = None if spill_uri else _ray_local_spill_dir()
+def ray_start_worker(
+    head_ip: str,
+    ray_port: int,
+    node_ip: str,
+    spill_uri: str | None = None,
+    local_spill_dir: str = DEFAULT_RAY_SPILL_DIR,
+) -> None:
+    local_spill_dir = None if spill_uri else resolve_ray_spill_dir(local_spill_dir)
     cmd = [
         _ray_bin(),
         "start",
@@ -1260,7 +1263,12 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     if num_tasks > 1 and args.rendezvous_dir:
         clear_rendezvous(args.rendezvous_dir)
 
-    ray_start_head(head_ip, ray_port, spill_uri=_ray_spill_uri(args.rendezvous_dir))
+    ray_start_head(
+        head_ip,
+        ray_port,
+        spill_uri=_ray_spill_uri(args.rendezvous_dir),
+        local_spill_dir=args.ray_spill_dir,
+    )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
     # Start the periodic Ray session-log -> object-store sync now that the session dir
@@ -1336,7 +1344,13 @@ def run_worker(args: argparse.Namespace) -> int:
     ray_port = int(payload.get("port", args.ray_port))
     ray_address = f"{head_ip}:{ray_port}"
 
-    ray_start_worker(head_ip, ray_port, node_ip, spill_uri=_ray_spill_uri(args.rendezvous_dir))
+    ray_start_worker(
+        head_ip,
+        ray_port,
+        node_ip,
+        spill_uri=_ray_spill_uri(args.rendezvous_dir),
+        local_spill_dir=args.ray_spill_dir,
+    )
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
 
@@ -1384,6 +1398,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         type=int,
         default=int(os.environ.get("OT_AGENT_IRIS_RAY_PORT", "6379")),
         help="Port the Ray head binds (default 6379).",
+    )
+    parser.add_argument(
+        "--ray-spill-dir",
+        type=resolve_ray_spill_dir,
+        default=DEFAULT_RAY_SPILL_DIR,
+        help=f"Node-local Ray object-spill directory (default {DEFAULT_RAY_SPILL_DIR}).",
     )
     parser.add_argument(
         "--rendezvous-dir",
