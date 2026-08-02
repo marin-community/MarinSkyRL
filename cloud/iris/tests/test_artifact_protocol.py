@@ -29,7 +29,7 @@ from cloud.iris.artifact_protocol import (  # noqa: E402
     launch_artifact,
 )
 from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant  # noqa: E402
-from cloud.iris.launch_rl_iris import IrisLaunchOutcome  # noqa: E402
+from cloud.iris.launch_rl_iris import IrisLaunchOutcome, create_parser  # noqa: E402
 from cloud.iris.start_rl_iris_controller import materialize_model_export  # noqa: E402
 from cloud.iris.task_bundle import build_task_bundle  # noqa: E402
 
@@ -187,6 +187,15 @@ def test_launcher_resolves_data_entries_below_staged_source_root(tmp_path: Path)
     assert "++trainer.placement.policy_num_gpus_per_node=4" in overrides
     assert "++generator.num_inference_engines=4" in overrides
     assert "++trainer.train_batch_size=16" in overrides
+
+
+def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> None:
+    argv = _launcher_argv(_envelope(tmp_path), "config.yaml")
+
+    args = create_parser().parse_args(argv)
+
+    assert args.rl_config == "config.yaml"
+    assert args.model_path == "/tmp/iceball-input-model"
 
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:

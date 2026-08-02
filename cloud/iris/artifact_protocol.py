@@ -294,9 +294,9 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
         f"++generator.n_samples_per_prompt={role_plan['n_samples_per_prompt']}",
     )
     argv = [
-        "--rl-config",
+        "--rl_config",
         config_path,
-        "--model-path",
+        "--model_path",
         request.model.local_path,
         "--model-source-uri",
         request.model.uri,
