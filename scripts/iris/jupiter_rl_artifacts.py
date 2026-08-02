@@ -15,11 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
-from scripts.iris.iris_ops import ERROR_DETAIL_CHARS, LOG_SUFFIXES
+from infra.artifact_files import LOG_SUFFIXES
+from scripts.iris.iris_ops import ERROR_DETAIL_CHARS
 
 _HOST_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 MISSING_PATH_MARKER = "No such file"
 JupiterSyncScope = Literal["status", "full"]
+SSH_COMMAND_TIMEOUT_SECONDS = 120
+TRACE_LIST_TIMEOUT_SECONDS = 300
+TRANSFER_TIMEOUT_SECONDS = 900
 _TRACE_LIST_SCRIPT = (
     "import os, sys\n"
     "root, limit = sys.argv[1], int(sys.argv[2])\n"
@@ -159,7 +163,7 @@ def _ssh(
     host: str,
     command: str,
     *,
-    timeout: int = 120,
+    timeout: int = SSH_COMMAND_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     return _run(runner, ["ssh", "-o", "BatchMode=yes", host, command], timeout=timeout)
 
@@ -229,7 +233,7 @@ def _rsync(
     destination: Path,
     *,
     extra_arguments: tuple[str, ...] = (),
-    timeout: int = 900,
+    timeout: int = TRANSFER_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     return _run(
@@ -258,7 +262,7 @@ def _newest_trace_directories(
         runner,
         host,
         f"python3 -c {shlex.quote(_TRACE_LIST_SCRIPT)} {shlex.quote(trace_root)} {limit}",
-        timeout=300,
+        timeout=TRACE_LIST_TIMEOUT_SECONDS,
     )
     if result.returncode:
         raise RuntimeError(f"Jupiter trace listing failed: {_error_detail(result)}")
@@ -283,7 +287,7 @@ def _sync_trace_directory(
     remote_directory: str,
     destination: Path,
     max_non_log_bytes: int,
-) -> tuple[str, ...]:
+) -> StageSyncResult:
     errors: list[str] = []
     source = f"{remote_directory.rstrip('/')}/"
     destination.mkdir(parents=True, exist_ok=True)
@@ -297,7 +301,7 @@ def _sync_trace_directory(
         result = _rsync(runner, host, source, destination, extra_arguments=log_filters)
         if result.returncode:
             errors.append(_error_detail(result))
-    return tuple(error for error in errors if error)
+    return StageSyncResult("partial" if errors else "synced", tuple(error for error in errors if error))
 
 
 def _sync_finelog(
@@ -323,7 +327,7 @@ def _sync_finelog(
             session.runner,
             session.host,
             f"tail -n {tail_lines} -- {shlex.quote(finelog_path)}",
-            timeout=900,
+            timeout=TRANSFER_TIMEOUT_SECONDS,
         )
         if result.returncode:
             return FinelogSyncResult("unavailable", (f"finelog: {_error_detail(result)}",), finelog_path)
@@ -401,16 +405,14 @@ def _sync_traces(
     )
     errors: list[str] = []
     for remote_directory in selected:
-        errors.extend(
-            f"trace {PurePosixPath(remote_directory).name}: {error}"
-            for error in _sync_trace_directory(
-                session.runner,
-                session.host,
-                remote_directory,
-                session.destination / "trace_jobs" / PurePosixPath(remote_directory).name,
-                max_non_log_bytes,
-            )
+        trace = _sync_trace_directory(
+            session.runner,
+            session.host,
+            remote_directory,
+            session.destination / "trace_jobs" / PurePosixPath(remote_directory).name,
+            max_non_log_bytes,
         )
+        errors.extend(f"trace {PurePosixPath(remote_directory).name}: {error}" for error in trace.errors)
     return TraceSyncResult(f"{trace_scope} {len(selected)} selected", tuple(errors), len(selected))
 
 

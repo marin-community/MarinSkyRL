@@ -57,13 +57,13 @@ from scripts.iris.coreweave_clusters import (  # noqa: E402
     COREWEAVE_KUBECONFIG,
     COREWEAVE_OBJECT_ENDPOINT,
 )
+from infra.artifact_files import LOG_SUFFIXES  # noqa: E402
 
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
 ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
-LOG_SUFFIXES = (".log", ".out", ".err", ".jsonl", ".txt")
 IRIS_CANDIDATES = [
     "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
     "/Users/benjaminfeuer/Documents/marin/.venv/bin/iris",

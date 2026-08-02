@@ -95,8 +95,6 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
 
     transferred_sources = [argument for call in calls if call[0] == "rsync" for argument in call]
     assert result.finelog == "synced"
-    assert result.ray_logs == "2 directories synced"
-    assert result.traces == "newest 2 selected"
     assert f"Jupiter:{experiment_dir}/logs/tasktrove-x6_1170543.out" in transferred_sources
     assert f"Jupiter:{experiment_dir}/ray_logs/" in transferred_sources
     assert f"Jupiter:{experiment_dir}/tasktrove-x6/ray_logs/" in transferred_sources

@@ -47,6 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from infra.artifact_files import LOG_SUFFIXES  # noqa: E402
 from infra.rl_metrics import (  # noqa: E402
     ENTROPY_KEYS,
     GRAD_NORM_KEYS,
@@ -84,7 +85,6 @@ from scripts.iris.coreweave_ops import (  # noqa: E402
 from scripts.iris.iris_ops import (  # noqa: E402
     DEFAULT_BUNDLE_ROOT,
     ERROR_DETAIL_CHARS,
-    LOG_SUFFIXES,
     MonitorError,
     StyledCell,
     TERMINAL_STATES,
@@ -143,6 +143,16 @@ class Cluster:
 
 
 @dataclass(frozen=True)
+class MonitorSettings:
+    bundle_root: Path
+    status_only: bool
+    max_non_log_bytes: int
+    iris_trace_sync_limit: int
+    jupiter_host: str
+    jupiter_trace_sync_limit: int
+
+
+@dataclass(frozen=True)
 class RlJob:
     cluster: Cluster
     job_id: str
@@ -166,18 +176,18 @@ class RlJob:
 
     @property
     def trials_uri(self) -> str | None:
-        return None
+        raise NotImplementedError
 
     @property
     def uses_iris_trace_budget(self) -> bool:
-        return False
+        raise NotImplementedError
 
-    def trace_sync_limit(self, args: argparse.Namespace) -> int:
-        return args.jupiter_trace_sync_limit
+    def trace_sync_limit(self, settings: MonitorSettings) -> int:
+        raise NotImplementedError
 
     def sync_artifacts(
         self,
-        args: argparse.Namespace,
+        settings: MonitorSettings,
         progress: ProgressReporter,
         *,
         scope: SyncScope,
@@ -197,17 +207,17 @@ class IrisRlJob(RlJob):
     def uses_iris_trace_budget(self) -> bool:
         return not self.is_terminal
 
-    def trace_sync_limit(self, args: argparse.Namespace) -> int:
-        return args.trace_sync_limit
+    def trace_sync_limit(self, settings: MonitorSettings) -> int:
+        return settings.iris_trace_sync_limit
 
     def sync_artifacts(
         self,
-        args: argparse.Namespace,
+        settings: MonitorSettings,
         progress: ProgressReporter,
         *,
         scope: SyncScope,
     ) -> tuple[ArtifactResult, Path]:
-        return sync_iris_job(self, args.bundle_root, scope=scope, progress=progress)
+        return sync_iris_job(self, settings.bundle_root, scope=scope, progress=progress)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -225,20 +235,31 @@ class JupiterRlJob(RlJob):
     def bundle_job_id(self) -> str:
         return f"/slurm/{self.job_id}"
 
+    @property
+    def trials_uri(self) -> str | None:
+        return None
+
+    @property
+    def uses_iris_trace_budget(self) -> bool:
+        return False
+
+    def trace_sync_limit(self, settings: MonitorSettings) -> int:
+        return settings.jupiter_trace_sync_limit
+
     def sync_artifacts(
         self,
-        args: argparse.Namespace,
+        settings: MonitorSettings,
         progress: ProgressReporter,
         *,
         scope: SyncScope,
     ) -> tuple[ArtifactResult, Path]:
         return sync_jupiter_job(
             self,
-            args.bundle_root,
+            settings.bundle_root,
             scope=scope,
-            jupiter_host=args.jupiter_host,
-            jupiter_trace_sync_limit=args.jupiter_trace_sync_limit,
-            max_non_log_bytes=args.max_non_log_bytes,
+            jupiter_host=settings.jupiter_host,
+            jupiter_trace_sync_limit=settings.jupiter_trace_sync_limit,
+            max_non_log_bytes=settings.max_non_log_bytes,
             progress=progress,
         )
 
@@ -267,9 +288,16 @@ class SyncedJob:
 
 
 @dataclass(frozen=True)
+class JobReportValue:
+    cluster: str
+    directory: str
+    artifacts: ArtifactResult
+
+
+@dataclass(frozen=True)
 class JobReportEntry:
     key: str
-    value: dict[str, Any]
+    value: JobReportValue
     row: list[object]
     errors: tuple[MonitorError, ...]
 
@@ -277,7 +305,7 @@ class JobReportEntry:
 @dataclass(frozen=True)
 class ReportData:
     rows: list[list[object]]
-    jobs: dict[str, Any]
+    jobs: dict[str, JobReportValue]
     errors: list[MonitorError]
 
 
@@ -970,7 +998,7 @@ def sync_warning(errors: tuple[str, ...]) -> str | None:
     first_error = errors[0]
     if "Ray/vLLM" in first_error:
         return "Ray/vLLM log sync unavailable; local diagnostic saved"
-        return first_error[-90:]
+    return first_error[-90:]
 
 
 def _monitor_error(scope: str, operation: str, error: object) -> MonitorError:
@@ -1263,7 +1291,7 @@ def discover_selected_jobs(
 
 
 def sync_per_job_evidence(
-    args: argparse.Namespace,
+    settings: MonitorSettings,
     jobs: list[MonitoredJob],
     progress: ProgressReporter,
 ) -> list[SyncedJob]:
@@ -1273,10 +1301,10 @@ def sync_per_job_evidence(
     for index, job in enumerate(ordered_jobs, start=1):
         try:
             progress.phase(f"job evidence {index}/{len(ordered_jobs)} {job.cluster.name}/{job.short_name}")
-            scope = "status" if args.status_only else "terminal" if job.is_terminal else "full"
-            artifacts, directory = job.sync_artifacts(args, progress, scope=scope)
+            scope = "status" if settings.status_only else "terminal" if job.is_terminal else "full"
+            artifacts, directory = job.sync_artifacts(settings, progress, scope=scope)
         except Exception as error:
-            directory = job_directory(args.bundle_root, job)
+            directory = job_directory(settings.bundle_root, job)
             artifacts = ArtifactResult(
                 "unavailable",
                 "unavailable",
@@ -1291,7 +1319,7 @@ def sync_per_job_evidence(
 
 
 def apply_iris_trace_budget(
-    args: argparse.Namespace,
+    settings: MonitorSettings,
     synced_jobs: list[SyncedJob],
     progress: ProgressReporter,
 ) -> list[SyncedJob]:
@@ -1299,7 +1327,7 @@ def apply_iris_trace_budget(
     active_iris_job_directories = [
         (item.job, item.directory) for item in synced_jobs if item.job.uses_iris_trace_budget
     ]
-    if args.status_only:
+    if settings.status_only:
         return synced_jobs
     if not active_iris_job_directories:
         progress.phase("no active Iris RL jobs; fleet object-store trace sync skipped")
@@ -1309,8 +1337,8 @@ def apply_iris_trace_budget(
     try:
         trace_statuses = sync_fleet_trace_jobs(
             active_iris_job_directories,
-            args.max_non_log_bytes,
-            args.trace_sync_limit,
+            settings.max_non_log_bytes,
+            settings.iris_trace_sync_limit,
             progress,
         )
     except Exception as error:
@@ -1351,7 +1379,7 @@ def apply_iris_trace_budget(
     return synchronized
 
 
-def build_job_report_entry(args: argparse.Namespace, synced: SyncedJob) -> JobReportEntry:
+def build_job_report_entry(settings: MonitorSettings, synced: SyncedJob) -> JobReportEntry:
     """Inspect one local bundle, write its manifest, and render its status row."""
     job, artifacts, directory = synced.job, synced.artifacts, synced.directory
     scope = f"{job.cluster.name}/{job.job_id}"
@@ -1365,11 +1393,11 @@ def build_job_report_entry(args: argparse.Namespace, synced: SyncedJob) -> JobRe
     try:
         write_job_manifest(
             job,
-            args.bundle_root,
+            settings.bundle_root,
             directory,
             artifacts,
-            args.max_non_log_bytes,
-            job.trace_sync_limit(args),
+            settings.max_non_log_bytes,
+            job.trace_sync_limit(settings),
         )
     except Exception as error:
         errors.append(_monitor_error(scope, "manifest write", error))
@@ -1390,23 +1418,19 @@ def build_job_report_entry(args: argparse.Namespace, synced: SyncedJob) -> JobRe
         ]
     return JobReportEntry(
         key=f"{job.cluster.name}/{job.job_id}",
-        value={
-            "cluster": job.cluster.name,
-            "directory": str(directory),
-            "artifacts": asdict(artifacts),
-        },
+        value=JobReportValue(job.cluster.name, str(directory), artifacts),
         row=row,
         errors=tuple(errors),
     )
 
 
 def collect_report_data(
-    args: argparse.Namespace,
+    settings: MonitorSettings,
     synced_jobs: list[SyncedJob],
     errors: list[MonitorError],
 ) -> ReportData:
     """Build report rows and manifests while retaining per-job failures."""
-    entries = [build_job_report_entry(args, synced) for synced in synced_jobs]
+    entries = [build_job_report_entry(settings, synced) for synced in synced_jobs]
     for entry in entries:
         errors.extend(entry.errors)
     return ReportData(
@@ -1421,7 +1445,7 @@ def publish_report(
     report_directory: Path,
     checked_at: datetime,
     rows: list[list[object]],
-    job_report: dict[str, Any],
+    job_report: dict[str, JobReportValue],
     errors: list[MonitorError],
     progress: ProgressReporter,
 ) -> None:
@@ -1451,7 +1475,7 @@ def publish_report(
         report_directory / "latest.json",
         {
             "checked_at": checked_at.isoformat(),
-            "jobs": job_report,
+            "jobs": {key: asdict(value) for key, value in job_report.items()},
             "report": str(report_path),
             "error_count": len(errors),
             "error_report": str(error_report_path),
@@ -1474,12 +1498,20 @@ def main() -> int:
     progress = ProgressReporter(enabled=not args.quiet_progress)
     checked_at = datetime.now(UTC)
     now_ms = int(checked_at.timestamp() * 1000)
+    settings = MonitorSettings(
+        bundle_root=args.bundle_root,
+        status_only=args.status_only,
+        max_non_log_bytes=args.max_non_log_bytes,
+        iris_trace_sync_limit=args.trace_sync_limit,
+        jupiter_host=args.jupiter_host,
+        jupiter_trace_sync_limit=args.jupiter_trace_sync_limit,
+    )
 
     jobs, errors = discover_selected_jobs(args, progress, now_ms=now_ms)
     jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
-    synced_jobs = sync_per_job_evidence(args, jobs, progress)
-    synced_jobs = apply_iris_trace_budget(args, synced_jobs, progress)
-    report_data = collect_report_data(args, synced_jobs, errors)
+    synced_jobs = sync_per_job_evidence(settings, jobs, progress)
+    synced_jobs = apply_iris_trace_budget(settings, synced_jobs, progress)
+    report_data = collect_report_data(settings, synced_jobs, errors)
     publish_report(
         args,
         report_directory,

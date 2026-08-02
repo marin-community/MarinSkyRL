@@ -430,6 +430,10 @@ def test_rl_sync_warning_never_renders_proxy_html():
     assert warning == "Ray/vLLM log sync unavailable; local diagnostic saved"
 
 
+def test_rl_sync_warning_preserves_non_ray_error_summary():
+    assert watch_coreweave_rl.sync_warning(("trace sync failed",)) == "trace sync failed"
+
+
 def _rl_report_row(tmp_path, finelog: str = "", state: str = "running", artifacts=None):
     if finelog:
         (tmp_path / "finelog.log").write_text(finelog)
