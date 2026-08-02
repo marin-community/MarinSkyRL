@@ -12,6 +12,7 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import (
+    get_batch_failure_metrics,
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
@@ -813,9 +814,12 @@ class TerminalBenchGenerator(GeneratorInterface):
             "loss_masks": [[0] for _ in range(num_trials)],
             "stop_reasons": ["error" for _ in range(num_trials)],
             "rollout_metrics": {
-                "generate/num_failed_instances": num_trials,
-                "generate/num_failed_trajectories": num_trials,
-                "generate/num_masked_trajectories": num_trials,
+                **get_batch_failure_metrics(
+                    num_trials,
+                    num_failed_trajectories=num_trials,
+                    num_failed_instances=num_trials,
+                    num_masked_trajectories=num_trials,
+                ),
                 f"generate/exception_{exception_type}": num_trials,
             },
             "rollout_logprobs": None,
@@ -1090,9 +1094,14 @@ class TerminalBenchGenerator(GeneratorInterface):
                 rollout_metrics["generate/out_tok_p90_p25_ratio"] = p90 / p25 if p25 > 0 else 0.0
         else:
             rollout_metrics = {}
-        rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
-        rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
-        rollout_metrics["generate/num_masked_trajectories"] = num_masked_trajectories
+        rollout_metrics.update(
+            get_batch_failure_metrics(
+                num_trials,
+                num_failed_trajectories=num_failed_trajectories,
+                num_failed_instances=len(failed_instance_ids),
+                num_masked_trajectories=num_masked_trajectories,
+            )
+        )
 
         # TIS logprob-alignment metrics (aggregated across all trajectories with
         # logprobs). These make an LCS fallback or alignment failure ALWAYS visible
@@ -1150,7 +1159,16 @@ class TerminalBenchGenerator(GeneratorInterface):
             for exc_type, count in exception_counts.items():
                 rollout_metrics[f"generate/errors/{exc_type}"] = count
 
-        logger.info(
+        # A batch that loses trials still trains on whatever survived, and its
+        # duration metrics improve while it does: a trial that cannot get a
+        # sandbox fails in seconds instead of running for minutes. This line is
+        # the only per-batch account of the loss, so escalate it off INFO when
+        # anything failed, as the TIS alignment guard above does. The wording is
+        # a parsed contract — extract_batch_errors in infra/rl_cleanup re-derives
+        # these counts from it and returns an empty report, not an error, once
+        # the pattern stops matching.
+        log_fn = logger.warning if num_failed_trajectories else logger.info
+        log_fn(
             f"Batch generation complete: {num_trials - num_failed_trajectories}/{num_trials} successful, "
             f"{len(failed_instance_ids)} failed instances, "
             f"{num_masked_trajectories} masked (excluded from baseline)"

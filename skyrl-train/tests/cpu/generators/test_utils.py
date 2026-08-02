@@ -6,6 +6,7 @@ import pytest
 from skyrl_train.generators.utils import (
     apply_overlong_filtering,
     encode_messages_subset,
+    get_batch_failure_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
 )
@@ -838,3 +839,43 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
         assert len(expected_loss_mask) == 32, "Total should be 32 tokens"
         assert loss_mask == expected_loss_mask, f"Expected {expected_loss_mask}, got {loss_mask}"
+
+
+@pytest.mark.parametrize(
+    "num_trials,num_failed,expected_fraction",
+    [
+        (64, 40, 0.625),  # the step that motivated the metric: 40 sandbox failures
+        (64, 0, 0.0),  # a healthy batch still reports the series rather than omitting it
+        (64, 64, 1.0),  # the orchestrator-failure path, where every trial is reported failed
+        (0, 0, 0.0),  # an empty batch has no denominator to divide by
+    ],
+)
+def test_failed_fraction_is_measured_against_the_whole_batch(num_trials, num_failed, expected_fraction):
+    metrics = get_batch_failure_metrics(
+        num_trials,
+        num_failed_trajectories=num_failed,
+        num_failed_instances=num_failed,
+        num_masked_trajectories=num_failed,
+    )
+
+    assert metrics["generate/failed_fraction"] == pytest.approx(expected_fraction)
+
+
+def test_failure_counts_stay_separate_from_the_fraction():
+    # Trajectories fail individually, instances group n_samples_per_prompt of
+    # them, and only the infrastructure failures are masked out of the RLOO
+    # baseline, so the three counts move independently and none substitutes
+    # for another.
+    metrics = get_batch_failure_metrics(
+        64,
+        num_failed_trajectories=40,
+        num_failed_instances=8,
+        num_masked_trajectories=24,
+    )
+
+    assert metrics == {
+        "generate/num_failed_instances": 8,
+        "generate/num_failed_trajectories": 40,
+        "generate/num_masked_trajectories": 24,
+        "generate/failed_fraction": pytest.approx(0.625),
+    }

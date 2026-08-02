@@ -154,3 +154,49 @@ def test_checkpoint_selection_rejects_an_invalid_reward():
             [{"trainer/global_step": 40, "reward/avg_raw_reward": "not-a-reward"}],
             save_every=20,
         )
+
+
+def _agentic_step_log(completion_prefix: str = "Batch generation complete:") -> str:
+    """One step of an agentic run as Ray forwards it to the driver.
+
+    Each line carries an ANSI colour code and the Ray actor prefix that
+    ``extract_batch_errors`` strips. Two generator workers split a 64-trial
+    batch and 40 of those trials died in sandbox provisioning.
+    """
+    lines = []
+    for pid in (48213, 48214):
+        actor = f"\x1b[36m(TerminalBenchGenerator pid={pid}, ip=10.0.5.12)\x1b[0m"
+        source = "terminal_bench.terminal_bench_generator:generate -"
+        lines.append(
+            f"{actor} 2026-07-30 21:14:52.117 | INFO | {source} "
+            "Exception breakdown: {'DaytonaValidationError': 20}"
+        )
+        lines.append(
+            f"{actor} 2026-07-30 21:14:52.118 | WARNING | {source} "
+            f"{completion_prefix} 12/32 successful, 4 failed instances, 20 masked (excluded from baseline)"
+        )
+    return "\n".join(lines)
+
+
+def test_batch_errors_are_read_back_through_ray_prefixes_and_ansi_codes():
+    assert parse_skyrl_metrics.extract_batch_errors(_agentic_step_log()) == {
+        1: {
+            "batch_errors/total_batches": 2,
+            "batch_errors/total_instances": 64,
+            "batch_errors/total_successful": 24,
+            "batch_errors/total_failed": 8,
+            "batch_errors/total_masked": 40,
+            "batch_errors/avg_DaytonaValidationError": 20.0,
+            "batch_errors/total_DaytonaValidationError": 40,
+        }
+    }
+
+
+def test_a_reworded_completion_line_reports_a_step_with_no_errors():
+    # The failure mode this contract needs pinning against: the counts are
+    # re-derived from the generator's log wording rather than from the metrics
+    # it emits, and a wording change drops the step silently. Even the exception
+    # breakdown, which still parses, is discarded with it.
+    reworded = _agentic_step_log(completion_prefix="Batch generation finished:")
+
+    assert parse_skyrl_metrics.extract_batch_errors(reworded) == {}

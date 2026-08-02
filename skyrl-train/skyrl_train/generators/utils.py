@@ -741,6 +741,32 @@ def get_rollout_metrics(
     return rollout_metrics
 
 
+def get_batch_failure_metrics(
+    num_trials: int,
+    num_failed_trajectories: int,
+    num_failed_instances: int,
+    num_masked_trajectories: int,
+) -> Dict[str, float]:
+    """Failure counts for one generated batch, plus the fraction of it they cost.
+
+    The counts alone are unreadable without the batch size, and the batch size is
+    not otherwise logged by the synchronous trainer, so a step that lost most of
+    its trials is indistinguishable on a dashboard from one that lost none.
+
+    Args:
+        num_trials: Trajectories the batch asked for; the denominator.
+        num_failed_trajectories: Trajectories that ended with ``stop_reason="error"``.
+        num_failed_instances: Distinct instances with at least one failed trajectory.
+        num_masked_trajectories: Failed trajectories excluded from the RLOO baseline.
+    """
+    return {
+        "generate/num_failed_instances": num_failed_instances,
+        "generate/num_failed_trajectories": num_failed_trajectories,
+        "generate/num_masked_trajectories": num_masked_trajectories,
+        "generate/failed_fraction": num_failed_trajectories / num_trials if num_trials else 0.0,
+    }
+
+
 def prepare_generator_input(
     prompts: List[Any],
     n_samples_per_prompt: int,
