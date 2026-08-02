@@ -46,11 +46,17 @@ TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier
 
 # Which trainer span contains which, as `span: containing span`. `None` marks a span that no
 # other span contains, which covers both `step` and the checkpoint, export, evaluation and
-# reference-update work that callbacks run between steps. The synchronous and fully asynchronous
-# trainers do not share a tree: the asynchronous one wraps scoring, advantage and optimizer work
-# in `run_training`, and the synchronous one runs them directly under `step`. Declaring the
-# deeper tree covers both, because a span whose container this run did not record resolves to
-# the nearest container it did record.
+# reference-update work that callbacks run between steps. The four trainers that emit
+# `timing/step` do not share a tree: `fully_async_trainer` wraps scoring, advantage and optimizer
+# work in `run_training`, while `trainer`, `examples/async/async_trainer` and
+# `scripts/full_context/trainer_full_ctx` run them directly under `step`. Declaring the deeper
+# tree covers all four, because a span whose container this run did not record resolves to the
+# nearest container it did record.
+#
+# Containment here is nesting, not a promise about wall clock. `examples/async/async_trainer`
+# generates one step ahead in a background asyncio task that writes into this same timing dict,
+# so its `generate` runs alongside `step` rather than inside it and the children can sum past
+# their parent. `summarize_timing_spans` reports that excess rather than hiding it.
 TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
@@ -76,6 +82,9 @@ TIMING_PARENTS: dict[str, str | None] = {
 
 # The synthesized row carrying the share of `step` that no child span covers.
 UNATTRIBUTED_SPAN = "unattributed"
+
+# The synthesized row carrying child time that ran alongside `step` instead of inside it.
+OVERLAP_SPAN = "overlap"
 
 
 @dataclass(frozen=True)
@@ -546,9 +555,9 @@ def span_duration(span: dict[str, Any]) -> float | None:
     try:
         start = datetime.fromisoformat(started_at.rstrip("Z"))
         end = datetime.fromisoformat(finished_at.rstrip("Z"))
+        return (end - start).total_seconds()
     except (ValueError, TypeError):
         return None
-    return (end - start).total_seconds()
 
 
 def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
@@ -624,9 +633,17 @@ def summarize_trial_phases(df: pd.DataFrame) -> dict[str, Any] | None:
 
     Shares divide summed phase time by summed trial duration, so they answer "where did the
     trials spend their time" rather than "how do the phases compare to each other", and the
-    remainder is trial time that no phase covers. Each phase reports its own trial count
-    because harbor records `agent_execution` and `verifier` per step on a multi-step trial,
-    leaving the trial-level blocks empty there while the setup phases stay populated.
+    remainder is trial time that no phase covers. Both sides of that division come from the
+    trials that recorded their own start and finish. A trial that timed a phase and then never
+    finished, which is what a run cut short by a sandbox quota produces, would otherwise reach
+    the numerator without reaching the denominator and report a phase as more than all of trial
+    time.
+
+    Medians, means and totals still cover every trial that timed the phase, because a phase a
+    trial paid before dying is evidence about that phase even when it cannot carry a share. Each
+    phase reports its own trial count because harbor records `agent_execution` and `verifier` per
+    step on a multi-step trial, leaving the trial-level blocks empty there while the setup phases
+    stay populated.
 
     Returns None when no phase was measurable.
     """
@@ -645,18 +662,21 @@ def summarize_trial_phases(df: pd.DataFrame) -> dict[str, Any] | None:
     if not phases:
         return None
 
-    trial_durations = df["trial_duration"].dropna()
+    measured = df[df["trial_duration"].notna()]
+    trial_total = float(measured["trial_duration"].sum())
     summary: dict[str, Any] = {
         "phases": phases,
-        "trial_total": float(trial_durations.sum()),
-        "trial_count": len(trial_durations),
+        "trial_total": trial_total,
+        "trial_count": len(measured),
+        "total_trials": len(df),
     }
 
-    if summary["trial_total"] > 0:
-        for phase in phases.values():
-            phase["share"] = phase["total"] / summary["trial_total"]
-        summary["unmeasured_total"] = summary["trial_total"] - sum(phase["total"] for phase in phases.values())
-        summary["unmeasured_share"] = summary["unmeasured_total"] / summary["trial_total"]
+    if trial_total > 0:
+        measured_totals = {name: float(measured[f"{name}_duration"].sum()) for name in phases}
+        for name, phase in phases.items():
+            phase["share"] = measured_totals[name] / trial_total
+        summary["unmeasured_total"] = trial_total - sum(measured_totals.values())
+        summary["unmeasured_share"] = summary["unmeasured_total"] / trial_total
 
     return summary
 
@@ -976,7 +996,8 @@ def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
     `train_critic_and_policy`, and checkpointing, export and evaluation sit outside the step
     span altogether. Measuring a span against its own container keeps siblings summing toward
     their parent, and the trailing `unattributed` row carries the part of the step that no
-    child covers.
+    child covers. Where a trainer runs a child alongside the step rather than inside it, the
+    children sum past the step and an `overlap` row carries the excess instead.
 
     Rows run depth-first from `step`, longest sibling first, then the spans that run outside
     `step`, then any column `TIMING_PARENTS` does not declare.
@@ -1012,15 +1033,17 @@ def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
     step_seconds = df["timing/step"]
     covered = df[[f"timing/{child}" for child in children["step"]]].fillna(0.0).sum(axis=1)
     unattributed = step_seconds - covered
-    rows.append(
-        TimingSpan(
-            UNATTRIBUTED_SPAN,
-            "step",
-            float(unattributed.mean()),
-            float((unattributed / step_seconds).mean()),
-            int(step_seconds.count()),
-        )
-    )
+    mean_unattributed = float(unattributed.mean())
+    steps = int(step_seconds.count())
+    if mean_unattributed < 0:
+        # The children sum past the step, so this trainer ran one of them alongside the step
+        # rather than inside it. Report the excess as its own row: it is neither idle step time
+        # nor a share of anything, and clamping it to zero would report a step whose parts fit
+        # when they do not.
+        rows.append(TimingSpan(OVERLAP_SPAN, "step", -mean_unattributed, None, steps))
+    else:
+        share = float((unattributed / step_seconds).mean())
+        rows.append(TimingSpan(UNATTRIBUTED_SPAN, "step", mean_unattributed, share, steps))
 
     for root in children[None]:
         rows.append(summarize(root, None))
@@ -1028,8 +1051,7 @@ def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
 
     undeclared = sorted(recorded - set(TIMING_PARENTS), key=lambda name: (-mean_seconds(name), name))
     for name in undeclared:
-        seconds = df[f"timing/{name}"]
-        rows.append(TimingSpan(name, None, float(seconds.mean()), None, int(seconds.count())))
+        rows.append(summarize(name, None))
 
     return rows
 
@@ -1142,8 +1164,10 @@ def generate_markdown_report(
             f.write(
                 "Each span is measured against the span that contains it, so siblings sum toward their\n"
                 "parent rather than toward the run. The `unattributed` row is the part of a step that no\n"
-                "child span covers. Spans listed as outside `step` are real wall clock between steps and\n"
-                "are not part of one; every average covers only the steps on which that span ran.\n\n"
+                "child span covers; an `overlap` row in its place means a child ran alongside the step\n"
+                "rather than inside it, as generation does when a trainer runs a step ahead. Spans listed\n"
+                "as outside `step` are real wall clock between steps and are not part of one; every\n"
+                "average covers only the steps on which that span ran.\n\n"
             )
 
             f.write("| Span | Within | Avg (s) | Avg % of Within | Steps |\n")
@@ -1279,9 +1303,11 @@ def generate_markdown_report(
                 if "unmeasured_share" in phase_durations:
                     f.write(
                         "Shares are of the "
-                        f"{phase_durations['trial_total']:.1f} s of wall clock recorded across "
-                        f"{phase_durations['trial_count']} trials, and `unmeasured` is trial time that no\n"
-                        "phase covers.\n\n"
+                        f"{phase_durations['trial_total']:.1f} s of wall clock recorded by the "
+                        f"{phase_durations['trial_count']} of {phase_durations['total_trials']} trials that\n"
+                        "timed their own start and finish, and `unmeasured` is trial time that no phase\n"
+                        "covers. Medians, means and totals cover every trial that timed the phase, including\n"
+                        "trials that never finished and so carry no share.\n\n"
                     )
                 else:
                     f.write("No trial recorded its own start and finish, so phase shares are unavailable.\n\n")

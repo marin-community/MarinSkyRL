@@ -286,6 +286,23 @@ def test_unattributed_span_covers_the_step_time_no_child_claims():
     assert unattributed.share_of_within == pytest.approx(0.3)
 
 
+def test_generation_that_runs_a_step_ahead_is_reported_as_overlap():
+    # examples/async/async_trainer.py times `generate` in a background asyncio task started before
+    # the step loop, writing into the same timing dict, so generation runs alongside the step
+    # instead of inside it and the children sum past their parent.
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(step=100.0, generate=145.0, train_critic_and_policy=20.0, sync_weights=10.0)
+    )
+
+    overlap = span_named(spans, "overlap")
+    assert overlap.within == "step"
+    assert overlap.mean_seconds == pytest.approx(75.0)
+    # A step whose parts do not fit inside it has no idle remainder to take a share of.
+    assert overlap.share_of_within is None
+    assert not any(span.name == "unattributed" for span in spans)
+    assert span_named(spans, "generate").share_of_within == pytest.approx(1.45)
+
+
 def test_trial_phase_shares_are_taken_against_trial_wall_clock():
     summary = parse_skyrl_metrics.summarize_trial_phases(
         pd.DataFrame(
@@ -301,9 +318,45 @@ def test_trial_phase_shares_are_taken_against_trial_wall_clock():
         )
     )
 
+    assert summary is not None
     assert summary["trial_count"] == 1
     assert summary["phases"]["environment_setup"]["share"] == pytest.approx(0.5)
     assert summary["phases"]["verifier"]["share"] == pytest.approx(0.05)
+    assert summary["unmeasured_share"] == pytest.approx(0.05)
+
+
+def test_shares_skip_trials_that_never_recorded_their_own_finish():
+    # A trial the sandbox quota kills times its setup phase and then stops, so it can reach the
+    # numerator of a share while contributing nothing to the denominator.
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": 200.0,
+                    "environment_setup_duration": 100.0,
+                    "agent_setup_duration": 20.0,
+                    "agent_execution_duration": 60.0,
+                    "verifier_duration": 10.0,
+                },
+                {
+                    "trial_duration": None,
+                    "environment_setup_duration": 100.0,
+                    "agent_setup_duration": None,
+                    "agent_execution_duration": None,
+                    "verifier_duration": None,
+                },
+            ]
+        )
+    )
+
+    assert summary is not None
+    assert summary["trial_count"] == 1
+    assert summary["total_trials"] == 2
+    # Both setup durations are evidence about the phase and stay in its median and total.
+    assert summary["phases"]["environment_setup"]["count"] == 2
+    assert summary["phases"]["environment_setup"]["total"] == pytest.approx(200.0)
+    # Only the finished trial has a wall clock to be a share of, so the share stays at 100 of 200 s.
+    assert summary["phases"]["environment_setup"]["share"] == pytest.approx(0.5)
     assert summary["unmeasured_share"] == pytest.approx(0.05)
 
 
@@ -323,6 +376,7 @@ def test_multi_step_trial_still_reports_the_phases_it_records():
         )
     )
 
+    assert summary is not None
     assert set(summary["phases"]) == {"environment_setup", "agent_setup"}
     assert summary["phases"]["environment_setup"]["count"] == 1
     assert summary["unmeasured_share"] == pytest.approx(0.6)
@@ -343,6 +397,7 @@ def test_phases_are_still_reported_when_the_trial_wall_clock_is_missing():
         )
     )
 
+    assert summary is not None
     assert summary["phases"]["environment_setup"]["total"] == pytest.approx(90.0)
     # Without a denominator the report must withhold shares rather than invent one.
     assert "share" not in summary["phases"]["environment_setup"]
@@ -354,7 +409,7 @@ def test_report_publishes_the_trial_phase_breakdown(tmp_path, monkeypatch):
     log_path.write_text(
         'WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.5, "trainer/global_step": 1, '
         '"timing/step": 100.0, "timing/generate": 60.0, "timing/train_critic_and_policy": 30.0, '
-        '"timing/policy_train": 28.0, "timing/save_checkpoints": 45.0}\n'
+        '"timing/policy_train": 28.0, "timing/save_checkpoints": 45.0, "timing/eval": 20.0}\n'
     )
     trace_jobs_dir = tmp_path / "trace_jobs"
     write_trial_result(
@@ -385,7 +440,10 @@ def test_report_publishes_the_trial_phase_breakdown(tmp_path, monkeypatch):
     assert "| environment_setup | 100.0 | 100.0 | 100.0 | 50.0% | 1 |" in report
     assert "| unmeasured | — | — | 10.0 | 5.0% | — |" in report
     assert "| policy_train | `train_critic_and_policy` | 28.0 | 93.3% | 1 |" in report
+    # Charging every span to the step summed these five to 183% of a 100 s step.
+    assert "| unattributed | `step` | 10.0 | 10.0% | 1 |" in report
     assert "| save_checkpoints | outside `step` | 45.0 | — | 1 |" in report
+    assert "| eval | outside `step` | 20.0 | — | 1 |" in report
 
 
 def test_checkpoint_selection_calculates_trailing_five_ema():
