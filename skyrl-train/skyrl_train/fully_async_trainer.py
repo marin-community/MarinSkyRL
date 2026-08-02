@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
-from skyrl_train.telemetry import critical_phase, record_rollout_buffer
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_rollout_buffer
 
 
 @dataclass
@@ -998,6 +998,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                 else:
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                record_generated_work(
+                    cur_generator_output["response_ids"],
+                    cur_generator_output.get("is_last_step"),
+                )
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 # Prefer the actual global_step captured at first vLLM inference (more accurate

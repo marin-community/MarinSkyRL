@@ -2,7 +2,7 @@ import contextlib
 import os
 import socket
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -71,6 +71,7 @@ def _iris_resources() -> dict[str, str]:
     for environment_name, resource_name in (
         ("IRIS_WORKER_ID", "worker"),
         ("IRIS_MULTIGPU_PROCESS_INDEX", "process_index"),
+        ("IRIS_NODE_NAME", "node_name"),
     ):
         if value := os.environ.get(environment_name):
             resources[resource_name] = value
@@ -158,6 +159,31 @@ def record_policy_step(policy_step: int) -> None:
             _PROGRESS_TIME_SECONDS.set(progress_time, attributes=attributes)
         if _POLICY_STEP is not None:
             _POLICY_STEP.set(policy_step, attributes={"role": TRAINER_ROLE})
+    except Exception:
+        pass
+
+
+def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None) -> None:
+    sample_count = len(response_ids)
+    rollout_count = sample_count if is_last_step is None else sum(is_last_step)
+    generated_token_count = sum(len(response) for response in response_ids)
+    progress_time = time.time()
+    if _active_process is not None and sample_count:
+        _active_process.last_progress_time_seconds = progress_time
+    try:
+        if _WORK_COMPLETED is not None:
+            for work_kind, count in (
+                ("rollout", rollout_count),
+                ("sample", sample_count),
+                ("generated_token", generated_token_count),
+            ):
+                if count:
+                    _WORK_COMPLETED.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE})
+        if _PROGRESS_TIME_SECONDS is not None and rollout_count:
+            _PROGRESS_TIME_SECONDS.set(
+                progress_time,
+                attributes={"work_kind": "rollout", "role": TRAINER_ROLE},
+            )
     except Exception:
         pass
 

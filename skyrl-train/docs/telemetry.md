@@ -1,14 +1,16 @@
 # MarinSkyRL telemetry
 
 Install `skyrl-train[telemetry]` to export the driver and trainer lifecycle,
-completed policy steps, exclusive rollout or inference wait and train-step
-durations, and fully async rollout-buffer occupancy through
-`rigging.telemetry`. Export is inert unless `SKYRL_TELEMETRY_ENDPOINT`,
-`SKYRL_ROOT_RUN_UID`, and `SKYRL_EXECUTION_UID` are set; the service is fixed
-to `marinskyrl`, and `SKYRL_SERVING_JOB_ID` optionally joins a centralized
-serving job. Marin's GPU images install the pinned extra explicitly because
-neither the direct Iris launcher nor its conditional controller bootstrap
-otherwise guarantees Rigging.
+completed policy steps, generated rollouts, samples and tokens, exclusive
+rollout or inference wait and train-step durations, and fully async
+rollout-buffer occupancy through `rigging.telemetry`. A rollout is one completed
+trajectory; a sample is one generated response segment, so step-wise training
+counts only terminal segments as rollouts. Export is inert unless
+`SKYRL_TELEMETRY_ENDPOINT`, `SKYRL_ROOT_RUN_UID`, and `SKYRL_EXECUTION_UID` are
+set; the service is fixed to `marinskyrl`, and `SKYRL_SERVING_JOB_ID` optionally
+joins a centralized serving job. Marin's GPU images install the pinned extra
+explicitly because neither the direct Iris launcher nor its conditional
+controller bootstrap otherwise guarantees Rigging.
 
 Export and shutdown failures do not change training results or W&B ownership.
 Ray, vLLM, DCGM, and Iris remain authoritative for metrics they already expose,

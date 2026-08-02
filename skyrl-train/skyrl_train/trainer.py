@@ -75,7 +75,7 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
-from skyrl_train.telemetry import critical_phase, record_policy_step
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
@@ -1200,6 +1200,7 @@ class RayPPOTrainer:
 
         if not self.cfg.trainer.step_wise_training:
             validate_generator_output(len(input_batch["prompts"]), generator_output)
+        record_generated_work(generator_output["response_ids"], generator_output.get("is_last_step"))
 
         return generator_output
 
