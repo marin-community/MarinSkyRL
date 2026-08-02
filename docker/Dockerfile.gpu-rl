@@ -500,7 +500,12 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
       /tmp/rl-pip-check && \
     grep -E '^The package `quack-kernels` requires `nvidia-cutlass-dsl[^`]*`, but `[^`]+` is installed$' \
       /tmp/rl-pip-check && \
-    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "3" && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then \
+      grep -E '^The package `megatron-bridge` requires `nvidia-resiliency-ext`, but it.s not installed$' /tmp/rl-pip-check && \
+      grep -E '^The package `megatron-bridge` requires `flashinfer-python[^`]*`, but `[^`]+` is installed$' /tmp/rl-pip-check && \
+      grep -E '^The package `megatron-bridge` requires `flashinfer-cubin[^`]*`, but `[^`]+` is installed$' /tmp/rl-pip-check && \
+      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "6"; \
+    else test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "3"; fi && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 

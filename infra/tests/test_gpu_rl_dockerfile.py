@@ -99,8 +99,6 @@ def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
 def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -> None:
     """Exercise the Dockerfile's dependency gate against representative reports."""
     report = tmp_path / "pip-check"
-    environment = {**os.environ, "INSTALL_MEGATRON": "0"}
-
     common = [
         "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed",
         "The package `gcsfs` requires `fsspec>=2026.6.0`, but `2026.4.0` is installed",
@@ -114,8 +112,15 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
         ],
     }
 
-    def check(gate: str, diagnostics: str) -> int:
+    megatron = [
+        "The package `megatron-bridge` requires `nvidia-resiliency-ext`, but it's not installed",
+        "The package `megatron-bridge` requires `flashinfer-python==0.6.8.post1`, but `0.6.12` is installed",
+        "The package `megatron-bridge` requires `flashinfer-cubin==0.6.8.post1`, but `0.6.12` is installed",
+    ]
+
+    def check(gate: str, diagnostics: str, install_megatron: bool) -> int:
         report.write_text(diagnostics + "\n")
+        environment = {**os.environ, "INSTALL_MEGATRON": "1" if install_megatron else "0"}
         return subprocess.run(["bash", "-c", gate], env=environment, check=False).returncode
 
     for path, expected in reports.items():
@@ -123,6 +128,12 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
         start = dockerfile.index("    cat /tmp/rl-pip-check && \\")
         end = dockerfile.index('    echo "baked harbor commit:', start)
         gate = dockerfile[start:end].replace("/tmp/rl-pip-check", str(report)) + "    true\n"
-        diagnostics = "\n".join(expected)
-        assert check(gate, diagnostics) == 0
-        assert check(gate, diagnostics + "\nThe package `unexpected` is incompatible") != 0
+        standard_diagnostics = "\n".join(expected)
+        assert check(gate, standard_diagnostics, False) == 0
+        assert check(gate, standard_diagnostics + "\nThe package `unexpected` is incompatible", False) != 0
+        megatron_expected = [*expected, *megatron]
+        if path == GPU_RL_ARM64_DOCKERFILE:
+            megatron_expected.append("The package `transformer-engine-cu12` was built for a different platform")
+        megatron_diagnostics = "\n".join(megatron_expected)
+        assert check(gate, megatron_diagnostics, True) == 0
+        assert check(gate, megatron_diagnostics + "\nThe package `unexpected` is incompatible", True) != 0
