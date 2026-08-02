@@ -15,6 +15,7 @@ from typing import Any, NamedTuple
 
 import torch
 import torch.nn.functional as F
+from loguru import logger
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel, initialization as init
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -70,6 +71,23 @@ def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:
         (span_starts == 1).all(),
         "Grug FlashAttention requires valid tokens to form one contiguous span in each attention-mask row",
     )
+
+
+def validate_grug_expert_parallel_options(
+    model_type: str | None,
+    *,
+    expert_model_parallel_size: int,
+    use_grouped_mm: bool,
+    ep_comm_backend: str,
+) -> None:
+    """Validate the narrow native Grug trainer-EP surface before model load."""
+
+    if model_type != GRUG_MOE_MODEL_TYPE or expert_model_parallel_size <= 1:
+        return
+    if not use_grouped_mm:
+        raise ValueError("Grug expert_model_parallel_size>1 requires use_grouped_mm=true")
+    if ep_comm_backend != "torch":
+        raise ValueError("Grug expert parallelism supports only ep_comm_backend=torch")
 
 
 def _jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -308,6 +326,23 @@ class _GrugZeroInitLinear(nn.Linear):
     pass
 
 
+def _run_grug_grouped_mm(
+    gate: torch.Tensor,
+    down: torch.Tensor,
+    up: torch.Tensor,
+    routed_input: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    """Run the native Grug projections through the existing grouped kernel."""
+
+    # Torchtitan is an EP-extra dependency. Import it only when this explicitly
+    # requested path runs so eager Grug model loading keeps its base dependency
+    # surface.
+    from skyrl_train.models.layers.moe import _run_experts_grouped_mm
+
+    return _run_experts_grouped_mm(gate, down, up, routed_input, num_tokens_per_expert)
+
+
 class GrugMoeExperts(nn.Module):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__()
@@ -318,8 +353,11 @@ class GrugMoeExperts(nn.Module):
         self.gate_proj = _GrugStackedLinear((num_experts, intermediate_size, hidden_size))
         self.up_proj = _GrugStackedLinear((num_experts, intermediate_size, hidden_size))
         self.down_proj = _GrugStackedLinear((num_experts, hidden_size, intermediate_size))
+        self.use_grouped_mm = False
+        self.ep_size = 1
+        self._grouped_mm_logged = False
 
-    def forward(
+    def forward_eager(
         self,
         hidden_states: torch.Tensor,
         selected_experts: torch.Tensor,
@@ -337,6 +375,34 @@ class GrugMoeExperts(nn.Module):
             weight = combine_weights[token_idx, slot_idx].unsqueeze(-1).to(expert_output.dtype)
             output.index_add_(0, token_idx, expert_output * weight)
         return output
+
+    def forward(
+        self,
+        routed_input: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run already-grouped routed rows.
+
+        This is the exact module boundary Torchtitan's expert-parallel hooks
+        wrap. Eager execution uses :meth:`forward_eager` explicitly, so a
+        requested grouped path can never fall back to the Python expert loop.
+        """
+
+        if not self.use_grouped_mm:
+            raise RuntimeError("Grug grouped expert forward called without use_grouped_mm=true")
+        if not self._grouped_mm_logged:
+            logger.info(
+                "[Grug-MoE-PATH] native grouped_mm "
+                f"(gate={type(self.gate_proj.weight).__name__}, routed_rows={routed_input.shape[0]})"
+            )
+            self._grouped_mm_logged = True
+        return _run_grug_grouped_mm(
+            self.gate_proj.weight,
+            self.down_proj.weight,
+            self.up_proj.weight,
+            routed_input,
+            num_tokens_per_expert,
+        )
 
 
 class GrugMoeRouterOutput(NamedTuple):
@@ -411,12 +477,48 @@ class GrugMoeSparseMoeBlock(nn.Module):
         self.router = GrugMoeRouter(config)
         self.experts = GrugMoeExperts(config)
 
+    def enable_grouped_mm(self) -> None:
+        self.experts.use_grouped_mm = True
+
+    def _forward_grouped(
+        self,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        combine_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        top_k = selected_experts.shape[-1]
+        flat_experts = selected_experts.reshape(-1)
+        order = torch.argsort(flat_experts, stable=True)
+        token_indices = torch.arange(num_tokens, device=hidden_states.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
+        sorted_token_indices = token_indices.index_select(0, order)
+        routed_input = hidden_states.index_select(0, sorted_token_indices)
+        num_tokens_per_expert = torch.bincount(flat_experts, minlength=self.experts.num_experts)
+        routed_output = self.experts(routed_input, num_tokens_per_expert)
+        sorted_weights = combine_weights.reshape(-1).index_select(0, order).to(hidden_states.dtype)
+        routed_output = routed_output * sorted_weights.unsqueeze(-1)
+        output = torch.zeros((num_tokens, hidden_size), dtype=hidden_states.dtype, device=hidden_states.device)
+        output.index_add_(0, sorted_token_indices, routed_output)
+        return output
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shape = hidden_states.shape
         flat = hidden_states.reshape(-1, shape[-1])
         _, selected_experts, combine_weights = self.router(flat)
-        output = self.experts(flat, selected_experts, combine_weights.to(flat.dtype))
+        if self.experts.use_grouped_mm:
+            output = self._forward_grouped(flat, selected_experts, combine_weights)
+        else:
+            output = self.experts.forward_eager(flat, selected_experts, combine_weights.to(flat.dtype))
         return output.reshape(shape)
+
+
+def enable_grug_grouped_mm(model: nn.Module) -> int:
+    """Enable native grouped execution on every Grug sparse-MoE block."""
+
+    blocks = [module for module in model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
+    for block in blocks:
+        block.enable_grouped_mm()
+    return len(blocks)
 
 
 def _apply_half_rope(

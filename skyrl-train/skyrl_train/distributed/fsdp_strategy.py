@@ -420,8 +420,8 @@ class FSDPStrategy(DistributedStrategy):
                 ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
                 num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs)
                 assert num_sharded > 0, (
-                    "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
-                    "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
+                    "expert_model_parallel_size>1 but no supported grouped experts were found; "
+                    "Grug requires use_grouped_mm=true, while generic HF MoE requires moe_grouped_gemm=true."
                 )
                 # DeepEP backend (Stage 5): set the SM count once (must precede the first
                 # dispatch; also sets the intranode kernel + RDMA channel count) and thread

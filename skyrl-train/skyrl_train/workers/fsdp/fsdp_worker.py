@@ -21,7 +21,7 @@ except ImportError:
     from torch.distributed._tensor import DTensor
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_expert_parallel_options
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
@@ -772,9 +772,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._normalize_mini_batch_size()
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        if getattr(model_config, "model_type", None) == GRUG_MOE_MODEL_TYPE:
-            if getattr(strategy, "ep_size", 1) != 1:
-                raise ValueError("Grug FSDP2 policy training requires expert_model_parallel_size=1")
+        validate_grug_expert_parallel_options(
+            getattr(model_config, "model_type", None),
+            expert_model_parallel_size=getattr(strategy, "ep_size", 1),
+            use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
+            ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", "torch")),
+        )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
