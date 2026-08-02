@@ -8,9 +8,9 @@
 #
 # WHY A SEPARATE FILE, NOT ARCH-CONDITIONAL ARGS IN Dockerfile.gpu-rl
 # -------------------------------------------------------------------
-# The two images differ in more than a flag. The arch list, the wheel MANIFEST
-# platform, the nvcc job width and — above all — the way the Megatron backend is
-# installed are all different. Expressing that as `if` branches inside the heavy
+# The two images differ in more than a flag. The arch list, wheel platform, nvcc
+# job width, and architecture-specific native artifacts are different. Expressing
+# that as `if` branches inside the heavy
 # RUN steps of Dockerfile.gpu-rl would put arm64-only shell inside every layer of
 # the image that production is digest-pinned to, where a mistake silently changes
 # the amd64 closure. docker/build_gpu_rl_kaniko.sh already selects the Dockerfile

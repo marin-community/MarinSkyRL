@@ -54,15 +54,30 @@ def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
     assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm"})
 
 
-def test_training_extras_separate_hardware_policy_and_rollout_axes() -> None:
-    extras = PYPROJECT["project"]["optional-dependencies"]
+def test_training_extras_separate_hardware_policy_and_rollout_axes(built_wheel: BuiltWheel) -> None:
+    metadata = Parser().parsestr(built_wheel.metadata)
+    extras = set(metadata.get_all("Provides-Extra", []))
+    requirements = metadata.get_all("Requires-Dist", [])
 
-    assert any(requirement.startswith("torch==") for requirement in extras["cpu"])
-    assert any(requirement.startswith("torch==") for requirement in extras["cuda"])
-    assert any(requirement.startswith("torchtitan") for requirement in extras["fsdp"])
-    assert any(requirement.startswith("vllm==") for requirement in extras["vllm"])
-    assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
-    assert [{"extra": "cpu"}, {"extra": "cuda"}] in PYPROJECT["tool"]["uv"]["conflicts"]
+    assert {"cpu", "cuda", "fsdp", "vllm", "megatron"}.issubset(extras)
+    assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
+    assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
+    assert any(requirement.startswith("torchtitan") and "extra == 'fsdp'" in requirement for requirement in requirements)
+    assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
+    assert any(
+        requirement.startswith("megatron-core") and "extra == 'megatron'" in requirement
+        for requirement in requirements
+    )
+
+    conflict = subprocess.run(
+        ["uv", "sync", "--frozen", "--dry-run", "--extra", "cpu", "--extra", "cuda"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert conflict.returncode != 0
+    assert "Extras `cpu` and `cuda` are incompatible" in conflict.stderr
 
 
 def test_megatron_extra_has_native_wheels_for_both_linux_architectures() -> None:

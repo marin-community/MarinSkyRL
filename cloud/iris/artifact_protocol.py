@@ -30,7 +30,6 @@ from cloud.iris.launch_rl_iris import IrisLaunchOutcome, launch, resolved_launch
 
 class AttemptState(StrEnum):
     PREPARED = "prepared"
-    SUBMITTED = "submitted"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 

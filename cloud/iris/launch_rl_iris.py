@@ -162,12 +162,11 @@ class ResolvedResourceRequests:
 
 @dataclass(frozen=True)
 class IrisLaunchOutcome:
-    """Terminal result of one Iris submission attempt."""
+    """Result of one Iris submission attempt."""
 
     job_id: str
     job_state: str
     exit_code: int
-    task_image: str
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -2016,7 +2015,7 @@ def resolved_launch_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
-    """Submit a normalized request and wait for its Iris job terminal state."""
+    """Submit a normalized request and, unless detached, wait for its terminal state."""
     parent_credentials_json = prepare_federated_parent_credentials(args)
 
     if not args.job_name:
@@ -2399,7 +2398,6 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
                 job_id=full_job_id,
                 job_state="submitted",
                 exit_code=0,
-                task_image=args.task_image,
             )
         print(
             f"[rl-iris] Now streaming logs for {full_job_id}. This process runs until the job ends.\n"
@@ -2424,7 +2422,6 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             job_id=full_job_id,
             job_state=job_state,
             exit_code=exit_code,
-            task_image=args.task_image,
         )
 
 

@@ -164,7 +164,6 @@ def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> Non
             job_id="01KTEST",
             job_state="succeeded",
             exit_code=0,
-            task_image=envelope.request.runtime.task_image,
         )
     )
 
@@ -229,7 +228,6 @@ def test_launch_artifact_failure_records_attempt_without_terminal_model(tmp_path
             job_id="01KFAILED",
             job_state="failed",
             exit_code=1,
-            task_image=envelope.request.runtime.task_image,
         )
     )
 
