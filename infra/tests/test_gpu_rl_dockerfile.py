@@ -96,20 +96,33 @@ def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
         assert "${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py" in dockerfile
 
 
-def test_arm64_image_accepts_only_the_known_pip_check_finding(tmp_path: Path) -> None:
+def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -> None:
     """Exercise the Dockerfile's dependency gate against representative reports."""
-    dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
-    start = dockerfile.index("    cat /tmp/rl-pip-check && \\")
-    end = dockerfile.index('    echo "baked harbor commit:', start)
     report = tmp_path / "pip-check"
-    gate = dockerfile[start:end].replace("/tmp/rl-pip-check", str(report)) + "    true\n"
     environment = {**os.environ, "INSTALL_MEGATRON": "0"}
 
-    expected = "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed"
+    common = [
+        "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed",
+        "The package `gcsfs` requires `fsspec>=2026.6.0`, but `2026.4.0` is installed",
+        "The package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed",
+    ]
+    reports = {
+        GPU_RL_DOCKERFILE: common,
+        GPU_RL_ARM64_DOCKERFILE: [
+            *common,
+            "The package `nvidia-cusparselt-cu12` was built for a different platform",
+        ],
+    }
 
-    def check(diagnostics: str) -> int:
+    def check(gate: str, diagnostics: str) -> int:
         report.write_text(diagnostics + "\n")
         return subprocess.run(["bash", "-c", gate], env=environment, check=False).returncode
 
-    assert check(expected) == 0
-    assert check(expected + "\nThe package `unexpected` is incompatible") != 0
+    for path, expected in reports.items():
+        dockerfile = path.read_text()
+        start = dockerfile.index("    cat /tmp/rl-pip-check && \\")
+        end = dockerfile.index('    echo "baked harbor commit:', start)
+        gate = dockerfile[start:end].replace("/tmp/rl-pip-check", str(report)) + "    true\n"
+        diagnostics = "\n".join(expected)
+        assert check(gate, diagnostics) == 0
+        assert check(gate, diagnostics + "\nThe package `unexpected` is incompatible") != 0

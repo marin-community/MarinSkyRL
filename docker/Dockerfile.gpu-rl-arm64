@@ -486,9 +486,9 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
-# The pip-check gate below always prints the full conflict report. Both variants
-# must have exactly the one known aiobotocore/botocore conflict. The root lock
-# selects ARM64 CUDA wheels directly; any platform-wheel diagnostic fails the gate.
+# The pip-check gate below always prints the full conflict report. ARM64 has the
+# three AMD64 metadata conflicts plus PyTorch's cusparselt wheel platform
+# diagnostic. Native imports above validate the selected ARM64 CUDA runtime.
 #
 # `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
 # them into extras, so every image up to that pin already carried them. Naming
@@ -505,13 +505,19 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
     ${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py && \
     rm /tmp/validate_harbor_artifact_writer.py && \
     if uv pip check --python ${RL_ENV_DIR}/bin/python > /tmp/rl-pip-check 2>&1; then \
-      echo "expected the known aiobotocore/botocore metadata conflict"; \
+      echo "expected the known runtime metadata conflicts"; \
       exit 1; \
     fi && \
     cat /tmp/rl-pip-check && \
     grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
       /tmp/rl-pip-check && \
-    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1" && \
+    grep -E '^The package `gcsfs` requires `fsspec[^`]*`, but `[^`]+` is installed$' \
+      /tmp/rl-pip-check && \
+    grep -E '^The package `nvidia-cusparselt-cu12` was built for a different platform$' \
+      /tmp/rl-pip-check && \
+    grep -E '^The package `quack-kernels` requires `nvidia-cutlass-dsl[^`]*`, but `[^`]+` is installed$' \
+      /tmp/rl-pip-check && \
+    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "4" && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 

@@ -465,8 +465,11 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
-# The pip-check gate below always prints the full conflict report. Both variants
-# must have exactly the one known aiobotocore/botocore conflict. The root lock
+# The pip-check gate below always prints the full conflict report. AMD64 has
+# exactly three known metadata conflicts: aiobotocore/botocore, Harbor's
+# gcsfs/fsspec pair, and vLLM/quack-kernels' mutually exclusive CUTLASS bounds.
+# Runtime import and dependency-metadata gates above validate the selected
+# implementations. The root lock
 # resolves the launch and Megatron OpenTelemetry constraints together, and the
 # backend imports above gate that overridden resolution.
 #
@@ -487,13 +490,17 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
     ${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py && \
     rm /tmp/validate_harbor_artifact_writer.py && \
     if uv pip check --python ${RL_ENV_DIR}/bin/python > /tmp/rl-pip-check 2>&1; then \
-      echo "expected the known aiobotocore/botocore metadata conflict"; \
+      echo "expected the known runtime metadata conflicts"; \
       exit 1; \
     fi && \
     cat /tmp/rl-pip-check && \
     grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
       /tmp/rl-pip-check && \
-    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1" && \
+    grep -E '^The package `gcsfs` requires `fsspec[^`]*`, but `[^`]+` is installed$' \
+      /tmp/rl-pip-check && \
+    grep -E '^The package `quack-kernels` requires `nvidia-cutlass-dsl[^`]*`, but `[^`]+` is installed$' \
+      /tmp/rl-pip-check && \
+    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "3" && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 
