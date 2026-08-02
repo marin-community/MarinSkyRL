@@ -44,10 +44,9 @@ class FakeLaunchBackend(LaunchBackend):
 
 
 def _repository_commit() -> str:
-    root = Path(__file__).resolve().parents[3]
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=root,
+        cwd=_REPOSITORY_ROOT,
         check=True,
         capture_output=True,
         text=True,
@@ -125,7 +124,7 @@ def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
                 resolved_config_uri=(output / "resolved-skyrl.json").as_uri(),
                 terminal_manifest_uri=(output / "terminal.json").as_uri(),
             ),
-            seed=17,
+            seed=7,
             overrides=("++trainer.max_steps=8",),
         ),
         execution=IrisLaunchOptions(
@@ -181,7 +180,7 @@ def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> Non
     assert json.loads(attempt.read_text()) == terminal
 
 
-def test_launcher_resolves_data_entries_below_staged_source_root(tmp_path: Path) -> None:
+def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path)
 
     argv = _launcher_argv(envelope, "config.yaml")

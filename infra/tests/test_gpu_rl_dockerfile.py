@@ -46,16 +46,22 @@ def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -
 @pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
 def test_megatron_native_packages_are_kept_out_of_the_common_layer(dockerfile_path: Path) -> None:
     dockerfile = dockerfile_path.read_text()
+    common_layer = dockerfile[
+        dockerfile.index("ENV RL_SYNC="):dockerfile.index('echo "uv sync layer 0', dockerfile.index("ENV RL_SYNC="))
+    ]
 
     for package in ("causal-conv1d", "mamba-ssm", "transformer-engine-cu12"):
-        assert f"--no-install-package {package}" in dockerfile
+        assert f"--no-install-package {package}" in common_layer
 
 
 def test_arm64_megatron_has_strict_native_import_gates() -> None:
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
+    gate = dockerfile[dockerfile.index("# Megatron backend asserts"):dockerfile.index("# torchtitan EP>1 assert")]
 
-    assert "megatron.bridge" in dockerfile
-    assert "transformer_engine.pytorch" in dockerfile
+    assert 'if [ "${INSTALL_MEGATRON}" = "1" ]' in gate
+    assert "import causal_conv1d, mamba_ssm, megatron.core, megatron.bridge, transformer_engine" in gate
+    assert "import torch, transformer_engine.pytorch" in gate
+    assert "from megatron.bridge.models.conversion.auto_bridge import AutoBridge" in gate
 
 
 def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:

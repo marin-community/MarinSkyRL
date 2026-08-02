@@ -34,7 +34,11 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import asdict, dataclass
 
+import fsspec
+
+from cloud.iris.export_contract import SOURCE_MANIFEST_FILENAME, relative_object_key, validate_hf_export
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
 
@@ -341,10 +345,14 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
 
 
-def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[dict[str, int | str]]:
-    """Copy one object-store tree and return its verified file inventory."""
-    import fsspec
+@dataclass(frozen=True)
+class StagedFile:
+    path: str
+    size: int
 
+
+def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[StagedFile]:
+    """Copy one object-store tree and return its verified file inventory."""
     filesystem, source_path = fsspec.core.url_to_fs(source_uri)
     files = sorted(path for path in filesystem.find(source_path) if not filesystem.isdir(path))
     if not files:
@@ -352,10 +360,9 @@ def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[dic
 
     target = os.path.abspath(local_path)
     os.makedirs(target, exist_ok=True)
-    source_prefix = source_path.rstrip("/") + "/"
-    copied: list[dict[str, int | str]] = []
+    copied: list[StagedFile] = []
     for source_file in files:
-        relative = source_file.removeprefix(source_prefix)
+        relative = relative_object_key(source_path, source_file)
         destination = os.path.join(target, relative)
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         expected_size = int(filesystem.info(source_file)["size"])
@@ -364,7 +371,7 @@ def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[dic
         actual_size = os.path.getsize(destination)
         if actual_size != expected_size:
             raise ValueError(f"Staging size mismatch for {relative}: expected {expected_size}, found {actual_size}")
-        copied.append({"path": relative, "size": actual_size})
+        copied.append(StagedFile(path=relative, size=actual_size))
 
     return copied
 
@@ -372,21 +379,15 @@ def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[dic
 def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
     """Copy and validate an object-store HF export on this allocated node."""
     copied = _materialize_object_store_tree(source_uri, local_path)
-    names = {entry["path"] for entry in copied}
-    if "config.json" not in names:
-        raise ValueError(f"Staged model is missing config.json: {source_uri}")
-    if not any(str(name).endswith((".safetensors", ".bin")) for name in names):
-        raise ValueError(f"Staged model has no weight shards: {source_uri}")
-    if not any(str(name).startswith("tokenizer") or str(name).endswith(".model") for name in names):
-        raise ValueError(f"Staged model has no tokenizer files: {source_uri}")
+    validate_hf_export({entry.path for entry in copied}, source_uri)
 
     manifest = {
         "source_uri": source_uri,
         "source_identity": source_identity,
-        "files": copied,
+        "files": [asdict(entry) for entry in copied],
     }
     target = os.path.abspath(local_path)
-    with open(os.path.join(target, ".marinskyrl-source.json"), "w") as destination:
+    with open(os.path.join(target, SOURCE_MANIFEST_FILENAME), "w") as destination:
         json.dump(manifest, destination, sort_keys=True)
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {target} "
@@ -407,9 +408,9 @@ def materialize_data_sources(data_sources_json: str) -> None:
         manifest = {
             "source_uri": source_uri,
             "source_identity": source_identity,
-            "files": copied,
+            "files": [asdict(entry) for entry in copied],
         }
-        with open(os.path.join(local_path, ".marinskyrl-source.json"), "w") as destination:
+        with open(os.path.join(local_path, SOURCE_MANIFEST_FILENAME), "w") as destination:
             json.dump(manifest, destination, sort_keys=True)
         _log(
             f"Training data staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "

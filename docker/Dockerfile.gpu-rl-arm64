@@ -487,8 +487,7 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
 # The pip-check gate below always prints the full conflict report. Both variants
 # must have exactly the one known aiobotocore/botocore conflict. The root lock
-# now selects ARM64 CUDA wheels directly, so the old cusparselt platform
-# diagnostic is no longer accepted.
+# selects ARM64 CUDA wheels directly; any platform-wheel diagnostic fails the gate.
 #
 # `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
 # them into extras, so every image up to that pin already carried them. Naming

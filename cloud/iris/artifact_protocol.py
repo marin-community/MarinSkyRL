@@ -19,6 +19,7 @@ from typing import Any, Protocol
 import fsspec
 
 from cloud.iris.gpu_rl_images import CLUSTER_ARCHITECTURES, GPU_RL_IMAGES, GpuRlImage
+from cloud.iris.export_contract import CHECKPOINT_MARKER_FILENAME, relative_object_key, validate_hf_export
 from cloud.iris.launch_rl_iris import IrisLaunchOutcome, launch, resolved_launch_args
 
 
@@ -251,20 +252,15 @@ def _path_exists(uri: str) -> bool:
 
 
 def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
-    checkpoint_marker = f"{request.output.checkpoint_root.rstrip('/')}/latest_ckpt_global_step.txt"
+    checkpoint_marker = f"{request.output.checkpoint_root.rstrip('/')}/{CHECKPOINT_MARKER_FILENAME}"
     if not _path_exists(checkpoint_marker):
         raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {checkpoint_marker}")
     global_step = int(_read_text(checkpoint_marker).strip())
     policy_uri = f"{request.output.export_root.rstrip('/')}/global_step_{global_step}/policy"
     filesystem, policy_path = fsspec.core.url_to_fs(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
-    names = {path.removeprefix(policy_path.rstrip("/") + "/") for path in files}
-    if "config.json" not in names:
-        raise ValueError(f"Terminal policy export is missing config.json: {policy_uri}")
-    if not any(name.endswith((".safetensors", ".bin")) for name in names):
-        raise ValueError(f"Terminal policy export has no weight shards: {policy_uri}")
-    if not any(name.startswith("tokenizer") or name.endswith(".model") for name in names):
-        raise ValueError(f"Terminal policy export has no tokenizer files: {policy_uri}")
+    names = {relative_object_key(policy_path, path) for path in files}
+    validate_hf_export(names, policy_uri)
     return SkyRLModel(
         policy_export_uri=policy_uri,
         global_step=global_step,
@@ -364,6 +360,26 @@ def _manifest_payload(envelope: ArtifactLaunchEnvelope, response: SkyRLTerminalR
     }
 
 
+def _failed_response(
+    envelope: ArtifactLaunchEnvelope,
+    outcome: IrisLaunchOutcome,
+    failure: str,
+) -> SkyRLTerminalResponse:
+    request = envelope.request
+    response = SkyRLTerminalResponse(
+        run_id=request.run_id,
+        attempt_id=request.attempt_id,
+        state=AttemptState.FAILED,
+        iris_job_id=outcome.job_id,
+        iris_job_state=outcome.job_state,
+        runtime=request.runtime,
+        model=None,
+        failure=failure,
+    )
+    _write_json(_attempt_uri(request), _manifest_payload(envelope, response))
+    return response
+
+
 def launch_artifact(
     envelope: ArtifactLaunchEnvelope,
     *,
@@ -395,47 +411,18 @@ def launch_artifact(
         outcome = (backend or IrisLaunchBackend()).launch(argv)
 
     if outcome.exit_code != 0:
-        response = SkyRLTerminalResponse(
-            run_id=request.run_id,
-            attempt_id=request.attempt_id,
-            state=AttemptState.FAILED,
-            iris_job_id=outcome.job_id,
-            iris_job_state=outcome.job_state,
-            runtime=request.runtime,
-            model=None,
-            failure=f"Iris job reached {outcome.job_state}",
-        )
-        _write_json(_attempt_uri(request), _manifest_payload(envelope, response))
-        return response
+        return _failed_response(envelope, outcome, f"Iris job reached {outcome.job_state}")
 
     try:
         model = _policy_export(request)
     except ValueError as error:
-        response = SkyRLTerminalResponse(
-            run_id=request.run_id,
-            attempt_id=request.attempt_id,
-            state=AttemptState.FAILED,
-            iris_job_id=outcome.job_id,
-            iris_job_state=outcome.job_state,
-            runtime=request.runtime,
-            model=None,
-            failure=str(error),
-        )
-        _write_json(_attempt_uri(request), _manifest_payload(envelope, response))
-        return response
+        return _failed_response(envelope, outcome, str(error))
     if not _path_exists(request.output.resolved_config_uri):
-        response = SkyRLTerminalResponse(
-            run_id=request.run_id,
-            attempt_id=request.attempt_id,
-            state=AttemptState.FAILED,
-            iris_job_id=outcome.job_id,
-            iris_job_state=outcome.job_state,
-            runtime=request.runtime,
-            model=None,
-            failure=f"Successful Iris job did not persist resolved config: {request.output.resolved_config_uri}",
+        return _failed_response(
+            envelope,
+            outcome,
+            f"Successful Iris job did not persist resolved config: {request.output.resolved_config_uri}",
         )
-        _write_json(_attempt_uri(request), _manifest_payload(envelope, response))
-        return response
     response = SkyRLTerminalResponse(
         run_id=request.run_id,
         attempt_id=request.attempt_id,
