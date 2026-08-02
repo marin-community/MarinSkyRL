@@ -179,6 +179,9 @@ def _agentic_step_log(completion_prefix: str = "Batch generation complete:") -> 
 
 
 def test_batch_errors_are_read_back_through_ray_prefixes_and_ansi_codes():
+    # The totals do not reconcile, and pinning that is the point: total_instances
+    # and total_successful count trajectories, total_failed counts instances, so
+    # 24 successful and 8 failed do not add up to 64.
     assert parse_skyrl_metrics.extract_batch_errors(_agentic_step_log()) == {
         1: {
             "batch_errors/total_batches": 2,
@@ -192,11 +195,12 @@ def test_batch_errors_are_read_back_through_ray_prefixes_and_ansi_codes():
     }
 
 
-def test_a_reworded_completion_line_reports_a_step_with_no_errors():
-    # The failure mode this contract needs pinning against: the counts are
-    # re-derived from the generator's log wording rather than from the metrics
-    # it emits, and a wording change drops the step silently. Even the exception
-    # breakdown, which still parses, is discarded with it.
+def test_a_reworded_completion_line_silently_drops_the_step():
+    # Pins the bug, not the intent: the counts are re-derived from the generator's
+    # log wording rather than from the metrics it emits, so a reworded line drops
+    # the step and takes the exception breakdown, which still parses, down with it.
+    # Reading generate/num_failed_trajectories off the mirrored metrics instead
+    # would fix this, and should change this assertion.
     reworded = _agentic_step_log(completion_prefix="Batch generation finished:")
 
     assert parse_skyrl_metrics.extract_batch_errors(reworded) == {}

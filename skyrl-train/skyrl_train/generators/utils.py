@@ -652,6 +652,26 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         # stays keyset-stable and consistent with the per-trajectory emission.
         rollout_metrics["generate/tis/lcs_fallback_alert"] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
 
+    # Preserve the batch failure counts for the same reason: get_rollout_metrics
+    # derives nothing from them, and the fully-async trainer reads rollout metrics
+    # off this result only. Sum the counts and recompute the fraction from those
+    # totals — averaging the per-group fractions would weight unequal groups equally.
+    failure_counts = [
+        rm
+        for rm in (output.get("rollout_metrics") or {} for output in generator_outputs)
+        if "generate/num_trials" in rm
+    ]
+    if failure_counts:
+        totals = {key: sum(rm.get(key, 0) for rm in failure_counts) for key in _BATCH_FAILURE_COUNT_KEYS}
+        rollout_metrics.update(
+            get_batch_failure_metrics(
+                totals["generate/num_trials"],
+                num_failed_trajectories=totals["generate/num_failed_trajectories"],
+                num_failed_instances=totals["generate/num_failed_instances"],
+                num_masked_trajectories=totals["generate/num_masked_trajectories"],
+            )
+        )
+
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -741,6 +761,14 @@ def get_rollout_metrics(
     return rollout_metrics
 
 
+_BATCH_FAILURE_COUNT_KEYS = (
+    "generate/num_trials",
+    "generate/num_failed_instances",
+    "generate/num_failed_trajectories",
+    "generate/num_masked_trajectories",
+)
+
+
 def get_batch_failure_metrics(
     num_trials: int,
     num_failed_trajectories: int,
@@ -749,21 +777,21 @@ def get_batch_failure_metrics(
 ) -> Dict[str, float]:
     """Failure counts for one generated batch, plus the fraction of it they cost.
 
-    The counts alone are unreadable without the batch size, and the batch size is
-    not otherwise logged by the synchronous trainer, so a step that lost most of
-    its trials is indistinguishable on a dashboard from one that lost none.
+    The denominator is one ``generate`` call, which is the whole training batch on
+    the synchronous trainer and a single rollout group on the fully asynchronous
+    one. It is emitted alongside the counts so ``concatenate_generator_outputs``
+    can re-derive the fraction over a merged batch.
 
     Args:
         num_trials: Trajectories the batch asked for; the denominator.
-        num_failed_trajectories: Trajectories that ended with ``stop_reason="error"``.
         num_failed_instances: Distinct instances with at least one failed trajectory.
-        num_masked_trajectories: Failed trajectories excluded from the RLOO baseline.
     """
     return {
+        "generate/num_trials": num_trials,
         "generate/num_failed_instances": num_failed_instances,
         "generate/num_failed_trajectories": num_failed_trajectories,
         "generate/num_masked_trajectories": num_masked_trajectories,
-        "generate/failed_fraction": num_failed_trajectories / num_trials if num_trials else 0.0,
+        "generate/failed_trajectory_fraction": num_failed_trajectories / num_trials if num_trials else 0.0,
     }
 
 

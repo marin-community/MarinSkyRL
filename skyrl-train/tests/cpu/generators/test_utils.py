@@ -5,6 +5,7 @@ uv run --extra dev --isolated pytest tests/cpu/generators/test_utils.py
 import pytest
 from skyrl_train.generators.utils import (
     apply_overlong_filtering,
+    concatenate_generator_outputs,
     encode_messages_subset,
     get_batch_failure_metrics,
     get_response_ids_and_loss_mask_from_messages,
@@ -858,7 +859,7 @@ def test_failed_fraction_is_measured_against_the_whole_batch(num_trials, num_fai
         num_masked_trajectories=num_failed,
     )
 
-    assert metrics["generate/failed_fraction"] == pytest.approx(expected_fraction)
+    assert metrics["generate/failed_trajectory_fraction"] == pytest.approx(expected_fraction)
 
 
 def test_failure_counts_stay_separate_from_the_fraction():
@@ -874,8 +875,48 @@ def test_failure_counts_stay_separate_from_the_fraction():
     )
 
     assert metrics == {
+        "generate/num_trials": 64,
         "generate/num_failed_instances": 8,
         "generate/num_failed_trajectories": 40,
         "generate/num_masked_trajectories": 24,
-        "generate/failed_fraction": pytest.approx(0.625),
+        "generate/failed_trajectory_fraction": pytest.approx(0.625),
     }
+
+
+def _generated_group(num_trials: int, num_failed: int) -> dict:
+    return {
+        "prompt_token_ids": [[1] for _ in range(num_trials)],
+        "response_ids": [[2, 3] for _ in range(num_trials)],
+        "rewards": [0.0 for _ in range(num_trials)],
+        "loss_masks": [[1, 1] for _ in range(num_trials)],
+        "stop_reasons": ["error" if i < num_failed else "stop" for i in range(num_trials)],
+        "rollout_logprobs": None,
+        "rollout_metrics": get_batch_failure_metrics(
+            num_trials,
+            num_failed_trajectories=num_failed,
+            num_failed_instances=num_failed,
+            num_masked_trajectories=num_failed,
+        ),
+    }
+
+
+def test_failure_metrics_survive_concatenation():
+    # The fully asynchronous trainer generates one rollout group at a time and reads
+    # rollout metrics off the concatenated result only, so a count that does not
+    # survive this merge never reaches the tracker. The groups are deliberately
+    # unequal: the fraction has to come from the summed totals, not from averaging
+    # 0.75 and 0.0 to 0.375.
+    merged = concatenate_generator_outputs([_generated_group(4, 3), _generated_group(2, 0)])
+
+    assert merged["rollout_metrics"]["generate/num_trials"] == 6
+    assert merged["rollout_metrics"]["generate/num_failed_trajectories"] == 3
+    assert merged["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(0.5)
+
+
+def test_generators_that_report_no_trials_get_no_failure_series():
+    # Only the agentic generator counts trials, and a fabricated zero series for
+    # every other generator would read as a measured "nothing failed".
+    merged = concatenate_generator_outputs([{**_generated_group(2, 0), "rollout_metrics": {}}])
+
+    assert "generate/num_trials" not in merged["rollout_metrics"]
+    assert "generate/failed_trajectory_fraction" not in merged["rollout_metrics"]

@@ -820,7 +820,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     num_failed_instances=num_trials,
                     num_masked_trajectories=num_trials,
                 ),
-                f"generate/exception_{exception_type}": num_trials,
+                f"generate/errors/{exception_type}": num_trials,
             },
             "rollout_logprobs": None,
             "exclude_from_baseline": [True for _ in range(num_trials)],  # Infrastructure failure
@@ -1159,14 +1159,9 @@ class TerminalBenchGenerator(GeneratorInterface):
             for exc_type, count in exception_counts.items():
                 rollout_metrics[f"generate/errors/{exc_type}"] = count
 
-        # A batch that loses trials still trains on whatever survived, and its
-        # duration metrics improve while it does: a trial that cannot get a
-        # sandbox fails in seconds instead of running for minutes. This line is
-        # the only per-batch account of the loss, so escalate it off INFO when
-        # anything failed, as the TIS alignment guard above does. The wording is
-        # a parsed contract — extract_batch_errors in infra/rl_cleanup re-derives
-        # these counts from it and returns an empty report, not an error, once
-        # the pattern stops matching.
+        # The wording is a parsed contract: extract_batch_errors in infra/rl_cleanup
+        # re-derives these counts from this line, and returns an empty report rather
+        # than an error once the pattern stops matching.
         log_fn = logger.warning if num_failed_trajectories else logger.info
         log_fn(
             f"Batch generation complete: {num_trials - num_failed_trajectories}/{num_trials} successful, "
