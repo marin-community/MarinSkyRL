@@ -31,8 +31,7 @@ class LocalRaySpillTarget:
     location: str
 
     def __post_init__(self) -> None:
-        if resolve_ray_spill_dir(self.location) != self.location:
-            raise ValueError(f"Local Ray spill target must be resolved, got {self.location!r}")
+        validate_ray_spill_dir(self.location)
 
     def head_flags(self) -> list[str]:
         return [f"{_RAY_LOCAL_SPILL_FLAG}={self.location}"]
@@ -63,15 +62,16 @@ class R2RaySpillTarget:
         return [f"--system-config={system_config}"]
 
     def worker_flags(self) -> list[str]:
+        # The head's remote system config propagates through GCS. Ray rejects the
+        # same system-config flag on a worker joining an existing cluster.
         return []
 
     def description(self) -> str:
         return f"Ray object spilling -> R2 prefix {self.location} (remote backend)"
 
 
-def resolve_ray_spill_dir(path: str) -> str:
-    """Resolve and validate a node-local Ray spill directory."""
-    resolved = os.path.expandvars(os.path.expanduser(path))
-    if not os.path.isabs(resolved) or "://" in resolved:
-        raise ValueError(f"Ray spill directory must be an absolute local path, got {resolved!r}")
-    return resolved
+def validate_ray_spill_dir(path: str) -> str:
+    """Validate a node-local path without interpreting it on the launch host."""
+    if not os.path.isabs(path) or "://" in path:
+        raise ValueError(f"Ray spill directory must be an absolute local path, got {path!r}")
+    return path

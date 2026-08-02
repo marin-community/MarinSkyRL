@@ -243,8 +243,6 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
             "12",
             "--ray-spill-dir",
             "/local/nvme/ray-spill",
-            "--ray-spill-backend",
-            "r2",
             "--no-record-literal",
         ],
     )
@@ -255,7 +253,6 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     assert args.rendezvous_dir == "s3://custom/rendezvous"
     assert args.cpu == 12
     assert args.ray_spill_dir == "/local/nvme/ray-spill"
-    assert args.ray_spill_backend.value == "r2"
     assert args.record_literal is False
 
 

@@ -47,3 +47,12 @@ def test_remote_spilling_fails_when_backend_dependency_is_missing(monkeypatch):
 def test_remote_spilling_rejects_non_s3_rendezvous():
     with pytest.raises(ValueError, match="requires an s3:// rendezvous directory"):
         controller._ray_spill_target("/shared/rendezvous/job", RaySpillBackend.R2, DEFAULT_RAY_SPILL_DIR)
+
+
+def test_remote_spilling_rejects_local_directory_override():
+    with pytest.raises(ValueError, match="only applies.*local"):
+        controller._ray_spill_target(
+            "s3://marin-us-east-02a/iris/rl-rdv/job",
+            RaySpillBackend.R2,
+            "/local/nvme/ray-spill",
+        )

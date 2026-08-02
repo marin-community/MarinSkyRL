@@ -43,7 +43,7 @@ from cloud.iris.ray_storage import (
     R2RaySpillTarget,
     RaySpillBackend,
     RaySpillTarget,
-    resolve_ray_spill_dir,
+    validate_ray_spill_dir,
 )
 
 RENDEZVOUS_FILENAME = "ray_head.json"
@@ -883,9 +883,11 @@ def _ray_spill_target(
 ) -> RaySpillTarget:
     """Resolve one valid local or remote Ray spill target."""
     if backend is RaySpillBackend.LOCAL:
-        return LocalRaySpillTarget(location=resolve_ray_spill_dir(local_spill_dir))
+        return LocalRaySpillTarget(location=validate_ray_spill_dir(local_spill_dir))
     if backend is not RaySpillBackend.R2:
         raise ValueError(f"Unsupported Ray spill backend: {backend}")
+    if local_spill_dir != DEFAULT_RAY_SPILL_DIR:
+        raise ValueError("--ray-spill-dir only applies to --ray-spill-backend=local")
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
         raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
     # Ray's smart_open spill backend imports boto3 directly.
@@ -1373,9 +1375,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--ray-spill-dir",
-        type=resolve_ray_spill_dir,
+        type=validate_ray_spill_dir,
         default=DEFAULT_RAY_SPILL_DIR,
-        help=f"Node-local Ray object-spill directory (default {DEFAULT_RAY_SPILL_DIR}).",
+        help=f"Node-local Ray object-spill directory for the local backend (default {DEFAULT_RAY_SPILL_DIR}).",
     )
     parser.add_argument(
         "--ray-spill-backend",
