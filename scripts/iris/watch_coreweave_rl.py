@@ -61,6 +61,8 @@ from infra.rl_metrics import (  # noqa: E402
     training_metrics_parse_error,
 )
 from scripts.iris.jupiter_rl_artifacts import (  # noqa: E402
+    LOG_SUFFIXES,
+    JupiterJobStatus,
     JupiterRunSpec,
     parse_jupiter_run_spec,
     query_jupiter_job_status,
@@ -83,6 +85,7 @@ from scripts.iris.iris_ops import (  # noqa: E402
     DEFAULT_BUNDLE_ROOT,
     MonitorError,
     StyledCell,
+    TERMINAL_STATES,
     box_table,
     filter_records,
     format_duration,
@@ -98,6 +101,7 @@ DEFAULT_USER = "benjaminfeuer"
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
 DEFAULT_TRACE_SYNC_LIMIT = 500
 DEFAULT_JUPITER_TRACE_SYNC_LIMIT = 20
+DEFAULT_JUPITER_HOST = "Jupiter"
 CURRENT_FINELOG_MAX_LINES = 600_000
 COMPLETE_FINELOG_MAX_LINES = 10_000_000
 FinelogScope = Literal["current", "complete"]
@@ -126,7 +130,6 @@ ERROR_PATTERNS = (
     re.compile(r"Traceback \(most recent call last\)"),
     re.compile(r"Train loop failed", re.IGNORECASE),
 )
-LOG_SUFFIXES = (".log", ".out", ".err", ".jsonl", ".txt")
 MISSING_OBJECT_ERROR_CODES = {"404", "NoSuchKey", "NoSuchObject", "NotFound"}
 
 
@@ -160,7 +163,7 @@ class RlJob:
 
     @property
     def is_terminal(self) -> bool:
-        return self.state in {"succeeded", "failed", "killed", "worker_failed", "unschedulable"}
+        return self.state in TERMINAL_STATES
 
     @property
     def bundle_job_id(self) -> str:
@@ -177,6 +180,7 @@ class ArtifactResult:
     trace_started: int | None
     trace_completed: int | None
     errors: tuple[str, ...]
+    slurm_logs: str = "not applicable"
 
 
 @dataclass(frozen=True)
@@ -247,8 +251,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--jupiter-host",
-        default="Jupiter",
-        help="SSH host or configured alias used for Jupiter access (default: Jupiter).",
+        default=DEFAULT_JUPITER_HOST,
+        help=f"SSH host or configured alias used for Jupiter access (default: {DEFAULT_JUPITER_HOST}).",
     )
     parser.add_argument(
         "--jupiter-only",
@@ -943,7 +947,7 @@ def sync_job(
     bundle_root: Path,
     *,
     scope: SyncScope,
-    jupiter_host: str = "Jupiter",
+    jupiter_host: str = DEFAULT_JUPITER_HOST,
     jupiter_trace_sync_limit: int = DEFAULT_JUPITER_TRACE_SYNC_LIMIT,
     max_non_log_bytes: int = DEFAULT_MAX_NON_LOG_BYTES,
     progress: ProgressReporter | None = None,
@@ -963,17 +967,19 @@ def sync_job(
             host=jupiter_host,
             trace_sync_limit=jupiter_trace_sync_limit,
             max_non_log_bytes=max_non_log_bytes,
-            status_only=scope == "status",
+            scope="status" if scope == "status" else "full",
+            finelog_tail_lines=CURRENT_FINELOG_MAX_LINES,
         )
         return (
             ArtifactResult(
                 result.finelog,
-                result.slurm_logs,
+                "not applicable (Jupiter)",
                 result.ray_logs,
                 result.traces,
                 result.trace_selected,
                 None,
                 result.errors,
+                slurm_logs=result.slurm_logs,
             ),
             directory,
         )
@@ -1080,8 +1086,8 @@ def write_job_manifest(
     )
 
 
-def main() -> int:
-    args = parse_args()
+def validate_args(args: argparse.Namespace) -> None:
+    """Validate cross-option monitor invariants before any remote access."""
     if args.max_non_log_bytes < 0:
         raise ValueError("--max-non-log-bytes must be non-negative")
     if args.trace_sync_limit < 0:
@@ -1094,17 +1100,15 @@ def main() -> int:
         raise ValueError("--jupiter-only requires at least one --jupiter-run")
     if not args.all_users and not re.fullmatch(r"[A-Za-z0-9_-]+", args.user):
         raise ValueError("--user may contain only letters, numbers, _ and -")
-    filters = parse_regex_filters(
-        args.filter,
-        {"cluster", "job", "name", "dataset", "type", "state", "submitted", "duration"},
-    )
-    args.bundle_root.mkdir(parents=True, exist_ok=True)
-    report_directory = args.bundle_root / "reports" / "rl"
-    report_directory.mkdir(parents=True, exist_ok=True)
-    progress = ProgressReporter(enabled=not args.quiet_progress)
-    checked_at = datetime.now(UTC)
-    now_ms = int(checked_at.timestamp() * 1000)
 
+
+def discover_selected_jobs(
+    args: argparse.Namespace,
+    progress: ProgressReporter,
+    *,
+    now_ms: int,
+) -> tuple[list[RlJob], list[MonitorError]]:
+    """Discover the default Iris fleet and resolve explicitly named Jupiter runs."""
     jobs: list[RlJob] = []
     errors: list[MonitorError] = []
     scope_user = None if args.all_users else args.user
@@ -1134,7 +1138,7 @@ def main() -> int:
         try:
             status = query_jupiter_job_status(run, host=args.jupiter_host)
         except Exception as error:
-            status = SimpleNamespace(state="unknown", job_name=run.job_name, error=str(error))
+            status = JupiterJobStatus("unknown", run.job_name, str(error))
         if status.error:
             errors.append(_monitor_error(f"{JUPITER_CLUSTER.name}/{run.job_id}", "Slurm status", status.error))
         jobs.append(
@@ -1149,9 +1153,15 @@ def main() -> int:
                 remote_job_name=status.job_name,
             )
         )
+    return jobs, errors
 
-    jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
 
+def sync_selected_jobs(
+    args: argparse.Namespace,
+    jobs: list[RlJob],
+    progress: ProgressReporter,
+) -> list[tuple[RlJob, ArtifactResult, Path]]:
+    """Sync per-job evidence, then apply the Iris fleet-wide trace budget."""
     synced_jobs: list[tuple[RlJob, ArtifactResult, Path]] = []
     ordered_jobs = sorted(jobs, key=lambda item: (item.cluster.name, item.submitted_at_ms, item.job_id))
     for index, job in enumerate(ordered_jobs, start=1):
@@ -1182,51 +1192,75 @@ def main() -> int:
     active_iris_job_directories = [
         (job, directory) for job, _, directory in synced_jobs if job.source == "iris" and not job.is_terminal
     ]
-    if not args.status_only and active_iris_job_directories:
-        progress.phase("starting fleet-wide trace inventory and transfer")
-        try:
-            trace_statuses = sync_fleet_trace_jobs(
-                active_iris_job_directories,
-                args.max_non_log_bytes,
-                args.trace_sync_limit,
-                progress,
-            )
-        except Exception as error:
-            trace_statuses = {
-                (job.cluster.name, job.job_id): (
-                    "unavailable",
-                    None,
-                    None,
-                    f"{type(error).__name__}: {error}",
-                )
-                for job, _directory in active_iris_job_directories
-            }
-        synchronized: list[tuple[RlJob, ArtifactResult, Path]] = []
-        for job, artifacts, directory in synced_jobs:
-            if job.is_terminal or job.source != "iris":
-                synchronized.append((job, artifacts, directory))
-                continue
-            traces, started, completed, trace_error = trace_statuses.get(
-                (job.cluster.name, job.job_id),
-                ("unavailable", None, None, "fleet trace sync returned no status"),
-            )
-            errors_for_job = artifacts.errors + ((f"trace sync: {trace_error}",) if trace_error else ())
-            synchronized.append(
-                (
-                    job,
-                    replace(
-                        artifacts,
-                        traces=traces,
-                        trace_started=started,
-                        trace_completed=completed,
-                        errors=errors_for_job,
-                    ),
-                    directory,
-                )
-            )
-        synced_jobs = synchronized
-    elif not args.status_only:
+    if args.status_only:
+        return synced_jobs
+    if not active_iris_job_directories:
         progress.phase("no active Iris RL jobs; fleet object-store trace sync skipped")
+        return synced_jobs
+
+    progress.phase("starting fleet-wide trace inventory and transfer")
+    try:
+        trace_statuses = sync_fleet_trace_jobs(
+            active_iris_job_directories,
+            args.max_non_log_bytes,
+            args.trace_sync_limit,
+            progress,
+        )
+    except Exception as error:
+        trace_statuses = {
+            (job.cluster.name, job.job_id): (
+                "unavailable",
+                None,
+                None,
+                f"{type(error).__name__}: {error}",
+            )
+            for job, _directory in active_iris_job_directories
+        }
+
+    synchronized: list[tuple[RlJob, ArtifactResult, Path]] = []
+    for job, artifacts, directory in synced_jobs:
+        if job.is_terminal or job.source != "iris":
+            synchronized.append((job, artifacts, directory))
+            continue
+        traces, started, completed, trace_error = trace_statuses.get(
+            (job.cluster.name, job.job_id),
+            ("unavailable", None, None, "fleet trace sync returned no status"),
+        )
+        errors_for_job = artifacts.errors + ((f"trace sync: {trace_error}",) if trace_error else ())
+        synchronized.append(
+            (
+                job,
+                replace(
+                    artifacts,
+                    traces=traces,
+                    trace_started=started,
+                    trace_completed=completed,
+                    errors=errors_for_job,
+                ),
+                directory,
+            )
+        )
+    return synchronized
+
+
+def main() -> int:
+    args = parse_args()
+    validate_args(args)
+    filters = parse_regex_filters(
+        args.filter,
+        {"cluster", "job", "name", "dataset", "type", "state", "submitted", "duration"},
+    )
+    args.bundle_root.mkdir(parents=True, exist_ok=True)
+    report_directory = args.bundle_root / "reports" / "rl"
+    report_directory.mkdir(parents=True, exist_ok=True)
+    progress = ProgressReporter(enabled=not args.quiet_progress)
+    checked_at = datetime.now(UTC)
+    now_ms = int(checked_at.timestamp() * 1000)
+
+    jobs, errors = discover_selected_jobs(args, progress, now_ms=now_ms)
+
+    jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
+    synced_jobs = sync_selected_jobs(args, jobs, progress)
 
     rows: list[list[object]] = []
     job_report: dict[str, Any] = {}

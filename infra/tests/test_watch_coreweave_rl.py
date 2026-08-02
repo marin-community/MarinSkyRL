@@ -88,6 +88,8 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
         host="Jupiter",
         trace_sync_limit=2,
         max_non_log_bytes=100 * 1024 * 1024,
+        scope="full",
+        finelog_tail_lines=600_000,
         runner=fake_run,
     )
 
@@ -128,7 +130,8 @@ def test_jupiter_status_only_tails_finelog_without_recursive_transfer(tmp_path: 
         host="Jupiter",
         trace_sync_limit=20,
         max_non_log_bytes=100 * 1024 * 1024,
-        status_only=True,
+        scope="status",
+        finelog_tail_lines=600_000,
         runner=fake_run,
     )
 
@@ -136,6 +139,23 @@ def test_jupiter_status_only_tails_finelog_without_recursive_transfer(tmp_path: 
     assert (tmp_path / "finelog.log").read_text().startswith("WANDB_MIRROR")
     assert all(call[0] == "ssh" for call in calls)
     assert any("tail -n 600000" in call[-1] for call in calls)
+
+
+def test_jupiter_sync_reports_ssh_transport_failure_instead_of_missing_artifacts(tmp_path: Path) -> None:
+    def failed_ssh(arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 255, stdout="", stderr="ssh: connect to host failed")
+
+    with pytest.raises(RuntimeError, match="connect to host failed"):
+        sync_jupiter_artifacts(
+            JupiterRunSpec("1170543", "/e/data1/experiments/tasktrove-x6"),
+            tmp_path,
+            host="Jupiter",
+            trace_sync_limit=20,
+            max_non_log_bytes=100 * 1024 * 1024,
+            scope="full",
+            finelog_tail_lines=600_000,
+            runner=failed_ssh,
+        )
 
 
 def test_jupiter_status_queries_only_the_requested_slurm_job() -> None:
@@ -203,3 +223,5 @@ def test_jupiter_only_run_uses_the_shared_report_and_skips_iris_trace_inventory(
     assert "jsc-jupiter/1170543" in report_json["jobs"]
     assert "TIS exact=0.99" in report
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["traces"] == "newest 1 selected"
+    assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["pod_logs"] == "not applicable (Jupiter)"
+    assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["slurm_logs"] == "synced"
