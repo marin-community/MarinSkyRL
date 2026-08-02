@@ -2,7 +2,7 @@ import contextlib
 import os
 import socket
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -22,30 +22,12 @@ CONTROLLER_ROLE = "controller"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
-class _Emit(Protocol):
-    def __call__(self, value: float, *, attributes: Mapping[str, str]) -> None: ...
-
-
-class _BestEffortInstrument:
-    """Prevent a telemetry handle failure from changing training control flow."""
-
-    def __init__(self, emit: _Emit) -> None:
-        self._emit = emit
-
-    def emit(self, value: float, *, attributes: Mapping[str, str]) -> None:
-        try:
-            self._emit(value, attributes=attributes)
-        except Exception:
-            # Per-step logging can flood or stall training during a telemetry outage.
-            pass
-
-
-work_completed = _BestEffortInstrument(telemetry.counter("work_completed", unit="{item}").add)
-phase_duration = _BestEffortInstrument(telemetry.histogram("phase_duration_seconds", unit="s").record)
-progress_timestamp = _BestEffortInstrument(telemetry.gauge("progress_time_seconds", unit="s").set)
-policy_step = _BestEffortInstrument(telemetry.gauge("policy_step", unit="{step}").set)
-rollout_queue_depth = _BestEffortInstrument(telemetry.gauge("queue_depth", unit="{item}").set)
-rollout_capacity = _BestEffortInstrument(telemetry.gauge("capacity", unit="{item}").set)
+work_completed = telemetry.counter("work_completed", unit="{item}")
+phase_duration = telemetry.histogram("phase_duration_seconds", unit="s")
+progress_timestamp = telemetry.gauge("progress_time_seconds", unit="s")
+policy_step = telemetry.gauge("policy_step", unit="{step}")
+rollout_queue_depth = telemetry.gauge("queue_depth", unit="{item}")
+rollout_capacity = telemetry.gauge("capacity", unit="{item}")
 
 
 class _BackgroundCollector(Protocol):
@@ -190,7 +172,7 @@ def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"]) ->
         outcome = "failure"
         raise
     finally:
-        phase_duration.emit(
+        phase_duration.record(
             time.perf_counter() - started,
             attributes={
                 "phase": phase,
@@ -206,9 +188,9 @@ def record_policy_step(step: int) -> None:
     _process_state.policy_step = step
     _process_state.last_progress_timestamp = progress_time
     attributes = {"work_kind": "policy_step", "role": TRAINER_ROLE}
-    work_completed.emit(1, attributes=attributes)
-    progress_timestamp.emit(progress_time, attributes=attributes)
-    policy_step.emit(step, attributes={"role": TRAINER_ROLE})
+    work_completed.add(1, attributes=attributes)
+    progress_timestamp.set(progress_time, attributes=attributes)
+    policy_step.set(step, attributes={"role": TRAINER_ROLE})
 
 
 def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None) -> None:
@@ -224,9 +206,9 @@ def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: S
         ("generated_token", generated_token_count),
     ):
         if count:
-            work_completed.emit(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE})
+            work_completed.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE})
     if rollout_count:
-        progress_timestamp.emit(
+        progress_timestamp.set(
             progress_time,
             attributes={"work_kind": "rollout", "role": TRAINER_ROLE},
         )
@@ -236,8 +218,8 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
     _process_state.queue_depth = depth
     _process_state.queue_capacity = queue_capacity
     attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE}
-    rollout_queue_depth.emit(depth, attributes=attributes)
-    rollout_capacity.emit(queue_capacity, attributes=attributes)
+    rollout_queue_depth.set(depth, attributes=attributes)
+    rollout_capacity.set(queue_capacity, attributes=attributes)
 
 
 class ProcessTelemetry:
@@ -256,21 +238,14 @@ class ProcessTelemetry:
         if self._config.root_run_uid is None or self._config.execution_uid is None:
             logger.warning("Telemetry requires root_run_uid and execution_uid; export remains inert")
             return self
-        try:
-            telemetry.configure(
-                endpoint=self._config.endpoint,
-                service=SERVICE,
-                attributes=_resources(self._config, self._role),
-            )
-            self._configured = bool(telemetry.runtime_status().configured)
-        except Exception:
-            logger.warning("Could not configure telemetry; export remains inert", exc_info=True)
-            self._configured = False
+        telemetry.configure(
+            endpoint=self._config.endpoint,
+            service=SERVICE,
+            attributes=_resources(self._config, self._role),
+        )
+        self._configured = telemetry.runtime_status().configured
         if self._configured:
-            try:
-                telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
-            except Exception:
-                logger.warning("Could not export telemetry lifecycle start", exc_info=True)
+            telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
         return self
 
     def collector_or_inert(self, collector: _BackgroundCollector) -> _BackgroundCollector:
@@ -289,42 +264,33 @@ class ProcessTelemetry:
             return
         self._closed = True
         if self._configured:
-            try:
-                export = telemetry.runtime_status()
-                telemetry.event(
-                    "terminal",
-                    {
-                        "status": status,
-                        "reason": reason[:512],
-                        "export_queued_records": export.queued_records,
-                        "export_lost_records": export.lost_records,
-                        "policy_step": _process_state.policy_step,
-                        "last_progress_time_seconds": _process_state.last_progress_timestamp,
-                        "queue_depth": _process_state.queue_depth,
-                        "queue_capacity": _process_state.queue_capacity,
-                    },
-                    attributes={"role": self._role},
-                )
-            except Exception:
-                logger.warning("Could not export telemetry terminal state", exc_info=True)
+            export = telemetry.runtime_status()
+            telemetry.event(
+                "terminal",
+                {
+                    "status": status,
+                    "reason": reason[:512],
+                    "export_queued_records": export.queued_records,
+                    "export_lost_records": export.lost_records,
+                    "policy_step": _process_state.policy_step,
+                    "last_progress_time_seconds": _process_state.last_progress_timestamp,
+                    "queue_depth": _process_state.queue_depth,
+                    "queue_capacity": _process_state.queue_capacity,
+                },
+                attributes={"role": self._role},
+            )
             self._drain_and_shutdown()
         self._configured = False
         _process_state.release(self)
 
     def _drain_and_shutdown(self) -> None:
         deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
-        try:
-            while telemetry.runtime_status().queued_records:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(0.01, remaining))
-        except Exception:
-            logger.warning("Could not read telemetry queue status during shutdown", exc_info=True)
-        try:
-            telemetry.shutdown(max(0.0, deadline - time.monotonic()))
-        except Exception:
-            logger.warning("Could not shut down telemetry exporter", exc_info=True)
+        while telemetry.runtime_status().queued_records:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.01, remaining))
+        telemetry.shutdown(max(0.0, deadline - time.monotonic()))
 
 
 def process_telemetry(role: str) -> ProcessTelemetry:
