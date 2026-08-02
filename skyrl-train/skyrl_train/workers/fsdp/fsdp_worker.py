@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import ray
 import torch
 import torch.distributed
+import torch.nn.functional as F
 from loguru import logger
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
@@ -929,6 +930,466 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             "runtime_worker_sha256": self._grug_benchmark_file_sha256(worker_path),
             "micro_batch_size": int(self.cfg.trainer.micro_train_batch_size_per_gpu),
             "mini_batch_size_per_gpu": int(self.policy_mini_batch_size_per_gpu),
+        }
+
+    def grug_benchmark_localize_staged(self):
+        """Compare eager and grouped Grug blocks on identical live FSDP inputs.
+
+        This is disposable measurement instrumentation.  One no-grad eager
+        model forward supplies the input to every sparse block.  A pre-hook
+        runs the grouped branch on that same tensor before the eager branch,
+        so later layers cannot hide where the first block-local difference
+        begins.  Layer zero additionally records projection-level FP32
+        references and a route-conditioned input/weight-gradient probe.
+        """
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before localization")
+        if self.cfg.trainer.strategy != "fsdp2":
+            raise RuntimeError("Grug localization is implemented only for FSDP2")
+
+        modules = [module for module in self.model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
+        if not modules:
+            raise RuntimeError("Grug localization found no sparse blocks")
+        if any(module.experts.use_grouped_mm for module in modules):
+            raise RuntimeError("Grug localization must start from the eager expert path")
+
+        def tensor_sha256(tensor: torch.Tensor) -> str:
+            cpu = tensor.detach().to("cpu").contiguous()
+            return hashlib.sha256(cpu.view(torch.uint8).numpy().tobytes()).hexdigest()
+
+        def tensor_summary(tensor: torch.Tensor) -> dict[str, object]:
+            value = tensor.detach().float()
+            return {
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "sha256": tensor_sha256(tensor),
+                "l2_norm": float(torch.linalg.vector_norm(value).item()),
+                "max_abs": float(value.abs().max().item()),
+                "mean": float(value.mean().item()),
+                "finite": bool(torch.isfinite(value).all().item()),
+            }
+
+        def difference(
+            actual: torch.Tensor,
+            reference: torch.Tensor,
+            *,
+            rtol: float = 0.0,
+            atol: float = 0.0,
+        ) -> dict[str, object]:
+            if actual.shape != reference.shape:
+                raise RuntimeError(f"cannot compare shapes {tuple(actual.shape)} and {tuple(reference.shape)}")
+            actual_float = actual.detach().float()
+            reference_float = reference.detach().float()
+            absolute = (actual_float - reference_float).abs()
+            allowance = atol + rtol * reference_float.abs()
+            scale = torch.linalg.vector_norm(reference_float)
+            return {
+                "numel": actual.numel(),
+                "exact": bool(torch.equal(actual.detach(), reference.detach())),
+                "allclose": bool((absolute <= allowance).all().item()),
+                "rtol": rtol,
+                "atol": atol,
+                "max_abs": float(absolute.max().item()),
+                "mean_abs": float(absolute.mean().item()),
+                "relative_l2": float((torch.linalg.vector_norm(absolute) / scale.clamp_min(1e-30)).item()),
+                "nonfinite": int((~torch.isfinite(actual_float)).sum().item()),
+            }
+
+        def local_weight(weight: torch.Tensor) -> torch.Tensor:
+            return self._grug_benchmark_local_tensor(weight).detach()
+
+        def eager_routed_stages(
+            hidden_states: torch.Tensor,
+            counts: torch.Tensor,
+            gate_weight: torch.Tensor,
+            down_weight: torch.Tensor,
+            up_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            rows = hidden_states.shape[0]
+            intermediate = gate_weight.shape[1]
+            gate = hidden_states.new_empty((rows, intermediate))
+            up = hidden_states.new_empty((rows, intermediate))
+            hidden = hidden_states.new_empty((rows, intermediate))
+            down = hidden_states.new_empty((rows, hidden_states.shape[1]))
+            start = 0
+            for expert_index, count in enumerate(counts.tolist()):
+                end = start + count
+                if count:
+                    expert_input = hidden_states[start:end]
+                    expert_gate = F.linear(expert_input, gate_weight[expert_index])
+                    expert_up = F.linear(expert_input, up_weight[expert_index])
+                    expert_hidden = F.silu(expert_gate) * expert_up
+                    gate[start:end] = expert_gate
+                    up[start:end] = expert_up
+                    hidden[start:end] = expert_hidden
+                    down[start:end] = F.linear(expert_hidden, down_weight[expert_index])
+                start = end
+            if start != rows:
+                raise RuntimeError(f"eager routed rows disagree with loads: rows={rows}, loads={start}")
+            return gate, up, hidden, down
+
+        def grouped_routed_stages(
+            hidden_states: torch.Tensor,
+            counts: torch.Tensor,
+            gate_weight: torch.Tensor,
+            down_weight: torch.Tensor,
+            up_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            from torchtitan.distributed.expert_parallel import TOKEN_GROUP_ALIGN_SIZE_M
+            from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
+
+            experts = gate_weight.shape[0]
+            with torch.no_grad():
+                permuted_indices, padded_counts, _ = generate_permute_indices(
+                    counts,
+                    experts,
+                    1,
+                    hidden_states.shape[0] + experts * TOKEN_GROUP_ALIGN_SIZE_M,
+                    TOKEN_GROUP_ALIGN_SIZE_M,
+                )
+            source = torch.vstack((hidden_states, hidden_states.new_zeros(hidden_states.shape[-1])))
+            padded_input = source.index_select(0, permuted_indices.long())
+            offsets = torch.cumsum(padded_counts, dim=0, dtype=torch.int32)
+            padded_gate = torch._grouped_mm(
+                padded_input.bfloat16(), gate_weight.bfloat16().transpose(-2, -1), offs=offsets
+            )
+            padded_up = torch._grouped_mm(padded_input.bfloat16(), up_weight.bfloat16().transpose(-2, -1), offs=offsets)
+            padded_hidden = F.silu(padded_gate) * padded_up
+            padded_down = torch._grouped_mm(
+                padded_hidden, down_weight.bfloat16().transpose(-2, -1), offs=offsets
+            ).type_as(hidden_states)
+
+            def unpermute(padded: torch.Tensor) -> torch.Tensor:
+                restored = padded.new_empty((source.shape[0], padded.shape[-1]))
+                restored[permuted_indices.long()] = padded
+                return restored[:-1]
+
+            return tuple(unpermute(value) for value in (padded_gate, padded_up, padded_hidden, padded_down))
+
+        def combine_routed(
+            routed_output: torch.Tensor,
+            combine_weights: torch.Tensor,
+            order: torch.Tensor,
+            sorted_token_indices: torch.Tensor,
+            num_tokens: int,
+        ) -> torch.Tensor:
+            sorted_weights = combine_weights.reshape(-1).index_select(0, order).to(routed_output.dtype)
+            output = routed_output.new_zeros((num_tokens, routed_output.shape[-1]))
+            output.index_add_(0, sorted_token_indices, routed_output * sorted_weights.unsqueeze(-1))
+            return output
+
+        def fp32_routed_reference(
+            hidden_states: torch.Tensor,
+            counts: torch.Tensor,
+            gate_weight: torch.Tensor,
+            down_weight: torch.Tensor,
+            up_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            rows = hidden_states.shape[0]
+            intermediate = gate_weight.shape[1]
+            gate = torch.empty((rows, intermediate), dtype=torch.float32, device=hidden_states.device)
+            up = torch.empty_like(gate)
+            hidden = torch.empty_like(gate)
+            down = torch.empty((rows, hidden_states.shape[1]), dtype=torch.float32, device=hidden_states.device)
+            start = 0
+            with torch.autocast(device_type="cuda", enabled=False):
+                for expert_index, count in enumerate(counts.tolist()):
+                    end = start + count
+                    if count:
+                        expert_input = hidden_states[start:end].float()
+                        expert_gate = F.linear(expert_input, gate_weight[expert_index].float())
+                        expert_up = F.linear(expert_input, up_weight[expert_index].float())
+                        expert_hidden = F.silu(expert_gate) * expert_up
+                        gate[start:end] = expert_gate
+                        up[start:end] = expert_up
+                        hidden[start:end] = expert_hidden
+                        down[start:end] = F.linear(expert_hidden, down_weight[expert_index].float())
+                    start = end
+            return gate, up, hidden, down
+
+        def single_expert_probe(
+            expert_input: torch.Tensor,
+            gate_weight: torch.Tensor,
+            down_weight: torch.Tensor,
+            up_weight: torch.Tensor,
+        ) -> dict[str, object]:
+            from skyrl_train.models.grug_moe import _run_grug_grouped_mm
+
+            output_count = expert_input.shape[0] * down_weight.shape[0]
+            cotangent = torch.linspace(
+                -1.0,
+                1.0,
+                steps=output_count,
+                dtype=torch.float32,
+                device=expert_input.device,
+            ).reshape(expert_input.shape[0], down_weight.shape[0])
+
+            def run(path: str, dtype: torch.dtype):
+                x = expert_input.detach().to(dtype).clone().requires_grad_(True)
+                gate = gate_weight.detach().to(dtype).clone().requires_grad_(True)
+                down = down_weight.detach().to(dtype).clone().requires_grad_(True)
+                up = up_weight.detach().to(dtype).clone().requires_grad_(True)
+                if path == "eager":
+                    output = F.linear(F.silu(F.linear(x, gate)) * F.linear(x, up), down)
+                elif path == "grouped":
+                    counts = torch.tensor([x.shape[0]], dtype=torch.int64, device=x.device)
+                    output = _run_grug_grouped_mm(gate.unsqueeze(0), down.unsqueeze(0), up.unsqueeze(0), x, counts)
+                else:
+                    raise ValueError(path)
+                scalar = (output.float() * cotangent).mean()
+                gradients = torch.autograd.grad(scalar, (x, gate, down, up))
+                return output.detach(), tuple(gradient.detach() for gradient in gradients)
+
+            with torch.enable_grad():
+                eager_output, eager_gradients = run("eager", torch.bfloat16)
+                grouped_output, grouped_gradients = run("grouped", torch.bfloat16)
+                with torch.autocast(device_type="cuda", enabled=False):
+                    fp32_output, fp32_gradients = run("eager", torch.float32)
+            names = ("input", "gate_weight", "down_weight", "up_weight")
+            return {
+                "rows": expert_input.shape[0],
+                "output_grouped_vs_eager": difference(grouped_output, eager_output, rtol=4e-2, atol=4e-3),
+                "output_eager_vs_fp32": difference(eager_output, fp32_output, rtol=4e-2, atol=4e-3),
+                "output_grouped_vs_fp32": difference(grouped_output, fp32_output, rtol=4e-2, atol=4e-3),
+                "gradients_grouped_vs_eager": {
+                    name: difference(grouped, eager, rtol=8e-2, atol=1e-4)
+                    for name, grouped, eager in zip(names, grouped_gradients, eager_gradients)
+                },
+                "gradients_eager_vs_fp32": {
+                    name: difference(eager, fp32, rtol=8e-2, atol=1e-4)
+                    for name, eager, fp32 in zip(names, eager_gradients, fp32_gradients)
+                },
+                "gradients_grouped_vs_fp32": {
+                    name: difference(grouped, fp32, rtol=8e-2, atol=1e-4)
+                    for name, grouped, fp32 in zip(names, grouped_gradients, fp32_gradients)
+                },
+            }
+
+        block_evidence: list[dict[str, object] | None] = [None] * len(modules)
+        shadow_by_layer: dict[int, dict[str, object]] = {}
+        hook_handles = []
+
+        def before_block(layer_index: int, module: GrugMoeSparseMoeBlock, args):
+            if layer_index in shadow_by_layer:
+                raise RuntimeError(f"nested Grug localization at layer {layer_index}")
+            hidden_states = args[0]
+            shape = hidden_states.shape
+            flat = hidden_states.reshape(-1, shape[-1])
+            with torch.no_grad():
+                router_output = module.router(flat)
+                selected_experts = router_output.selected_experts
+                combine_weights = router_output.combine_weights
+                flat_experts = selected_experts.reshape(-1)
+                order = torch.argsort(flat_experts, stable=True)
+                token_indices = (
+                    torch.arange(flat.shape[0], device=flat.device)
+                    .unsqueeze(1)
+                    .expand(-1, selected_experts.shape[-1])
+                    .reshape(-1)
+                )
+                sorted_token_indices = token_indices.index_select(0, order)
+                routed_input = flat.index_select(0, sorted_token_indices)
+                counts = torch.bincount(flat_experts, minlength=module.experts.num_experts)
+
+                was_grouped = module.experts.use_grouped_mm
+                module.experts.use_grouped_mm = True
+                try:
+                    grouped_output = module._forward_grouped(flat, selected_experts, combine_weights).reshape(shape)
+                finally:
+                    module.experts.use_grouped_mm = was_grouped
+
+                sorted_logits = torch.topk(
+                    router_output.router_logits + module.router.bias,
+                    k=module.router.top_k + 1,
+                    dim=-1,
+                    sorted=True,
+                ).values
+                margin = sorted_logits[:, module.router.top_k - 1] - sorted_logits[:, module.router.top_k]
+                evidence: dict[str, object] = {
+                    "layer": layer_index,
+                    "input_shape": list(flat.shape),
+                    "input_sha256": tensor_sha256(flat),
+                    "selected_experts_sha256": tensor_sha256(selected_experts),
+                    "route_loads": counts.cpu().tolist(),
+                    "route_margin": {
+                        "min": float(margin.min().item()),
+                        "p01": float(torch.quantile(margin.float(), 0.01).item()),
+                        "median": float(torch.quantile(margin.float(), 0.5).item()),
+                        "p99": float(torch.quantile(margin.float(), 0.99).item()),
+                        "max": float(margin.max().item()),
+                        "count_le_1e-4": int((margin <= 1e-4).sum().item()),
+                        "count_le_1e-3": int((margin <= 1e-3).sum().item()),
+                        "count_le_1e-2": int((margin <= 1e-2).sum().item()),
+                    },
+                }
+
+                if layer_index == 0:
+                    gate_weight = local_weight(module.experts.gate_proj.weight)
+                    down_weight = local_weight(module.experts.down_proj.weight)
+                    up_weight = local_weight(module.experts.up_proj.weight)
+                    eager_stages = eager_routed_stages(routed_input, counts, gate_weight, down_weight, up_weight)
+                    grouped_stages = grouped_routed_stages(routed_input, counts, gate_weight, down_weight, up_weight)
+                    old_tf32 = torch.backends.cuda.matmul.allow_tf32
+                    old_precision = torch.get_float32_matmul_precision()
+                    torch.backends.cuda.matmul.allow_tf32 = False
+                    torch.set_float32_matmul_precision("highest")
+                    try:
+                        fp32_stages = fp32_routed_reference(routed_input, counts, gate_weight, down_weight, up_weight)
+                    finally:
+                        torch.backends.cuda.matmul.allow_tf32 = old_tf32
+                        torch.set_float32_matmul_precision(old_precision)
+                    stage_names = ("gate_projection", "up_projection", "swiglu", "down_projection")
+                    detailed = {
+                        "input": tensor_summary(flat),
+                        "router_logits": tensor_summary(router_output.router_logits),
+                        "route_order_exact": bool(
+                            torch.equal(
+                                order,
+                                torch.cat([torch.where(flat_experts == expert)[0] for expert in range(counts.numel())]),
+                            )
+                        ),
+                        "stages_grouped_vs_eager": {
+                            name: difference(grouped, eager)
+                            for name, grouped, eager in zip(stage_names, grouped_stages, eager_stages)
+                        },
+                        "stages_eager_vs_fp32": {
+                            name: difference(eager, fp32)
+                            for name, eager, fp32 in zip(stage_names, eager_stages, fp32_stages)
+                        },
+                        "stages_grouped_vs_fp32": {
+                            name: difference(grouped, fp32)
+                            for name, grouped, fp32 in zip(stage_names, grouped_stages, fp32_stages)
+                        },
+                    }
+                    manual_grouped_output = combine_routed(
+                        grouped_stages[-1],
+                        combine_weights,
+                        order,
+                        sorted_token_indices,
+                        flat.shape[0],
+                    )
+                    detailed["manual_grouped_vs_product_grouped"] = difference(
+                        manual_grouped_output, grouped_output.reshape_as(manual_grouped_output)
+                    )
+                    probe_expert = int(torch.argmax(counts).item())
+                    probe_start = int(counts[:probe_expert].sum().item())
+                    probe_end = probe_start + int(counts[probe_expert].item())
+                    detailed["gradient_probe_expert"] = probe_expert
+                    detailed["gradient_probe"] = single_expert_probe(
+                        routed_input[probe_start:probe_end],
+                        gate_weight[probe_expert],
+                        down_weight[probe_expert],
+                        up_weight[probe_expert],
+                    )
+                    evidence["detailed"] = detailed
+                    del eager_stages, grouped_stages, fp32_stages
+
+            actual_router: dict[str, object] = {}
+
+            def capture_actual_router(_router, _args, output):
+                actual_router["logits"] = difference(output.router_logits, router_output.router_logits)
+                actual_router["selected_experts_exact"] = bool(
+                    torch.equal(output.selected_experts, router_output.selected_experts)
+                )
+                actual_router["combine_weights"] = difference(output.combine_weights, router_output.combine_weights)
+
+            router_handle = module.router.register_forward_hook(capture_actual_router)
+            shadow_by_layer[layer_index] = {
+                "grouped_output": grouped_output,
+                "actual_router": actual_router,
+                "router_handle": router_handle,
+                "evidence": evidence,
+            }
+
+        def after_block(layer_index: int, _module: GrugMoeSparseMoeBlock, _args, eager_output):
+            shadow = shadow_by_layer.pop(layer_index)
+            shadow["router_handle"].remove()
+            actual_router = shadow["actual_router"]
+            if set(actual_router) != {"logits", "selected_experts_exact", "combine_weights"}:
+                raise RuntimeError(f"layer {layer_index} did not capture the eager router output")
+            evidence = shadow["evidence"]
+            evidence["router_shadow_vs_eager"] = actual_router
+            evidence["block_output_grouped_vs_eager"] = difference(
+                shadow["grouped_output"], eager_output, rtol=4e-2, atol=4e-3
+            )
+            block_evidence[layer_index] = evidence
+
+        for layer_index, module in enumerate(modules):
+            hook_handles.extend(
+                (
+                    module.register_forward_pre_hook(
+                        lambda module, args, index=layer_index: before_block(index, module, args)
+                    ),
+                    module.register_forward_hook(
+                        lambda module, args, output, index=layer_index: after_block(index, module, args, output)
+                    ),
+                )
+            )
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        state_hash_before = self._grug_benchmark_state_hash(self.model.state_dict())
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state()
+        gradients_before = sum(parameter.grad is not None for parameter in self.model.parameters())
+        self.optimizer.zero_grad(set_to_none=True)
+        diagnostic_batch = self._grug_benchmark_batch[:1]
+        experience = BatchIterator.batch_to_experience(diagnostic_batch)
+        experience.to_device(torch.cuda.current_device())
+        try:
+            self.model.train()
+            with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                action_log_probs = self.model(
+                    experience.sequences,
+                    experience.num_actions,
+                    attention_mask=experience.attention_mask,
+                    temperature=1.0,
+                    return_output=False,
+                    compute_entropy=False,
+                    rollout_routed_experts=None,
+                )
+        finally:
+            for handle in hook_handles:
+                handle.remove()
+            for shadow in shadow_by_layer.values():
+                shadow["router_handle"].remove()
+            torch.set_rng_state(cpu_rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state)
+            self.optimizer.zero_grad(set_to_none=True)
+        if shadow_by_layer:
+            raise RuntimeError(f"Grug localization left open layers: {sorted(shadow_by_layer)}")
+        if any(item is None for item in block_evidence):
+            raise RuntimeError("Grug localization did not observe every sparse block")
+        if any(module.experts.use_grouped_mm for module in modules):
+            raise RuntimeError("Grug localization did not restore the eager path")
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        state_hash_after = self._grug_benchmark_state_hash(self.model.state_dict())
+        if state_hash_after != state_hash_before:
+            raise RuntimeError(
+                f"Grug localization changed model state: before={state_hash_before}, after={state_hash_after}"
+            )
+        gradients_after = sum(parameter.grad is not None for parameter in self.model.parameters())
+        if gradients_after:
+            raise RuntimeError(f"Grug localization left {gradients_after} model gradients")
+        first_nonexact_layer = next(
+            (item["layer"] for item in block_evidence if not item["block_output_grouped_vs_eager"]["exact"]),
+            None,
+        )
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash_before": state_hash_before,
+            "state_hash_after": state_hash_after,
+            "gradients_cleared_before": gradients_before,
+            "gradients_after": gradients_after,
+            "cpu_rng_restored": bool(torch.equal(torch.get_rng_state(), cpu_rng_state)),
+            "cuda_rng_restored": bool(torch.equal(torch.cuda.get_rng_state(), cuda_rng_state)),
+            "action_log_probs": tensor_summary(action_log_probs),
+            "first_nonexact_block_output_layer": first_nonexact_layer,
+            "blocks": block_evidence,
         }
 
     def grug_benchmark_run_staged_ppo(self, profile: bool = False):

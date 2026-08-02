@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--logical-batch-sha256", required=True)
     parser.add_argument("--attention-backend", choices=("eager", "flash_attention_2"), required=True)
     parser.add_argument("--expert-implementation", choices=("eager", "grouped"), required=True)
-    parser.add_argument("--objective", choices=("operational", "matched_ce"), required=True)
+    parser.add_argument("--objective", choices=("operational", "matched_ce", "localize"), required=True)
     parser.add_argument("--mode", choices=("preflight", "headline"), required=True)
     parser.add_argument("--result-s3-uri", required=True)
     parser.add_argument("--sample", type=int, required=True)
@@ -350,6 +350,10 @@ def main() -> None:
     args = parse_args()
     if args.profile_s3_uri is not None and args.mode != "preflight":
         raise ValueError("profiling is restricted to bounded preflight runs")
+    if args.objective == "localize" and (
+        args.mode != "preflight" or args.expert_implementation != "eager" or args.profile_s3_uri is not None
+    ):
+        raise ValueError("localization requires unprofiled preflight mode starting from eager experts")
     if args.expert_attribution and args.objective != "matched_ce":
         raise ValueError("expert attribution is defined only for the matched_ce boundary")
     world_size = WORLD_SIZES[args.mode]
@@ -430,6 +434,77 @@ def main() -> None:
                 if evidence["field_hashes"] != expected_hashes or evidence["field_shapes"] != expected_shapes:
                     raise RuntimeError(f"rank {rank} staged different replay bytes")
             del batches
+
+            if args.objective == "localize":
+                localization = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_localize_staged"))
+                for rank, (item, identity) in enumerate(zip(localization, identities)):
+                    if item["rank"] != rank:
+                        raise RuntimeError(f"localization actor/rank order mismatch: {item}")
+                    if item["state_hash_before"] != item["state_hash_after"]:
+                        raise RuntimeError(f"localization changed rank {rank} model state")
+                    if not item["cpu_rng_restored"] or not item["cuda_rng_restored"]:
+                        raise RuntimeError(f"localization did not restore rank {rank} RNG state")
+                    if item["gradients_after"] != 0:
+                        raise RuntimeError(f"localization left rank {rank} model gradients")
+                    if len(item["blocks"]) != identity["num_hidden_layers"]:
+                        raise RuntimeError(f"localization missed rank {rank} sparse blocks")
+                    for block in item["blocks"]:
+                        router = block["router_shadow_vs_eager"]
+                        if (
+                            not router["logits"]["exact"]
+                            or not router["selected_experts_exact"]
+                            or not router["combine_weights"]["exact"]
+                        ):
+                            raise RuntimeError(f"rank {rank} shadow changed layer {block['layer']} routing")
+                result = {
+                    "schema_version": 1,
+                    "created_utc": dt.datetime.now(dt.UTC).isoformat(),
+                    "benchmark": "marinskyrl_grug_fixed_replay_localization",
+                    "objective": args.objective,
+                    "mode": args.mode,
+                    "sample": args.sample,
+                    "source_revision": args.source_revision,
+                    "image": args.image,
+                    "model": args.model,
+                    "model_revision": args.model_revision,
+                    "attention_backend": args.attention_backend,
+                    "expert_implementation": args.expert_implementation,
+                    "world_size": world_size,
+                    "manifest_s3_uri": args.manifest_s3_uri,
+                    "manifest_sha256": args.manifest_sha256,
+                    "logical_batch_sha256": args.logical_batch_sha256,
+                    "manifest_batch": manifest["batch"],
+                    "manifest_batch_metadata": manifest["batch_metadata"],
+                    "config": OmegaConf.to_container(cfg, resolve=True),
+                    "topology": topology,
+                    "worker_identities": identities,
+                    "staging": staged,
+                    "localization": localization,
+                    "runtime_benchmark_path": str(Path(__file__).resolve()),
+                    "runtime_benchmark_sha256": sha256_file(Path(__file__).resolve()),
+                    "boundary": (
+                        "one no-grad eager fixed-replay forward per rank; every native-grouped sparse block is "
+                        "shadowed on the identical live block input, with detailed FP32 and gradient probes only "
+                        "at layer zero; no optimizer step and no model gradients"
+                    ),
+                }
+                payload_sha256 = upload_result(client, args.result_s3_uri, result)
+                print(
+                    "GRUG_LOCALIZATION_RESULT="
+                    + json.dumps(
+                        {
+                            "result_s3_uri": args.result_s3_uri,
+                            "payload_sha256": payload_sha256,
+                            "result_sha256": result["result_sha256"],
+                            "first_nonexact_block_output_layer_by_rank": [
+                                item["first_nonexact_block_output_layer"] for item in localization
+                            ],
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return
 
             warmup_method = (
                 "grug_benchmark_warmup_and_restore"
