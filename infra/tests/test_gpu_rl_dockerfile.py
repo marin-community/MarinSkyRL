@@ -109,6 +109,16 @@ def test_arm64_megatron_has_strict_native_import_gates() -> None:
     assert "transformer_engine.pytorch" in imported_modules
 
 
+def test_arm64_wheel_builder_declares_native_build_versions() -> None:
+    dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
+    wheel_builder = dockerfile[
+        dockerfile.index("FROM ${BASE_IMAGE} AS wheel-builder"):dockerfile.index("FROM wheel-builder AS wheels")
+    ]
+
+    for version_argument in ("TORCH_VERSION", "TORCHVISION_VERSION", "FLASH_ATTN_VERSION"):
+        assert f"ARG {version_argument}\n" in wheel_builder
+
+
 def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
     dockerfiles = [path.read_text() for path in GPU_RL_DOCKERFILES]
     harbor_commits = {

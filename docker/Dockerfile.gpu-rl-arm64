@@ -122,6 +122,7 @@ FROM ${BASE_IMAGE} AS wheel-builder
 RUN test "$(uname -m)" = aarch64 || { echo "Dockerfile.gpu-rl-arm64 needs an aarch64 builder, got $(uname -m)" >&2; exit 1; }
 
 ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
 ARG FLASH_ATTN_VERSION
 ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
