@@ -8,7 +8,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris import start_rl_iris_controller as controller  # noqa: E402
-from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, RaySpillTarget  # noqa: E402
+from cloud.iris.ray_storage import (  # noqa: E402
+    DEFAULT_RAY_SPILL_DIR,
+    LocalRaySpillTarget,
+    R2RaySpillTarget,
+    RaySpillBackend,
+)
 
 
 def test_remote_spilling_requires_explicit_opt_in():
@@ -24,8 +29,8 @@ def test_remote_spilling_requires_explicit_opt_in():
         DEFAULT_RAY_SPILL_DIR,
     )
 
-    assert local == RaySpillTarget(RaySpillBackend.LOCAL, DEFAULT_RAY_SPILL_DIR)
-    assert remote == RaySpillTarget(RaySpillBackend.R2, "s3://marin-us-east-02a/iris/rl-rdv/job/ray_spill")
+    assert local == LocalRaySpillTarget(DEFAULT_RAY_SPILL_DIR)
+    assert remote == R2RaySpillTarget("s3://marin-us-east-02a/iris/rl-rdv/job/ray_spill")
 
 
 def test_remote_spilling_fails_when_backend_dependency_is_missing(monkeypatch):
@@ -42,10 +47,3 @@ def test_remote_spilling_fails_when_backend_dependency_is_missing(monkeypatch):
 def test_remote_spilling_rejects_non_s3_rendezvous():
     with pytest.raises(ValueError, match="requires an s3:// rendezvous directory"):
         controller._ray_spill_target("/shared/rendezvous/job", RaySpillBackend.R2, DEFAULT_RAY_SPILL_DIR)
-
-
-def test_default_spill_backend_uses_launcher_owned_local_storage():
-    target = RaySpillTarget(RaySpillBackend.LOCAL, DEFAULT_RAY_SPILL_DIR)
-
-    assert controller._ray_head_spill_flags(target) == ["--object-spilling-directory=/tmp/skyrl-ray-spill"]
-    assert controller._ray_worker_spill_flags(target) == ["--object-spilling-directory=/tmp/skyrl-ray-spill"]

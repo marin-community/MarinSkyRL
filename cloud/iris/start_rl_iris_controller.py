@@ -37,7 +37,14 @@ import time
 
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
-from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, RaySpillTarget, resolve_ray_spill_dir
+from cloud.iris.ray_storage import (
+    DEFAULT_RAY_SPILL_DIR,
+    LocalRaySpillTarget,
+    R2RaySpillTarget,
+    RaySpillBackend,
+    RaySpillTarget,
+    resolve_ray_spill_dir,
+)
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -869,10 +876,6 @@ def _ray_port_flags() -> list[str]:
 # passed independently to every node.
 # Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
 # within a run share one prefix without colliding across jobs.
-RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
-RAY_LOCAL_SPILL_FLAG = "--object-spilling-directory"
-
-
 def _ray_spill_target(
     rendezvous_dir: str | None,
     backend: RaySpillBackend,
@@ -880,7 +883,7 @@ def _ray_spill_target(
 ) -> RaySpillTarget:
     """Resolve one valid local or remote Ray spill target."""
     if backend is RaySpillBackend.LOCAL:
-        return RaySpillTarget(backend=backend, location=resolve_ray_spill_dir(local_spill_dir))
+        return LocalRaySpillTarget(location=resolve_ray_spill_dir(local_spill_dir))
     if backend is not RaySpillBackend.R2:
         raise ValueError(f"Unsupported Ray spill backend: {backend}")
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
@@ -892,37 +895,7 @@ def _ray_spill_target(
         raise RuntimeError(
             "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
         ) from error
-    return RaySpillTarget(backend=backend, location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
-
-
-def _ray_head_spill_flags(target: RaySpillTarget) -> list[str]:
-    """Build head-raylet flags for the selected spill target."""
-    if target.backend is RaySpillBackend.LOCAL:
-        return [f"{RAY_LOCAL_SPILL_FLAG}={target.location}"]
-    # Ray expects object_spilling_config as a JSON string nested inside the system
-    # config. min_spilling_size=0 applies only to explicit R2 mode.
-    spilling_config = json.dumps(
-        {
-            "type": "smart_open",
-            "params": {"uri": target.location, "buffer_size": RAY_SPILL_BUFFER_SIZE},
-        }
-    )
-    system_config = json.dumps({"object_spilling_config": spilling_config, "min_spilling_size": 0})
-    return [f"--system-config={system_config}"]
-
-
-def _ray_worker_spill_flags(target: RaySpillTarget) -> list[str]:
-    """Build worker-raylet flags for the selected spill target."""
-    if target.backend is RaySpillBackend.LOCAL:
-        return [f"{RAY_LOCAL_SPILL_FLAG}={target.location}"]
-    return []
-
-
-def _log_ray_spill(target: RaySpillTarget) -> None:
-    if target.backend is RaySpillBackend.R2:
-        _log(f"Ray object spilling -> R2 prefix {target.location} (remote backend)")
-    else:
-        _log(f"Ray object spilling -> launcher-owned local scratch {target.location}")
+    return R2RaySpillTarget(location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
 
 
 # --- Ray cgroup-aware memory ----------------------------------------------------
@@ -1009,9 +982,9 @@ def ray_start_head(
         "--dashboard-host=0.0.0.0",
         *_ray_port_flags(),
         *_ray_mem_flags(),
-        *_ray_head_spill_flags(spill_target),
+        *spill_target.head_flags(),
     ]
-    _log_ray_spill(spill_target)
+    _log(spill_target.description())
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
     t0 = time.time()
     subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)
@@ -1031,9 +1004,9 @@ def ray_start_worker(
         f"--node-ip-address={node_ip}",
         *_ray_port_flags(),
         *_ray_mem_flags(),
-        *_ray_worker_spill_flags(spill_target),
+        *spill_target.worker_flags(),
     ]
-    _log_ray_spill(spill_target)
+    _log(spill_target.description())
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
