@@ -70,7 +70,9 @@ _RAY_METRICS = {
     "ray_gcs_placement_group_count": _RayMetricSpec(unit="{placement_group}", labels=_STATE),
 }
 _LOGICAL_RESOURCES = frozenset({"CPU", "GPU"})
-_LOWERCASE_ATTRIBUTES = frozenset({"is_retry", "location", "object_state", "reason", "resource", "source", "state", "transfer_kind"})
+_LOWERCASE_ATTRIBUTES = frozenset(
+    {"is_retry", "location", "object_state", "reason", "resource", "source", "state", "transfer_kind"}
+)
 
 
 def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[ForwardedPrometheusSample, ...]:
@@ -92,9 +94,7 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[ForwardedPromet
                 sorted(
                     (
                         target,
-                        sample.labels[source].lower()
-                        if target in _LOWERCASE_ATTRIBUTES
-                        else sample.labels[source],
+                        sample.labels[source].lower() if target in _LOWERCASE_ATTRIBUTES else sample.labels[source],
                     )
                     for source, target in spec.labels.items()
                     if sample.labels.get(source)
