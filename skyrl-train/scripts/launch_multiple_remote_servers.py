@@ -4,7 +4,7 @@ Helper script to launch multiple vLLM remote servers in a Ray cluster.
 The main purpose is to be able to test out the remote endpoint functionality in SkyRL easily.
 
 Example usage:
-uv run --isolated --frozen --extra cuda --extra fsdp --extra vllm scripts/launch_multiple_remote_servers.py --model-path Qwen/Qwen2.5-1.5B-Instruct --tp-size 2 --num-replicas 2 --gpu-memory-utilization 0.9 > my_server_logs.log 2>&1
+uv run --isolated --frozen --extra vllm scripts/launch_multiple_remote_servers.py --model-path Qwen/Qwen2.5-1.5B-Instruct --tp-size 2 --num-replicas 2 --gpu-memory-utilization 0.9 > my_server_logs.log 2>&1
 """
 
 import argparse

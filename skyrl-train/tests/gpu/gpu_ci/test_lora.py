@@ -1,6 +1,6 @@
 """
 # Run vllm tests (requires vllm extra):
-uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm pytest tests/gpu/gpu_ci/test_lora.py
+uv run --isolated --group dev --extra vllm pytest tests/gpu/gpu_ci/test_lora.py
 """
 
 import pytest

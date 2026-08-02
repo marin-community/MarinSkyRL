@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra cuda --extra fsdp --extra vllm -m examples.tis_correction.main_tis_dapo
+uv run --isolated --extra vllm -m examples.tis_correction.main_tis_dapo
 """
 
 import ray

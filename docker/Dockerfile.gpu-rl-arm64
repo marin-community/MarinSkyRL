@@ -279,8 +279,8 @@ RUN cd ${SKYRL_HOME} && \
     echo "/opt/skyrl git tree baked @ $(git -C ${SKYRL_HOME} rev-parse HEAD) (origin=marin-community/MarinSkyRL, source @ ${GITSHA})"
 
 # =============================================================================
-# RL environment — installed directly from the root lock. `cuda`, `fsdp`, and
-# `vllm` select independent hardware, policy, and rollout dependency axes. When
+# RL environment — installed directly from the root lock. `vllm` implies the
+# CUDA hardware closure; `fsdp` and `megatron` select policy dependencies. When
 # INSTALL_MEGATRON=1, `megatron` adds the aarch64 policy backend from the same
 # frozen resolution.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
@@ -312,7 +312,7 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # each Kaniko RUN layer. In particular, the initial split layer reached 6.96 GiB
 # even though its installed closure was much smaller, reintroducing the RNO
 # ImagePullBackOff failure mode. The temporary cache leaves no pull payload.
-ENV RL_SYNC="uv sync --frozen --no-cache --extra cuda --extra vllm --extra telemetry --no-install-package flash-attn"
+ENV RL_SYNC="uv sync --frozen --no-cache --extra vllm --extra telemetry --no-install-package flash-attn"
 # layer 0: all small packages + torch; defer the heavies.
 RUN cd ${SKYRL_HOME} && \
     if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \

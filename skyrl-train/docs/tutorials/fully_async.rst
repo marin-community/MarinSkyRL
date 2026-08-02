@@ -96,7 +96,7 @@ Following `examples/fully_async/async_run_gsm8k.sh <https://github.com/NovaSky-A
 
 .. code-block:: bash
 
-    uv run --isolated --extra cuda --extra fsdp --extra vllm -m examples.fully_async.main_async \
+    uv run --isolated --extra vllm -m examples.fully_async.main_async \
     ...
 
 For fully async specifically, the following are the main knobs to tune:

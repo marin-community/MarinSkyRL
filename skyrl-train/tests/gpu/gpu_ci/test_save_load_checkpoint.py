@@ -3,7 +3,7 @@ For FSDP and DeepSpeed, run:
 uv run --isolated --group dev --extra deepspeed -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --group dev --extra cuda --extra vllm --extra megatron -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
+uv run --isolated --group dev --extra vllm --extra megatron -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
 """
 
 import ray

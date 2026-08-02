@@ -59,7 +59,7 @@ Then, create a new virtual environment and install the dependencies:
 
 ```bash
 # creates the root project venv at ../.venv/
-uv sync --extra cuda --extra fsdp --extra vllm
+uv sync --extra vllm
 source ../.venv/bin/activate
 ```
 

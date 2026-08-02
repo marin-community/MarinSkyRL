@@ -47,7 +47,8 @@ def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -
 
     assert "COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/" in dockerfile
     assert "COPY chat_templates ${SKYRL_HOME}/chat_templates" in dockerfile
-    assert "--extra cuda --extra vllm" in sync_command
+    assert "--extra vllm" in sync_command
+    assert "--extra cuda" not in sync_command
     assert "--extra fsdp" not in sync_command
     assert policy_selectors
     assert all('POLICY="--extra megatron"' in line for line in policy_selectors)

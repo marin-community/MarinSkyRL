@@ -54,7 +54,7 @@ def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
     assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm"})
 
 
-def test_training_extras_separate_hardware_policy_and_rollout_axes(built_wheel: BuiltWheel) -> None:
+def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_wheel: BuiltWheel) -> None:
     metadata = Parser().parsestr(built_wheel.metadata)
     extras = set(metadata.get_all("Provides-Extra", []))
     requirements = metadata.get_all("Requires-Dist", [])
@@ -64,6 +64,11 @@ def test_training_extras_separate_hardware_policy_and_rollout_axes(built_wheel: 
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torchtitan") and "extra == 'fsdp'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
+    assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
+    assert any(
+        requirement.startswith("torchvision==") and "extra == 'megatron'" in requirement
+        for requirement in requirements
+    )
     assert any(
         requirement.startswith("megatron-core") and "extra == 'megatron'" in requirement
         for requirement in requirements

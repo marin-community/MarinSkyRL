@@ -8,7 +8,7 @@ Run it on an otherwise idle node with at least four GPUs:
 
 ```bash
 cd skyrl-train
-uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm \
+uv run --isolated --group dev --extra vllm \
   pytest -s tests/gpu/fault_injection/nccl_collective_contract.py
 ```
 
@@ -32,7 +32,7 @@ Run only the warmed production divergence experiment with:
 
 ```bash
 cd skyrl-train
-uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm \
+uv run --isolated --group dev --extra vllm \
   pytest -s tests/gpu/fault_injection/nccl_collective_contract.py \
   -k warmed_production_phase_divergence
 ```

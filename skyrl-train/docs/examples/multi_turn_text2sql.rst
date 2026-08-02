@@ -81,7 +81,7 @@ Now that we have our dataset and database files, let's walk through the some of 
     # path for .db files for environment interaction
     DB_PATH="$HOME/path/to/db_files"
 
-    uv run --isolated --extra cuda --extra fsdp --extra vllm -m skyrl_train.entrypoints.main_base \
+    uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
         #### Environment configuration
         environment.env_class=text2sql \
         environment.skyrl_gym.text2sql.db_path=$DB_PATH \

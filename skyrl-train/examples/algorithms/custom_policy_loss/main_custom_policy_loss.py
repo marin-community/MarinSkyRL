@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra cuda --extra fsdp --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss
+uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss
 """
 
 import ray

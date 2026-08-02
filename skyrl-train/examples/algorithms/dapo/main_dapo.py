@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra cuda --extra fsdp --extra vllm -m examples.algorithms.dapo.main_dapo
+uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo
 """
 
 import ray

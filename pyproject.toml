@@ -59,26 +59,44 @@ cuda = [
     "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
 deepspeed = [
-    "marinskyrl[cuda]==0.1.0 ; sys_platform == 'linux'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "deepspeed==0.17.6 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
 fsdp = ["torchtitan ; sys_platform == 'linux'"]
 vllm = [
-    "marinskyrl[cuda]==0.1.0 ; sys_platform == 'linux'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flash-attn==2.8.3 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
     "vllm==0.23.0 ; sys_platform == 'linux'",
 ]
 megatron = [
-    "marinskyrl[cuda]==0.1.0 ; sys_platform == 'linux'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "mamba-ssm>=2.2,<3 ; sys_platform == 'linux'",
     "megatron-bridge==0.5.0 ; sys_platform == 'linux'",
     "megatron-core==0.18.0 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
     "nvidia-modelopt==0.45.0 ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
     "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux'",
     "transformer-engine-cu12==2.11.0 ; sys_platform == 'linux'",
     "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
@@ -124,7 +142,12 @@ dev = [
 [tool.uv]
 package = true
 required-version = ">=0.8.10"
-conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "cpu" }, { extra = "deepspeed" }],
+    [{ extra = "cpu" }, { extra = "megatron" }],
+    [{ extra = "cpu" }, { extra = "vllm" }],
+]
 environments = [
     "sys_platform == 'darwin'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -167,8 +190,16 @@ requires-dist = ["torch", "einops"]
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu129", extra = "cuda" },
+    { index = "pytorch-cu129", extra = "deepspeed" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "vllm" },
 ]
-torchvision = { index = "pytorch-cu129", extra = "cuda" }
+torchvision = [
+    { index = "pytorch-cu129", extra = "cuda" },
+    { index = "pytorch-cu129", extra = "deepspeed" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "vllm" },
+]
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [

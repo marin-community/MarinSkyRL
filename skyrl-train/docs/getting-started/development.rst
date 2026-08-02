@@ -67,7 +67,7 @@ Finally, you can run the tests by running the following command:
 
 .. code-block:: bash
 
-    uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm pytest tests/gpu
+    uv run --isolated --group dev --extra vllm pytest tests/gpu
 
 
 SkyRL-gym

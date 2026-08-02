@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra cuda --extra fsdp --extra vllm --group dev -- pytest -s -vvv tests/gpu/test_grpo_sp_sanity.py
+uv run --isolated --extra vllm --group dev -- pytest -s -vvv tests/gpu/test_grpo_sp_sanity.py
 
 This is the Ulysses sequence-parallel (SP) sanity check: a full GRPO step at sp=2
 matches sp=1 within tol. The Context-Parallel (CP) counterpart — a full seeded
