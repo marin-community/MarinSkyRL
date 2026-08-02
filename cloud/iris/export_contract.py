@@ -8,6 +8,11 @@ CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
 
 
+def policy_export_uri(export_root: str, global_step: int) -> str:
+    """Return the trainer-owned Hugging Face policy export location."""
+    return f"{export_root.rstrip('/')}/global_step_{global_step}/policy"
+
+
 def relative_object_key(root: str, path: str) -> str:
     """Return ``path`` below ``root`` or reject a non-descendant object key."""
     normalized_root = posixpath.normpath(root)

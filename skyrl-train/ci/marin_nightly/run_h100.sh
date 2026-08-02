@@ -43,11 +43,9 @@ VAL_ROWS="${VAL_ROWS:-16}"
 
 cd "$(dirname "$0")/../.."   # skyrl-train/
 
-# skyrl-train depends on skyrl-gym through `path = "./skyrl-gym"`, which in the repo is a symlink to
-# the sibling package. Two zip-based packaging layers here cannot use a symlink: Iris bundles the
-# workspace as a zip whose extraction flattens the symlink into a plain text file, and Ray then
-# ships a zip of *this* directory as its runtime_env working_dir. Materialise the gym as a real
-# directory and put both checked-out packages ahead of the image's baked source.
+# The nightly exercises checked-out trainer and environment source ahead of the image's baked
+# fallback. Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling
+# environment package before setting the source paths.
 rm -rf skyrl-gym
 cp -R ../skyrl-gym skyrl-gym
 export PYTHONPATH="$PWD/skyrl-gym:$PWD${PYTHONPATH:+:$PYTHONPATH}"

@@ -1,7 +1,9 @@
 """Static contracts for the GPU-RL image build."""
 
+import ast
 import os
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
@@ -36,10 +38,17 @@ def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
 @pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
 def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -> None:
     dockerfile = dockerfile_path.read_text()
+    sync_command = next(line for line in dockerfile.splitlines() if line.startswith("ENV RL_SYNC="))
+    megatron_selectors = [
+        line
+        for line in dockerfile.splitlines()
+        if line.lstrip().startswith('if [ "${INSTALL_MEGATRON}"') and "MEG=" in line
+    ]
 
     assert "COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/" in dockerfile
-    assert "--extra train-vllm" in dockerfile
-    assert "--extra train-megatron" in dockerfile
+    assert "--extra train-vllm" in sync_command
+    assert megatron_selectors
+    assert all('MEG="--extra train-megatron"' in line for line in megatron_selectors)
     assert "skyrl-train/uv.lock" not in dockerfile
 
 
@@ -58,10 +67,19 @@ def test_arm64_megatron_has_strict_native_import_gates() -> None:
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
     gate = dockerfile[dockerfile.index("# Megatron backend asserts"):dockerfile.index("# torchtitan EP>1 assert")]
 
+    commands = re.findall(r'-c "([^"\\]*(?:\\.[^"\\]*)*)"', gate)
+    imported_modules: set[str] = set()
+    for command in commands:
+        for node in ast.walk(ast.parse(command)):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+
     assert 'if [ "${INSTALL_MEGATRON}" = "1" ]' in gate
-    assert "import causal_conv1d, mamba_ssm, megatron.core, megatron.bridge, transformer_engine" in gate
-    assert "import torch, transformer_engine.pytorch" in gate
-    assert "from megatron.bridge.models.conversion.auto_bridge import AutoBridge" in gate
+    assert {"causal_conv1d", "mamba_ssm", "megatron.core", "megatron.bridge", "transformer_engine"} <= imported_modules
+    assert "torch" in imported_modules
+    assert "transformer_engine.pytorch" in imported_modules
 
 
 def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:

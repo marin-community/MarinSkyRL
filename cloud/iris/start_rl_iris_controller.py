@@ -351,9 +351,16 @@ class StagedFile:
     size: int
 
 
+@dataclass(frozen=True)
+class StagedSource:
+    uri: str
+    local_path: str
+    identity: str
+
+
 def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[StagedFile]:
     """Copy one object-store tree and return its verified file inventory."""
-    filesystem, source_path = fsspec.core.url_to_fs(source_uri)
+    filesystem, source_path = _fs_and_path(source_uri)
     files = sorted(path for path in filesystem.find(source_path) if not filesystem.isdir(path))
     if not files:
         raise ValueError(f"Object-store source contains no files: {source_uri}")
@@ -376,23 +383,27 @@ def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[Sta
     return copied
 
 
-def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
-    """Copy and validate an object-store HF export on this allocated node."""
-    copied = _materialize_object_store_tree(source_uri, local_path)
-    validate_hf_export({entry.path for entry in copied}, source_uri)
-
+def _record_staged_source(source: StagedSource, copied: list[StagedFile], kind: str) -> None:
     manifest = {
-        "source_uri": source_uri,
-        "source_identity": source_identity,
+        "source_uri": source.uri,
+        "source_identity": source.identity,
         "files": [asdict(entry) for entry in copied],
     }
-    target = os.path.abspath(local_path)
+    target = os.path.abspath(source.local_path)
     with open(os.path.join(target, SOURCE_MANIFEST_FILENAME), "w") as destination:
         json.dump(manifest, destination, sort_keys=True)
     _log(
-        f"Model export staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {target} "
-        f"({len(copied)} files, identity={source_identity})"
+        f"{kind} staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {target} "
+        f"({len(copied)} files, identity={source.identity})"
     )
+
+
+def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store HF export on this allocated node."""
+    source = StagedSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    copied = _materialize_object_store_tree(source.uri, source.local_path)
+    validate_hf_export({entry.path for entry in copied}, source_uri)
+    _record_staged_source(source, copied, "Model export")
 
 
 def materialize_data_sources(data_sources_json: str) -> None:
@@ -400,22 +411,10 @@ def materialize_data_sources(data_sources_json: str) -> None:
     sources = json.loads(data_sources_json)
     if not isinstance(sources, list):
         raise ValueError("--data-sources-json must contain a JSON list")
-    for source in sources:
-        source_uri = source["uri"]
-        local_path = source["local_path"]
-        source_identity = source["identity"]
-        copied = _materialize_object_store_tree(source_uri, local_path)
-        manifest = {
-            "source_uri": source_uri,
-            "source_identity": source_identity,
-            "files": [asdict(entry) for entry in copied],
-        }
-        with open(os.path.join(local_path, SOURCE_MANIFEST_FILENAME), "w") as destination:
-            json.dump(manifest, destination, sort_keys=True)
-        _log(
-            f"Training data staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
-            f"({len(copied)} files, identity={source_identity})"
-        )
+    for value in sources:
+        source = StagedSource(uri=value["uri"], local_path=value["local_path"], identity=value["identity"])
+        copied = _materialize_object_store_tree(source.uri, source.local_path)
+        _record_staged_source(source, copied, "Training data")
 
 
 # Special tokens the delphi_v0 reasoning protocol depends on; asserted present in the
@@ -643,8 +642,6 @@ def _fs_and_path(uri: str):
     ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE`` env
     (default ``virtual``) allows an override for a path-style store (e.g. GCS).
     """
-    import fsspec
-
     storage_options = None
     if uri.startswith("s3://") or uri.startswith("s3a://"):
         style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
@@ -1485,7 +1482,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--data-sources-json",
-        default=os.environ.get("MARINSKYRL_DATA_SOURCES_JSON", ""),
+        default="",
         help="Immutable object-store data locators to materialize before Ray starts.",
     )
     parser.add_argument(
@@ -1510,17 +1507,17 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--model-source-uri",
-        default=os.environ.get("MARINSKYRL_MODEL_SOURCE_URI", ""),
+        default="",
         help="Object-store HF export to materialize on every node before Ray starts.",
     )
     parser.add_argument(
         "--model-local-path",
-        default=os.environ.get("MARINSKYRL_MODEL_LOCAL_PATH", ""),
+        default="",
         help="Deterministic node-local directory for --model-source-uri.",
     )
     parser.add_argument(
         "--model-source-identity",
-        default=os.environ.get("MARINSKYRL_MODEL_SOURCE_IDENTITY", ""),
+        default="",
         help="Immutable producer identity recorded beside the staged export.",
     )
     parser.add_argument(

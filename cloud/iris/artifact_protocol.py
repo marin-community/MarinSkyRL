@@ -19,7 +19,12 @@ from typing import Any, Protocol
 import fsspec
 
 from cloud.iris.gpu_rl_images import CLUSTER_ARCHITECTURES, GPU_RL_IMAGES, GpuRlImage
-from cloud.iris.export_contract import CHECKPOINT_MARKER_FILENAME, relative_object_key, validate_hf_export
+from cloud.iris.export_contract import (
+    CHECKPOINT_MARKER_FILENAME,
+    policy_export_uri,
+    relative_object_key,
+    validate_hf_export,
+)
 from cloud.iris.launch_rl_iris import IrisLaunchOutcome, launch, resolved_launch_args
 
 
@@ -256,7 +261,7 @@ def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
     if not _path_exists(checkpoint_marker):
         raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {checkpoint_marker}")
     global_step = int(_read_text(checkpoint_marker).strip())
-    policy_uri = f"{request.output.export_root.rstrip('/')}/global_step_{global_step}/policy"
+    policy_uri = policy_export_uri(request.output.export_root, global_step)
     filesystem, policy_path = fsspec.core.url_to_fs(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
     names = {relative_object_key(policy_path, path) for path in files}
@@ -360,7 +365,7 @@ def _manifest_payload(envelope: ArtifactLaunchEnvelope, response: SkyRLTerminalR
     }
 
 
-def _failed_response(
+def _record_failed_attempt(
     envelope: ArtifactLaunchEnvelope,
     outcome: IrisLaunchOutcome,
     failure: str,
@@ -411,14 +416,14 @@ def launch_artifact(
         outcome = (backend or IrisLaunchBackend()).launch(argv)
 
     if outcome.exit_code != 0:
-        return _failed_response(envelope, outcome, f"Iris job reached {outcome.job_state}")
+        return _record_failed_attempt(envelope, outcome, f"Iris job reached {outcome.job_state}")
 
     try:
         model = _policy_export(request)
     except ValueError as error:
-        return _failed_response(envelope, outcome, str(error))
+        return _record_failed_attempt(envelope, outcome, str(error))
     if not _path_exists(request.output.resolved_config_uri):
-        return _failed_response(
+        return _record_failed_attempt(
             envelope,
             outcome,
             f"Successful Iris job did not persist resolved config: {request.output.resolved_config_uri}",

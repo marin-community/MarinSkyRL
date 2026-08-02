@@ -376,10 +376,9 @@ def resolve_node_resource_requests(
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
 RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
-# In-container source sync target. iris syncs the launcher's `workspace`
-# (this MarinSkyRL repo, PROJECT_ROOT — see IrisClient.remote(..., workspace=PROJECT_ROOT))
-# to /app and sets IRIS_WORKDIR=/app. The runtime is self-contained here (cloud.iris.*) —
-# no OpenThoughts-Agent workspace is required in-pod.
+# In-container source sync target. Iris syncs the minimal build_task_bundle()
+# workspace to /app and sets IRIS_WORKDIR=/app. The runtime controller code is
+# self-contained there; no repository checkout is required in-pod.
 #
 # The bundle wins for `cloud.iris.*` ONLY. It does NOT win for `skyrl_train.*`, even though
 # PYTHONPATH lists /app/skyrl-train ahead of /opt/skyrl/skyrl-train: run_rl.py launches the
@@ -1885,21 +1884,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
-    # Wrap in a bash bootstrap: cd to the synced workspace and set PYTHONPATH so
-    # live /app + skyrl-train win over the image's baked copies. Use the absolute
-    # RL venv python (set above) — independent of iris's activated venv.
-    #
-    # ALL MarinSkyRL code resolves from the SYNCED /app (the launcher syncs
-    # PROJECT_ROOT -> /app), retiring the /app-vs-/opt/skyrl shadow split:
-    #   - /app            : cloud.* (cloud/iris/*)  -> synced source
-    #   - /app/skyrl-train: skyrl_train.* + examples.terminal_bench.* -> synced source
-    #   - /opt/skyrl/skyrl-train: baked fallback (kept LAST so a partial /app can't
-    #     ModuleNotFoundError, but /app wins for anything it carries)
-    # The venv/deps still come from the /opt/skyrl editable install; only the SOURCE
-    # that `import skyrl_train`/`examples.*` resolves is moved to /app. This makes the
-    # /app sync the single deploy vector — everything now rides the /app sync off `main`;
-    # /opt/skyrl stays at its baked HEAD purely as a last-resort import fallback.
-    pythonpath = f"{APP_DIR}:{APP_DIR}/skyrl-train:{SKYRL_HOME}/skyrl-train"
+    # The synchronized bundle supplies cloud.iris controller code. Trainer source
+    # and Hydra configuration remain immutable in the digest-pinned image.
+    pythonpath = f"{APP_DIR}:{SKYRL_HOME}/skyrl-train"
     # GAP D fix: install marin-iris into the RL venv at bootstrap for the controller-
     # ingress registration/mint path. cloud.iris.ingress_utils hard-imports
     # iris.cluster.client.* / iris.rpc.*, but the gpu-rl image bakes ONLY MarinSkyRL +
