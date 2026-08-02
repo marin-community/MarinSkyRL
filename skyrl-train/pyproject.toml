@@ -125,7 +125,7 @@ docs = [
 ]
 telemetry = [
     "marin-rigging",
-    "ray[default]==2.51.1",
+    "ray[default]",
 ]
 sandboxes = [
     "litellm[proxy]>=1.67.5",
