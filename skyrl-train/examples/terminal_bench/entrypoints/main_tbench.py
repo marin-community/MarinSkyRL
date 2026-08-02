@@ -16,6 +16,7 @@ from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenera
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
 from examples.terminal_bench.fd_monitor import start_fd_monitor
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry
 from skyrl_train.trainer import RayPPOTrainer
 
 
@@ -120,23 +121,24 @@ def main(cfg: DictConfig) -> None:
 
     initialize_ray(cfg)
 
-    # Register SIGTERM handler so that cluster preemption / job scheduler
-    # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
-    def _sigterm_handler(signum, frame):
-        logger.warning("Received SIGTERM on head node, shutting down Ray...")
-        ray.shutdown()
-        sys.exit(1)
+    with process_telemetry(DRIVER_ROLE):
+        # Register SIGTERM handler so that cluster preemption / job scheduler
+        # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
+        def _sigterm_handler(signum, frame):
+            logger.warning("Received SIGTERM on head node, shutting down Ray...")
+            ray.shutdown()
+            sys.exit(1)
 
-    signal.signal(signal.SIGTERM, _sigterm_handler)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
 
-    try:
-        ray.get(skyrl_entrypoint.remote(cfg))
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-        raise
-    finally:
-        logger.info("Shutting down Ray on head node...")
-        ray.shutdown()
+        try:
+            ray.get(skyrl_entrypoint.remote(cfg))
+        except Exception as e:
+            logger.error(f"Training failed: {e}")
+            raise
+        finally:
+            logger.info("Shutting down Ray on head node...")
+            ray.shutdown()
 
 
 if __name__ == "__main__":

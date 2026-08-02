@@ -462,6 +462,10 @@ class BasePPOExp:
         return trainer
 
     def run(self):
+        with process_telemetry(TRAINER_ROLE):
+            self._run()
+
+    def _run(self):
         # Force the orchestrator onto CPython's stock asyncio event loop (epoll),
         # NOT uvloop. Ray installs uvloop globally in every worker by default
         # (RAY_USE_UVLOOP defaults True -> default_worker.py:221 try_install_uvloop).
@@ -518,9 +522,8 @@ def skyrl_entrypoint(cfg: DictConfig):
     # through), NOT here -- terminal_bench and other entrypoints use their own
     # skyrl_entrypoint wrappers, so the fix must be on run(). See run() above.
     # make sure that the training loop is not run on the head node.
-    with process_telemetry(TRAINER_ROLE):
-        exp = BasePPOExp(cfg)
-        exp.run()
+    exp = BasePPOExp(cfg)
+    exp.run()
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)

@@ -41,7 +41,9 @@ from cloud.iris.paths import resolve_repo_path
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
-except ImportError as error:
+except ModuleNotFoundError as error:
+    if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
+        raise
     _RAY_METRICS_UNAVAILABLE_REASON = str(error)
 
     def ray_metrics_telemetry(node_ip: str, metrics_port: int):

@@ -126,20 +126,19 @@ def _ray_resources() -> dict[str, str]:
         logger.warning("Could not read Ray identity for telemetry; continuing without it", exc_info=True)
         return {}
 
-    try:
-        values = (
-            ("ray_job_id", context.get_job_id(), False),
-            ("ray_task_id", context.get_task_id(), False),
-            ("ray_task_attempt", context.get_task_attempt_number(), True),
-            ("actor_uid", context.get_actor_id(), False),
-            ("node_uid", context.get_node_id(), False),
-        )
-    except Exception:
-        logger.warning("Could not read Ray identity for telemetry; continuing without it", exc_info=True)
-        return {}
-
     resources: dict[str, str] = {}
-    for name, raw_value, keep_zero in values:
+    for name, getter_name, keep_zero in (
+        ("ray_job_id", "get_job_id", False),
+        ("ray_task_id", "get_task_id", False),
+        ("ray_task_attempt", "get_task_attempt_number", True),
+        ("actor_uid", "get_actor_id", False),
+        ("node_uid", "get_node_id", False),
+    ):
+        try:
+            raw_value = getattr(context, getter_name)()
+        except Exception:
+            logger.warning(f"Could not read {name} for telemetry; continuing without it", exc_info=True)
+            continue
         if raw_value is None:
             continue
         value = str(raw_value)
