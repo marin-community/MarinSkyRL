@@ -20,16 +20,11 @@
 # The cost is duplication. Both files carry a pointer to the other; a change to
 # one is a change to both.
 #
-# HOW MEGATRON IS INSTALLED HERE, AND WHY IT IS NOT THE `megatron` EXTRA
-# ---------------------------------------------------------------------
-# Every requirement in skyrl-train's `megatron` extra is gated on
-# `platform_machine == 'x86_64'`, and `[tool.uv.sources]` pins
-# transformer-engine-torch / mamba-ssm / causal-conv1d to x86_64 wheel URLs. So on
-# aarch64 `uv sync --extra megatron` SUCCEEDS and installs nothing: the failure
-# would only surface later at `import transformer_engine`. Relaxing those markers
-# means regenerating skyrl-train/uv.lock, which is an input to the amd64 image
-# that production runs, so this file installs the Megatron stack explicitly from
-# aarch64 artifacts instead. Every piece exists (verified against PyPI and the
+# HOW MEGATRON IS INSTALLED HERE
+# ------------------------------
+# The root `train-megatron` extra resolves the backend on aarch64 and pins the
+# architecture-specific native wheels. Selecting it can no longer succeed while
+# installing no backend. Every piece exists (verified against PyPI and the
 # upstream GitHub releases on 2026-07-28):
 #   transformer_engine        2.11.0  py3-none-any                  (PyPI)
 #   transformer_engine_cu12   2.11.0  py3-none-manylinux_2_28_aarch64 (PyPI)
@@ -37,18 +32,13 @@
 #   megatron_core             0.18.0  cp312-manylinux_2_28_aarch64  (PyPI)
 #   megatron_bridge           0.5.0   py3-none-any                  (PyPI)
 #   mamba_ssm / causal_conv1d         cp312-linux_aarch64  (erictang000 releases)
-# No TransformerEngine source build is required. The whole Megatron subtree — 96
-# distributions absent from the aarch64 lock resolution — has aarch64 wheels; the
-# lock records only their x86_64 files because they are reachable only under an
-# x86_64 marker.
+# No TransformerEngine source build is required. The whole Megatron subtree has
+# aarch64 wheels, and the root lock records the architecture-specific native
+# artifacts for both supported Linux platforms.
 #
-# The Megatron subtree is therefore NOT lock-pinned on this image. The versions
-# that matter are pinned exactly below, and the layer asserts afterwards that
-# torch and torchvision are still the locked +cu129 builds — the resolution that
-# would break every compiled extension in the image if it moved.
-#
-# The image installs skyrl-train's dependency closure DIRECTLY FROM skyrl-train's
-# own `uv.lock` (`uv sync --frozen`) — the lock is the single source of truth. On
+# The image installs the root project's dependency closure directly from
+# `uv.lock`; the architecture-specific native artifacts are part of that frozen
+# resolution. On
 # top of that closure it installs flash-attn from its validated wheel and the
 # exact vLLM fork source with validated precompiled native extensions. Nothing
 # from the launcher repo is baked in.
@@ -72,7 +62,7 @@
 #   2.11.0, CUDA 12.9, cp312, aarch64, TORCH_CUDA_ARCH_LIST "9.0;10.0" }.
 #
 # =============================================================================
-# Version pins (ground truth = skyrl-train/pyproject.toml + uv.lock):
+# Version pins (ground truth = root pyproject.toml + uv.lock):
 #   - torch 2.11.0+cu129 : skyrl-train pins torch to the cu129 index, matching
 #       the 12.9 toolkit below. The two move together on purpose. An earlier
 #       attempt raised only the toolkit and left torch on cu128; a split
@@ -113,20 +103,8 @@ ARG TORCH_CUDA_ARCH_LIST="9.0;10.0"
 ARG MAX_JOBS=24
 ARG NVCC_THREADS=2
 # Opt-in Megatron training backend. Off by default so the default image is
-# fsdp2-only; set INSTALL_MEGATRON=1 to build the megatron variant. On aarch64
-# this does NOT go through the lock's `megatron` extra — see the header.
+# fsdp2-only; set INSTALL_MEGATRON=1 to select the root `train-megatron` extra.
 ARG INSTALL_MEGATRON=0
-# Megatron stack, installed explicitly from aarch64 artifacts. Versions match the
-# `megatron` extra in skyrl-train/pyproject.toml; the three GitHub wheels are the
-# aarch64 siblings of the x86_64 URLs pinned in that file's [tool.uv.sources].
-ARG TRANSFORMER_ENGINE_VERSION=2.11.0
-ARG MEGATRON_CORE_VERSION=0.18.0
-ARG MEGATRON_BRIDGE_VERSION=0.5.0
-ARG FLASH_LINEAR_ATTENTION_VERSION=0.4.2
-ARG NVIDIA_MODELOPT_VERSION=0.45.0
-ARG TE_TORCH_AARCH64_WHEEL=https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl
-ARG MAMBA_SSM_AARCH64_WHEEL=https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl
-ARG CAUSAL_CONV1D_AARCH64_WHEEL=https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl
 # Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
 # than overriding it at build time.
 ARG HARBOR_COMMIT=1ffb4003f202daadcb7e407f449bd62278b5e8e1
@@ -236,14 +214,6 @@ ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
 ARG TORCH_CUDA_ARCH_LIST
 ARG INSTALL_MEGATRON
-ARG TRANSFORMER_ENGINE_VERSION
-ARG MEGATRON_CORE_VERSION
-ARG MEGATRON_BRIDGE_VERSION
-ARG FLASH_LINEAR_ATTENTION_VERSION
-ARG NVIDIA_MODELOPT_VERSION
-ARG TE_TORCH_AARCH64_WHEEL
-ARG MAMBA_SSM_AARCH64_WHEEL
-ARG CAUSAL_CONV1D_AARCH64_WHEEL
 ARG HARBOR_COMMIT
 ARG FASTAPI_VERSION
 ARG OTEL_EXPORTER_VERSION
@@ -284,24 +254,20 @@ ENV UV_RETRIES=5
 ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
 
 # =============================================================================
-# skyrl-train + skyrl-gym (the trainer + its gym dep). In the repo,
-# skyrl-train/skyrl-gym is a symlink -> ../skyrl-gym; skyrl-train's uv.lock resolves
-# the member as `editable = "skyrl-gym"` relative to skyrl-train, i.e. at
-# /opt/skyrl/skyrl-train/skyrl-gym. kaniko's COPY does not yield a resolvable
-# skyrl-gym there via the symlink, so `uv sync --frozen` fails to find the
-# distribution. Materialize skyrl-gym as a REAL directory at that nested path:
-# copy skyrl-train first (which brings the dangling symlink), then copy skyrl-gym
-# over it so the real tree replaces the symlink exactly where the frozen lock looks.
+# Root marinskyrl project. The built distribution owns cloud.iris, skyrl_train,
+# and skyrl_gym, so its frozen extras work both from a wheel and this source tree.
 # =============================================================================
 ENV SKYRL_HOME=/opt/skyrl
+COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/
+COPY cloud ${SKYRL_HOME}/cloud
 COPY skyrl-train ${SKYRL_HOME}/skyrl-train
-COPY skyrl-gym ${SKYRL_HOME}/skyrl-train/skyrl-gym
+COPY skyrl-gym ${SKYRL_HOME}/skyrl-gym
 
 # Make /opt/skyrl a REAL git working tree so the baked MarinSkyRL commit is
 # recorded (provenance) and /opt/skyrl serves as a clean baked-HEAD import
 # fallback behind the launcher's live /app source sync (which shadows it on
 # PYTHONPATH — the single deploy vector for skyrl-train + examples source).
-# skyrl-train stays `pip install -e` (uv sync below). This is ADDITIVE: the
+# marinskyrl stays editable (uv sync below). This is additive: the
 # committed working-tree content is exactly the COPY'd source above (unchanged
 # closure); we only add .git + the origin remote.
 RUN cd ${SKYRL_HOME} && \
@@ -312,12 +278,10 @@ RUN cd ${SKYRL_HOME} && \
     echo "/opt/skyrl git tree baked @ $(git -C ${SKYRL_HOME} rev-parse HEAD) (origin=marin-community/MarinSkyRL, source @ ${GITSHA})"
 
 # =============================================================================
-# RL environment — installed DIRECTLY from skyrl-train's uv.lock (single source of
-# truth). `uv sync --frozen` yields the exact locked closure at torch 2.11.0+cu129
-# (NCCL-cu12 2.28.9), the `vllm` extra (stock vLLM 0.23.0 + flashinfer) and the
-# `ep` extra (torchtitan + tyro, for MoE EP>1). The `megatron` extra is NOT synced
-# here — every requirement in it is x86_64-gated, so on aarch64 it would install
-# nothing; INSTALL_MEGATRON=1 installs that subtree explicitly further down.
+# RL environment — installed directly from the root lock. `train-vllm` selects
+# the FSDP2/vLLM closure, including torchtitan for MoE EP>1. When
+# INSTALL_MEGATRON=1, `train-megatron` adds the aarch64 policy backend from the
+# same frozen resolution.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the OT-Agent iris launcher's hardcoded
@@ -341,151 +305,99 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # FlashAttention is excluded from every sync layer and installed from the compiled
 # wheel below. Building the locked source distribution here would waste the
 # wheel-builder stage and leave a redundant native-extension layer in the image.
-#
-# The amd64 file carries three more buckets — mamba-ssm, causal-conv1d and
-# transformer-engine-cu12 — and passes `--extra megatron`. None of that applies
-# here: every requirement in the `megatron` extra is gated on
-# `platform_machine == 'x86_64'`, so on aarch64 the extra resolves to nothing and
-# those three packages never enter the closure. They are installed explicitly
-# after the sync instead; see the Megatron block below.
+# The Megatron-only native wheels use the same buckets as the amd64 image.
 # =============================================================================
 # `--no-cache` is essential here: otherwise uv's download cache is copied into
 # each Kaniko RUN layer. In particular, the initial split layer reached 6.96 GiB
 # even though its installed closure was much smaller, reintroducing the RNO
 # ImagePullBackOff failure mode. The temporary cache leaves no pull payload.
-ENV RL_SYNC="uv sync --frozen --no-cache --extra vllm --extra ep --no-install-package flash-attn"
+ENV RL_SYNC="uv sync --frozen --no-cache --extra train-vllm --no-install-package flash-attn"
 # layer 0: all small packages + torch; defer the heavies.
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
       --no-install-package flashinfer-jit-cache \
       --no-install-package nvidia-cudnn-cu12 \
       --no-install-package nvidia-cublas-cu12 \
-      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 0 (small pkgs + torch) done"
 # layer 1: + flashinfer-jit-cache
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
       --no-install-package nvidia-cudnn-cu12 \
       --no-install-package nvidia-cublas-cu12 \
-      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 1 (flashinfer-jit-cache) done"
 # layer 2: + nvidia-cudnn-cu12
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
       --no-install-package nvidia-cublas-cu12 \
-      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 2 (cudnn) done"
 # layer 3: + nvidia-cublas-cu12
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
-      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin \
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package mamba-ssm --no-install-package causal-conv1d \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 3 (cublas) done"
-# layer 4: + nvidia-nccl-cu12 + flashinfer-cubin
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+# layer 4: + mamba-ssm + causal-conv1d (megatron-only)
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
-    echo "uv sync layer 4 (nccl, flashinfer-cubin) done"
-# layers 5–7: install the three sparse/solver CUDA wheels separately.  The combined
+    echo "uv sync layer 4 (mamba-ssm, causal-conv1d) done"
+# layer 5: + nvidia-nccl-cu12 + flashinfer-cubin + transformer-engine-cu12
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
+      --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
+      --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
+    echo "uv sync layer 5 (nccl, flashinfer-cubin, transformer-engine-cu12) done"
+# layers 6–8: install the three sparse/solver CUDA wheels separately.  The combined
 # layer measured 7.48 GB in gpu-rl-megatron-cc408e74 and still EOFed on RNO's
 # CoreWeave→GHCR pull path; each layer must stay near the proven <=3.5 GB profile.
-# layer 5: + nvidia-cusparse-cu12
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+# layer 6: + nvidia-cusparse-cu12
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
       --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
-    echo "uv sync layer 5 (cusparse) done"
-# layer 6: + nvidia-cusparselt-cu12
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+    echo "uv sync layer 6 (cusparse) done"
+# layer 7: + nvidia-cusparselt-cu12
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
       --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
-    echo "uv sync layer 6 (cusparselt) done"
-# layer 7: + nvidia-cusolver-cu12
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} \
+    echo "uv sync layer 7 (cusparselt) done"
+# layer 8: + nvidia-cusolver-cu12
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
-    echo "uv sync layer 7 (cusolver) done"
-# layer 8: FINAL — installs the remaining heavies. FlashAttention remains
+    echo "uv sync layer 8 (cusolver) done"
+# layer 9: FINAL — installs the remaining heavies. FlashAttention remains
 # excluded because the compiled wheel below supplies the locked version.
-RUN cd ${SKYRL_HOME}/skyrl-train && \
-    ${RL_SYNC} && \
-    echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done"
-
-# =============================================================================
-# MEGATRON BACKEND (aarch64) — explicit, because the lock's `megatron` extra is
-# x86_64-only. See the header for why this is not a relaxed marker plus a relock.
-# Split into three layers to hold the same <=4 GB per-layer profile as the syncs:
-# transformer_engine_cu12 alone unpacks to roughly 800 MB, and the megatron-bridge
-# subtree pulls in another ~90 distributions.
-# =============================================================================
-# `uv pip install` reads no project configuration, so it does NOT apply
-# skyrl-train's `[tool.uv] override-dependencies`. The amd64 image gets those
-# overrides for free through `uv sync`; without them megatron-bridge's
-# `megatron-core[dev]` pulls nvidia-resiliency-ext, which publishes only
-# `manylinux_2_39` wheels and so cannot install on this glibc 2.35 base:
-#
-#   Because nvidia-resiliency-ext==0.6.0 has no wheels with a matching platform
-#   tag (e.g. `manylinux_2_35_aarch64`) ... your requirements are unsatisfiable
-#
-# The same override list also holds the boto3/fsspec/flashinfer pins that the
-# lock resolved, which this install would otherwise be free to move. Extract it
-# from pyproject rather than restating it here, so the two cannot drift.
-ENV MEGATRON_OVERRIDES=/opt/skyrl/megatron-overrides.txt
-RUN ${RL_ENV_DIR}/bin/python -c "\
-import pathlib, tomllib; \
-overrides = tomllib.loads(pathlib.Path('${SKYRL_HOME}/skyrl-train/pyproject.toml').read_text())['tool']['uv']['override-dependencies']; \
-assert any(o.startswith('nvidia-resiliency-ext') for o in overrides), overrides; \
-pathlib.Path('${MEGATRON_OVERRIDES}').write_text('\n'.join(overrides) + '\n'); \
-print('megatron overrides from pyproject:', len(overrides))"
-ENV MEGATRON_PIP="uv pip install --python ${RL_ENV_DIR}/bin/python --no-cache --overrides ${MEGATRON_OVERRIDES} --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match"
-# TransformerEngine: the pure-Python framework wheel, the CUDA core library and
-# the torch extension. transformer_engine_torch is the aarch64 sibling of the
-# x86_64 URL pinned in skyrl-train/pyproject.toml [tool.uv.sources]; both come
-# from the same erictang000 release, which exists because upstream TE 2.11.0 does
-# not build against torch 2.11.
-RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-      ${MEGATRON_PIP} \
-        "transformer-engine==${TRANSFORMER_ENGINE_VERSION}" \
-        "transformer-engine-cu12==${TRANSFORMER_ENGINE_VERSION}" \
-        "${TE_TORCH_AARCH64_WHEEL}" && \
-      ${RL_ENV_DIR}/bin/python -c "import transformer_engine; print('transformer_engine', transformer_engine.__version__)"; \
-    else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
-# megatron-core / megatron-bridge and the two model-side extras the amd64
-# `megatron` extra also carries.
-RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-      ${MEGATRON_PIP} \
-        "megatron-core[dev,mlm]==${MEGATRON_CORE_VERSION}" \
-        "megatron-bridge==${MEGATRON_BRIDGE_VERSION}" \
-        "flash-linear-attention==${FLASH_LINEAR_ATTENTION_VERSION}" \
-        "nvidia-modelopt==${NVIDIA_MODELOPT_VERSION}"; \
-    else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
-# mamba-ssm and causal-conv1d serve Mamba-family models, which nothing on this
-# cluster trains today. They are installed for parity with the amd64 megatron
-# image so a config that reaches for them does not fail at first use, and their
-# import is asserted here so a bad wheel fails the build rather than a job.
-RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-      ${MEGATRON_PIP} "${MAMBA_SSM_AARCH64_WHEEL}" "${CAUSAL_CONV1D_AARCH64_WHEEL}" && \
-      ${RL_ENV_DIR}/bin/python -c "import mamba_ssm, causal_conv1d; print('mamba_ssm + causal_conv1d import OK')"; \
-    else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
-# The Megatron subtree is resolved fresh rather than from the lock, so prove it
-# did not move the locked core underneath the rest of the image. torch is the one
-# that matters most: a resolver that swaps 2.11.0+cu129 for a PyPI build silently
-# breaks every compiled extension in the image.
-RUN ${RL_ENV_DIR}/bin/python -c "\
-import importlib.metadata as m; \
-expected = {'torch': '${TORCH_VERSION}+cu129', 'torchvision': '${TORCHVISION_VERSION}+cu129'}; \
-actual = {name: m.version(name) for name in expected}; \
-assert actual == expected, f'megatron install moved the locked core: {actual} != {expected}'; \
-print('locked core intact after megatron install:', actual)"
+RUN cd ${SKYRL_HOME} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
+    ${RL_SYNC} ${MEG} && \
+    echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done (megatron=${INSTALL_MEGATRON})"
 
 # Validate the wheels against the pins that produced them, then record provenance.
 # There is no native donor on this image — the wheels are compiled in-tree from
@@ -554,16 +466,16 @@ RUN ${RL_ENV_DIR}/bin/python -c "from importlib.metadata import distribution, ve
 # transformer_engine.common dlopens its core library at import time and finds
 # libcudart only once torch has loaded the CUDA runtime.
 RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-        ${RL_ENV_DIR}/bin/python -c "import megatron.core, megatron.bridge, transformer_engine; print('megatron.core + megatron.bridge + transformer_engine import OK')" && \
+        ${RL_ENV_DIR}/bin/python -c "import causal_conv1d, mamba_ssm, megatron.core, megatron.bridge, transformer_engine; print('Megatron native imports OK')" && \
         ${RL_ENV_DIR}/bin/python -c "import torch, transformer_engine.pytorch; from megatron.bridge.models.conversion.auto_bridge import AutoBridge; print('transformer_engine.pytorch + megatron.bridge AutoBridge import OK')"; \
     else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
 
-# torchtitan EP>1 assert (the `ep` extra installed it with tyro from the lock).
+# torchtitan EP>1 assert (the `train-vllm` extra installed it from the lock).
 RUN ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel import ExpertParallel; print('torchtitan ExpertParallel import OK (apply_ep EP>1 unblocked)')"
 
 # The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +
 # the S3 rendezvous/checkpoint boto3 path) comes ENTIRELY through the frozen lock:
-# skyrl-train/pyproject.toml declares s3fs==2026.4.0 (→ aiobotocore 3.7.0, raising
+# Root pyproject.toml declares s3fs==2026.4.0 (→ aiobotocore 3.7.0, raising
 # the botocore cap), smart_open==8.0.0, and boto3, so `uv sync --frozen` above
 # produces the whole stack — NO post-hoc pip (that was the drift vector). Assert it
 # built correctly (imports + a boto3 S3 client ctor, which is exactly where the
@@ -573,19 +485,17 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
-# The pip-check gate below always prints the full conflict report. The plain image must have exactly
-# the known aiobotocore/botocore conflict and the arm64 cusparselt platform marker. The Megatron
-# install adds further conflicts of its own, so INSTALL_MEGATRON=1 only requires the aiobotocore
-# conflict and leaves the printed report for review.
+# The pip-check gate below always prints the full conflict report. Both variants
+# must have exactly the one known aiobotocore/botocore conflict. The root lock
+# now selects ARM64 CUDA wheels directly, so the old cusparselt platform
+# diagnostic is no longer accepted.
 #
 # `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
 # them into extras, so every image up to that pin already carried them. Naming
 # them keeps the closure the same rather than dropping two packages as a side
 # effect of a verifier change. `datasets` also decides the gate: the lock pins
 # datasets 4.0.0, which caps `fsspec[http]` at 2025.3.0 while the lock resolves
-# fsspec 2026.4.0, so without the extra a second conflict appears. The gate below
-# catches that only when INSTALL_MEGATRON=0, and the megatron variant is the one
-# this image exists to ship, so nothing would catch it there — name the extras.
+# fsspec 2026.4.0, so without the extra a second conflict appears.
 COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
@@ -601,11 +511,7 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
     cat /tmp/rl-pip-check && \
     grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
       /tmp/rl-pip-check && \
-    if [ "${INSTALL_MEGATRON}" != "1" ]; then \
-      grep -Fx 'The package `nvidia-cusparselt-cu12` was built for a different platform' \
-        /tmp/rl-pip-check && \
-      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "2"; \
-    fi && \
+    test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "1" && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 

@@ -1,7 +1,7 @@
 """
 Tests for policy loss functions.
 
-uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
+uv run --isolated --group dev --group train-cpu -- pytest tests/cpu/algorithms/test_losses.py
 """
 
 import pytest

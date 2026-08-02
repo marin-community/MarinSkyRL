@@ -25,6 +25,20 @@ This is a fork of SkyRL maintained for the [Marin project](https://github.com/ma
 
 We aim to upstream these changes to the main SkyRL branch.
 
+## MarinSkyRL packaging
+
+The repository root builds one `marinskyrl` wheel containing the typed Iris launcher, `skyrl_train`, and
+`skyrl_gym`. Its base dependency set is CPU-only and supports launcher inspection, validation, and dry runs:
+
+```bash
+uv sync --frozen
+uv run --frozen marinskyrl --help
+```
+
+GPU images select `train-vllm` for the common FSDP2/vLLM closure and add `train-megatron` for the Megatron
+policy backend. Native CUDA wheels are validated and installed by the GPU Docker builds rather than implied by
+the CPU base install.
+
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while

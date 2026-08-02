@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm -m examples.multiply.main_multiply
+uv run --isolated --extra train-vllm -m examples.multiply.main_multiply
 """
 
 import ray

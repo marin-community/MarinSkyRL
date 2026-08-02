@@ -11,7 +11,7 @@ Pure (Ray-free) checks that the ray/uni backend chooses:
   - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
     paths (the mp {GPU:tp_pp_size} bundle is already node-atomic).
 
-uv run --isolated --extra dev pytest tests/cpu/test_engine_placement_strategy.py
+uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_engine_placement_strategy.py
 """
 
 import pytest

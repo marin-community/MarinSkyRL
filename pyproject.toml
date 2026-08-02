@@ -1,20 +1,75 @@
 [build-system]
-requires = ["setuptools>=83.0.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "skyrl"
+name = "marinskyrl"
 version = "0.1.0"
-description = "A Post-Training Stack for LLMs"
-authors = [
-    { name = "NovaSkyAI Team"}
+description = "Marin's typed launcher and RL training runtime"
+requires-python = "==3.12.*"
+dependencies = [
+    "fsspec>=2024.0.0",
+    "huggingface-hub>=0.34.0",
+    "marin-iris==0.2.54.dev202607210800",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
 ]
-license = "MIT"
-readme = "README.md"
-requires-python = ">=3.12"
 
-[tool.setuptools]
-packages = []
+[project.optional-dependencies]
+agentic = ["daytona>=0.92.0"]
+deepspeed = ["deepspeed==0.17.6 ; sys_platform == 'linux'"]
+test = ["pytest>=8.4"]
+train-vllm = [
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
+    "boto3 ; sys_platform == 'linux'",
+    "datasets>=4.0.0 ; sys_platform == 'linux'",
+    "debugpy==1.8.0 ; sys_platform == 'linux'",
+    "fastapi ; sys_platform == 'linux'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "func_timeout ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "hf_transfer ; sys_platform == 'linux'",
+    "hydra-core==1.3.2 ; sys_platform == 'linux'",
+    "jaxtyping ; sys_platform == 'linux'",
+    "loguru ; sys_platform == 'linux'",
+    "ninja ; sys_platform == 'linux'",
+    "nvidia-ml-py ; sys_platform == 'linux'",
+    "omegaconf ; sys_platform == 'linux'",
+    "pandas ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "polars ; sys_platform == 'linux'",
+    "ray==2.51.1 ; sys_platform == 'linux'",
+    "requests ; sys_platform == 'linux'",
+    "s3fs ; sys_platform == 'linux'",
+    "smart_open ; sys_platform == 'linux'",
+    "tensorboard ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchtitan ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
+    "transformers>=5.8.1,<5.9 ; sys_platform == 'linux'",
+    "uvicorn ; sys_platform == 'linux'",
+    "vllm==0.23.0 ; sys_platform == 'linux'",
+    "wandb ; sys_platform == 'linux'",
+]
+train-megatron = [
+    "causal-conv1d>=1.5,<2 ; sys_platform == 'linux'",
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
+    "mamba-ssm>=2.2,<3 ; sys_platform == 'linux'",
+    "megatron-bridge==0.5.0 ; sys_platform == 'linux'",
+    "megatron-core==0.18.0 ; sys_platform == 'linux'",
+    "nvidia-modelopt==0.45.0 ; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine-cu12==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
+]
+
+[project.scripts]
+marinskyrl = "cloud.iris.artifact_protocol:main"
 
 [dependency-groups]
 analysis = [
@@ -26,10 +81,118 @@ dev = [
     "boto3",
     "fsspec",
     "huggingface-hub",
+    "litellm",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
-    "pytest",
+    "pytest>=8.4",
+    "pytest-asyncio",
     "universal-pathlib",
 ]
+train-cpu = [
+    "accelerate>=1.14,<2",
+    "boto3",
+    "datasets>=4.0.0",
+    "debugpy==1.8.0",
+    "fastapi",
+    "func_timeout",
+    "harbor-config",
+    "hf_transfer",
+    "hydra-core==1.3.2",
+    "jaxtyping",
+    "loguru",
+    "ninja",
+    "nvidia-ml-py",
+    "omegaconf",
+    "pandas",
+    "peft>=0.19",
+    "polars",
+    "ray==2.51.1",
+    "requests",
+    "s3fs",
+    "smart_open",
+    "tensorboard",
+    "tensordict",
+    "torch>=2.10.0",
+    "torchdata",
+    "tqdm",
+    "transformers>=5.8.1,<5.9",
+    "uvicorn",
+    "wandb",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"cloud/iris" = "cloud/iris"
+"skyrl-gym/skyrl_gym" = "skyrl_gym"
+"skyrl-train/skyrl_train" = "skyrl_train"
+
+[tool.uv]
+package = true
+required-version = ">=0.8.10"
+environments = [
+    "sys_platform == 'darwin'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+no-build-isolation-package = [
+    "transformer-engine",
+    "transformer-engine-torch",
+]
+override-dependencies = [
+    "transformer-engine-cu13 ; sys_platform == 'never'",
+    "nvidia-resiliency-ext ; sys_platform == 'never'",
+    "botocore==1.43.48 ; sys_platform == 'linux'",
+    "boto3==1.43.48 ; sys_platform == 'linux'",
+    "s3transfer==0.19.1 ; sys_platform == 'linux'",
+    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
+    "s3fs==2026.4.0 ; sys_platform == 'linux'",
+    "fsspec==2026.4.0",
+    "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
+    "humming-kernels[cu12]==0.1.4 ; sys_platform == 'linux'",
+    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
+    "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
+]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
+transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
+transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+requires-dist = ["torch", "einops"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
+torchvision = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
+flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
+torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
+transformer-engine-torch = [
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+causal-conv1d = [
+    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+mamba-ssm = [
+    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu129"
+url = "https://flashinfer.ai/whl/cu129"
+explicit = true
 
 [tool.marin-style]
 checks = ["ruff-check", "ruff-format"]
@@ -41,5 +204,24 @@ line-length = 120
 
 [tool.ruff.lint]
 ignore = [
-    "F722"
+    "F722",
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"skyrl-train/tests/gpu/test_e2e_moe_rl_step.py" = ["E402"]
+"skyrl-train/tests/gpu/test_e2e_moe_rl_step_80b.py" = ["E402"]
+"skyrl-train/tests/cpu/distributed/test_muon_hybrid.py" = ["E402"]
+"skyrl-train/tests/cpu/generators/test_normalize_prompt_token_ids.py" = ["E402"]
+"skyrl-train/tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
+"skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
+"skyrl-train/examples/terminal_bench/_harbor_compat.py" = ["F401"]
+
+[tool.pytest.ini_options]
+addopts = "-v -s"
+testpaths = ["skyrl-train/tests", "cloud/iris/tests"]
+markers = [
+    "vllm",
+    "integrations",
+    "megatron",
 ]

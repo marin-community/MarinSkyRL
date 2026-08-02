@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm -m scripts.full_context.main_full_ctx
+uv run --isolated --extra train-vllm -m scripts.full_context.main_full_ctx
 """
 
 import hydra

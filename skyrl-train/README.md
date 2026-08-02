@@ -59,7 +59,7 @@ Then, create a new virtual environment and install the dependencies:
 
 ```bash
 # creates a venv at .venv/
-uv sync --extra vllm 
+uv sync --extra train-vllm
 source .venv/bin/activate
 ```
 

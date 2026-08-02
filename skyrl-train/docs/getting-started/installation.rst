@@ -129,7 +129,7 @@ Then activate the virtual environment and install the dependencies.
 .. code-block:: bash
 
     source <path_to_venv>/bin/activate
-    uv sync --active --extra vllm
+    uv sync --active --extra train-vllm
 
 With ``conda``: 
 

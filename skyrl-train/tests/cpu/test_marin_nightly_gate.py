@@ -1,6 +1,6 @@
 """Tests for the nightly end-to-end gate (ci/marin_nightly/gate.py).
 
-Run with: uv run --isolated --extra dev pytest tests/cpu/test_marin_nightly_gate.py
+Run with: uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_marin_nightly_gate.py
 """
 
 import json

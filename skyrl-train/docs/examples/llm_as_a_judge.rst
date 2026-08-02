@@ -91,7 +91,7 @@ The training configuration uses GRPO with colocated training and generation. Key
    NUM_INFERENCE_ENGINES=4
    TP_SIZE=1
 
-   uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
+   uv run --isolated --extra train-vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
      # Data configuration
      data.train_data="['$DATA_DIR/train.parquet']" \
      data.val_data="['$DATA_DIR/validation.parquet']" \

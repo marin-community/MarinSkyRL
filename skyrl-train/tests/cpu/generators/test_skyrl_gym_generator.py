@@ -1,5 +1,5 @@
 """
-uv run --extra dev --isolated pytest tests/cpu/generators/test_skyrl_gym_generator.py
+uv run --group dev --group train-cpu --isolated pytest tests/cpu/generators/test_skyrl_gym_generator.py
 """
 
 import pytest

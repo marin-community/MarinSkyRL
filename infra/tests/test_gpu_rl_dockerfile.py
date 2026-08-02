@@ -33,6 +33,32 @@ def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
     assert "uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/flash_attn-*.whl" in dockerfile
 
 
+@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
+def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -> None:
+    dockerfile = dockerfile_path.read_text()
+
+    assert "COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/" in dockerfile
+    assert "--extra train-vllm" in dockerfile
+    assert "--extra train-megatron" in dockerfile
+    assert "skyrl-train/uv.lock" not in dockerfile
+
+
+@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
+def test_megatron_native_packages_are_kept_out_of_the_common_layer(dockerfile_path: Path) -> None:
+    dockerfile = dockerfile_path.read_text()
+
+    for package in ("causal-conv1d", "mamba-ssm", "transformer-engine-cu12"):
+        assert f"--no-install-package {package}" in dockerfile
+
+
+def test_arm64_megatron_is_not_installed_post_lock() -> None:
+    dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
+
+    assert "MEGATRON_PIP" not in dockerfile
+    assert "megatron.bridge" in dockerfile
+    assert "transformer_engine.pytorch" in dockerfile
+
+
 def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
     dockerfiles = [path.read_text() for path in GPU_RL_DOCKERFILES]
     harbor_commits = {
@@ -46,7 +72,7 @@ def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
         assert "${RL_ENV_DIR}/bin/python /tmp/validate_harbor_artifact_writer.py" in dockerfile
 
 
-def test_arm64_plain_image_accepts_only_known_pip_check_findings(tmp_path: Path) -> None:
+def test_arm64_image_accepts_only_the_known_pip_check_finding(tmp_path: Path) -> None:
     """Exercise the Dockerfile's dependency gate against representative reports."""
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
     start = dockerfile.index("    cat /tmp/rl-pip-check && \\")
@@ -55,12 +81,7 @@ def test_arm64_plain_image_accepts_only_known_pip_check_findings(tmp_path: Path)
     gate = dockerfile[start:end].replace("/tmp/rl-pip-check", str(report)) + "    true\n"
     environment = {**os.environ, "INSTALL_MEGATRON": "0"}
 
-    expected = "\n".join(
-        (
-            "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed",
-            "The package `nvidia-cusparselt-cu12` was built for a different platform",
-        )
-    )
+    expected = "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed"
 
     def check(diagnostics: str) -> int:
         report.write_text(diagnostics + "\n")
@@ -68,4 +89,3 @@ def test_arm64_plain_image_accepts_only_known_pip_check_findings(tmp_path: Path)
 
     assert check(expected) == 0
     assert check(expected + "\nThe package `unexpected` is incompatible") != 0
-    assert check(expected.splitlines()[0]) != 0

@@ -16,7 +16,7 @@ must:
 See notes/RL/skyrl/fsdp2_context_parallel_stages/{README,stage0_config_scaffold_scope}.md.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/distributed/test_cp_config.py -v
+    uv run --isolated --group dev --group train-cpu pytest tests/cpu/distributed/test_cp_config.py -v
 """
 
 from pathlib import Path

@@ -1912,7 +1912,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     #     needs neither kubernetes<36 nor Secret-Manager (it loads grpc + connectrpc +
     #     rigging + finelog only), so skipping it avoids the biggest dep-conflict source.
     #   - No --constraint file: the lock IS the constraint (Dockerfile.gpu-rl builds the
-    #     RL venv via `uv sync --frozen` off skyrl-train/uv.lock; there is no baked
+    #     RL venv via `uv sync --frozen` off the root uv.lock; there is no baked
     #     rl_env_constraints.txt anymore — pointing at it File-not-found'd on newer images).
     #     `uv pip install` does not upgrade already-satisfying installed deps, and iris's
     #     deps are all present with satisfied >= bounds, so uv only ADDS pure-python leaves;

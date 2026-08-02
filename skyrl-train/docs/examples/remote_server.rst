@@ -26,7 +26,7 @@ To launch the server, run the following command (the full script is at :code_lin
 
 .. code-block:: bash
 
-    uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
+    uv run --isolated --extra train-vllm -m skyrl_train.inference_engines.vllm.vllm_server \
         # model and tensor parallel size
         --model Qwen/Qwen2.5-1.5B-Instruct \
         --tensor-parallel-size 4 \
@@ -66,7 +66,7 @@ To start training, we need to set up our training script. You can find a complet
 
 .. code-block:: bash
 
-    uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+    uv run --isolated --extra train-vllm -m skyrl_train.entrypoints.main_base \
         # Setup for training with a remote inference engine
         generator.run_engines_locally=False \
         generator.remote_inference_engine_urls="['127.0.0.1:8001']" \

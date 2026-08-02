@@ -205,7 +205,7 @@ def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
 
 def _installed_launcher_commit() -> str:
     try:
-        direct_url = importlib.metadata.distribution("marinskyrl-launcher").read_text("direct_url.json")
+        direct_url = importlib.metadata.distribution("marinskyrl").read_text("direct_url.json")
     except importlib.metadata.PackageNotFoundError:
         direct_url = None
     if direct_url:

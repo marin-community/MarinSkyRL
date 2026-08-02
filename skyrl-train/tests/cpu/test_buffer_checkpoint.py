@@ -1,6 +1,6 @@
 """Unit tests for BufferCheckpointCallback save/restore roundtrip.
 
-Run with: uv run --isolated --extra dev pytest tests/cpu/test_buffer_checkpoint.py
+Run with: uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_buffer_checkpoint.py
 """
 
 import asyncio

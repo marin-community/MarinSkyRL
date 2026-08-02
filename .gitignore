@@ -46,6 +46,7 @@ trials/
 
 # uv lock files
 uv.lock
+!/uv.lock
 
 # temp directory
 /temp/

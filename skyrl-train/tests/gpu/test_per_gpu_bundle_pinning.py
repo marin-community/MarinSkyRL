@@ -15,7 +15,7 @@ ranks materializing onto GPU 0; here we assert non-collision deterministically.
 Smallest useful shape is 2 nodes x 4 GPU (8 GPUs). Run several times to show
 the distinctness holds regardless of Ray bundle tiling:
 
-  uv run --isolated --extra dev -- pytest tests/gpu/test_per_gpu_bundle_pinning.py -q
+  uv run --isolated --group dev -- pytest tests/gpu/test_per_gpu_bundle_pinning.py -q
 
 Requires a >= 2-node, 4-GPU/node allocation (the bug only manifests multi-node).
 """

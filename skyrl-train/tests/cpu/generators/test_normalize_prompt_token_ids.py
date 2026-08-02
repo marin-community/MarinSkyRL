@@ -14,7 +14,7 @@ so element 0 was the string 'input_ids'). The fix normalizes the
 the ids are still present.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/generators/test_normalize_prompt_token_ids.py
+    uv run --isolated --group dev --group train-cpu pytest tests/cpu/generators/test_normalize_prompt_token_ids.py
 """
 
 import pytest

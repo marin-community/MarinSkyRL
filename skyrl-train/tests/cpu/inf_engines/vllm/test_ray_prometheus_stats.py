@@ -2,7 +2,7 @@
 Test for RayPrometheusStatLogger integration in the vLLM engine.
 
 Run with:
-uv run --isolated --extra dev pytest tests/cpu/inf_engines/vllm/test_ray_prometheus_stats.py
+uv run --isolated --group dev --group train-cpu pytest tests/cpu/inf_engines/vllm/test_ray_prometheus_stats.py
 """
 
 from unittest.mock import patch, MagicMock

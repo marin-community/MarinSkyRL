@@ -6,10 +6,10 @@ ensuring that training can resume exactly where it left off.
 
 Run with:
 For FSDP and DeepSpeed, run:
-uv run --isolated --extra dev --extra deepspeed --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+uv run --isolated --group dev --extra deepspeed --extra train-vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
+uv run --isolated --group dev --extra train-vllm --extra train-megatron pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
 import ray

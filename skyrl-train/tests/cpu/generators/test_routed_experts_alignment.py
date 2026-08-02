@@ -5,7 +5,7 @@ port (see notes/skyrl/stage1_capture_rail_scope.md). NO MoE math / replay logic
 here — pure data-plane alignment + collation.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/generators/test_routed_experts_alignment.py
+    uv run --isolated --group dev --group train-cpu pytest tests/cpu/generators/test_routed_experts_alignment.py
 """
 
 import pytest

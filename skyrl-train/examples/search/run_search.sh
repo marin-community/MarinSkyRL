@@ -9,7 +9,7 @@ set -x
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra train-vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
