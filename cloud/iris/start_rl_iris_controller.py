@@ -875,12 +875,13 @@ def _ray_port_flags() -> list[str]:
 RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
 DEFAULT_RAY_SPILL_DIR = "/tmp/skyrl-ray-spill"
 _RAY_SPILL_DIR_ENV = "OT_AGENT_RAY_SPILL_DIR"
+_RAY_SPILL_TO_R2_ENV = "OT_AGENT_RAY_SPILL_TO_R2"
 
 
 def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
     """Per-job R2 spill prefix derived from the rendezvous dir, or None if R2 spilling
     is disabled or no rendezvous dir is available."""
-    if os.environ.get("OT_AGENT_RAY_SPILL_TO_R2", "0") != "1":
+    if os.environ.get(_RAY_SPILL_TO_R2_ENV, "0") != "1":
         return None
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
         return None
@@ -889,7 +890,7 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
         import boto3  # noqa: F401
     except ImportError as error:
         raise RuntimeError(
-            "OT_AGENT_RAY_SPILL_TO_R2=1 requires boto3; rebuild the GPU-RL image with boto3 or disable R2 spilling"
+            f"{_RAY_SPILL_TO_R2_ENV}=1 requires boto3; rebuild the GPU-RL image with boto3 or disable R2 spilling"
         ) from error
     return f"{rendezvous_dir.rstrip('/')}/ray_spill"
 
