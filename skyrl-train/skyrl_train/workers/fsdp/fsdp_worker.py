@@ -697,9 +697,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             wrapped_model = HFModelWrapper(
                 model_path,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=True,
+                # Marin stores MuonH parameters and optimizer state in FP32;
+                # FSDP2's mixed-precision policy still casts forward compute to BF16.
+                # Every pre-existing optimizer keeps its BF16 load path.
+                bf16=not strategy.is_muonh_optimizer,
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,

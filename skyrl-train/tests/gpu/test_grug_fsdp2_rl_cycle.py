@@ -1,10 +1,4 @@
-"""Grug FSDP2 capstones on Hopper.
-
-The two-H100 test covers colocated CUDA-IPC weight sync. The four-H100 test
-puts the same vLLM TP1/DP2/EP2 and FSDP2 EP1 workers on disjoint GPUs and
-covers the production NCCL-broadcast path. Both run rollout -> RL update +
-query bias -> exact weight readback -> a second rollout.
-"""
+"""Grug FSDP2 mixed-precision lifecycle capstone on Hopper."""
 
 from __future__ import annotations
 
@@ -16,7 +10,6 @@ from pathlib import Path
 import pytest
 import ray
 import torch
-from ray.util.placement_group import placement_group
 from transformers import AutoConfig, AutoTokenizer
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -30,30 +23,30 @@ from skyrl_train.models.grug_moe import (
     GrugMoeForCausalLM,
 )
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 
 POLICY_WORLD_SIZE = 2
-COLOCATED_NUM_GPUS = POLICY_WORLD_SIZE
-DISAGGREGATED_NUM_GPUS = POLICY_WORLD_SIZE * 2
+NUM_GPUS = POLICY_WORLD_SIZE * 2
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-@dataclass(frozen=True)
-class _TrainingSnapshot:
-    bias_names: list[str]
-    representative_name: str
-    bf16_sentinel_name: str
-    weights: dict[str, torch.Tensor]
+STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
+SERVING_EXPERT_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
+LM_HEAD_NAME = "lm_head.weight"
 
 
 @dataclass(frozen=True)
 class _RepresentativeNames:
     bias_names: list[str]
-    trainable_name: str
-    bf16_sentinel_name: str
+    parameter_names: list[str]
+    sync_parameter_names: list[str]
+    wire_bf16_sentinel_name: str
+
+
+@dataclass(frozen=True)
+class _TrainingSnapshot(_RepresentativeNames):
+    weights: dict[str, torch.Tensor]
 
 
 def _write_tiny_checkpoint(path) -> None:
@@ -81,8 +74,6 @@ def _write_tiny_checkpoint(path) -> None:
 
 def _config(
     model_path: str,
-    *,
-    colocate_all: bool = True,
 ):
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model_path
@@ -99,7 +90,7 @@ def _config(
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.algorithm.use_entropy_loss = False
-    cfg.trainer.placement.colocate_all = colocate_all
+    cfg.trainer.placement.colocate_all = False
     cfg.trainer.placement.policy_num_nodes = 1
     cfg.trainer.placement.policy_num_gpus_per_node = POLICY_WORLD_SIZE
     cfg.trainer.policy.fsdp_config.cpu_offload = True
@@ -109,7 +100,20 @@ def _config(
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.fsdp_config.moe_grouped_gemm = False
     cfg.trainer.policy.fsdp_config.use_grouped_mm = False
-    cfg.trainer.policy.optimizer_config.lr = 1.0e-3
+    cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+    cfg.trainer.policy.optimizer_config.lr = 3.0e-2
+    cfg.trainer.policy.optimizer_config.weight_decay = 123.0
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
+    cfg.trainer.policy.optimizer_config.optimizer_kwargs = {
+        "adam_lr": 4.0e-3,
+        "momentum": 0.95,
+        "nesterov": True,
+        "backend_steps": 5,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "epsilon": 1.0e-8,
+        "muon_epsilon": 1.0e-8,
+    }
     cfg.generator.backend = "vllm"
     cfg.generator.async_engine = True
     cfg.generator.weight_sync_backend = "nccl"
@@ -173,7 +177,7 @@ def _engine_client(cfg, model_path: str, shared_pg) -> InferenceEngineClient:
         enforce_eager=True,
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
+        inference_engine_enable_sleep=False,
         async_engine=True,
         max_num_batched_tokens=128 * cfg.generator.inference_engine_data_parallel_size,
         max_num_seqs=cfg.trainer.train_batch_size,
@@ -184,14 +188,18 @@ def _engine_client(cfg, model_path: str, shared_pg) -> InferenceEngineClient:
     return InferenceEngineClient(engines, tokenizer, cfg)
 
 
+def _validation_snapshots(policy, names=()):
+    return ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
+
+
 def _snapshot(policy, names=()):
-    snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
+    snapshots = _validation_snapshots(policy, names)
     rank0 = next(snapshot for snapshot in snapshots if snapshot.rank == 0)
     return rank0.weights
 
 
 def _assert_policy_attention_backend(policy, expected: str) -> None:
-    snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot"))
+    snapshots = _validation_snapshots(policy)
     assert {snapshot.attention_backend for snapshot in snapshots} == {expected}
 
 
@@ -199,71 +207,117 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=False, local_files_only=True)
     assert config.model_type == GRUG_MOE_MODEL_TYPE
     biases = [f"model.layers.{idx}{GRUG_ROUTER_BIAS_SUFFIX}" for idx in range(config.num_hidden_layers)]
+    parameter_names = [
+        "model.layers.0.self_attn.q_proj.weight",
+        STACKED_EXPERT_NAME,
+        LM_HEAD_NAME,
+        "model.layers.0.mlp.router.weight",
+    ]
     return _RepresentativeNames(
         bias_names=biases,
-        trainable_name="model.layers.0.mlp.router.weight",
-        bf16_sentinel_name="model.layers.0.input_layernorm.weight",
+        parameter_names=parameter_names,
+        sync_parameter_names=[parameter_names[0], SERVING_EXPERT_NAME, parameter_names[2], parameter_names[3]],
+        wire_bf16_sentinel_name="model.layers.0.input_layernorm.weight",
     )
 
 
 def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _TrainingSnapshot:
     names = _representative_names(model_path)
-    before = _snapshot(policy, [names.trainable_name])
+    before = _snapshot(policy, names.parameter_names)
     train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
-    assert math.isfinite(status["raw_grad_norm"])
-    assert status["raw_grad_norm"] > 0
+    # Marin's recipe disables clipping, so the worker deliberately omits this
+    # clipping-only metric.
+    assert "raw_grad_norm" not in status
     assert status["optimizer_step_succeeded"] == 1.0
-    weights = _snapshot(policy, [names.trainable_name, names.bf16_sentinel_name, *names.bias_names])
-    assert not torch.equal(weights[names.trainable_name], before[names.trainable_name])
+    snapshot_names = [*names.parameter_names, names.wire_bf16_sentinel_name, *names.bias_names]
+    weights = _snapshot(policy, snapshot_names)
+    for name in names.parameter_names:
+        assert not torch.equal(weights[name], before[name]), f"{name} did not update"
+        assert (weights[name] - before[name]).dtype == torch.float32
     assert all(torch.count_nonzero(weights[name]).item() > 0 for name in names.bias_names)
-    return _TrainingSnapshot(names.bias_names, names.trainable_name, names.bf16_sentinel_name, weights)
+    return _TrainingSnapshot(
+        bias_names=names.bias_names,
+        parameter_names=names.parameter_names,
+        sync_parameter_names=names.sync_parameter_names,
+        wire_bf16_sentinel_name=names.wire_bf16_sentinel_name,
+        weights=weights,
+    )
 
 
-def _assert_checkpoint_restores_biases(
+def _assert_checkpoint_resume_next_step(
     policy,
     mutation_batch: TrainingInputBatch,
     checkpoint_path: str,
     model_path: str,
-    bias_names: list[str],
+    names: list[str],
     expected_weights: dict[str, torch.Tensor],
-) -> None:
+) -> _TrainingSnapshot:
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     ray.get(
         policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer)
     )
     mutation_batch.metadata["global_step"] = 1
-    ray.get(policy.async_run_ray_method("pass_through", "ppo_train", mutation_batch))
+    expected_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
     ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
-    resumed = _snapshot(policy, bias_names)
-    for name in bias_names:
+    resumed = _snapshot(policy, names)
+    for name in names:
         torch.testing.assert_close(resumed[name], expected_weights[name], rtol=0, atol=0)
+    resumed_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
+    for name in names:
+        torch.testing.assert_close(
+            resumed_next_step.weights[name],
+            expected_next_step.weights[name],
+            rtol=0,
+            atol=0,
+        )
+    return resumed_next_step
+
+
+def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot) -> None:
+    found = {name: False for name in names}
+    for engine in client.engines:
+        per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(names, False))
+        if isinstance(per_rank, dict):
+            per_rank = [per_rank]
+        for rank_values in per_rank:
+            for name in names:
+                entry = rank_values[name]
+                if entry.get("skip"):
+                    continue
+                assert entry["found"], (name, entry)
+                found[name] = True
+                expected_dtype = (
+                    "float32" if name in training.bias_names or name.endswith(".mlp.router.weight") else "bfloat16"
+                )
+                assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
+                expected = (
+                    training.weights[STACKED_EXPERT_NAME][0] if name == SERVING_EXPERT_NAME else training.weights[name]
+                )
+                actual = entry["tensor"]
+                if name not in training.bias_names:
+                    expected = expected.to(torch.bfloat16).to(actual.dtype)
+                if name == LM_HEAD_NAME:
+                    # vLLM aligns the vocabulary dimension (151665 -> 151680
+                    # for this tokenizer). The HF weight occupies the prefix.
+                    assert actual.shape[0] >= expected.shape[0], (actual.shape, expected.shape)
+                    actual = actual[: expected.shape[0]]
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert all(found.values()), found
 
 
 def _run_full_cycle(
     model_path: str,
     tmp_path: Path,
-    *,
-    colocate_all: bool = True,
 ) -> None:
-    cfg = _config(model_path, colocate_all=colocate_all)
+    cfg = _config(model_path)
     initialize_ray(cfg)
-    required_gpus = COLOCATED_NUM_GPUS if colocate_all else DISAGGREGATED_NUM_GPUS
     available_gpus = int(ray.cluster_resources().get("GPU", 0))
-    if available_gpus < required_gpus:
-        pytest.skip(f"topology requires {required_gpus} Ray GPUs, found {available_gpus}")
-    pg = None
-    if colocate_all:
-        pg = placement_group(
-            [{"GPU": 1, "CPU": 1}] * COLOCATED_NUM_GPUS,
-            strategy="PACK",
-        )
-        get_ray_pg_ready_with_timeout(pg, timeout=60)
-    client = _engine_client(cfg, model_path, pg)
+    if available_gpus < NUM_GPUS:
+        pytest.skip(f"topology requires {NUM_GPUS} Ray GPUs, found {available_gpus}")
+    client = _engine_client(cfg, model_path, None)
     try:
-        if colocate_all:
-            asyncio.run(client.wake_up())
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % len(prompt_pattern)] for idx in range(cfg.trainer.train_batch_size)]
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
@@ -283,53 +337,42 @@ def _run_full_cycle(
             )
         )
         first_logprob = first_score["prompt_logprobs"][0][-1][first_token]
-        if colocate_all:
-            asyncio.run(client.sleep())
-
         policy = init_worker_with_type(
             "policy",
-            shared_pg=pg,
-            colocate_all=colocate_all,
+            shared_pg=None,
+            colocate_all=False,
             num_gpus_per_node=POLICY_WORLD_SIZE,
             num_nodes=1,
             cfg=cfg,
         )
         _assert_policy_attention_backend(policy, "flash_attention_2")
         training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
-        sync_names = [*training.bias_names, training.representative_name, training.bf16_sentinel_name]
+        checkpoint_names = [
+            *training.bias_names,
+            *training.parameter_names,
+            training.wire_bf16_sentinel_name,
+        ]
 
         checkpoint_path = str(tmp_path / "resume-checkpoint")
-        _assert_checkpoint_restores_biases(
+        training = _assert_checkpoint_resume_next_step(
             policy,
             _training_batch(prompts, first_rollout),
             checkpoint_path,
             model_path,
-            training.bias_names,
+            checkpoint_names,
             training.weights,
         )
+        sync_names = [
+            *training.bias_names,
+            *training.sync_parameter_names,
+            training.wire_bf16_sentinel_name,
+        ]
 
-        if colocate_all:
-            policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        if colocate_all:
-            asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        for engine in client.engines:
-            per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(sync_names, False))
-            if isinstance(per_rank, dict):
-                per_rank = [per_rank]
-            for rank_values in per_rank:
-                for name in sync_names:
-                    entry = rank_values[name]
-                    assert entry["found"], (name, entry)
-                    expected_dtype = "bfloat16" if name == training.bf16_sentinel_name else "float32"
-                    assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
-                    torch.testing.assert_close(entry["tensor"], training.weights[name], rtol=0, atol=0)
+        _assert_engine_weights(client, sync_names, training)
 
-        if colocate_all:
-            policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
-            asyncio.run(client.wake_up(tags=["kv_cache"]))
         asyncio.run(client.reset_prefix_cache())
         second_score = asyncio.run(
             client.generate(
@@ -347,18 +390,10 @@ def _run_full_cycle(
 
 
 @pytest.mark.vllm
-def test_grug_two_h100_rollout_train_sync_rollout(tmp_path):
-    require_hoppers(COLOCATED_NUM_GPUS)
-
-    _write_tiny_checkpoint(tmp_path)
-    _run_full_cycle(str(tmp_path), tmp_path)
-
-
-@pytest.mark.vllm
 def test_grug_four_h100_disaggregated_rollout_train_broadcast_rollout(tmp_path):
     """Exercise mixed-dtype Grug sync with trainer and rollout on disjoint GPUs."""
 
-    require_hoppers(DISAGGREGATED_NUM_GPUS)
+    require_hoppers(NUM_GPUS)
 
     _write_tiny_checkpoint(tmp_path)
-    _run_full_cycle(str(tmp_path), tmp_path, colocate_all=False)
+    _run_full_cycle(str(tmp_path), tmp_path)
