@@ -92,7 +92,7 @@ requires-dist = ["requests>=2.0.0", "prometheus-client>=0.24"]
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
-marin-rigging = { git = "https://github.com/marin-community/marin", rev = "df280dee340a408bb5f69b0de2938a643aff7fce", subdirectory = "lib/rigging" }
+marin-rigging = { git = "https://github.com/marin-community/marin", rev = "86a2577a6d13afb0ed5356b560a6e76c8a261603", subdirectory = "lib/rigging" }
 torch = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
 torchvision = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "extra == 'vllm'" }

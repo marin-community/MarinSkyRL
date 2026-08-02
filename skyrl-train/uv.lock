@@ -2263,7 +2263,7 @@ provides-extras = ["causal-conv1d", "dev"]
 [[package]]
 name = "marin-rigging"
 version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin?subdirectory=lib%2Frigging&rev=df280dee340a408bb5f69b0de2938a643aff7fce#df280dee340a408bb5f69b0de2938a643aff7fce" }
+source = { git = "https://github.com/marin-community/marin?subdirectory=lib%2Frigging&rev=86a2577a6d13afb0ed5356b560a6e76c8a261603#86a2577a6d13afb0ed5356b560a6e76c8a261603" }
 dependencies = [
     { name = "prometheus-client" },
     { name = "requests" },
@@ -5343,7 +5343,7 @@ requires-dist = [
     { name = "loguru" },
     { name = "mamba-ssm", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl" },
     { name = "mamba-ssm", marker = "python_full_version != '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = ">=2.2,<3" },
-    { name = "marin-rigging", marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin?subdirectory=lib%2Frigging&rev=df280dee340a408bb5f69b0de2938a643aff7fce" },
+    { name = "marin-rigging", marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin?subdirectory=lib%2Frigging&rev=86a2577a6d13afb0ed5356b560a6e76c8a261603" },
     { name = "megatron-bridge", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.5.0" },
     { name = "megatron-core", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
     { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },

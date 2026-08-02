@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from loguru import logger
 from prometheus_client.core import Metric
 from rigging import telemetry as rigging_telemetry
-from rigging.telemetry.prometheus import ForwardedPrometheusSample, PrometheusForwarder
+from rigging.telemetry.prometheus import PrometheusCollector, PrometheusScraper
 
 from skyrl_train.telemetry import CONTROLLER_ROLE, process_telemetry
 
 
-MAX_FORWARDED_RAY_SAMPLES = 512
-FORWARDER_STOP_TIMEOUT_SECONDS = 0.5
+MAX_RAY_METRIC_SNAPSHOTS = 512
+COLLECTOR_STOP_TIMEOUT_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ _LOWERCASE_ATTRIBUTES = frozenset(
 )
 
 
-def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[ForwardedPrometheusSample, ...]:
+def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[rigging_telemetry.MetricSnapshot, ...]:
     """Normalize the bounded Ray logical-state allowlist for Finelog."""
     values: defaultdict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(float)
     for family in families:
@@ -103,7 +103,7 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[ForwardedPromet
             values[(family.name, attributes)] += value
 
     return tuple(
-        ForwardedPrometheusSample(
+        rigging_telemetry.MetricSnapshot(
             name=name,
             value=value,
             unit=_RAY_METRICS[name].unit,
@@ -117,26 +117,29 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[ForwardedPromet
 
 @contextlib.contextmanager
 def ray_metrics_telemetry(node_ip: str, metrics_port: int) -> Iterator[None]:
-    """Own one bounded local Ray Prometheus forwarder for this controller process."""
+    """Own one bounded local Ray Prometheus collector for this controller process."""
     with process_telemetry(CONTROLLER_ROLE) as owner:
-        forwarder = None
+        collector = None
         if owner.configured:
             try:
-                forwarder = PrometheusForwarder(
-                    f"http://{node_ip}:{metrics_port}/metrics",
+                collector = PrometheusCollector(
                     metric_source="ray",
-                    transform=transform_ray_metrics,
-                    max_forwarded_samples=MAX_FORWARDED_RAY_SAMPLES,
+                    scraper=PrometheusScraper(f"http://{node_ip}:{metrics_port}/metrics"),
+                    processor=transform_ray_metrics,
+                    publisher=rigging_telemetry.MetricSnapshotPublisher(
+                        max_records=MAX_RAY_METRIC_SNAPSHOTS,
+                        attributes={"metric_source": "ray"},
+                    ),
                 )
-                forwarder.start()
+                collector.start()
             except Exception:
                 logger.warning("Could not start local Ray metric forwarding; training will continue", exc_info=True)
-                forwarder = None
+                collector = None
         try:
             yield
         finally:
-            if forwarder is not None:
+            if collector is not None:
                 try:
-                    forwarder.stop(timeout=FORWARDER_STOP_TIMEOUT_SECONDS)
+                    collector.stop(timeout=COLLECTOR_STOP_TIMEOUT_SECONDS)
                 except Exception:
                     logger.warning("Could not stop local Ray metric forwarding", exc_info=True)
