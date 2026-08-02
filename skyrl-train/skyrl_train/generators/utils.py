@@ -779,8 +779,8 @@ def get_batch_failure_metrics(
 
     The denominator is one ``generate`` call, which is the whole training batch on
     the synchronous trainer and a single rollout group on the fully asynchronous
-    one. It is emitted alongside the counts so ``concatenate_generator_outputs``
-    can re-derive the fraction over a merged batch.
+    one. It is emitted alongside the counts, so merging several batches means
+    summing the counts and calling this again with the totals.
 
     Args:
         num_trials: Trajectories the batch asked for; the denominator.
