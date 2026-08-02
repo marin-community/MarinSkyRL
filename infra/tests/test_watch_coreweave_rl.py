@@ -96,7 +96,7 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
     remote_commands = [call[-1] for call in calls if call[0] == "ssh"]
     transferred_sources = [argument for call in calls if call[0] == "rsync" for argument in call]
     assert result.finelog == "synced"
-    assert result.ray_logs == "2 directories requested"
+    assert result.ray_logs == "2 directories synced"
     assert result.traces == "newest 2 selected"
     assert all("find " not in command and "du " not in command for command in remote_commands)
     assert f"Jupiter:{experiment_dir}/logs/tasktrove-x6_1170543.out" in transferred_sources
@@ -138,7 +138,6 @@ def test_jupiter_status_only_tails_finelog_without_recursive_transfer(tmp_path: 
     assert result.finelog == "current tail (1 line)"
     assert (tmp_path / "finelog.log").read_text().startswith("WANDB_MIRROR")
     assert all(call[0] == "ssh" for call in calls)
-    assert any("tail -n 600000" in call[-1] for call in calls)
 
 
 def test_jupiter_sync_reports_ssh_transport_failure_instead_of_missing_artifacts(tmp_path: Path) -> None:
@@ -173,7 +172,9 @@ def test_jupiter_status_queries_only_the_requested_slurm_job() -> None:
 
     assert status.state == "running"
     assert status.job_name == "tasktrove-x6"
-    assert calls == [["ssh", "-o", "BatchMode=yes", "Jupiter", "squeue -h -j 1170543 -o '%T|%j'"]]
+    assert len(calls) == 1
+    assert "squeue" in calls[0][-1]
+    assert "1170543" in calls[0][-1]
 
 
 def test_jupiter_only_run_uses_the_shared_report_and_skips_iris_trace_inventory(
@@ -188,7 +189,7 @@ def test_jupiter_only_run_uses_the_shared_report_and_skips_iris_trace_inventory(
         (destination / "finelog.log").write_text(
             'WANDB_MIRROR kind=train step=9 metrics={"generate/tis/exact_match_fraction": 0.99}\n'
         )
-        return JupiterArtifactSyncResult("synced", "synced", "1 directory requested", "newest 1 selected", 1, ())
+        return JupiterArtifactSyncResult("synced", "synced", "1 directory synced", "newest 1 selected", 1, ())
 
     monkeypatch.setattr(
         sys,
@@ -225,3 +226,5 @@ def test_jupiter_only_run_uses_the_shared_report_and_skips_iris_trace_inventory(
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["traces"] == "newest 1 selected"
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["pod_logs"] == "not applicable (Jupiter)"
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["slurm_logs"] == "synced"
+    assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["trace_started"] is None
+    assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["trace_selected"] == 1

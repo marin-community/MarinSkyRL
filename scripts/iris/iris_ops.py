@@ -83,6 +83,7 @@ NAME_TO_INT = {v: k for k, v in STATE_NAMES.items()}
 
 RUNNING_STATES = {"pending", "building", "running", "unspecified"}
 TERMINAL_STATES = {"succeeded", "failed", "killed", "worker_failed", "unschedulable"}
+LOG_SUFFIXES = (".log", ".out", ".err", ".jsonl", ".txt")
 
 # Retry/backoff for Iris CLI calls: transient controller and Finelog connection
 # failures should not be read as terminal job transitions.

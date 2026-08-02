@@ -15,10 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
+from scripts.iris.iris_ops import LOG_SUFFIXES
 
-LOG_SUFFIXES = (".log", ".out", ".err", ".jsonl", ".txt")
 _HOST_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 ERROR_DETAIL_CHARS = 240
+MISSING_PATH_MARKER = "No such file"
 JupiterSyncScope = Literal["status", "full"]
 
 
@@ -65,6 +66,34 @@ class JupiterJobStatus:
     state: str
     job_name: str
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class JupiterSyncSession:
+    run: JupiterRunSpec
+    destination: Path
+    host: str
+    runner: CommandRunner
+
+    @property
+    def logs_dir(self) -> str:
+        return str(PurePosixPath(self.run.experiment_dir) / "logs")
+
+
+@dataclass(frozen=True)
+class StageSyncResult:
+    status: str
+    errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FinelogSyncResult(StageSyncResult):
+    remote_path: str | None = None
+
+
+@dataclass(frozen=True)
+class TraceSyncResult(StageSyncResult):
+    selected: int = 0
 
 
 _SLURM_STATES = {
@@ -139,7 +168,7 @@ def _finelog_path(runner: CommandRunner, host: str, logs_dir: str, job_id: str) 
         f"set -o pipefail; ls -1t -- {shlex.quote(logs_dir)}/*_{job_id}.out | sed -n '1p'",
     )
     if result.returncode:
-        if "No such file" in result.stderr:
+        if MISSING_PATH_MARKER in result.stderr:
             return None
         raise RuntimeError(f"Jupiter finelog lookup failed: {_error_detail(result)}")
     candidate_text = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
@@ -223,7 +252,7 @@ def _newest_trace_directories(
         timeout=300,
     )
     if result.returncode:
-        if "No such file" in result.stderr:
+        if MISSING_PATH_MARKER in result.stderr:
             return ()
         raise RuntimeError(f"Jupiter trace listing failed: {_error_detail(result)}")
 
@@ -265,109 +294,117 @@ def _sync_trace_directory(
 
 
 def _sync_finelog(
-    run: JupiterRunSpec,
-    destination: Path,
+    session: JupiterSyncSession,
     *,
-    host: str,
     scope: JupiterSyncScope,
     tail_lines: int,
-    runner: CommandRunner,
-) -> tuple[str, str | None, tuple[str, ...]]:
-    logs_dir = str(PurePosixPath(run.experiment_dir) / "logs")
-    if not _remote_exists(runner, host, logs_dir, directory=True):
-        return "unavailable", None, (f"finelog: expected logs directory is absent: {logs_dir}",)
-    finelog_path = _finelog_path(runner, host, logs_dir, run.job_id)
+) -> FinelogSyncResult:
+    if not _remote_exists(session.runner, session.host, session.logs_dir, directory=True):
+        return FinelogSyncResult(
+            "unavailable",
+            (f"finelog: expected logs directory is absent: {session.logs_dir}",),
+        )
+    finelog_path = _finelog_path(session.runner, session.host, session.logs_dir, session.run.job_id)
     if finelog_path is None:
-        return "unavailable", None, (f"finelog: no *_{run.job_id}.out file found directly under {logs_dir}",)
+        return FinelogSyncResult(
+            "unavailable",
+            (f"finelog: no *_{session.run.job_id}.out file found directly under {session.logs_dir}",),
+        )
 
     if scope == "status":
-        result = _ssh(runner, host, f"tail -n {tail_lines} -- {shlex.quote(finelog_path)}", timeout=900)
+        result = _ssh(
+            session.runner,
+            session.host,
+            f"tail -n {tail_lines} -- {shlex.quote(finelog_path)}",
+            timeout=900,
+        )
         if result.returncode:
-            return "unavailable", finelog_path, (f"finelog: {_error_detail(result)}",)
-        (destination / "finelog.log").write_text(result.stdout)
+            return FinelogSyncResult("unavailable", (f"finelog: {_error_detail(result)}",), finelog_path)
+        (session.destination / "finelog.log").write_text(result.stdout)
         line_count = len(result.stdout.splitlines())
-        return f"current tail ({line_count:,} {'line' if line_count == 1 else 'lines'})", finelog_path, ()
+        return FinelogSyncResult(
+            f"current tail ({line_count:,} {'line' if line_count == 1 else 'lines'})",
+            remote_path=finelog_path,
+        )
 
-    result = _rsync(runner, host, finelog_path, destination / "finelog.log")
+    result = _rsync(session.runner, session.host, finelog_path, session.destination / "finelog.log")
     if result.returncode:
-        return "unavailable", finelog_path, (f"finelog: {_error_detail(result)}",)
-    return "synced", finelog_path, ()
+        return FinelogSyncResult("unavailable", (f"finelog: {_error_detail(result)}",), finelog_path)
+    return FinelogSyncResult("synced", remote_path=finelog_path)
 
 
 def _sync_slurm_logs(
-    run: JupiterRunSpec,
-    destination: Path,
+    session: JupiterSyncSession,
     *,
-    host: str,
     finelog_path: str | None,
-    runner: CommandRunner,
-) -> tuple[str, tuple[str, ...]]:
-    logs_dir = str(PurePosixPath(run.experiment_dir) / "logs")
-    if not _remote_exists(runner, host, logs_dir, directory=True):
-        return "absent", ()
+) -> StageSyncResult:
+    if not _remote_exists(session.runner, session.host, session.logs_dir, directory=True):
+        return StageSyncResult("absent")
     log_arguments = (f"--exclude={PurePosixPath(finelog_path).name}",) if finelog_path else ()
     result = _rsync(
-        runner,
-        host,
-        f"{logs_dir}/",
-        destination / "slurm_logs",
+        session.runner,
+        session.host,
+        f"{session.logs_dir}/",
+        session.destination / "slurm_logs",
         extra_arguments=log_arguments,
     )
     if result.returncode:
-        return "unavailable", (f"Slurm logs: {_error_detail(result)}",)
-    return "synced", ()
+        return StageSyncResult("unavailable", (f"Slurm logs: {_error_detail(result)}",))
+    return StageSyncResult("synced")
 
 
-def _sync_ray_logs(
-    run: JupiterRunSpec,
-    destination: Path,
-    *,
-    host: str,
-    runner: CommandRunner,
-) -> tuple[str, tuple[str, ...]]:
+def _sync_ray_logs(session: JupiterSyncSession) -> StageSyncResult:
     remote_directories = (
-        str(PurePosixPath(run.experiment_dir) / "ray_logs"),
-        str(PurePosixPath(run.experiment_dir) / run.job_name / "ray_logs"),
+        ("launcher", str(PurePosixPath(session.run.experiment_dir) / "ray_logs")),
+        ("worker", str(PurePosixPath(session.run.experiment_dir) / session.run.job_name / "ray_logs")),
     )
-    requested = 0
+    synced = 0
     errors: list[str] = []
-    for remote_directory in remote_directories:
-        if not _remote_exists(runner, host, remote_directory, directory=True):
+    for local_name, remote_directory in remote_directories:
+        if not _remote_exists(session.runner, session.host, remote_directory, directory=True):
             continue
-        requested += 1
-        local_name = "launcher" if requested == 1 else "worker"
-        result = _rsync(runner, host, f"{remote_directory}/", destination / "ray_logs" / local_name)
+        result = _rsync(
+            session.runner,
+            session.host,
+            f"{remote_directory}/",
+            session.destination / "ray_logs" / local_name,
+        )
         if result.returncode:
             errors.append(f"Ray logs: {_error_detail(result)}")
-    return f"{requested} directories requested", tuple(errors)
+        else:
+            synced += 1
+    noun = "directory" if synced == 1 else "directories"
+    return StageSyncResult(f"{synced} {noun} synced", tuple(errors))
 
 
 def _sync_traces(
-    run: JupiterRunSpec,
-    destination: Path,
+    session: JupiterSyncSession,
     *,
-    host: str,
     trace_sync_limit: int,
     max_non_log_bytes: int,
-    runner: CommandRunner,
-) -> tuple[str, int, tuple[str, ...]]:
+) -> TraceSyncResult:
     trace_scope = "all" if trace_sync_limit == 0 else "newest"
-    if not _remote_exists(runner, host, run.trace_root, directory=True):
-        return f"{trace_scope} 0 selected", 0, ()
-    selected = _newest_trace_directories(runner, host, run.trace_root, trace_sync_limit)
+    if not _remote_exists(session.runner, session.host, session.run.trace_root, directory=True):
+        return TraceSyncResult(f"{trace_scope} 0 selected")
+    selected = _newest_trace_directories(
+        session.runner,
+        session.host,
+        session.run.trace_root,
+        trace_sync_limit,
+    )
     errors: list[str] = []
     for remote_directory in selected:
         errors.extend(
             f"trace {PurePosixPath(remote_directory).name}: {error}"
             for error in _sync_trace_directory(
-                runner,
-                host,
+                session.runner,
+                session.host,
                 remote_directory,
-                destination / "trace_jobs" / PurePosixPath(remote_directory).name,
+                session.destination / "trace_jobs" / PurePosixPath(remote_directory).name,
                 max_non_log_bytes,
             )
         )
-    return f"{trace_scope} {len(selected)} selected", len(selected), tuple(errors)
+    return TraceSyncResult(f"{trace_scope} {len(selected)} selected", tuple(errors), len(selected))
 
 
 def sync_jupiter_artifacts(
@@ -392,44 +429,33 @@ def sync_jupiter_artifacts(
         raise ValueError("Jupiter finelog tail line count must be positive")
 
     destination.mkdir(parents=True, exist_ok=True)
-    finelog_status, finelog_path, finelog_errors = _sync_finelog(
-        run,
-        destination,
-        host=host,
+    session = JupiterSyncSession(run, destination, host, runner)
+    finelog = _sync_finelog(
+        session,
         scope=scope,
         tail_lines=finelog_tail_lines,
-        runner=runner,
     )
     if scope == "status":
         return JupiterArtifactSyncResult(
-            finelog_status,
+            finelog.status,
             "not requested",
             "not requested",
             "not requested",
             0,
-            finelog_errors,
+            finelog.errors,
         )
-    slurm_logs_status, slurm_errors = _sync_slurm_logs(
-        run,
-        destination,
-        host=host,
-        finelog_path=finelog_path,
-        runner=runner,
-    )
-    ray_logs_status, ray_errors = _sync_ray_logs(run, destination, host=host, runner=runner)
-    trace_status, trace_selected, trace_errors = _sync_traces(
-        run,
-        destination,
-        host=host,
+    slurm_logs = _sync_slurm_logs(session, finelog_path=finelog.remote_path)
+    ray_logs = _sync_ray_logs(session)
+    traces = _sync_traces(
+        session,
         trace_sync_limit=trace_sync_limit,
         max_non_log_bytes=max_non_log_bytes,
-        runner=runner,
     )
     return JupiterArtifactSyncResult(
-        finelog_status,
-        slurm_logs_status,
-        ray_logs_status,
-        trace_status,
-        trace_selected,
-        finelog_errors + slurm_errors + ray_errors + trace_errors,
+        finelog.status,
+        slurm_logs.status,
+        ray_logs.status,
+        traces.status,
+        traces.selected,
+        finelog.errors + slurm_logs.errors + ray_logs.errors + traces.errors,
     )

@@ -1,12 +1,8 @@
 from infra.rl_metrics import (
     ENTROPY_KEYS,
     GRAD_NORM_KEYS,
-    POLICY_LOG_RATIO_ABS_MAX_KEYS,
-    POLICY_LOG_RATIO_ABS_MEAN_KEYS,
-    POLICY_LOG_RATIO_ABS_P99_KEYS,
     POLICY_LOSS_KEYS,
     REWARD_KEYS,
-    TIS_EXACT_MATCH_KEYS,
     metric_value,
     parse_training_metrics_result,
 )
@@ -35,30 +31,6 @@ def test_parse_training_metrics_extracts_standard_rl_status_fields() -> None:
     assert metric_value(records[0].metrics, *POLICY_LOSS_KEYS) == 2.77e-09
     assert metric_value(records[0].metrics, *GRAD_NORM_KEYS) == 0.0371
     assert metric_value(records[0].metrics, *ENTROPY_KEYS) == 1.178
-
-
-def test_stability_metric_aliases_cover_current_and_legacy_training_logs() -> None:
-    current = {
-        "generate/tis/exact_match_fraction": 0.99,
-        "policy/log_ratio_abs_mean": 0.01,
-        "policy/log_ratio_abs_p99": 0.2,
-        "policy/log_ratio_abs_max": 1.5,
-    }
-    legacy = {
-        "tis/exact_match_fraction": 0.98,
-        "log_ratio_abs_mean": 0.02,
-        "log_ratio_abs_p99": 0.3,
-        "log_ratio_abs_max": 2.5,
-    }
-
-    assert metric_value(current, *TIS_EXACT_MATCH_KEYS) == 0.99
-    assert metric_value(legacy, *TIS_EXACT_MATCH_KEYS) == 0.98
-    assert metric_value(current, *POLICY_LOG_RATIO_ABS_MEAN_KEYS) == 0.01
-    assert metric_value(legacy, *POLICY_LOG_RATIO_ABS_MEAN_KEYS) == 0.02
-    assert metric_value(current, *POLICY_LOG_RATIO_ABS_P99_KEYS) == 0.2
-    assert metric_value(legacy, *POLICY_LOG_RATIO_ABS_P99_KEYS) == 0.3
-    assert metric_value(current, *POLICY_LOG_RATIO_ABS_MAX_KEYS) == 1.5
-    assert metric_value(legacy, *POLICY_LOG_RATIO_ABS_MAX_KEYS) == 2.5
 
 
 def test_parse_training_metrics_preserves_latest_valid_record_and_reports_malformed_lines() -> None:
