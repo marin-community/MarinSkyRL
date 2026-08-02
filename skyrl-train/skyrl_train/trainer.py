@@ -145,9 +145,6 @@ class RayPPOTrainer:
         # Trainer control object for callback coordination
         self._control = TrainerControl()
 
-    def _record_policy_progress(self) -> None:
-        record_policy_step(self.global_step)
-
     def _build_train_dataloader_and_compute_training_steps(self):
         """
         Hook for constructing the training dataloader. Subclasses can override
@@ -656,7 +653,7 @@ class RayPPOTrainer:
                 # 10. Update progress bar and global step
                 pbar.update(1)
                 last_completed_step = self.global_step
-                self._record_policy_progress()
+                record_policy_step(self.global_step)
                 self.global_step += 1
 
                 del training_input, generator_output

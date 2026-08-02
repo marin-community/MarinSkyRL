@@ -40,9 +40,12 @@ from cloud.iris.model_paths import is_object_store_model_path, unsupported_model
 from cloud.iris.paths import resolve_repo_path
 
 try:
-    from skyrl_train.ray_metrics import ray_metrics_telemetry as _ray_metrics_telemetry
+    from skyrl_train.ray_metrics import ray_metrics_telemetry
 except ImportError:
-    _ray_metrics_telemetry = None
+
+    def ray_metrics_telemetry(node_ip: str, metrics_port: int):
+        return contextlib.nullcontext()
+
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -864,12 +867,6 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-def _ray_metrics_context(node_ip: str):
-    if _ray_metrics_telemetry is None:
-        return contextlib.nullcontext()
-    return _ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT)
-
-
 # --- R2 object-store spilling ----------------------------------------------------
 # Ray spills its object store to /tmp/ray/session*/ray_spilled_objects on LOCAL
 # disk when plasma overflows. The async RL generator over-produces rollouts during
@@ -1297,7 +1294,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
-    with _ray_metrics_context(head_ip):
+    with ray_metrics_telemetry(head_ip, RAY_METRICS_EXPORT_PORT):
         env = training_driver_env(derived_gloo_ifname)
         env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
         env["PYTHONUNBUFFERED"] = "1"
@@ -1370,7 +1367,7 @@ def run_worker(args: argparse.Namespace) -> int:
     # Block until the head publishes the done marker (training finished) or we
     # are signalled. The training driver on rank 0 schedules actors onto this
     # node's GPUs; this process just keeps the Ray node alive.
-    with _ray_metrics_context(node_ip):
+    with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT):
         while not stop.is_set():
             if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
                 _log(f"Worker rank {rank} saw head done-marker; shutting down.")

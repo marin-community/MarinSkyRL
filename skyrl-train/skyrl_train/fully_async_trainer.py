@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_rollout_buffer
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 
 
 @dataclass
@@ -810,7 +810,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 pbar.update(1)
 
                 last_completed_step = self.global_step
-                self._record_policy_progress()
+                record_policy_step(self.global_step)
                 self.global_step += 1
 
                 # 9. Notify generation workers that the capacity has increased, unblocking them.

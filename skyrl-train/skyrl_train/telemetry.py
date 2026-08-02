@@ -4,36 +4,59 @@ import socket
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 import ray
 from loguru import logger
 
 try:
-    from rigging import telemetry as _rigging
+    from rigging import telemetry
 except ImportError:
-    _rigging = None
+    from skyrl_train import inert_telemetry as telemetry
 
 
 SERVICE = "marinskyrl"
-_TELEMETRY_ROLE = getattr(_rigging, "TelemetryRole", None)
-DRIVER_ROLE = _TELEMETRY_ROLE.DRIVER if _TELEMETRY_ROLE is not None else "driver"
-TRAINER_ROLE = _TELEMETRY_ROLE.TRAINER if _TELEMETRY_ROLE is not None else "trainer"
-CONTROLLER_ROLE = _TELEMETRY_ROLE.CONTROLLER if _TELEMETRY_ROLE is not None else "controller"
+DRIVER_ROLE = "driver"
+TRAINER_ROLE = "trainer"
+CONTROLLER_ROLE = "controller"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
-_active_process: "ProcessTelemetry | None" = None
+work_completed = telemetry.counter("work_completed", unit="{item}")
+phase_duration_seconds = telemetry.histogram("phase_duration_seconds", unit="s")
+progress_time_seconds = telemetry.gauge("progress_time_seconds", unit="s")
+policy_step = telemetry.gauge("policy_step", unit="{step}")
+queue_depth = telemetry.gauge("queue_depth", unit="{item}")
+capacity = telemetry.gauge("capacity", unit="{item}")
 
-if _rigging is None:
-    _WORK_COMPLETED = _PHASE_DURATION_SECONDS = _PROGRESS_TIME_SECONDS = None
-    _POLICY_STEP = _QUEUE_DEPTH = _CAPACITY = None
-else:
-    _WORK_COMPLETED = _rigging.counter("work_completed", unit="{item}")
-    _PHASE_DURATION_SECONDS = _rigging.histogram("phase_duration_seconds", unit="s")
-    _PROGRESS_TIME_SECONDS = _rigging.gauge("progress_time_seconds", unit="s")
-    _POLICY_STEP = _rigging.gauge("policy_step", unit="{step}")
-    _QUEUE_DEPTH = _rigging.gauge("queue_depth", unit="{item}")
-    _CAPACITY = _rigging.gauge("capacity", unit="{item}")
+
+class _BackgroundCollector(Protocol):
+    def start(self) -> None: ...
+
+    def stop(self, *, timeout: float) -> None: ...
+
+
+class _InertCollector:
+    def start(self) -> None:
+        pass
+
+    def stop(self, *, timeout: float) -> None:
+        pass
+
+
+_inert_collector = _InertCollector()
+
+
+@dataclass
+class _ProcessState:
+    policy_step: int | None = None
+    last_progress_time_seconds: float | None = None
+    queue_depth: int | None = None
+    queue_capacity: int | None = None
+
+
+_inactive_state = _ProcessState()
+_active_state = _inactive_state
+_active_process: "ProcessTelemetry | None" = None
 
 
 @dataclass(frozen=True)
@@ -135,33 +158,28 @@ def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"]) ->
         raise
     finally:
         try:
-            if _PHASE_DURATION_SECONDS is not None:
-                _PHASE_DURATION_SECONDS.record(
-                    time.perf_counter() - started,
-                    attributes={
-                        "phase": phase,
-                        "clock_domain": "critical_path",
-                        "role": TRAINER_ROLE,
-                        "outcome": outcome,
-                    },
-                )
+            phase_duration_seconds.record(
+                time.perf_counter() - started,
+                attributes={
+                    "phase": phase,
+                    "clock_domain": "critical_path",
+                    "role": TRAINER_ROLE,
+                    "outcome": outcome,
+                },
+            )
         except Exception:
             pass
 
 
-def record_policy_step(policy_step: int) -> None:
+def record_policy_step(step: int) -> None:
     progress_time = time.time()
-    if _active_process is not None:
-        _active_process.policy_step = policy_step
-        _active_process.last_progress_time_seconds = progress_time
+    _active_state.policy_step = step
+    _active_state.last_progress_time_seconds = progress_time
     attributes = {"work_kind": "policy_step", "role": TRAINER_ROLE}
     try:
-        if _WORK_COMPLETED is not None:
-            _WORK_COMPLETED.add(1, attributes=attributes)
-        if _PROGRESS_TIME_SECONDS is not None:
-            _PROGRESS_TIME_SECONDS.set(progress_time, attributes=attributes)
-        if _POLICY_STEP is not None:
-            _POLICY_STEP.set(policy_step, attributes={"role": TRAINER_ROLE})
+        work_completed.add(1, attributes=attributes)
+        progress_time_seconds.set(progress_time, attributes=attributes)
+        policy_step.set(step, attributes={"role": TRAINER_ROLE})
     except Exception:
         pass
 
@@ -171,19 +189,18 @@ def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: S
     rollout_count = sample_count if is_last_step is None else sum(is_last_step)
     generated_token_count = sum(len(response) for response in response_ids)
     progress_time = time.time()
-    if _active_process is not None and sample_count:
-        _active_process.last_progress_time_seconds = progress_time
+    if sample_count:
+        _active_state.last_progress_time_seconds = progress_time
     try:
-        if _WORK_COMPLETED is not None:
-            for work_kind, count in (
-                ("rollout", rollout_count),
-                ("sample", sample_count),
-                ("generated_token", generated_token_count),
-            ):
-                if count:
-                    _WORK_COMPLETED.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE})
-        if _PROGRESS_TIME_SECONDS is not None and rollout_count:
-            _PROGRESS_TIME_SECONDS.set(
+        for work_kind, count in (
+            ("rollout", rollout_count),
+            ("sample", sample_count),
+            ("generated_token", generated_token_count),
+        ):
+            if count:
+                work_completed.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE})
+        if rollout_count:
+            progress_time_seconds.set(
                 progress_time,
                 attributes={"work_kind": "rollout", "role": TRAINER_ROLE},
             )
@@ -192,58 +209,56 @@ def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: S
 
 
 def record_rollout_buffer(depth: int, capacity: int) -> None:
-    if _active_process is not None:
-        _active_process.queue_depth = depth
-        _active_process.queue_capacity = capacity
+    _active_state.queue_depth = depth
+    _active_state.queue_capacity = capacity
     attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE}
     try:
-        if _QUEUE_DEPTH is not None:
-            _QUEUE_DEPTH.set(depth, attributes=attributes)
-        if _CAPACITY is not None:
-            _CAPACITY.set(capacity, attributes=attributes)
+        queue_depth.set(depth, attributes=attributes)
+        capacity.set(capacity, attributes=attributes)
     except Exception:
         pass
 
 
 class ProcessTelemetry:
     def __init__(self, config: TelemetryConfig, role: str) -> None:
-        self.config = config
-        self.role = role
-        self.configured = False
-        self.closed = False
-        self.policy_step: int | None = None
-        self.last_progress_time_seconds: float | None = None
-        self.queue_depth: int | None = None
-        self.queue_capacity: int | None = None
+        self._config = config
+        self._role = role
+        self._configured = False
+        self._closed = False
+        self._state = _ProcessState()
 
     def __enter__(self) -> "ProcessTelemetry":
-        global _active_process
+        global _active_process, _active_state
 
         if _active_process is not None:
             logger.warning("Telemetry already has a process owner; leaving the nested lifecycle inert")
             return self
         _active_process = self
-        if _rigging is None or self.config.endpoint is None:
+        _active_state = self._state
+        if self._config.endpoint is None:
             return self
-        if self.config.root_run_uid is None or self.config.execution_uid is None:
+        if self._config.root_run_uid is None or self._config.execution_uid is None:
             logger.warning("Telemetry requires root_run_uid and execution_uid; export remains inert")
             return self
         try:
-            _rigging.configure(
-                endpoint=self.config.endpoint,
+            telemetry.configure(
+                endpoint=self._config.endpoint,
                 service=SERVICE,
-                attributes=_resources(self.config, self.role),
+                attributes=_resources(self._config, self._role),
             )
-            self.configured = bool(_rigging.runtime_status().configured)
+            self._configured = bool(telemetry.runtime_status().configured)
         except Exception:
             logger.warning("Could not configure telemetry; export remains inert", exc_info=True)
-            self.configured = False
-        if self.configured:
+            self._configured = False
+        if self._configured:
             try:
-                _rigging.event("lifecycle", {"state": "started"}, attributes={"role": self.role})
+                telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
             except Exception:
                 logger.warning("Could not export telemetry lifecycle start", exc_info=True)
         return self
+
+    def background_collector(self, collector: _BackgroundCollector) -> _BackgroundCollector:
+        return collector if self._configured else _inert_collector
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         del exc, traceback
@@ -254,39 +269,40 @@ class ProcessTelemetry:
         return False
 
     def close(self, *, status: str, reason: str) -> None:
-        global _active_process
+        global _active_process, _active_state
 
-        if self.closed:
+        if self._closed:
             return
-        self.closed = True
-        if _rigging is not None and self.configured:
+        self._closed = True
+        if self._configured:
             try:
-                export = _rigging.runtime_status()
-                _rigging.event(
+                export = telemetry.runtime_status()
+                telemetry.event(
                     "terminal",
                     {
                         "status": status,
                         "reason": reason[:512],
                         "export_queued_records": export.queued_records,
                         "export_lost_records": export.lost_records,
-                        "policy_step": self.policy_step,
-                        "last_progress_time_seconds": self.last_progress_time_seconds,
-                        "queue_depth": self.queue_depth,
-                        "queue_capacity": self.queue_capacity,
+                        "policy_step": self._state.policy_step,
+                        "last_progress_time_seconds": self._state.last_progress_time_seconds,
+                        "queue_depth": self._state.queue_depth,
+                        "queue_capacity": self._state.queue_capacity,
                     },
-                    attributes={"role": self.role},
+                    attributes={"role": self._role},
                 )
             except Exception:
                 logger.warning("Could not export telemetry terminal state", exc_info=True)
             self._drain_and_shutdown()
-        self.configured = False
+        self._configured = False
         if _active_process is self:
             _active_process = None
+            _active_state = _inactive_state
 
     def _drain_and_shutdown(self) -> None:
         deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
         try:
-            while _rigging.runtime_status().queued_records:
+            while telemetry.runtime_status().queued_records:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -294,7 +310,7 @@ class ProcessTelemetry:
         except Exception:
             logger.warning("Could not read telemetry queue status during shutdown", exc_info=True)
         try:
-            _rigging.shutdown(max(0.0, deadline - time.monotonic()))
+            telemetry.shutdown(max(0.0, deadline - time.monotonic()))
         except Exception:
             logger.warning("Could not shut down telemetry exporter", exc_info=True)
 

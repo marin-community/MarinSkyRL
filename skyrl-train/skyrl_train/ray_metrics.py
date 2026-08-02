@@ -119,27 +119,25 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[rigging_telemet
 def ray_metrics_telemetry(node_ip: str, metrics_port: int) -> Iterator[None]:
     """Own one bounded local Ray Prometheus collector for this controller process."""
     with process_telemetry(CONTROLLER_ROLE) as owner:
-        collector = None
-        if owner.configured:
-            try:
-                collector = PrometheusCollector(
-                    metric_source="ray",
-                    scraper=PrometheusScraper(f"http://{node_ip}:{metrics_port}/metrics"),
-                    processor=transform_ray_metrics,
-                    publisher=rigging_telemetry.MetricSnapshotPublisher(
-                        max_records=MAX_RAY_METRIC_SNAPSHOTS,
-                        attributes={"metric_source": "ray"},
-                    ),
-                )
-                collector.start()
-            except Exception:
-                logger.warning("Could not start local Ray metric forwarding; training will continue", exc_info=True)
-                collector = None
+        collector = owner.background_collector(
+            PrometheusCollector(
+                metric_source="ray",
+                scraper=PrometheusScraper(f"http://{node_ip}:{metrics_port}/metrics"),
+                processor=transform_ray_metrics,
+                publisher=rigging_telemetry.MetricSnapshotPublisher(
+                    max_records=MAX_RAY_METRIC_SNAPSHOTS,
+                    attributes={"metric_source": "ray"},
+                ),
+            )
+        )
+        try:
+            collector.start()
+        except Exception:
+            logger.warning("Could not start local Ray metric forwarding; training will continue", exc_info=True)
         try:
             yield
         finally:
-            if collector is not None:
-                try:
-                    collector.stop(timeout=COLLECTOR_STOP_TIMEOUT_SECONDS)
-                except Exception:
-                    logger.warning("Could not stop local Ray metric forwarding", exc_info=True)
+            try:
+                collector.stop(timeout=COLLECTOR_STOP_TIMEOUT_SECONDS)
+            except Exception:
+                logger.warning("Could not stop local Ray metric forwarding", exc_info=True)
