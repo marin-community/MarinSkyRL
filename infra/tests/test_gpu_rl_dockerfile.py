@@ -12,6 +12,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
 GPU_RL_ARM64_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl-arm64"
+GPU_RL_SYNC_SCRIPT = REPOSITORY_ROOT / "docker" / "sync_gpu_rl_env.sh"
 GPU_RL_DOCKERFILES = (
     GPU_RL_DOCKERFILE,
     GPU_RL_ARM64_DOCKERFILE,
@@ -29,33 +30,50 @@ def test_runtime_image_exposes_source_and_harbor_provenance(dockerfile_path: Pat
 def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
     """The validated wheel, rather than uv, supplies FlashAttention."""
     dockerfile = GPU_RL_DOCKERFILE.read_text()
-    sync_command = next(line for line in dockerfile.splitlines() if line.startswith("ENV RL_SYNC="))
+    sync_script = GPU_RL_SYNC_SCRIPT.read_text()
 
-    assert "--no-install-package flash-attn" in sync_command
+    assert "--no-install-package flash-attn" in sync_script
     assert "uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/flash_attn-*.whl" in dockerfile
 
 
 @pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
 def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -> None:
     dockerfile = dockerfile_path.read_text()
-    sync_command = next(line for line in dockerfile.splitlines() if line.startswith("ENV RL_SYNC="))
-    policy_selectors = [
-        line
-        for line in dockerfile.splitlines()
-        if line.lstrip().startswith('if [ "${INSTALL_MEGATRON}"') and "POLICY=" in line
-    ]
 
     assert "COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/" in dockerfile
     assert "COPY chat_templates ${SKYRL_HOME}/chat_templates" in dockerfile
-    assert "--extra vllm" in sync_command
-    assert "--extra cuda" not in sync_command
-    assert "--extra fsdp" not in sync_command
-    assert policy_selectors
-    assert all('POLICY="--extra megatron"' in line for line in policy_selectors)
-    assert all('POLICY="--extra fsdp"' in line for line in policy_selectors)
+    assert "COPY docker/sync_gpu_rl_env.sh /usr/local/bin/sync-gpu-rl-env" in dockerfile
+    assert "ENV RL_SYNC=/usr/local/bin/sync-gpu-rl-env" in dockerfile
     assert 'if [ "${INSTALL_MEGATRON}" = "0" ]; then' in dockerfile
-    assert "FSDP torchtitan backend not installed (INSTALL_MEGATRON=1)" in dockerfile
     assert "skyrl-train/uv.lock" not in dockerfile
+
+
+@pytest.mark.parametrize(("install_megatron", "policy_extra"), [("0", "fsdp"), ("1", "megatron")])
+def test_gpu_rl_sync_selects_policy_and_implied_cuda_component(
+    tmp_path: Path, install_megatron: str, policy_extra: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    arguments_path = tmp_path / "arguments"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$ARGUMENTS_PATH"\n')
+    fake_uv.chmod(0o755)
+    environment = os.environ | {
+        "ARGUMENTS_PATH": str(arguments_path),
+        "INSTALL_MEGATRON": install_megatron,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+
+    subprocess.run(
+        ["bash", str(GPU_RL_SYNC_SCRIPT), "--no-install-package", "vllm"],
+        env=environment,
+        check=True,
+    )
+
+    arguments = arguments_path.read_text().splitlines()
+    assert arguments[:7] == ["sync", "--frozen", "--no-cache", "--extra", "vllm", "--extra", "telemetry"]
+    assert ["--extra", policy_extra] == arguments[9:11]
+    assert arguments[-2:] == ["--no-install-package", "vllm"]
 
 
 @pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)

@@ -65,9 +65,9 @@ source ../.venv/bin/activate
 
 #### Training profiles and backends
 
-Select exactly one hardware profile: `cpu` or `cuda`. Add `fsdp`, `megatron`, or `deepspeed` for policy-backend
-dependencies and `vllm` for the rollout backend. Native CUDA artifacts are installed and validated by the GPU
-image build.
+Select `cpu` for CPU training. GPU-only component extras imply the `cuda` profile, so ordinary FSDP/vLLM
+training selects `vllm`; add `fsdp` only for its TorchTitan expert-parallel dependencies. Native CUDA artifacts
+are installed and validated by the GPU image build.
 
 Then, prepare the dataset:
 

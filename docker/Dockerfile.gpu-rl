@@ -234,6 +234,8 @@ COPY chat_templates ${SKYRL_HOME}/chat_templates
 COPY cloud ${SKYRL_HOME}/cloud
 COPY skyrl-train ${SKYRL_HOME}/skyrl-train
 COPY skyrl-gym ${SKYRL_HOME}/skyrl-gym
+COPY docker/sync_gpu_rl_env.sh /usr/local/bin/sync-gpu-rl-env
+RUN chmod 0755 /usr/local/bin/sync-gpu-rl-env
 
 # Make /opt/skyrl a REAL git working tree so the baked MarinSkyRL commit is
 # recorded (provenance) and /opt/skyrl serves as a clean baked-HEAD import
@@ -290,11 +292,10 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # each Kaniko RUN layer. In particular, the initial split layer reached 6.96 GiB
 # even though its installed closure was much smaller, reintroducing the RNO
 # ImagePullBackOff failure mode. The temporary cache leaves no pull payload.
-ENV RL_SYNC="uv sync --frozen --no-cache --extra vllm --extra telemetry --no-install-package flash-attn"
+ENV RL_SYNC=/usr/local/bin/sync-gpu-rl-env
 # layer 0: all small packages + torch; defer the 16 heavies.
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package flashinfer-jit-cache \
       --no-install-package nvidia-cudnn-cu12 \
       --no-install-package nvidia-cublas-cu12 \
@@ -305,8 +306,7 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 0 (small pkgs + torch) done (megatron=${INSTALL_MEGATRON})"
 # layer 1: + flashinfer-jit-cache (HB1)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package nvidia-cudnn-cu12 \
       --no-install-package nvidia-cublas-cu12 \
       --no-install-package mamba-ssm --no-install-package causal-conv1d \
@@ -316,8 +316,7 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 1 (flashinfer-jit-cache) done"
 # layer 2: + nvidia-cudnn-cu12 (HB2)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package nvidia-cublas-cu12 \
       --no-install-package mamba-ssm --no-install-package causal-conv1d \
       --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
@@ -326,8 +325,7 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 2 (cudnn) done"
 # layer 3: + nvidia-cublas-cu12 (HB3)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package mamba-ssm --no-install-package causal-conv1d \
       --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
@@ -335,16 +333,14 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 3 (cublas) done"
 # layer 4: + mamba-ssm + causal-conv1d (HB4)  [megatron-only]
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 4 (mamba-ssm, causal-conv1d) done"
 # layer 5: + nvidia-nccl-cu12 + flashinfer-cubin + transformer-engine-cu12 (HB5)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 5 (nccl, flashinfer-cubin, transformer-engine-cu12) done"
@@ -353,29 +349,25 @@ RUN cd ${SKYRL_HOME} && \
 # CoreWeave→GHCR pull path; each layer must stay near the proven <=3.5 GB profile.
 # layer 6: + nvidia-cusparse-cu12 (HB6a)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 6 (cusparse) done"
 # layer 7: + nvidia-cusparselt-cu12 (HB6b)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 7 (cusparselt) done"
 # layer 8: + nvidia-cusolver-cu12 (HB6c)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} \
+    ${RL_SYNC} \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 8 (cusolver) done"
 # layer 9: FINAL — installs the remaining heavies. FlashAttention remains
 # excluded because the validated wheel below supplies the locked version.
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
-    ${RL_SYNC} ${POLICY} && \
+    ${RL_SYNC} && \
     echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done (megatron=${INSTALL_MEGATRON})"
 
 # Validate and record the native donor before installing its artifacts.
