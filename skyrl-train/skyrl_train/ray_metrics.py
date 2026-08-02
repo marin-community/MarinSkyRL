@@ -119,7 +119,7 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[rigging_telemet
 def ray_metrics_telemetry(node_ip: str, metrics_port: int) -> Iterator[None]:
     """Own one bounded local Ray Prometheus collector for this controller process."""
     with process_telemetry(CONTROLLER_ROLE) as owner:
-        collector = owner.background_collector(
+        collector = owner.collector_or_inert(
             PrometheusCollector(
                 metric_source="ray",
                 scraper=PrometheusScraper(f"http://{node_ip}:{metrics_port}/metrics"),
