@@ -88,6 +88,9 @@ class SkyRLLaunchRequest:
 class IrisLaunchOptions:
     cluster: str
     cluster_config: str
+    cpu: float
+    memory: str
+    disk: str
     target_cluster: str | None
     parent_cluster_config: str | None
     priority: str
@@ -314,6 +317,12 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
         str(request.topology.gpus_per_node),
         "--gpu-variant",
         request.topology.gpu_variant,
+        "--cpu",
+        str(execution.cpu),
+        "--memory",
+        execution.memory,
+        "--disk",
+        execution.disk,
         "--cluster",
         execution.cluster,
         "--cluster-config",

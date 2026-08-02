@@ -130,6 +130,9 @@ def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
         execution=IrisLaunchOptions(
             cluster="cw-us-east-08a",
             cluster_config=str(_cluster_config(tmp_path)),
+            cpu=128,
+            memory="800GB",
+            disk="4TB",
             target_cluster=None,
             parent_cluster_config=None,
             priority="interactive",
@@ -196,6 +199,9 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
 
     assert args.rl_config == "config.yaml"
     assert args.model_path == "/tmp/iceball-input-model"
+    assert args.cpu == 128
+    assert args.memory == "800GB"
+    assert args.disk == "4TB"
 
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:
