@@ -1,7 +1,7 @@
 """
 Tests for expert parallel (EP).
 
-uv run --isolated --group dev --extra train-vllm pytest tests/gpu/test_expert_parallel_inference.py
+uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm pytest tests/gpu/test_expert_parallel_inference.py
 
 """
 

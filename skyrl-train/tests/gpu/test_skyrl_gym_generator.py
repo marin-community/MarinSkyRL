@@ -1,5 +1,5 @@
 """
-uv run --group dev --extra train-vllm --isolated pytest tests/gpu/test_skyrl_gym_generator.py
+uv run --group dev --extra cuda --extra fsdp --extra vllm --isolated pytest tests/gpu/test_skyrl_gym_generator.py
 """
 
 import os

@@ -13,7 +13,7 @@ cases need no process group.
 
 Run::
 
-    uv run --isolated --group dev --group train-cpu --extra train-vllm pytest tests/cpu/distributed/test_ep_mesh.py
+    uv run --isolated --group dev --extra cpu --extra fsdp pytest tests/cpu/distributed/test_ep_mesh.py
     # or directly (no pytest): python tests/cpu/distributed/test_ep_mesh.py
 """
 

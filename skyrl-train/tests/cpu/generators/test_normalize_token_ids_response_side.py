@@ -22,7 +22,7 @@ The fix coerces all four ``apply_chat_template`` results through
 path.
 
 Run:
-    uv run --isolated --group dev --group train-cpu pytest \
+    uv run --isolated --group dev --extra cpu pytest \
         tests/cpu/generators/test_normalize_token_ids_response_side.py
 """
 

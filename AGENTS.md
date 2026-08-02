@@ -37,15 +37,15 @@ extra only when resolving a GPU training environment.
 
 ```bash
 # Root launcher + skyrl-train CPU tests (what PR CI runs)
-uv sync --frozen --group dev --group train-cpu
+uv sync --frozen --group dev --extra cpu
 uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
 
 # FSDP2/vLLM image closure (GPU tests need an 8-GPU node; not run in PR CI)
-uv sync --frozen --extra train-vllm --group dev
+uv sync --frozen --extra cuda --extra fsdp --extra vllm --group dev
 uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not (integrations or megatron)"
 
 # Megatron image closure (select it together with the common training closure)
-uv sync --frozen --extra train-vllm --extra train-megatron --group dev
+uv sync --frozen --extra cuda --extra vllm --extra megatron --group dev
 
 # skyrl-gym
 cd skyrl-gym
@@ -65,9 +65,9 @@ uv run --project .. examples/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm
 NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 ```
 
-`train-vllm` is the common FSDP2/vLLM image closure. `train-megatron` adds only the policy-backend packages and
-must be selected with `train-vllm`. Native vLLM, FlashAttention, TransformerEngine, Mamba, and CUDA artifacts
-remain Docker image construction concerns; the extras describe their truthful Python dependency closure.
+`cpu` and `cuda` are mutually exclusive hardware profiles. `fsdp`, `megatron`, and `deepspeed` select policy
+backend dependencies; `vllm` selects the rollout backend. Native vLLM, FlashAttention, TransformerEngine,
+Mamba, and CUDA artifacts remain Docker image construction concerns; the extras describe their Python closure.
 
 ## Lint
 

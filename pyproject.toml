@@ -8,54 +8,69 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
+    "boto3",
+    "datasets>=4.0.0",
+    "debugpy==1.8.0",
+    "fastapi",
     "fsspec>=2024.0.0",
+    "func_timeout",
+    "hf_transfer",
     "huggingface-hub>=0.34.0",
+    "hydra-core==1.3.2",
+    "jaxtyping",
+    "loguru",
     "marin-iris==0.2.54.dev202607210800",
+    "ninja",
+    "nvidia-ml-py",
+    "omegaconf",
+    "pandas",
+    "polars",
     "pyyaml>=6.0",
+    "ray==2.51.1",
+    "requests",
+    "s3fs",
+    "smart_open",
+    "tensorboard",
     "tqdm>=4.66",
+    "transformers>=5.8.1,<5.9",
+    "uvicorn",
+    "wandb",
 ]
 
 [project.optional-dependencies]
 agentic = ["daytona>=0.92.0"]
-deepspeed = ["deepspeed==0.17.6 ; sys_platform == 'linux'"]
-train-vllm = [
+cpu = [
+    "accelerate>=1.14,<2",
+    "harbor-config",
+    "peft>=0.19",
+    "tensordict",
+    "torch==2.11.0",
+    "torchdata",
+]
+cuda = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "boto3 ; sys_platform == 'linux'",
-    "datasets>=4.0.0 ; sys_platform == 'linux'",
-    "debugpy==1.8.0 ; sys_platform == 'linux'",
-    "fastapi ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
+]
+deepspeed = [
+    "marinskyrl[cuda]==0.1.0 ; sys_platform == 'linux'",
+    "deepspeed==0.17.6 ; sys_platform == 'linux'",
+]
+fsdp = ["torchtitan ; sys_platform == 'linux'"]
+vllm = [
+    "marinskyrl[cuda]==0.1.0 ; sys_platform == 'linux'",
     "flash-attn==2.8.3 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
-    "func_timeout ; sys_platform == 'linux'",
-    "harbor-config ; sys_platform == 'linux'",
-    "hf_transfer ; sys_platform == 'linux'",
-    "hydra-core==1.3.2 ; sys_platform == 'linux'",
-    "jaxtyping ; sys_platform == 'linux'",
-    "loguru ; sys_platform == 'linux'",
-    "ninja ; sys_platform == 'linux'",
-    "nvidia-ml-py ; sys_platform == 'linux'",
-    "omegaconf ; sys_platform == 'linux'",
-    "pandas ; sys_platform == 'linux'",
-    "peft>=0.19 ; sys_platform == 'linux'",
-    "polars ; sys_platform == 'linux'",
-    "ray==2.51.1 ; sys_platform == 'linux'",
-    "requests ; sys_platform == 'linux'",
-    "s3fs ; sys_platform == 'linux'",
-    "smart_open ; sys_platform == 'linux'",
-    "tensorboard ; sys_platform == 'linux'",
-    "tensordict ; sys_platform == 'linux'",
-    "torch==2.11.0 ; sys_platform == 'linux'",
-    "torchdata ; sys_platform == 'linux'",
-    "torchtitan ; sys_platform == 'linux'",
-    "torchvision==0.26.0 ; sys_platform == 'linux'",
-    "transformers>=5.8.1,<5.9 ; sys_platform == 'linux'",
-    "uvicorn ; sys_platform == 'linux'",
     "vllm==0.23.0 ; sys_platform == 'linux'",
-    "wandb ; sys_platform == 'linux'",
 ]
-train-megatron = [
+megatron = [
+    "marinskyrl[cuda]==0.1.0 ; sys_platform == 'linux'",
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "mamba-ssm>=2.2,<3 ; sys_platform == 'linux'",
@@ -94,38 +109,6 @@ dev = [
     "pytest-asyncio",
     "universal-pathlib",
 ]
-train-cpu = [
-    "accelerate>=1.14,<2",
-    "boto3",
-    "datasets>=4.0.0",
-    "debugpy==1.8.0",
-    "fastapi",
-    "func_timeout",
-    "harbor-config",
-    "hf_transfer",
-    "hydra-core==1.3.2",
-    "jaxtyping",
-    "loguru",
-    "ninja",
-    "nvidia-ml-py",
-    "omegaconf",
-    "pandas",
-    "peft>=0.19",
-    "polars",
-    "ray==2.51.1",
-    "requests",
-    "s3fs",
-    "smart_open",
-    "tensorboard",
-    "tensordict",
-    "torch>=2.10.0",
-    "torchdata",
-    "tqdm",
-    "transformers>=5.8.1,<5.9",
-    "uvicorn",
-    "wandb",
-]
-
 [tool.hatch.build.targets.wheel.force-include]
 "chat_templates" = "chat_templates"
 "cloud/iris" = "cloud/iris"
@@ -135,6 +118,7 @@ train-cpu = [
 [tool.uv]
 package = true
 required-version = ">=0.8.10"
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
 environments = [
     "sys_platform == 'darwin'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -174,8 +158,11 @@ name = "flash-attn"
 requires-dist = ["torch", "einops"]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
-torchvision = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "pytorch-cu129", extra = "cuda" },
+]
+torchvision = { index = "pytorch-cu129", extra = "cuda" }
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
@@ -191,6 +178,11 @@ mamba-ssm = [
     { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu129"

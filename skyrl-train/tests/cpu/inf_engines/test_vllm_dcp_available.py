@@ -15,7 +15,7 @@ venv / production SIF) they are the gate.
 See notes/RL/skyrl/vllm_dcp_rollout_stages/stage1_vllm_support_and_plumbing_scope.md.
 
 Run:
-    uv run --isolated --group dev --group train-cpu pytest tests/cpu/inf_engines/test_vllm_dcp_available.py -v
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_vllm_dcp_available.py -v
 """
 
 import pytest

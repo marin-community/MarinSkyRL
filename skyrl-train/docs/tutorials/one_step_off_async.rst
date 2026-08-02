@@ -95,7 +95,7 @@ Finally, we modify the training configuration to use our new entrypoint and disa
 
 .. code-block:: bash
 
-  uv run --isolated --extra train-vllm -m examples.async.main_async \
+  uv run --isolated --extra cuda --extra fsdp --extra vllm -m examples.async.main_async \
     trainer.placement.colocate_all=false \
     trainer.placement.colocate_policy_ref=true \
     trainer.placement.policy_num_gpus_per_node=4 \

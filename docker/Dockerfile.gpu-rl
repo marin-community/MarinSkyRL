@@ -45,7 +45,7 @@
 #   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu129 / cp312 so
 #       flash_attn_2_cuda EXISTS (the root lock pins flash-attn 2.8.3; a
 #       `--no-deps` wheel swap here is the version that actually runs).
-#   - transformers 5.8.1 : root train-vllm pin (>=5.8.1,<5.9), required by the
+#   - transformers 5.8.1 : root package pin (>=5.8.1,<5.9), required by the
 #       megatron backend (megatron-bridge 0.5.0). vLLM 0.23.0 accepts it.
 #   - python 3.12 / CUDA 12.9 (devel base, for nvcc). 12.9 is a FLOOR, not a
 #       preference: the vLLM fork's Blackwell MXFP4 experts kernel static-asserts
@@ -250,10 +250,10 @@ RUN cd ${SKYRL_HOME} && \
     echo "/opt/skyrl git tree baked @ $(git -C ${SKYRL_HOME} rev-parse HEAD) (origin=marin-community/MarinSkyRL, source @ ${GITSHA})"
 
 # =============================================================================
-# RL environment — installed directly from the root lock. `train-vllm` selects
-# the FSDP2/vLLM closure, including torchtitan for MoE EP>1. When
-# INSTALL_MEGATRON=1, `train-megatron` adds the policy backend and native Python
-# wheel declarations from the same root project.
+# RL environment — installed directly from the root lock. `cuda`, `fsdp`, and
+# `vllm` select independent hardware, policy, and rollout dependency axes. When
+# INSTALL_MEGATRON=1, `megatron` adds the policy backend and native Python wheel
+# declarations from the same root project.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the OT-Agent iris launcher's hardcoded
@@ -265,7 +265,7 @@ ENV RL_ENV_DIR=/opt/openthoughts/envs/rl
 ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # =============================================================================
 # RE-LAYERED uv sync (packaging only — SAME lock, SAME closure, SAME versions).
-# A single `uv sync --frozen ... --extra train-megatron` RUN puts the ENTIRE env
+# A single `uv sync --frozen ... --extra megatron` RUN puts the ENTIRE env
 # (torch + all nvidia CUDA libs + flashinfer-jit-cache + TE + megatron) into
 # ONE ~17.6 GB layer, which ImagePullBackOffs indefinitely
 # over the CoreWeave->ghcr egress (a single >8 GB blob never completes — ops doc
@@ -290,11 +290,11 @@ ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # each Kaniko RUN layer. In particular, the initial split layer reached 6.96 GiB
 # even though its installed closure was much smaller, reintroducing the RNO
 # ImagePullBackOff failure mode. The temporary cache leaves no pull payload.
-ENV RL_SYNC="uv sync --frozen --no-cache --extra train-vllm --no-install-package flash-attn"
+ENV RL_SYNC="uv sync --frozen --no-cache --extra cuda --extra vllm --no-install-package flash-attn"
 # layer 0: all small packages + torch; defer the 16 heavies.
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package flashinfer-jit-cache \
       --no-install-package nvidia-cudnn-cu12 \
       --no-install-package nvidia-cublas-cu12 \
@@ -305,8 +305,8 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 0 (small pkgs + torch) done (megatron=${INSTALL_MEGATRON})"
 # layer 1: + flashinfer-jit-cache (HB1)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package nvidia-cudnn-cu12 \
       --no-install-package nvidia-cublas-cu12 \
       --no-install-package mamba-ssm --no-install-package causal-conv1d \
@@ -316,8 +316,8 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 1 (flashinfer-jit-cache) done"
 # layer 2: + nvidia-cudnn-cu12 (HB2)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package nvidia-cublas-cu12 \
       --no-install-package mamba-ssm --no-install-package causal-conv1d \
       --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
@@ -326,8 +326,8 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 2 (cudnn) done"
 # layer 3: + nvidia-cublas-cu12 (HB3)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package mamba-ssm --no-install-package causal-conv1d \
       --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
@@ -335,16 +335,16 @@ RUN cd ${SKYRL_HOME} && \
     echo "uv sync layer 3 (cublas) done"
 # layer 4: + mamba-ssm + causal-conv1d (HB4)  [megatron-only]
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package nvidia-nccl-cu12 --no-install-package flashinfer-cubin --no-install-package transformer-engine-cu12 \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 4 (mamba-ssm, causal-conv1d) done"
 # layer 5: + nvidia-nccl-cu12 + flashinfer-cubin + transformer-engine-cu12 (HB5)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package nvidia-cusparse-cu12 --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 5 (nccl, flashinfer-cubin, transformer-engine-cu12) done"
@@ -353,29 +353,29 @@ RUN cd ${SKYRL_HOME} && \
 # CoreWeave→GHCR pull path; each layer must stay near the proven <=3.5 GB profile.
 # layer 6: + nvidia-cusparse-cu12 (HB6a)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package nvidia-cusparselt-cu12 --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 6 (cusparse) done"
 # layer 7: + nvidia-cusparselt-cu12 (HB6b)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package nvidia-cusolver-cu12 \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 7 (cusparselt) done"
 # layer 8: + nvidia-cusolver-cu12 (HB6c)
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} \
       --no-install-package vllm --no-install-package nvidia-cufft-cu12 --no-install-package triton --no-install-package nvidia-nvshmem-cu12 --no-install-package nvidia-cuda-nvrtc-cu12 && \
     echo "uv sync layer 8 (cusolver) done"
 # layer 9: FINAL — installs the remaining heavies. FlashAttention remains
 # excluded because the validated wheel below supplies the locked version.
 RUN cd ${SKYRL_HOME} && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then MEG="--extra train-megatron"; else MEG=""; fi && \
-    ${RL_SYNC} ${MEG} && \
+    if [ "${INSTALL_MEGATRON}" = "1" ]; then POLICY="--extra megatron"; else POLICY="--extra fsdp"; fi && \
+    ${RL_SYNC} ${POLICY} && \
     echo "uv sync FINAL (vllm, cufft, triton, nvshmem, nvrtc + closure verify) done (megatron=${INSTALL_MEGATRON})"
 
 # Validate and record the native donor before installing its artifacts.
@@ -450,7 +450,7 @@ RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
         ${RL_ENV_DIR}/bin/python -c "import causal_conv1d, mamba_ssm, megatron.core, megatron.bridge, transformer_engine; print('Megatron native imports OK')"; \
     else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
 
-# torchtitan EP>1 assert (the `train-vllm` extra installed it from the lock).
+# torchtitan EP>1 assert (the `fsdp` extra installed it from the lock).
 RUN ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel import ExpertParallel; print('torchtitan ExpertParallel import OK (apply_ep EP>1 unblocked)')"
 
 # The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +

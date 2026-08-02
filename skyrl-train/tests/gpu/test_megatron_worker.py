@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --group dev --extra train-vllm --extra train-megatron -- pytest tests/gpu/test_megatron_worker.py
+uv run --isolated --group dev --extra cuda --extra vllm --extra megatron -- pytest tests/gpu/test_megatron_worker.py
 """
 
 import ray

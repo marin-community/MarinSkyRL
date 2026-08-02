@@ -22,7 +22,7 @@ We provide baseline examples for GRPO training on GSM8K for each of these backen
 
 .. code-block:: bash
 
-    uv run --isolated --extra train-vllm -m skyrl_train.entrypoints.main_base \
+    uv run --isolated --extra cuda --extra fsdp --extra vllm -m skyrl_train.entrypoints.main_base \
         trainer.algorithm.advantage_estimator="grpo" \
         data.train_data="['$HOME/data/gsm8k/train.parquet']" \
         data.val_data="['$HOME/data/gsm8k/validation.parquet']" \
@@ -45,8 +45,8 @@ DeepSpeed requires installing the optional ``deepspeed`` extra. You can either:
 .. code-block:: bash
 
     # Modify the uv run command in examples/gsm8k/run_gsm8k.sh to include deepspeed extra:
-    # Change: uv run --isolated --extra train-vllm -m skyrl_train.entrypoints.main_base \
-    # To:     uv run --isolated --extra train-vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
+    # Change: uv run --isolated --extra cuda --extra fsdp --extra vllm -m skyrl_train.entrypoints.main_base \
+    # To:     uv run --isolated --extra cuda --extra fsdp --extra vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
 
     # Then run with DeepSpeed strategy:
     bash examples/gsm8k/run_gsm8k.sh trainer.strategy=deepspeed

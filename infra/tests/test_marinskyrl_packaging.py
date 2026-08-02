@@ -51,15 +51,26 @@ def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
     requirements = Parser().parsestr(built_wheel.metadata).get_all("Requires-Dist", [])
     base_requirements = {requirement.partition(";")[0].strip().split("[")[0].split()[0].lower() for requirement in requirements if "extra ==" not in requirement}
 
-    assert base_requirements.isdisjoint({"flash-attn", "ray", "torch", "transformer-engine", "vllm"})
+    assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm"})
+
+
+def test_training_extras_separate_hardware_policy_and_rollout_axes() -> None:
+    extras = PYPROJECT["project"]["optional-dependencies"]
+
+    assert any(requirement.startswith("torch==") for requirement in extras["cpu"])
+    assert any(requirement.startswith("torch==") for requirement in extras["cuda"])
+    assert any(requirement.startswith("torchtitan") for requirement in extras["fsdp"])
+    assert any(requirement.startswith("vllm==") for requirement in extras["vllm"])
+    assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
+    assert [{"extra": "cpu"}, {"extra": "cuda"}] in PYPROJECT["tool"]["uv"]["conflicts"]
 
 
 def test_megatron_extra_has_native_wheels_for_both_linux_architectures() -> None:
     extras = PYPROJECT["project"]["optional-dependencies"]
     sources = PYPROJECT["tool"]["uv"]["sources"]
 
-    assert extras["train-megatron"]
-    assert any(requirement.startswith("megatron-core") for requirement in extras["train-megatron"])
+    assert extras["megatron"]
+    assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
     for package in ("causal-conv1d", "mamba-ssm", "transformer-engine-torch"):
         urls = sources[package]
         assert any("linux_x86_64.whl" in source["url"] for source in urls)

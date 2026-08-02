@@ -1,5 +1,5 @@
 """
-uv run --isolated --group dev --extra train-vllm --with verifiers pytest tests/gpu/gpu_ci/test_verifiers_generator.py
+uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm --with verifiers pytest tests/gpu/gpu_ci/test_verifiers_generator.py
 """
 
 import pytest

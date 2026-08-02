@@ -39,17 +39,19 @@ def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
 def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -> None:
     dockerfile = dockerfile_path.read_text()
     sync_command = next(line for line in dockerfile.splitlines() if line.startswith("ENV RL_SYNC="))
-    megatron_selectors = [
+    policy_selectors = [
         line
         for line in dockerfile.splitlines()
-        if line.lstrip().startswith('if [ "${INSTALL_MEGATRON}"') and "MEG=" in line
+        if line.lstrip().startswith('if [ "${INSTALL_MEGATRON}"') and "POLICY=" in line
     ]
 
     assert "COPY pyproject.toml uv.lock README.md LICENSE ${SKYRL_HOME}/" in dockerfile
     assert "COPY chat_templates ${SKYRL_HOME}/chat_templates" in dockerfile
-    assert "--extra train-vllm" in sync_command
-    assert megatron_selectors
-    assert all('MEG="--extra train-megatron"' in line for line in megatron_selectors)
+    assert "--extra cuda --extra vllm" in sync_command
+    assert "--extra fsdp" not in sync_command
+    assert policy_selectors
+    assert all('POLICY="--extra megatron"' in line for line in policy_selectors)
+    assert all('POLICY="--extra fsdp"' in line for line in policy_selectors)
     assert "skyrl-train/uv.lock" not in dockerfile
 
 

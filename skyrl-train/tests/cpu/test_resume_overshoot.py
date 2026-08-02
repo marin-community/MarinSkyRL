@@ -19,7 +19,7 @@ process exits 0 (clean COMPLETED).
 These tests exercise the decision logic and the finalize handler directly,
 without booting Ray / models, so they run on CPU.
 
-    uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_resume_overshoot.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/test_resume_overshoot.py
 """
 
 import asyncio

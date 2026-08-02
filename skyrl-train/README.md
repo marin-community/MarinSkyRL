@@ -59,15 +59,15 @@ Then, create a new virtual environment and install the dependencies:
 
 ```bash
 # creates the root project venv at ../.venv/
-uv sync --extra train-vllm
+uv sync --extra cuda --extra fsdp --extra vllm
 source ../.venv/bin/activate
 ```
 
-#### Training extras
+#### Training profiles and backends
 
-The root `train-vllm` extra pins the common FSDP2/vLLM image closure at torch 2.11.0 from the CUDA 12.9 index.
-Select `train-megatron` together with `train-vllm` when using the Megatron policy backend. Native CUDA artifacts
-are installed and validated by the GPU image build.
+Select exactly one hardware profile: `cpu` or `cuda`. Add `fsdp`, `megatron`, or `deepspeed` for policy-backend
+dependencies and `vllm` for the rollout backend. Native CUDA artifacts are installed and validated by the GPU
+image build.
 
 Then, prepare the dataset:
 

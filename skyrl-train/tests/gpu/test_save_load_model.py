@@ -5,7 +5,7 @@ For FSDP and DeepSpeed, run with:
 uv run --isolated --group dev --extra deepspeed -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
 
 For Megatron, run with:
-uv run --isolated --group dev --extra train-vllm --extra train-megatron -- pytest tests/gpu/test_save_load_model.py -m "megatron"
+uv run --isolated --group dev --extra cuda --extra vllm --extra megatron -- pytest tests/gpu/test_save_load_model.py -m "megatron"
 
 Context-Parallel (CP) resume note: under CP the model weights are FSDP-sharded on
 the ``fsdp`` submesh, which is ORTHOGONAL to the ``cp`` submesh — CP shards only

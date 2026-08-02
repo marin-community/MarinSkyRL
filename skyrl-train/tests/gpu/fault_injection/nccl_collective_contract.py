@@ -2,7 +2,7 @@
 
 Run on an otherwise idle node with at least four GPUs:
 
-    uv run --isolated --group dev --extra train-vllm \
+    uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm \
         pytest -s tests/gpu/fault_injection/nccl_collective_contract.py
 
 The controller launches disposable torchrun gangs for one healthy EP collective

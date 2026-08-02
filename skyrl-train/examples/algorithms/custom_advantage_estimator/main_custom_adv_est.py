@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra train-vllm -m examples.algorithm.custom_advantage_estimator.main_custom_adv_est
+uv run --isolated --extra cuda --extra fsdp --extra vllm -m examples.algorithm.custom_advantage_estimator.main_custom_adv_est
 """
 
 import ray

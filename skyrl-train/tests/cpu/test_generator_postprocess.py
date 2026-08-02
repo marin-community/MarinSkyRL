@@ -2,7 +2,7 @@
 Test for token-level rewards support in RayPPOTrainer.postprocess_generator_output method.
 
 Run with:
-uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_generator_postprocess.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/test_generator_postprocess.py
 """
 
 from unittest.mock import MagicMock

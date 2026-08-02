@@ -3,7 +3,7 @@
 Every trainer role must expose the same disabled EP defaults.
 
 Run:
-    uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_ep_config_defaults.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/test_ep_config_defaults.py
 """
 
 from skyrl_train.config.utils import get_default_config

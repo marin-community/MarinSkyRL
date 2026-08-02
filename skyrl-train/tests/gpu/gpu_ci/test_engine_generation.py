@@ -1,6 +1,6 @@
 """
 # Run only vllm tests (requires vllm extra):
-uv run --isolated --group dev --extra train-vllm pytest tests/gpu/gpu_ci/test_engine_generation.py -m "vllm"
+uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm pytest tests/gpu/gpu_ci/test_engine_generation.py -m "vllm"
 
 """
 

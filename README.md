@@ -35,9 +35,9 @@ uv sync --frozen
 uv run --frozen marinskyrl --help
 ```
 
-GPU images select `train-vllm` for the common FSDP2/vLLM closure and add `train-megatron` for the Megatron
-policy backend. Native CUDA wheels are validated and installed by the GPU Docker builds rather than implied by
-the CPU base install.
+Training environments select one hardware profile and independent backend extras. The standard image uses
+`cuda`, `fsdp`, and `vllm`; the Megatron variant also selects `megatron`. Native CUDA wheels are validated and
+installed by the GPU Docker builds rather than implied by the CPU-only root package.
 
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base

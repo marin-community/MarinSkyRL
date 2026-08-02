@@ -9,7 +9,7 @@ CPU fp32, including the Qwen3-Next shared-expert sigmoid-gate adaptation.
 
 Run::
 
-    uv run --isolated --group dev --group train-cpu pytest tests/cpu/models/test_moe_weight_remap.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/models/test_moe_weight_remap.py
     # or: python tests/cpu/models/test_moe_weight_remap.py
 """
 

@@ -14,7 +14,7 @@ This is the load-bearing GH200 device-pinning logic. It must:
     (so modulo "spreads" but is positional/logical, not physical) while
     per-GPU bundles give the true distinct physical ids.
 
-uv run --isolated --group dev --group train-cpu pytest tests/cpu/test_resolve_pinned_local_rank.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/test_resolve_pinned_local_rank.py
 """
 
 from skyrl_train.utils.utils import resolve_pinned_local_rank, resolve_actor_cuda_env

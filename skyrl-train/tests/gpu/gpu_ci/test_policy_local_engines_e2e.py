@@ -1,6 +1,6 @@
 """
 # Run only vllm tests (requires vllm extra):
-uv run --isolated --group dev --extra train-vllm --extra deepspeed pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
+uv run --isolated --group dev --extra cuda --extra fsdp --extra vllm --extra deepspeed pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
 
 """
 

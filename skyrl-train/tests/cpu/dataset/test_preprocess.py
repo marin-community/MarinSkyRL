@@ -1,5 +1,5 @@
 """
-uv run --isolated --group dev --group train-cpu pytest tests/cpu/dataset/test_preprocess.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/dataset/test_preprocess.py
 """
 
 import pytest

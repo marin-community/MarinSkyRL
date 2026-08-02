@@ -71,9 +71,9 @@ jobs:
       - name: Check the macOS CPU environment resolves
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
-        run: uv sync --frozen --dry-run --group dev --group train-cpu --python-platform aarch64-apple-darwin
+        run: uv sync --frozen --dry-run --group dev --extra cpu --python-platform aarch64-apple-darwin
       - name: Install skyrl-train
-        run: uv sync --frozen --group dev --group train-cpu
+        run: uv sync --frozen --group dev --extra cpu
       - name: Check the lockfile is current
         run: uv lock --check
       - name: Run cpu tests
@@ -90,7 +90,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install skyrl-train
-        run: uv sync --frozen --group dev --group train-cpu
+        run: uv sync --frozen --group dev --extra cpu
       - name: Exercise local filesystem I/O
         run: uv run --frozen pytest skyrl-train/tests/cpu/utils/test_io.py
 
