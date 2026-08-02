@@ -69,7 +69,7 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
         run: uv sync --frozen --dry-run --extra dev --python-platform aarch64-apple-darwin
       - name: Install skyrl-train
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra telemetry
       - name: Check the lockfile is current
         run: uv lock --check
       - name: Run cpu tests

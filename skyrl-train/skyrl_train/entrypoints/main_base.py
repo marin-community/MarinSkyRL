@@ -31,7 +31,7 @@ import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.logging_utils import log_exception_as_text
-from skyrl_train.telemetry import process_telemetry
+from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
 import asyncio
 import multiprocessing as mp
 
@@ -518,7 +518,7 @@ def skyrl_entrypoint(cfg: DictConfig):
     # through), NOT here -- terminal_bench and other entrypoints use their own
     # skyrl_entrypoint wrappers, so the fix must be on run(). See run() above.
     # make sure that the training loop is not run on the head node.
-    with process_telemetry("trainer"):
+    with process_telemetry(TRAINER_ROLE):
         exp = BasePPOExp(cfg)
         exp.run()
 
@@ -537,7 +537,7 @@ def main(cfg: DictConfig) -> None:
 
     initialize_ray(cfg)
 
-    with process_telemetry("driver"):
+    with process_telemetry(DRIVER_ROLE):
         # Register SIGTERM handler so that cluster preemption / job scheduler
         # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
         def _sigterm_handler(signum, frame):

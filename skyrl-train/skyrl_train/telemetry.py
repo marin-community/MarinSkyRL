@@ -16,8 +16,10 @@ except ImportError:
 
 
 SERVICE = "marinskyrl"
-ProcessRole = Literal["driver", "trainer"]
-TRAINER_ROLE: ProcessRole = "trainer"
+_TELEMETRY_ROLE = getattr(_rigging, "TelemetryRole", None)
+DRIVER_ROLE = _TELEMETRY_ROLE.DRIVER if _TELEMETRY_ROLE is not None else "driver"
+TRAINER_ROLE = _TELEMETRY_ROLE.TRAINER if _TELEMETRY_ROLE is not None else "trainer"
+CONTROLLER_ROLE = _TELEMETRY_ROLE.CONTROLLER if _TELEMETRY_ROLE is not None else "controller"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 _active_process: "ProcessTelemetry | None" = None
@@ -40,7 +42,6 @@ class TelemetryConfig:
     root_run_uid: str | None = None
     execution_uid: str | None = None
     serving_job_id: str | None = None
-    shutdown_timeout_seconds: float = SHUTDOWN_TIMEOUT_SECONDS
 
     @classmethod
     def from_environment(cls) -> "TelemetryConfig":
@@ -87,18 +88,20 @@ def _ray_resources() -> dict[str, str]:
         logger.warning("Could not read Ray identity for telemetry; continuing without it")
         return {}
 
+    try:
+        values = (
+            ("ray_job_id", context.get_job_id(), False),
+            ("ray_task_id", context.get_task_id(), False),
+            ("ray_task_attempt", context.get_task_attempt_number(), True),
+            ("actor_uid", context.get_actor_id(), False),
+            ("node_uid", context.get_node_id(), False),
+        )
+    except Exception:
+        logger.warning("Could not read Ray identity for telemetry; continuing without it", exc_info=True)
+        return {}
+
     resources: dict[str, str] = {}
-    for name, getter, keep_zero in (
-        ("ray_job_id", "get_job_id", False),
-        ("ray_task_id", "get_task_id", False),
-        ("ray_task_attempt", "get_task_attempt_number", True),
-        ("actor_uid", "get_actor_id", False),
-        ("node_uid", "get_node_id", False),
-    ):
-        try:
-            raw_value = getattr(context, getter)()
-        except Exception:
-            continue
+    for name, raw_value, keep_zero in values:
         if raw_value is None:
             continue
         value = str(raw_value)
@@ -107,7 +110,7 @@ def _ray_resources() -> dict[str, str]:
     return resources
 
 
-def _resources(config: TelemetryConfig, role: ProcessRole) -> dict[str, str]:
+def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
     resources = {
         **_iris_resources(),
         **_ray_resources(),
@@ -203,7 +206,7 @@ def record_rollout_buffer(depth: int, capacity: int) -> None:
 
 
 class ProcessTelemetry:
-    def __init__(self, config: TelemetryConfig, role: ProcessRole) -> None:
+    def __init__(self, config: TelemetryConfig, role: str) -> None:
         self.config = config
         self.role = role
         self.configured = False
@@ -233,13 +236,13 @@ class ProcessTelemetry:
             )
             self.configured = bool(_rigging.runtime_status().configured)
         except Exception:
-            logger.warning("Could not configure telemetry; export remains inert")
+            logger.warning("Could not configure telemetry; export remains inert", exc_info=True)
             self.configured = False
         if self.configured:
             try:
                 _rigging.event("lifecycle", {"state": "started"}, attributes={"role": self.role})
             except Exception:
-                pass
+                logger.warning("Could not export telemetry lifecycle start", exc_info=True)
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
@@ -274,14 +277,14 @@ class ProcessTelemetry:
                     attributes={"role": self.role},
                 )
             except Exception:
-                pass
+                logger.warning("Could not export telemetry terminal state", exc_info=True)
             self._drain_and_shutdown()
         self.configured = False
         if _active_process is self:
             _active_process = None
 
     def _drain_and_shutdown(self) -> None:
-        deadline = time.monotonic() + self.config.shutdown_timeout_seconds
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
         try:
             while _rigging.runtime_status().queued_records:
                 remaining = deadline - time.monotonic()
@@ -289,12 +292,12 @@ class ProcessTelemetry:
                     break
                 time.sleep(min(0.01, remaining))
         except Exception:
-            pass
+            logger.warning("Could not read telemetry queue status during shutdown", exc_info=True)
         try:
             _rigging.shutdown(max(0.0, deadline - time.monotonic()))
         except Exception:
-            pass
+            logger.warning("Could not shut down telemetry exporter", exc_info=True)
 
 
-def process_telemetry(role: ProcessRole) -> ProcessTelemetry:
+def process_telemetry(role: str) -> ProcessTelemetry:
     return ProcessTelemetry(TelemetryConfig.from_environment(), role)

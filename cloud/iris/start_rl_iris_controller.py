@@ -25,6 +25,7 @@ local path — opened via ``fsspec``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -37,6 +38,11 @@ import time
 
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
+
+try:
+    from skyrl_train.ray_metrics import ray_metrics_telemetry as _ray_metrics_telemetry
+except ImportError:
+    _ray_metrics_telemetry = None
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -858,6 +864,12 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
+def _ray_metrics_context(node_ip: str):
+    if _ray_metrics_telemetry is None:
+        return contextlib.nullcontext()
+    return _ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT)
+
+
 # --- R2 object-store spilling ----------------------------------------------------
 # Ray spills its object store to /tmp/ray/session*/ray_spilled_objects on LOCAL
 # disk when plasma overflows. The async RL generator over-produces rollouts during
@@ -1285,26 +1297,27 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
-    env = training_driver_env(derived_gloo_ifname)
-    env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
-    env["PYTHONUNBUFFERED"] = "1"
+    with _ray_metrics_context(head_ip):
+        env = training_driver_env(derived_gloo_ifname)
+        env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
+        env["PYTHONUNBUFFERED"] = "1"
 
-    _log("Launching MarinSkyRL training driver:")
-    _log("  " + " ".join(train_argv))
-    sys.stdout.flush()
-    sys.stderr.flush()
+        _log("Launching MarinSkyRL training driver:")
+        _log("  " + " ".join(train_argv))
+        sys.stdout.flush()
+        sys.stderr.flush()
 
-    # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
-    # `process` here arms its driver-teardown path (the closure reads this value).
-    process = subprocess.Popen(train_argv, env=env, start_new_session=True)
+        # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
+        # `process` here arms its driver-teardown path (the closure reads this value).
+        process = subprocess.Popen(train_argv, env=env, start_new_session=True)
 
-    exit_code = process.wait()
-    if exit_code != 0:
-        capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
-    # Final flush of this node's Ray session logs before teardown reaps them.
-    if ray_log_sync_stop is not None:
-        ray_log_sync_stop.set()
-    sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        exit_code = process.wait()
+        if exit_code != 0:
+            capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
+        # Final flush of this node's Ray session logs before teardown reaps them.
+        if ray_log_sync_stop is not None:
+            ray_log_sync_stop.set()
+        sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
         _set_marker(args.rendezvous_dir, DONE_FILENAME)
@@ -1357,14 +1370,15 @@ def run_worker(args: argparse.Namespace) -> int:
     # Block until the head publishes the done marker (training finished) or we
     # are signalled. The training driver on rank 0 schedules actors onto this
     # node's GPUs; this process just keeps the Ray node alive.
-    while not stop.is_set():
-        if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
-            _log(f"Worker rank {rank} saw head done-marker; shutting down.")
-            break
-        time.sleep(POLL_INTERVAL)
-    # Final flush of this worker node's Ray session logs before Ray teardown.
-    ray_log_sync_stop.set()
-    sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
+    with _ray_metrics_context(node_ip):
+        while not stop.is_set():
+            if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
+                _log(f"Worker rank {rank} saw head done-marker; shutting down.")
+                break
+            time.sleep(POLL_INTERVAL)
+        # Final flush of this worker node's Ray session logs before Ray teardown.
+        ray_log_sync_stop.set()
+        sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
     return 0
 
