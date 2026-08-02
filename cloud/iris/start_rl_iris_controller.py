@@ -884,17 +884,13 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
         return None
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
         return None
-    # Ray's smart_open spill backend imports boto3 directly. An explicit R2 request
-    # falls back to launcher-owned local scratch if the image lacks boto3.
+    # Ray's smart_open spill backend imports boto3 directly.
     try:
         import boto3  # noqa: F401
-    except ImportError:
-        _log(
-            "WARNING: boto3 missing -> Ray R2 object-spilling DISABLED (local scratch fallback); "
-            "rebuild gpu-rl image with boto3 (Dockerfile.gpu-rl) to enable. This run risks "
-            "the ephemeral-storage eviction if its object store spills > the --disk limit."
-        )
-        return None
+    except ImportError as error:
+        raise RuntimeError(
+            "OT_AGENT_RAY_SPILL_TO_R2=1 requires boto3; rebuild the GPU-RL image with boto3 or disable R2 spilling"
+        ) from error
     return f"{rendezvous_dir.rstrip('/')}/ray_spill"
 
 
@@ -906,13 +902,12 @@ def _ray_local_spill_dir() -> str:
 
 
 def _ray_spill_flags(spill_uri: str | None, local_spill_dir: str | None) -> list[str]:
-    """Build the head-node flag for local scratch or explicit R2 spilling.
-
-    The R2 object_spilling_config value is itself a JSON string (double-encoded), per
-    Ray's system-config schema. min_spilling_size=0 applies only to explicit R2 mode."""
+    """Build the head-node flag for local scratch or explicit R2 spilling."""
     if not spill_uri:
         assert local_spill_dir is not None
         return [f"--object-spilling-directory={local_spill_dir}"]
+    # Ray expects object_spilling_config as a JSON string nested inside the system
+    # config. min_spilling_size=0 applies only to explicit R2 mode.
     spilling_config = json.dumps(
         {
             "type": "smart_open",
