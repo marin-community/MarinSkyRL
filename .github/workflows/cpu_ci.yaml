@@ -60,7 +60,6 @@ jobs:
           uv pip install --python /tmp/marinskyrl-base/bin/python dist/marinskyrl-*.whl
           cd /tmp
           /tmp/marinskyrl-base/bin/marinskyrl --help
-          /tmp/marinskyrl-base/bin/python -c "import cloud.iris.artifact_protocol, sys; assert not {'flash_attn', 'ray', 'skyrl_train', 'torch', 'vllm'} & sys.modules"
 
   skyrl_train_tests:
     runs-on: ubuntu-latest

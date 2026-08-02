@@ -33,7 +33,7 @@
 #
 # =============================================================================
 # Version pins (ground truth = root pyproject.toml + uv.lock):
-#   - torch 2.11.0+cu129 : skyrl-train pins torch to the cu129 index, matching
+#   - torch 2.11.0+cu129 : the root project pins torch to the cu129 index, matching
 #       the 12.9 toolkit below. The two move together on purpose. An earlier
 #       attempt raised only the toolkit and left torch on cu128; a split
 #       toolchain builds but leaves a native extension linked against one CUDA
@@ -43,9 +43,9 @@
 #       marin-community/vllm @ VLLM_FORK_COMMIT. The lock uses stock vLLM 0.23.0
 #       as its dependency anchor; native files come from the validated donor.
 #   - flash-attn 2.8.3   : compiled from source vs torch 2.11.0+cu129 / cp312 so
-#       flash_attn_2_cuda EXISTS (skyrl-train's lock leaves flash-attn unpinned; a
+#       flash_attn_2_cuda EXISTS (the root lock pins flash-attn 2.8.3; a
 #       `--no-deps` wheel swap here is the version that actually runs).
-#   - transformers 5.8.1 : skyrl-train base pin (>=5.8.1,<5.9), required by the
+#   - transformers 5.8.1 : root train-vllm pin (>=5.8.1,<5.9), required by the
 #       megatron backend (megatron-bridge 0.5.0). vLLM 0.23.0 accepts it.
 #   - python 3.12 / CUDA 12.9 (devel base, for nvcc). 12.9 is a FLOOR, not a
 #       preference: the vLLM fork's Blackwell MXFP4 experts kernel static-asserts

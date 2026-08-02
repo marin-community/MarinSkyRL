@@ -306,3 +306,11 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
     assert exit_code == 0
     assert json.loads(captured.out)["state"] == "prepared"
     assert "human launcher log" in captured.err
+
+
+def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    artifact_protocol._write_json("result.json", {"state": "prepared"})
+
+    assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}

@@ -18,7 +18,6 @@ dependencies = [
 [project.optional-dependencies]
 agentic = ["daytona>=0.92.0"]
 deepspeed = ["deepspeed==0.17.6 ; sys_platform == 'linux'"]
-test = ["pytest>=8.4"]
 train-vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "boto3 ; sys_platform == 'linux'",
@@ -76,6 +75,14 @@ analysis = [
     "matplotlib",
     "pandas",
     "tabulate",
+]
+docs = [
+    "myst-parser>=2.0.0",
+    "sphinx>=7.0.0",
+    "sphinx-autobuild>=2021.3.14",
+    "sphinx-autodoc-typehints>=1.25.0",
+    "sphinx-copybutton>=0.5.0",
+    "sphinx-rtd-theme>=2.0.0",
 ]
 dev = [
     "boto3",

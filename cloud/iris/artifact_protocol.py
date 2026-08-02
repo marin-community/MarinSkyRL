@@ -7,6 +7,7 @@ import contextlib
 import importlib.metadata
 import json
 import os
+import posixpath
 import subprocess
 import sys
 import tempfile
@@ -139,18 +140,6 @@ class IrisLaunchBackend:
             return launch(args)
 
 
-def _runtime_identity(value: dict[str, Any]) -> RuntimeIdentity:
-    return RuntimeIdentity(**value)
-
-
-def _model_locator(value: dict[str, Any]) -> ModelLocator:
-    return ModelLocator(**value)
-
-
-def _data_locator(value: dict[str, Any]) -> DataLocator:
-    return DataLocator(**value)
-
-
 def _resolved_data_path(locator: DataLocator) -> str:
     relative = Path(locator.relative_path)
     if relative.is_absolute() or ".." in relative.parts:
@@ -166,10 +155,10 @@ def launch_envelope(value: dict[str, Any]) -> ArtifactLaunchEnvelope:
             run_id=request["run_id"],
             attempt_id=request["attempt_id"],
             config_yaml=request["config_yaml"],
-            runtime=_runtime_identity(request["runtime"]),
-            model=_model_locator(request["model"]),
-            train_data=tuple(_data_locator(locator) for locator in request["train_data"]),
-            validation_data=tuple(_data_locator(locator) for locator in request["validation_data"]),
+            runtime=RuntimeIdentity(**request["runtime"]),
+            model=ModelLocator(**request["model"]),
+            train_data=tuple(DataLocator(**locator) for locator in request["train_data"]),
+            validation_data=tuple(DataLocator(**locator) for locator in request["validation_data"]),
             topology=SkyRLTopology(**request["topology"]),
             output=SkyRLOutputPaths(**request["output"]),
             seed=int(request["seed"]),
@@ -212,7 +201,9 @@ def _installed_launcher_commit() -> str:
         commit = json.loads(direct_url).get("vcs_info", {}).get("commit_id")
         if commit:
             return str(commit)
-    repository_root = str(Path(__file__).resolve().parents[2])
+    repository_root = Path(__file__).resolve().parents[2]
+    if not (repository_root / ".git").exists() or not (repository_root / "pyproject.toml").exists():
+        raise RuntimeError("Installed marinskyrl wheel has no VCS commit identity in direct_url.json")
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository_root,
@@ -224,7 +215,7 @@ def _installed_launcher_commit() -> str:
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
     filesystem, path = fsspec.core.url_to_fs(uri)
-    parent = path.rsplit("/", 1)[0]
+    parent = posixpath.dirname(path)
     if parent:
         filesystem.makedirs(parent, exist_ok=True)
     with filesystem.open(path, "w") as destination:

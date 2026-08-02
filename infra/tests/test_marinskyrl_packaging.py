@@ -2,34 +2,50 @@
 
 from __future__ import annotations
 
+from email.parser import Parser
 from pathlib import Path
+import subprocess
 import tomllib
+import zipfile
+
+import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
 
 
-def test_root_wheel_owns_launcher_and_training_packages() -> None:
-    project = PYPROJECT["project"]
-    force_include = PYPROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+@pytest.fixture(scope="module")
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> tuple[set[str], str, str]:
+    output = tmp_path_factory.mktemp("marinskyrl-wheel")
+    subprocess.run(["uv", "build", "--wheel", "--out-dir", str(output)], cwd=REPOSITORY_ROOT, check=True)
+    wheel = next(output.glob("marinskyrl-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        entry_points_name = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
+        metadata = archive.read(metadata_name).decode()
+        entry_points = archive.read(entry_points_name).decode()
+    return names, metadata, entry_points
 
-    assert project["name"] == "marinskyrl"
-    assert project["scripts"]["marinskyrl"] == "cloud.iris.artifact_protocol:main"
-    assert force_include == {
-        "cloud/iris": "cloud/iris",
-        "skyrl-gym/skyrl_gym": "skyrl_gym",
-        "skyrl-train/skyrl_train": "skyrl_train",
-    }
+
+def test_root_wheel_owns_launcher_and_training_packages(built_wheel: tuple[set[str], str, str]) -> None:
+    names, metadata, entry_points = built_wheel
+
+    assert Parser().parsestr(metadata)["Name"] == "marinskyrl"
+    assert "marinskyrl = cloud.iris.artifact_protocol:main" in entry_points
+    assert "cloud/iris/artifact_protocol.py" in names
+    assert "skyrl_gym/__init__.py" in names
+    assert "skyrl_train/__init__.py" in names
+    assert "skyrl_train/config/ppo_base_config.yaml" in names
 
 
-def test_base_dependencies_are_cpu_only() -> None:
-    dependency_names = {
-        dependency.split("[")[0].split("=")[0].split(">")[0].lower()
-        for dependency in PYPROJECT["project"]["dependencies"]
-    }
+def test_base_dependencies_are_cpu_only(built_wheel: tuple[set[str], str, str]) -> None:
+    _, metadata, _ = built_wheel
+    requirements = Parser().parsestr(metadata).get_all("Requires-Dist", [])
+    base_requirements = {requirement.partition(";")[0].strip().split("[")[0].split()[0].lower() for requirement in requirements if "extra ==" not in requirement}
 
-    assert dependency_names.isdisjoint({"flash-attn", "ray", "torch", "transformer-engine", "vllm"})
+    assert base_requirements.isdisjoint({"flash-attn", "ray", "torch", "transformer-engine", "vllm"})
 
 
 def test_megatron_extra_has_native_wheels_for_both_linux_architectures() -> None:

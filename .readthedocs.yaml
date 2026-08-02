@@ -14,7 +14,7 @@ build:
       create_environment:
          - cd skyrl-train && uv venv "${READTHEDOCS_VIRTUALENV_PATH}"
       install:
-         - cd skyrl-train && UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" uv sync --frozen --extra docs
+         - cd skyrl-train && UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" uv sync --frozen --group docs
 
 sphinx:
    configuration: skyrl-train/docs/conf.py
