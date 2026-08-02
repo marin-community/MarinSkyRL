@@ -123,7 +123,7 @@ def _ray_resources() -> dict[str, str]:
     try:
         context = ray.get_runtime_context()
     except Exception:
-        logger.warning("Could not read Ray identity for telemetry; continuing without it")
+        logger.warning("Could not read Ray identity for telemetry; continuing without it", exc_info=True)
         return {}
 
     try:
@@ -279,18 +279,9 @@ class ProcessTelemetry:
                 },
                 attributes={"role": self._role},
             )
-            self._drain_and_shutdown()
+            telemetry.shutdown(SHUTDOWN_TIMEOUT_SECONDS)
         self._configured = False
         _process_state.release(self)
-
-    def _drain_and_shutdown(self) -> None:
-        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
-        while telemetry.runtime_status().queued_records:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(0.01, remaining))
-        telemetry.shutdown(max(0.0, deadline - time.monotonic()))
 
 
 def process_telemetry(role: str) -> ProcessTelemetry:

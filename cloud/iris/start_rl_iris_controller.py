@@ -41,9 +41,11 @@ from cloud.iris.paths import resolve_repo_path
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
-except ImportError:
+except ImportError as error:
+    _RAY_METRICS_UNAVAILABLE_REASON = str(error)
 
     def ray_metrics_telemetry(node_ip: str, metrics_port: int):
+        _log(f"Ray metric forwarding is unavailable: {_RAY_METRICS_UNAVAILABLE_REASON}")
         return contextlib.nullcontext()
 
 

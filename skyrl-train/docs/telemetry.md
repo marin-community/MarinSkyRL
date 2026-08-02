@@ -16,4 +16,4 @@ The Ray allowlist discards worker, address and task-name labels and never forwar
 Ray's physical node or GPU families; Iris remains authoritative for host and GPU
 telemetry, while centralized vLLM metrics stay with the serving job. Hardware
 probes are not started. The GPU images select the telemetry extra, and process
-shutdown polls Rigging's public queue status for at most two seconds.
+shutdown gives Rigging at most two seconds to drain queued records.

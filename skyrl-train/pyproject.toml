@@ -71,6 +71,7 @@ override-dependencies = [
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
+    "opentelemetry-api>=1.39.1",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -84,11 +85,6 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 [[tool.uv.dependency-metadata]]
 name = "flash-attn"
 requires-dist = ["torch", "einops"]
-
-[[tool.uv.dependency-metadata]]
-name = "marin-rigging"
-version = "0.2.70.dev30755316227"
-requires-dist = ["requests>=2.0.0", "prometheus-client>=0.24"]
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
@@ -123,7 +119,7 @@ docs = [
     "sphinx-autobuild>=2021.3.14"
 ]
 telemetry = [
-    "marin-rigging==0.2.70.dev30755316227",
+    "marin-rigging[prometheus]==0.2.70.dev30755316227",
     "ray[default]",
 ]
 sandboxes = [
