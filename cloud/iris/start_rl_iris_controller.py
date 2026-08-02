@@ -1000,7 +1000,7 @@ def ray_start_head(
         *_ray_spill_flags(spill_uri, local_spill_dir),
     ]
     if spill_uri:
-        _log(f"Ray object spilling -> R2 prefix {spill_uri} (no local /tmp spill)")
+        _log(f"Ray object spilling -> R2 prefix {spill_uri} (remote backend)")
     else:
         _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
@@ -1027,10 +1027,7 @@ def ray_start_worker(
         *(_ray_spill_flags(None, local_spill_dir) if local_spill_dir else []),
     ]
     if spill_uri:
-        _log(
-            f"Ray object spilling -> R2 prefix {spill_uri} (cluster config from head; "
-            f"this worker spills per-node, no local /tmp spill)"
-        )
+        _log(f"Ray object spilling -> R2 prefix {spill_uri} (remote cluster config from head)")
     else:
         _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")

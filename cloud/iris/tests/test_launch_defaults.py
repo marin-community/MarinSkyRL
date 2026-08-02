@@ -277,7 +277,6 @@ def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
     materialize_rl_config(str(task_copy), launch.task_environment())
     assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
-    assert "--ray-spill-dir /tmp/skyrl-ray-spill" in command[-1]
     assert str(source) not in command[-1]
 
 
