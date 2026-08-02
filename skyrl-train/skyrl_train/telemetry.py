@@ -11,7 +11,9 @@ from loguru import logger
 
 try:
     from rigging import telemetry
-except ImportError:
+except ModuleNotFoundError as error:
+    if error.name != "rigging":
+        raise
     from skyrl_train import inert_telemetry as telemetry
 
 
@@ -226,7 +228,6 @@ class ProcessTelemetry:
         self._config = config
         self._role = role
         self._configured = False
-        self._closed = False
 
     def __enter__(self) -> "ProcessTelemetry":
         if not _process_state.claim(self):
@@ -252,23 +253,13 @@ class ProcessTelemetry:
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         del exc, traceback
-        self.close(
-            status="completed" if exc_type is None else "failed",
-            reason="normal_exit" if exc_type is None else getattr(exc_type, "__name__", "exception"),
-        )
-        return False
-
-    def close(self, *, status: str, reason: str) -> None:
-        if self._closed:
-            return
-        self._closed = True
         if self._configured:
             export = telemetry.runtime_status()
             telemetry.event(
                 "terminal",
                 {
-                    "status": status,
-                    "reason": reason[:512],
+                    "status": "completed" if exc_type is None else "failed",
+                    "reason": "normal_exit" if exc_type is None else getattr(exc_type, "__name__", "exception"),
                     "export_queued_records": export.queued_records,
                     "export_lost_records": export.lost_records,
                     "policy_step": _process_state.policy_step,
@@ -281,6 +272,7 @@ class ProcessTelemetry:
             telemetry.shutdown(SHUTDOWN_TIMEOUT_SECONDS)
         self._configured = False
         _process_state.release(self)
+        return False
 
 
 def process_telemetry(role: str) -> ProcessTelemetry:
