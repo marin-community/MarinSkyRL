@@ -63,7 +63,8 @@ class _TrainingSnapshot(_RepresentativeNames):
     weights: dict[str, torch.Tensor]
 
 
-def _write_tiny_checkpoint(path) -> None:
+def _write_tiny_checkpoint(path) -> torch.Tensor:
+    """Write the tiny fixture and return its pre-sharding stacked experts."""
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     config = GrugMoeConfig(
         vocab_size=len(tokenizer),
@@ -82,8 +83,11 @@ def _write_tiny_checkpoint(path) -> None:
         qk_mult=1.37,
     )
     torch.manual_seed(17)
-    GrugMoeForCausalLM(config).save_pretrained(path, safe_serialization=True)
+    model = GrugMoeForCausalLM(config)
+    stacked_experts = model.state_dict()[STACKED_EXPERT_NAME].detach().cpu().clone()
+    model.save_pretrained(path, safe_serialization=True)
     tokenizer.save_pretrained(path)
+    return stacked_experts
 
 
 def _config(
@@ -387,6 +391,7 @@ def _run_full_cycle(
     colocate_all: bool = True,
     policy_world_size: int = EP1_POLICY_WORLD_SIZE,
     expert_model_parallel_size: int = 1,
+    unsharded_stacked_experts: torch.Tensor | None = None,
 ) -> None:
     cfg = _config(
         model_path,
@@ -457,6 +462,10 @@ def _run_full_cycle(
             assert all(item["mesh_dim_names"] == ["ddp", "fsdp", "ep"] for item in geometry)
             assert all(tuple(item["mesh_shape"]) == (1, 2, 2) for item in geometry)
             assert {item["ep_coord"] for item in geometry} == {0, 1}
+            assert unsharded_stacked_experts is not None
+            gathered_stacked_experts = _snapshot(policy, [STACKED_EXPERT_NAME])[STACKED_EXPERT_NAME]
+            stored_stacked_experts = unsharded_stacked_experts.to(torch.bfloat16).to(torch.float32)
+            torch.testing.assert_close(gathered_stacked_experts, stored_stacked_experts, rtol=0, atol=0)
         optimizer_name = cfg.trainer.policy.optimizer_config.optimizer
         training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path, optimizer_name)
         checkpoint_names = [
@@ -534,11 +543,12 @@ def test_grug_six_h100_mixed_ep_disaggregated_rollout_train_broadcast_rollout(tm
 
     require_hoppers(MIXED_EP_DISAGGREGATED_NUM_GPUS)
 
-    _write_tiny_checkpoint(tmp_path)
+    unsharded_stacked_experts = _write_tiny_checkpoint(tmp_path)
     _run_full_cycle(
         str(tmp_path),
         tmp_path,
         colocate_all=False,
         policy_world_size=MIXED_EP_POLICY_WORLD_SIZE,
         expert_model_parallel_size=2,
+        unsharded_stacked_experts=unsharded_stacked_experts,
     )
