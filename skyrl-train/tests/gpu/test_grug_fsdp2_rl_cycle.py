@@ -222,6 +222,7 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
 
 
 def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _TrainingSnapshot:
+    """Run one policy step and return its post-update FP32 training snapshot."""
     names = _representative_names(model_path)
     before = _snapshot(policy, names.parameter_names)
     train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]

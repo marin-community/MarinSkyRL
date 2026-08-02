@@ -22,8 +22,9 @@ https://github.com/NVIDIA-NeMo/Emerging-Optimizers
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from itertools import chain
-from typing import Any, Iterable
+from typing import Any, Literal, Protocol
 
 import torch
 from torch import Tensor
@@ -43,6 +44,14 @@ _QUINTIC_COEFFICIENTS = (
     (2.8366, -3.0525, 1.2012),
 )
 _HYPERBALL_EPS = 1e-10
+
+type MuonRoute = Literal["muonh", "adamh", "adam"]
+
+
+class _OptimizerConfig(Protocol):
+    lr: float
+
+    def get(self, key: str, default: object = None) -> object: ...
 
 
 def newton_schulz_quintic(matrix: Tensor, *, steps: int = 5, eps: float = 1e-8) -> Tensor:
@@ -365,15 +374,19 @@ class GrugMuonH(Optimizer):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.muonh.load_state_dict(state_dict["muonh"])
         self.adamh.load_state_dict(state_dict["adamh"])
-        if self.adam is not None and state_dict.get("adam") is not None:
-            self.adam.load_state_dict(state_dict["adam"])
+        adam_state = state_dict.get("adam")
+        if (self.adam is None) != (adam_state is None):
+            raise ValueError("checkpoint Adam state does not match the current MuonH parameter route")
+        if self.adam is not None:
+            assert adam_state is not None
+            self.adam.load_state_dict(adam_state)
         # Optimizer.load_state_dict replaces each child's param-group mapping. Refresh
         # the composite view so a restored scheduler mutates the live child groups.
         self.param_groups = list(chain.from_iterable(child.param_groups for child in self._children))
         self.state = _MergedState(self._children)
 
 
-def grug_muonh_route(name: str, parameter: Tensor) -> str:
+def grug_muonh_route(name: str, parameter: Tensor) -> MuonRoute:
     """Return the pinned Marin route adapted to PyTorch parameter names."""
     lower_name = name.lower()
     # Check GatedNorm before the broader embedding and attention-gate markers
@@ -395,10 +408,13 @@ def grug_muonh_route(name: str, parameter: Tensor) -> str:
     return "adam"
 
 
-def build_grug_muonh(named_parameters, optim_config) -> GrugMuonH:
+def build_grug_muonh(
+    named_parameters: Iterable[tuple[str, Tensor]],
+    optim_config: _OptimizerConfig,
+) -> GrugMuonH:
     """Classify named parameters and construct the exact three-group recipe."""
-    parameters: dict[str, list[Tensor]] = {"muonh": [], "adamh": [], "adam": []}
-    names: dict[str, list[str]] = {"muonh": [], "adamh": [], "adam": []}
+    parameters: dict[MuonRoute, list[Tensor]] = {"muonh": [], "adamh": [], "adam": []}
+    names: dict[MuonRoute, list[str]] = {"muonh": [], "adamh": [], "adam": []}
     for name, parameter in named_parameters:
         if not parameter.requires_grad:
             continue
@@ -406,7 +422,10 @@ def build_grug_muonh(named_parameters, optim_config) -> GrugMuonH:
         parameters[route].append(parameter)
         names[route].append(name)
 
-    extra = dict(optim_config.get("optimizer_kwargs", {}) or {})
+    raw_extra = optim_config.get("optimizer_kwargs", {})
+    if not isinstance(raw_extra, Mapping):
+        raise TypeError("MuonH optimizer_kwargs must be a mapping")
+    extra = dict(raw_extra)
     known = {
         "adam_lr",
         "momentum",

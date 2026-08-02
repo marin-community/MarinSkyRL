@@ -242,6 +242,12 @@ def test_checkpoint_resume_next_step_matches_uninterrupted():
         optimizer_state = copy.deepcopy(uninterrupted_optimizer.state_dict())
         scheduler_state = copy.deepcopy(uninterrupted_scheduler.state_dict())
 
+        malformed_optimizer = _optimizer(_TinyGrug(fixture), fixture)
+        malformed_state = copy.deepcopy(optimizer_state)
+        del malformed_state["adam"]
+        with pytest.raises(ValueError, match="checkpoint Adam state"):
+            malformed_optimizer.load_state_dict(malformed_state)
+
         resumed_model = _TinyGrug(fixture)
         resumed_model.load_state_dict(model_state)
         resumed_optimizer = _optimizer(resumed_model, fixture)

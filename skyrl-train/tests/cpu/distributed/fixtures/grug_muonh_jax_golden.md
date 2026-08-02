@@ -14,7 +14,7 @@ epsilons `1e-8`. Final matrix axes are transposed when saved to match PyTorch
 layout. Weight decay inputs are deliberately nonzero; the expected recipe
 applies no decay.
 
-The [full generator on the preserved validation branch](https://github.com/marin-community/MarinSkyRL/blob/grug-optimizer-validation-0792437-20260802/skyrl-train/tests/cpu/distributed/fixtures/grug_muonh_jax_golden.md)
+The [full generator at the preserved validation commit](https://github.com/marin-community/MarinSkyRL/blob/0792437b14c712331102b39ca7e3e73d118e6d14/skyrl-train/tests/cpu/distributed/fixtures/grug_muonh_jax_golden.md)
 includes the complete parameter tree, routing keys, state extraction, and
 layout conversion. From the MarinSkyRL repository root, save that generator as
 `/tmp/generate_grug_muonh_golden.py`, archive the pinned Marin revision to
