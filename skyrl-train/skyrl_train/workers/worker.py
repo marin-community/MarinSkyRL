@@ -54,6 +54,50 @@ from omegaconf import DictConfig
 from pathlib import Path
 
 
+def _grug_query_bias_virtual_shard_mask(
+    attention_mask: torch.Tensor,
+    *,
+    local_step: int,
+    micro_batch_size: int,
+    accumulation_steps: int,
+    ep_size: int,
+    ep_rank: int,
+) -> torch.Tensor:
+    """Select this EP coordinate's deterministic share of an optimizer window.
+
+    The optimizer-window row count must be divisible by ``ep_size``.
+    """
+
+    if attention_mask.ndim != 2:
+        raise ValueError(f"attention_mask must be 2-D, got shape={tuple(attention_mask.shape)}")
+    if micro_batch_size < 1 or accumulation_steps < 1:
+        raise ValueError(
+            f"micro_batch_size and accumulation_steps must be positive, got {micro_batch_size}, {accumulation_steps}"
+        )
+    if attention_mask.shape[0] != micro_batch_size:
+        raise RuntimeError(
+            "the final policy optimizer window is incomplete: "
+            f"expected microbatch rows={micro_batch_size}, got {attention_mask.shape[0]}"
+        )
+    if ep_size < 1 or not 0 <= ep_rank < ep_size:
+        raise ValueError(f"invalid EP coordinate ep_rank={ep_rank}, ep_size={ep_size}")
+
+    rows_per_window = micro_batch_size * accumulation_steps
+    if rows_per_window % ep_size:
+        raise ValueError(
+            "Grug query-bias virtual shards require "
+            f"micro_batch_size*accumulation_steps={rows_per_window} divisible by ep_size={ep_size}"
+        )
+
+    rows_per_shard = rows_per_window // ep_size
+    shard_start = ep_rank * rows_per_shard
+    shard_end = shard_start + rows_per_shard
+    microbatch_start = (local_step % accumulation_steps) * micro_batch_size
+    row_offsets = torch.arange(micro_batch_size, device=attention_mask.device) + microbatch_start
+    owned_rows = (row_offsets >= shard_start) & (row_offsets < shard_end)
+    return attention_mask.bool() & owned_rows.unsqueeze(1)
+
+
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
 class DistributedTorchRayActor:
     def __init__(
@@ -1133,15 +1177,29 @@ class PolicyWorkerBase(Worker):
         grug_microbatch_valid_tokens = None
         if grug_causal_lm is not None:
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
-            grug_microbatch_valid_tokens = [
-                int(mask.sum().item()) for mask in train_data["attention_mask"].split(micro_batch_size)
-            ]
+            ep_size = int(getattr(self.strategy, "ep_size", 1))
+            ep_rank = int(self.strategy.device_mesh.get_local_rank(mesh_dim="ep")) if ep_size > 1 else 0
+            attention_masks = list(train_data["attention_mask"].split(micro_batch_size))
+            grug_microbatch_valid_tokens = []
+            for microbatch_step, mask in enumerate(attention_masks):
+                virtual_mask = _grug_query_bias_virtual_shard_mask(
+                    mask,
+                    local_step=microbatch_step,
+                    micro_batch_size=micro_batch_size,
+                    accumulation_steps=accumulation_steps,
+                    ep_size=ep_size,
+                    ep_rank=ep_rank,
+                )
+                grug_microbatch_valid_tokens.append(int(virtual_mask.sum().item()))
             remainder = len(grug_microbatch_valid_tokens) % accumulation_steps
             if remainder:
                 raise RuntimeError(
                     "the final policy optimizer window is incomplete: "
                     f"expected {accumulation_steps} microbatches, got {remainder}"
                 )
+            self._grug_query_bias_valid_token_counts = grug_microbatch_valid_tokens
+            self._grug_query_bias_ep_size = ep_size
+            self._grug_query_bias_ep_rank = ep_rank
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
@@ -1212,6 +1270,11 @@ class PolicyWorkerBase(Worker):
                     all_metrics[k].append(v)
                 pbar.set_postfix(short_status)
 
+        if grug_causal_lm is not None:
+            del self._grug_query_bias_valid_token_counts
+            del self._grug_query_bias_ep_size
+            del self._grug_query_bias_ep_rank
+
         torch.distributed.barrier()
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
@@ -1253,10 +1316,25 @@ class PolicyWorkerBase(Worker):
 
         grug_causal_lm = self._grug_causal_lm()
         grug_query_bias_accumulator = getattr(self, "_grug_query_bias_accumulator", None)
-        if grug_causal_lm is not None and grug_query_bias_accumulator is not None:
+        grug_capture_mask = attention_mask
+        grug_capture_active = grug_causal_lm is not None and grug_query_bias_accumulator is not None
+        valid_token_counts = getattr(self, "_grug_query_bias_valid_token_counts", None)
+        if grug_capture_active and valid_token_counts is not None:
+            grug_capture_active = valid_token_counts[local_step] > 0
+            if grug_capture_active:
+                grug_capture_mask = _grug_query_bias_virtual_shard_mask(
+                    attention_mask,
+                    local_step=local_step,
+                    micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                    accumulation_steps=accumulation_steps,
+                    ep_size=self._grug_query_bias_ep_size,
+                    ep_rank=self._grug_query_bias_ep_rank,
+                )
+        if grug_capture_active:
+            assert grug_causal_lm is not None
             grug_causal_lm.begin_query_bias_capture(
                 self._grug_query_bias_candidate_count,
-                attention_mask,
+                grug_capture_mask,
             )
 
         # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
@@ -1284,7 +1362,9 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
                 rollout_routed_experts=rollout_routed_experts,
             )
-            if grug_causal_lm is not None and grug_query_bias_accumulator is not None:
+            if grug_capture_active:
+                assert grug_causal_lm is not None
+                assert grug_query_bias_accumulator is not None
                 grug_query_bias_accumulator.observe(
                     grug_causal_lm.take_query_bias_observation(
                         candidate_count=self._grug_query_bias_candidate_count,

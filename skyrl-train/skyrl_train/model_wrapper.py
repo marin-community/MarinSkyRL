@@ -30,6 +30,7 @@ from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     GRUG_SUPPORTED_ATTENTION_BACKENDS,
+    enable_grug_grouped_mm,
     validate_grug_training_strategy,
 )
 from skyrl_train.utils.flash_attention import (
@@ -104,6 +105,8 @@ def validate_grug_training_options(
 
     if model_type != GRUG_MOE_MODEL_TYPE:
         return
+    if use_grouped_mm and moe_grouped_gemm:
+        raise ValueError("Grug FSDP2 training cannot enable both native and generic grouped MoE")
     unsupported = {
         "attention backend": attn_implementation not in GRUG_SUPPORTED_ATTENTION_BACKENDS,
         "sample packing": use_sample_packing,
@@ -112,7 +115,7 @@ def validate_grug_training_options(
         "sequence parallelism": sequence_parallel_size > 1,
         "context parallelism": context_parallel_size > 1,
         "router replay/R3": moe_router_replay,
-        "grouped MoE": moe_grouped_gemm or use_grouped_mm,
+        "generic grouped MoE swap": moe_grouped_gemm,
         "Liger kernels": use_liger_kernel,
     }
     enabled = [name for name, is_enabled in unsupported.items() if is_enabled]
@@ -602,6 +605,12 @@ class HFModelWrapper(nn.Module):
                 engage_flashqla(self.model)
         else:
             self.model = pretrain_or_model
+
+        if use_grouped_mm and getattr(getattr(self.model, "config", None), "model_type", None) == GRUG_MOE_MODEL_TYPE:
+            num_grug_moe_blocks = enable_grug_grouped_mm(self.model)
+            if num_grug_moe_blocks == 0:
+                raise RuntimeError("use_grouped_mm=true selected Grug native grouping but found no Grug MoE blocks")
+            logger.info(f"[Grug-MoE] enabled native grouped_mm on {num_grug_moe_blocks} blocks")
 
         # CP mask contract probe (computed once): does this HF model's forward
         # accept the per-layer-type mask DICT escape hatch? Dense Qwen3 does;
