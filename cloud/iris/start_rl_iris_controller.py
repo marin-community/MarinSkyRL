@@ -867,9 +867,8 @@ def _ray_port_flags() -> list[str]:
 
 
 # --- Ray object-store spilling ---------------------------------------------------
-# Training-step arguments are reconstructible and latency-sensitive. Spill them to
-# launcher-owned local scratch by default; do not turn a dispatch amplification bug
-# into durable or cross-region object traffic. R2 is an explicit emergency opt-in.
+# Training-step arguments are reconstructible and latency-sensitive. Local scratch
+# avoids durable cross-region traffic; R2 remains an explicit emergency opt-in.
 #
 # R2's object_spilling_config is set on the head and propagates through GCS; Ray
 # rejects that system config on workers. Local spill directories are CLI flags
