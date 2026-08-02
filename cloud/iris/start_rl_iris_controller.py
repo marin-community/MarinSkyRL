@@ -1013,8 +1013,7 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
 
 
 def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str | None = None) -> None:
-    # The head propagates its cluster-wide spill configuration through GCS. Each
-    # worker still writes its own spill files on its local node.
+    local_spill_dir = None if spill_uri else _ray_local_spill_dir()
     cmd = [
         _ray_bin(),
         "start",
@@ -1022,12 +1021,15 @@ def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str |
         f"--node-ip-address={node_ip}",
         *_ray_port_flags(),
         *_ray_mem_flags(),
+        *(_ray_spill_flags(None, local_spill_dir) if local_spill_dir else []),
     ]
     if spill_uri:
         _log(
             f"Ray object spilling -> R2 prefix {spill_uri} (cluster config from head; "
             f"this worker spills per-node, no local /tmp spill)"
         )
+    else:
+        _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
