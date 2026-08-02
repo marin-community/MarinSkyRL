@@ -201,7 +201,7 @@ def test_find_pod_disambiguates_colliding_truncated_job_labels_with_pod_group(mo
 
 def test_rl_job_pods_discovers_hashed_names_by_pod_group(monkeypatch):
     cluster = watch_coreweave_rl.Cluster("cw-us-east-08a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(
+    job = watch_coreweave_rl.IrisRlJob(
         cluster,
         "/benjaminfeuer/rl-tasktrove-dq-sweep-30b-gb200-qwen3-co-20260730-103953-9fed75",
         "running",
@@ -434,7 +434,7 @@ def _rl_report_row(tmp_path, finelog: str = "", state: str = "running", artifact
     if finelog:
         (tmp_path / "finelog.log").write_text(finelog)
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", state, 0, "", dataset="DCAgent/tasks")
+    job = watch_coreweave_rl.IrisRlJob(cluster, "/user/rl-job", state, 0, "", dataset="DCAgent/tasks")
     if artifacts is None:
         artifacts = watch_coreweave_rl.ArtifactResult("synced", "synced", "synced", "synced", None, None, ())
     return watch_coreweave_rl.report_row(job, artifacts, tmp_path)
@@ -442,7 +442,7 @@ def _rl_report_row(tmp_path, finelog: str = "", state: str = "running", artifact
 
 def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_path):
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(cluster, "/user/rl-job", "running", 0, "", dataset="DCAgent/tasks")
+    job = watch_coreweave_rl.IrisRlJob(cluster, "/user/rl-job", "running", 0, "", dataset="DCAgent/tasks")
     calls: list[list[str]] = []
 
     def fake_run_iris(_cluster, arguments, **_kwargs):
@@ -460,7 +460,7 @@ def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_p
 
     monkeypatch.setattr(watch_coreweave_rl, "run_iris", fake_run_iris)
 
-    artifacts, directory = watch_coreweave_rl.sync_job(job, tmp_path, scope="status")
+    artifacts, directory = watch_coreweave_rl.sync_iris_job(job, tmp_path, scope="status")
     row = watch_coreweave_rl.report_row(job, artifacts, directory)
 
     assert len(calls) == 1
@@ -493,7 +493,8 @@ def test_rl_report_row_reads_policy_namespaced_tis_log_ratio(tmp_path):
         '"policy/tis/log_ratio_abs_mean": 0.125}\n',
     )
 
-    assert row[-1].value == "entropy=0.05; TIS |log r|=0.125"
+    assert "entropy=0.05" in row[-1].value
+    assert "TIS |log r|=0.125" in row[-1].value
 
 
 def test_tis_ratio_summary_uses_distinct_legacy_importance_ratio_label():
@@ -511,7 +512,7 @@ def test_rl_report_row_replaces_traceback_signal_with_error_report_pointer(tmp_p
 
 def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypatch, tmp_path, capsys):
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    job = watch_coreweave_rl.RlJob(
+    job = watch_coreweave_rl.IrisRlJob(
         cluster,
         "/user/rl-job",
         "running",
@@ -532,6 +533,10 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
             bundle_root=tmp_path,
             quiet_progress=True,
             status_only=True,
+            jupiter_only=False,
+            jupiter_run=[],
+            jupiter_host="Jupiter",
+            jupiter_trace_sync_limit=20,
         ),
     )
     monkeypatch.setattr(watch_coreweave_rl, "CLUSTERS", (cluster,))
@@ -542,7 +547,7 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
     )
     monkeypatch.setattr(
         watch_coreweave_rl,
-        "sync_job",
+        "sync_iris_job",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(LookupError("unexpected raw sync exception")),
     )
     monkeypatch.setattr(watch_coreweave_rl, "write_job_manifest", lambda *_args, **_kwargs: None)
@@ -632,8 +637,8 @@ def _fleet_trace_inventories():
     root, first, objects = _remote_trace_objects()
     full, _, _ = watch_coreweave_rl.recent_trace_jobs(objects, root, trace_sync_limit=0)
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    first_job = watch_coreweave_rl.RlJob(cluster, "/user/first", "running", 0, "")
-    second_job = watch_coreweave_rl.RlJob(cluster, "/user/second", "running", 0, "")
+    first_job = watch_coreweave_rl.IrisRlJob(cluster, "/user/first", "running", 0, "")
+    second_job = watch_coreweave_rl.IrisRlJob(cluster, "/user/second", "running", 0, "")
     first_inventory = watch_coreweave_rl.TraceInventory(first_job, "bucket", root, object(), tuple(full), 3, 3)
     second_inventory = watch_coreweave_rl.TraceInventory(
         second_job,

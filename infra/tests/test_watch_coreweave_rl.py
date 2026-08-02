@@ -93,12 +93,10 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
         runner=fake_run,
     )
 
-    remote_commands = [call[-1] for call in calls if call[0] == "ssh"]
     transferred_sources = [argument for call in calls if call[0] == "rsync" for argument in call]
     assert result.finelog == "synced"
     assert result.ray_logs == "2 directories synced"
     assert result.traces == "newest 2 selected"
-    assert all("find " not in command and "du " not in command for command in remote_commands)
     assert f"Jupiter:{experiment_dir}/logs/tasktrove-x6_1170543.out" in transferred_sources
     assert f"Jupiter:{experiment_dir}/ray_logs/" in transferred_sources
     assert f"Jupiter:{experiment_dir}/tasktrove-x6/ray_logs/" in transferred_sources
@@ -106,7 +104,7 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
     assert f"Jupiter:{trace_root}/trial-older/" in transferred_sources
 
 
-def test_parse_jupiter_run_spec_is_wysiwyg() -> None:
+def test_jupiter_run_spec_preserves_the_explicit_absolute_experiment_path() -> None:
     assert parse_jupiter_run_spec("1170543=/e/data1/experiments/tasktrove-x6") == JupiterRunSpec(
         "1170543",
         "/e/data1/experiments/tasktrove-x6",

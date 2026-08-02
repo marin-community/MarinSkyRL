@@ -66,6 +66,7 @@ from scripts.iris.jupiter_rl_artifacts import (  # noqa: E402
     parse_jupiter_run_spec,
     query_jupiter_job_status,
     sync_jupiter_artifacts,
+    validate_jupiter_host,
 )
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
@@ -140,7 +141,7 @@ class Cluster:
     context: str | None
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class RlJob:
     cluster: Cluster
     job_id: str
@@ -162,10 +163,50 @@ class RlJob:
     def bundle_job_id(self) -> str:
         return self.job_id
 
+    @property
+    def trials_uri(self) -> str | None:
+        return None
 
-@dataclass(frozen=True, kw_only=True)
+    @property
+    def uses_iris_trace_budget(self) -> bool:
+        return False
+
+    def trace_sync_limit(self, args: argparse.Namespace) -> int:
+        return args.jupiter_trace_sync_limit
+
+    def sync_artifacts(
+        self,
+        args: argparse.Namespace,
+        progress: ProgressReporter,
+        *,
+        scope: SyncScope,
+    ) -> tuple[ArtifactResult, Path]:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
 class IrisRlJob(RlJob):
     """An Iris-backed RL job whose artifacts live in Kubernetes and object storage."""
+
+    @property
+    def trials_uri(self) -> str | None:
+        return iris_trials_uri(self)
+
+    @property
+    def uses_iris_trace_budget(self) -> bool:
+        return not self.is_terminal
+
+    def trace_sync_limit(self, args: argparse.Namespace) -> int:
+        return args.trace_sync_limit
+
+    def sync_artifacts(
+        self,
+        args: argparse.Namespace,
+        progress: ProgressReporter,
+        *,
+        scope: SyncScope,
+    ) -> tuple[ArtifactResult, Path]:
+        return sync_iris_job(self, args.bundle_root, scope=scope, progress=progress)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -182,6 +223,23 @@ class JupiterRlJob(RlJob):
     @property
     def bundle_job_id(self) -> str:
         return f"/slurm/{self.job_id}"
+
+    def sync_artifacts(
+        self,
+        args: argparse.Namespace,
+        progress: ProgressReporter,
+        *,
+        scope: SyncScope,
+    ) -> tuple[ArtifactResult, Path]:
+        return sync_jupiter_job(
+            self,
+            args.bundle_root,
+            scope=scope,
+            jupiter_host=args.jupiter_host,
+            jupiter_trace_sync_limit=args.jupiter_trace_sync_limit,
+            max_non_log_bytes=args.max_non_log_bytes,
+            progress=progress,
+        )
 
 
 MonitoredJob = IrisRlJob | JupiterRlJob
@@ -580,7 +638,7 @@ def sync_pod_and_ray_logs(
     return f"{len(pods)} pod(s), {len(running_pods)} Running", f"{ray_files:,} files", errors
 
 
-def trials_uri(job: IrisRlJob) -> str:
+def iris_trials_uri(job: IrisRlJob) -> str:
     match = TRIALS_URI_PATTERN.search(job.entrypoint)
     if match:
         return match.group("uri").rstrip("/")
@@ -663,7 +721,7 @@ def trace_selection_manifest(
 
 def collect_trace_inventory(job: IrisRlJob) -> TraceInventory:
     """List all remote objects for one job before selecting a fleet-wide subset."""
-    uri = trials_uri(job)
+    uri = iris_trials_uri(job)
     bucket, prefix = split_s3_uri(uri)
     base = kubectl_base(COREWEAVE_CLUSTERS[job.cluster.name], SimpleNamespace(kubeconfig=None, kube_context=None))
     client = object_store_client(base, COREWEAVE_CLUSTERS[job.cluster.name])
@@ -1105,7 +1163,7 @@ def write_job_manifest(
             "kind": "rl",
             "job": asdict(job),
             "job_directory": str(directory),
-            "trials_uri": trials_uri(job) if isinstance(job, IrisRlJob) else None,
+            "trials_uri": job.trials_uri,
             "synced_at": datetime.now(UTC).isoformat(),
             "max_non_log_bytes": max_non_log_bytes,
             "trace_sync_limit": trace_sync_limit,
@@ -1126,6 +1184,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--hours must be non-negative")
     if args.jupiter_only and not args.jupiter_run:
         raise ValueError("--jupiter-only requires at least one --jupiter-run")
+    validate_jupiter_host(args.jupiter_host)
     if not args.all_users and not re.fullmatch(r"[A-Za-z0-9_-]+", args.user):
         raise ValueError("--user may contain only letters, numbers, _ and -")
 
@@ -1195,18 +1254,7 @@ def sync_per_job_evidence(
         try:
             progress.phase(f"job evidence {index}/{len(ordered_jobs)} {job.cluster.name}/{job.short_name}")
             scope = "status" if args.status_only else "terminal" if job.is_terminal else "full"
-            if isinstance(job, JupiterRlJob):
-                artifacts, directory = sync_jupiter_job(
-                    job,
-                    args.bundle_root,
-                    scope=scope,
-                    jupiter_host=args.jupiter_host,
-                    jupiter_trace_sync_limit=args.jupiter_trace_sync_limit,
-                    max_non_log_bytes=args.max_non_log_bytes,
-                    progress=progress,
-                )
-            else:
-                artifacts, directory = sync_iris_job(job, args.bundle_root, scope=scope, progress=progress)
+            artifacts, directory = job.sync_artifacts(args, progress, scope=scope)
         except Exception as error:
             directory = job_directory(args.bundle_root, job)
             artifacts = ArtifactResult(
@@ -1228,9 +1276,7 @@ def apply_iris_trace_budget(
     progress: ProgressReporter,
 ) -> list[tuple[MonitoredJob, ArtifactResult, Path]]:
     """Apply the global Iris trace budget without touching Jupiter selections."""
-    active_iris_job_directories = [
-        (job, directory) for job, _, directory in synced_jobs if isinstance(job, IrisRlJob) and not job.is_terminal
-    ]
+    active_iris_job_directories = [(job, directory) for job, _, directory in synced_jobs if job.uses_iris_trace_budget]
     if args.status_only:
         return synced_jobs
     if not active_iris_job_directories:
@@ -1258,7 +1304,7 @@ def apply_iris_trace_budget(
 
     synchronized: list[tuple[MonitoredJob, ArtifactResult, Path]] = []
     for job, artifacts, directory in synced_jobs:
-        if job.is_terminal or isinstance(job, JupiterRlJob):
+        if not job.uses_iris_trace_budget:
             synchronized.append((job, artifacts, directory))
             continue
         traces, started, completed, trace_error = trace_statuses.get(
@@ -1282,26 +1328,12 @@ def apply_iris_trace_budget(
     return synchronized
 
 
-def main() -> int:
-    args = parse_args()
-    validate_args(args)
-    filters = parse_regex_filters(
-        args.filter,
-        {"cluster", "job", "name", "dataset", "type", "state", "submitted", "duration"},
-    )
-    args.bundle_root.mkdir(parents=True, exist_ok=True)
-    report_directory = args.bundle_root / "reports" / "rl"
-    report_directory.mkdir(parents=True, exist_ok=True)
-    progress = ProgressReporter(enabled=not args.quiet_progress)
-    checked_at = datetime.now(UTC)
-    now_ms = int(checked_at.timestamp() * 1000)
-
-    jobs, errors = discover_selected_jobs(args, progress, now_ms=now_ms)
-
-    jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
-    synced_jobs = sync_per_job_evidence(args, jobs, progress)
-    synced_jobs = apply_iris_trace_budget(args, synced_jobs, progress)
-
+def collect_report_data(
+    args: argparse.Namespace,
+    synced_jobs: list[tuple[MonitoredJob, ArtifactResult, Path]],
+    errors: list[MonitorError],
+) -> tuple[list[list[object]], dict[str, Any], list[MonitorError]]:
+    """Build report rows and manifests while retaining per-job failures."""
     rows: list[list[object]] = []
     job_report: dict[str, Any] = {}
     for job, artifacts, directory in synced_jobs:
@@ -1320,7 +1352,7 @@ def main() -> int:
                 directory,
                 artifacts,
                 args.max_non_log_bytes,
-                args.jupiter_trace_sync_limit if isinstance(job, JupiterRlJob) else args.trace_sync_limit,
+                job.trace_sync_limit(args),
             )
         except Exception as error:
             errors.append(_monitor_error(scope, "manifest write", error))
@@ -1346,7 +1378,19 @@ def main() -> int:
             "directory": str(directory),
             "artifacts": asdict(artifacts),
         }
+    return rows, job_report, errors
 
+
+def publish_report(
+    args: argparse.Namespace,
+    report_directory: Path,
+    checked_at: datetime,
+    rows: list[list[object]],
+    job_report: dict[str, Any],
+    errors: list[MonitorError],
+    progress: ProgressReporter,
+) -> None:
+    """Render, persist, and print one fleet status report."""
     headers = ["Job", "Dataset", "State", "Step", "Reward", "Policy Loss", "Grad Norm", "Traces", "Trend"]
     table = (
         box_table(headers, rows) if rows else "No RL jobs matched the selected Iris window or explicit Jupiter runs."
@@ -1380,6 +1424,28 @@ def main() -> int:
     )
     progress.phase("report written; printing status table")
     print(f"{heading}\n\n{terminal_table}\n\n{error_summary}")
+
+
+def main() -> int:
+    args = parse_args()
+    validate_args(args)
+    filters = parse_regex_filters(
+        args.filter,
+        {"cluster", "job", "name", "dataset", "type", "state", "submitted", "duration"},
+    )
+    args.bundle_root.mkdir(parents=True, exist_ok=True)
+    report_directory = args.bundle_root / "reports" / "rl"
+    report_directory.mkdir(parents=True, exist_ok=True)
+    progress = ProgressReporter(enabled=not args.quiet_progress)
+    checked_at = datetime.now(UTC)
+    now_ms = int(checked_at.timestamp() * 1000)
+
+    jobs, errors = discover_selected_jobs(args, progress, now_ms=now_ms)
+    jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
+    synced_jobs = sync_per_job_evidence(args, jobs, progress)
+    synced_jobs = apply_iris_trace_budget(args, synced_jobs, progress)
+    rows, job_report, errors = collect_report_data(args, synced_jobs, errors)
+    publish_report(args, report_directory, checked_at, rows, job_report, errors, progress)
     return 0
 
 

@@ -129,6 +129,11 @@ def parse_jupiter_run_spec(value: str) -> JupiterRunSpec:
     return JupiterRunSpec(job_id, str(path))
 
 
+def validate_jupiter_host(host: str) -> None:
+    if _HOST_PATTERN.fullmatch(host) is None:
+        raise ValueError("--jupiter-host must be an SSH host name or configured alias")
+
+
 def _run(
     runner: CommandRunner,
     arguments: list[str],
@@ -187,8 +192,7 @@ def query_jupiter_job_status(
     runner: CommandRunner = subprocess.run,
 ) -> JupiterJobStatus:
     """Read one explicit Slurm job without enumerating the Jupiter queue."""
-    if _HOST_PATTERN.fullmatch(host) is None:
-        raise ValueError("--jupiter-host must be an SSH host name or configured alias")
+    validate_jupiter_host(host)
     commands = (
         f"squeue -h -j {run.job_id} -o '%T|%j'",
         f"sacct -n -X -j {run.job_id} --format=State,JobName --parsable2 | head -n 1",
@@ -419,8 +423,7 @@ def sync_jupiter_artifacts(
     runner: CommandRunner = subprocess.run,
 ) -> JupiterArtifactSyncResult:
     """Incrementally sync one explicit Jupiter experiment without broad GPFS scans."""
-    if _HOST_PATTERN.fullmatch(host) is None:
-        raise ValueError("--jupiter-host must be an SSH host name or configured alias")
+    validate_jupiter_host(host)
     if trace_sync_limit < 0:
         raise ValueError("Jupiter trace sync limit must be non-negative")
     if max_non_log_bytes < 0:
