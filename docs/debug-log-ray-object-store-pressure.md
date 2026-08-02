@@ -2,10 +2,10 @@
 
 ## Initial status
 
-An E9 policy forward at 24k context serialized padded training shards across 64 policy ranks. Dispatch
-took 561--588 seconds and crossed the 480-second ProcessGroupNCCL heartbeat deadline. Ray spilled about 2.05
-TiB through a CoreWeave R2 bucket despite the run using little host memory. At 16k context the same dispatch took
-261--289 seconds and completed.
+A reported 64-rank policy forward at 24k context serialized padded training shards across all policy ranks.
+Dispatch took 561--588 seconds and crossed the 480-second ProcessGroupNCCL heartbeat deadline. Ray spilled
+about 2.05 TiB through a CoreWeave R2 bucket despite the run using little host memory. At 16k context the same
+dispatch took 261--289 seconds and completed.
 
 The current mesh dispatch shares an explicit `ObjectRef` only when a batch contains `rollout_routed_experts`.
 Ordinary dense batches are passed by value to every actor. Ray documents that repeated large by-value arguments
@@ -19,10 +19,10 @@ times: once per distinct data chunk. The current implementation serializes it on
 
 ## Results
 
-Partly refuted as the explanation for E9. The 64 FSDP ranks consume distinct DP shards, so sharing an ObjectRef
-cannot collapse those 64 values into one. Existing router-replay dispatch already shares chunks when several
-model-parallel ranks consume the same DP shard. Generalizing that transport does not address this incident and
-is not part of this change.
+Partly refuted as the explanation for the 64-rank incident. The FSDP ranks consume distinct DP shards, so
+sharing an ObjectRef cannot collapse those 64 values into one. Existing router-replay dispatch already shares
+chunks when several model-parallel ranks consume the same DP shard. Generalizing that transport does not
+address this incident and is not part of this change.
 
 The discriminating serialization probe found the larger multiplier. A 64-row, 8 MiB parent tensor produced
 128 KiB one-row chunks whose views still referenced the parent's full 8 MiB storage. `torch.save` serialized

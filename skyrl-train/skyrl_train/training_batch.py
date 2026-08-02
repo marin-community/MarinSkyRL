@@ -112,16 +112,6 @@ class TensorBatch(dict, Generic[DictType]):
             self[key] = value.to(device, dtype, non_blocking=non_blocking)
         return self
 
-    def contiguous(self) -> "TensorBatch":
-        """Make the tensors contiguous"""
-        for key, value in self.items():
-            if value is None:
-                continue
-            # some of these asserts are not needed, but it's kept for type safety
-            assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-            self[key] = value.contiguous()
-        return self
-
     @property
     def batch_size(self) -> int:
         """Batch size for the tensors"""

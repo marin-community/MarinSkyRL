@@ -180,7 +180,7 @@ def test_train_batch_pickle():
 
 
 def test_chunked_batch_ray_serialization_stays_within_logical_payload_budget():
-    parent = TensorBatch({"sequences": torch.zeros((64, 32_768), dtype=torch.float32)})
+    parent = TensorBatch({"sequences": torch.arange(64 * 32_768, dtype=torch.float32).reshape(64, 32_768)})
     chunks = parent.chunk(1)
     tensor = chunks[17]["sequences"]
     logical_bytes = parent["sequences"].numel() * parent["sequences"].element_size()

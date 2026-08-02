@@ -898,16 +898,21 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
     return f"{rendezvous_dir.rstrip('/')}/ray_spill"
 
 
-def _ray_spill_flags(spill_uri: str | None) -> list[str]:
+def _ray_local_spill_dir() -> str:
+    spill_dir = os.path.expandvars(os.path.expanduser(os.environ.get(_RAY_SPILL_DIR_ENV, DEFAULT_RAY_SPILL_DIR)))
+    if not os.path.isabs(spill_dir) or "://" in spill_dir:
+        raise ValueError(f"{_RAY_SPILL_DIR_ENV} must be an absolute local path, got {spill_dir!r}")
+    return spill_dir
+
+
+def _ray_spill_flags(spill_uri: str | None, local_spill_dir: str | None) -> list[str]:
     """Build the head-node flag for local scratch or explicit R2 spilling.
 
     The R2 object_spilling_config value is itself a JSON string (double-encoded), per
     Ray's system-config schema. min_spilling_size=0 applies only to explicit R2 mode."""
     if not spill_uri:
-        spill_dir = os.path.expandvars(os.path.expanduser(os.environ.get(_RAY_SPILL_DIR_ENV, DEFAULT_RAY_SPILL_DIR)))
-        if not os.path.isabs(spill_dir) or "://" in spill_dir:
-            raise ValueError(f"{_RAY_SPILL_DIR_ENV} must be an absolute local path, got {spill_dir!r}")
-        return [f"--object-spilling-directory={spill_dir}"]
+        assert local_spill_dir is not None
+        return [f"--object-spilling-directory={local_spill_dir}"]
     spilling_config = json.dumps(
         {
             "type": "smart_open",
@@ -989,6 +994,7 @@ def _ray_mem_flags() -> list[str]:
 
 
 def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) -> None:
+    local_spill_dir = None if spill_uri else _ray_local_spill_dir()
     cmd = [
         _ray_bin(),
         "start",
@@ -998,15 +1004,12 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
         "--dashboard-host=0.0.0.0",
         *_ray_port_flags(),
         *_ray_mem_flags(),
-        *_ray_spill_flags(spill_uri),
+        *_ray_spill_flags(spill_uri, local_spill_dir),
     ]
     if spill_uri:
         _log(f"Ray object spilling -> R2 prefix {spill_uri} (no local /tmp spill)")
     else:
-        _log(
-            "Ray object spilling -> launcher-owned local scratch "
-            f"{os.environ.get(_RAY_SPILL_DIR_ENV, DEFAULT_RAY_SPILL_DIR)}"
-        )
+        _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
     t0 = time.time()
     subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)

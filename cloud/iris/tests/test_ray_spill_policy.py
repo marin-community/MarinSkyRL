@@ -5,7 +5,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.start_rl_iris_controller import _ray_spill_flags, _ray_spill_uri
+from cloud.iris.start_rl_iris_controller import (  # noqa: E402
+    _ray_local_spill_dir,
+    _ray_spill_flags,
+    _ray_spill_uri,
+)
 
 
 def test_remote_spilling_requires_explicit_opt_in(monkeypatch):
@@ -21,5 +25,6 @@ def test_remote_spilling_requires_explicit_opt_in(monkeypatch):
 
 def test_default_spill_backend_uses_launcher_owned_local_storage(monkeypatch):
     monkeypatch.delenv("OT_AGENT_RAY_SPILL_DIR", raising=False)
+    local_spill_dir = _ray_local_spill_dir()
 
-    assert _ray_spill_flags(None) == ["--object-spilling-directory=/tmp/skyrl-ray-spill"]
+    assert _ray_spill_flags(None, local_spill_dir) == ["--object-spilling-directory=/tmp/skyrl-ray-spill"]
