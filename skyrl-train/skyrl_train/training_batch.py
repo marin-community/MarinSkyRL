@@ -134,13 +134,17 @@ class TensorBatch(dict, Generic[DictType]):
 
     def __getstate__(self):
         """Serialize the `TensorBatch` object for pickle protocol"""
-        self.contiguous()
         if self._device is not None:
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
         batch_dict = {}
         for key, value in self.items():
+            value_to_save = value
+            if value is not None:
+                logical_bytes = value.numel() * value.element_size()
+                if value.storage_offset() != 0 or value.untyped_storage().nbytes() > logical_bytes:
+                    value_to_save = value.clone(memory_format=torch.contiguous_format)
             buffer = io.BytesIO()
-            torch.save(value, buffer)
+            torch.save(value_to_save, buffer)
             batch_dict[key] = buffer.getvalue()
 
         return {
@@ -149,6 +153,10 @@ class TensorBatch(dict, Generic[DictType]):
             "device": self._device,
             "metadata": self.metadata,
         }
+
+    def __reduce_ex__(self, _protocol: int):
+        """Serialize only the compact custom state, not the inherited dict payload."""
+        return self.__class__, (), self.__getstate__()
 
     def __setstate__(self, state):
         """Deserialize the `TensorBatch` object and load it into memory"""

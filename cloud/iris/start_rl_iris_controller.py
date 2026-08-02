@@ -858,42 +858,39 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-# --- R2 object-store spilling ----------------------------------------------------
-# Ray spills its object store to /tmp/ray/session*/ray_spilled_objects on LOCAL
-# disk when plasma overflows. The async RL generator over-produces rollouts during
-# the slow first training step, so the spill can grow past the kubelet's
-# ephemeral-storage limit and EVICT rank-0. CoreWeave task pods carry R2 (S3-compat)
-# creds + endpoint in env (AWS_ENDPOINT_URL / AWS_*_KEY / AWS_REGION=auto), so we
-# redirect Ray's spill to s3://marin-us-east-02a/... instead of local disk. Requires
-# boto3 in the rl env (baked into the gpu-rl image).
+# --- Ray object-store spilling ---------------------------------------------------
+# Training-step arguments are reconstructible and latency-sensitive. Spill them to
+# launcher-owned local scratch by default; do not turn a dispatch amplification bug
+# into durable or cross-region object traffic. R2 is an explicit emergency opt-in.
 #
 # Set on the HEAD ONLY. `object_spilling_config` lives in Ray's `_system_config`,
 # which Ray REJECTS on a worker `ray start --address=...` ("System config parameters
 # can only be set on the head node"). The head's config propagates cluster-wide via
 # GCS, and each worker raylet still spills its OWN objects per-node — the smart_open
 # backend appends "_<node_id>" to the prefix so nodes never collide.
-# Gate: OT_AGENT_RAY_SPILL_TO_R2 (default "1" = on); set to "0" for local /tmp.
+# Gate: OT_AGENT_RAY_SPILL_TO_R2 (default "0" = off); set to "1" only when local
+# scratch cannot safely hold the workload.
 # Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
 # within a run share one prefix without colliding across jobs.
 RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
+DEFAULT_RAY_SPILL_DIR = "/tmp/skyrl-ray-spill"
+_RAY_SPILL_DIR_ENV = "OT_AGENT_RAY_SPILL_DIR"
 
 
 def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
     """Per-job R2 spill prefix derived from the rendezvous dir, or None if R2 spilling
-    is disabled / no rendezvous dir is available (single-node runs with no s3 dir fall
-    back to local /tmp spilling)."""
-    if os.environ.get("OT_AGENT_RAY_SPILL_TO_R2", "1") != "1":
+    is disabled or no rendezvous dir is available."""
+    if os.environ.get("OT_AGENT_RAY_SPILL_TO_R2", "0") != "1":
         return None
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
         return None
-    # SELF-GATE on boto3: Ray's smart_open spill backend imports boto3 directly. On an
-    # image without boto3, return None -> clean fallback to local /tmp spill (no
-    # `ray start` crash). R2 spilling AUTO-ACTIVATES once the image ships boto3.
+    # Ray's smart_open spill backend imports boto3 directly. An explicit R2 request
+    # falls back to launcher-owned local scratch if the image lacks boto3.
     try:
         import boto3  # noqa: F401
     except ImportError:
         _log(
-            "WARNING: boto3 missing -> Ray R2 object-spilling DISABLED (local /tmp fallback); "
+            "WARNING: boto3 missing -> Ray R2 object-spilling DISABLED (local scratch fallback); "
             "rebuild gpu-rl image with boto3 (Dockerfile.gpu-rl) to enable. This run risks "
             "the ephemeral-storage eviction if its object store spills > the --disk limit."
         )
@@ -902,13 +899,15 @@ def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
 
 
 def _ray_spill_flags(spill_uri: str | None) -> list[str]:
-    """Build the `--system-config` flag that redirects Ray object spilling to R2.
+    """Build the head-node flag for local scratch or explicit R2 spilling.
 
-    The object_spilling_config VALUE is itself a JSON STRING (double-encoded), per Ray's
-    system-config schema. min_spilling_size=0 forces every overflow to spill remotely
-    rather than buffering small objects locally first."""
+    The R2 object_spilling_config value is itself a JSON string (double-encoded), per
+    Ray's system-config schema. min_spilling_size=0 applies only to explicit R2 mode."""
     if not spill_uri:
-        return []
+        spill_dir = os.path.expandvars(os.path.expanduser(os.environ.get(_RAY_SPILL_DIR_ENV, DEFAULT_RAY_SPILL_DIR)))
+        if not os.path.isabs(spill_dir) or "://" in spill_dir:
+            raise ValueError(f"{_RAY_SPILL_DIR_ENV} must be an absolute local path, got {spill_dir!r}")
+        return [f"--object-spilling-directory={spill_dir}"]
     spilling_config = json.dumps(
         {
             "type": "smart_open",
@@ -1003,6 +1002,11 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
     ]
     if spill_uri:
         _log(f"Ray object spilling -> R2 prefix {spill_uri} (no local /tmp spill)")
+    else:
+        _log(
+            "Ray object spilling -> launcher-owned local scratch "
+            f"{os.environ.get(_RAY_SPILL_DIR_ENV, DEFAULT_RAY_SPILL_DIR)}"
+        )
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
     t0 = time.time()
     subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)
@@ -1010,9 +1014,8 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
 
 
 def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str | None = None) -> None:
-    # NOTE: do NOT pass _ray_spill_flags here — `--system-config` is head-only in Ray
-    # (see the R2-spill block comment). The head's config propagates to this worker via
-    # GCS; the worker still spills its own objects per-node.
+    # The head propagates its cluster-wide spill configuration through GCS. Each
+    # worker still writes its own spill files on its local node.
     cmd = [
         _ray_bin(),
         "start",

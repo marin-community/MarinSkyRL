@@ -179,6 +179,22 @@ def test_train_batch_pickle():
     assert unpickled.metadata == data.metadata
 
 
+def test_chunked_batch_ray_serialization_stays_within_logical_payload_budget():
+    parent = TensorBatch({"sequences": torch.zeros((64, 32_768), dtype=torch.float32)})
+    chunks = parent.chunk(1)
+    tensor = chunks[17]["sequences"]
+    logical_bytes = parent["sequences"].numel() * parent["sequences"].element_size()
+
+    assert tensor.untyped_storage().nbytes() == parent["sequences"].untyped_storage().nbytes()
+    assert tensor.untyped_storage().nbytes() > tensor.numel() * tensor.element_size()
+
+    payloads = [ray.cloudpickle.dumps(chunk) for chunk in chunks]
+    restored = ray.cloudpickle.loads(payloads[17])
+
+    assert sum(map(len, payloads)) < 2 * logical_bytes
+    assert torch.equal(restored["sequences"], tensor)
+
+
 def test_train_batch_setitem():
     batch_size = 3
     seq_len = 4
