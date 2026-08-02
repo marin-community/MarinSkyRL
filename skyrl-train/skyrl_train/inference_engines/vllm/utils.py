@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, Protocol
+from typing import Dict, Any, Optional, Protocol
 
 
 class PrefixCacheCounts(Protocol):
@@ -9,16 +9,18 @@ class PrefixCacheCounts(Protocol):
     hits: int
 
 
-def prefix_cache_hit_rate_percent(stats: PrefixCacheCounts) -> float:
+def prefix_cache_hit_rate_percent(stats: PrefixCacheCounts) -> Optional[float]:
     """Share of queried prefix tokens that were already cached, as a percentage.
 
     `PrefixCacheStats` counts tokens, not requests: `queries` is how many were looked up and
     `hits` how many were served from cache. This is the ratio vLLM's `CachingMetrics` uses,
-    applied to a single iteration's delta rather than to its running request window. An
-    iteration that queried no tokens has no rate to report and yields 0.0.
+    applied to a single iteration's delta rather than to its running request window.
+
+    Returns None for an iteration that queried nothing, which has no rate to report rather
+    than a rate of zero. `CachingMetrics.observe` drops those deltas for the same reason.
     """
     if stats.queries == 0:
-        return 0.0
+        return None
     return stats.hits / stats.queries * 100.0
 
 

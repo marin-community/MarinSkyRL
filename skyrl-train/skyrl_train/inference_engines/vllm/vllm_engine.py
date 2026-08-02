@@ -1223,7 +1223,9 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
             current_running = 0
             current_waiting = 0
             current_cache_usage = 0.0
-            current_prefix_hit = 0.0
+            # None whenever the iteration queried no prefix tokens, so decode-only iterations
+            # contribute no sample instead of a 0.0 that drags the median down.
+            current_prefix_hit: Optional[float] = None
 
             if scheduler_stats is not None:
                 current_running = getattr(scheduler_stats, "num_running_reqs", 0)
@@ -1231,6 +1233,8 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 current_cache_usage = getattr(scheduler_stats, "kv_cache_usage", 0.0) * 100.0  # Convert to percentage
 
                 current_prefix_hit = prefix_cache_hit_rate_percent(scheduler_stats.prefix_cache_stats)
+
+            has_prefix_hit = current_prefix_hit is not None
 
             # Extract iteration_stats (second positional arg) for per-request latency data
             iteration_stats = None
@@ -1287,7 +1291,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         "_samples_running": [current_running] if is_active else [],
                         "_samples_waiting": [current_waiting] if is_active else [],
                         "_samples_cache": [current_cache_usage] if is_active else [],
-                        "_samples_prefix_hit": [current_prefix_hit] if is_active else [],
+                        "_samples_prefix_hit": [current_prefix_hit] if is_active and has_prefix_hit else [],
                         # Per-request latency samples (accumulated from finished requests)
                         "_samples_prefill_time": list(finished_prefill_times),
                         "_samples_decode_time": list(finished_decode_times),
@@ -1301,7 +1305,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         "_peak_running": current_running,
                         "_peak_waiting": current_waiting,
                         "_peak_cache": current_cache_usage,
-                        "_peak_prefix_hit": current_prefix_hit,
+                        "_peak_prefix_hit": current_prefix_hit if has_prefix_hit else 0.0,
                         # Counters
                         "_num_samples": 1,
                         "_num_active_samples": 1 if is_active else 0,
@@ -1314,7 +1318,8 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     existing["_peak_running"] = max(existing["_peak_running"], current_running)
                     existing["_peak_waiting"] = max(existing["_peak_waiting"], current_waiting)
                     existing["_peak_cache"] = max(existing["_peak_cache"], current_cache_usage)
-                    existing["_peak_prefix_hit"] = max(existing["_peak_prefix_hit"], current_prefix_hit)
+                    if has_prefix_hit:
+                        existing["_peak_prefix_hit"] = max(existing["_peak_prefix_hit"], current_prefix_hit)
 
                     # Accumulate per-request latency samples
                     existing["_samples_prefill_time"].extend(finished_prefill_times)
@@ -1331,7 +1336,8 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         existing["_samples_running"].append(current_running)
                         existing["_samples_waiting"].append(current_waiting)
                         existing["_samples_cache"].append(current_cache_usage)
-                        existing["_samples_prefix_hit"].append(current_prefix_hit)
+                        if has_prefix_hit:
+                            existing["_samples_prefix_hit"].append(current_prefix_hit)
                         existing["_num_active_samples"] += 1
 
                     existing["_num_samples"] += 1

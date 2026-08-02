@@ -4,37 +4,45 @@ Run with:
 uv run --frozen pytest tests/cpu/utils/test_timer.py
 """
 
-import time
+from typing import Iterable
 
 import pytest
 
+import skyrl_train.utils.utils as timer_module
 from skyrl_train.utils import Timer
 
 
-def _clock(*ticks: float):
-    """A clock returning each tick in turn, then holding the last value.
+class FakeClock:
+    """A stand-in for the `time` module, installed only on the module `Timer` lives in.
 
-    Patching the module attribute reaches every caller, including the asyncio event loop,
-    which reads `time.monotonic` to schedule. Holding the last value rather than running
-    out keeps those callers working while still making an extra read inside `Timer` show
-    up as a much larger duration. The timed blocks below never await, so the loop's own
-    reads fall outside the window these ticks cover.
+    Patching `time.monotonic` globally would also retime the asyncio event loop, which
+    schedules off the same clock. Scoping the patch to one module leaves every other
+    caller on the real clock, so each tick here is consumed by `Timer` and nothing else.
+    `monotonic` and `time` advance independently, which is what lets a test step the wall
+    clock backwards without disturbing the monotonic one.
     """
-    remaining = list(ticks)
 
-    def read() -> float:
-        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+    def __init__(self, *monotonic_ticks: float, wall_clock_ticks: Iterable[float] = ()):
+        self._monotonic_ticks = list(monotonic_ticks)
+        self._wall_clock_ticks = list(wall_clock_ticks)
 
-    return read
+    def monotonic(self) -> float:
+        assert self._monotonic_ticks, "Timer read the monotonic clock more times than the test scripted"
+        return self._monotonic_ticks.pop(0)
+
+    def time(self) -> float:
+        assert self._wall_clock_ticks, "Timer measured a duration on the wall clock"
+        return self._wall_clock_ticks.pop(0)
 
 
 def test_accumulated_duration_comes_from_a_single_clock_read(monkeypatch):
     """The duration `Timer` accumulates is the one it measured, not a later re-read.
 
     Reading the clock once for the log line and again for `update_dict` charges the
-    accumulator for the logging call on top of the block itself.
+    accumulator for the logging call on top of the block itself. The third tick is far
+    enough away that a second read reports 800.0 rather than 1.0.
     """
-    monkeypatch.setattr(time, "monotonic", _clock(100.0, 101.0, 900.0))
+    monkeypatch.setattr(timer_module, "time", FakeClock(100.0, 101.0, 900.0))
 
     timings = {}
     with Timer("generate", timings):
@@ -44,7 +52,7 @@ def test_accumulated_duration_comes_from_a_single_clock_read(monkeypatch):
 
 
 def test_repeated_blocks_accumulate_under_one_key(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", _clock(10.0, 12.0, 100.0, 103.0))
+    monkeypatch.setattr(timer_module, "time", FakeClock(10.0, 12.0, 100.0, 103.0))
 
     timings = {}
     for _ in range(2):
@@ -60,8 +68,7 @@ def test_duration_ignores_a_backwards_wall_clock_step(monkeypatch):
     `timing/*` values are read as fractions of `timing/step`, so a negative duration
     corrupts the phase breakdown rather than merely looking odd.
     """
-    monkeypatch.setattr(time, "monotonic", _clock(100.0, 101.0))
-    monkeypatch.setattr(time, "time", _clock(5000.0, 1000.0))
+    monkeypatch.setattr(timer_module, "time", FakeClock(100.0, 101.0, wall_clock_ticks=(5000.0, 1000.0, 1000.0)))
 
     timings = {}
     with Timer("generate", timings):
@@ -72,7 +79,7 @@ def test_duration_ignores_a_backwards_wall_clock_step(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_async_block_accumulates_a_single_measured_duration(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", _clock(100.0, 101.0, 900.0))
+    monkeypatch.setattr(timer_module, "time", FakeClock(100.0, 101.0, 900.0))
 
     timings = {}
     async with Timer("generate", timings):
