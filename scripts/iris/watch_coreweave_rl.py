@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync and summarize every active CoreWeave Iris RL job for one user.
+"""Sync and summarize CoreWeave Iris and explicitly selected Jupiter RL jobs.
 
 The monitor is deliberately read-only.  Each Iris job gets one stable local
 directory, keyed by its full Iris job id, so repeated sweeps and Iris task
@@ -13,8 +13,15 @@ size bound; that rule avoids repeatedly downloading giant rollout payloads while
 preserving any diagnostic log regardless of size.
 
 By default the scope is the current lab user's active RL jobs on every
-configured CoreWeave GPU cluster. Use ``--all-users`` only when cross-user
-monitoring is intended.
+configured CoreWeave GPU cluster. Jupiter runs are opt-in because their
+artifacts live on GPFS: pass the canonical launcher experiment path with
+``--jupiter-run SLURM_JOB_ID=/absolute/experiment/path``. The Jupiter sync only
+touches known subtrees below that path and performs one shallow trace listing.
+
+For a Jupiter-only status sweep:
+
+``python scripts/iris/watch_coreweave_rl.py --jupiter-only \
+  --jupiter-run 1234567=/absolute/path/to/experiments/my-run --status-only``
 """
 
 from __future__ import annotations
@@ -43,11 +50,21 @@ if str(REPO_ROOT) not in sys.path:
 from infra.rl_metrics import (  # noqa: E402
     ENTROPY_KEYS,
     GRAD_NORM_KEYS,
+    POLICY_LOG_RATIO_ABS_MAX_KEYS,
+    POLICY_LOG_RATIO_ABS_MEAN_KEYS,
+    POLICY_LOG_RATIO_ABS_P99_KEYS,
     POLICY_LOSS_KEYS,
     REWARD_KEYS,
+    TIS_EXACT_MATCH_KEYS,
     metric_value,
     parse_training_metrics_result,
     training_metrics_parse_error,
+)
+from scripts.iris.jupiter_rl_artifacts import (  # noqa: E402
+    JupiterRunSpec,
+    parse_jupiter_run_spec,
+    query_jupiter_job_status,
+    sync_jupiter_artifacts,
 )
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS  # noqa: E402
 from scripts.iris.coreweave_ops import (  # noqa: E402
@@ -80,6 +97,7 @@ from scripts.iris.iris_ops import (  # noqa: E402
 DEFAULT_USER = "benjaminfeuer"
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
 DEFAULT_TRACE_SYNC_LIMIT = 500
+DEFAULT_JUPITER_TRACE_SYNC_LIMIT = 20
 CURRENT_FINELOG_MAX_LINES = 600_000
 COMPLETE_FINELOG_MAX_LINES = 10_000_000
 FinelogScope = Literal["current", "complete"]
@@ -128,14 +146,26 @@ class RlJob:
     entrypoint: str
     dataset: str = "—"
     finished_at_ms: int | None = None
+    source: Literal["iris", "jupiter"] = "iris"
+    remote_experiment_dir: str | None = None
+    remote_job_name: str | None = None
 
     @property
     def short_name(self) -> str:
+        if self.source == "jupiter":
+            return self.remote_job_name or (
+                Path(self.remote_experiment_dir).name if self.remote_experiment_dir else self.job_id
+            )
         return self.job_id.rstrip("/").rsplit("/", 1)[-1]
 
     @property
     def is_terminal(self) -> bool:
-        return self.state in {"succeeded", "failed"}
+        return self.state in {"succeeded", "failed", "killed", "worker_failed", "unschedulable"}
+
+    @property
+    def bundle_job_id(self) -> str:
+        """Return a canonical bundle id without pretending Slurm ids are Iris ids."""
+        return f"/slurm/{self.job_id}" if self.source == "jupiter" else self.job_id
 
 
 @dataclass(frozen=True)
@@ -188,6 +218,7 @@ class ProgressReporter:
 
 
 CLUSTERS = tuple(Cluster(name, config.kubeconfig, config.context) for name, config in COREWEAVE_CLUSTERS.items())
+JUPITER_CLUSTER = Cluster("jsc-jupiter", Path(), None)
 
 
 def parse_args() -> argparse.Namespace:
@@ -196,7 +227,7 @@ def parse_args() -> argparse.Namespace:
         "--bundle-root",
         type=Path,
         default=DEFAULT_BUNDLE_ROOT,
-        help="Root for canonical local Iris evidence bundles and RL reports.",
+        help="Root for canonical local RL evidence bundles and reports.",
     )
     parser.add_argument(
         "--hours",
@@ -206,6 +237,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--user", default=DEFAULT_USER, help=f"Iris user to monitor (default: {DEFAULT_USER}).")
     parser.add_argument("--all-users", action="store_true", help="Discover active RL jobs for every user.")
+    parser.add_argument(
+        "--jupiter-run",
+        action="append",
+        default=[],
+        type=parse_jupiter_run_spec,
+        metavar="SLURM_JOB_ID=/ABSOLUTE/EXPERIMENT/PATH",
+        help="Also monitor one explicit Jupiter RL run. Repeat for multiple runs.",
+    )
+    parser.add_argument(
+        "--jupiter-host",
+        default="Jupiter",
+        help="SSH host or configured alias used for Jupiter access (default: Jupiter).",
+    )
+    parser.add_argument(
+        "--jupiter-only",
+        action="store_true",
+        help="Skip CoreWeave Iris discovery and monitor only the explicit --jupiter-run entries.",
+    )
     parser.add_argument(
         "--max-non-log-bytes",
         type=int,
@@ -225,6 +274,15 @@ def parse_args() -> argparse.Namespace:
         "--status-only",
         action="store_true",
         help="Fetch only the current finelog tail for status; skip pod, Ray, and trace artifacts.",
+    )
+    parser.add_argument(
+        "--jupiter-trace-sync-limit",
+        type=int,
+        default=DEFAULT_JUPITER_TRACE_SYNC_LIMIT,
+        help=(
+            "Sync this many newest trace directories per explicit Jupiter run "
+            "(default: 20; 0 deliberately syncs all traces in that run)."
+        ),
     )
     parser.add_argument(
         "--filter",
@@ -361,8 +419,8 @@ def discover_rl_jobs(
 
 
 def job_directory(bundle_root: Path, job: RlJob) -> Path:
-    """Return the shared canonical evidence directory for this Iris job."""
-    return job_bundle(bundle_root, job.cluster.name, job.job_id).directory
+    """Return the shared canonical evidence directory for this RL job."""
+    return job_bundle(bundle_root, job.cluster.name, job.bundle_job_id).directory
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -758,8 +816,6 @@ def tis_ratio_summary(metrics: dict[str, Any]) -> str:
         metrics,
         "policy/tis/log_ratio_abs_mean",
         "tis/log_ratio_abs_mean",
-        "policy/log_ratio_abs_mean",
-        "log_ratio_abs_mean",
     )
     if log_ratio is not None:
         return f"TIS |log r|={display_metric(log_ratio)}"
@@ -771,6 +827,27 @@ def tis_ratio_summary(metrics: dict[str, Any]) -> str:
         "policy/rollout_train_prob_diff_mean",
     )
     return f"TIS r={display_metric(importance_ratio)}"
+
+
+def tis_alignment_summary(metrics: dict[str, Any]) -> str:
+    """Render served-token versus trainer-token exact alignment for TIS."""
+    return f"TIS exact={display_metric(metric_value(metrics, *TIS_EXACT_MATCH_KEYS))}"
+
+
+def token_probability_shift_summary(metrics: dict[str, Any]) -> str:
+    """Render the center and tail of per-token policy probability movement.
+
+    These are absolute old-policy versus new-policy log-probability deltas, not
+    literal top-k model probability mass. A widening p99/max tail relative to
+    the mean is the available signal that a few tokens carry extreme changes.
+    """
+    values = (
+        metric_value(metrics, *POLICY_LOG_RATIO_ABS_MEAN_KEYS),
+        metric_value(metrics, *POLICY_LOG_RATIO_ABS_P99_KEYS),
+        metric_value(metrics, *POLICY_LOG_RATIO_ABS_MAX_KEYS),
+    )
+    rendered = "/".join(display_metric(value) for value in values)
+    return f"token |Δlog p| μ/p99/max={rendered}"
 
 
 def terminal_signal(finelog: Path) -> str | None:
@@ -836,7 +913,14 @@ def report_row(job: RlJob, artifacts: ArtifactResult, directory: Path) -> list[o
     grad_norm = metric_value(metrics, *GRAD_NORM_KEYS)
     entropy = metric_value(metrics, *ENTROPY_KEYS)
     signal = terminal_signal(directory / "finelog.log")
-    trend = f"entropy={display_metric(entropy)}; {tis_ratio_summary(metrics)}"
+    trend = "; ".join(
+        (
+            f"entropy={display_metric(entropy)}",
+            tis_alignment_summary(metrics),
+            tis_ratio_summary(metrics),
+            token_probability_shift_summary(metrics),
+        )
+    )
     if signal:
         trend = "workload error detected; see error report"
     elif step is None:
@@ -859,12 +943,40 @@ def sync_job(
     bundle_root: Path,
     *,
     scope: SyncScope,
+    jupiter_host: str = "Jupiter",
+    jupiter_trace_sync_limit: int = DEFAULT_JUPITER_TRACE_SYNC_LIMIT,
+    max_non_log_bytes: int = DEFAULT_MAX_NON_LOG_BYTES,
     progress: ProgressReporter | None = None,
 ) -> tuple[ArtifactResult, Path]:
     """Sync non-trace evidence for one job before the fleet trace selection."""
-    bundle = job_bundle(bundle_root, job.cluster.name, job.job_id)
+    bundle = job_bundle(bundle_root, job.cluster.name, job.bundle_job_id)
     directory = bundle.directory
     directory.mkdir(parents=True, exist_ok=True)
+    if job.source == "jupiter":
+        if job.remote_experiment_dir is None:
+            raise ValueError(f"Jupiter job {job.job_id} has no explicit experiment directory")
+        if progress:
+            progress.phase(f"bounded GPFS artifact sync {job.cluster.name}/{job.short_name}")
+        result = sync_jupiter_artifacts(
+            JupiterRunSpec(job.job_id, job.remote_experiment_dir, job.remote_job_name),
+            directory,
+            host=jupiter_host,
+            trace_sync_limit=jupiter_trace_sync_limit,
+            max_non_log_bytes=max_non_log_bytes,
+            status_only=scope == "status",
+        )
+        return (
+            ArtifactResult(
+                result.finelog,
+                result.slurm_logs,
+                result.ray_logs,
+                result.traces,
+                result.trace_selected,
+                None,
+                result.errors,
+            ),
+            directory,
+        )
     if scope == "status":
         if progress:
             progress.phase(f"current finelog tail {job.cluster.name}/{job.short_name}")
@@ -952,7 +1064,7 @@ def write_job_manifest(
     max_non_log_bytes: int,
     trace_sync_limit: int,
 ) -> None:
-    bundle = job_bundle(bundle_root, job.cluster.name, job.job_id)
+    bundle = job_bundle(bundle_root, job.cluster.name, job.bundle_job_id)
     write_bundle_manifest(
         bundle,
         {
@@ -974,8 +1086,12 @@ def main() -> int:
         raise ValueError("--max-non-log-bytes must be non-negative")
     if args.trace_sync_limit < 0:
         raise ValueError("--trace-sync-limit must be non-negative")
+    if args.jupiter_trace_sync_limit < 0:
+        raise ValueError("--jupiter-trace-sync-limit must be non-negative")
     if args.hours < 0:
         raise ValueError("--hours must be non-negative")
+    if args.jupiter_only and not args.jupiter_run:
+        raise ValueError("--jupiter-only requires at least one --jupiter-run")
     if not args.all_users and not re.fullmatch(r"[A-Za-z0-9_-]+", args.user):
         raise ValueError("--user may contain only letters, numbers, _ and -")
     filters = parse_regex_filters(
@@ -993,24 +1109,46 @@ def main() -> int:
     errors: list[MonitorError] = []
     scope_user = None if args.all_users else args.user
     submitted_since_ms = None if args.hours == 0 else now_ms - int(args.hours * 3_600_000)
-    for cluster in CLUSTERS:
-        progress.phase(f"discovering RL jobs on {cluster.name}")
-        try:
-            found, discovery_errors = discover_rl_jobs(
-                cluster,
-                scope_user,
-                submitted_since_ms=submitted_since_ms,
+    if not args.jupiter_only:
+        for cluster in CLUSTERS:
+            progress.phase(f"discovering RL jobs on {cluster.name}")
+            try:
+                found, discovery_errors = discover_rl_jobs(
+                    cluster,
+                    scope_user,
+                    submitted_since_ms=submitted_since_ms,
+                )
+            except Exception as error:
+                found, discovery_errors = [], [str(error)]
+            active_count = sum(not job.is_terminal for job in found)
+            terminal_count = len(found) - active_count
+            window_label = "all history" if args.hours == 0 else f"submitted in last {args.hours:g}h"
+            progress.phase(
+                f"discovery {cluster.name}: {active_count:,} active, {terminal_count:,} succeeded/failed; {window_label}"
             )
+            jobs.extend(found)
+            errors.extend(_monitor_error(cluster.name, "job discovery", error) for error in discovery_errors)
+
+    for run in args.jupiter_run:
+        progress.phase(f"checking explicit Jupiter Slurm job {run.job_id}")
+        try:
+            status = query_jupiter_job_status(run, host=args.jupiter_host)
         except Exception as error:
-            found, discovery_errors = [], [str(error)]
-        active_count = sum(not job.is_terminal for job in found)
-        terminal_count = len(found) - active_count
-        window_label = "all history" if args.hours == 0 else f"submitted in last {args.hours:g}h"
-        progress.phase(
-            f"discovery {cluster.name}: {active_count:,} active, {terminal_count:,} succeeded/failed; {window_label}"
+            status = SimpleNamespace(state="unknown", job_name=run.job_name, error=str(error))
+        if status.error:
+            errors.append(_monitor_error(f"{JUPITER_CLUSTER.name}/{run.job_id}", "Slurm status", status.error))
+        jobs.append(
+            RlJob(
+                cluster=JUPITER_CLUSTER,
+                job_id=run.job_id,
+                state=status.state,
+                submitted_at_ms=now_ms,
+                entrypoint="",
+                source="jupiter",
+                remote_experiment_dir=run.experiment_dir,
+                remote_job_name=status.job_name,
+            )
         )
-        jobs.extend(found)
-        errors.extend(_monitor_error(cluster.name, "job discovery", error) for error in discovery_errors)
 
     jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
 
@@ -1023,6 +1161,9 @@ def main() -> int:
                 job,
                 args.bundle_root,
                 scope="status" if args.status_only else "terminal" if job.is_terminal else "full",
+                jupiter_host=args.jupiter_host,
+                jupiter_trace_sync_limit=args.jupiter_trace_sync_limit,
+                max_non_log_bytes=args.max_non_log_bytes,
                 progress=progress,
             )
         except Exception as error:
@@ -1038,12 +1179,14 @@ def main() -> int:
             )
         synced_jobs.append((job, artifacts, directory))
 
-    active_job_directories = [(job, directory) for job, _, directory in synced_jobs if not job.is_terminal]
-    if not args.status_only and active_job_directories:
+    active_iris_job_directories = [
+        (job, directory) for job, _, directory in synced_jobs if job.source == "iris" and not job.is_terminal
+    ]
+    if not args.status_only and active_iris_job_directories:
         progress.phase("starting fleet-wide trace inventory and transfer")
         try:
             trace_statuses = sync_fleet_trace_jobs(
-                active_job_directories,
+                active_iris_job_directories,
                 args.max_non_log_bytes,
                 args.trace_sync_limit,
                 progress,
@@ -1056,11 +1199,11 @@ def main() -> int:
                     None,
                     f"{type(error).__name__}: {error}",
                 )
-                for job, _directory in active_job_directories
+                for job, _directory in active_iris_job_directories
             }
         synchronized: list[tuple[RlJob, ArtifactResult, Path]] = []
         for job, artifacts, directory in synced_jobs:
-            if job.is_terminal:
+            if job.is_terminal or job.source != "iris":
                 synchronized.append((job, artifacts, directory))
                 continue
             traces, started, completed, trace_error = trace_statuses.get(
@@ -1083,7 +1226,7 @@ def main() -> int:
             )
         synced_jobs = synchronized
     elif not args.status_only:
-        progress.phase("no active RL jobs; trace inventory and transfer skipped")
+        progress.phase("no active Iris RL jobs; fleet object-store trace sync skipped")
 
     rows: list[list[object]] = []
     job_report: dict[str, Any] = {}
@@ -1103,7 +1246,7 @@ def main() -> int:
                 directory,
                 artifacts,
                 args.max_non_log_bytes,
-                args.trace_sync_limit,
+                args.jupiter_trace_sync_limit if job.source == "jupiter" else args.trace_sync_limit,
             )
         except Exception as error:
             errors.append(_monitor_error(scope, "manifest write", error))
@@ -1124,7 +1267,7 @@ def main() -> int:
                     StyledCell("status unavailable; see error report", "error"),
                 ]
             )
-        job_report[job.job_id] = {
+        job_report[f"{job.cluster.name}/{job.job_id}"] = {
             "cluster": job.cluster.name,
             "directory": str(directory),
             "artifacts": asdict(artifacts),
@@ -1132,9 +1275,7 @@ def main() -> int:
 
     headers = ["Job", "Dataset", "State", "Step", "Reward", "Policy Loss", "Grad Norm", "Traces", "Trend"]
     table = (
-        box_table(headers, rows)
-        if rows
-        else "No active or succeeded/failed CoreWeave Iris RL jobs in the selected window."
+        box_table(headers, rows) if rows else "No RL jobs matched the selected Iris window or explicit Jupiter runs."
     )
     terminal_table = box_table(headers, rows, color=sys.stdout.isatty()) if rows else table
     filter_suffix = f"; filters={','.join(args.filter)}" if args.filter else ""
@@ -1143,12 +1284,12 @@ def main() -> int:
     error_report_path = write_error_report(
         report_directory,
         timestamp,
-        "Iris CoreWeave RL monitor errors",
+        "RL monitor errors",
         checked_at,
         errors,
     )
     error_summary = f"Monitor errors: {len(errors)}; details: {error_report_path}"
-    heading = f"# Iris CoreWeave RL status — {checked_at.isoformat()}; submitted={window}{filter_suffix}"
+    heading = f"# RL status — {checked_at.isoformat()}; Iris submitted={window}{filter_suffix}"
     report = f"{heading}\n\n{table}\n\n{error_summary}\n"
     report_path = report_directory / f"{timestamp}.md"
     report_path.write_text(report)
