@@ -40,8 +40,8 @@
 # `uv.lock`; the architecture-specific native artifacts are part of that frozen
 # resolution. On
 # top of that closure it installs flash-attn from its validated wheel and the
-# exact vLLM fork source with validated precompiled native extensions. Nothing
-# from the launcher repo is baked in.
+# exact vLLM fork source with validated precompiled native extensions. The
+# unified source tree is baked into the image.
 #
 # Consumed by the iris RL launcher (digest-pinned). Built in-cluster via kaniko
 # (docker/build_gpu_rl_kaniko.sh) on an aarch64 build host — kaniko builds for the
@@ -265,8 +265,8 @@ COPY skyrl-gym ${SKYRL_HOME}/skyrl-gym
 
 # Make /opt/skyrl a REAL git working tree so the baked MarinSkyRL commit is
 # recorded (provenance) and /opt/skyrl serves as a clean baked-HEAD import
-# fallback behind the launcher's live /app source sync (which shadows it on
-# PYTHONPATH — the single deploy vector for skyrl-train + examples source).
+# fallback behind the live /app controller bundle. Trainer and example source
+# resolve from this baked tree.
 # marinskyrl stays editable (uv sync below). This is additive: the
 # committed working-tree content is exactly the COPY'd source above (unchanged
 # closure); we only add .git + the origin remote.

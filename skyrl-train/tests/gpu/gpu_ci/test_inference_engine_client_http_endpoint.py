@@ -6,8 +6,6 @@ the inference client engine. Only requires 1 GPU.
 
 # Run only vllm tests (requires vllm extra):
 uv run --isolated --group dev --extra train-vllm pytest tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "vllm"
-# Run only sglang tests (requires sglang extra):
-uv run --isolated --group dev --extra sglang pytest tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "sglang"
 """
 
 import json

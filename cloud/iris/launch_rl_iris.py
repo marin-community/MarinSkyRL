@@ -380,11 +380,8 @@ SKYRL_HOME = "/opt/skyrl"
 # workspace to /app and sets IRIS_WORKDIR=/app. The runtime controller code is
 # self-contained there; no repository checkout is required in-pod.
 #
-# The bundle wins for `cloud.iris.*` ONLY. It does NOT win for `skyrl_train.*`, even though
-# PYTHONPATH lists /app/skyrl-train ahead of /opt/skyrl/skyrl-train: run_rl.py launches the
-# trainer with `subprocess.Popen(cmd, cwd=$SKYRL_HOME/skyrl-train)`, and `python -m` puts the
-# CWD first on sys.path, ahead of PYTHONPATH. So `skyrl_train.*` and `examples.terminal_bench.*`
-# always resolve to the BAKED image tree.
+# The bundle wins for `cloud.iris.*` only. `skyrl_train.*` and
+# `examples.terminal_bench.*` resolve from the baked image tree.
 #
 # Path test: edited skyrl-train/ -> image rebuild required. Edited cloud/iris/ -> no rebuild.
 # See .agents/ops/gpu-rl-image-build.md. An earlier version of this comment claimed the bundle
@@ -1690,7 +1687,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
 
     The full pipeline that runs inside each task container:
       cd /app
-      && export SKYRL_HOME + PYTHONPATH (live /app + skyrl-train win)
+      && export SKYRL_HOME + PYTHONPATH (live cloud.iris, baked skyrl_train)
       && <RL_PYTHON> cloud/iris/start_rl_iris_controller.py
             --ray-port ... --rendezvous-dir ...
             -- <RL_PYTHON> -m cloud.iris.run_rl --rl_config ... --num_nodes N ...
