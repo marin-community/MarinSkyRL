@@ -26,6 +26,7 @@ from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_
 from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
+from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -1154,12 +1155,22 @@ class PolicyWorkerBase(Worker):
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])
                     self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
-                status = self.training_step(
-                    experience,
-                    global_step,
-                    local_step,
-                    accumulation_steps,
-                )
+                diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
+                with _phase_diagnostics.region(
+                    diagnostic_mesh,
+                    kind=_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+                    rank=self._rank,
+                    metadata=_phase_diagnostics.CollectiveRegionMetadata(
+                        global_step=global_step,
+                        local_step=local_step,
+                    ),
+                ):
+                    status = self.training_step(
+                        experience,
+                        global_step,
+                        local_step,
+                        accumulation_steps,
+                    )
                 policy_update_steps += 1
 
                 # for DP
@@ -1213,10 +1224,17 @@ class PolicyWorkerBase(Worker):
         output.metadata = {"train_status": status_mean}
         return output
 
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+    def training_step(
+        self,
+        experience: Experience,
+        global_step: int,
+        local_step: int,
+        accumulation_steps: int,
+    ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
         experience.to_device(torch.cuda.current_device())
 
@@ -1253,6 +1271,7 @@ class PolicyWorkerBase(Worker):
         policy_loss_mask = build_think_weighted_loss_mask(loss_mask, response_span_tags, think_token_weight)
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -1281,6 +1300,7 @@ class PolicyWorkerBase(Worker):
                 loss_mask=policy_loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
 
         # TIS importance-ratio diagnostics. Emitted on EVERY rank with an
         # identical key set whenever use_tis is on, so the per-key
@@ -1338,8 +1358,10 @@ class PolicyWorkerBase(Worker):
         # such method (non-HF wrappers).
         _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
         _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
+        _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
         with _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
         # teardown to here (after backward) so gradient-checkpoint recompute still
@@ -1481,6 +1503,7 @@ class PolicyWorkerBase(Worker):
                 status[k] = v.mean().item() if isinstance(v, torch.Tensor) else v
 
         status["response_length"] = num_actions
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_EXIT)
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):

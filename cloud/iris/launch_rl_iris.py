@@ -1440,17 +1440,16 @@ def create_parser() -> argparse.ArgumentParser:
         "(SKYRL_EP_LOADER_CHUNK_ROWS). Default: unset = 8.",
     )
     g.add_argument(
-        "--collective-count-diag",
-        dest="collective_count_diag",
+        "--collective-phase-diagnostics",
+        dest="collective_phase_diagnostics",
         choices=["on", "off"],
         default=None,
-        help="GC-proof per-rank default-PG collective-count instrumentation "
-        "(SKYRL_COLLECTIVE_COUNT_DIAG), a DIAGNOSTIC knob for the 80B gs1 NCCL "
-        "desync. Logs each policy rank's default-PG collective count at forward "
-        "phase boundaries (forward/_forward_impl enter+exit + the first MoE-EP "
-        "all-to-all per forward) to the finelog, which survives pod GC — diffing "
-        "the counts across ranks at the wedge localizes the divergent EP group. "
-        "O(phases), reads torch's own PG seq counter (no perturbation). "
+        help="Record each policy rank's world and device-mesh process-group sequence "
+        "numbers at inference and training phase boundaries "
+        "(SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS). The structured log records survive worker "
+        "teardown and localize the first rank or subgroup that stops following the "
+        "shared collective schedule. Recording reads existing counters and does not "
+        "issue additional collectives. "
         "Default: unset = off.",
     )
 
@@ -1505,7 +1504,7 @@ def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
     _onoff("SKYRL_W13_RELOAD_BRACKET", args.w13_reload_bracket)
     if args.ep_loader_chunk_rows is not None:
         env["SKYRL_EP_LOADER_CHUNK_ROWS"] = str(args.ep_loader_chunk_rows)
-    _onoff("SKYRL_COLLECTIVE_COUNT_DIAG", args.collective_count_diag)
+    _onoff("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", args.collective_phase_diagnostics)
     return env
 
 
@@ -2032,7 +2031,7 @@ def main() -> int:
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
     print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
     # Surface the resolved SKYRL_* runtime-knob flag env here (before the --dry-run
-    # return) so a dry-run confirms e.g. --collective-count-diag actually resolves.
+    # return) so a dry-run confirms e.g. --collective-phase-diagnostics actually resolves.
     # This is display-only; main() re-derives it (idempotent, pure fn of args) below.
     _flag_env_preview = build_skyrl_flag_env(args)
     if _flag_env_preview:

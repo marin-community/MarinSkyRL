@@ -200,6 +200,75 @@ def test_flash_attention_accepts_rl_contiguous_span_mask(monkeypatch):
     assert torch.isfinite(output.logits).all()
 
 
+def test_flash_attention_accepts_four_value_unpad_contract(monkeypatch):
+    attention = GrugMoeAttention(tiny_config(num_hidden_layers=1))
+    batch_size = 2
+    sequence_length = 4
+    query = torch.arange(
+        batch_size * sequence_length * attention.config.num_attention_heads * attention.config.head_dim,
+        dtype=torch.float32,
+    ).reshape(
+        batch_size,
+        sequence_length,
+        attention.config.num_attention_heads,
+        attention.config.head_dim,
+    )
+    key = query[:, :, : attention.config.num_key_value_heads, :].clone()
+    value = key + 1
+    attention_mask = torch.tensor([[0, 1, 1, 1], [1, 1, 0, 0]])
+    expected_indices = torch.tensor([1, 2, 3, 4, 5])
+    expected_cu_seqlens = torch.tensor([0, 3, 5], dtype=torch.int32)
+    expected_unpadded_query = query.flatten(0, 1).index_select(0, expected_indices)
+    kernel_offset = 1000
+    kernel_calls = 0
+
+    def four_value_unpad_input(tensor, valid):
+        indices = valid.flatten().nonzero().flatten()
+        unpadded = tensor.flatten(0, 1).index_select(0, indices)
+        lengths = valid.sum(dim=-1, dtype=torch.int32)
+        cu_seqlens = torch.cat((torch.zeros(1, dtype=torch.int32), lengths.cumsum(dim=0, dtype=torch.int32)))
+        return unpadded, indices, cu_seqlens, int(lengths.max())
+
+    def varlen_attention(unpadded_query, _key, _value, cu_seqlens_q, cu_seqlens_k, max_q, max_k, **_kwargs):
+        nonlocal kernel_calls
+        kernel_calls += 1
+        torch.testing.assert_close(unpadded_query, expected_unpadded_query)
+        torch.testing.assert_close(cu_seqlens_q, expected_cu_seqlens)
+        torch.testing.assert_close(cu_seqlens_k, expected_cu_seqlens)
+        assert max_q == 3
+        assert max_k == 3
+        return unpadded_query + kernel_offset
+
+    def pad_input(unpadded, indices, batch, sequence):
+        padded = torch.zeros(batch * sequence, *unpadded.shape[1:], dtype=unpadded.dtype)
+        padded.index_copy_(0, indices, unpadded)
+        return padded.reshape(batch, sequence, *unpadded.shape[1:])
+
+    flash_attention_globals = GrugMoeAttention._flash_attention.__globals__
+    monkeypatch.setitem(flash_attention_globals, "FLASH_ATTN_IMPORT_ERROR", None)
+    monkeypatch.setitem(flash_attention_globals, "flash_unpad_input", four_value_unpad_input)
+    monkeypatch.setitem(
+        flash_attention_globals,
+        "flash_index_first_axis",
+        lambda tensor, indices: tensor.index_select(0, indices),
+    )
+    monkeypatch.setitem(flash_attention_globals, "flash_attn_varlen_func", varlen_attention)
+    monkeypatch.setitem(flash_attention_globals, "flash_pad_input", pad_input)
+
+    output, value_for_xsa = attention._flash_attention(
+        query,
+        key,
+        value,
+        attention_mask,
+        is_long=False,
+    )
+
+    expected_output = (query + kernel_offset).masked_fill(~attention_mask[:, :, None, None].bool(), 0)
+    assert kernel_calls == 1
+    torch.testing.assert_close(output, expected_output)
+    torch.testing.assert_close(value_for_xsa, value.repeat_interleave(2, dim=2))
+
+
 def test_query_bias_candidates_accumulate_exactly_and_change_next_routing():
     config = tiny_config(num_hidden_layers=1, num_local_experts=4, num_experts_per_tok=1)
     router = GrugMoeRouter(config)

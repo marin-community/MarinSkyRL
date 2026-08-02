@@ -48,6 +48,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+
 # torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
 # does the DTensor->local convert + generate_permute_indices (cross-rank
 # interleaved -> local-expert order) + ALIGN_SIZE_M padding around the bare
@@ -558,13 +560,10 @@ class MoE(nn.Module):
         Returns:
             (bs, slen, dim).
         """
-        # Collective-count diagnostic (default OFF): log this rank's default-PG count
-        # at the FIRST MoE-EP all-to-all of the current forward region (the torch-EP
-        # dispatch/combine fires inside the experts call below). Rate-limited to once
-        # per forward -> O(1), not O(MoE layers). See distributed/collective_count_diag.
-        from skyrl_train.distributed import collective_count_diag as _ccdiag
-
-        _ccdiag.log_moe_ep_boundary_once()
+        # The optional phase diagnostic snapshots process-group counters at the first
+        # MoE boundary in each forward or backward phase. It reads existing counters
+        # without issuing a collective.
+        _phase_diagnostics.log_moe_ep_boundary_once()
 
         bs, slen, dim = x.shape
         x = x.view(-1, dim)

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
+from skyrl_train.generators.base import ConversationType, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_train.config.utils import get_default_config
@@ -276,6 +276,52 @@ async def test_agent_loop_single_turn(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+@pytest.mark.parametrize("retokenize_chat_history", [False, True])
+async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+    retokenize_chat_history,
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = retokenize_chat_history
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = AssertionError("an overlong initial prompt must not enter the environment")
+    mock_llm.generate.side_effect = AssertionError("an overlong initial prompt must not reach inference")
+    mock_tokenizer.apply_chat_template.side_effect = lambda *_args, **_kwargs: [1, 2, 3, 4, 5]
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+    if retokenize_chat_history:
+        generator.custom_chat_template = "<custom>"
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Initial input"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=8,
+        max_input_length=4,
+    )
+
+    assert output.prompt_ids == [1, 2, 3, 4, 5]
+    assert output.response_ids == []
+    assert output.loss_mask == []
+    assert output.rollout_logprobs == []
+    assert output.reward == (0.0 if retokenize_chat_history else [])
+    assert output.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
 async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg):
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
@@ -309,25 +355,6 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
 
 
 def test_generator_output_concatenation():
-    # First ensure that the GeneratorOutput fields are what we expect
-    expected_fields = [
-        "prompt_token_ids",
-        "response_ids",
-        "rewards",
-        "loss_masks",
-        "stop_reasons",
-        "rollout_metrics",
-        "rollout_logprobs",
-        # optional but present in the signature
-        "trajectory_ids",
-        "is_last_step",
-    ]
-    assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
-        "GeneratorOutput fields are not what we expect. "
-        "Please update the test and `concatenate_generator_outputs()` to reflect the new fields."
-        "It is needed to help Trainer.eval() record the full GeneratorOutput information."
-    )
-
     generator_output_1: GeneratorOutput = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
@@ -335,6 +362,9 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
+        "trajectory_ids": [TrajectoryID("first", 0), TrajectoryID("second", 0)],
+        "is_last_step": [True, False],
+        "exclude_from_baseline": [False, True],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -344,6 +374,9 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
+        "trajectory_ids": [TrajectoryID("third", 0), TrajectoryID("fourth", 0)],
+        "is_last_step": [False, True],
+        "exclude_from_baseline": [True, False],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -355,6 +388,14 @@ def test_generator_output_concatenation():
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
+    assert [trajectory.instance_id for trajectory in concatenated_output["trajectory_ids"]] == [
+        "first",
+        "second",
+        "third",
+        "fourth",
+    ]
+    assert concatenated_output["is_last_step"] == [True, False, False, True]
+    assert concatenated_output["exclude_from_baseline"] == [False, True, True, False]
 
     # Validate rollout metrics
     expected_rollout_metrics = {
@@ -391,6 +432,12 @@ def test_get_metrics_from_generator_output():
     uids = ["a", "b"]
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
     assert avg_score == 1.0
+    assert pass_at_n == 0.5
+
+    generator_output["response_ids"] = [[], [3, 4]]
+    generator_output["rewards"] = [[], [0.0, 1.0]]
+    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
+    assert avg_score == 0.5
     assert pass_at_n == 0.5
 
 

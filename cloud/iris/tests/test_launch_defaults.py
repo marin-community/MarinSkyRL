@@ -20,6 +20,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
+    build_skyrl_flag_env,
     build_task_command,
     create_parser,
     derive_default_job_name,
@@ -250,6 +251,12 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     assert args.rendezvous_dir == "s3://custom/rendezvous"
     assert args.cpu == 12
     assert args.record_literal is False
+
+
+def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):
+    args = _args(tmp_path, "opencode", ["--collective-phase-diagnostics", "on"])
+
+    assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
 
 
 def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):

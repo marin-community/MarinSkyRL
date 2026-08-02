@@ -1485,6 +1485,7 @@ class RayPPOTrainer:
         if "rollout_routed_experts" in training_input.keys():
             fwd_keys.append("rollout_routed_experts")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
+        data_fwd_pass.metadata["global_step"] = self.global_step
 
         def collect_results(actor_infos, results, key):
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)

@@ -25,6 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
+from tests.cpu.fsdp_config_assertions import TRAINER_MODEL_ROLES, assert_role_fsdp_defaults
 
 # The baseline snapshots `get_default_config()` without the intentionally additive
 # CP, grouped-mm, attention-backend, and DCP fields. Keeping the remaining defaults
@@ -67,18 +68,12 @@ STAGE0_DCP_GENERATOR_FIELDS = {
 MOE_FSDP_FIELDS = {
     "use_grouped_mm": False,
 }
-ROLES = ("policy", "ref", "critic")
 
 
 # ----------------------------------------------------------------------------- G0
 def test_cp_fields_parse_with_defaults():
     """All three CP keys present, with disabled defaults, in every role's fsdp_config."""
-    cfg = get_default_config()
-    for role in ROLES:
-        fsdp = cfg.trainer[role].fsdp_config
-        for k, v in CP_FIELDS.items():
-            assert k in fsdp, f"trainer.{role}.fsdp_config missing {k}"
-            assert fsdp[k] == v, f"trainer.{role}.fsdp_config.{k}={fsdp[k]!r}, expected {v!r}"
+    assert_role_fsdp_defaults(get_default_config(), CP_FIELDS)
 
 
 def test_default_config_validates_noop():
@@ -102,7 +97,7 @@ def test_all_defaults_is_structurally_identical_to_baseline():
     Proves the default (production) path is byte-identical post-change.
     """
     container = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
-    for role in ROLES:
+    for role in TRAINER_MODEL_ROLES:
         fsdp = container["trainer"][role]["fsdp_config"]
         for k in (*CP_FIELDS, *MOE_FSDP_FIELDS):  # strip the additive keys -> should reproduce pre-CP shape
             fsdp.pop(k, None)
@@ -119,7 +114,7 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
     current = OmegaConf.to_container(get_default_config(), resolve=False, throw_on_missing=False)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     expected_added = set(CP_FIELDS) | set(MOE_FSDP_FIELDS)
-    for role in ROLES:
+    for role in TRAINER_MODEL_ROLES:
         cur_fsdp = current["trainer"][role]["fsdp_config"]
         gold_fsdp = golden["trainer"][role]["fsdp_config"]
         added = set(cur_fsdp) - set(gold_fsdp)
@@ -149,7 +144,7 @@ def _cp_enabled_config(role: str = "policy", cp_size: int = 2):
     cfg.trainer.strategy = "fsdp2"
     cfg.trainer.use_sample_packing = False
     # Give every role a world size divisible by cp_size (default 4 gpus/node already is).
-    for r in ROLES:
+    for r in TRAINER_MODEL_ROLES:
         cfg.trainer[r].sequence_parallel_size = 1
     cfg.trainer[role].fsdp_config.context_parallel_size = cp_size
     cfg.trainer[role].fsdp_config.cp_style = "ring_sdpa"
@@ -232,7 +227,7 @@ def test_cp_rejects_indivisible_world_size():
         _validate_cp_cfg(cfg)
 
 
-@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("role", TRAINER_MODEL_ROLES)
 def test_cp_mutual_exclusion_enforced_per_role(role):
     """The Ulysses mutual-exclusion assert fires for each role independently."""
     pytest.importorskip("hydra")
