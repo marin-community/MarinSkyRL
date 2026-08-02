@@ -51,10 +51,9 @@ def test_megatron_native_packages_are_kept_out_of_the_common_layer(dockerfile_pa
         assert f"--no-install-package {package}" in dockerfile
 
 
-def test_arm64_megatron_is_not_installed_post_lock() -> None:
+def test_arm64_megatron_has_strict_native_import_gates() -> None:
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
 
-    assert "MEGATRON_PIP" not in dockerfile
     assert "megatron.bridge" in dockerfile
     assert "transformer_engine.pytorch" in dockerfile
 

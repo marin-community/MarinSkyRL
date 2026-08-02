@@ -54,11 +54,24 @@ class DataLocator:
 
 
 @dataclass(frozen=True)
+class SkyRLRolePlan:
+    colocate_all: bool
+    policy_num_nodes: int
+    policy_num_gpus_per_node: int
+    num_inference_engines: int
+    inference_engine_tensor_parallel_size: int
+    train_batch_size: int
+    policy_mini_batch_size: int
+    micro_train_batch_size_per_gpu: int
+    n_samples_per_prompt: int
+
+
+@dataclass(frozen=True)
 class SkyRLTopology:
     num_nodes: int
     gpus_per_node: int
     gpu_variant: str
-    role_plan: dict[str, Any]
+    role_plan: SkyRLRolePlan
 
 
 @dataclass(frozen=True)
@@ -159,7 +172,12 @@ def launch_envelope(value: dict[str, Any]) -> ArtifactLaunchEnvelope:
             model=ModelLocator(**request["model"]),
             train_data=tuple(DataLocator(**locator) for locator in request["train_data"]),
             validation_data=tuple(DataLocator(**locator) for locator in request["validation_data"]),
-            topology=SkyRLTopology(**request["topology"]),
+            topology=SkyRLTopology(
+                num_nodes=request["topology"]["num_nodes"],
+                gpus_per_node=request["topology"]["gpus_per_node"],
+                gpu_variant=request["topology"]["gpu_variant"],
+                role_plan=SkyRLRolePlan(**request["topology"]["role_plan"]),
+            ),
             output=SkyRLOutputPaths(**request["output"]),
             seed=int(request["seed"]),
             overrides=tuple(request.get("overrides", ())),
@@ -262,30 +280,16 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
     execution = envelope.execution
     data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
     role_plan = request.topology.role_plan
-    required_role_fields = {
-        "colocate_all",
-        "policy_num_nodes",
-        "policy_num_gpus_per_node",
-        "num_inference_engines",
-        "inference_engine_tensor_parallel_size",
-        "train_batch_size",
-        "policy_mini_batch_size",
-        "micro_train_batch_size_per_gpu",
-        "n_samples_per_prompt",
-    }
-    missing_role_fields = required_role_fields - set(role_plan)
-    if missing_role_fields:
-        raise ValueError(f"SkyRL role plan is missing fields: {sorted(missing_role_fields)}")
     role_overrides = (
-        f"++trainer.placement.colocate_all={str(role_plan['colocate_all']).lower()}",
-        f"++trainer.placement.policy_num_nodes={role_plan['policy_num_nodes']}",
-        f"++trainer.placement.policy_num_gpus_per_node={role_plan['policy_num_gpus_per_node']}",
-        f"++generator.num_inference_engines={role_plan['num_inference_engines']}",
-        f"++generator.inference_engine_tensor_parallel_size={role_plan['inference_engine_tensor_parallel_size']}",
-        f"++trainer.train_batch_size={role_plan['train_batch_size']}",
-        f"++trainer.policy_mini_batch_size={role_plan['policy_mini_batch_size']}",
-        f"++trainer.micro_train_batch_size_per_gpu={role_plan['micro_train_batch_size_per_gpu']}",
-        f"++generator.n_samples_per_prompt={role_plan['n_samples_per_prompt']}",
+        f"++trainer.placement.colocate_all={str(role_plan.colocate_all).lower()}",
+        f"++trainer.placement.policy_num_nodes={role_plan.policy_num_nodes}",
+        f"++trainer.placement.policy_num_gpus_per_node={role_plan.policy_num_gpus_per_node}",
+        f"++generator.num_inference_engines={role_plan.num_inference_engines}",
+        f"++generator.inference_engine_tensor_parallel_size={role_plan.inference_engine_tensor_parallel_size}",
+        f"++trainer.train_batch_size={role_plan.train_batch_size}",
+        f"++trainer.policy_mini_batch_size={role_plan.policy_mini_batch_size}",
+        f"++trainer.micro_train_batch_size_per_gpu={role_plan.micro_train_batch_size_per_gpu}",
+        f"++generator.n_samples_per_prompt={role_plan.n_samples_per_prompt}",
     )
     argv = [
         "--rl_config",
@@ -335,7 +339,7 @@ def _launcher_argv(envelope: ArtifactLaunchEnvelope, config_path: str) -> list[s
         "--skyrl-override",
         "++trainer.resume_mode=latest",
         "--skyrl-override",
-        f"++seed={request.seed}",
+        f"++trainer.seed={request.seed}",
     ]
     for override in role_overrides:
         argv.extend(["--skyrl-override", override])

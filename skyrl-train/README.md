@@ -58,25 +58,16 @@ cd SkyRL/skyrl-train
 Then, create a new virtual environment and install the dependencies:
 
 ```bash
-# creates a venv at .venv/
+# creates the root project venv at ../.venv/
 uv sync --extra train-vllm
-source .venv/bin/activate
+source ../.venv/bin/activate
 ```
 
-#### Extra ↔ torch version matrix (FSDP2 Context-Parallel branch)
+#### Training extras
 
-The inference/training extras are mutually exclusive (see `[tool.uv].conflicts` in
-`pyproject.toml`) because each pins its own exact `torch`. Pick exactly one with `uv sync --extra <X>`:
-
-All torch wheels come from the CUDA 13 index (`pytorch-cu130`), matching the production SIF;
-they need an NVIDIA driver >= 580.
-
-| Extra      | torch    | Notes                                                                    |
-|------------|----------|--------------------------------------------------------------------------|
-| (base)     | `>=2.10` | trainer floor — carries torch-native `context_parallel` for FSDP2 CP     |
-| `vllm`     | `2.11.0` | active inference path / CP set (vLLM 0.20.2, flash-attn 2.6.3)            |
-| `sglang`   | `2.11.0` | sglang 0.5.13 (first sglang line on torch 2.11)                          |
-| `mcore`    | `2.9.1`  | Megatron path: TE 2.11 + megatron-bridge 0.3.0 (+ megatron-core in bridge's range). **Partial** — the Megatron components support torch 2.10, but the bundled vLLM (0.14.1) hard-pins `torch==2.9.1` (every published vLLM through 0.16.1 does), capping this extra at 2.9.1 until vLLM moves to torch 2.10 |
+The root `train-vllm` extra pins the common FSDP2/vLLM image closure at torch 2.11.0 from the CUDA 12.9 index.
+Select `train-megatron` together with `train-vllm` when using the Megatron policy backend. Native CUDA artifacts
+are installed and validated by the GPU image build.
 
 Then, prepare the dataset:
 

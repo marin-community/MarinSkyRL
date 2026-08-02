@@ -49,12 +49,12 @@ uv sync --frozen --extra train-vllm --extra train-megatron --group dev
 
 # skyrl-gym
 cd skyrl-gym
-uv sync --frozen --group dev
+uv sync --frozen --extra dev
 uv run --frozen pytest tests/
 
 # skyrl-tx
 cd skyrl-tx
-uv run --extra tinker --group dev pytest --forked -s tests
+uv run --extra tinker --extra dev pytest --forked -s tests
 ```
 
 Training runs go through Hydra. Commands that need the examples package run with `skyrl-train/` as the working

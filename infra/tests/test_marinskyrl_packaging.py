@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from email.parser import Parser
 from pathlib import Path
 import subprocess
@@ -15,8 +16,15 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
 
 
+@dataclass(frozen=True)
+class BuiltWheel:
+    names: set[str]
+    metadata: str
+    entry_points: str
+
+
 @pytest.fixture(scope="module")
-def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> tuple[set[str], str, str]:
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> BuiltWheel:
     output = tmp_path_factory.mktemp("marinskyrl-wheel")
     subprocess.run(["uv", "build", "--wheel", "--out-dir", str(output)], cwd=REPOSITORY_ROOT, check=True)
     wheel = next(output.glob("marinskyrl-*.whl"))
@@ -26,23 +34,20 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> tuple[set[str], str
         entry_points_name = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
         metadata = archive.read(metadata_name).decode()
         entry_points = archive.read(entry_points_name).decode()
-    return names, metadata, entry_points
+    return BuiltWheel(names=names, metadata=metadata, entry_points=entry_points)
 
 
-def test_root_wheel_owns_launcher_and_training_packages(built_wheel: tuple[set[str], str, str]) -> None:
-    names, metadata, entry_points = built_wheel
-
-    assert Parser().parsestr(metadata)["Name"] == "marinskyrl"
-    assert "marinskyrl = cloud.iris.artifact_protocol:main" in entry_points
-    assert "cloud/iris/artifact_protocol.py" in names
-    assert "skyrl_gym/__init__.py" in names
-    assert "skyrl_train/__init__.py" in names
-    assert "skyrl_train/config/ppo_base_config.yaml" in names
+def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel) -> None:
+    assert Parser().parsestr(built_wheel.metadata)["Name"] == "marinskyrl"
+    assert "marinskyrl = cloud.iris.artifact_protocol:main" in built_wheel.entry_points
+    assert "cloud/iris/artifact_protocol.py" in built_wheel.names
+    assert "skyrl_gym/__init__.py" in built_wheel.names
+    assert "skyrl_train/__init__.py" in built_wheel.names
+    assert "skyrl_train/config/ppo_base_config.yaml" in built_wheel.names
 
 
-def test_base_dependencies_are_cpu_only(built_wheel: tuple[set[str], str, str]) -> None:
-    _, metadata, _ = built_wheel
-    requirements = Parser().parsestr(metadata).get_all("Requires-Dist", [])
+def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
+    requirements = Parser().parsestr(built_wheel.metadata).get_all("Requires-Dist", [])
     base_requirements = {requirement.partition(";")[0].strip().split("[")[0].split()[0].lower() for requirement in requirements if "extra ==" not in requirement}
 
     assert base_requirements.isdisjoint({"flash-attn", "ray", "torch", "transformer-engine", "vllm"})
