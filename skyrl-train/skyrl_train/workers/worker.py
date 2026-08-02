@@ -1234,7 +1234,12 @@ class PolicyWorkerBase(Worker):
                 # for DP
                 # TODO (sumanthrh): this assumes all workers are data parallel.
                 # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
+                phase = getattr(self, "_grug_benchmark_phase", None)
+                if phase is not None:
+                    phase("begin", "status_collectives")
                 status = self.strategy.all_reduce(status)
+                if phase is not None:
+                    phase("end", "status_collectives")
 
                 # weighted mean for kl
                 # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
@@ -1350,6 +1355,9 @@ class PolicyWorkerBase(Worker):
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
+        phase = getattr(self, "_grug_benchmark_phase", None)
+        if phase is not None:
+            phase("begin", "model_forward_entropy")
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -1370,6 +1378,9 @@ class PolicyWorkerBase(Worker):
                         candidate_count=self._grug_query_bias_candidate_count,
                     )
                 )
+            if phase is not None:
+                phase("end", "model_forward_entropy")
+                phase("begin", "policy_loss_and_diagnostics")
             # loss function
             # TODO: recompute advantages
             policy_loss, clip_ratio = self.policy_loss_fn(
@@ -1429,6 +1440,9 @@ class PolicyWorkerBase(Worker):
         else:
             loss = policy_loss + kl_loss_term - entropy_loss_term
             loss = loss / accumulation_steps
+        if phase is not None:
+            phase("end", "policy_loss_and_diagnostics")
+            phase("begin", "backward")
         # FIX-6 (#232): wrap backward in the CP ring-SDPA dispatcher span so a CP
         # training step's gradient-checkpoint recompute dispatches to ring attention
         # (matching the saved full-length q/k/v) instead of plain SDPA on the
@@ -1442,6 +1456,8 @@ class PolicyWorkerBase(Worker):
         with _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
+        if phase is not None:
+            phase("end", "backward")
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
         # teardown to here (after backward) so gradient-checkpoint recompute still
@@ -1496,6 +1512,8 @@ class PolicyWorkerBase(Worker):
             stale_min = getattr(self, "_current_stale_min", None)
             lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
 
+            if phase is not None:
+                phase("begin", "optimizer")
             grad_norm = self.strategy.optimizer_step(
                 self.optimizer,
                 self.model,
@@ -1511,6 +1529,8 @@ class PolicyWorkerBase(Worker):
                 grad_norm = grad_norm.detach().cpu().item()
 
             self._finish_grug_query_bias_window(optimizer_step_succeeded=optimizer_step_succeeded)
+            if phase is not None:
+                phase("end", "optimizer")
 
             # Now push this step's entropy to the rolling window for next step.
             if stale_clip is not None:
