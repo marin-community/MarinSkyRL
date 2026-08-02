@@ -2342,6 +2342,10 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
 
     @_contextmanager
     def _direct_client():
+        if ambient_client := _ambient_in_cluster_client(IrisClient, workspace):
+            with ambient_client as client:
+                yield client
+            return
         # Direct submission to --cluster's own controller. On CoreWeave the loopback SSH
         # tunnel presents as the trusted local_admin identity (no IAP login needed) —
         # byte-identical to before.
@@ -2438,6 +2442,14 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             exit_code=exit_code,
             task_image=args.task_image,
         )
+
+
+def _ambient_in_cluster_client(client_type: Any, workspace: Path) -> Any | None:
+    """Connect child launches to the controller already assigned to an Iris task."""
+    controller_url = os.environ.get("IRIS_CONTROLLER_URL")
+    if not controller_url:
+        return None
+    return client_type.in_cluster(controller_url, workspace=workspace)
 
 
 def main(argv: list[str] | None = None) -> int:

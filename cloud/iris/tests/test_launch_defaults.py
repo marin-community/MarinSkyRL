@@ -20,6 +20,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.launch_rl_iris import (  # noqa: E402
+    _ambient_in_cluster_client,
     build_skyrl_flag_env,
     build_task_command,
     create_parser,
@@ -101,6 +102,22 @@ def _pod_snapshot(
         },
         "status": {"phase": phase},
     }
+
+
+def test_artifact_launch_reuses_the_ambient_iris_controller(tmp_path, monkeypatch):
+    calls = []
+    client = object()
+
+    class ClientType:
+        @classmethod
+        def in_cluster(cls, controller_url, *, workspace):
+            calls.append((controller_url, workspace))
+            return client
+
+    monkeypatch.setenv("IRIS_CONTROLLER_URL", "http://iris-controller-svc:10000")
+
+    assert _ambient_in_cluster_client(ClientType, tmp_path) is client
+    assert calls == [("http://iris-controller-svc:10000", tmp_path)]
 
 
 @pytest.mark.parametrize(("memory_request", "expected_memory"), [("auto", "764Gi"), ("900Gi", "900Gi")])
