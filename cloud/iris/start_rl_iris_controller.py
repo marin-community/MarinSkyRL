@@ -37,7 +37,7 @@ import time
 
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
-from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, resolve_ray_spill_dir
+from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, RaySpillTarget, resolve_ray_spill_dir
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -870,12 +870,19 @@ def _ray_port_flags() -> list[str]:
 # Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
 # within a run share one prefix without colliding across jobs.
 RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
+RAY_LOCAL_SPILL_FLAG = "--object-spilling-directory"
 
 
-def _ray_spill_uri(rendezvous_dir: str | None, backend: RaySpillBackend) -> str | None:
-    """Return the per-job R2 spill prefix when the remote backend is selected."""
+def _ray_spill_target(
+    rendezvous_dir: str | None,
+    backend: RaySpillBackend,
+    local_spill_dir: str,
+) -> RaySpillTarget:
+    """Resolve one valid local or remote Ray spill target."""
     if backend is RaySpillBackend.LOCAL:
-        return None
+        return RaySpillTarget(backend=backend, location=resolve_ray_spill_dir(local_spill_dir))
+    if backend is not RaySpillBackend.R2:
+        raise ValueError(f"Unsupported Ray spill backend: {backend}")
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
         raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
     # Ray's smart_open spill backend imports boto3 directly.
@@ -885,35 +892,37 @@ def _ray_spill_uri(rendezvous_dir: str | None, backend: RaySpillBackend) -> str 
         raise RuntimeError(
             "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
         ) from error
-    return f"{rendezvous_dir.rstrip('/')}/ray_spill"
+    return RaySpillTarget(backend=backend, location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
 
 
-def _ray_spill_flags(spill_uri: str | None, local_spill_dir: str | None) -> list[str]:
-    """Build Ray start flags for local scratch or head-configured R2 spilling."""
-    if not spill_uri:
-        assert local_spill_dir is not None
-        return [f"--object-spilling-directory={local_spill_dir}"]
+def _ray_head_spill_flags(target: RaySpillTarget) -> list[str]:
+    """Build head-raylet flags for the selected spill target."""
+    if target.backend is RaySpillBackend.LOCAL:
+        return [f"{RAY_LOCAL_SPILL_FLAG}={target.location}"]
     # Ray expects object_spilling_config as a JSON string nested inside the system
     # config. min_spilling_size=0 applies only to explicit R2 mode.
     spilling_config = json.dumps(
         {
             "type": "smart_open",
-            "params": {"uri": spill_uri, "buffer_size": RAY_SPILL_BUFFER_SIZE},
+            "params": {"uri": target.location, "buffer_size": RAY_SPILL_BUFFER_SIZE},
         }
     )
     system_config = json.dumps({"object_spilling_config": spilling_config, "min_spilling_size": 0})
     return [f"--system-config={system_config}"]
 
 
-def _resolved_local_spill_dir(spill_uri: str | None, local_spill_dir: str) -> str | None:
-    return None if spill_uri else resolve_ray_spill_dir(local_spill_dir)
+def _ray_worker_spill_flags(target: RaySpillTarget) -> list[str]:
+    """Build worker-raylet flags for the selected spill target."""
+    if target.backend is RaySpillBackend.LOCAL:
+        return [f"{RAY_LOCAL_SPILL_FLAG}={target.location}"]
+    return []
 
 
-def _log_ray_spill(spill_uri: str | None, local_spill_dir: str | None) -> None:
-    if spill_uri:
-        _log(f"Ray object spilling -> R2 prefix {spill_uri} (remote backend)")
+def _log_ray_spill(target: RaySpillTarget) -> None:
+    if target.backend is RaySpillBackend.R2:
+        _log(f"Ray object spilling -> R2 prefix {target.location} (remote backend)")
     else:
-        _log(f"Ray object spilling -> launcher-owned local scratch {local_spill_dir}")
+        _log(f"Ray object spilling -> launcher-owned local scratch {target.location}")
 
 
 # --- Ray cgroup-aware memory ----------------------------------------------------
@@ -989,10 +998,8 @@ def _ray_mem_flags() -> list[str]:
 def ray_start_head(
     head_ip: str,
     ray_port: int,
-    spill_uri: str | None = None,
-    local_spill_dir: str = DEFAULT_RAY_SPILL_DIR,
+    spill_target: RaySpillTarget,
 ) -> None:
-    local_spill_dir = _resolved_local_spill_dir(spill_uri, local_spill_dir)
     cmd = [
         _ray_bin(),
         "start",
@@ -1002,9 +1009,9 @@ def ray_start_head(
         "--dashboard-host=0.0.0.0",
         *_ray_port_flags(),
         *_ray_mem_flags(),
-        *_ray_spill_flags(spill_uri, local_spill_dir),
+        *_ray_head_spill_flags(spill_target),
     ]
-    _log_ray_spill(spill_uri, local_spill_dir)
+    _log_ray_spill(spill_target)
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
     t0 = time.time()
     subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)
@@ -1015,10 +1022,8 @@ def ray_start_worker(
     head_ip: str,
     ray_port: int,
     node_ip: str,
-    spill_uri: str | None = None,
-    local_spill_dir: str = DEFAULT_RAY_SPILL_DIR,
+    spill_target: RaySpillTarget,
 ) -> None:
-    local_spill_dir = _resolved_local_spill_dir(spill_uri, local_spill_dir)
     cmd = [
         _ray_bin(),
         "start",
@@ -1026,9 +1031,9 @@ def ray_start_worker(
         f"--node-ip-address={node_ip}",
         *_ray_port_flags(),
         *_ray_mem_flags(),
-        *(_ray_spill_flags(None, local_spill_dir) if local_spill_dir else []),
+        *_ray_worker_spill_flags(spill_target),
     ]
-    _log_ray_spill(spill_uri, local_spill_dir)
+    _log_ray_spill(spill_target)
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
@@ -1262,8 +1267,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     ray_start_head(
         head_ip,
         ray_port,
-        spill_uri=_ray_spill_uri(args.rendezvous_dir, args.ray_spill_backend),
-        local_spill_dir=args.ray_spill_dir,
+        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
@@ -1344,8 +1348,7 @@ def run_worker(args: argparse.Namespace) -> int:
         head_ip,
         ray_port,
         node_ip,
-        spill_uri=_ray_spill_uri(args.rendezvous_dir, args.ray_spill_backend),
-        local_spill_dir=args.ray_spill_dir,
+        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
