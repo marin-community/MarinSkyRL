@@ -52,6 +52,8 @@ def test_gpu_rl_images_install_the_root_training_extras(dockerfile_path: Path) -
     assert policy_selectors
     assert all('POLICY="--extra megatron"' in line for line in policy_selectors)
     assert all('POLICY="--extra fsdp"' in line for line in policy_selectors)
+    assert 'if [ "${INSTALL_MEGATRON}" = "0" ]; then' in dockerfile
+    assert "FSDP torchtitan backend not installed (INSTALL_MEGATRON=1)" in dockerfile
     assert "skyrl-train/uv.lock" not in dockerfile
 
 
@@ -68,7 +70,9 @@ def test_megatron_native_packages_are_kept_out_of_the_common_layer(dockerfile_pa
 
 def test_arm64_megatron_has_strict_native_import_gates() -> None:
     dockerfile = GPU_RL_ARM64_DOCKERFILE.read_text()
-    gate = dockerfile[dockerfile.index("# Megatron backend asserts"):dockerfile.index("# torchtitan EP>1 assert")]
+    gate = dockerfile[
+        dockerfile.index("# Megatron backend asserts"):dockerfile.index("# FSDP expert-parallel assert")
+    ]
 
     commands = re.findall(r'-c "([^"\\]*(?:\\.[^"\\]*)*)"', gate)
     imported_modules: set[str] = set()

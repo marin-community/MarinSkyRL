@@ -471,8 +471,11 @@ RUN if [ "${INSTALL_MEGATRON}" = "1" ]; then \
         ${RL_ENV_DIR}/bin/python -c "import torch, transformer_engine.pytorch; from megatron.bridge.models.conversion.auto_bridge import AutoBridge; print('transformer_engine.pytorch + megatron.bridge AutoBridge import OK')"; \
     else echo "megatron backend not installed (INSTALL_MEGATRON=0)"; fi
 
-# torchtitan EP>1 assert (the `fsdp` extra installed it from the lock).
-RUN ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel import ExpertParallel; print('torchtitan ExpertParallel import OK (apply_ep EP>1 unblocked)')"
+# FSDP expert-parallel assert. Megatron selects a different policy dependency
+# axis and is validated by the native imports above.
+RUN if [ "${INSTALL_MEGATRON}" = "0" ]; then \
+      ${RL_ENV_DIR}/bin/python -c "from torchtitan.distributed.expert_parallel import ExpertParallel; print('torchtitan ExpertParallel import OK (apply_ep EP>1 unblocked)')"; \
+    else echo "FSDP torchtitan backend not installed (INSTALL_MEGATRON=1)"; fi
 
 # The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +
 # the S3 rendezvous/checkpoint boto3 path) comes ENTIRELY through the frozen lock:
