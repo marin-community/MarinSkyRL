@@ -73,7 +73,7 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
                 stdout=f"{experiment_dir}/logs/tasktrove-x6_1170543.out\n",
                 stderr="",
             )
-        if arguments[0] == "ssh" and "ls -1dt" in arguments[-1]:
+        if arguments[0] == "ssh" and "os.scandir" in arguments[-1]:
             return subprocess.CompletedProcess(
                 arguments,
                 0,

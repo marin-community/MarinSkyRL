@@ -15,12 +15,19 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
-from scripts.iris.iris_ops import LOG_SUFFIXES
+from scripts.iris.iris_ops import ERROR_DETAIL_CHARS, LOG_SUFFIXES
 
 _HOST_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
-ERROR_DETAIL_CHARS = 240
 MISSING_PATH_MARKER = "No such file"
 JupiterSyncScope = Literal["status", "full"]
+_TRACE_LIST_SCRIPT = (
+    "import os, sys\n"
+    "root, limit = sys.argv[1], int(sys.argv[2])\n"
+    "entries = [entry for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False)]\n"
+    "entries.sort(key=lambda entry: entry.stat(follow_symlinks=False).st_mtime, reverse=True)\n"
+    "selected = entries if limit == 0 else entries[:limit]\n"
+    "print('\\n'.join(entry.path for entry in selected))\n"
+)
 
 
 class CommandRunner(Protocol):
@@ -247,17 +254,13 @@ def _newest_trace_directories(
     trace_root: str,
     limit: int,
 ) -> tuple[str, ...]:
-    quoted_root = shlex.quote(trace_root)
-    limit_clause = "" if limit == 0 else f" | sed -n '1,{limit}p'"
     result = _ssh(
         runner,
         host,
-        f"set -o pipefail; ls -1dt -- {quoted_root}/*/{limit_clause}",
+        f"python3 -c {shlex.quote(_TRACE_LIST_SCRIPT)} {shlex.quote(trace_root)} {limit}",
         timeout=300,
     )
     if result.returncode:
-        if MISSING_PATH_MARKER in result.stderr:
-            return ()
         raise RuntimeError(f"Jupiter trace listing failed: {_error_detail(result)}")
 
     root = PurePosixPath(trace_root)

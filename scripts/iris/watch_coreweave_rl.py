@@ -83,6 +83,7 @@ from scripts.iris.coreweave_ops import (  # noqa: E402
 )
 from scripts.iris.iris_ops import (  # noqa: E402
     DEFAULT_BUNDLE_ROOT,
+    ERROR_DETAIL_CHARS,
     LOG_SUFFIXES,
     MonitorError,
     StyledCell,
@@ -256,6 +257,28 @@ class ArtifactResult:
     errors: tuple[str, ...]
     slurm_logs: str = "not applicable"
     trace_selected: int | None = None
+
+
+@dataclass(frozen=True)
+class SyncedJob:
+    job: MonitoredJob
+    artifacts: ArtifactResult
+    directory: Path
+
+
+@dataclass(frozen=True)
+class JobReportEntry:
+    key: str
+    value: dict[str, Any]
+    row: list[object]
+    errors: tuple[MonitorError, ...]
+
+
+@dataclass(frozen=True)
+class ReportData:
+    rows: list[list[object]]
+    jobs: dict[str, Any]
+    errors: list[MonitorError]
 
 
 @dataclass(frozen=True)
@@ -467,7 +490,7 @@ def discover_rl_jobs(
     result = run_iris(cluster, ["query", sql, "-f", "csv"])
     if result.returncode:
         message = (result.stderr or result.stdout).strip().replace("\n", " ")
-        return [], [f"{cluster.name}: discovery failed: {message[-240:]}"]
+        return [], [f"{cluster.name}: discovery failed: {message[-ERROR_DETAIL_CHARS:]}"]
 
     jobs: list[IrisRlJob] = []
     try:
@@ -535,7 +558,7 @@ def job_pods(job: IrisRlJob) -> list[tuple[str, str]]:
         timeout=120,
     )
     if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout).strip()[-240:])
+        raise RuntimeError((result.stderr or result.stdout).strip()[-ERROR_DETAIL_CHARS:])
     return sorted(
         (
             item["metadata"]["name"],
@@ -555,7 +578,7 @@ def fetch_complete_pod_log(base: list[str], pod: str, destination: Path) -> None
     )
     destination.write_text(result.stdout)
     if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout).strip()[-240:])
+        raise RuntimeError((result.stderr or result.stdout).strip()[-ERROR_DETAIL_CHARS:])
 
 
 def fetch_complete_ray_logs(base: list[str], pod: str, destination: Path) -> int:
@@ -829,7 +852,7 @@ def sync_trace_inventory(
             f"({fleet_selected:,}/{fleet_available:,} total); {copied:,} copied, {skipped:,} skipped",
             inventory.available,
             inventory.completed,
-            str(error)[-240:],
+            str(error)[-ERROR_DETAIL_CHARS:],
         )
     write_json(destination / "skipped_objects.json", skipped_objects)
     scope = "all" if trace_sync_limit == 0 else "newest"
@@ -914,12 +937,9 @@ def tis_alignment_summary(metrics: dict[str, Any]) -> str:
 
 
 def token_probability_shift_summary(metrics: dict[str, Any]) -> str:
-    """Render the center and tail of per-token policy probability movement.
-
-    These are absolute old-policy versus new-policy log-probability deltas, not
-    literal top-k model probability mass. A widening p99/max tail relative to
-    the mean is the available signal that a few tokens carry extreme changes.
-    """
+    """Render the center and tail of per-token old/new policy log-probability movement."""
+    # A widening p99/max tail relative to the mean signals that a few tokens
+    # carry extreme changes; these values are not literal top-k probability mass.
     values = (
         metric_value(metrics, *POLICY_LOG_RATIO_ABS_MEAN_KEYS),
         metric_value(metrics, *POLICY_LOG_RATIO_ABS_P99_KEYS),
@@ -950,7 +970,7 @@ def sync_warning(errors: tuple[str, ...]) -> str | None:
     first_error = errors[0]
     if "Ray/vLLM" in first_error:
         return "Ray/vLLM log sync unavailable; local diagnostic saved"
-    return first_error[-90:]
+        return first_error[-90:]
 
 
 def _monitor_error(scope: str, operation: str, error: object) -> MonitorError:
@@ -1122,7 +1142,7 @@ def sync_fleet_trace_jobs(
             inventories.append(collect_trace_inventory(job))
         except Exception as error:
             # Object-store failures must degrade one row, not abort the fleet-wide report.
-            statuses[key] = ("unavailable", None, None, str(error)[-240:])
+            statuses[key] = ("unavailable", None, None, str(error)[-ERROR_DETAIL_CHARS:])
 
     selected = select_recent_fleet_traces(inventories, trace_sync_limit)
     fleet_available = sum(inventory.available for inventory in inventories)
@@ -1246,9 +1266,9 @@ def sync_per_job_evidence(
     args: argparse.Namespace,
     jobs: list[MonitoredJob],
     progress: ProgressReporter,
-) -> list[tuple[MonitoredJob, ArtifactResult, Path]]:
+) -> list[SyncedJob]:
     """Sync each job through its backend-specific artifact transport."""
-    synced_jobs: list[tuple[MonitoredJob, ArtifactResult, Path]] = []
+    synced_jobs: list[SyncedJob] = []
     ordered_jobs = sorted(jobs, key=lambda item: (item.cluster.name, item.submitted_at_ms, item.job_id))
     for index, job in enumerate(ordered_jobs, start=1):
         try:
@@ -1266,17 +1286,19 @@ def sync_per_job_evidence(
                 None,
                 (f"{type(error).__name__}: {error}",),
             )
-        synced_jobs.append((job, artifacts, directory))
+        synced_jobs.append(SyncedJob(job, artifacts, directory))
     return synced_jobs
 
 
 def apply_iris_trace_budget(
     args: argparse.Namespace,
-    synced_jobs: list[tuple[MonitoredJob, ArtifactResult, Path]],
+    synced_jobs: list[SyncedJob],
     progress: ProgressReporter,
-) -> list[tuple[MonitoredJob, ArtifactResult, Path]]:
+) -> list[SyncedJob]:
     """Apply the global Iris trace budget without touching Jupiter selections."""
-    active_iris_job_directories = [(job, directory) for job, _, directory in synced_jobs if job.uses_iris_trace_budget]
+    active_iris_job_directories = [
+        (item.job, item.directory) for item in synced_jobs if item.job.uses_iris_trace_budget
+    ]
     if args.status_only:
         return synced_jobs
     if not active_iris_job_directories:
@@ -1302,10 +1324,11 @@ def apply_iris_trace_budget(
             for job, _directory in active_iris_job_directories
         }
 
-    synchronized: list[tuple[MonitoredJob, ArtifactResult, Path]] = []
-    for job, artifacts, directory in synced_jobs:
+    synchronized: list[SyncedJob] = []
+    for item in synced_jobs:
+        job, artifacts, directory = item.job, item.artifacts, item.directory
         if not job.uses_iris_trace_budget:
-            synchronized.append((job, artifacts, directory))
+            synchronized.append(item)
             continue
         traces, started, completed, trace_error = trace_statuses.get(
             (job.cluster.name, job.job_id),
@@ -1313,7 +1336,7 @@ def apply_iris_trace_budget(
         )
         errors_for_job = artifacts.errors + ((f"trace sync: {trace_error}",) if trace_error else ())
         synchronized.append(
-            (
+            SyncedJob(
                 job,
                 replace(
                     artifacts,
@@ -1328,57 +1351,69 @@ def apply_iris_trace_budget(
     return synchronized
 
 
-def collect_report_data(
-    args: argparse.Namespace,
-    synced_jobs: list[tuple[MonitoredJob, ArtifactResult, Path]],
-    errors: list[MonitorError],
-) -> tuple[list[list[object]], dict[str, Any], list[MonitorError]]:
-    """Build report rows and manifests while retaining per-job failures."""
-    rows: list[list[object]] = []
-    job_report: dict[str, Any] = {}
-    for job, artifacts, directory in synced_jobs:
-        scope = f"{job.cluster.name}/{job.job_id}"
-        errors.extend(_monitor_error(scope, "artifact sync", error) for error in artifacts.errors)
-        parsed_metrics = parse_metrics(directory / "finelog.log")
-        if parsed_metrics.error:
-            errors.append(_monitor_error(scope, "Finelog parse", parsed_metrics.error))
-        signal = terminal_signal(directory / "finelog.log")
-        if signal:
-            errors.append(_monitor_error(scope, "workload signal", signal))
-        try:
-            write_job_manifest(
-                job,
-                args.bundle_root,
-                directory,
-                artifacts,
-                args.max_non_log_bytes,
-                job.trace_sync_limit(args),
-            )
-        except Exception as error:
-            errors.append(_monitor_error(scope, "manifest write", error))
-        try:
-            rows.append(report_row(job, artifacts, directory))
-        except Exception as error:
-            errors.append(_monitor_error(scope, "row rendering", error))
-            rows.append(
-                [
-                    f"{job.cluster.name}/{job.short_name}",
-                    job.dataset,
-                    _state_cell(job.state),
-                    "—",
-                    "—",
-                    "—",
-                    "—",
-                    "unavailable",
-                    StyledCell("status unavailable; see error report", "error"),
-                ]
-            )
-        job_report[f"{job.cluster.name}/{job.job_id}"] = {
+def build_job_report_entry(args: argparse.Namespace, synced: SyncedJob) -> JobReportEntry:
+    """Inspect one local bundle, write its manifest, and render its status row."""
+    job, artifacts, directory = synced.job, synced.artifacts, synced.directory
+    scope = f"{job.cluster.name}/{job.job_id}"
+    errors = [_monitor_error(scope, "artifact sync", error) for error in artifacts.errors]
+    parsed_metrics = parse_metrics(directory / "finelog.log")
+    if parsed_metrics.error:
+        errors.append(_monitor_error(scope, "Finelog parse", parsed_metrics.error))
+    signal = terminal_signal(directory / "finelog.log")
+    if signal:
+        errors.append(_monitor_error(scope, "workload signal", signal))
+    try:
+        write_job_manifest(
+            job,
+            args.bundle_root,
+            directory,
+            artifacts,
+            args.max_non_log_bytes,
+            job.trace_sync_limit(args),
+        )
+    except Exception as error:
+        errors.append(_monitor_error(scope, "manifest write", error))
+    try:
+        row = report_row(job, artifacts, directory)
+    except Exception as error:
+        errors.append(_monitor_error(scope, "row rendering", error))
+        row = [
+            f"{job.cluster.name}/{job.short_name}",
+            job.dataset,
+            _state_cell(job.state),
+            "—",
+            "—",
+            "—",
+            "—",
+            "unavailable",
+            StyledCell("status unavailable; see error report", "error"),
+        ]
+    return JobReportEntry(
+        key=f"{job.cluster.name}/{job.job_id}",
+        value={
             "cluster": job.cluster.name,
             "directory": str(directory),
             "artifacts": asdict(artifacts),
-        }
-    return rows, job_report, errors
+        },
+        row=row,
+        errors=tuple(errors),
+    )
+
+
+def collect_report_data(
+    args: argparse.Namespace,
+    synced_jobs: list[SyncedJob],
+    errors: list[MonitorError],
+) -> ReportData:
+    """Build report rows and manifests while retaining per-job failures."""
+    entries = [build_job_report_entry(args, synced) for synced in synced_jobs]
+    for entry in entries:
+        errors.extend(entry.errors)
+    return ReportData(
+        rows=[entry.row for entry in entries],
+        jobs={entry.key: entry.value for entry in entries},
+        errors=errors,
+    )
 
 
 def publish_report(
@@ -1444,8 +1479,16 @@ def main() -> int:
     jobs = filter_records(jobs, filters, lambda job: job_filter_values(job, now_ms=now_ms))
     synced_jobs = sync_per_job_evidence(args, jobs, progress)
     synced_jobs = apply_iris_trace_budget(args, synced_jobs, progress)
-    rows, job_report, errors = collect_report_data(args, synced_jobs, errors)
-    publish_report(args, report_directory, checked_at, rows, job_report, errors, progress)
+    report_data = collect_report_data(args, synced_jobs, errors)
+    publish_report(
+        args,
+        report_directory,
+        checked_at,
+        report_data.rows,
+        report_data.jobs,
+        report_data.errors,
+        progress,
+    )
     return 0
 
 
