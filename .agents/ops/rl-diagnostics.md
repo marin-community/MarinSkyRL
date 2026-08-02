@@ -92,6 +92,10 @@ shorter learning-quality window as insufficient evidence and report the actual s
 - policy loss and gradient norms;
 - per-phase durations, especially generation-buffer wait.
 
+Read a phase share next to the step index it came from: the first step of a fully asynchronous run
+pays a one-time rollout-buffer fill, so an average over few steps reports that startup cost as
+steady state.
+
 Metric sinks may add prefixes. Match the semantic suffix rather than assuming one serialized key.
 Trainer metrics can lag live rollouts under asynchronous generation. For agentic runs, require
 trial-level agreement before a learning-quality kill recommendation. For standard runs, reconcile

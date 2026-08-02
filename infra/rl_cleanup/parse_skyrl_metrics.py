@@ -44,6 +44,54 @@ from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training
 # Harbor writes one TimingInfo block per phase on every trial result, in execution order.
 TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier")
 
+# Which trainer span contains which, as `span: containing span`. `None` marks a span that no
+# other span contains, which covers both `step` and the checkpoint, export, evaluation and
+# reference-update work that callbacks run between steps. The synchronous and fully asynchronous
+# trainers do not share a tree: the asynchronous one wraps scoring, advantage and optimizer work
+# in `run_training`, and the synchronous one runs them directly under `step`. Declaring the
+# deeper tree covers both, because a span whose container this run did not record resolves to
+# the nearest container it did record.
+TIMING_PARENTS: dict[str, str | None] = {
+    "step": None,
+    "generate": "step",
+    "wait_for_generation_buffer": "step",
+    "postprocess_generator_output": "step",
+    "convert_to_training_input": "step",
+    "run_training": "step",
+    "fwd_logprobs_values_reward": "run_training",
+    "apply_reward_kl_penalty": "run_training",
+    "compute_advantages_and_returns": "run_training",
+    "train_critic_and_policy": "run_training",
+    "critic_train": "train_critic_and_policy",
+    "policy_train": "train_critic_and_policy",
+    "policy_critic_overlap_train": "train_critic_and_policy",
+    "sync_weights": "step",
+    "init_weight_sync_state": None,
+    "save_checkpoints": None,
+    "cleanup_old_checkpoints": "save_checkpoints",
+    "save_hf_model": None,
+    "eval": None,
+    "update_ref_with_policy": None,
+}
+
+# The synthesized row carrying the share of `step` that no child span covers.
+UNATTRIBUTED_SPAN = "unattributed"
+
+
+@dataclass(frozen=True)
+class TimingSpan:
+    """One row of the step-time breakdown, measured against the span that contains it.
+
+    `within` names the containing span, and is None for `step` itself, for the spans that run
+    outside it, and for any span `TIMING_PARENTS` does not declare.
+    """
+
+    name: str
+    within: str | None
+    mean_seconds: float
+    share_of_within: float | None
+    steps: int
+
 
 @dataclass(frozen=True)
 class CheckpointSelection:
@@ -485,10 +533,14 @@ def resolve_trace_jobs_dir(log_folder: Path, requested_dir: str | None) -> Path 
     return find_trace_jobs_dir(log_folder)
 
 
-def phase_duration(phase: dict[str, Any]) -> float | None:
-    """Return the seconds spanned by one harbor TimingInfo block, or None when it cannot be measured."""
-    started_at = phase.get("started_at")
-    finished_at = phase.get("finished_at")
+def span_duration(span: dict[str, Any]) -> float | None:
+    """Return the seconds between `started_at` and `finished_at`, or None when they cannot be read.
+
+    Harbor writes that pair on each phase's TimingInfo block and on the trial result itself, so
+    the same arithmetic measures a phase and the trial that contains it.
+    """
+    started_at = span.get("started_at")
+    finished_at = span.get("finished_at")
     if not started_at or not finished_at:
         return None
     try:
@@ -509,7 +561,7 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
       - exception_type (or None if no exception)
       - reward (or None)
       - n_input_tokens, n_output_tokens
-      - a duration for each phase in TRIAL_PHASES
+      - a duration for each phase in TRIAL_PHASES, and for the trial that contains them
 
     Robust to individual missing or malformed files.
 
@@ -554,8 +606,9 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
         trial["reward"] = rewards.get("reward")
 
         # Timing
+        trial["trial_duration"] = span_duration(data)
         for phase_name in TRIAL_PHASES:
-            trial[f"{phase_name}_duration"] = phase_duration(data.get(phase_name) or {})
+            trial[f"{phase_name}_duration"] = span_duration(data.get(phase_name) or {})
 
         results.append(trial)
 
@@ -563,6 +616,49 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
         print(f"  Warning: Skipped {n_skipped} missing/malformed result.json files")
 
     return results
+
+
+def summarize_trial_phases(df: pd.DataFrame) -> dict[str, Any] | None:
+    """
+    Summarize each harbor phase against the trial wall clock that contains it.
+
+    Shares divide summed phase time by summed trial duration, so they answer "where did the
+    trials spend their time" rather than "how do the phases compare to each other", and the
+    remainder is trial time that no phase covers. Each phase reports its own trial count
+    because harbor records `agent_execution` and `verifier` per step on a multi-step trial,
+    leaving the trial-level blocks empty there while the setup phases stay populated.
+
+    Returns None when no phase was measurable.
+    """
+    phases: dict[str, dict[str, float]] = {}
+    for phase_name in TRIAL_PHASES:
+        durations = df[f"{phase_name}_duration"].dropna()
+        if durations.empty:
+            continue
+        phases[phase_name] = {
+            "median": float(durations.median()),
+            "mean": float(durations.mean()),
+            "total": float(durations.sum()),
+            "count": len(durations),
+        }
+
+    if not phases:
+        return None
+
+    trial_durations = df["trial_duration"].dropna()
+    summary: dict[str, Any] = {
+        "phases": phases,
+        "trial_total": float(trial_durations.sum()),
+        "trial_count": len(trial_durations),
+    }
+
+    if summary["trial_total"] > 0:
+        for phase in phases.values():
+            phase["share"] = phase["total"] / summary["trial_total"]
+        summary["unmeasured_total"] = summary["trial_total"] - sum(phase["total"] for phase in phases.values())
+        summary["unmeasured_share"] = summary["unmeasured_total"] / summary["trial_total"]
+
+    return summary
 
 
 def compute_trial_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
@@ -574,12 +670,17 @@ def compute_trial_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
       - Turn count by exception type
       - Turn count by reward outcome (success vs failure)
       - Exception type distribution
+      - Per-phase durations and their share of trial wall clock
     """
     if not trials:
         return {}
 
     df = pd.DataFrame(trials)
     stats: dict[str, Any] = {"total_trials": len(df)}
+
+    phase_durations = summarize_trial_phases(df)
+    if phase_durations:
+        stats["phase_durations"] = phase_durations
 
     # Turn count stats (filter out None)
     turns = df["n_episodes"].dropna()
@@ -859,6 +960,88 @@ def create_summary_statistics(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return summaries
 
 
+def resolve_timing_parent(name: str, recorded: set[str]) -> str | None:
+    """Return the nearest container of `name` that this run recorded, or None when it has none."""
+    parent = TIMING_PARENTS[name]
+    while parent is not None and parent not in recorded:
+        parent = TIMING_PARENTS[parent]
+    return parent
+
+
+def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
+    """
+    Summarize every `timing/*` column against the span that contains it.
+
+    Dividing each span by `timing/step` overstates the run: `policy_train` is inside
+    `train_critic_and_policy`, and checkpointing, export and evaluation sit outside the step
+    span altogether. Measuring a span against its own container keeps siblings summing toward
+    their parent, and the trailing `unattributed` row carries the part of the step that no
+    child covers.
+
+    Rows run depth-first from `step`, longest sibling first, then the spans that run outside
+    `step`, then any column `TIMING_PARENTS` does not declare.
+    """
+    recorded = {column.removeprefix("timing/") for column in df.columns if column.startswith("timing/")}
+    if "step" not in recorded:
+        return []
+
+    def mean_seconds(name: str) -> float:
+        return float(df[f"timing/{name}"].mean())
+
+    def summarize(name: str, parent: str | None) -> TimingSpan:
+        seconds = df[f"timing/{name}"]
+        share = float((seconds / df[f"timing/{parent}"]).mean()) if parent is not None else None
+        return TimingSpan(name, parent, float(seconds.mean()), share, int(seconds.count()))
+
+    children: dict[str | None, list[str]] = defaultdict(list)
+    for name in recorded & set(TIMING_PARENTS):
+        if name != "step":
+            children[resolve_timing_parent(name, recorded)].append(name)
+    for siblings in children.values():
+        siblings.sort(key=lambda name: (-mean_seconds(name), name))
+
+    rows = [summarize("step", None)]
+
+    def append_subtree(parent: str) -> None:
+        for child in children[parent]:
+            rows.append(summarize(child, parent))
+            append_subtree(child)
+
+    append_subtree("step")
+
+    step_seconds = df["timing/step"]
+    covered = df[[f"timing/{child}" for child in children["step"]]].fillna(0.0).sum(axis=1)
+    unattributed = step_seconds - covered
+    rows.append(
+        TimingSpan(
+            UNATTRIBUTED_SPAN,
+            "step",
+            float(unattributed.mean()),
+            float((unattributed / step_seconds).mean()),
+            int(step_seconds.count()),
+        )
+    )
+
+    for root in children[None]:
+        rows.append(summarize(root, None))
+        append_subtree(root)
+
+    undeclared = sorted(recorded - set(TIMING_PARENTS), key=lambda name: (-mean_seconds(name), name))
+    for name in undeclared:
+        seconds = df[f"timing/{name}"]
+        rows.append(TimingSpan(name, None, float(seconds.mean()), None, int(seconds.count())))
+
+    return rows
+
+
+def _timing_within_label(span: TimingSpan) -> str:
+    if span.within is not None:
+        return f"`{span.within}`"
+    if span.name not in TIMING_PARENTS:
+        return "not declared"
+    return "—" if span.name == "step" else "outside `step`"
+
+
 def generate_markdown_report(
     all_data: dict[str, list[dict[str, Any]]],
     output_path: Path,
@@ -953,29 +1136,26 @@ def generate_markdown_report(
         # Timing breakdown
         f.write("## Timing Analysis\n\n")
 
-        timing_cols = [c for c in df.columns if c.startswith("timing/")]
-        if timing_cols:
-            timing_df = df[["log_file"] + timing_cols].copy()
+        timing_spans = summarize_timing_spans(df)
+        if timing_spans:
+            f.write("### Average Time Breakdown\n\n")
+            f.write(
+                "Each span is measured against the span that contains it, so siblings sum toward their\n"
+                "parent rather than toward the run. The `unattributed` row is the part of a step that no\n"
+                "child span covers. Spans listed as outside `step` are real wall clock between steps and\n"
+                "are not part of one; every average covers only the steps on which that span ran.\n\n"
+            )
 
-            # Calculate percentages of step time
-            if "timing/step" in timing_df.columns:
-                f.write("### Average Time Breakdown (% of step time)\n\n")
+            f.write("| Span | Within | Avg (s) | Avg % of Within | Steps |\n")
+            f.write("|------|--------|---------|-----------------|-------|\n")
+            for span in timing_spans:
+                share = f"{span.share_of_within * 100:.1f}%" if span.share_of_within is not None else "—"
+                f.write(
+                    f"| {span.name} | {_timing_within_label(span)} | "
+                    f"{span.mean_seconds:.1f} | {share} | {span.steps} |\n"
+                )
 
-                breakdown = {}
-                for col in timing_cols:
-                    if col != "timing/step":
-                        avg_pct = (df[col] / df["timing/step"] * 100).mean()
-                        breakdown[col.replace("timing/", "")] = avg_pct
-
-                # Sort by percentage
-                breakdown = dict(sorted(breakdown.items(), key=lambda x: x[1], reverse=True))
-
-                f.write("| Component | Avg % of Step Time |\n")
-                f.write("|-----------|-------------------|\n")
-                for component, pct in breakdown.items():
-                    f.write(f"| {component} | {pct:.1f}% |\n")
-
-                f.write("\n")
+            f.write("\n")
 
         # Comparison across logs
         if len(all_data) > 1:
@@ -1087,6 +1267,39 @@ def generate_markdown_report(
         if trial_stats:
             f.write("## Trial-Level Analysis (from result.json)\n\n")
             f.write(f"Total trials parsed: {trial_stats.get('total_trials', 0)}\n\n")
+
+            phase_durations = trial_stats.get("phase_durations")
+            if phase_durations:
+                f.write("### Phase Duration Breakdown\n\n")
+                f.write(
+                    "Harbor times four phases on a trial result. A phase carries its own trial count\n"
+                    "because a multi-step trial records `agent_execution` and `verifier` per step rather\n"
+                    "than on the trial itself.\n\n"
+                )
+                if "unmeasured_share" in phase_durations:
+                    f.write(
+                        "Shares are of the "
+                        f"{phase_durations['trial_total']:.1f} s of wall clock recorded across "
+                        f"{phase_durations['trial_count']} trials, and `unmeasured` is trial time that no\n"
+                        "phase covers.\n\n"
+                    )
+                else:
+                    f.write("No trial recorded its own start and finish, so phase shares are unavailable.\n\n")
+
+                f.write("| Phase | Median (s) | Mean (s) | Total (s) | % of Trial Time | Trials |\n")
+                f.write("|-------|------------|----------|-----------|-----------------|--------|\n")
+                for phase_name, phase in phase_durations["phases"].items():
+                    share = f"{phase['share'] * 100:.1f}%" if "share" in phase else "—"
+                    f.write(
+                        f"| {phase_name} | {phase['median']:.1f} | {phase['mean']:.1f} | "
+                        f"{phase['total']:.1f} | {share} | {phase['count']} |\n"
+                    )
+                if "unmeasured_share" in phase_durations:
+                    f.write(
+                        f"| unmeasured | — | — | {phase_durations['unmeasured_total']:.1f} | "
+                        f"{phase_durations['unmeasured_share'] * 100:.1f}% | — |\n"
+                    )
+                f.write("\n")
 
             tc = trial_stats.get("turn_count")
             if tc:
