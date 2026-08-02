@@ -87,12 +87,11 @@ requires-dist = ["torch", "einops"]
 
 [[tool.uv.dependency-metadata]]
 name = "marin-rigging"
-version = "0.2.0"
+version = "0.2.70.dev30755316227"
 requires-dist = ["requests>=2.0.0", "prometheus-client>=0.24"]
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
-marin-rigging = { git = "https://github.com/marin-community/marin", rev = "0693fb2f88831811ae8490cf24f43e533142ba40", subdirectory = "lib/rigging" }
 torch = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
 torchvision = { index = "pytorch-cu129", marker = "sys_platform != 'darwin'" }
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "extra == 'vllm'" }
@@ -124,7 +123,7 @@ docs = [
     "sphinx-autobuild>=2021.3.14"
 ]
 telemetry = [
-    "marin-rigging",
+    "marin-rigging==0.2.70.dev30755316227",
     "ray[default]",
 ]
 sandboxes = [

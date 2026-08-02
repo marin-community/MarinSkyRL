@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from loguru import logger
 from prometheus_client.core import Metric
 from rigging import telemetry as rigging_telemetry
+from rigging.telemetry.metrics import MetricSnapshot, MetricSnapshotPublisher
 from rigging.telemetry.prometheus import PrometheusCollector, PrometheusScraper
 
 from skyrl_train.telemetry import CONTROLLER_ROLE, process_telemetry
@@ -75,7 +76,7 @@ _LOWERCASE_ATTRIBUTES = frozenset(
 )
 
 
-def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[rigging_telemetry.MetricSnapshot, ...]:
+def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[MetricSnapshot, ...]:
     """Normalize the bounded Ray logical-state allowlist for Finelog."""
     values: defaultdict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(float)
     for family in families:
@@ -103,7 +104,7 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[rigging_telemet
             values[(family.name, attributes)] += value
 
     return tuple(
-        rigging_telemetry.MetricSnapshot(
+        MetricSnapshot(
             name=name,
             value=value,
             unit=_RAY_METRICS[name].unit,
@@ -124,7 +125,7 @@ def ray_metrics_telemetry(node_ip: str, metrics_port: int) -> Iterator[None]:
                 metric_source="ray",
                 scraper=PrometheusScraper(f"http://{node_ip}:{metrics_port}/metrics"),
                 processor=transform_ray_metrics,
-                publisher=rigging_telemetry.MetricSnapshotPublisher(
+                publisher=MetricSnapshotPublisher(
                     max_records=MAX_RAY_METRIC_SNAPSHOTS,
                     attributes={"metric_source": "ray"},
                 ),

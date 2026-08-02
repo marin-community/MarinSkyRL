@@ -31,7 +31,7 @@ requires-dist = ["torch", "einops"]
 
 [[manifest.dependency-metadata]]
 name = "marin-rigging"
-version = "0.2.0"
+version = "0.2.70.dev30755316227"
 requires-dist = ["requests>=2.0.0", "prometheus-client>=0.24"]
 
 [[package]]
@@ -2262,11 +2262,15 @@ provides-extras = ["causal-conv1d", "dev"]
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin?subdirectory=lib%2Frigging&rev=0693fb2f88831811ae8490cf24f43e533142ba40#0693fb2f88831811ae8490cf24f43e533142ba40" }
+version = "0.2.70.dev30755316227"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "prometheus-client" },
     { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5d/8e/23937bac9786f61a867e4903d83391d31ad929da9f96aa286830a399e8b6/marin_rigging-0.2.70.dev30755316227.tar.gz", hash = "sha256:f690dc551e2225e1a256f0a6e0f636c4cde63b3c7d53b377cb187ba390f49e8a", size = 166827, upload-time = "2026-08-02T15:53:43.509Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/f2/66899ba4ccb5197ede43af1c330f50bfd48dac4ca31d82cefceb54b296bd/marin_rigging-0.2.70.dev30755316227-py3-none-any.whl", hash = "sha256:f9cda6428372295a354a60efb51c11fb464d8a63a3a8cda38281512a23db3e65", size = 284423, upload-time = "2026-08-02T15:53:35.375Z" },
 ]
 
 [[package]]
@@ -5343,7 +5347,7 @@ requires-dist = [
     { name = "loguru" },
     { name = "mamba-ssm", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl" },
     { name = "mamba-ssm", marker = "python_full_version != '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = ">=2.2,<3" },
-    { name = "marin-rigging", marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin?subdirectory=lib%2Frigging&rev=0693fb2f88831811ae8490cf24f43e533142ba40" },
+    { name = "marin-rigging", marker = "extra == 'telemetry'", specifier = "==0.2.70.dev30755316227" },
     { name = "megatron-bridge", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.5.0" },
     { name = "megatron-core", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
     { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
