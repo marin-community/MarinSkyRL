@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import ray
+from ray.remote_function import RemoteFunction
 import hydra
 from loguru import logger
 from omegaconf import DictConfig
@@ -106,8 +107,9 @@ def skyrl_entrypoint(cfg: DictConfig):
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def run_terminal_bench_entrypoint(cfg: DictConfig, entrypoint: RemoteFunction) -> None:
+    """Run TerminalBench with an explicit Ray driver entrypoint."""
+
     # validate the arguments
     validate_cfg(cfg)
 
@@ -130,13 +132,18 @@ def main(cfg: DictConfig) -> None:
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
-        ray.get(skyrl_entrypoint.remote(cfg))
+        ray.get(entrypoint.remote(cfg))
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise
     finally:
         logger.info("Shutting down Ray on head node...")
         ray.shutdown()
+
+
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    run_terminal_bench_entrypoint(cfg, skyrl_entrypoint)
 
 
 if __name__ == "__main__":
