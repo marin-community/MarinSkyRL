@@ -192,6 +192,24 @@ class SkyRLGymGenerator(GeneratorInterface):
         )
 
         initial_prompt_length = len(input_ids)
+        if initial_prompt_length > max_input_length:
+            logger.warning(
+                "Skipping generation because the templated initial prompt has {} tokens, exceeding max_input_length={}",
+                initial_prompt_length,
+                max_input_length,
+            )
+            env_metrics = env.get_metrics()
+            await self._run_in_executor_if_available(env.close)
+            return AgentLoopOutput(
+                response_ids=[],
+                reward=0.0 if retokenize_chat_history else [],
+                stop_reason="length",
+                loss_mask=[],
+                prompt_ids=input_ids,
+                rollout_logprobs=[],
+                env_metrics=env_metrics,
+            )
+
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
