@@ -883,8 +883,6 @@ def _ray_spill_target(
     """Resolve one valid local or remote Ray spill target."""
     if backend is RaySpillBackend.LOCAL:
         return LocalRaySpillTarget(location=validate_ray_spill_dir(local_spill_dir))
-    if backend is not RaySpillBackend.R2:
-        raise ValueError(f"Unsupported Ray spill backend: {backend}")
     if local_spill_dir != DEFAULT_RAY_SPILL_DIR:
         raise ValueError("--ray-spill-dir only applies to --ray-spill-backend=local")
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
