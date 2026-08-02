@@ -468,6 +468,11 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # resolves the launch and Megatron OpenTelemetry constraints together, and the
 # backend imports above gate that overridden resolution.
 #
+# The validated x86_64 TransformerEngine donor imports against CUDA 12 above,
+# but its wheel metadata marks transformer-engine-cu12 as platform-specific and
+# retains the upstream cu13 requirement. Keep both diagnostics explicit here;
+# the exact count prevents any additional conflict from being hidden.
+#
 # `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
 # them into extras, so every image up to that pin already carried them. Naming
 # them keeps the closure the same rather than dropping two packages as a side
@@ -477,6 +482,7 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # build fails. The extra's `datasets>=4.4.1` resolves to a release whose cap
 # clears 2026.4.0.
 COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py
+COPY --chmod=0755 docker/validate_gpu_rl_pip_check.sh /usr/local/bin/validate-gpu-rl-pip-check
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
@@ -489,18 +495,7 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
       exit 1; \
     fi && \
     cat /tmp/rl-pip-check && \
-    grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
-      /tmp/rl-pip-check && \
-    grep -E '^The package `gcsfs` requires `fsspec[^`]*`, but `[^`]+` is installed$' \
-      /tmp/rl-pip-check && \
-    grep -E '^The package `quack-kernels` requires `nvidia-cutlass-dsl[^`]*`, but `[^`]+` is installed$' \
-      /tmp/rl-pip-check && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-      grep -E '^The package `megatron-bridge` requires `nvidia-resiliency-ext`, but it.s not installed$' /tmp/rl-pip-check && \
-      grep -E '^The package `megatron-bridge` requires `flashinfer-python[^`]*`, but `[^`]+` is installed$' /tmp/rl-pip-check && \
-      grep -E '^The package `megatron-bridge` requires `flashinfer-cubin[^`]*`, but `[^`]+` is installed$' /tmp/rl-pip-check && \
-      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "6"; \
-    else test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "3"; fi && \
+    validate-gpu-rl-pip-check /tmp/rl-pip-check linux_x86_64 "${INSTALL_MEGATRON}" && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 

@@ -122,7 +122,6 @@ FROM ${BASE_IMAGE} AS wheel-builder
 RUN test "$(uname -m)" = aarch64 || { echo "Dockerfile.gpu-rl-arm64 needs an aarch64 builder, got $(uname -m)" >&2; exit 1; }
 
 ARG TORCH_VERSION
-ARG TORCHVISION_VERSION
 ARG FLASH_ATTN_VERSION
 ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
@@ -492,6 +491,7 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 # datasets 4.0.0, which caps `fsspec[http]` at 2025.3.0 while the lock resolves
 # fsspec 2026.4.0, so without the extra a second conflict appears.
 COPY docker/validate_harbor_artifact_writer.py /tmp/validate_harbor_artifact_writer.py
+COPY --chmod=0755 docker/validate_gpu_rl_pip_check.sh /usr/local/bin/validate-gpu-rl-pip-check
 RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
         "fastapi==${FASTAPI_VERSION}" \
         "opentelemetry-exporter-otlp==${OTEL_EXPORTER_VERSION}" \
@@ -504,21 +504,7 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python \
       exit 1; \
     fi && \
     cat /tmp/rl-pip-check && \
-    grep -E '^The package `aiobotocore` requires `botocore[^`]*`, but `[^`]+` is installed$' \
-      /tmp/rl-pip-check && \
-    grep -E '^The package `gcsfs` requires `fsspec[^`]*`, but `[^`]+` is installed$' \
-      /tmp/rl-pip-check && \
-    grep -E '^The package `nvidia-cusparselt-cu12` was built for a different platform$' \
-      /tmp/rl-pip-check && \
-    grep -E '^The package `quack-kernels` requires `nvidia-cutlass-dsl[^`]*`, but `[^`]+` is installed$' \
-      /tmp/rl-pip-check && \
-    if [ "${INSTALL_MEGATRON}" = "1" ]; then \
-      grep -E '^The package `megatron-bridge` requires `nvidia-resiliency-ext`, but it.s not installed$' /tmp/rl-pip-check && \
-      grep -E '^The package `megatron-bridge` requires `flashinfer-python[^`]*`, but `[^`]+` is installed$' /tmp/rl-pip-check && \
-      grep -E '^The package `megatron-bridge` requires `flashinfer-cubin[^`]*`, but `[^`]+` is installed$' /tmp/rl-pip-check && \
-      grep -E '^The package `transformer-engine-cu12` was built for a different platform$' /tmp/rl-pip-check && \
-      test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "8"; \
-    else test "$(grep -c '^The package `' /tmp/rl-pip-check)" = "4"; fi && \
+    validate-gpu-rl-pip-check /tmp/rl-pip-check linux_aarch64 "${INSTALL_MEGATRON}" && \
     rm /tmp/rl-pip-check && \
     echo "baked harbor commit: ${HARBOR_COMMIT}"
 

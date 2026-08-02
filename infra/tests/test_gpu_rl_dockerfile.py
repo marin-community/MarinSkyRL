@@ -13,6 +13,7 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
 GPU_RL_ARM64_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl-arm64"
 GPU_RL_SYNC_SCRIPT = REPOSITORY_ROOT / "docker" / "sync_gpu_rl_env.sh"
+GPU_RL_PIP_CHECK_SCRIPT = REPOSITORY_ROOT / "docker" / "validate_gpu_rl_pip_check.sh"
 GPU_RL_DOCKERFILES = (
     GPU_RL_DOCKERFILE,
     GPU_RL_ARM64_DOCKERFILE,
@@ -130,11 +131,8 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
         "The package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed",
     ]
     reports = {
-        GPU_RL_DOCKERFILE: common,
-        GPU_RL_ARM64_DOCKERFILE: [
-            *common,
-            "The package `nvidia-cusparselt-cu12` was built for a different platform",
-        ],
+        "linux_x86_64": common,
+        "linux_aarch64": [*common, "The package `nvidia-cusparselt-cu12` was built for a different platform"],
     }
 
     megatron = [
@@ -143,22 +141,27 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
         "The package `megatron-bridge` requires `flashinfer-cubin==0.6.8.post1`, but `0.6.12` is installed",
     ]
 
-    def check(gate: str, diagnostics: str, install_megatron: bool) -> int:
+    def check(platform: str, diagnostics: str, install_megatron: bool) -> int:
         report.write_text(diagnostics + "\n")
-        environment = {**os.environ, "INSTALL_MEGATRON": "1" if install_megatron else "0"}
-        return subprocess.run(["bash", "-c", gate], env=environment, check=False).returncode
+        return subprocess.run(
+            ["bash", str(GPU_RL_PIP_CHECK_SCRIPT), str(report), platform, "1" if install_megatron else "0"],
+            check=False,
+        ).returncode
 
-    for path, expected in reports.items():
-        dockerfile = path.read_text()
-        start = dockerfile.index("    cat /tmp/rl-pip-check && \\")
-        end = dockerfile.index('    echo "baked harbor commit:', start)
-        gate = dockerfile[start:end].replace("/tmp/rl-pip-check", str(report)) + "    true\n"
+    for platform, expected in reports.items():
         standard_diagnostics = "\n".join(expected)
-        assert check(gate, standard_diagnostics, False) == 0
-        assert check(gate, standard_diagnostics + "\nThe package `unexpected` is incompatible", False) != 0
+        assert check(platform, standard_diagnostics, False) == 0
+        assert check(platform, standard_diagnostics + "\nThe package `unexpected` is incompatible", False) != 0
         megatron_expected = [*expected, *megatron]
-        if path == GPU_RL_ARM64_DOCKERFILE:
+        if platform == "linux_aarch64":
             megatron_expected.append("The package `transformer-engine-cu12` was built for a different platform")
+        else:
+            megatron_expected.extend(
+                [
+                    "The package `transformer-engine-cu12` was built for a different platform",
+                    "The package `transformer-engine-torch` requires `transformer-engine-cu13==2.11.0`, but it's not installed",
+                ]
+            )
         megatron_diagnostics = "\n".join(megatron_expected)
-        assert check(gate, megatron_diagnostics, True) == 0
-        assert check(gate, megatron_diagnostics + "\nThe package `unexpected` is incompatible", True) != 0
+        assert check(platform, megatron_diagnostics, True) == 0
+        assert check(platform, megatron_diagnostics + "\nThe package `unexpected` is incompatible", True) != 0
