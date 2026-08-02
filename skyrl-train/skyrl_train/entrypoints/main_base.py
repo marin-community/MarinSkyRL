@@ -471,15 +471,15 @@ class BasePPOExp:
         # (RAY_USE_UVLOOP defaults True -> default_worker.py:221 try_install_uvloop).
         # libuv's epoll-ctl machinery SIGABRTs this orchestrator under Daytona
         # sandbox-teardown socket churn (uv__epoll_ctl_prep AND uv__io_poll asserts;
-        # present across libuv 1.45-1.49+). Reset the policy HERE -- this run()
-        # method is the common chokepoint EVERY entrypoint funnels through
+        # present across libuv 1.45-1.49+). Reset the policy in this shared
+        # BasePPOExp._run() path, which every training entrypoint funnels through
         # (main_base.skyrl_entrypoint, examples.terminal_bench.main_tbench's
         # TerminalBenchExp(BasePPOExp) which does NOT override run(), etc.) -- and
         # it runs immediately before the asyncio.run() below creates the loop, so
         # both asyncio.run() calls build a stock SelectorEventLoop with no libuv
         # path. Placing it on the per-entrypoint skyrl_entrypoint wrapper is a
         # trap: there are 26+ such functions and terminal_bench uses its own, so
-        # the fix must live on this shared run() method. Orchestrator is
+        # the fix must live on this shared _run() method. Orchestrator is
         # network-RTT-bound (vLLM/Daytona) so uvloop's throughput edge is moot.
         #
         # DEPRECATION NOTE: asyncio.set_event_loop_policy() emits a
