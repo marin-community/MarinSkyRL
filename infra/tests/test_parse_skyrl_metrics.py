@@ -26,6 +26,11 @@ def span_named(spans: list[parse_skyrl_metrics.TimingSpan], name: str) -> parse_
     return span
 
 
+def phase_named(summary: parse_skyrl_metrics.TrialPhaseSummary, name: str) -> parse_skyrl_metrics.TrialPhase:
+    (phase,) = [phase for phase in summary.phases if phase.name == name]
+    return phase
+
+
 def test_default_parser_reads_agentic_wandb_json(tmp_path):
     log_path = tmp_path / "terminus-trainer.out"
     log_path.write_text(
@@ -217,6 +222,17 @@ def test_unusable_phase_timing_leaves_the_duration_empty(tmp_path, environment_s
     assert trial["agent_execution_duration"] == 33.0
 
 
+def test_a_phase_that_spells_utc_both_ways_is_still_measured():
+    # Stripping the trailing `Z` would leave one of these naive and the other aware, so
+    # subtracting them would raise and the phase would read as untimed.
+    assert (
+        parse_skyrl_metrics.span_duration(
+            {"started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:01:00+00:00"}
+        )
+        == 60.0
+    )
+
+
 def test_nested_optimizer_span_is_measured_against_its_container_not_the_step():
     spans = parse_skyrl_metrics.summarize_timing_spans(
         timing_frame(step=100.0, generate=60.0, train_critic_and_policy=30.0, policy_train=28.0)
@@ -286,10 +302,30 @@ def test_unattributed_span_covers_the_step_time_no_child_claims():
     assert unattributed.share_of_within == pytest.approx(0.3)
 
 
-def test_generation_that_runs_a_step_ahead_is_reported_as_overlap():
-    # examples/async/async_trainer.py times `generate` in a background asyncio task started before
-    # the step loop, writing into the same timing dict, so generation runs alongside the step
-    # instead of inside it and the children sum past their parent.
+def test_a_span_that_skips_a_step_still_leaves_the_children_summing_to_the_step():
+    # `sync_weights` runs on one of the two steps. Averaging its share over that step alone,
+    # while the remainder charges the step it skipped as zero, summed the children to 110%.
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        pd.DataFrame(
+            [
+                {"timing/step": 100.0, "timing/generate": 60.0, "timing/sync_weights": 50.0},
+                {"timing/step": 100.0, "timing/generate": 60.0, "timing/sync_weights": None},
+            ]
+        )
+    )
+
+    sync_weights = span_named(spans, "sync_weights")
+    assert sync_weights.share_of_within == pytest.approx(0.25)
+    # The average and the step count still describe the one step on which it ran.
+    assert sync_weights.mean_seconds == pytest.approx(50.0)
+    assert sync_weights.steps == 1
+    children = [span for span in spans if span.within == "step"]
+    assert sum(span.share_of_within for span in children) == pytest.approx(1.0)
+
+
+def test_children_that_sum_past_the_step_are_reported_as_overlap():
+    # A trainer that runs a child alongside the step rather than inside it, which nothing in
+    # harbor or the Timer contract forbids, leaves the step with a negative remainder.
     spans = parse_skyrl_metrics.summarize_timing_spans(
         timing_frame(step=100.0, generate=145.0, train_critic_and_policy=20.0, sync_weights=10.0)
     )
@@ -319,10 +355,10 @@ def test_trial_phase_shares_are_taken_against_trial_wall_clock():
     )
 
     assert summary is not None
-    assert summary["trial_count"] == 1
-    assert summary["phases"]["environment_setup"]["share"] == pytest.approx(0.5)
-    assert summary["phases"]["verifier"]["share"] == pytest.approx(0.05)
-    assert summary["unmeasured_share"] == pytest.approx(0.05)
+    assert summary.measured_trials == 1
+    assert phase_named(summary, "environment_setup").share_of_trial == pytest.approx(0.5)
+    assert phase_named(summary, "verifier").share_of_trial == pytest.approx(0.05)
+    assert phase_named(summary, "unattributed").share_of_trial == pytest.approx(0.05)
 
 
 def test_shares_skip_trials_that_never_recorded_their_own_finish():
@@ -350,14 +386,15 @@ def test_shares_skip_trials_that_never_recorded_their_own_finish():
     )
 
     assert summary is not None
-    assert summary["trial_count"] == 1
-    assert summary["total_trials"] == 2
+    assert summary.measured_trials == 1
+    assert summary.total_trials == 2
+    environment_setup = phase_named(summary, "environment_setup")
     # Both setup durations are evidence about the phase and stay in its median and total.
-    assert summary["phases"]["environment_setup"]["count"] == 2
-    assert summary["phases"]["environment_setup"]["total"] == pytest.approx(200.0)
+    assert environment_setup.trials == 2
+    assert environment_setup.total_seconds == pytest.approx(200.0)
     # Only the finished trial has a wall clock to be a share of, so the share stays at 100 of 200 s.
-    assert summary["phases"]["environment_setup"]["share"] == pytest.approx(0.5)
-    assert summary["unmeasured_share"] == pytest.approx(0.05)
+    assert environment_setup.share_of_trial == pytest.approx(0.5)
+    assert phase_named(summary, "unattributed").share_of_trial == pytest.approx(0.05)
 
 
 def test_multi_step_trial_still_reports_the_phases_it_records():
@@ -377,9 +414,9 @@ def test_multi_step_trial_still_reports_the_phases_it_records():
     )
 
     assert summary is not None
-    assert set(summary["phases"]) == {"environment_setup", "agent_setup"}
-    assert summary["phases"]["environment_setup"]["count"] == 1
-    assert summary["unmeasured_share"] == pytest.approx(0.6)
+    assert [phase.name for phase in summary.phases] == ["environment_setup", "agent_setup", "unattributed"]
+    assert phase_named(summary, "environment_setup").trials == 1
+    assert phase_named(summary, "unattributed").share_of_trial == pytest.approx(0.6)
 
 
 def test_phases_are_still_reported_when_the_trial_wall_clock_is_missing():
@@ -398,10 +435,35 @@ def test_phases_are_still_reported_when_the_trial_wall_clock_is_missing():
     )
 
     assert summary is not None
-    assert summary["phases"]["environment_setup"]["total"] == pytest.approx(90.0)
+    assert phase_named(summary, "environment_setup").total_seconds == pytest.approx(90.0)
     # Without a denominator the report must withhold shares rather than invent one.
-    assert "share" not in summary["phases"]["environment_setup"]
-    assert "unmeasured_share" not in summary
+    assert phase_named(summary, "environment_setup").share_of_trial is None
+    assert [phase.name for phase in summary.phases] == ["environment_setup", "agent_setup"]
+
+
+def test_phases_that_overlap_report_the_excess_instead_of_a_negative_share():
+    # Harbor times each phase independently and does not hold the four to the trial's own span,
+    # so a phase that runs alongside another leaves the trial with less time than its phases sum
+    # to. Subtracting them anyway printed a negative share and phases summing past 100%.
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": 100.0,
+                    "environment_setup_duration": 80.0,
+                    "agent_setup_duration": 40.0,
+                    "agent_execution_duration": 30.0,
+                    "verifier_duration": 5.0,
+                }
+            ]
+        )
+    )
+
+    assert summary is not None
+    overlap = phase_named(summary, "overlap")
+    assert overlap.total_seconds == pytest.approx(55.0)
+    assert overlap.share_of_trial is None
+    assert not any(phase.name == "unattributed" for phase in summary.phases)
 
 
 def test_report_publishes_the_trial_phase_breakdown(tmp_path, monkeypatch):
@@ -438,7 +500,7 @@ def test_report_publishes_the_trial_phase_breakdown(tmp_path, monkeypatch):
 
     report = (output_path / "report.md").read_text()
     assert "| environment_setup | 100.0 | 100.0 | 100.0 | 50.0% | 1 |" in report
-    assert "| unmeasured | — | — | 10.0 | 5.0% | — |" in report
+    assert "| unattributed | — | — | 10.0 | 5.0% | — |" in report
     assert "| policy_train | `train_critic_and_policy` | 28.0 | 93.3% | 1 |" in report
     # Charging every span to the step summed these five to 183% of a 100 s step.
     assert "| unattributed | `step` | 10.0 | 10.0% | 1 |" in report

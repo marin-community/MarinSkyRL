@@ -46,17 +46,13 @@ TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier
 
 # Which trainer span contains which, as `span: containing span`. `None` marks a span that no
 # other span contains, which covers both `step` and the checkpoint, export, evaluation and
-# reference-update work that callbacks run between steps. The four trainers that emit
-# `timing/step` do not share a tree: `fully_async_trainer` wraps scoring, advantage and optimizer
-# work in `run_training`, while `trainer`, `examples/async/async_trainer` and
-# `scripts/full_context/trainer_full_ctx` run them directly under `step`. Declaring the deeper
-# tree covers all four, because a span whose container this run did not record resolves to the
-# nearest container it did record.
+# reference-update work that callbacks run between steps. The four trainers under `skyrl-train/`
+# that emit `timing/step` do not share one tree, so this declares the deepest of them: a span
+# whose container a run did not record resolves to the nearest container it did. That resolution
+# only walks up, so a trainer that nests a span declared here as a root goes uncorrected.
 #
-# Containment here is nesting, not a promise about wall clock. `examples/async/async_trainer`
-# generates one step ahead in a background asyncio task that writes into this same timing dict,
-# so its `generate` runs alongside `step` rather than inside it and the children can sum past
-# their parent. `summarize_timing_spans` reports that excess rather than hiding it.
+# Containment is nesting, not a promise about wall clock. A child that runs alongside its parent
+# makes the children sum past it, and the summary carries the excess as its own row.
 TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
@@ -80,26 +76,41 @@ TIMING_PARENTS: dict[str, str | None] = {
     "update_ref_with_policy": None,
 }
 
-# The synthesized row carrying the share of `step` that no child span covers.
-UNATTRIBUTED_SPAN = "unattributed"
-
-# The synthesized row carrying child time that ran alongside `step` instead of inside it.
-OVERLAP_SPAN = "overlap"
+UNATTRIBUTED_ROW = "unattributed"
+OVERLAP_ROW = "overlap"
 
 
 @dataclass(frozen=True)
 class TimingSpan:
-    """One row of the step-time breakdown, measured against the span that contains it.
-
-    `within` names the containing span, and is None for `step` itself, for the spans that run
-    outside it, and for any span `TIMING_PARENTS` does not declare.
-    """
+    """One row of the step-time breakdown, measured against the span that contains it."""
 
     name: str
     within: str | None
     mean_seconds: float
     share_of_within: float | None
     steps: int
+
+
+@dataclass(frozen=True)
+class TrialPhase:
+    """One row of the trial-phase breakdown, measured against the trial wall clock."""
+
+    name: str
+    median_seconds: float | None
+    mean_seconds: float | None
+    total_seconds: float
+    share_of_trial: float | None
+    trials: int | None
+
+
+@dataclass(frozen=True)
+class TrialPhaseSummary:
+    """The trial-phase rows and the trial wall clock their shares divide."""
+
+    phases: list[TrialPhase]
+    measured_seconds: float
+    measured_trials: int
+    total_trials: int
 
 
 @dataclass(frozen=True)
@@ -553,10 +564,8 @@ def span_duration(span: dict[str, Any]) -> float | None:
     if not started_at or not finished_at:
         return None
     try:
-        start = datetime.fromisoformat(started_at.rstrip("Z"))
-        end = datetime.fromisoformat(finished_at.rstrip("Z"))
-        return (end - start).total_seconds()
-    except (ValueError, TypeError):
+        return (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
+    except ValueError:
         return None
 
 
@@ -627,58 +636,55 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
     return results
 
 
-def summarize_trial_phases(df: pd.DataFrame) -> dict[str, Any] | None:
+def summarize_trial_phases(df: pd.DataFrame) -> TrialPhaseSummary | None:
     """
     Summarize each harbor phase against the trial wall clock that contains it.
 
-    Shares divide summed phase time by summed trial duration, so they answer "where did the
-    trials spend their time" rather than "how do the phases compare to each other", and the
-    remainder is trial time that no phase covers. Both sides of that division come from the
-    trials that recorded their own start and finish. A trial that timed a phase and then never
-    finished, which is what a run cut short by a sandbox quota produces, would otherwise reach
-    the numerator without reaching the denominator and report a phase as more than all of trial
-    time.
+    Shares divide summed phase time by summed trial duration, and both sides of that division
+    come from the trials that recorded their own start and finish: a trial that timed a phase
+    and then never finished, which is what a run cut short by a sandbox quota produces, would
+    otherwise reach the numerator without reaching the denominator. Medians, means and totals
+    still cover every trial that timed the phase, and each phase carries its own trial count.
 
-    Medians, means and totals still cover every trial that timed the phase, because a phase a
-    trial paid before dying is evidence about that phase even when it cannot carry a share. Each
-    phase reports its own trial count because harbor records `agent_execution` and `verifier` per
-    step on a multi-step trial, leaving the trial-level blocks empty there while the setup phases
-    stay populated.
+    A trailing `unattributed` row carries the trial time no phase covers. Harbor times each
+    phase independently and does not hold them to the trial's own span, so where they sum past
+    it an `overlap` row carries the excess instead.
 
     Returns None when no phase was measurable.
     """
-    phases: dict[str, dict[str, float]] = {}
-    for phase_name in TRIAL_PHASES:
-        durations = df[f"{phase_name}_duration"].dropna()
+    measured = df[df["trial_duration"].notna()]
+    measured_seconds = float(measured["trial_duration"].sum())
+
+    phases: list[TrialPhase] = []
+    attributed_seconds = 0.0
+    for name in TRIAL_PHASES:
+        durations = df[f"{name}_duration"].dropna()
         if durations.empty:
             continue
-        phases[phase_name] = {
-            "median": float(durations.median()),
-            "mean": float(durations.mean()),
-            "total": float(durations.sum()),
-            "count": len(durations),
-        }
+        phase_seconds = float(measured[f"{name}_duration"].sum())
+        attributed_seconds += phase_seconds
+        phases.append(
+            TrialPhase(
+                name=name,
+                median_seconds=float(durations.median()),
+                mean_seconds=float(durations.mean()),
+                total_seconds=float(durations.sum()),
+                share_of_trial=phase_seconds / measured_seconds if measured_seconds > 0 else None,
+                trials=len(durations),
+            )
+        )
 
     if not phases:
         return None
 
-    measured = df[df["trial_duration"].notna()]
-    trial_total = float(measured["trial_duration"].sum())
-    summary: dict[str, Any] = {
-        "phases": phases,
-        "trial_total": trial_total,
-        "trial_count": len(measured),
-        "total_trials": len(df),
-    }
+    if measured_seconds > 0:
+        remainder = measured_seconds - attributed_seconds
+        if remainder < 0:
+            phases.append(TrialPhase(OVERLAP_ROW, None, None, -remainder, None, None))
+        else:
+            phases.append(TrialPhase(UNATTRIBUTED_ROW, None, None, remainder, remainder / measured_seconds, None))
 
-    if trial_total > 0:
-        measured_totals = {name: float(measured[f"{name}_duration"].sum()) for name in phases}
-        for name, phase in phases.items():
-            phase["share"] = measured_totals[name] / trial_total
-        summary["unmeasured_total"] = trial_total - sum(measured_totals.values())
-        summary["unmeasured_share"] = summary["unmeasured_total"] / trial_total
-
-    return summary
+    return TrialPhaseSummary(phases, measured_seconds, len(measured), len(df))
 
 
 def compute_trial_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1011,7 +1017,9 @@ def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
 
     def summarize(name: str, parent: str | None) -> TimingSpan:
         seconds = df[f"timing/{name}"]
-        share = float((seconds / df[f"timing/{parent}"]).mean()) if parent is not None else None
+        # A step on which a span did not run is a step on which it took no time, which is how the
+        # remainder below counts it too, so a parent's children and its remainder sum to the parent.
+        share = float((seconds.fillna(0.0) / df[f"timing/{parent}"]).mean()) if parent is not None else None
         return TimingSpan(name, parent, float(seconds.mean()), share, int(seconds.count()))
 
     children: dict[str | None, list[str]] = defaultdict(list)
@@ -1037,13 +1045,11 @@ def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
     steps = int(step_seconds.count())
     if mean_unattributed < 0:
         # The children sum past the step, so this trainer ran one of them alongside the step
-        # rather than inside it. Report the excess as its own row: it is neither idle step time
-        # nor a share of anything, and clamping it to zero would report a step whose parts fit
-        # when they do not.
-        rows.append(TimingSpan(OVERLAP_SPAN, "step", -mean_unattributed, None, steps))
+        # rather than inside it. The excess is neither idle step time nor a share of anything.
+        rows.append(TimingSpan(OVERLAP_ROW, "step", -mean_unattributed, None, steps))
     else:
         share = float((unattributed / step_seconds).mean())
-        rows.append(TimingSpan(UNATTRIBUTED_SPAN, "step", mean_unattributed, share, steps))
+        rows.append(TimingSpan(UNATTRIBUTED_ROW, "step", mean_unattributed, share, steps))
 
     for root in children[None]:
         rows.append(summarize(root, None))
@@ -1164,10 +1170,12 @@ def generate_markdown_report(
             f.write(
                 "Each span is measured against the span that contains it, so siblings sum toward their\n"
                 "parent rather than toward the run. The `unattributed` row is the part of a step that no\n"
-                "child span covers; an `overlap` row in its place means a child ran alongside the step\n"
-                "rather than inside it, as generation does when a trainer runs a step ahead. Spans listed\n"
-                "as outside `step` are real wall clock between steps and are not part of one; every\n"
-                "average covers only the steps on which that span ran.\n\n"
+                "child span covers, and an `overlap` row in its place means a child ran alongside the\n"
+                "step rather than inside it. Spans listed as outside `step` are real wall clock between\n"
+                "steps and are not part of one. An average covers only the steps on which its span ran,\n"
+                "while a share counts a step the span skipped as zero. A short run averages in one-time\n"
+                "costs: the first step of a fully asynchronous run pays a rollout-buffer fill that later\n"
+                "steps do not.\n\n"
             )
 
             f.write("| Span | Within | Avg (s) | Avg % of Within | Steps |\n")
@@ -1292,39 +1300,35 @@ def generate_markdown_report(
             f.write("## Trial-Level Analysis (from result.json)\n\n")
             f.write(f"Total trials parsed: {trial_stats.get('total_trials', 0)}\n\n")
 
-            phase_durations = trial_stats.get("phase_durations")
-            if phase_durations:
+            phase_summary = trial_stats.get("phase_durations")
+            if phase_summary:
                 f.write("### Phase Duration Breakdown\n\n")
                 f.write(
                     "Harbor times four phases on a trial result. A phase carries its own trial count\n"
                     "because a multi-step trial records `agent_execution` and `verifier` per step rather\n"
                     "than on the trial itself.\n\n"
                 )
-                if "unmeasured_share" in phase_durations:
+                if phase_summary.measured_seconds > 0:
                     f.write(
                         "Shares are of the "
-                        f"{phase_durations['trial_total']:.1f} s of wall clock recorded by the "
-                        f"{phase_durations['trial_count']} of {phase_durations['total_trials']} trials that\n"
-                        "timed their own start and finish, and `unmeasured` is trial time that no phase\n"
-                        "covers. Medians, means and totals cover every trial that timed the phase, including\n"
-                        "trials that never finished and so carry no share.\n\n"
+                        f"{phase_summary.measured_seconds:.1f} s of wall clock recorded by the "
+                        f"{phase_summary.measured_trials} of {phase_summary.total_trials} trials that\n"
+                        "timed their own start and finish. `unattributed` is trial time that no phase\n"
+                        "covers, and an `overlap` row in its place means the phases sum past the trials\n"
+                        "containing them. Medians, means and totals cover every trial that timed the\n"
+                        "phase, including trials that never finished and so carry no share.\n\n"
                     )
                 else:
                     f.write("No trial recorded its own start and finish, so phase shares are unavailable.\n\n")
 
                 f.write("| Phase | Median (s) | Mean (s) | Total (s) | % of Trial Time | Trials |\n")
                 f.write("|-------|------------|----------|-----------|-----------------|--------|\n")
-                for phase_name, phase in phase_durations["phases"].items():
-                    share = f"{phase['share'] * 100:.1f}%" if "share" in phase else "—"
-                    f.write(
-                        f"| {phase_name} | {phase['median']:.1f} | {phase['mean']:.1f} | "
-                        f"{phase['total']:.1f} | {share} | {phase['count']} |\n"
-                    )
-                if "unmeasured_share" in phase_durations:
-                    f.write(
-                        f"| unmeasured | — | — | {phase_durations['unmeasured_total']:.1f} | "
-                        f"{phase_durations['unmeasured_share'] * 100:.1f}% | — |\n"
-                    )
+                for phase in phase_summary.phases:
+                    median = f"{phase.median_seconds:.1f}" if phase.median_seconds is not None else "—"
+                    mean = f"{phase.mean_seconds:.1f}" if phase.mean_seconds is not None else "—"
+                    share = f"{phase.share_of_trial * 100:.1f}%" if phase.share_of_trial is not None else "—"
+                    trials = str(phase.trials) if phase.trials is not None else "—"
+                    f.write(f"| {phase.name} | {median} | {mean} | {phase.total_seconds:.1f} | {share} | {trials} |\n")
                 f.write("\n")
 
             tc = trial_stats.get("turn_count")
