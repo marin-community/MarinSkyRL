@@ -1,27 +1,52 @@
 import json
-from typing import Dict, Any, Optional, Protocol
+from typing import Dict, Any, List, Optional, Protocol
 
 
-class PrefixCacheCounts(Protocol):
+class PrefixCacheStatsLike(Protocol):
     """The token counters vLLM's `PrefixCacheStats` carries for one scheduler iteration."""
 
     queries: int
     hits: int
 
 
-def prefix_cache_hit_rate_percent(stats: PrefixCacheCounts) -> Optional[float]:
+def prefix_cache_hit_rate_percent(stats: PrefixCacheStatsLike) -> Optional[float]:
     """Share of queried prefix tokens that were already cached, as a percentage.
 
     `PrefixCacheStats` counts tokens, not requests: `queries` is how many were looked up and
-    `hits` how many were served from cache. This is the ratio vLLM's `CachingMetrics` uses,
-    applied to a single iteration's delta rather than to its running request window.
+    `hits` how many were served from cache.
 
     Returns None for an iteration that queried nothing, which has no rate to report rather
-    than a rate of zero. `CachingMetrics.observe` drops those deltas for the same reason.
+    than a rate of zero.
     """
     if stats.queries == 0:
         return None
     return stats.hits / stats.queries * 100.0
+
+
+class PrefixCacheHitRateAccumulator:
+    """Peak and per-iteration samples of the prefix cache hit rate for one engine.
+
+    Owns which scheduler iterations are sampled at all. Only iterations that queried prefix
+    tokens are: `prefix_cache_stats` is a delta that admission writes, decode-only iterations
+    outnumber admissions heavily, and scoring those as zeroes would pin the median near 0.0.
+    vLLM's `CachingMetrics.observe` skips the same iterations, keyed on `requests`, which
+    `PrefixCacheStats.record` bumps alongside `queries`.
+    """
+
+    def __init__(self) -> None:
+        self.peak: float = 0.0
+        self.samples: List[float] = []
+
+    def observe(self, stats: Optional[PrefixCacheStatsLike], is_active: bool) -> None:
+        """Fold one scheduler iteration in, where `is_active` means it had queued or running work."""
+        if stats is None:
+            return
+        rate = prefix_cache_hit_rate_percent(stats)
+        if rate is None:
+            return
+        self.peak = max(self.peak, rate)
+        if is_active:
+            self.samples.append(rate)
 
 
 def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:

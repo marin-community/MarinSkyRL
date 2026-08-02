@@ -1,4 +1,4 @@
-"""The prefix cache hit rate is a share of queried tokens, not a share of requests.
+"""The prefix cache hit rate is a share of queried tokens, sampled only on admissions.
 
 Run with:
 uv run --frozen pytest tests/cpu/inf_engines/vllm/test_prefix_cache_hit_rate.py
@@ -9,17 +9,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from skyrl_train.inference_engines.vllm.utils import prefix_cache_hit_rate_percent
+from skyrl_train.inference_engines.vllm.utils import PrefixCacheHitRateAccumulator, prefix_cache_hit_rate_percent
 
 
 @dataclass
 class FakePrefixCacheStats:
-    """The field set of vLLM's `PrefixCacheStats`, which carries no miss counter.
-
-    Deriving a rate from a field this class does not have is what made the published
-    metric constant, so the fake mirrors the real shape exactly. A mock would grow a
-    `misses` attribute on demand and hide the defect under test.
-    """
+    """The field set of vLLM's `PrefixCacheStats`, which carries no miss counter."""
 
     reset: bool = False
     requests: int = 0
@@ -30,48 +25,69 @@ class FakePrefixCacheStats:
     preempted_hits: int = 0
 
 
-def test_partial_hit_rate_is_the_cached_share_of_queried_tokens():
-    assert prefix_cache_hit_rate_percent(FakePrefixCacheStats(requests=2, queries=1000, hits=300)) == 30.0
-
-
-def test_rates_between_the_extremes_are_distinguishable():
+@pytest.mark.parametrize(
+    ("hits", "expected"),
+    [(1, 0.1), (250, 25.0), (300, 30.0), (500, 50.0), (1000, 100.0)],
+)
+def test_the_rate_is_the_cached_share_of_queried_tokens(hits, expected):
     """A denominator of `hits` alone collapses every one of these to 100.0."""
-    rates = [
-        prefix_cache_hit_rate_percent(FakePrefixCacheStats(requests=1, queries=1000, hits=hits))
-        for hits in (1, 250, 500, 1000)
-    ]
-
-    assert rates == [0.1, 25.0, 50.0, 100.0]
+    assert prefix_cache_hit_rate_percent(FakePrefixCacheStats(requests=1, queries=1000, hits=hits)) == expected
 
 
-def test_a_fully_cached_prefix_reports_one_hundred_percent():
-    assert prefix_cache_hit_rate_percent(FakePrefixCacheStats(requests=1, queries=512, hits=512)) == 100.0
-
-
-def test_an_iteration_that_queried_nothing_contributes_no_sample():
-    """Scheduler iterations that admit no new request carry an all-zero delta.
-
-    Reporting 0.0 for one is not a low hit rate, it is no measurement, and decode-only
-    iterations outnumber admissions badly enough to pin the median there. vLLM's
-    `CachingMetrics.observe` returns early on the same empty delta.
-    """
+def test_an_iteration_that_queried_nothing_has_no_rate():
     assert prefix_cache_hit_rate_percent(FakePrefixCacheStats()) is None
 
 
-def test_a_genuine_zero_hit_rate_is_still_a_sample():
+def test_a_genuine_zero_hit_rate_is_still_a_rate():
     """An admission that hit nothing is a real 0.0, distinct from having queried nothing."""
     assert prefix_cache_hit_rate_percent(FakePrefixCacheStats(requests=1, queries=1000, hits=0)) == 0.0
 
 
-def test_only_preempted_lookups_contribute_no_sample():
+def test_readmitted_preempted_tokens_are_left_out_of_the_rate():
     """vLLM books readmitted preempted requests to a separate set of counters.
 
-    Reading those as admission traffic would report the prefix a preemption forced vLLM to
-    look up again as if it were a fresh prompt.
+    Counting them would report the prefix a preemption forced vLLM to look up a second time as
+    if it were a fresh prompt, reading 55.6 here rather than 20.0.
     """
-    preempted_only = FakePrefixCacheStats(preempted_requests=1, preempted_queries=800, preempted_hits=800)
+    mixed = FakePrefixCacheStats(
+        requests=1, queries=1000, hits=200, preempted_requests=1, preempted_queries=800, preempted_hits=800
+    )
 
-    assert prefix_cache_hit_rate_percent(preempted_only) is None
+    assert prefix_cache_hit_rate_percent(mixed) == 20.0
+
+
+def test_decode_only_iterations_do_not_drag_the_published_median_down():
+    """Most scheduler iterations admit nothing and carry an all-zero delta.
+
+    Sampling 0.0 for each is what published a median of 0.0 beside a peak of 100.0.
+    """
+    accumulator = PrefixCacheHitRateAccumulator()
+
+    accumulator.observe(FakePrefixCacheStats(requests=1, queries=1000, hits=400), is_active=True)
+    for _ in range(9):
+        accumulator.observe(FakePrefixCacheStats(), is_active=True)
+
+    assert accumulator.samples == [40.0]
+    assert accumulator.peak == 40.0
+
+
+def test_an_iteration_without_scheduler_stats_is_not_a_zero_hit_rate():
+    accumulator = PrefixCacheHitRateAccumulator()
+
+    accumulator.observe(None, is_active=True)
+
+    assert accumulator.samples == []
+    assert accumulator.peak == 0.0
+
+
+def test_the_peak_covers_iterations_the_median_skips():
+    """Every metric in this registry peaks over all iterations and samples only active ones."""
+    accumulator = PrefixCacheHitRateAccumulator()
+
+    accumulator.observe(FakePrefixCacheStats(requests=1, queries=100, hits=90), is_active=False)
+
+    assert accumulator.peak == 90.0
+    assert accumulator.samples == []
 
 
 def test_the_fake_carries_the_same_fields_as_vllms_prefix_cache_stats():
