@@ -1,27 +1,12 @@
 name: SkyRL-tx-CPU
 
-# Manual-dispatch only, because skyrl-tx does not currently work with the dependencies it
-# resolves: jax floated to 0.10, whose gather now demands an explicit output sharding, and
-# every model test and `tx train` itself dies on `ShardingTypeError`. Separately, tinker
-# began validating the shape of its API key, which the tinker tests do not satisfy. Both
-# are upstream drift, not a regression -- the suite fails identically with and without the
-# lockfile this repo now carries, and it had gone unnoticed because the path filter below
-# meant this workflow had not run in months.
-#
-# Pinning around it is not a one-line fix (jax 0.8 clears the sharding error and then hits
-# a bfloat16 interop error instead), so it needs a real dependency-repair pass. Leaving the
-# pull_request trigger on would just paint every skyrl-tx PR red for reasons unrelated to
-# the change. The lockfile pins today's resolution so that repair is reproducible, and the
-# root lint job already covers skyrl-tx/**. Restore the triggers below once the suite is
-# green again.
 on:
   workflow_dispatch:
 
 permissions:
-  checks: write   # for status checks to appear
+  checks: write
   contents: read
 
-# Cancel runs for previous commits on the same branch
 concurrency:
   group: skyrl-tx-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -34,7 +19,7 @@ jobs:
         shell: bash
         working-directory: ./skyrl-tx
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Install uv
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh

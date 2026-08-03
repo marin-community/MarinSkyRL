@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev pytest tests/cpu/test_eval.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
 from unittest.mock import MagicMock

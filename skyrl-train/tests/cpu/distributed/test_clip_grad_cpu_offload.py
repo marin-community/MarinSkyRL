@@ -23,7 +23,7 @@ Gates:
 
 Run::
 
-    uv run --isolated --extra dev pytest tests/cpu/distributed/test_clip_grad_cpu_offload.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/distributed/test_clip_grad_cpu_offload.py
     # or directly (no pytest): python tests/cpu/distributed/test_clip_grad_cpu_offload.py
 """
 

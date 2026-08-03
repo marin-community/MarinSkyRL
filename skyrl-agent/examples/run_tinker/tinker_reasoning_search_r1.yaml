@@ -10,7 +10,7 @@ data:
 generator:
   infer_backend: tinker
   backend_config: null
-  num_trajectories: 8  # Number of trajectories per prompt for GRPO
+  num_trajectories: 8
   max_iterations: 5
   max_prompt_length: 8000
   sampling_params:
@@ -30,6 +30,5 @@ generator:
 
 dispatcher:
   type: async_batch
-  max_parallel_agents: 32  # Adjust based on your resources
+  max_parallel_agents: 32
   max_eval_parallel_agents: 32
-

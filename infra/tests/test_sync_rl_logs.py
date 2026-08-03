@@ -140,13 +140,36 @@ def test_unresolvable_returns_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Store/creds resolution defaults — the object-store + kubeconfig wiring is untouched
+# Store and credential resolution
 # ---------------------------------------------------------------------------
 
 
-def test_store_and_kubeconfig_defaults_unchanged():
-    assert srl.BUCKET == "marin-us-east-02a"
-    assert srl.ENDPOINT == "https://cwobject.com"
-    assert srl.EAST_KUBECONFIG.endswith("coreweave-iris-gpu")
-    assert srl.RAY_SUBDIR == "ray_session_logs"
-    assert srl.KCFG == {"cw-us-east-02a": "~/.kube/coreweave-iris-gpu", "cw-rno2a": "~/.kube/coreweave-iris"}
+def test_cli_accepts_east08_cluster():
+    args = srl.argument_parser().parse_args(["/operator/job", "--cluster", "cw-us-east-08a"])
+
+    assert args.cluster == "cw-us-east-08a"
+
+
+def test_trace_batches_limit_total_download_bytes_and_report_oversized_non_logs():
+    objects = [
+        ("iris/job/trace_jobs/a/result.json", 40),
+        ("iris/job/trace_jobs/a/agent/trajectory.json", 40),
+        ("iris/job/trace_jobs/a/large.bin", 101),
+    ]
+
+    batches, skipped = srl.trace_object_batches(objects, batch_bytes=64, max_non_log_bytes=100)
+
+    assert batches == [
+        [("iris/job/trace_jobs/a/result.json", 40)],
+        [("iris/job/trace_jobs/a/agent/trajectory.json", 40)],
+    ]
+    assert skipped == [{"key": "iris/job/trace_jobs/a/large.bin", "size": 101, "reason": "non_log_size_limit"}]
+
+
+def test_trace_batches_keep_large_log_objects_when_non_log_guard_is_enabled():
+    objects = [("iris/job/trace_jobs/a/opencode.txt", 120)]
+
+    batches, skipped = srl.trace_object_batches(objects, batch_bytes=64, max_non_log_bytes=100)
+
+    assert batches == [[("iris/job/trace_jobs/a/opencode.txt", 120)]]
+    assert skipped == []

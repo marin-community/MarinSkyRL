@@ -47,7 +47,7 @@ that request's output limit to the remaining window and stops before a request
 with no room for output. Tool observations and chat-template overhead therefore
 cannot make a final request exceed vLLM capacity.
 
-`cloud/iris/run_rl.py` writes `resolved-context-budget.json` beside the durable
+`cloud/iris/training_driver.py` writes `resolved-context-budget.json` beside the durable
 Harbor trial bundle when it is an object-store URI, otherwise beside local run
 artifacts, and prints its fields before training. Low-level YAML
 declarations and `--skyrl_override` values for derived length fields fail at

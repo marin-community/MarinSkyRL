@@ -8,10 +8,9 @@ on:
   pull_request:
 
 permissions:
-  checks: write   # for status checks to appear
+  checks: write
   contents: read
 
-# Cancel runs for previous commits on the same branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -20,8 +19,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
       - name: Lint and format
@@ -34,71 +33,66 @@ jobs:
   infra_tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
       - name: Run infra tests
-        # sync_rl_logs.py imports boto3 lazily (inside s3client), so its resolution logic is
-        # importable and testable without any cloud deps; --no-project keeps this off the
-        # unregenerable skyrl-train lockfile.
-        run: uv run --no-project --with pytest pytest infra/tests/ -q
+        run: uv run --no-project --with pytest --with pandas --with matplotlib --with tabulate pytest infra/tests/ -q
 
   iris_launcher_tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
+      - name: Install the CPU-only launcher
+        run: uv sync --frozen --group dev
       - name: Run iris launcher tests
-        # pyyaml, fsspec, and huggingface_hub are plain module-level imports in the launcher
-        # code under test; universal-pathlib backs the lazy gs:// UPath import in
-        # literal_proxy_utils.py. rigging (private, Marin-monorepo-only) is not installed here,
-        # so test_federated_parent_auth.py self-skips via importorskip and only runs on hosts
-        # where rigging is present. --no-project keeps this off the unregenerable skyrl-train
-        # lockfile.
+        run: uv run --frozen pytest cloud/iris/tests/ -q
+      - name: Verify the base dependency boundary
+        run: uv run --frozen pytest infra/tests/test_marinskyrl_packaging.py -q
+      - name: Exercise a clean built-wheel install
         run: |
-          uv run --no-project \
-            --with pytest --with pyyaml --with fsspec --with huggingface_hub --with universal-pathlib \
-            pytest cloud/iris/tests/ -q
+          uv build --wheel --out-dir dist
+          uv venv --python 3.12 /tmp/marinskyrl-base
+          uv pip install --python /tmp/marinskyrl-base/bin/python dist/marinskyrl-*.whl
+          cd /tmp
+          /tmp/marinskyrl-base/bin/marinskyrl --help
 
   skyrl_train_tests:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: ./skyrl-train
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
       - name: Check the macOS CPU environment resolves
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
-        run: uv sync --frozen --dry-run --extra dev --python-platform aarch64-apple-darwin
+        run: uv sync --frozen --dry-run --group dev --extra cpu --python-platform aarch64-apple-darwin
       - name: Install skyrl-train
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --group dev --extra cpu --extra telemetry
       - name: Check the lockfile is current
-        # The lock went stale for months because it could not be regenerated at all. Now that it
-        # can, this keeps pyproject.toml and uv.lock from drifting apart again.
         run: uv lock --check
       - name: Run cpu tests
-        # These five fail on main today and are test-vs-code drift, not regressions, so the suite
-        # would report them on every PR. Each needs a judgement call this CI change should not make:
-        #   test_cp_config / test_ep_config_noop  golden "defaults have not drifted" baselines that
-        #                                         the defaults have in fact drifted from
-        #   test_generator_output_concatenation   GeneratorOutput grew fields the test does not know
-        #   test_generate_retry_no_gen_finish     expected-payload drift
-        #   test_ppo_train_batch_calculations     the test's config predates a config-schema change
         run: |
-          uv run --frozen pytest tests/cpu/ \
-            --deselect tests/cpu/distributed/test_cp_config.py::test_all_defaults_is_structurally_identical_to_pre_cp \
-            --deselect tests/cpu/generators/test_skyrl_gym_generator.py::test_generator_output_concatenation \
-            --deselect tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
-            --deselect tests/cpu/test_ep_config_noop.py::test_all_defaults_is_structurally_identical_to_pre_ep \
-            --deselect tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
+          uv run --frozen pytest skyrl-train/tests/cpu/ \
+            --deselect skyrl-train/tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
+            --deselect skyrl-train/tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
+
+  skyrl_train_macos_install:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: true
+      - name: Install skyrl-train
+        run: uv sync --frozen --group dev --extra cpu
+      - name: Exercise local filesystem I/O
+        run: uv run --frozen pytest skyrl-train/tests/cpu/utils/test_io.py
 
   skyrl_gym_tests:
     runs-on: ubuntu-latest
@@ -107,13 +101,11 @@ jobs:
         shell: bash
         working-directory: ./skyrl-gym
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
       - name: Install skyrl-gym
-        # Pinned to 3.12: on 3.13 the searchcode tests assert on a traceback whose formatting
-        # changed.
         run: uv sync --frozen --extra dev --python 3.12
       - name: Run cpu tests
         run: uv run --frozen --python 3.12 pytest tests/

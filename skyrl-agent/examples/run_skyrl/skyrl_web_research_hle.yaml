@@ -7,15 +7,12 @@ tools: ["search_engine", "web_browser", "finish"]
 data:
   data_source_key: data_source
   instance_id_key: extra_info.index
-  # Intentionally omit instance_key to pass full record (dict) to the task
 
 generator:
   infer_backend: skyrl-train
   backend_config: null
-  # Keep this in sync with +skyrl_agent.num_trajectories at launch
   num_trajectories: 8
   max_iterations: 20
-  # Keep prompt/response lengths modest for initial smoke tests; tune per model/context
   max_prompt_length: 31232
   sampling_params:
     temperature: 1.0

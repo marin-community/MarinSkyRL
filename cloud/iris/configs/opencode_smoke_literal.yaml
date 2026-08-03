@@ -1,51 +1,3 @@
-# =============================================================================
-# Iris / CoreWeave opencode literal-bridge SMOKE (Experiment 2 S7 gate).
-# =============================================================================
-# Port of the frozen OT-Agent `hpc/skyrl_yaml/iris/opencode_smoke_literal.yaml`
-# onto the canonical `cloud.iris.run_rl` launcher (schema-identical to the
-# sibling `56GPU_qwen3_8b.yaml`, so the trainer/generator knobs use that config's
-# known-valid values where the frozen one differed — loss_reduction=sequence_mean,
-# served_model_name — while the harbor agent + smoke sizing come from the frozen
-# opencode config).
-#
-# PURPOSE: validate the opencode RL controller-ingress + record-literal path
-# end-to-end on 1 node (8 H100): opencode (in a Daytona sandbox) reaches the
-# co-located vLLM through the marin-minted /proxy/t/<token>/… capability URL
-# published as HARBOR_MODEL_ENDPOINT, and the co-located harbor RecordProxy
-# captures the opencode<->vLLM POSTs into literal.jsonl.
-#
-# Colocated single-node: policy/ref/engines share the 8 GPUs via vLLM sleep mode;
-# placement counts null -> derived from --num-nodes 1 / --gpus_per_node 8; TP=1,
-# num_inference_engines null -> 8.
-#
-# ⚠ SCOPE (2026-07-16): PR #14 (`feuer/rl-iris-native-ingress`) consolidated the
-# ingress RUNTIME only. The opencode literal BRIDGE code is NOT yet in it:
-#   - GAP B: AGENT_SCHEMA (harbor_config.py) exposes neither `version` nor
-#     `opencode_config`, so the `version`/`opencode_config` keys below are
-#     currently DROPPED ("Unknown harbor config key … - ignoring"). opencode
-#     installs @latest; the compaction (gate-4) observable is not exercised.
-#   - S5: terminal_bench_generator.py has no per-trial x-ot-trial-id correlation
-#     glue, so the recovered literal is NOT correlated back into per-trial
-#     rollout_details. The FULL POLICY §4 gate 5 (per-trial rollout_details,
-#     missing_logprobs_count==0, no bleed) is therefore NOT met on this config
-#     until the bridge branches (harbor feuer/opencode-literal-rollout-details +
-#     MSkyRL feuer/opencode-literal-correlation) are consolidated (S8).
-# This config DOES test the NARROW gate: RecordProxy captures the opencode POSTs +
-# literal.jsonl is created + NON-EMPTY, and the live curl→200 via the
-# marin-minted HARBOR_MODEL_ENDPOINT. The `version`/`opencode_config` keys are
-# kept so the config is correct the moment GAP B lands.
-#
-# MUST launch with (opencode's CLI runs INSIDE the Daytona sandbox, so it needs a
-# PUBLIC endpoint — head_ip:8000 is internal-only):
-#   python -m cloud.iris.launch_rl_iris \
-#     --rl_config cloud/iris/configs/opencode_smoke_literal.yaml \
-#     --model_path Qwen/Qwen3-8B \
-#     --train-data '["DCAgent/exp_rpt_pymethods2test-large"]' \
-#     --num-nodes 1 --gpus_per_node 8 \
-#     --ingress-mode controller --ingress-host iris.oa.dev \
-#     --target-cluster cw-us-east-02a --record-literal \
-#     --job-name <UNIQUE> --no-wait
-# =============================================================================
 
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
@@ -61,19 +13,14 @@ terminal_bench:
   trials_dir: s3://marin-us-east-02a/iris/rl-opencode-lit-smoke/trace_jobs
 
   harbor:
-    # opencode: harbor's literal-token-capable CLI agent. Reaches vLLM through the
-    # controller-ingress capability URL (HARBOR_MODEL_ENDPOINT).
     name: opencode
-    # ⚠ GAP B: dropped until AGENT_SCHEMA exposes version/opencode_config.
     version: "1.18.2"
     opencode_config:
       compaction:
         auto: true
         reserved: 16384
-    # RecordProxy captures the literal; (with the S5 glue) recovered into rollout_details.
     collect_rollout_details: true
 
-    # opencode installs via nvm + npm at setup; give it room.
     override_setup_timeout_sec: 600
     override_timeout_sec: 600
     verifier_override_timeout_sec: 120
@@ -96,7 +43,6 @@ terminal_bench:
       - RewardFileEmptyError
       - VerifierOutputParseError
 
-    # SMOKE: one small concurrency wave (8 identical-seed rollouts of the 1 prompt).
     n_concurrent_trials: 8
 
     log_level: INFO
@@ -145,8 +91,6 @@ trainer:
   max_steps: 3
   update_epochs_per_batch: 1
 
-  # GATE 5: train_batch_size == n_samples_per_prompt == 8 => 1 prompt/step run as 8
-  # identical-seed rollouts through the ONE shared proxy.
   train_batch_size: 8
   policy_mini_batch_size: 8
   eval_batch_size: 8
@@ -159,9 +103,7 @@ trainer:
 
   eval_interval: 999999
   eval_before_train: false
-  ckpt_interval: 999
   resume_mode: latest
-  hf_save_interval: 999
   hf_hub_repo_id: null
   hf_hub_private: false
   hf_hub_revision: main
@@ -191,7 +133,6 @@ trainer:
       cpu_offload: false
       reshard_after_forward: true
 
-  # Colocated single node: all counts null -> derived from --num-nodes/--gpus_per_node.
   placement:
     colocate_all: true
     policy_num_nodes: null
@@ -207,7 +148,6 @@ generator:
   inference_engine_tensor_parallel_size: 1
   num_inference_engines: null
 
-  # GATE 5: 8 identical-seed rollouts of the single prompt.
   n_samples_per_prompt: 8
   eval_n_samples_per_prompt: 8
 
@@ -236,17 +176,6 @@ generator:
   engine_init_kwargs:
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     served_model_name: Qwen3-8B
-    # opencode drives the policy as a tool-using agent: it sends
-    # tool_choice:"auto" to /v1/chat/completions. Without tool-calling enabled
-    # the engine returns '"auto" tool choice requires --enable-auto-tool-choice
-    # and --tool-call-parser to be set', opencode exits 1, and every trial is a
-    # NonZeroAgentExitCodeError scoring reward 0. These two keys are consumed by
-    # pop_openai_kwargs() (skyrl_train/inference_engines/vllm/utils.py) — mapped
-    # to OpenAIServingChat's enable_auto_tools / tool_parser — so tool parsing is
-    # wired ONLY into the OpenAI serving layer (harbor rollout path); the raw
-    # token_ids that TIS/TITO literal-recording relies on are unaffected.
-    # hermes = Qwen3-8B's <tool_call>…</tool_call> tool format (Qwen3 dense/
-    # thinking; qwen3_coder is for Qwen3-Coder's distinct XML function-call format).
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 

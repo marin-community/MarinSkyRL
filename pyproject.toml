@@ -1,50 +1,263 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "skyrl"
+name = "marinskyrl"
 version = "0.1.0"
-description = "A Post-Training Stack for LLMs"
-authors = [
-    { name = "NovaSkyAI Team"}
+description = "Marin's typed launcher and RL training runtime"
+requires-python = "==3.12.*"
+dependencies = [
+    "boto3",
+    "datasets>=4.0.0",
+    "debugpy==1.8.0",
+    "fastapi",
+    "fsspec>=2024.0.0",
+    "func_timeout",
+    "hf_transfer",
+    "huggingface-hub>=0.34.0",
+    "hydra-core==1.3.2",
+    "jaxtyping",
+    "loguru",
+    "marin-finelog-server==0.2.17.dev30664483151",
+    "marin-iris==0.2.70.dev30755316227",
+    "marin-iris-native==0.1.5.dev30223685542",
+    "ninja",
+    "nvidia-ml-py",
+    "omegaconf",
+    "pandas",
+    "polars",
+    "pyyaml>=6.0",
+    "ray==2.51.1",
+    "requests",
+    "s3fs",
+    "smart_open",
+    "tensorboard",
+    "tqdm>=4.66",
+    "transformers>=5.8.1,<5.9",
+    "uvicorn",
+    "wandb",
 ]
-license = "MIT"
-readme = "README.md"
-requires-python = ">=3.12"
 
-[tool.setuptools]
-# Root package is metadata-only - actual code is in subdirectories:
-# - skyrl-train/  (install with: pip install ./skyrl-train[vllm])
-# - skyrl-gym/    (install with: pip install ./skyrl-gym)
-# - skyagent/     (install with: pip install ./skyagent)
-packages = []
+[project.optional-dependencies]
+agentic = ["daytona>=0.92.0"]
+cpu = [
+    "accelerate>=1.14,<2",
+    "harbor-config",
+    "peft>=0.19",
+    "tensordict",
+    "torch==2.11.0",
+    "torchdata",
+]
+cuda = [
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
+]
+deepspeed = [
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
+    "deepspeed==0.17.6 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
+]
+fsdp = ["torchtitan ; sys_platform == 'linux'"]
+vllm = [
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
+    "vllm==0.23.0 ; sys_platform == 'linux'",
+]
+megatron = [
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
+    "causal-conv1d>=1.5,<2 ; sys_platform == 'linux'",
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
+    "mamba-ssm>=2.2,<3 ; sys_platform == 'linux'",
+    "megatron-bridge==0.5.0 ; sys_platform == 'linux'",
+    "megatron-core==0.18.0 ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "nvidia-modelopt==0.45.0 ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.26.0 ; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine-cu12==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
+]
+telemetry = [
+    "marin-rigging[prometheus]==0.2.70.dev30755316227",
+    "ray[default]",
+]
+
+[project.scripts]
+marinskyrl = "cloud.iris.job:main"
 
 [dependency-groups]
+analysis = [
+    "matplotlib",
+    "pandas",
+    "tabulate",
+]
+docs = [
+    "myst-parser>=2.0.0",
+    "sphinx>=7.0.0",
+    "sphinx-autobuild>=2021.3.14",
+    "sphinx-autodoc-typehints>=1.25.0",
+    "sphinx-copybutton>=0.5.0",
+    "sphinx-rtd-theme>=2.0.0",
+]
 dev = [
+    "litellm",
+    "marin-rigging[prometheus]==0.2.70.dev30755316227",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
+    "prometheus-client",
+    "pytest>=8.4",
+    "pytest-asyncio",
+    "universal-pathlib",
+]
+[tool.hatch.build.targets.wheel.force-include]
+"chat_templates" = "chat_templates"
+"cloud/iris" = "cloud/iris"
+"skyrl-gym/skyrl_gym" = "skyrl_gym"
+"skyrl-train/skyrl_train" = "skyrl_train"
+
+[tool.uv]
+package = true
+required-version = ">=0.8.10"
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "cpu" }, { extra = "deepspeed" }],
+    [{ extra = "cpu" }, { extra = "megatron" }],
+    [{ extra = "cpu" }, { extra = "vllm" }],
+]
+environments = [
+    "sys_platform == 'darwin'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+no-build-isolation-package = [
+    "transformer-engine",
+    "transformer-engine-torch",
+]
+override-dependencies = [
+    "transformer-engine-cu13 ; sys_platform == 'never'",
+    "nvidia-resiliency-ext ; sys_platform == 'never'",
+    "botocore==1.43.48 ; sys_platform == 'linux'",
+    "boto3==1.43.48 ; sys_platform == 'linux'",
+    "s3transfer==0.19.1 ; sys_platform == 'linux'",
+    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
+    "s3fs==2026.4.0 ; sys_platform == 'linux'",
+    "fsspec==2026.4.0",
+    "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
+    "humming-kernels[cu12]==0.1.4 ; sys_platform == 'linux'",
+    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
+    "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
 ]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
+transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
+transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+requires-dist = ["torch", "einops"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "pytorch-cu129", extra = "cuda" },
+    { index = "pytorch-cu129", extra = "deepspeed" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "vllm" },
+]
+torchvision = [
+    { index = "pytorch-cu129", extra = "cuda" },
+    { index = "pytorch-cu129", extra = "deepspeed" },
+    { index = "pytorch-cu129", extra = "megatron" },
+    { index = "pytorch-cu129", extra = "vllm" },
+]
+flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
+torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
+transformer-engine-torch = [
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+causal-conv1d = [
+    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+mamba-ssm = [
+    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu129"
+url = "https://flashinfer.ai/whl/cu129"
+explicit = true
+
 [tool.marin-style]
-# ruff-format is switched on by the reformat PR stacked on top of this one, together with
-# the tree-wide reformat it demands. Enabling it here would just make this PR's lint job
-# fail on 157 files of dialect drift that have nothing to do with the changes in it.
 checks = ["ruff-check", "ruff-format"]
-# Pinned rather than inherited from the kit's default, so that bumping marin-style cannot
-# silently reformat the tree: a ruff release that changes the format dialect has to be
-# adopted here, deliberately, as its own commit. This is the only formatter that runs --
-# skyrl-train's dev extra still lists ruff 0.11.9 and black, but nothing invokes them
-# (lint goes through infra/pre-commit.py), and they cannot be dropped while the lockfile
-# is unregenerable.
 ruff_version = "0.14.3"
-# skyrl-agent is a dormant snapshot that nothing in CI builds or tests; reformatting it
-# would be pure churn. The three live packages are linted.
-include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**"]
+include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**", "scripts/**"]
 
 [tool.ruff]
 line-length = 120
 
 [tool.ruff.lint]
 ignore = [
-    "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
+    "F722",
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"skyrl-train/tests/gpu/test_e2e_moe_rl_step.py" = ["E402"]
+"skyrl-train/tests/gpu/test_e2e_moe_rl_step_80b.py" = ["E402"]
+"skyrl-train/tests/cpu/distributed/test_muon_hybrid.py" = ["E402"]
+"skyrl-train/tests/cpu/generators/test_normalize_prompt_token_ids.py" = ["E402"]
+"skyrl-train/tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
+"skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
+"skyrl-train/examples/terminal_bench/_harbor_compat.py" = ["F401"]
+
+[tool.pytest.ini_options]
+addopts = "-v -s"
+testpaths = ["skyrl-train/tests", "cloud/iris/tests"]
+markers = [
+    "vllm",
+    "integrations",
+    "megatron",
 ]

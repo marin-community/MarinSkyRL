@@ -13,12 +13,15 @@ Usage::
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import fsspec
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import yaml
 
@@ -26,6 +29,8 @@ from cloud.iris.paths import resolve_paths_in_dict
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
+RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
+RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 _CONTEXT_BUDGET_FIELDS = frozenset(
     {
@@ -61,6 +66,24 @@ class ContextBudget:
         """Return the input allowance after reserving one complete response."""
         return self.request_window_tokens - self.max_new_tokens_per_turn
 
+    @property
+    def opencode_limit_output(self) -> int:
+        """OpenCode's per-request output cap (mirrors harbor ``_resolve_model_limit``)."""
+        return min(self.max_new_tokens_per_turn, max(1, self.max_input_tokens - 1))
+
+    @property
+    def opencode_limit_context(self) -> int:
+        """OpenCode's sliding-window / compaction-trigger size.
+
+        Mirrors the formula in ``harbor/src/harbor/agents/installed/opencode.py``
+        ``_resolve_model_limit``: ``context = window - output - margin`` where
+        ``margin`` reserves a small safety band so ``context + output`` stays
+        strictly below the engine's prompt cap.
+        """
+        output = self.opencode_limit_output
+        margin = min(1024, max(0, self.max_input_tokens - output - 1))
+        return max(1, self.max_input_tokens - output - margin)
+
     def as_dict(self) -> Dict[str, int]:
         """Return the persisted representation, including derived client input."""
         return {
@@ -68,6 +91,8 @@ class ContextBudget:
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
             "max_input_tokens": self.max_input_tokens,
+            "opencode_limit_context": self.opencode_limit_context,
+            "opencode_limit_output": self.opencode_limit_output,
         }
 
 
@@ -414,6 +439,27 @@ def resolve_rl_config_path(raw_path: str) -> Path:
     raise FileNotFoundError(
         f"RL config not found: {raw_path}\nSearched: {path}, {SKYRL_CONFIG_DIR / raw_path}, {fallback_yaml}"
     )
+
+
+def materialize_rl_config(
+    config_path: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Materialize a launcher-forwarded RL config inside the task container."""
+    environment = os.environ if environment is None else environment
+    payload = environment.get(RL_CONFIG_PAYLOAD_ENV)
+    if payload is None:
+        return config_path
+
+    try:
+        contents = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError(f"Invalid base64 in {RL_CONFIG_PAYLOAD_ENV}") from error
+
+    destination = Path(config_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(contents)
+    return str(destination)
 
 
 def parse_rl_config(

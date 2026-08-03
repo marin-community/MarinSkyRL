@@ -5,7 +5,7 @@ port (see notes/skyrl/stage1_capture_rail_scope.md). NO MoE math / replay logic
 here — pure data-plane alignment + collation.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/generators/test_routed_experts_alignment.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/generators/test_routed_experts_alignment.py
 """
 
 import pytest
@@ -235,9 +235,8 @@ def test_packer_noop_flag_off(char_tokenizer):
 
 # ---------------------------------------------------------------------------
 # Case 4b: TrainingInputBatch byte-identical when the flag is off (TensorBatch.__eq__).
-# Mirrors test_ep_config_noop.py's "purely additive" guarantee at the batch boundary:
-# the flag-off batch must have the EXACT same keys/tensors as today, while the
-# flag-on batch adds exactly one key (rollout_routed_experts).
+# At the batch boundary, the flag-off batch must have the same keys and tensors,
+# while the flag-on batch adds exactly one key (rollout_routed_experts).
 # ---------------------------------------------------------------------------
 def test_training_input_batch_noop_vs_present(char_tokenizer):
     from skyrl_train.training_batch import TrainingInputBatch

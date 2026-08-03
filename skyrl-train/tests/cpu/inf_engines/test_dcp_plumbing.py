@@ -20,7 +20,7 @@ Asserts the engine-launch wiring, with NO GPU and NO real Ray actor / vLLM init:
 See notes/RL/skyrl/vllm_dcp_rollout_stages/stage1_vllm_support_and_plumbing_scope.md.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_dcp_plumbing.py -v
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_dcp_plumbing.py -v
 """
 
 import sys
@@ -113,6 +113,7 @@ def _run_create(monkeypatch, dcp: int):
     import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 
     capture = _RemoteCapture()
+    monkeypatch.setattr(rwie, "_validate_installed_vllm_for_model", lambda _pretrain: None)
 
     # Stub the vllm import + actor classes (the module imports them lazily in the vllm branch).
     fake_vllm = types.ModuleType("vllm")
@@ -145,7 +146,11 @@ def _run_create(monkeypatch, dcp: int):
     # ray.get(...) is called on get_all_env_variables.remote() — return a dummy env dict.
     monkeypatch.setattr(rwie.ray, "get", lambda *a, **k: {})
     # get_rendezvous_addr_port is only used for data_parallel_size>1; stub anyway.
-    monkeypatch.setattr(rwie, "get_rendezvous_addr_port", lambda pg, idx: ("127.0.0.1", 12345))
+    monkeypatch.setattr(
+        rwie,
+        "get_rendezvous_addr_port",
+        lambda pg, idx, excluded_ports=(): ("127.0.0.1", 12345),
+    )
     # The real RayWrappedInferenceEngine wrapper is trivial (it only stores the actor
     # handle as .inference_engine_actor), so use it unmocked — the readiness gate reads
     # engine.inference_engine_actor off it.

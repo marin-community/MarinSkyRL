@@ -5,7 +5,7 @@ test_qwen3_5_moe_router_replay``. Single GPU, dense (unpacked), no EP/SP.
 
 Run::
 
-    uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_router_replay_eager.py
+    uv run --isolated --group dev pytest tests/gpu/gpu_ci/test_router_replay_eager.py
 
 Or directly (no pytest):
 

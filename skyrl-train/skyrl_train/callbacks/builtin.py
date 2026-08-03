@@ -18,12 +18,14 @@ Supports two configuration styles:
    ```
 """
 
+import os
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.utils.io import io
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 
@@ -256,6 +258,7 @@ class HFHubUploadCallback(TrainerCallback):
         self._pending_uploads: List[int] = []  # Steps that need uploading
         self._export_path: Optional[str] = None
         self._api = None
+        self._final_step: Optional[int] = None
 
     def _get_api(self):
         """Lazy-load HuggingFace Hub API."""
@@ -328,7 +331,11 @@ class HFHubUploadCallback(TrainerCallback):
             if state.global_step not in self._pending_uploads:
                 self._pending_uploads.append(state.global_step)
 
-        # Process all pending uploads
+        self._final_step = state.global_step
+
+        # Process all pending uploads.  The final step's export may not exist
+        # yet — on_train_end fires BEFORE save_models() in the training loop.
+        # The trainer calls post_save_flush() after the export lands.
         self._process_pending_uploads()
         return control
 
@@ -344,42 +351,59 @@ class HFHubUploadCallback(TrainerCallback):
         if not self._ensure_repo_exists():
             return
 
-        from pathlib import Path
-
         api = self._get_api()
 
-        for step in self._pending_uploads:
-            model_path = Path(self._export_path) / f"global_step_{step}" / "policy"
+        requested = list(self._pending_uploads)
+        missing: list[int] = []
 
-            if not model_path.exists():
+        for step in requested:
+            model_path = os.path.join(self._export_path, f"global_step_{step}", "policy")
+
+            if not io.exists(model_path):
+                missing.append(step)
                 logger.warning(f"HFHubUploadCallback: Model path not found: {model_path}")
                 continue
 
-            # Always upload the step to the repo ROOT (path_in_repo="" => repo root in
-            # huggingface_hub), overwriting prior root weights. Whichever step uploads
-            # last naturally wins root, keeping the repo from_pretrained-able. In "all"
-            # mode we additionally archive each step under "{prefix}/step_{N}/".
-            upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
-            if self.upload_mode == "all":
-                archive_path = f"{self.path_in_repo_prefix}/step_{step}"
-                upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
+            with io.local_read_dir(model_path) as local_dir:
+                upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
+                if self.upload_mode == "all":
+                    archive_path = f"{self.path_in_repo_prefix}/step_{step}"
+                    upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
 
-            for path_in_repo, commit_message in upload_targets:
-                dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
-                try:
-                    logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
-                    with _hf_hub_online():
-                        api.upload_folder(
-                            folder_path=str(model_path),
-                            repo_id=self.repo_id,
-                            path_in_repo=path_in_repo,
-                            repo_type="model",
-                            revision=self.revision,
-                            commit_message=commit_message,
-                        )
-                    logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
-                except Exception as e:
-                    logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
+                for path_in_repo, commit_message in upload_targets:
+                    dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
+                    try:
+                        logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
+                        with _hf_hub_online():
+                            api.upload_folder(
+                                folder_path=str(local_dir),
+                                repo_id=self.repo_id,
+                                path_in_repo=path_in_repo,
+                                repo_type="model",
+                                revision=self.revision,
+                                commit_message=commit_message,
+                            )
+                        logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
+                    except Exception as e:
+                        logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
+
+        if requested and len(missing) == len(requested):
+            # Every export the run asked to publish was absent. The per-step warnings above scroll
+            # past in a long training log, so a run can finish, exit 0, and leave an empty repo —
+            # which is how two completed 80-step runs produced no publishable model before anyone
+            # noticed. Say it once, loudly, with the reason most likely to apply.
+            logger.error(
+                "HFHubUploadCallback: PUBLISHED NOTHING — all %d requested export(s) %s were "
+                "missing under export_path=%s, so repo %s is empty. On a multi-node job this is "
+                "expected when export_path is node-local: the exports are written by the policy "
+                "worker while this callback runs on the head node, and the existence check and "
+                "upload are both local-filesystem operations. Point export_path at storage "
+                "visible to the uploading process.",
+                len(missing),
+                missing,
+                self._export_path,
+                self.repo_id,
+            )
 
         self._pending_uploads.clear()
 
@@ -396,11 +420,24 @@ class HFHubUploadCallback(TrainerCallback):
             if state.global_step not in self._pending_uploads:
                 self._pending_uploads.append(state.global_step)
 
+        self._final_step = state.global_step
+
         # Run uploads in thread pool to not block
         if self._pending_uploads:
             await asyncio.to_thread(self._process_pending_uploads)
 
         return control
+
+    def post_save_flush(self, final_step: int) -> None:
+        """Re-process the final step's upload after ``save_models()`` has written it.
+
+        ``on_train_end`` fires *before* ``save_models()`` in the training loop, so
+        the final step's export is missing during the first upload pass.  The
+        trainer calls this method after the export is on disk to retry it.
+        """
+        if self.upload_on_train_end and self.upload_steps > 0:
+            self._pending_uploads.append(final_step)
+            self._process_pending_uploads()
 
 
 @register_callback("database_registration")
@@ -696,6 +733,89 @@ class LoggingCallback(TrainerCallback):
         if self.log_every_step:
             control.should_log = True
         return control
+
+
+class PreflightGateError(Exception):
+    """Raised when the pre-flight reward gate fails with on_failure='abort'."""
+
+
+@register_callback("preflight_gate")
+class PreflightGateCallback(TrainerCallback):
+    """Pre-flight reward gate: abort training when the reward distribution is
+    outside the band where RLOO has usable within-group variance.
+
+    DEFAULT-OFF. When enabled, checks mean per-sample reward after the first
+    training step's rollouts are scored (before the second step).  On failure
+    with ``on_failure="abort"`` raises ``PreflightGateError``; with
+    ``on_failure="warn"`` logs and continues.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = False,
+        min_reward: float = 0.25,
+        max_reward: float = 0.75,
+        on_failure: str = "abort",
+        num_trials: int = 256,
+    ):
+        self.enabled = enabled
+        self.min_reward = min_reward
+        self.max_reward = max_reward
+        self.on_failure = on_failure
+        self.num_trials = num_trials
+        self._checked = False
+
+    def on_step_end(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        if self._checked or not self.enabled:
+            return control
+        self._checked = True
+
+        trainer = kwargs.get("trainer")
+        if trainer is None:
+            return control
+
+        rewards = self._extract_step_rewards(trainer)
+        if not rewards:
+            # An enabled gate that quietly does nothing is the failure this whole
+            # mechanism exists to prevent, so say so at error level rather than
+            # letting the run proceed looking gated.
+            logger.error(
+                "[preflight] Gate is ENABLED but step 1 exposed no per-sample rewards, "
+                "so nothing was checked and this run is UNGATED. Expected the trainer to "
+                "set _current_step_rewards during reward post-processing."
+            )
+            return control
+
+        if len(rewards) < self.num_trials:
+            # Not a failure: the sample count is set by train_batch_size x
+            # n_samples_per_prompt, not by the dataset. Report it so a verdict drawn
+            # from a thin sample is not read as a firm one.
+            logger.warning(
+                f"[preflight] Checking {len(rewards)} samples, fewer than the requested "
+                f"num_trials={self.num_trials}; the estimate is correspondingly noisier."
+            )
+
+        from skyrl_train.utils.preflight_gate import check_preflight_gate
+
+        result = check_preflight_gate(rewards, self.min_reward, self.max_reward)
+        if not result.passed and self.on_failure == "abort":
+            raise PreflightGateError(result.message)
+
+        return control
+
+    @staticmethod
+    def _extract_step_rewards(trainer) -> List[float]:
+        """Extract per-sample scalar rewards from the trainer's current batch."""
+        for attr in ("_current_step_rewards", "step_rewards"):
+            val = getattr(trainer, attr, None)
+            if val is not None:
+                return [float(r) for r in val]
+        return []
 
 
 @register_callback("vllm_stats")
@@ -1048,6 +1168,20 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
             if harbor:
                 agent_name = getattr(harbor, "name", None)
         callbacks.append(DatabaseRegistrationCallback(agent_name=agent_name))
+
+    # Pre-flight reward gate (default-off)
+    gate_cfg = getattr(cfg.trainer, "preflight_gate", None)
+    gate_enabled = getattr(gate_cfg, "enabled", False) if gate_cfg else False
+    if gate_enabled:
+        callbacks.append(
+            PreflightGateCallback(
+                enabled=True,
+                min_reward=getattr(gate_cfg, "min_reward", 0.25),
+                max_reward=getattr(gate_cfg, "max_reward", 0.75),
+                on_failure=getattr(gate_cfg, "on_failure", "abort"),
+                num_trials=getattr(gate_cfg, "num_trials", 256),
+            )
+        )
 
     # vLLM stats callback (enabled when using vLLM backend)
     # This collects engine stats directly, bypassing unreliable Ray log-to-driver

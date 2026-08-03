@@ -3,14 +3,18 @@ Test for `skyrl-train/skyrl_train/inference_engines/inference_engine_client.py` 
 that can be mocked. Also tests for `skyrl-train/skyrl_train/inference_engines/utils.py`.
 
 Run with:
-uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_inference_engine_client.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_inference_engine_client.py
 """
 
 from http import HTTPStatus
+import socket
 from unittest.mock import patch
 
 from transformers import AutoTokenizer
 from skyrl_train.inference_engines.utils import (
+    _RENDEZVOUS_PORT_START,
+    _RENDEZVOUS_PORT_STOP,
+    _find_available_rendezvous_port,
     postprocess_completion_request,
     route_prompts_to_engines,
     hash_with_sha256,
@@ -25,6 +29,68 @@ import asyncio
 import pytest
 import random
 from copy import deepcopy
+
+
+def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatch):
+    first = _RENDEZVOUS_PORT_START
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("", first))
+        monkeypatch.setattr("skyrl_train.inference_engines.utils.random.shuffle", lambda _ports: None)
+        second = _find_available_rendezvous_port()
+
+    assert _RENDEZVOUS_PORT_START <= second < _RENDEZVOUS_PORT_STOP
+    assert second == first + 1
+
+
+def test_rendezvous_port_fails_when_range_is_excluded():
+    with pytest.raises(RuntimeError, match="No free rendezvous port"):
+        _find_available_rendezvous_port(range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP))
+
+
+class _CommunicatorEngine:
+    def __init__(self, relative_rank_offset=None, *, tp_size=1, pp_size=1):
+        self.weight_sync_relative_rank_offset = relative_rank_offset
+        self._tp_size = tp_size
+        self._pp_size = pp_size
+        self.received_rank_offset = None
+
+    def tp_size(self):
+        return self._tp_size
+
+    def pp_size(self):
+        return self._pp_size
+
+    async def init_weight_update_communicator(self, **kwargs):
+        self.received_rank_offset = kwargs["rank_offset"]
+
+
+@pytest.mark.parametrize(
+    ("engines", "expected_offsets"),
+    [
+        ([_CommunicatorEngine(offset) for offset in (0, 0, 2, 2)], [1, 1, 3, 3]),
+        ([_CommunicatorEngine(tp_size=2), _CommunicatorEngine(tp_size=2)], [1, 3]),
+    ],
+    ids=["logical-dp-engines", "legacy-sequential-engines"],
+)
+def test_weight_sync_communicator_rank_offsets(engines, expected_offsets):
+    client = object.__new__(InferenceEngineClient)
+    client.engines = engines
+    client._dead_engines = set()
+    client.enable_http_endpoint = False
+
+    asyncio.run(
+        client.init_weight_update_communicator(
+            master_addr="127.0.0.1",
+            master_port=1234,
+            rank_offset=1,
+            world_size=5,
+            group_name="test",
+            backend="nccl",
+        )
+    )
+
+    assert [engine.received_rank_offset for engine in engines] == expected_offsets
+
 
 # -------------------------------------------
 # tests for postprocess_completion_request
@@ -898,11 +964,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    # Since finish_reason != abort on the second call and no accumulation occurred,
-    # client should return the second response directly (no aggregation)
-    # Besides, since we completed in one turn, we return the text response of the first turn returned by
-    # the underlying engine instead re-tokenizing the accumulated tokens
-    assert out == engines[0].responses[1]
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
 
 
 # -------------------------------------------
@@ -920,6 +982,44 @@ class _MockStreamEngine:
         self.entered.set()
         yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         yield "data: [DONE]\n\n"
+
+
+class _MockWeightSyncEngine:
+    def __init__(self):
+        self.scheduler_paused = False
+        self.outstanding_requests = 388
+        self.reloads = 0
+
+    async def pause_generation(self):
+        self.scheduler_paused = True
+        self.outstanding_requests = 0
+
+    async def update_named_weights(self, **_request):
+        if not self.scheduler_paused or self.outstanding_requests:
+            raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
+        self.reloads += 1
+
+    async def resume_generation(self):
+        self.scheduler_paused = False
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeypatch):
+    engine = _MockWeightSyncEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
+    )
+
+    await client.pause_generation()
+    await client.update_named_weights(request={"names": ["model.weight"]})
+
+    assert engine.scheduler_paused
+    assert engine.outstanding_requests == 0
+    assert engine.reloads == 1
+
+    await client.resume_generation()
+    assert not engine.scheduler_paused
 
 
 @pytest.mark.asyncio
@@ -944,7 +1044,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
 
     A NEW stream must not reach the engine while generation is paused for a weight
     sync — otherwise it would register a fresh request in the vLLM scheduler during
-    the pause -> reload -> resume window (after abort_generation drained the engine)
+    the pause -> reload -> resume window (after the scheduler pause drained the engine)
     and the next engine step would run a forward pass against meta-device params.
     The streaming path must honor the same ``generation_paused_event`` barrier the
     non-streaming retry loop uses. Once resumed, the stream proceeds normally.
@@ -953,7 +1053,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
     # Simulate a weight-sync pause directly (bypass pause_generation()'s 5s grace +
-    # abort_generation() fan-out, which are not needed to exercise the barrier).
+    # engine scheduler fan-out, which is not needed to exercise the barrier).
     client.generation_paused_event.set()
 
     payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}

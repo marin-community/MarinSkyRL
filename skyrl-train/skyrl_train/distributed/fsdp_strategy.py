@@ -20,6 +20,7 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
+from skyrl_train.utils.constants import get_worker_nccl_timeout_s
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -91,6 +92,7 @@ class FSDPStrategy(DistributedStrategy):
         self.is_lora = self.model_config.lora.rank > 0 if self.model_config is not None else False
 
         self.time_steps = defaultdict(int)
+        self.last_optimizer_step_succeeded = False
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -129,6 +131,7 @@ class FSDPStrategy(DistributedStrategy):
         self.device_mesh = create_device_mesh(
             world_size=self.world_size,
             fsdp_size=self.fsdp_config.fsdp_size,
+            timeout_seconds=get_worker_nccl_timeout_s(),
             ep_size=ep_size,
             cp_size=cp_size,
         )
@@ -203,6 +206,7 @@ class FSDPStrategy(DistributedStrategy):
             param_group's lr for this single ``optimizer.step()`` call, then
             restored. Used by StaleClip for predictive LR damping.
         """
+        self.last_optimizer_step_succeeded = False
         z_clip = kwargs.get("z_clip", None)
         stale_clip_lr_scale = float(kwargs.get("stale_clip_lr_scale", 1.0))
 
@@ -265,6 +269,7 @@ class FSDPStrategy(DistributedStrategy):
         if scheduler is not None:
             scheduler.step()
         optimizer.zero_grad()
+        self.last_optimizer_step_succeeded = True
         return grad_norm
 
     def prepare(

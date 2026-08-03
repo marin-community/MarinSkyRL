@@ -12,12 +12,9 @@ concurrency:
 
 jobs:
   request-cleanup:
-    # This avoids runner use for unrelated items. The action repeats the guard
-    # because it can also be called from workflows that omit this filter.
     if: contains(github.event.issue.labels.*.name || github.event.pull_request.labels.*.name, 'agent-generated')
     runs-on: ubuntu-latest
     steps:
-      # The pinned action is a no-op while automated prose cleanup is disabled.
       - uses: marin-community/marin-style/actions/prose-cleanup@main
         with:
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}

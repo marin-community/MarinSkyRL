@@ -21,6 +21,7 @@ from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
+from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.generators.utils import prepare_generator_input, concatenate_generator_outputs
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from typing import List, Optional, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 
 
 @dataclass
@@ -518,9 +520,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._train_loop()
         except Exception as e:
-            logger.opt(exception=True).error(
-                "Train loop failed at global_step " + str(self.global_step) + ": " + str(e)
-            )
+            log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
         finally:
             # Cancel any orphaned generator tasks that survived an early exit
@@ -528,40 +528,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self._cancel_generator_tasks()
 
             await self._teardown()
-
-    async def _handle_resume_at_max_steps(self) -> None:
-        """Handle a run that resumed AT or PAST max_steps (already complete).
-
-        Fires the on_train_end callbacks (so any configured final checkpoint /
-        HF export / HF upload runs if it is missing) and returns without executing
-        another training step. This makes a resumed-at-max run exit 0 (clean
-        COMPLETED), which terminates the afternotok restart chain instead of
-        overshooting to gs N+1 and FAILING.
-        """
-        logger.info(
-            f"Resumed at global_step {self.global_step} >= max training steps "
-            f"({self.total_training_steps}); run is already COMPLETE. Skipping further "
-            f"training and finalizing (export/upload if missing)."
-        )
-
-        final_epoch = max(self.cfg.trainer.epochs - 1, 0)
-        final_state = self._create_trainer_state(epoch=final_epoch)
-        self._control.reset()
-        self._control = await self.callback_handler.call_event_async(
-            "on_train_end", final_state, self._control, trainer=self
-        )
-
-        # Honor final-save requests from callbacks (idempotent: re-saving the gsN
-        # checkpoint / re-exporting HF is safe and ensures the export exists).
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint (resume-at-max finalize).")
-        if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final HF model (resume-at-max finalize).")
-        logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _train_loop(self):
         """
@@ -653,6 +619,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
         start_epoch = self.global_step // self.num_steps_per_epoch
+        last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
@@ -687,7 +654,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("step", self.all_timings):
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
-                    with Timer("wait_for_generation_buffer", self.all_timings):
+                    with (
+                        Timer("wait_for_generation_buffer", self.all_timings),
+                        critical_phase("rollout_or_inference_wait"),
+                    ):
                         buffer_pbar = tqdm(
                             total=self.mini_batch_size,
                             initial=0,
@@ -702,6 +672,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         while len(cur_generation_group_mini_batch) < self.mini_batch_size:
                             # We do finish-time FIFO here (not schedule-time FIFO)
                             cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                            record_rollout_buffer(
+                                generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize
+                            )
                             buffer_pbar.update(1)
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                         buffer_pbar.close()
@@ -836,6 +809,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_timings = {}
                 pbar.update(1)
 
+                last_completed_step = self.global_step
+                record_policy_step(self.global_step)
                 self.global_step += 1
 
                 # 9. Notify generation workers that the capacity has increased, unblocking them.
@@ -919,22 +894,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # End of training
         pbar.close()
 
-        # Call on_train_end callbacks
-        final_state = self._create_trainer_state(epoch=self.cfg.trainer.epochs - 1)
-        self._control.reset()
-        self._control = await self.callback_handler.call_event_async(
-            "on_train_end", final_state, self._control, trainer=self
+        await self._finalize_training(
+            completed_step=last_completed_step,
+            epoch=self.cfg.trainer.epochs - 1,
         )
-
-        # Handle final checkpoint/model save if requested by callbacks
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint.")
-        if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final model.")
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
@@ -987,7 +950,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model
-        with Timer("train_critic_and_policy", self.all_timings):
+        with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
@@ -1035,6 +998,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                 else:
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                record_generated_work(
+                    cur_generator_output["response_ids"],
+                    cur_generator_output.get("is_last_step"),
+                )
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 # Prefer the actual global_step captured at first vLLM inference (more accurate
@@ -1074,8 +1041,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         generator_output=cur_generator_output,
                         uid=uids[0],
                         global_step_when_scheduled=staleness_step,
-                    )
+                    ),
                 )
+                record_rollout_buffer(generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:
@@ -1090,7 +1058,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self._staleness_manager._stat.running -= 1
             return
         except Exception as e:
-            logger.opt(exception=True).error("Generator worker errored out with exception: " + str(e))
+            log_exception_as_text("Generator worker failed", e)
             if "slot_acquired" in locals() and slot_acquired:
                 self._staleness_manager._stat.submitted -= 1
                 self._staleness_manager._stat.running -= 1

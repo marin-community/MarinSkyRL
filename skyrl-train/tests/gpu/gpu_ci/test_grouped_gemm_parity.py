@@ -13,7 +13,7 @@ exercises the shared-expert sigmoid-gate adaptation).
 
 Run::
 
-    uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_grouped_gemm_parity.py
+    uv run --isolated --group dev pytest tests/gpu/gpu_ci/test_grouped_gemm_parity.py
     # or directly (no pytest): python tests/gpu/gpu_ci/test_grouped_gemm_parity.py
 """
 

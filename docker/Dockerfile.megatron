@@ -1,7 +1,7 @@
 # =============================================================================
 # ⚠ NOT the megatron RL image. This is an incomplete CUDA/TransformerEngine base
 # stub and is NOT wired into any build. The actual CoreWeave megatron RL image
-# (`:gpu-rl-megatron-<sha>`) is built from `docker/Dockerfile.gpu-rl` with
+# (`:gpu-rl-megatron-<full-sha>`) is built from `docker/Dockerfile.gpu-rl` with
 # `INSTALL_MEGATRON=1` / `TAG_PREFIX=gpu-rl-megatron` via
 # `docker/build_gpu_rl_kaniko.sh` — that path adds the skyrl-train `megatron`
 # extra and bakes /opt/skyrl. Do NOT add skyrl/COPY here expecting it to change

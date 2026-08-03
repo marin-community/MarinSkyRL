@@ -24,8 +24,10 @@ from ray.util.placement_group import (
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
+from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
+from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -42,7 +44,18 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
+from skyrl_train.models.grug_query_bias import (
+    GrugQueryBiasAccumulator,
+    next_query_bias,
+    query_bias_candidate_count,
+)
+from skyrl_train.models.grug_moe import GrugMoeForCausalLM
+from skyrl_train.utils.utils import (
+    configure_ray_worker_logging,
+    get_tcp_url,
+    resolve_actor_cuda_env,
+    resolve_pinned_local_rank,
+)
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -101,8 +114,6 @@ class DistributedTorchRayActor:
         # pin_to_ray_gpu_id (case 3) engages only on the per-GPU {GPU:1}-bundle policy PG,
         # where ray.get_gpu_ids() is a reliable distinct physical id per actor. The full
         # decision lives in resolve_pinned_local_rank() (pure / unit-tested).
-        from skyrl_train.utils.utils import resolve_pinned_local_rank, resolve_actor_cuda_env
-
         _noset = ray_noset_visible_devices()
 
         # Deterministic forced-CVD-mask pin (opt-in via policy_force_cvd_mask).
@@ -130,7 +141,7 @@ class DistributedTorchRayActor:
                 ray.get_gpu_ids(),
             )
 
-        os.environ["LOCAL_RANK"] = resolve_pinned_local_rank(
+        resolved_local_rank = resolve_pinned_local_rank(
             noset_visible_devices=_noset,
             cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
             ray_gpu_ids=ray.get_gpu_ids(),
@@ -138,6 +149,9 @@ class DistributedTorchRayActor:
             device_count=torch.cuda.device_count(),
             pin_to_ray_gpu_id=pin_to_ray_gpu_id,
         )
+        physical_gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), int(resolved_local_rank))
+        set_numa_affinity_for_gpu(physical_gpu_id)
+        os.environ["LOCAL_RANK"] = resolved_local_rank
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
@@ -301,39 +315,6 @@ class DistributedTorchRayActor:
 
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
-
-    def _set_numa_affinity(self, rank):
-        """Set CPU + memory affinity to match the GPU for this rank.
-
-        Uses shared NUMA utility that auto-detects GPU-to-CPU NUMA topology
-        via nvidia-smi topo. Handles GH200 unified memory correctly.
-
-        The NUMA binding must key off the PHYSICAL GPU id (sysfs/PCI-ordered,
-        as nvidia-smi sees it), not a positional/logical index. Resolution
-        order for the physical id:
-          1. CUDA_VISIBLE_DEVICES[rank] — when Ray masked CVD, its entries are
-             the physical ids this process can see (the historical path).
-          2. LOCAL_RANK env — when CVD is unset (SIF Ray) but device pinning
-             ran in __init__, LOCAL_RANK already holds the physical id we
-             selected (ray.get_gpu_ids()[0] in the per-GPU-bundle path), so
-             NUMA binds to the SAME physical GPU torch.cuda.set_device() chose.
-             This corrects the prior `gpu_id = rank` fallback, which on GH200
-             could bind a different physical socket than the device in use,
-             because logical (rank) and physical ordering differ.
-          3. positional rank — last resort if neither is available.
-        """
-        try:
-            from skyrl_train.utils.numa import set_numa_affinity_for_gpu
-
-            cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-            if cuda_devs[0]:
-                gpu_id = int(cuda_devs[rank])
-            else:
-                _lr = os.environ.get("LOCAL_RANK")
-                gpu_id = int(_lr) if _lr not in (None, "", "-1") else rank
-            set_numa_affinity_for_gpu(gpu_id)
-        except Exception as e:
-            logger.debug(f"NUMA affinity setup skipped: {e}")
 
 
 class Worker(DistributedTorchRayActor):
@@ -944,6 +925,39 @@ class PolicyWorkerBase(Worker):
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
 
+    def _grug_causal_lm(self) -> GrugMoeForCausalLM | None:
+        """Return the local Grug CausalLM through the HF wrapper, if present."""
+
+        causal_lm = getattr(self.model, "model", self.model)
+        return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
+
+    def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
+        config = causal_lm.config
+        candidate_count = query_bias_candidate_count(
+            valid_tokens,
+            config.num_experts_per_tok,
+            config.num_local_experts,
+        )
+        self._grug_query_bias_accumulator = GrugQueryBiasAccumulator(
+            candidate_count=candidate_count,
+            num_layers=config.num_hidden_layers,
+            num_experts=config.num_local_experts,
+        )
+        self._grug_query_bias_candidate_count = candidate_count
+
+    def _finish_grug_query_bias_window(self, *, optimizer_step_succeeded: bool) -> None:
+        """Apply one completed Grug bias window, or discard it after a skipped step."""
+
+        accumulator = getattr(self, "_grug_query_bias_accumulator", None)
+        if accumulator is None:
+            return
+        if optimizer_step_succeeded:
+            causal_lm = self._grug_causal_lm()
+            if causal_lm is None:
+                raise RuntimeError("Grug query-bias accumulator exists without a Grug policy model")
+            causal_lm.set_query_bias(next_query_bias(accumulator.finalize_betas()))
+        self._grug_query_bias_accumulator = None
+
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
         # Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
@@ -1089,6 +1103,19 @@ class PolicyWorkerBase(Worker):
         status_list = []
         all_metrics = defaultdict(list)
         policy_update_steps = 0
+        grug_causal_lm = self._grug_causal_lm()
+        grug_microbatch_valid_tokens = None
+        if grug_causal_lm is not None:
+            micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+            grug_microbatch_valid_tokens = [
+                int(mask.sum().item()) for mask in train_data["attention_mask"].split(micro_batch_size)
+            ]
+            remainder = len(grug_microbatch_valid_tokens) % accumulation_steps
+            if remainder:
+                raise RuntimeError(
+                    "the final policy optimizer window is incomplete: "
+                    f"expected {accumulation_steps} microbatches, got {remainder}"
+                )
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
@@ -1097,12 +1124,27 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
-                status = self.training_step(
-                    experience,
-                    global_step,
-                    local_step,
-                    accumulation_steps,
-                )
+                if grug_causal_lm is not None and local_step % accumulation_steps == 0:
+                    assert grug_microbatch_valid_tokens is not None
+                    window_end = local_step + accumulation_steps
+                    valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])
+                    self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
+                diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
+                with _phase_diagnostics.region(
+                    diagnostic_mesh,
+                    kind=_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+                    rank=self._rank,
+                    metadata=_phase_diagnostics.CollectiveRegionMetadata(
+                        global_step=global_step,
+                        local_step=local_step,
+                    ),
+                ):
+                    status = self.training_step(
+                        experience,
+                        global_step,
+                        local_step,
+                        accumulation_steps,
+                    )
                 policy_update_steps += 1
 
                 # for DP
@@ -1156,10 +1198,17 @@ class PolicyWorkerBase(Worker):
         output.metadata = {"train_status": status_mean}
         return output
 
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+    def training_step(
+        self,
+        experience: Experience,
+        global_step: int,
+        local_step: int,
+        accumulation_steps: int,
+    ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
         experience.to_device(torch.cuda.current_device())
 
@@ -1176,6 +1225,14 @@ class PolicyWorkerBase(Worker):
         rollout_routed_experts = experience.rollout_routed_experts
         response_span_tags = experience.response_span_tags
 
+        grug_causal_lm = self._grug_causal_lm()
+        grug_query_bias_accumulator = getattr(self, "_grug_query_bias_accumulator", None)
+        if grug_causal_lm is not None and grug_query_bias_accumulator is not None:
+            grug_causal_lm.begin_query_bias_capture(
+                self._grug_query_bias_candidate_count,
+                attention_mask,
+            )
+
         # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
         # per-token weighted loss mask (THINK positions scaled by think_token_weight,
         # everything else == loss_mask). At think_token_weight==1.0 (default) or when
@@ -1188,6 +1245,7 @@ class PolicyWorkerBase(Worker):
         policy_loss_mask = build_think_weighted_loss_mask(loss_mask, response_span_tags, think_token_weight)
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -1200,6 +1258,12 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
                 rollout_routed_experts=rollout_routed_experts,
             )
+            if grug_causal_lm is not None and grug_query_bias_accumulator is not None:
+                grug_query_bias_accumulator.observe(
+                    grug_causal_lm.take_query_bias_observation(
+                        candidate_count=self._grug_query_bias_candidate_count,
+                    )
+                )
             # loss function
             # TODO: recompute advantages
             policy_loss, clip_ratio = self.policy_loss_fn(
@@ -1210,6 +1274,7 @@ class PolicyWorkerBase(Worker):
                 loss_mask=policy_loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
 
         # TIS importance-ratio diagnostics. Emitted on EVERY rank with an
         # identical key set whenever use_tis is on, so the per-key
@@ -1267,8 +1332,10 @@ class PolicyWorkerBase(Worker):
         # such method (non-HF wrappers).
         _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
         _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
+        _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
         with _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
         # teardown to here (after backward) so gradient-checkpoint recompute still
@@ -1312,6 +1379,7 @@ class PolicyWorkerBase(Worker):
         grad_norm = None
         ratio_diag = {}
         spike_diag = {}
+        optimizer_step_succeeded = False
         if (local_step + 1) % accumulation_steps == 0:
             # StaleClip: read rolling entropy from prior steps' history; decide LR scale
             # for THIS step's optimizer.step(). The current micro-batch entropy is pushed
@@ -1330,8 +1398,13 @@ class PolicyWorkerBase(Worker):
                 z_clip=z_clip,
                 stale_clip_lr_scale=lr_scale,
             )
+            optimizer_step_succeeded = (
+                bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
+            )
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
+
+            self._finish_grug_query_bias_window(optimizer_step_succeeded=optimizer_step_succeeded)
 
             # Now push this step's entropy to the rolling window for next step.
             if stale_clip is not None:
@@ -1393,6 +1466,8 @@ class PolicyWorkerBase(Worker):
 
         if grad_norm is not None:
             status["raw_grad_norm"] = grad_norm
+        if grug_causal_lm is not None and (local_step + 1) % accumulation_steps == 0:
+            status["optimizer_step_succeeded"] = float(optimizer_step_succeeded)
 
         for k, v in experience.info.items():
             if k == "kl":
@@ -1402,6 +1477,7 @@ class PolicyWorkerBase(Worker):
                 status[k] = v.mean().item() if isinstance(v, torch.Tensor) else v
 
         status["response_length"] = num_actions
+        _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_EXIT)
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):

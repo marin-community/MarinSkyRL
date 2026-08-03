@@ -1,108 +1,99 @@
 ---
 name: rl-job-health-deep-dive
 description: >-
-  Deep single-RL-job health probe on the CoreWeave clusters → one evidence-backed KILL / NO-KILL /
-  ERROR recommendation for the supervisor. Use on any RL job in a new or untested setting (new
-  config, geometry, model, or image; first launch after a code change) and on any running job that
-  looks starved or wedged — wherever a state poll plus table metrics cannot separate "progressing"
-  from "silently dead." The prober never kills; the supervisor owns the kill. Cluster access and
-  capture commands live in .agents/ops/coreweave.md; log/metric semantics live in
-  .agents/ops/rl-diagnostics.md — read those, do not restate them.
+  Diagnose one live or suspect Iris RL job and return an evidence-backed KILL, NO-KILL, or ERROR
+  recommendation. Use when ordinary state and metric checks cannot distinguish progress from a
+  silent stall, or when validating a new model, geometry, configuration, or image. This is a
+  read-only repository role: it never edits code, commits, pushes, opens PRs, or kills jobs.
 ---
 
-# rl-job-health-deep-dive
+# Deep-dive one Iris RL job
 
-Probe one RL job hard and return one recommendation. You are a subagent: you never execute a
-kill. When genuinely uncertain, prefer NO-KILL and escalate — a wrongly killed healthy run
-wastes a full bring-up; a wrongly kept dead one wastes one sweep. But if you could not get the
-evidence, the answer is ERROR, not a hedged NO-KILL.
+Inspect one job and return a recommendation to its supervisor. Read
+`.agents/ops/coreweave.md` for access and capture procedures and
+`.agents/ops/rl-diagnostics.md` for signal interpretation before probing.
 
-**Facts live in the ops docs, not here.** Read `.agents/ops/coreweave.md` (access, state poll,
-log capture, GPU poll, py-spy, guardrails) and `.agents/ops/rl-diagnostics.md` (what the logs
-and metrics mean) before probing. If a needed fact is missing from those docs, add it there and
-point — never inline it here.
+## Diagnostic mode
 
-## Step 0 — capture first, analyze from files
+Declare `MODE: agentic` or `MODE: standard` from the launched configuration before collecting
+mode-specific evidence. Agentic runs use Harbor, Daytona, terminal-bench, or another sandboxed
+agent harness. Standard runs use dataset rows and programmatic rewards without an agent harness.
+Do not infer the mode from whether `trace_jobs/` happens to exist.
 
-Before any gate: sync the job's logs local with `infra/sync_rl_logs.py` (command in
-`coreweave.md` §Log capture) and do all analysis from the local files. Live probes are reserved
-for what files cannot give: the GPU poll and a py-spy on a still-running suspect (both die with
-the job — capture them before recommending any kill). Hand the supervisor exact local file
-paths plus quoted lines so the verdict can be confirmed from the same files.
+Use `infra/rl_cleanup/parse_skyrl_metrics.py`; it detects training-log serialization independently of
+the declared mode. Pass `--trace_jobs_dir` when agentic traces are not adjacent to the logs. A parser
+that returns no usable metrics is a failed probe; inspect the log serialization before classifying the
+dynamics gate.
 
-## The contract — evidence or ERROR
+## Role boundary
 
-Return `VERDICT: ERROR` whenever you could not obtain required evidence: a tool failed, a log
-could not be fetched, policy and engine GPUs could not be separated, or two authoritative
-signals disagree unreconciled. Report the exact command, its exact failure output, what is
-missing, and what you did establish. Never emit KILL/NO-KILL on missing evidence, and never
-default to NO-KILL as a hedge.
+- Do not create a worktree or edit repository files, configurations, skills, or ops documents.
+- Do not commit, push, open or update a PR, or apply a code fix.
+- Do not kill, stop, relaunch, or mutate a job. The supervisor owns job actions.
+- You may perform read-only repository inspection and non-mutating live probes.
+- Express any required source or configuration change as a concrete handoff: evidence, likely cause,
+  affected path or component, proposed behavior, and a test that would prove the fix.
 
-| Gate | A PASS/FAIL requires you to have read and quoted | else the gate is |
-|---|---|---|
-| A liveness | the authoritative state-poll line and the newest phase-timer/step line with its timestamp | ERROR |
-| B resources | per-rank GPU util with policy ranks separated from engine ranks, and the engine subscription line (Running vs Waiting vs cap) | ERROR |
-| C rollouts | actual reward values / trial exception files you opened, not counts you assumed | ERROR |
-| D dynamics | the per-step metric series (reward, entropy, TIS, phase timers) you extracted from the synced finelog over a ≥10-step window | ERROR |
+If an ops document is stale or incomplete, report the discrepancy. Do not repair it in this role.
 
-## Probe order
+## Capture before analysis
 
-1. **Restart-burn check** (cheap; `rl-diagnostics.md` §Restart-burn): restarts burned, and is
-   it the same failure every attempt?
-2. **Gate A — liveness.** Authoritative state poll + log freshness against the run's own
-   cadence + wedge/death signatures. On a multi-mesh job, clear the colocated-engine deception
-   checks (`rl-diagnostics.md`) before calling PASS. On any death or wedge, read both
-   `finelog.log` and `ray_session_logs/` — the root cause hides in one of them, and which one
-   varies.
-3. **Gate B — resources.** Live GPU poll, policy ranks separated from engine ranks; engine
-   subscription read via the saturation tuple, not SM-util. For suspected starvation, take the
-   pipeline measurements named in `rl-diagnostics.md` §Engine saturation while the job is
-   alive; an unmeasured starvation claim is ERROR-quality.
-4. **Gate C — rollout quality.** Open actual trial artifacts: rewards, turns, coherence,
-   verifier behavior. Match against the known signatures in `rl-diagnostics.md` before
-   inventing a new theory.
-5. **Gate D — training dynamics.** State, GPUs, and rollouts can all be green while the run
-   quietly stops learning or bleeds throughput. Extract four series from the synced finelog
-   (and wandb when configured) and read each against `rl-diagnostics.md` §Training dynamics:
-   reward, entropy, the TIS family, and a per-phase Timer table. Report the phase table and
-   the metric values, not an impression. A drifting step time with no pathology is a tuning
-   note, not a KILL.
-6. **Optional deep probe — per-trial duty cycle.** Only when you must decide whether trial
-   throughput is capped by generation vs sandbox lifecycle vs tool exec: aggregate per-trial
-   timing from trial artifacts in bounded samples (`rl-diagnostics.md` §Per-trial duty
-   cycle), and never assert "sandbox churn" without those numbers.
+Sync the durable job logs and analyze the local evidence bundle. Use live probes only for evidence
+that disappears with the job, such as per-rank GPU state or process stacks. Preserve exact commands,
+timestamps, file paths, and representative lines so another operator can reproduce the verdict.
 
-## Deliver one recommendation
+Return `ERROR` when required evidence cannot be obtained or authoritative signals remain
+unreconciled. Missing evidence is not a conservative `NO-KILL`.
 
+## Required gates
+
+1. **Restarts:** determine whether attempts repeat the same failure or recovered from a transient.
+2. **Liveness:** pair authoritative controller state with the newest phase or step advancement.
+3. **Resources:** separate policy and inference ranks; interpret engine saturation using the tuple in
+   the diagnostics runbook, not point-in-time utilization.
+4. **Rollouts:** use the mode-specific evidence in the diagnostics runbook. Agentic runs require
+   trial outputs, rewards, verifier results, stop reasons, and exception artifacts. Standard runs
+   use trainer reward metrics and histograms, generation-token metrics, and verifier exceptions in
+   trainer logs; they do not require trial artifacts or a `trace_jobs/` prefix.
+5. **Dynamics:** extract reward, entropy, TIS, and phase-time series over the minimum useful window
+   specified in the diagnostics runbook.
+6. **Duty cycle:** for agentic runs, optionally measure bounded per-trial timings when attribution
+   between generation, tools, and sandbox lifecycle changes the recommendation. Report `N/A` for
+   standard runs; their `timing/*` phase metrics belong in the dynamics gate.
+
+Each of the four core gates is `PASS`, `FAIL`, or `ERROR`. Report restarts separately and include
+the optional duty-cycle evidence when used. Quote the evidence supporting every classification.
+
+## Verdict rules
+
+- `KILL`: a hard failure is established and has no transient or benign explanation. A stall verdict
+  must include live process evidence captured while the job still exists.
+- `NO-KILL`: the gates pass, or an observed anomaly has a supported transient or initialization
+  explanation. State the precise signal that would change the verdict.
+- `ERROR`: a required gate lacks evidence, a probe failed, or sources disagree without resolution.
+
+For learning-quality concerns, require the configured minimum observation window, agreement between
+trainer and trial evidence, a named mechanism, and evidence that the run is not already recovering.
+A plateau alone is not a kill condition. Read any artifact-retention threshold from the campaign
+record and surface its consequence without weakening a hard-failure verdict.
+
+## Report format
+
+```text
+RL-JOB-HEALTH — <job-id> — captured <timestamp> at <evidence-dir>
+
+VERDICT: KILL | NO-KILL | ERROR
+CONFIDENCE: high | medium | low
+MODE: agentic | standard
+RESTARTS: <count and interpretation>
+
+LIVENESS:  PASS | FAIL | ERROR — <quoted evidence>
+RESOURCES: PASS | FAIL | ERROR — <quoted evidence>
+ROLLOUTS:  PASS | FAIL | ERROR — <quoted evidence>
+DYNAMICS:  PASS | FAIL | ERROR — <metric window and phase table>
+DUTY CYCLE: <bounded agentic evidence | N/A for standard>
+
+REASONING: <load-bearing evidence and mechanism>
+NEXT ACTION: <supervisor job action or implementation handoff>
+FLIP SIGNAL: <specific condition that would change this recommendation>
 ```
-RL-JOB-HEALTH — <job_id>  (<model>, <geometry>, <stage>)   captured: <dir>
-
-VERDICT: KILL | NO-KILL | ERROR          confidence: high|medium|low
-Evidence I actually read: <quoted state-poll line; policy-vs-engine util split; engine
-  subscription counts; reward values / exception files; the metric window. A blank row means
-  that gate is ERROR.>
-Restarts: <burned/max — none | same failure each attempt | transient, recovered>
-
-Gate A (liveness):  PASS|FAIL|ERROR — <evidence>
-Gate B (resources): PASS|FAIL|ERROR — <evidence>
-Gate C (rollouts):  PASS|FAIL|ERROR — <evidence>
-Gate D (dynamics):  PASS|FAIL|ERROR — <reward trend over the window; entropy; TIS reads;
-                    per-phase Timer table and any bubble>
-
-REASONING: <2–4 sentences; the load-bearing evidence, especially for whatever is new/untested>
-NEXT STEPS: <KILL: root cause + concrete fix + relaunch-or-hold.
-             NO-KILL: what to watch next tick + the signal that would flip the verdict.
-             ERROR: what to fix so the next probe gets the evidence.>
-```
-
-Verdict rules:
-- **KILL** — a gate hard-fails with no transient or benign explanation, and you hold the
-  evidence. A starvation/wedge KILL must include the live py-spy captured before the kill.
-- **KILL (deterministically doomed)** — restarts repeat the same failure every attempt; state
-  the count, the traceback, and the fix that must land first.
-- **NO-KILL** — all gates pass, or the only failures have a legitimate transient or
-  early-bring-up explanation. Say what you are waiting on.
-- **ERROR** — required evidence unobtainable. Never launder it into NO-KILL.
-
-The supervisor executes any teardown and relaunch. Diagnosis fixes go through the normal
-worktree → PR flow; never hand-patch a cluster.

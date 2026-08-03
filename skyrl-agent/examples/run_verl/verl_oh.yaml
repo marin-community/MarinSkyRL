@@ -23,7 +23,7 @@ generator:
   infer_backend: verl
   backend_config: null
   num_trajectories: 8
-  max_iterations: 50 # 50
+  max_iterations: 50
   max_prompt_length: 32768
   sampling_params:
     temperature: 1

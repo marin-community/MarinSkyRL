@@ -1,17 +1,5 @@
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# ===========================================================================
-# REPLAY-vs-MESH ISOLATION FOLLOW-UP (label: v1ep4 / mesh-iso)
-# Identical to 64GPU_qwen3_coder_30b_a3b.yaml (v0l) EXCEPT the EP mesh:
-#   expert_model_parallel_size 8 -> 4  (policy AND ref)
-#   policy_num_nodes 4 -> 2, ref_num_nodes 4 -> 2  (policy mesh = 16 GPU)
-#   num_inference_engines 4 -> 2       (keep the 1:1 trainer:gen GPU ratio)
-#   max_steps 20 -> 3                  (SHORT measurement run: bank gs1 + a warm fwd)
-# moe_router_replay stays TRUE on both — replay is the variable being isolated.
-# Policy training mesh: fsdp(4) x ep(4) x cp(1) = 16 GPU = 2 nodes x 8  ✓
-# matches the 866390 EP=4/16-GPU reference mesh (which had fwd ~55s, no replay).
-# Total footprint: 2 (policy+ref colocated) + 2 (inference) = 4 nodes / 32 GPU.
-# ===========================================================================
 
 config_groups:
   terminal_bench_config: terminal_bench
@@ -22,30 +10,14 @@ context_budget:
   max_turns: 30
 
 terminal_bench:
-  # Overridden per-run by the launcher (++terminal_bench_config.trials_dir=...<job>...).
   trials_dir: s3://marin-us-east-02a/iris/tasktrove-dq-sweep-30b/trace_jobs
 
   harbor:
-    # opencode: harbor's literal-token-capable CLI agent (literal path validated GREEN
-    # on fullgate15). Per POLICY §4 the terminus-2-only keys are DROPPED (enable_summarize
-    # / strict_json_parser / interleaved_thinking / enable_pane_logging + companions
-    # store_all_messages / trajectory_config / extra_body / record_terminal_session /
-    # enable_episode_logging / upload_agent_logs): opencode bypasses harbor Chat and
-    # drives thinking from its own config, so those are no-ops (or terminus-only) for it.
     name: opencode
-    # Pin opencode 1.18.2 — forwards the per-trial correlation header the literal bridge
-    # needs (older 1.0.x drops provider options; opencode #5674).
     version: "1.18.2"
-    # opencode_config EMPTY — compaction OFF. ⚠ FORCED deviation (POLICY §3 mandated
-    # compaction): auto-compaction crashes -Thinking- models (the summary turn emits a
-    # tool call, opencode fatally rejects it: `Tool call not allowed while generating
-    # summary`) → NonZeroAgentExit → reward 0. This is a MODEL/harness issue independent
-    # of the trainer backend. Matches datagen parity (hpc/harbor_yaml/datagen/
-    # opencode_ctx131k.yaml:66 empty; eval fixed same way, OT-Agent e764bf12). Prompts
-    # stay bounded by opencode's limit.context sliding window (harbor #11).
     opencode_config: {}
-    override_setup_timeout_sec: 600  # opencode installs via nvm + npm at setup
-    override_timeout_sec: 1800  # 30min: ABOVE the healthy-trial p90 (~19min) so real trials finish; baked Harbor's server-side timeout forcibly reaps a runaway at this deadline. A shorter ceiling would murder healthy trials mid-task.
+    override_setup_timeout_sec: 600
+    override_timeout_sec: 1800
 
     override_cpus: 1
     override_memory_mb: 2048
@@ -67,11 +39,6 @@ terminal_bench:
       - VerifierOutputParseError
       - VerifierRuntimeError
 
-    # Prod concurrency (demand target). Paired IN LOCKSTEP with the decode-capacity
-    # supply lever below (max_num_seqs x num_inference_engines) per marinskyrl.md — never
-    # permute this alone. The old Daytona idle-reap that made 288 fail (keep1-v8) is fixed
-    # in baked Harbor (auto_stop_interval_mins 5->0), so
-    # sandboxes now survive the queue depth; decode capacity (raised below) sets throughput.
     n_concurrent_trials: 288
 
     log_level: INFO
@@ -125,7 +92,6 @@ trainer:
     tito_full: true
 
   epochs: 2
-  # POLICY §3: short per-dataset DQ probe — 80 steps OR 2 epochs, whichever first.
   max_steps: 80
   update_epochs_per_batch: 1
 
@@ -141,9 +107,7 @@ trainer:
 
   eval_interval: 999999
   eval_before_train: false
-  ckpt_interval: 1
   resume_mode: latest
-  hf_save_interval: 5
   hf_hub_repo_id: null
   hf_hub_private: false
   hf_hub_revision: main
@@ -167,21 +131,12 @@ trainer:
       max_grad_norm: 0.9
       optimizer_kwargs:
         foreach: false
-    # Megatron backend geometry (trainer.strategy=megatron). VALIDATED on east18/east19.
-    # 16 training GPUs: TP4 x PP2 x CP1 = 8 model-parallel, DP=2; EP4 over 128 experts.
     megatron_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
-      # ⚠ The fresh megatron image (gpu-rl-megatron-98f4dfe0) lacks APEX's
-      # fused_weight_gradient_mlp_cuda ext (APEX not built --cpp_ext --cuda_ext), so
-      # gradient_accumulation_fusion=True crashes at init_model (keep1-v5:
-      # "fused_weight_gradient_mlp_cuda is not found"). Disable the fusion — the sanctioned
-      # fallback the error names; gradients are IDENTICAL (just unfused, minor perf), fine
-      # for a DQ probe. Deep-merges onto the preset's transformer_config_kwargs (recompute_*
-      # preserved). DURABLE fix: rebuild the image with APEX --cpp_ext --cuda_ext.
       transformer_config_kwargs:
         gradient_accumulation_fusion: false
     fsdp_config:
@@ -198,11 +153,6 @@ trainer:
       ep_comm_backend: torch
   ref:
     model:
-      # POLICY §2 base model (also passed as the policy --model_path at launch).
-      # PIVOTED to Coder-Instruct (operator 2026-07-18): better agentic tool-use; the
-      # -Thinking-2507 model looped/never self-terminated opencode (v8-v11) → all trials
-      # AgentTimeout→reward 0. Coder-Instruct is the base config's NATIVE model (reverses
-      # the earlier Coder→Thinking swap); same Qwen3MoE arch → TP4/EP4 geometry unchanged.
       path: Qwen/Qwen3-Coder-30B-A3B-Instruct
     megatron_config:
       tensor_model_parallel_size: 4
@@ -210,8 +160,6 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 4
       expert_tensor_parallel_size: 1
-      # Same APEX-fusion fallback as policy (see above) — the ref forward also builds a
-      # Megatron module and hits the missing fused_weight_gradient_mlp_cuda without it.
       transformer_config_kwargs:
         gradient_accumulation_fusion: false
     fsdp_config:
@@ -248,23 +196,11 @@ generator:
 
   enforce_eager: false
 
-  # Inference GEOMETRY repartitioned 2xTP8/DCP2 -> 4xTP4/DCP1/EP4 (keep1-v10, KV-131k
-  # validated). TP8 was TP-comm waste for a 30B-A3B (~3B active) AND mis-aligned to the
-  # model's 4 KV heads (replicates 2x unless DCP2 rescues). TP4 = 4 KV heads split EXACTLY
-  # 1/GPU (no replication, DCP unnecessary=1), 4 independent schedulers over 16 GPUs (2x
-  # aggregate slots vs v9's 48, halved TP all-reduce group = the real win). KV-at-131k:
-  # a full 131k seq = 12 GiB across the model -> 3.0 GiB/GPU at TP4 = 6.4% of the ~47 GB
-  # pool (15.7x margin; ~15-17 full-131k seqs/engine). TP2 rejected (~5 seqs/engine @131k).
-  # Mirrors the proven sibling 64GPU_qwen3_6_35b_a3b.yaml (8xTP4/DCP1/EP4). 4xTP4=16 GPUs.
   inference_engine_tensor_parallel_size: 4
   num_inference_engines: 4
 
-  # EP-shard the 128 experts (32/GPU) — standard MoE-inference path at TP4 (was 1).
   inference_engine_expert_parallel_size: 4
 
-  # DCP=1: at TP4 each GPU already holds exactly 1 KV head, so no decode-context split is
-  # needed (DCP existed to de-replicate KV at TP8). DCP1 + enable_return_routed_experts is
-  # the proven routed-experts path (35B sibling) — removes the routed-experts x DCP interaction.
   inference_engine_decode_context_parallel_size: 1
 
   inference_engine_mp_backend: false
@@ -274,12 +210,6 @@ generator:
 
   gpu_memory_utilization: 0.80
 
-  # Per-engine decode slots. 24 x 4 engines = 96 aggregate (2x v9's 48). 24 is 1.5x the
-  # pure-131k KV capacity (~15-17/engine), backstopped by chunked-prefill + vLLM preemption
-  # (opencode contexts are bounded to ~113k and mostly short, KV was 1-8%). Push to 32
-  # (128 aggregate) after confirming KV-cache-usage stays off-ceiling in the sweep — the
-  # engines are slot-bound, not KV-bound. Drop gpu_memory_utilization 0.80->0.75 or this
-  # value first on any KV-bind OOM (never TP).
   max_num_seqs: 24
   max_num_batched_tokens: 16384
 
@@ -294,10 +224,6 @@ generator:
   enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
-  # BOUNDED turn cap (fullgate proven-green value). 999999 (unbounded) let the
-  # -Thinking-/compaction-off opencode agent loop without self-terminating until the
-  # override_timeout_sec wall -> verifier never ran -> 0 result.json -> 0 completions.
-  # Reference healthy trial = ~8 sequential calls; 30 is a generous safety net.
 
   sampling_params:
     temperature: 1.2
@@ -305,24 +231,9 @@ generator:
     top_k: 20
 
   engine_init_kwargs:
-    # NO custom chat template: Qwen/Qwen3-Coder-30B-A3B-Instruct's NATIVE HF chat_template
-    # emits the Qwen3-Coder XML function-call format the qwen3_coder parser expects. Omitting
-    # custom_chat_template_chat_completion_path makes the vLLM chat endpoint pass chat_template=None
-    # (vllm_engine.py:1630), so it falls back to the model's tokenizer template. The old
-    # qwen3_thinking_acc.jinja2 was a -Thinking- artifact that FORCED the hermes <tool_call>{json}
-    # format onto Coder (which was not trained for it → tool_use=0). (The 32GPU coder throughput
-    # config keeps that jinja only because it drives TERMINUS-2, which parses tool calls itself
-    # and never hits the vLLM OpenAI tool parser — opencode does, so the format must match.)
     disable_custom_all_reduce: true
     enable_return_routed_experts: true
     async_scheduling: false
-    # opencode sends tool_choice:"auto"; without tool-calling enabled the engine returns
-    # '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser',
-    # opencode exits 1, every rollout = NonZeroAgentExit reward 0. qwen3_coder = the native
-    # Qwen3-Coder XML function-call parser (registered in the pinned vLLM 0.20.2:
-    # tool_parsers/__init__.py "qwen3_coder"), matching the model's native chat_template above.
-    # hermes was the -Thinking- <tool_call>{json} format — never matched Coder's output (v13
-    # tool_use=0). Model/harness setting, backend-independent.
     enable_auto_tool_choice: true
     tool_call_parser: qwen3_coder
 

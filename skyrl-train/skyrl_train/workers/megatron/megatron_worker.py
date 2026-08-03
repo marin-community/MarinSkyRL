@@ -28,6 +28,7 @@ from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
+from skyrl_train.models.grug_moe import validate_grug_training_strategy
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.utils.ppo_utils import TIS_DIAG_KEYS
@@ -191,8 +192,9 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -319,7 +321,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.profiler: Profiler = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
             self.actor_module, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
         )
@@ -721,7 +722,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         self.actor_module: List[nn.Module] = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):

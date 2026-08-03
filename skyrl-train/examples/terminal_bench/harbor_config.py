@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_train.utils.harbor_errors import DEFAULT_ERROR_HANDLING_CONFIG, ErrorHandlingConfig
 
 from harbor.models.trial.config import (
     TrialConfig,
@@ -112,8 +113,19 @@ AGENT_SCHEMA = SectionSchema(
         # opencode drifts on @latest and the correlation header can silently stop forwarding.
         "version": FieldMapping("version", field_type="kwargs"),
         # opencode-specific extra config deep-merged into opencode.json (OpenCode.__init__
-        # opencode_config kwarg). No default: absent -> {} in the ctor (byte-identical). Carries
-        # e.g. compaction:{auto,reserved} for the RL smoke's compaction-crossing observable.
+        # opencode_config kwarg). No default: absent -> {} in the ctor (byte-identical).
+        # Carries e.g. compaction:{auto,reserved} for the RL smoke's compaction-crossing
+        # observable.
+        #
+        # Compaction: OpenCode auto-compacts when the prompt approaches limit.context.
+        # DEFAULT OFF (opencode_config: {} or absent). Historically disabled because the
+        # summary turn could emit a tool call that OpenCode rejects fatally ("Tool call
+        # not allowed while generating summary"), ending the trial at reward 0. Observed
+        # on -Thinking- models; NOT re-tested on Coder-Instruct. To enable:
+        #   opencode_config:
+        #     compaction:
+        #       auto: true
+        #       reserved: 16384
         "opencode_config": FieldMapping("opencode_config", field_type="kwargs"),
         # Strict JSON parser mode (for RL training)
         # When true, treats parser warnings as errors and disables auto-correction.
@@ -291,6 +303,15 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         "pbs_gamma": FieldMapping("pbs_gamma", default=1.0),
         "pbs_max_total_shaping": FieldMapping("pbs_max_total_shaping", default=0.3),
         "pbs_potential_shape": FieldMapping("pbs_potential_shape", default="linear"),
+        # Truncation penalty: penalize generations that terminate at
+        # max_generate_length rather than emitting a stop token. 0.0 == no-op
+        # (byte-identical). A cap-truncated trial is otherwise scored
+        # identically to an honest wrong answer, so nothing opposes the policy
+        # drifting longer until every generation hits the wall. When >0, a
+        # truncated trial with zero original reward is scored at
+        # -truncation_penalty (below the zero floor) so it is distinguishable
+        # from an honest failure in the advantage signal.
+        "truncation_penalty": FieldMapping("truncation_penalty", default=0.0),
     }
 )
 
@@ -299,42 +320,43 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
 # - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
 # - "zero" exceptions: Included in baseline with reward=0 (agent failures)
 #
-# Default classification:
-# - Infrastructure failures (mask): DaytonaError, NetworkError, EnvironmentStartTimeoutError
-# - Agent failures (zero): AgentTimeoutError, ContextLengthExceededError
-# - Ambiguous (configurable): VerifierTimeoutError, RewardFileNotFoundError
+# Default classification comes from the pinned harbor-config taxonomy. Lists
+# here are explicit campaign overrides and therefore default empty.
 ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={
         # Enable RLOO-N style error handling (exclude infrastructure failures from baseline)
-        "enable_error_classification": FieldMapping("enable_error_classification", default=False),
+        "enable_error_classification": FieldMapping(
+            "enable_error_classification",
+            default=DEFAULT_ERROR_HANDLING_CONFIG.enable_error_classification,
+        ),
         # Exceptions to pass through (ignore exception, use verifier reward normally).
         # The verifier still runs after these errors in Harbor, so we get a real reward.
         # Use for soft limits like timeout/context-length where partial work is evaluated.
-        "passthrough_exceptions": FieldMapping("passthrough_exceptions", default=[]),
+        "passthrough_exceptions": FieldMapping(
+            "passthrough_exceptions",
+            default=list(DEFAULT_ERROR_HANDLING_CONFIG.passthrough_exceptions),
+        ),
         # Exceptions to mask (exclude from baseline, no gradient contribution)
         # These are treated as "neutral" - infrastructure issues, not agent failures
         "mask_exceptions": FieldMapping(
             "mask_exceptions",
-            default=[
-                "DaytonaError",
-                "EnvironmentStartTimeoutError",
-                "NetworkError",
-                "ConnectionError",
-                "RewardFileNotFoundError",
-                "RewardFileEmptyError",
-            ],
+            default=list(DEFAULT_ERROR_HANDLING_CONFIG.mask_exceptions),
         ),
         # Exceptions to zero (include in baseline with reward=0)
         # These are treated as agent failures - the model should learn to avoid them
         "zero_exceptions": FieldMapping(
             "zero_exceptions",
-            default=[
-                "AgentTimeoutError",
-                "ContextLengthExceededError",
-            ],
+            default=list(DEFAULT_ERROR_HANDLING_CONFIG.zero_exceptions),
         ),
         # Default treatment for unclassified exceptions ("mask", "zero", or "passthrough")
-        "default_error_treatment": FieldMapping("default_error_treatment", default="zero"),
+        "default_error_treatment": FieldMapping(
+            "default_error_treatment",
+            default=DEFAULT_ERROR_HANDLING_CONFIG.default_error_treatment.value,
+        ),
+        "preserve_logprobs_on_timeout": FieldMapping(
+            "preserve_logprobs_on_timeout",
+            default=DEFAULT_ERROR_HANDLING_CONFIG.preserve_logprobs_on_timeout,
+        ),
     }
 )
 
@@ -754,37 +776,16 @@ class HarborConfigBuilder:
                 return str(value).upper()
         return default
 
-    def get_error_handling_config(self) -> Dict[str, Any]:
-        """
-        Get error handling configuration for RLOO-N advantage estimator.
-
-        This controls how different exception types are treated:
-        - "passthrough" exceptions: Ignore exception, use verifier reward normally
-        - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
-        - "zero" exceptions: Included in baseline with reward=0 (agent failures)
-
-        Returns:
-            Dict with keys:
-                - enable_error_classification: bool - whether to classify errors
-                - passthrough_exceptions: Set[str] - exception names to pass through (use verifier reward)
-                - mask_exceptions: Set[str] - exception names to mask (exclude from baseline)
-                - zero_exceptions: Set[str] - exception names to zero (include with reward=0)
-                - default_error_treatment: str - "mask", "zero", or "passthrough" for unclassified errors
-        """
+    def get_error_handling_config(self) -> ErrorHandlingConfig:
+        """Build the validated RLOO-N treatment configuration."""
         config = {}
 
         for yaml_key, mapping in ERROR_HANDLING_SCHEMA.fields.items():
             value = self._get_field_value(yaml_key, mapping, self._cfg)
             if value is not None:
-                # Convert lists to sets for faster lookup
-                if yaml_key in ("passthrough_exceptions", "mask_exceptions", "zero_exceptions"):
-                    if isinstance(value, (list, tuple)):
-                        value = set(value)
-                    elif isinstance(value, str):
-                        value = {s.strip() for s in value.split(",") if s.strip()}
                 config[yaml_key] = value
 
-        return config
+        return ErrorHandlingConfig.from_mapping(config)
 
     def get_eval_timeout_override_sec(self, default: int = 900) -> int:
         """
