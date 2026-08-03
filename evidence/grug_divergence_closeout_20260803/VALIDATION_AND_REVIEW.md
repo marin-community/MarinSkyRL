@@ -54,9 +54,9 @@ skyrl-train/.venv/bin/python -m pytest \
   /tmp/grug-closeout/test_gate_contract.py -q
 ```
 
-The final run collected 38 tests and reported `38 passed in 18.96s`. The first attempt with
-the root environment stopped during collection because it lacked Ray; no test
-ran in that attempt. The final evidence diff also passed:
+The final run collected 38 tests and reported `38 passed in 18.96s`. The first
+attempt with the root environment stopped during collection because it lacked
+Ray; no test ran in that attempt. The final evidence diff also passed:
 
 ```text
 uv run python infra/pre-commit.py --changed-files --fix
@@ -66,11 +66,12 @@ ruff check <both archived readers>
 bash -n <each archived shell launcher>
 ```
 
-The repository's post-commit advisory review reported maintainability findings
-in the disposable diagnostic harness, but no evidence or measurement error. The
-harness is not part of PR #276. Pruning or refactoring executed source after the
-run would weaken the source-to-artifact chain, so those findings remain recorded
-as evidence-branch debt.
+The final post-commit advisory review reported maintainability findings in the
+disposable diagnostic harness, but no evidence or measurement error. Its log is
+`/tmp/marin-style-lint/grug-eager-grouped-divergence-closeout-20260802/20260803T050416-0a116b9x`.
+The harness is not part of PR #276. Pruning or refactoring executed source after
+the run would weaken the source-to-artifact chain, so those findings remain
+recorded as evidence-branch debt.
 
 ## Four High goal reviews
 
@@ -89,3 +90,12 @@ wording in `RUN_LOG.md` and the issue draft address the material findings.
 
 The route-retention and critical-rank clarifications are reporting changes. The
 strict reader is CPU-only and does not alter or rerun either accelerator arm.
+
+## Publication
+
+The final evidence branch was pushed through
+`0aa40030b4700eb13a2e3bc4223eecb26d9740aa` before publication. The bounded
+closeout was then published at
+https://github.com/marin-community/marin/issues/7903#issuecomment-5162561004.
+Independent GitHub readback confirmed the exact comment, open issue state, and
+unchanged clean state of MarinSkyRL #276.

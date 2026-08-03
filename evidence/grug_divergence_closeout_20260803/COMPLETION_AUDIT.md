@@ -1,8 +1,8 @@
 # Grug divergence closeout completion audit
 
 This is a live requirement-by-requirement audit of
-`notes/goals/2026-08-02-grug-eager-grouped-divergence-closeout.md`. A pending
-row blocks completion. Evidence work here is disposable; MarinSkyRL PR #276
+`notes/goals/2026-08-02-grug-eager-grouped-divergence-closeout.md`. Any
+non-terminal row blocks completion. Evidence work here is disposable; MarinSkyRL PR #276
 remains the product branch.
 
 | Requirement | Status | Authoritative evidence |
@@ -18,12 +18,12 @@ remains the product branch.
 | Gate validity under the predeclared contract | Proven | The gate has exact eager oracle behavior; grouped/eager CE and action-log-probability allowance ratios `0.441190` and `0.559959`; 476 finite nonempty gradient tensors and at least 8,384,693,120 gradient elements per rank; 0 unexplained changed-route tokens across 208 rank-layers. See `RUN_LOG.md`. |
 | Run exactly one sequential eager/grouped matched-CE forward-plus-backward pair on the same 32 H100s, without optimizer | Proven execution; semantic invalid | Job `/romain/grug-paired-eager-grouped-2dd905e-s1-20260803` completed both arms sequentially in one unchanged 32-H100 actor group and uploaded its result before the predeclared headline check failed. Structural correctness passes, but 1,995/12,288 action-log-probability checks fail, so this is not a valid causal headline measurement. Result SHA-256 is `2c1ef16927846e2ea031077064fd61b84e63bd707b9ec63904169096cb3fbe0c`. |
 | Independently read back correctness, synchronized wall, routed and non-routed time, throughput, peak HBM, GPU-seconds, limits, and source chain | Proven | CPU Iris job `/romain/grug-paired-readback-2dd905e-s1-20260803` verified structure and metrics. Post-review CPU job `/romain/grug-paired-strict-readback-2dd905e-s1-20260803` additionally asserted every external pin and independently recomputed the semantic checks from raw samples. Both found structural pass and semantic fail. See `RUN_LOG.md` and `VALIDATION_AND_REVIEW.md`. |
-| Leave a precise bounded blocked result when another substantive diagnosis/fix cycle is required | In progress | The remaining discriminator is a full-headline per-token route-membership comparison under the predeclared margin rule. The completed headline did not retain routes. Collecting them requires a changed harness and second 32-H100 pair, beyond the authorized one-gate/one-pair cycle. The issue closeout must report the invalid 18.811970x observation without claiming recovery and leave #7903 open. |
+| Leave a precise bounded blocked result when another substantive diagnosis/fix cycle is required | Proven | The remaining discriminator is a full-headline per-token route-membership comparison under the predeclared margin rule. The completed headline did not retain routes. Collecting them requires a changed harness and second 32-H100 pair, beyond the authorized one-gate/one-pair cycle. The invalid 18.811970x observation, exact limitation, and future acceptance condition are published in [#7903](https://github.com/marin-community/marin/issues/7903#issuecomment-5162561004), which remains open. |
 | Run ordinary validation, then four High `KIND=GOAL` reviewers and address material findings | Proven | 38 focused tests passed. Four High reviews completed successfully. Three approved the bounded result; one required provenance and reporting fixes. Exact sources are now archived, the registry binding is recorded, a stricter CPU readback asserts all pins and recomputes semantics, and causal/rank/acceptance wording is narrowed. See `VALIDATION_AND_REVIEW.md`. |
-| Publish final evidence to #7903 and any affected #276 surface | Pending | #7903 is open with no comments. #276 needs no product update unless final evidence changes the classification. |
+| Publish final evidence to #7903 and any affected #276 surface | Proven | The bounded closeout is published in [#7903](https://github.com/marin-community/marin/issues/7903#issuecomment-5162561004), and the issue remains open. Live readback after publication shows MarinSkyRL #276 unchanged at `0c213586b5491b8046ca7780e965c4b26dc6a2a2`, open, non-draft, clean, mergeable, green, and unmerged. No #276 comment was warranted because no product classification changed. |
 
 The source-to-image-to-artifact chain is frozen as source
 `2dd905e29597b848f912dd5cdaf2cebdfbf3d0c2`, image
 `ghcr.io/marin-community/marinskyrl@sha256:24c655d33ebb6ef78b9f9a5db4053f838c2e9d6c98e3adef338cdb87e1c072a2`,
-and the result URI above. Completion remains unproven until every pending row
-has terminal evidence.
+and the result URI above. Every row now has terminal evidence. This pass is
+complete as the strictly bounded human-reviewable closeout allowed by the goal.

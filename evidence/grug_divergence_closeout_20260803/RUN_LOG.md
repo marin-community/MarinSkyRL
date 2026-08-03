@@ -151,3 +151,13 @@ chain, recording the registry tag-to-digest binding, and running CPU Iris job
 every external pin and independently recomputed all numeric semantic checks from
 raw samples, reproducing the 1,995 output violations and the failed verdict.
 See `VALIDATION_AND_REVIEW.md`. MarinSkyRL #276 remains unchanged.
+
+## Publication
+
+The bounded result was published at
+https://github.com/marin-community/marin/issues/7903#issuecomment-5162561004.
+Readback confirmed that #7903 remains open. MarinSkyRL #276 remained unchanged
+at `0c213586b5491b8046ca7780e965c4b26dc6a2a2`, open, non-draft, clean,
+mergeable, green, and unmerged. No #276 comment was added because this pass
+demonstrated no permanent grouped-runtime defect and did not change its product
+classification.
