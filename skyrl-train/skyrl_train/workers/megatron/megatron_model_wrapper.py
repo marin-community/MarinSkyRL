@@ -8,16 +8,22 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 
-from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs, vocab_parallel_entropy
+from skyrl_train.distributed.megatron.model_utils import (
+    from_parallel_logits_to_logprobs,
+    from_parallel_logits_to_logprobs_packed_sequences,
+    vocab_parallel_entropy,
+)
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.utils.ppo_utils import compute_approx_kl, masked_mean
+from skyrl_train.utils.ppo_utils import compute_approx_kl, compute_tis_diagnostics, masked_mean
 
 from skyrl_train.distributed.megatron.megatron_utils import (
+    compact_left_padded_tokens,
     make_batch_generator,
+    pack_padded_tokens,
     preprocess_packed_seqs,
-    postprocess_packed_seqs,
     remove_left_padding,
-    recover_left_padding,
+    scatter_token_values,
+    unpack_packed_token_values,
 )
 
 
@@ -70,6 +76,55 @@ class MegatronModelWrapper:
     def eval(self):
         [module.eval() for module in self.actor_module]
 
+    def _token_logprobs(
+        self,
+        logits: torch.Tensor,
+        sequences: torch.Tensor,
+        attention_mask: torch.Tensor,
+        packed_seq_params,
+    ) -> torch.Tensor:
+        """Compute logprobs before reconstructing only scalar token values."""
+        tp_group = mpu.get_tensor_model_parallel_group()
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        if self.use_sample_packing:
+            if packed_seq_params is None:
+                raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
+            packed_sequences = pack_padded_tokens(sequences, attention_mask, packed_seq_params)
+            return from_parallel_logits_to_logprobs_packed_sequences(
+                logits,
+                packed_sequences,
+                packed_seq_params.cu_seqlens_q_padded,
+                attention_mask,
+                vocab_start_index=tp_rank * logits.shape[-1],
+                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                group=tp_group,
+                inference_only=not self.actor_module[0].training,
+                cp_group=mpu.get_context_parallel_group(),
+                chunk_size=self._logprob_chunk_size,
+            )
+
+        compact_sequences = compact_left_padded_tokens(sequences, attention_mask)
+        compact_logprobs = from_parallel_logits_to_logprobs(
+            logits,
+            compact_sequences,
+            vocab_start_index=tp_rank * logits.shape[-1],
+            vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+            tp_group=tp_group,
+            inference_only=not self.actor_module[0].training,
+            cp_group=None,
+            chunk_size=self._logprob_chunk_size,
+        )
+        return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
+
+    def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:
+        """Compute entropy before reconstructing only scalar token values."""
+        token_entropies = vocab_parallel_entropy(logits)
+        if self.use_sample_packing:
+            if packed_seq_params is None:
+                raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
+            return unpack_packed_token_values(token_entropies, packed_seq_params, attention_mask)
+        return scatter_token_values(token_entropies, attention_mask, drop_last=False)
+
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
@@ -95,24 +150,13 @@ class MegatronModelWrapper:
         """
         forward_backward_func = get_forward_backward_func()
 
-        def collection_func(logits, data):
+        def collection_func(logits, data, packed_seq_params):
             sequences = data["sequences"]
-            tp_grp = mpu.get_tensor_model_parallel_group()
-            tp_rank = mpu.get_tensor_model_parallel_rank()
 
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = from_parallel_logits_to_logprobs(
-                logits,
-                sequences,
-                vocab_start_index=tp_rank * logits.shape[-1],
-                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                tp_group=tp_grp,
-                inference_only=True,
-                cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=self._logprob_chunk_size,
-            )
+            token_logprobs = self._token_logprobs(logits, sequences, data["attention_mask"].to(bool), packed_seq_params)
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
@@ -143,27 +187,10 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                fp32_output=False,
             )
 
-            if self.use_sample_packing:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_batch_size,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
-            else:
-                outputs = recover_left_padding(
-                    outputs,
-                    new_attention_mask,
-                    attention_mask,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
-
-            return outputs, partial(collection_func, data=batch)
+            return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
@@ -214,7 +241,7 @@ class MegatronModelWrapper:
         """
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(logits, data):
+        def loss_func(logits, data, packed_seq_params):
             sequences = data["sequences"]
             num_actions = data["num_actions"]
             old_action_log_probs = data["old_action_log_probs"]
@@ -223,23 +250,11 @@ class MegatronModelWrapper:
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
 
-            tp_grp = mpu.get_tensor_model_parallel_group()
-            tp_rank = mpu.get_tensor_model_parallel_rank()
-
             # temperature normalization
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = from_parallel_logits_to_logprobs(
-                logits,
-                sequences,
-                vocab_start_index=tp_rank * logits.shape[-1],
-                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                tp_group=tp_grp,
-                inference_only=False,
-                cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
-                chunk_size=self._logprob_chunk_size,
-            )
+            token_logprobs = self._token_logprobs(logits, sequences, data["attention_mask"].to(bool), packed_seq_params)
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
@@ -254,8 +269,8 @@ class MegatronModelWrapper:
             )
 
             with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
-                action_logits = logits[:, -num_actions - 1 : -1, :]
-                entropy_BS = vocab_parallel_entropy(action_logits)
+                token_entropies = self._token_entropies(logits, data["attention_mask"].to(bool), packed_seq_params)
+                entropy_BS = token_entropies[:, -num_actions - 1 : -1]
                 entropy = masked_mean(entropy_BS, loss_mask)
 
             if self.cfg.trainer.algorithm.use_entropy_loss:
@@ -284,6 +299,19 @@ class MegatronModelWrapper:
                 "ppo_clip_ratio": clip_ratio,
                 "policy_kl": kl_loss.detach().item(),
             }
+            # TIS importance-ratio diagnostics — same helper as the FSDP path
+            # (PolicyWorkerBase.training_step), so both backends emit identical
+            # keys with identical semantics. The helper's fallback branch keeps
+            # the keyset identical when rollout logprobs are absent.
+            if self.cfg.trainer.algorithm.use_tis:
+                metrics.update(
+                    compute_tis_diagnostics(
+                        old_action_log_probs,
+                        rollout_action_logprobs,
+                        loss_mask,
+                        cap=self.cfg.trainer.algorithm.tis_imp_ratio_cap,
+                    )
+                )
             return loss, metrics
 
         def forward_step(batch_iter, model):
@@ -315,27 +343,10 @@ class MegatronModelWrapper:
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
+                fp32_output=False,
             )
 
-            if self.use_sample_packing:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_batch_size,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
-            else:
-                outputs = recover_left_padding(
-                    outputs,
-                    new_attention_mask,
-                    attention_mask,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
-
-            return outputs, partial(loss_func, data=batch)
+            return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 
         # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))

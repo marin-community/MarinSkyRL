@@ -19,7 +19,7 @@ process exits 0 (clean COMPLETED).
 These tests exercise the decision logic and the finalize handler directly,
 without booting Ray / models, so they run on CPU.
 
-    uv run --isolated --extra dev pytest tests/cpu/test_resume_overshoot.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/test_resume_overshoot.py
 """
 
 import asyncio
@@ -85,10 +85,12 @@ class _RecordingCallbackHandler:
 
     def __init__(self, on_train_end_control: TrainerControl):
         self.events = []
+        self.states = []
         self._on_train_end_control = on_train_end_control
 
     async def call_event_async(self, event, state, control, **kwargs):
         self.events.append(event)
+        self.states.append(state)
         if event == "on_train_end":
             return self._on_train_end_control
         return control
@@ -139,6 +141,27 @@ def test_fresh_run_stops_at_exactly_max_steps():
     assert trained_steps[-1] == total, "fresh run must stop exactly at max_steps"
     assert max(trained_steps) == total, "fresh run must NOT train gsN+1 (no overshoot)"
     assert len(trained_steps) == total
+
+
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+def test_train_end_saves_the_last_completed_step(cls):
+    """Final callbacks and artifacts must use completed steps, not the next step index."""
+    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
+    requested = TrainerControl()
+    requested.should_save = True
+    requested.should_save_hf_model = True
+    trainer.callback_handler = _RecordingCallbackHandler(requested)
+    saved_steps = []
+    trainer.save_checkpoints.side_effect = lambda: saved_steps.append(trainer.global_step)
+    trainer.save_models.side_effect = lambda: saved_steps.append(trainer.global_step)
+    trainer._flush_hf_uploads = MagicMock()
+
+    asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
+
+    assert trainer.global_step == 16
+    assert trainer.callback_handler.states[0].global_step == 16
+    assert saved_steps == [16, 16]
+    assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
 # ---------------------------------------------------------------------------

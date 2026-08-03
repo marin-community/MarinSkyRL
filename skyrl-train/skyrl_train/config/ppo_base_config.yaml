@@ -2,7 +2,6 @@ defaults:
   - _self_
   - deepspeed_config@deepspeed_config.train: train
   - deepspeed_config@deepspeed_config.eval: eval
-  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
@@ -21,45 +20,8 @@ trainer:
     critic_num_gpus_per_node: 4
     ref_num_nodes: 1
     ref_num_gpus_per_node: 4
-    # When true AND the run is disaggregated (colocate_all=false) AND no ref
-    # model is used, reserve the policy/training placement group up front with
-    # a STRICT_SPREAD whole-node bundle per policy node, BEFORE the inference
-    # engines' placement group is created. This guarantees the FSDP policy
-    # claims its N dedicated nodes first, forcing the (PACK) inference engines
-    # onto the disjoint remaining nodes. Prevents the nondeterministic
-    # policy/vLLM GPU-collision OOM on exactly-full clusters (e.g. 80B on 24
-    # nodes: 8 policy + 16 inference = 24). Default false preserves the
-    # historical lazy-PACK behavior for all existing runs.
     policy_strict_spread_pg: false
-    # When true (and policy_strict_spread_pg is also true), build the dedicated
-    # policy placement group out of one {GPU:1,CPU:1} bundle PER policy GPU
-    # (num_nodes * num_gpus_per_node bundles) instead of one whole-node {GPU:4}
-    # bundle per node. This makes len(bundles) == world_size, so the actor group
-    # engages the reliable get_reordered_bundle_indices() path (each InfoActor
-    # probes its bundle's single physical GPU via ray.get_gpu_ids()), and every
-    # policy actor is scheduled with num_gpus=1 against a 1-GPU bundle. The
-    # actor's own ray.get_gpu_ids()[0] then returns that bundle's distinct
-    # physical GPU id, so device pinning no longer depends on a positional
-    # rank%num_gpus_per_node modulo (which is wrong on GH200, where CUDA logical
-    # ordering is FASTEST_FIRST, not PCI/NUMA-identity, and which still races
-    # because the SIF Ray leaves CUDA_VISIBLE_DEVICES unmasked). Whole-node
-    # NVLink locality is preserved because the reorder sorts bundles by
-    # (node_id, gpu_id), so a node's 4 GPUs stay contiguous in rank order.
-    # Default false preserves the current whole-node-bundle behavior.
     policy_per_gpu_bundles: false
-    # When true (and policy_per_gpu_bundles is also true), each policy actor
-    # additionally MASKS CUDA_VISIBLE_DEVICES to its single Ray-assigned
-    # physical GPU and forces CUDA_DEVICE_ORDER=PCI_BUS_ID BEFORE any CUDA /
-    # EP-device-mesh init. This is the DETERMINISTIC form of the device pin:
-    # with exactly one visible device, torch.cuda.set_device(0),
-    # init_device_mesh (which reads LOCAL_RANK/current_device), and FSDP's
-    # device_id=current_device() can only resolve that one physical GPU, so
-    # EP=8×FSDP=4 ranks cannot stack on a shared GPU even if the SIF Ray left
-    # CVD unmasked or ray.get_gpu_ids() / the InfoActor reorder is unreliable.
-    # Closes the nondeterministic Qwen3-Next-80B init-OOM (intra-policy GPU-0
-    # stacking) that set_device(LOCAL_RANK) alone could not deterministically
-    # prevent. Default false preserves the set_device(LOCAL_RANK)-only pin and
-    # is a no-op for the 8B / a3 (non-EP, single-device-masked) path.
     policy_force_cvd_mask: false
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
@@ -75,42 +37,33 @@ trainer:
           exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
-      optimizer: "AdamW" # torch.optim class name (e.g. AdamW, SGD, RMSprop, NAdam, Adafactor, Muon)
+      optimizer: "AdamW"
       lr: 1.0e-6
-      adam_betas: [0.9, 0.999] # only used for Adam/AdamW/NAdam/RAdam/Adamax
+      adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
-      max_grad_norm: 1.0 # gradient clipping
-      offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
-      num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
+      max_grad_norm: 1.0
+      offload_after_step: true
+      num_warmup_steps: 0
       scheduler: "constant_with_warmup"
-      optimizer_kwargs: {} # passthrough kwargs for optimizer-specific params (e.g. {momentum: 0.9} for SGD)
+      optimizer_kwargs: {}
     fsdp_config:
-      cpu_offload: false # offload params + optimizer state to cpu during fwd pass
-      reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
+      cpu_offload: false
+      reshard_after_forward: true
       fsdp_size: -1
-      # --- Expert-parallel / router-replay (Stage 0; defaults = current behavior) ---
-      # See notes/skyrl/fsdp2_ep_router_replay_port_plan.md. No code path consumes
-      # these yet; all defaults preserve the existing plain-FSDP2 path byte-for-byte.
-      expert_model_parallel_size: 1        # EP degree on the FSDP2 mesh; 1 = no EP (today's path)
-      expert_tensor_parallel_size: 1       # TP within each expert shard; 1 = none
-      moe_token_dispatcher_type: "alltoall"  # "alltoall" | "deepep"
-      moe_router_replay: false             # R3 rollout-routing replay; off = unchanged forward
-      moe_grouped_gemm: false              # Stage 3b: swap HF eager MoE for grouped-GEMM (EP=1); off = HF eager untouched
-      use_grouped_mm: false                # runtime grouped-mm MoE swap (fsdp_worker reader, config-driven); off = HF eager untouched
-      ep_comm_backend: "torch"             # "torch" | "deepep"; torch = no NVSHMEM dependency
-      deepep_num_sms: 20                    # Stage 5: SMs for DeepEP dispatch/combine kernels (deepep backend only)
-      deepep_token_chunk_size: null         # Stage 5: tokens per DeepEP dispatch chunk; null = whole batch
-      # --- Context-parallel (torch-native ring SDPA; Stage 0; defaults = current behavior) ---
-      # See notes/RL/skyrl/fsdp2_context_parallel_stages/. No code path consumes
-      # these yet; all defaults preserve the existing plain-FSDP2 path byte-for-byte.
-      # CP and Ulysses (sequence_parallel_size) are mutually exclusive (both shard the seq dim).
-      context_parallel_size: 1          # 1 = disabled. CP ring degree (FSDP2 only).
-      cp_style: "ring_sdpa"             # "ring_sdpa" (torch-native). reserved: "ring_flash_attn"
-      cp_rotate_method: "allgather"     # torch CP rotate: "allgather" | "all_to_all"
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      moe_token_dispatcher_type: "alltoall"
+      moe_router_replay: false
+      moe_grouped_gemm: false
+      use_grouped_mm: false
+      ep_comm_backend: "torch"
+      deepep_num_sms: 20
+      deepep_token_chunk_size: null
+      context_parallel_size: 1
+      cp_style: "ring_sdpa"
+      cp_rotate_method: "allgather"
     sequence_parallel_size: 1
-    # uses torch compile with logits calculation
     use_torch_compile: false
-    # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
   ref:
     model:
@@ -121,17 +74,15 @@ trainer:
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
-      # --- Expert-parallel / router-replay (Stage 0; defaults = current behavior) ---
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
       moe_token_dispatcher_type: "alltoall"
       moe_router_replay: false
       moe_grouped_gemm: false
-      use_grouped_mm: false                # runtime grouped-mm MoE swap (fsdp_worker reader, config-driven); off = HF eager untouched
+      use_grouped_mm: false
       ep_comm_backend: "torch"
       deepep_num_sms: 20
       deepep_token_chunk_size: null
-      # --- Context-parallel (torch-native ring SDPA; Stage 0; defaults = current behavior) ---
       context_parallel_size: 1
       cp_style: "ring_sdpa"
       cp_rotate_method: "allgather"
@@ -146,206 +97,127 @@ trainer:
         exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
-      optimizer: "AdamW" # torch.optim class name (e.g. AdamW, SGD, RMSprop, NAdam, Adafactor, Muon)
+      optimizer: "AdamW"
       lr: 5.0e-6
-      adam_betas: [0.9, 0.999] # only used for Adam/AdamW/NAdam/RAdam/Adamax
+      adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
-      max_grad_norm: 1.0 # gradient clipping
-      offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
-      num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
+      max_grad_norm: 1.0
+      offload_after_step: true
+      num_warmup_steps: 0
       scheduler: "constant_with_warmup"
-      optimizer_kwargs: {} # passthrough kwargs for optimizer-specific params (e.g. {momentum: 0.9} for SGD)
+      optimizer_kwargs: {}
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
-      # --- Expert-parallel / router-replay (Stage 0; defaults = current behavior) ---
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
       moe_token_dispatcher_type: "alltoall"
       moe_router_replay: false
       moe_grouped_gemm: false
-      use_grouped_mm: false                # runtime grouped-mm MoE swap (fsdp_worker reader, config-driven); off = HF eager untouched
+      use_grouped_mm: false
       ep_comm_backend: "torch"
       deepep_num_sms: 20
       deepep_token_chunk_size: null
-      # --- Context-parallel (torch-native ring SDPA; Stage 0; defaults = current behavior) ---
       context_parallel_size: 1
       cp_style: "ring_sdpa"
       cp_rotate_method: "allgather"
     sequence_parallel_size: 1
   algorithm:
-    advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
-    kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
-      type: "fixed" # "fixed" or "adaptive"
-      kl_target: 0.1 # target KL divergence for adaptive KL controller
-      horizon: 10000 # controls the update rate of the adaptive KL controller
-    kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-    use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
-    use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
-    # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
-    use_kl_in_reward: false # apply kl loss to rewards
-    use_kl_loss: true # used in policy model
+    advantage_estimator: "grpo"
+    kl_ctrl:
+      type: "fixed"
+      kl_target: 0.1
+      horizon: 10000
+    kl_estimator_type: "k3"
+    use_kl_estimator_k3: false
+    use_abs_kl: false
+    use_kl_in_reward: false
+    use_kl_loss: true
     kl_loss_coef: 0.001
-    # entropy loss
     use_entropy_loss: false
     entropy_loss_coef: 0.01
-    # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
-    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov", or customizable with PolicyLossRegistry
-    loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"
-    # Single global length-unbiased loss denominator Z = global_num_seqs * max_seq_len,
-    # computed + assigned at runtime in FSDPPolicyWorkerBase.ppo_train ONLY when
-    # loss_reduction == "seq_mean_token_sum_norm_global". Declared here (default null) so
-    # the runtime assignment is legal under OmegaConf struct mode; read via
-    # getattr(config, "global_loss_denom", None) in ppo_policy_loss so all other
-    # loss_reduction paths (token_mean / sequence_mean / seq_mean_token_sum_norm) are
-    # byte-identical (the key is never written or read on those paths).
+    policy_loss_type: "regular"
+    loss_reduction: "token_mean"
     global_loss_denom: null
-    grpo_norm_by_std: true # set to false to disable normalization by std in GRPO
-    # RLOO-N: minimum included samples per group for leave-one-out baseline.
-    # Groups below this threshold get advantage=0 for all samples.
+    grpo_norm_by_std: true
     rloo_n_min_group_size: 4
-    # RLOO-N: skip groups where all included samples have the same reward.
-    # Zero-variance groups produce zero RLOO advantage but can still
-    # contribute noisy gradients that push the policy toward entropy collapse.
     rloo_n_filter_zero_reward_groups: true
-    # GAE parameters
     lambd: 1.0
     gamma: 1.0
-    # PPO parameters
     eps_clip_low: 0.2
     eps_clip_high: 0.2
-    # dual clip parameters
     clip_ratio_c: 3.0
-    # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl
     tis_imp_ratio_cap: -1.0
     use_tis: false
-    # Full token-in-token-out rollout assembly (consume Harbor per-turn
-    # prompt_token_ids so the multi-turn MASKED context is assembled from the exact
-    # served ids, no re-tokenization). Resolution precedence (see
-    # generators/utils.py::_tito_full_enabled): (1) env SKYRL_TITO_FULL wins if set;
-    # (2) this explicit flag if non-null (true/false); (3) else AUTO -> defaults to
-    # `use_tis` (TITO-full ON whenever TIS is on, OFF otherwise). null = auto.
-    # Validated flag-on == flag-off byte-identical + policy-invariant on replay
-    # traces; routed_experts stay on the existing aligner (R3 exact-by-id deferred).
     tito_full: null
-    # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
-    # per-token shaping channel (token_level_shaping) + span tags
-    # (response_span_tags). Default false -> the trainer never pulls these from the
-    # GeneratorOutput nor sets them on the TrainingInputBatch, so the flag-off
-    # batch + advantage + loss are byte-identical to today. When true, Stage B
-    # threads the channel as ZEROS (no-op); Stages C/D register the combiner that
-    # fills it. NOTE: the generator-side gate lives in the harbor reward_shaping
-    # block (reward_shaping.enable_token_reward_channel); set BOTH to enable.
     enable_token_reward_channel: false
-    # Stage D (F7 + M4) — think-token budget. DEFAULT-OFF (byte-identical).
-    #  - think_token_weight: per-token weight applied to <think> (SPAN_THINK) tokens
-    #    in the POLICY loss (F7). 1.0 == no-op (byte-identical loss path); set < 1
-    #    (e.g. 0.3) to DOWN-WEIGHT think tokens (NOT zero — some planning is
-    #    load-bearing). Read directly by the worker's training_step; requires
-    #    enable_token_reward_channel=true so response_span_tags are threaded.
-    #  - think_token_cost: magnitude of the mild per-think-token NEGATIVE reward
-    #    (M4), written onto SPAN_THINK tokens in the token_level_shaping channel by
-    #    the generator (harbor reward_shaping mapping) and combined via the
-    #    rloo_n_pbs additive seam. 0.0 == no-op. (e.g. 1e-4/think-token.)
-    #  - think_max_cost_per_turn: |cap| on the total think-cost per assistant turn
-    #    (keeps a single long ramble from dominating).
     think_token_weight: 1.0
     think_token_cost: 0.0
     think_max_cost_per_turn: 0.05
-    # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:
       tau_pos: 1.0
-      tau_neg: 1.05 # default values used in the paper with Qwen3-30B-A3B-Base
+      tau_neg: 1.05
     
-    # value loss parameters
     value_clip: 0.2
     dynamic_sampling:
-      type: null # filter, replace, or null
-      max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
-      min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+      type: null
+      max_sample_batches: 30
+      min_replace_ratio: 0.3
     
-    # clip-cov parameters (only used when policy_loss_type: "clip_cov"
     clip_cov:
-      clip_ratio: 0.0002 # fraction of tokens to clip based on covariance
-      clip_cov_lb: 1.0 # lower bound for covariance clipping
-      clip_cov_ub: 5.0 # upper bound for covariance clipping
+      clip_ratio: 0.0002
+      clip_cov_lb: 1.0
+      clip_cov_ub: 5.0
     
-    # kl-cov parameters (only used when policy_loss_type: "kl_cov")
     kl_cov:
-      kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
+      kl_cov_frac: 0.2
       ppo_kl_coef: 1.0
     
-    # cispo parameters (only used when policy_loss_type: "cispo")
     cispo:
-      cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
-      cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+      cispo_eps_clip_low: 0
+      cispo_eps_clip_high: 5
 
-    # ZClip — reactive grad-norm spike mitigation via EMA z-score.
-    # Port of https://github.com/bluorion-com/ZClip. When enabled, replaces the
-    # static `policy.optimizer_config.max_grad_norm` clip with an adaptive one
-    # whose ceiling drops when grad_norm is an outlier vs recent EMA.
     z_clip:
       enabled: false
-      alpha: 0.97              # EMA smoothing for mean/var of grad_norm
-      z_thresh: 2.5            # z-score threshold for spike detection
-      warmup_steps: 25         # collect grad_norms before EMA initialization
-      mode: "zscore"           # "zscore" or "percentile"
-      clip_option: "adaptive_scaling"   # "adaptive_scaling" or "mean" (only for mode=zscore)
-      clip_factor: 1.0         # multiplier on adaptive threshold (0.5-0.9 = aggressive)
-      skip_update_on_spike: false  # if true, EMA stats are not updated when a spike is detected
+      alpha: 0.97
+      z_thresh: 2.5
+      warmup_steps: 25
+      mode: "zscore"
+      clip_option: "adaptive_scaling"
+      clip_factor: 1.0
+      skip_update_on_spike: false
 
-    # StaleClip — predictive LR damping when an all-stale batch lands in a
-    # concentrated-policy regime. Hypothesis: stale_min=0 provides an on-policy
-    # anchor that keeps IS-corrected gradients bounded; when stale_min > 0 AND
-    # entropy is below threshold, IS correlation amplifies and Adam spikes.
-    # Damping factor:
-    #   scale = 1.0 if rolling_entropy >= entropy_threshold OR stale_min == 0
-    #         = max(min_lr_scale, 1 - alpha * stale_min) otherwise
     stale_clip:
       enabled: false
-      alpha: 0.3               # damping rate per unit of stale_min
-      entropy_threshold: 0.15  # rolling entropy must be below this to engage
-      entropy_window: 10       # rolling-window size for entropy mean
-      min_lr_scale: 0.1        # floor on the damping scale (e.g. 0.1 = 10× cut max)
+      alpha: 0.3
+      entropy_threshold: 0.15
+      entropy_window: 10
+      min_lr_scale: 0.1
 
-  # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
-    # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
-    # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
-    # The larger the max_staleness_steps, the more off-policy the training is, and the more throughput we get.
     max_staleness_steps: 4
 
-    # The number of generation workers to spawn, where each worker works on a group of trajcetories,
-    # being the same prompt repeated `generator.n_samples_per_prompt` times.
-    # It should be >= policy_mini_batch_size to avoid wasted throughput, and <= policy_mini_batch_size * (max_staleness_steps + 1)
-    # since it would be wasted due to capacity control.
-    # The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
-    # Default value is: policy_mini_batch_size * (max_staleness_steps / 2 + 1) = 256 * (4 / 2 + 1) = 768
     num_parallel_generation_workers: 768
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42
-  resume_mode: latest # null/"none", "latest", "from_path"
+  resume_mode: latest
   resume_path: null
-  ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
-  max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
-  ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
-  hf_save_interval: 5  # Save HF format model(s) every `hf_save_interval` steps. (config-hygiene default; a run can override, -1 disables.)
-  # HF Hub auto-upload layout: "latest" (default) uploads each saved step to the repo ROOT
-  # (overwriting previous root weights, so the repo is always from_pretrained-able with zero
-  # per-step bloat); "all" additionally archives each step under checkpoints/step_N/ while still
-  # keeping the newest weights at root.
-  hf_upload_mode: latest  # "latest" | "all"
-  export_path: "${oc.env:HOME}/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
+  ckpt_path: "${oc.env:HOME}/ckpts/"
+  max_ckpts_to_keep: -1
+  ckpt_interval: 5
+  hf_save_interval: 5
+  hf_upload_mode: latest
+  export_path: "${oc.env:HOME}/exports/"
   bf16: true
-  epochs: 1  # Number of passes over the full dataset
-  max_steps: null  # If set, stops training after this many steps (overrides epochs)
-  update_epochs_per_batch: 1  # Number of gradient update passes over each train batch
-  train_batch_size: 1024  # See `utils/utils.py::validate_batch_sizes` for train, mini, and micro batch size constraints.
+  epochs: 1
+  max_steps: null
+  update_epochs_per_batch: 1
+  train_batch_size: 1024
   policy_mini_batch_size: 256
   critic_mini_batch_size: 256
   micro_train_batch_size_per_gpu: 1
@@ -354,84 +226,59 @@ trainer:
   use_sample_packing: true
   eval_batch_size: 1024
   eval_before_train: true
-  eval_interval: 5 # Set to -1 to disable evaluation.
-  # max prompt length in training dataset
+  eval_interval: 5
+  preflight_gate:
+    enabled: false
+    min_reward: 0.25
+    max_reward: 0.75
+    num_trials: 256
+    on_failure: "abort"
   max_prompt_length: 512
   flash_attn: true
-  # --- Stage 2 (FSDP2 CP): attention backend selector -----------------------
-  # attn_backend ∈ {"auto","flash_attention_2","sdpa","flex"}.
-  #   "auto" (default) = today's exact behavior: flash_attention_2 if flash_attn
-  #          else eager (keeps every existing run byte-identical — G1).
-  #   != "auto" overrides the flash_attn bool and forces that backend.
-  # Context parallel (fsdp_config.context_parallel_size > 1) requires sdpa/flex
-  # (flash-attn varlen is rejected under CP — G2).
   attn_backend: "auto"
   disable_fast_tokenizer: false
-  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
-  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
+  target_modules: null
+  exclude_modules: null
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
-  # Whether to commit/sync to WandB after each training step (useful for async training to see real-time updates)
   tracker_commit_each_step: false
   dump_data_batch: false
   dump_eval_results: true
-  # SkyRL logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
   log_level: "INFO"
 
-  # YaRN:
   rope_scaling: null
   rope_theta: null
-  # rope_scaling:
-  #   rope_type: yarn
-  #   factor: 1.0
-  #   original_max_position_embeddings: 32768
 
   step_wise_training: false
 
 generator:
   model_name: ${trainer.policy.model.path}
-  model_dtype: "bfloat16" # should match dtype for inference engine
-  # Timeout multiplier for API requests (used by VerifiersGenerator)
+  model_dtype: "bfloat16"
   timeout_multiplier: 1.0
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
   weight_sync_backend: "nccl"
-  # Fuse gate/up and q/k/v weights before NCCL sync for FP8 inference compatibility.
-  # When true, sets SKYRL_FUSE_WEIGHTS=1 and VLLM_ALLOW_INSECURE_SERIALIZATION=1.
-  # Requires vLLM with FP8 weight sync patches (marianna13/vllm fp8_weight_sync).
   fuse_weights: false
-  # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
   inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1
   inference_engine_data_parallel_size: 1
-  inference_engine_decode_context_parallel_size: 1   # 1 = disabled. vLLM DCP shards the KV cache across dcp ranks during decode; reuses TP GPUs (no extra GPUs); requires tp % dcp == 0 and dcp <= tp/num_kv_heads (GQA via FlashAttention, or MLA); vLLM backend only; not compatible with R3 (enable_return_routed_experts). REMOTE engines (run_engines_locally=false): SkyRL does NOT launch the server — you MUST start the external `vllm serve` with `-dcp <n>`; this value is then carried as client metadata only.
-  # Opt-in: use vLLM's `mp` executor backend (instead of `ray`) for non-colocated
-  # multi-GPU engines. Required for the Qwen3-Next-80B-A3B R3 router-capture path
-  # (enable_return_routed_experts=true), where the vLLM Ray Compiled-DAG deadlocks on the
-  # hybrid arch. Only valid when trainer.placement.colocate_all=false. Default false =>
-  # byte-identical to the ray backend for every existing run.
+  inference_engine_decode_context_parallel_size: 1
   inference_engine_mp_backend: false
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
-  max_input_length: ${trainer.max_prompt_length} # max generator input length used for multi-turn conversations - for single turn set equal to max_prompt_length
-  # VLLM_ENABLE_V1_MULTIPROCESSING=0 for reproducibility
+  max_input_length: ${trainer.max_prompt_length}
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true
   enable_chunked_prefill: true
   max_num_batched_tokens: 8192
-  # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   fully_sharded_loras: false
-  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
-  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
   enable_ray_prometheus_stats: false
-  # Log vLLM engine stats (throughput, KV cache, request counts) every N steps.
-  # Stats are logged to console and wandb. Set to 0 to disable.
   vllm_stats_interval: 1
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
@@ -441,20 +288,15 @@ generator:
   http_endpoint_port: 8000
   max_turns: 1
 
-  # chat template configuration
   chat_template:
-    source: "name"  # "name" or "file"
-    name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
+    source: "name"
+    name_or_path: null
   
-  # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
   chat_template_kwargs: {}
 
-  # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
-  # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}
   
-  override_existing_update_group: "auto" # "auto", "enable", "disable"
-  # sampling params for generation phase
+  override_existing_update_group: "auto"
   sampling_params:
     max_generate_length: 1024
     repetition_penalty: 1.0
@@ -465,17 +307,10 @@ generator:
     logprobs: null
     stop: null
 
-  # whether to use a conversation based format for multi-turn generations
-  # if false, append multi-turn model responses and env observations to the original assistant response
-  # if true, each multi-turn model response and env observations is stored in a separate assistant/user message respectively
   use_conversation_multi_turn: true
 
-  # Used when use_conversation_multi_turn is true, and sampling_params.stop is not null.
-  # If true, append tokenizer.eos_token_id to the end of the generation if the generation ends
-  # with stop_reason "stop" and matched a stop string in sampling_params.stop.
   append_eos_token_after_stop_str_in_multi_turn: true
 
-  # sampling params for evaluation
   eval_sampling_params:
     max_generate_length: ${generator.sampling_params.max_generate_length}
     repetition_penalty: 1.0
@@ -486,69 +321,31 @@ generator:
     logprobs: null
     stop: null
 
-  # number of samples per prompt for evaluation
   eval_n_samples_per_prompt: 1
 
-  # NOTE (sumanthrh): This flag sets the reward to 0 if the `stop_reason` is not `stop`.
-  # This is useful in cases where the LLM generation was truncated or aborted.
-  # Cases where this is useful: Often, we have format rewards for the LLM to follow,
-  # but in cases where the LLM didn't finish the response, we typically don't want to reward it.
-  # This is a general setting for all environments.
-  # TODO (erictang000): Show clear ablations for benefits of this on GSM8K or SQL.
   zero_reward_on_non_stop: false
 
-  # Whether to apply DAPO Overlong Filtering to the loss masks.
-  # For each trajectory that exceeds the max length (i.e., truncated and does not end with an
-  # EOS token), this masks out every token in the loss mask.
   apply_overlong_filtering: false
 
-  # rope parameters, can be optionally different from the trainer , useful in some cases like with thinking models.
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}
 
-# Teacher model configuration for distillation.
-# When teacher.model_path is set, a separate vLLM inference engine is created for the teacher.
-# The teacher engine is used to score student-generated sequences (on-policy distillation)
-# or generate its own completions (off-policy distillation).
 teacher:
-  model_path: null                          # null = no teacher. Set to HF path or local path.
-  top_k_logprobs: 256                       # K for top-K logprobs from teacher
+  model_path: null
+  top_k_logprobs: 256
   num_inference_engines: 1
   inference_engine_tensor_parallel_size: 1
   inference_engine_pipeline_parallel_size: 1
   gpu_memory_utilization: 0.9
   enforce_eager: false
   backend: vllm
-  # Arbitrary vLLM kwargs passed directly to the engine constructor.
-  # Supports quantization, kv_cache_dtype, enable_expert_parallel, max_model_len, etc.
-  # CLI usage: +teacher.engine_init_kwargs.quantization=awq
   engine_init_kwargs: {}
 
 environment:
   env_class: "gsm8k"
-  # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:
-  # skyrl_gym: config/skyrl_gym_config/default.yaml
 
-# K-actor rollout fan-out (fully-async terminal_bench path only).
-# Default OFF: when enabled=false the trainer never constructs the dispatcher
-# or coordinators, and the rollout code path is byte-for-byte identical to the
-# single-process behavior. See examples/terminal_bench/rollout_coordinator.py
-# and notes/ot-agent/RL/architecture/skyrl_harbor_rollout_fanout_design.md.
 rollout:
   fanout:
-    # Master flag. DEFAULT ON: shards rollout orchestration across K coordinator
-    # processes to break the single-event-loop GIL ceiling (validated 2026-06-01,
-    # Jupiter + Perlmutter). Weight sync is always the no-drain / bounded-staleness
-    # path (the coordinator hard-drain that could hang was removed, not gated) — so
-    # there is no unsafe weight-sync mode to select. Set false to fall back to the
-    # legacy single-loop generator (e.g. for an A/B baseline).
     enabled: true
-    # K: number of RolloutCoordinator actor processes. Each gets its own event
-    # loop, TerminalBenchGenerator, QueueOrchestrator/semaphore (n_concurrent//K),
-    # litellm cache, and Daytona client (connection_pool_maxsize//K).
-    # enabled=true + num_coordinators=1 is behavior-identical modulo one RPC hop.
     num_coordinators: 4
-    # CPUs requested per coordinator bundle in the SPREAD PlacementGroup.
-    # Each coordinator is a single-event-loop CPU-bound orchestrator; a small
-    # value (4-8) is plenty and keeps the PG schedulable on busy nodes.
     cpus_per_coordinator: 8

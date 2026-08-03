@@ -1,38 +1,24 @@
-# Single-turn verifiable MATH RL (GRPO) for the DENSE delphi models, on the Iris
-# H100-gang launcher. This is the NON-AGENTIC path (no Harbor/Daytona/terminal_bench):
-# `skyrl_train.entrypoints.main_base` + the skyrl-gym `aime` boxed-answer verifier,
-# reproducing the Delphi #6279 Stage-E math-RLVR recipe (stabilized "fix" HPs).
-#
-# Data: SkyRL-parquet built by `cloud/iris/delphi_math_dataset.py` from allenai/RLVR-MATH
-# (rows: prompt / env_class=aime / reward_model.ground_truth). Pass the prepped parquet
-# via --train_data (data.kind=parquet routes it PAST the terminal_bench task extractor).
-#
-# Chat template: the SFT repo ships NO chat_template, so `policy_chat_template` FORCES
-# delphi_v0 onto the policy tokenizer's cached tokenizer_config.json + chat_template.jinja
-# on EVERY node before training (mirrors sbatch_delphi_math_rl.sh; asserts <|start_think|>).
-#
-# TP GUARD: the dense delphi arch has 42 attention heads, so
-# generator.inference_engine_tensor_parallel_size MUST divide 42 (1, 2, 3, 6, 7, 14, 21, 42)
-# — NEVER 8. model_num_attention_heads=42 arms the config-translation guard.
 
 entrypoint: skyrl_train.entrypoints.main_base
 
-# Force delphi_v0 onto the policy tokenizer cache on every node (launcher-only key,
-# NOT a Hydra override). Repo-relative; resolved against the in-pod repo root (/app).
+context_budget:
+  request_window_tokens: 4096
+  max_new_tokens_per_turn: 3584
+  max_turns: 1
+
 policy_chat_template: chat_templates/delphi_v0.jinja2
 
-# Arms the TP-divides-heads guard in rl_config_translation (launcher-only key).
 model_num_attention_heads: 42
 
 environment:
-  env_class: ifeval  # D2: instruction-following constraint verifier (ground_truth = IFEval JSON spec)
+  env_class: ifeval
 
 trainer:
-  strategy: fsdp2  # dense model; no head-sharding on the training side
+  strategy: fsdp2
   algorithm:
-    advantage_estimator: grpo  # gold parity (rloo_n also group-relative if preferred)
+    advantage_estimator: grpo
     use_kl_loss: false
-    use_entropy_loss: false  # stabilized: the +0.01 entropy bonus drove entropy 0.13->~11.5
+    use_entropy_loss: false
     eps_clip_low: 0.2
     eps_clip_high: 0.2
 
@@ -45,8 +31,6 @@ trainer:
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 2
 
-  max_prompt_length: 512
-  ckpt_interval: 20
   eval_before_train: false
   eval_interval: 0
 
@@ -55,36 +39,25 @@ trainer:
 
   policy:
     optimizer_config:
-      lr: 3.0e-6  # proven-safe (1e-5 is the pending-promote candidate)
-      max_grad_norm: 0.5  # tightened brake
+      lr: 3.0e-6
+      max_grad_norm: 0.5
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true
 
   placement:
-    # DISAGGREGATED (not colocated). colocate_all:true is fatal on a multi-node H100
-    # gang here: the hybrid path SKIPS the per-engine STRICT_PACK placement group
-    # (ray_wrapped_inference_engine.py:375 `if not use_hybrid_engine`; utils.py:220),
-    # so a multi-GPU vLLM engine's TP ranks scatter across two physical nodes and gloo
-    # advertises loopback 127.0.0.1 → cross-node `connectFullMesh Connection refused`,
-    # every engine dies at init before training. colocate_all:false takes the
-    # `not use_hybrid_engine` branch → each TP=2 engine is node-atomic. Split the 4-node
-    # gang 16 policy (2 nodes, FSDP2) + 16 inference (2 nodes, 8×TP2), mirroring the
-    # proven 32GPU_qwen3_coder shape (which only differs by TP=8, illegal for 42 heads).
     colocate_all: false
-    policy_num_nodes: 2          # 2 × 8 = 16 GPUs for the FSDP2 policy
+    policy_num_nodes: 2
     policy_num_gpus_per_node: 8
-    policy_strict_spread_pg: true   # reserve the policy nodes BEFORE engine PGs (anti-starvation)
-    policy_per_gpu_bundles: true    # per-GPU {GPU:1} bundles; reliable device pinning
+    policy_strict_spread_pg: true
+    policy_per_gpu_bundles: true
 
 generator:
   backend: vllm
   model_dtype: bfloat16
 
-  inference_engine_tensor_parallel_size: 2  # MUST divide 42; 1 or 2 for the pilot. NEVER 8.
-  num_inference_engines: 8  # 8 × TP2 = 16 inference GPUs (2 nodes). Set EXPLICITLY: else the
-                            # launcher derives 32//2 = 16 engines (rl_config_translation.py:425),
-                            # which under colocate_all:false demands 32+16 = 48 GPUs and fails placement.
+  inference_engine_tensor_parallel_size: 2
+  num_inference_engines: 8
   n_samples_per_prompt: 8
 
   gpu_memory_utilization: 0.85
@@ -96,38 +69,17 @@ generator:
   async_engine: true
 
   sampling_params:
-    max_generate_length: 3584  # 4096 - 512 prompt
     temperature: 0.7
     top_p: 1.0
-    # NOTE: do NOT set skip_special_tokens here — it is not a SkyRL sampling_params
-    # struct key (ppo_base_config allows only max_generate_length/repetition_penalty/
-    # temperature/top_p/min_p/top_k/logprobs/stop; a hard override struct-rejects at
-    # Hydra parse → driver crash before training). It is also unnecessary: SkyRL is
-    # token-in-token-out — it trains on response_token_ids (the <|start_think|>/<|end_think|>
-    # tokens are preserved by construction), and only uses skip_special_tokens=True for the
-    # string view the aime verifier reads (which extracts \boxed{...}, unaffected). The
-    # delphi template + think tokens are already forced onto the policy tokenizer by the
-    # launcher's apply_policy_chat_template preflight; the eval-context skip_special_tokens
-    # flag does not apply to the RL rollout path.
 
   engine_init_kwargs:
-    max_model_len: 4096  # HARD 4k cap
     custom_chat_template_chat_completion_path: chat_templates/delphi_v0.jinja2
 
 extra_env:
-  # Offline HF so every node reads the warm, template-rewritten node-local cache
-  # (the launcher forwards --prestage-model + --policy-chat-template to the controller).
   HF_HUB_OFFLINE: "1"
-  # ⚠ REQUIRED on cw-rno2a (no-op on cw-us-east-02a): an EXCLUDE pattern that skips IB/IPoIB
-  # + virtual ifaces so NCCL's bootstrap socket AND Ray's raylet/GCS (all ifaces visible under
-  # host_network:true) bind the host ethernet PF carrying the node IP. Omitting it on rno2a
-  # lets both mis-detect → raylets "Failed to establish connection" → the multi-node gang never
-  # forms → silent 0-progress wedge (marin #6940; observed keep-6 idle 3.4h). Value verbatim
-  # from cw-rno2a.yaml:128 / 128GPU_80B_A3B_next_cp1.yaml. An exact enpXsYnpZ pin is fragile
-  # per-node — do NOT carry over cw-us-east-02a's interface.
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
 
 data:
-  kind: parquet  # route --train_data PAST the terminal_bench task extractor (launcher-only)
-  train_data: []  # supplied by --train_data (SkyRL parquet from delphi_math_dataset.py)
+  kind: parquet
+  train_data: []
   val_data: []

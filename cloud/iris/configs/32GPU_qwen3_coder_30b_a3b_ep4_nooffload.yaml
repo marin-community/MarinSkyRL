@@ -1,27 +1,19 @@
 entrypoint: examples.terminal_bench.entrypoints.main_tbench
 
-# ===========================================================================
-# REPLAY-vs-MESH ISOLATION FOLLOW-UP (label: v1ep4 / mesh-iso)
-# Identical to 64GPU_qwen3_coder_30b_a3b.yaml (v0l) EXCEPT the EP mesh:
-#   expert_model_parallel_size 8 -> 4  (policy AND ref)
-#   policy_num_nodes 4 -> 2, ref_num_nodes 4 -> 2  (policy mesh = 16 GPU)
-#   num_inference_engines 4 -> 2       (keep the 1:1 trainer:gen GPU ratio)
-#   max_steps 20 -> 3                  (SHORT measurement run: bank gs1 + a warm fwd)
-# moe_router_replay stays TRUE on both — replay is the variable being isolated.
-# Policy training mesh: fsdp(4) x ep(4) x cp(1) = 16 GPU = 2 nodes x 8  ✓
-# matches the 866390 EP=4/16-GPU reference mesh (which had fwd ~55s, no replay).
-# Total footprint: 2 (policy+ref colocated) + 2 (inference) = 4 nodes / 32 GPU.
-# ===========================================================================
 
 config_groups:
   terminal_bench_config: terminal_bench
+
+context_budget:
+  request_window_tokens: 131072
+  max_new_tokens_per_turn: 16384
+  max_turns: 999999
 
 terminal_bench:
   trials_dir: s3://marin-us-east-02a/iris/rno2a-30b-coder-v1ep4/trace_jobs
 
   harbor:
     name: terminus-2
-    max_episodes: 999999
     enable_summarize: false
     store_all_messages: true
     trajectory_config:
@@ -83,8 +75,6 @@ terminal_bench:
       - ContextLengthExceededError
 
   model_info:
-    max_input_tokens: 130000
-    max_output_tokens: 16384
 
   archiving:
     enabled: false
@@ -124,15 +114,12 @@ trainer:
   micro_forward_batch_size_per_gpu: 4
   micro_train_batch_size_per_gpu: 1
 
-  max_prompt_length: 999999
 
   use_sample_packing: true
 
   eval_interval: 999999
   eval_before_train: false
-  ckpt_interval: 1
   resume_mode: latest
-  hf_save_interval: 5
   hf_hub_repo_id: null
   hf_hub_private: false
   hf_hub_revision: main
@@ -156,8 +143,6 @@ trainer:
       max_grad_norm: 0.9
       optimizer_kwargs:
         foreach: false
-    # Megatron backend geometry (trainer.strategy=megatron). VALIDATED on east18/east19.
-    # 16 training GPUs: TP4 x PP2 x CP1 = 8 model-parallel, DP=2; EP4 over 128 experts.
     megatron_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
@@ -247,16 +232,13 @@ generator:
   enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
-  max_turns: 999999
 
   sampling_params:
-    max_generate_length: 16384
     temperature: 1.2
     top_p: 0.95
     top_k: 20
 
   engine_init_kwargs:
-    max_model_len: 131072
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     disable_custom_all_reduce: true
     enable_return_routed_experts: true
@@ -279,7 +261,6 @@ extra_env:
   SKYRL_POLICY_HOST_RAM_MONITOR: "1"
   SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
-  LD_LIBRARY_PATH: /opt/marin/envs/rl/lib
   NCCL_DEBUG: WARN
   VLLM_ALLOW_ROUTED_EXPERTS_DCP: "1"
   VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"

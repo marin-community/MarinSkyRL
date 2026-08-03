@@ -46,11 +46,14 @@ trials/
 
 # uv lock files
 uv.lock
+!/uv.lock
 
 # temp directory
 /temp/
 
 # build directories
 /_build*
-# gpu-rl prebuilt wheels (fetched at build time, not committed)
+/.git-worktrees/
+# gpu-rl prebuilt wheelhouse (fetched at build time, not committed)
 docker/wheelhouse/*.whl
+docker/wheelhouse/MANIFEST

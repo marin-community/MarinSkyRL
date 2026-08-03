@@ -32,6 +32,7 @@ import torch.distributed as dist
 
 from skyrl_train.distributed.fsdp_utils import apply_ep, create_device_mesh
 from skyrl_train.models.layers.moe import MoE
+from tests.distributed_runtime_constants import GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
 
 
 # Tiny config: num_experts // ep_size = 8 // 2 = 4 (clean).
@@ -235,7 +236,12 @@ def main():
     rank = dist.get_rank()
 
     assert world_size == 4, f"Stage 5 DeepEP gates need 4 ranks (EP=2 x FSDP=2); got {world_size}"
-    device_mesh = create_device_mesh(world_size=world_size, fsdp_size=2, ep_size=2)
+    device_mesh = create_device_mesh(
+        world_size=world_size,
+        fsdp_size=2,
+        timeout_seconds=GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+        ep_size=2,
+    )
 
     for dtype in (torch.bfloat16,):
         if rank == 0:

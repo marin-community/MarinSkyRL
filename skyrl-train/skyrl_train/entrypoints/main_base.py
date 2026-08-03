@@ -30,6 +30,8 @@ import sys
 import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
+from skyrl_train.utils.logging_utils import log_exception_as_text
+from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
 import asyncio
 import multiprocessing as mp
 
@@ -460,20 +462,24 @@ class BasePPOExp:
         return trainer
 
     def run(self):
+        with process_telemetry(TRAINER_ROLE):
+            self._run()
+
+    def _run(self):
         # Force the orchestrator onto CPython's stock asyncio event loop (epoll),
         # NOT uvloop. Ray installs uvloop globally in every worker by default
         # (RAY_USE_UVLOOP defaults True -> default_worker.py:221 try_install_uvloop).
         # libuv's epoll-ctl machinery SIGABRTs this orchestrator under Daytona
         # sandbox-teardown socket churn (uv__epoll_ctl_prep AND uv__io_poll asserts;
-        # present across libuv 1.45-1.49+). Reset the policy HERE -- this run()
-        # method is the common chokepoint EVERY entrypoint funnels through
+        # present across libuv 1.45-1.49+). Reset the policy in this shared
+        # BasePPOExp._run() path, which every training entrypoint funnels through
         # (main_base.skyrl_entrypoint, examples.terminal_bench.main_tbench's
         # TerminalBenchExp(BasePPOExp) which does NOT override run(), etc.) -- and
         # it runs immediately before the asyncio.run() below creates the loop, so
         # both asyncio.run() calls build a stock SelectorEventLoop with no libuv
         # path. Placing it on the per-entrypoint skyrl_entrypoint wrapper is a
         # trap: there are 26+ such functions and terminal_bench uses its own, so
-        # the fix must live on this shared run() method. Orchestrator is
+        # the fix must live on this shared _run() method. Orchestrator is
         # network-RTT-bound (vLLM/Daytona) so uvloop's throughput edge is moot.
         #
         # DEPRECATION NOTE: asyncio.set_event_loop_policy() emits a
@@ -534,23 +540,24 @@ def main(cfg: DictConfig) -> None:
 
     initialize_ray(cfg)
 
-    # Register SIGTERM handler so that cluster preemption / job scheduler
-    # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
-    def _sigterm_handler(signum, frame):
-        logger.warning("Received SIGTERM on head node, shutting down Ray...")
-        ray.shutdown()
-        sys.exit(1)
+    with process_telemetry(DRIVER_ROLE):
+        # Register SIGTERM handler so that cluster preemption / job scheduler
+        # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
+        def _sigterm_handler(signum, frame):
+            logger.warning("Received SIGTERM on head node, shutting down Ray...")
+            ray.shutdown()
+            sys.exit(1)
 
-    signal.signal(signal.SIGTERM, _sigterm_handler)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
 
-    try:
-        ray.get(skyrl_entrypoint.remote(cfg))
-    except Exception as e:
-        logger.opt(exception=True).error("Training failed: " + str(e))
-        raise
-    finally:
-        logger.info("Shutting down Ray on head node...")
-        ray.shutdown()
+        try:
+            ray.get(skyrl_entrypoint.remote(cfg))
+        except Exception as e:
+            log_exception_as_text("Training failed", e)
+            raise
+        finally:
+            logger.info("Shutting down Ray on head node...")
+            ray.shutdown()
 
 
 if __name__ == "__main__":

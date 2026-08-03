@@ -5,6 +5,7 @@ from loguru import logger
 import numpy as np
 import torch
 from torch import distributed as dist
+from torch.distributed.tensor import DeviceMesh
 from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
@@ -16,6 +17,8 @@ DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 
 
 class DistributedStrategy(ABC):
+    device_mesh: DeviceMesh | None = None
+
     @abstractmethod
     def setup_distributed(self):
         pass

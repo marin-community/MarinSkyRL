@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev pytest tests/cpu/utils/test_ppo_utils.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/utils/test_ppo_utils.py
 """
 
 import torch
@@ -20,6 +20,8 @@ from skyrl_train.utils.ppo_utils import (
     register_policy_loss,
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
+    compute_tis_diagnostics,
+    TIS_DIAG_KEYS,
 )
 import numpy as np
 
@@ -542,14 +544,12 @@ def test_policy_loss_registry_specific():
     PolicyLossRegistry.unregister("test_policy_decorator")
 
 
+@pytest.mark.usefixtures("ray_module")
 def test_registry_cross_ray_process():
     """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
     try:
         import ray
         from omegaconf import DictConfig
-
-        if not ray.is_initialized():
-            ray.init()
 
         # Create test functions
         def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
@@ -608,13 +608,11 @@ def test_registry_cross_ray_process():
         AdvantageEstimatorRegistry.reset()
 
 
+@pytest.mark.usefixtures("ray_module")
 def test_registry_named_actor_creation():
     """Test that the registry creates named Ray actors and properly serializes functions."""
     try:
         import ray
-
-        if not ray.is_initialized():
-            ray.init()
 
         def test_func(**kwargs):
             rewards = kwargs["token_level_rewards"]
@@ -628,7 +626,7 @@ def test_registry_named_actor_creation():
         assert retrieved == test_func
 
         # Verify named actor exists and contains function
-        actor = ray.get_actor("advantage_estimator_registry")
+        actor = ray.get_actor(AdvantageEstimatorRegistry._actor_name)
         assert actor is not None
 
         available_in_actor = ray.get(actor.list_available.remote())
@@ -657,6 +655,7 @@ def test_registry_named_actor_creation():
         AdvantageEstimatorRegistry.reset()
 
 
+@pytest.mark.usefixtures("ray_module")
 def test_registry_reset_after_ray_shutdown():
     """
     Test that the registry resets properly after ray is shutdown.
@@ -674,18 +673,18 @@ def test_registry_reset_after_ray_shutdown():
         AdvantageEstimatorRegistry.register("named_actor_test", test_func)
         retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
         assert retrieved == test_func
-        actor = ray.get_actor("advantage_estimator_registry")
+        actor = ray.get_actor(AdvantageEstimatorRegistry._actor_name)
         assert actor is not None
 
     try:
         import ray
 
-        # 1. Initialize ray and register function
-        if not ray.is_initialized():
-            ray.init()
+        # 1. Register a function in the fixture's Ray session
         _register_func_and_verify()
 
-        # 2. Shutdown ray
+        # 2. Force-kill the named actor before shutting down Ray. Waiting for
+        # owner-death cleanup can take Ray's full graceful actor timeout.
+        ray.kill(ray.get_actor(AdvantageEstimatorRegistry._actor_name))
         ray.shutdown()
 
         # 3. Initialize ray, reset registry, and register function
@@ -694,4 +693,76 @@ def test_registry_reset_after_ray_shutdown():
         _register_func_and_verify()
 
     finally:
+        AdvantageEstimatorRegistry.reset()
         ray.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# compute_tis_diagnostics — the shared TIS importance-ratio diagnostics used by
+# both the FSDP (PolicyWorkerBase.training_step) and Megatron
+# (MegatronModelWrapper.forward_backward_mini_batch) backends.
+# ---------------------------------------------------------------------------
+
+
+def test_tis_diagnostics_on_policy_is_exact():
+    """Identical old/rollout logprobs => ratio exactly 1.0, zero abs log-ratio."""
+    lp = torch.tensor([[-0.5, -1.0, -2.0]])
+    mask = torch.ones_like(lp)
+    out = compute_tis_diagnostics(lp, lp.clone(), mask, cap=2.0)
+    assert out == {
+        "tis/imp_ratio_mean": 1.0,
+        "tis/imp_ratio_capped_fraction": 0.0,
+        "tis/log_ratio_abs_mean": 0.0,
+    }
+
+
+def test_tis_diagnostics_hand_computed_masked_means():
+    """Mask-weighted means over a hand-computed case; masked tokens must not count.
+
+    Two valid tokens with ratios 2 and 0.5 (deltas +/-log 2) and one masked token
+    with a huge delta that would dominate every metric if the mask leaked.
+    """
+    log2 = math.log(2.0)
+    old_lp = torch.tensor([[log2, -log2, 100.0]])
+    rollout_lp = torch.tensor([[0.0, 0.0, -100.0]])
+    mask = torch.tensor([[1.0, 1.0, 0.0]])
+    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=1.5)
+    assert out["tis/imp_ratio_mean"] == pytest.approx((2.0 + 0.5) / 2)
+    # Only the ratio-2 token exceeds cap=1.5.
+    assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(0.5)
+    assert out["tis/log_ratio_abs_mean"] == pytest.approx(log2)
+
+
+def test_tis_diagnostics_clamps_ratio_but_not_log_ratio():
+    """delta=60 exponentiates at the +/-20 clamp; the abs log-ratio stays unclamped."""
+    old_lp = torch.tensor([[30.0]])
+    rollout_lp = torch.tensor([[-30.0]])
+    mask = torch.ones_like(old_lp)
+    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
+    assert out["tis/imp_ratio_mean"] == pytest.approx(math.exp(20.0), rel=1e-6)
+    assert out["tis/log_ratio_abs_mean"] == pytest.approx(60.0)
+    assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(1.0)
+
+
+def test_tis_diagnostics_none_rollout_keyset_identical_fallback():
+    """Absent rollout logprobs must still emit the full keyset (all_reduce safety)."""
+    old_lp = torch.tensor([[0.1, 0.2]])
+    mask = torch.ones_like(old_lp)
+    out = compute_tis_diagnostics(old_lp, None, mask, cap=2.0)
+    assert tuple(out.keys()) == TIS_DIAG_KEYS
+    assert out == {
+        "tis/imp_ratio_mean": 1.0,
+        "tis/imp_ratio_capped_fraction": 0.0,
+        "tis/log_ratio_abs_mean": 0.0,
+    }
+
+
+def test_tis_diagnostics_all_masked_batch_emits_zeros_not_nan():
+    """A fully-masked micro-batch divides by the clamped denom, never NaN."""
+    old_lp = torch.tensor([[1.0, 2.0]])
+    rollout_lp = torch.tensor([[0.0, 0.0]])
+    mask = torch.zeros_like(old_lp)
+    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
+    assert out["tis/imp_ratio_mean"] == 0.0
+    assert out["tis/imp_ratio_capped_fraction"] == 0.0
+    assert out["tis/log_ratio_abs_mean"] == 0.0

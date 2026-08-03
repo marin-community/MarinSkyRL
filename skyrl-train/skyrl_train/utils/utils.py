@@ -17,13 +17,15 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
-    DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
-    get_worker_nccl_timeout_s,
 )
+from .logging_utils import format_exception_text
+from .nccl_environment import worker_nccl_environment
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
@@ -1051,6 +1053,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # edge is moot. See feedback_uvloop_libuv_019_pin.
     env_vars["RAY_USE_UVLOOP"] = "0"
 
+    # Ray's job runtime environment is the explicit contract for worker-wide
+    # settings. Forward NUMA placement when the launcher opts in so the early
+    # worker hook and actor constructors observe the same value as the driver.
+    if NUMA_AFFINITY_ENV in os.environ:
+        env_vars[NUMA_AFFINITY_ENV] = os.environ[NUMA_AFFINITY_ENV]
+
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #
     # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
@@ -1077,75 +1085,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # boot in case import ordering races the runtime-env injection.
     env_vars["UV_USE_IO_URING"] = "0"
 
-    # ---------------------------------------------------------------------
-    # NCCL flight-recorder + finite-timeout instrumentation (Option A diag).
-    #
-    # The 80B R3 router-replay run (job 673119, EP=8xFSDP=6, 48-GPU policy)
-    # HARD-deadlocked at the first policy_train backward micro-iteration on an
-    # EP all-to-all / router-replay-recompute MoE-backward collective and spun
-    # ~115 min with NO watchdog teardown. Root cause of the *silent* spin:
-    # without TORCH_NCCL_ASYNC_ERROR_HANDLING the NCCL watchdog never tears the
-    # process down on a stuck collective, and with no flight recorder there is
-    # no per-rank stuck-collective trace.
-    #
-    # These vars (1) enable the torch NCCL flight recorder so the next hang
-    # dumps the exact stuck collective name + ranks per worker, and (2) make
-    # the watchdog actually abort + dump on timeout. The *finite* timeout
-    # itself is plumbed below via SKYRL_WORKER_NCCL_TIMEOUT_IN_S, which is read
-    # by init_process_group in worker.py (and the EP/FSDP sub-meshes created by
-    # init_device_mesh inherit the default PG's timeout). We raise it to 20 min
-    # so a genuinely-stuck EP collective aborts with a flight-recorder dump
-    # instead of spinning silently for hours.
-    #
-    # These are propagated to EVERY Ray worker (policy/ref/inference) via the
-    # ray runtime env, the same path as RAY_USE_UVLOOP above. Pure diagnostic
-    # overhead; the model/training config is unchanged so the trace localizes
-    # the SAME deadlock. (NCCL_DEBUG / NCCL_DEBUG_SUBSYS are forced to INFO AFTER
-    # the launcher-env forwarding loop below -- see the override there -- because
-    # the OT-Agent launcher exports NCCL_DEBUG=WARN, which the forwarding loop
-    # would otherwise copy in and clobber an INFO set here.)
-    #
-    # Flight-recorder buffer size: torch 2.9 renamed TORCH_NCCL_TRACE_BUFFER_SIZE
-    # -> TORCH_FR_BUFFER_SIZE (old name still honored as a deprecated alias). Set
-    # both so the recorder is enabled regardless of the torch version in the SIF.
-    env_vars["TORCH_FR_BUFFER_SIZE"] = "20000"
-    env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "20000"
-    env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
-    env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-    # Flight-recorder dump-on-timeout target. This MUST resolve to a path that is
-    # WRITABLE inside the worker process (per-pod on CoreWeave; per-node scratch on
-    # Jupiter). It was previously a hardcoded Jupiter ABSOLUTE path
-    # (/e/data1/.../nccl_trace/673_relaunch_rank), which on the CoreWeave pods does
-    # NOT exist -> FlightRecorder.cpp:21 "Error opening file for writing Flight
-    # Recorder debug info" on EVERY rank => the next-repro pickle was never written
-    # (2026-06-28 MoE NCCL hang: both arms wedged, zero FR dump). Now derive it from
-    # the launcher/yaml env (the iris configs set TORCH_NCCL_DEBUG_INFO_TEMP_FILE /
-    # TORCH_FR_DUMP_TEMP_FILE in extra_env) and DEFAULT to an in-pod /tmp dir that is
-    # writable everywhere. torch 2.9 renamed the cvar TORCH_NCCL_DEBUG_INFO_TEMP_FILE
-    # -> TORCH_FR_DUMP_TEMP_FILE (old name deprecated-but-honored); set BOTH so the
-    # dump lands regardless of the torch version baked in the image.
-    _fr_dump_path = (
-        os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
-        or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
-        or "/tmp/nccl_fr_rank"
-    )
-    env_vars["TORCH_FR_DUMP_TEMP_FILE"] = _fr_dump_path
-    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = _fr_dump_path
-    # Finite NCCL collective timeout, forwarded to the Ray workers. Resolved via
-    # the SINGLE canonical accessor (skyrl_train.utils.constants.
-    # get_worker_nccl_timeout_s: env override, else DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
-    # = 1800). Read back by constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
-    # torch.distributed.init_process_group(timeout=...) in worker.py; the EP / FSDP
-    # device-mesh sub-groups inherit this default-PG timeout. Raised (was constants
-    # default 600 / here a 1200 floor) to 1800 so a stuck EP all-to-all or a slow
-    # 80B first-step forward / rank-0 full-state-dict materialize aborts (with a
-    # flight recorder dump) rather than SIGABRTing on the old watchdog. A config
-    # that sets a larger value (extra_env) gets it — the env var is the override.
-    try:
-        _cfg_nccl_timeout = get_worker_nccl_timeout_s()
-    except (TypeError, ValueError):
-        _cfg_nccl_timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
-    env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(_cfg_nccl_timeout)
+    env_vars.update(worker_nccl_environment())
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
@@ -1249,9 +1189,17 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # actually reach the policy/vLLM workers. Pure passthrough: a no-op unless
     # the var is set in the launcher environment, so the production/default path
     # is unchanged.
+    #
+    # GLOO_SOCKET_IFNAME is deliberately NOT in this list. runtime_env is
+    # job-level, so it pushes one value to every node, and gloo reads the value as
+    # a literal interface name with no `^exclude` form. NIC names are not uniform
+    # across a gang: job 20260729-102429-52af30 broadcast the head's `enp90s0np0`
+    # to a node naming its NIC `enp90s0f0np0` and megatron's gloo group creation
+    # there died with `Unable to find address for: enp90s0np0`. Set it per node
+    # instead (the iris controller derives it from each pod's own IP before that
+    # node's `ray start`, which the node's Ray workers inherit).
     for _net_env in (
         "NCCL_SOCKET_IFNAME",
-        "GLOO_SOCKET_IFNAME",
         "NCCL_IB_HCA",
         "NCCL_IB_DISABLE",
         "NCCL_NET",
@@ -1299,102 +1247,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     return env_vars
 
 
-def _force_stock_asyncio_in_worker() -> None:
-    """Ray ``worker_process_setup_hook``: force CPython stock asyncio in EVERY worker.
-
-    Runs ONCE at the very start of every Ray worker process (before any task/actor
-    is dispatched and before the C++ CoreWorker builds an actor's
-    concurrency-group event loop), so it is the earliest possible point to pin the
-    event-loop policy in the worker process.
-
-    WHY THIS EXISTS (the gap the two prior fixes missed):
-      * ``BasePPOExp.run()`` (main_base.py) resets the policy, but ONLY in the
-        driver/orchestrator process -- not in Ray actor processes.
-      * ``RAY_USE_UVLOOP=0`` in ``prepare_runtime_environment`` is supposed to make
-        Ray's ``try_install_uvloop`` a no-op, and the per-actor reset in
-        ``RolloutCoordinator.__init__`` is supposed to flip the policy before the
-        loop is built -- but BOTH were empirically INSUFFICIENT: job 927538 still
-        SIGABRT'd in a ``RolloutCoordinator`` under uvloop after ~85 min, with the
-        loop created by the C++
-        ``CoreWorker.initialize_eventloops_for_actor_concurrency_group`` (the
-        backtrace is ``uv__epoll_ctl_prep -> uvloop Loop._run -> run_forever ->
-        CoreWorker...concurrency_group -> Fatal Python error: Aborted``). The async
-        actor's concurrency-group loop is created by the CoreWorker independently of
-        ``__init__`` ordering and was NOT governed by the env var in this Ray build
-        (2.51.1). A ``worker_process_setup_hook`` runs strictly before any of that,
-        so resetting the policy here makes EVERY worker's loop a stock
-        ``SelectorEventLoop`` (epoll, no libuv) -- the one place that reliably
-        covers the actor concurrency-group loop.
-
-    This is the same idiom as the driver fix (``set_event_loop_policy`` ->
-    ``DefaultEventLoopPolicy``); it is process-global and idempotent. Actors are
-    network-RTT-bound (vLLM/Daytona HTTP), so uvloop's throughput edge is moot.
-
-    NOT ENOUGH ON ITS OWN (job 930208, the SSL re-abort): setting only the
-    POLICY left a different uvloop path live. 930208 SIGABRT'd in a
-    RolloutCoordinator at ``uvloop/sslproto.pyx:517
-    SSLProtocol._on_handshake_complete`` -- the litellm->Daytona HTTPS handshake
-    running on a uvloop.Loop(). ``uvloop.new_event_loop()`` builds ``uvloop.Loop()``
-    DIRECTLY and ignores the asyncio policy, so Ray's C++ CoreWorker (or
-    aiohttp) can still stand up a uvloop loop after this policy reset. We
-    therefore ALSO (1) export ``UV_USE_IO_URING=0`` into the worker env before
-    any libuv init (libuv 1.48.0 reads it via getenv at first use of
-    uv__use_io_uring() and caches it -> the buggy io_uring epoll-ctl path is
-    never armed; fixed-for-real in libuv 1.49.0), and (2) NEUTRALIZE uvloop
-    in-process so ``uvloop.install`` / ``uvloop.new_event_loop`` /
-    ``uvloop.EventLoopPolicy`` can no longer produce a uvloop loop -- they fall
-    back to stock asyncio. (1) keeps uvloop working on plain epoll if some loop
-    survives; (2) makes sure none does. Belt-and-suspenders covering the SSL
-    path that the bare policy reset missed.
-    """
-    import os
-
-    # (1) Kill the buggy libuv 1.48.0 io_uring epoll-ctl path FIRST, before any
-    # import of uvloop/libuv in this worker triggers uv__use_io_uring(). This is
-    # the same value set in the Ray runtime_env env_vars (prepare_runtime_environment);
-    # re-setting it here guards against any import-ordering race where libuv is
-    # touched before the runtime-env injection lands.
-    os.environ["UV_USE_IO_URING"] = "0"
-
-    import asyncio
-
-    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-
-    # (2) Neutralize uvloop in-process so nothing (Ray C++ CoreWorker, litellm,
-    # aiohttp) can construct a uvloop.Loop() that runs the SSL handshake on
-    # libuv. Guarded: if uvloop is not importable, there is nothing to do.
-    # Idempotent: re-aliasing to the stock equivalents is a no-op on re-entry.
-    try:
-        import uvloop  # noqa: F401
-    except Exception:
-        return
-
-    def _stock_new_event_loop():
-        # Stock asyncio loop (SelectorEventLoop on POSIX) -- never uvloop.Loop().
-        return asyncio.SelectorEventLoop()
-
-    def _stock_install():
-        # uvloop.install() normally sets uvloop's policy; force stock instead.
-        asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-
-    try:
-        uvloop.new_event_loop = _stock_new_event_loop  # type: ignore[assignment]
-        uvloop.install = _stock_install  # type: ignore[assignment]
-        # Anything that does asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-        # (e.g. ray aiohttp worker, or older code paths) now installs the stock
-        # policy instead of uvloop's.
-        uvloop.EventLoopPolicy = asyncio.DefaultEventLoopPolicy  # type: ignore[assignment]
-        if hasattr(uvloop, "Loop"):
-            # Constructing uvloop.Loop() directly (the lowest-level escape hatch)
-            # now yields a stock SelectorEventLoop.
-            uvloop.Loop = asyncio.SelectorEventLoop  # type: ignore[assignment]
-    except Exception:
-        # Best-effort: the policy reset + UV_USE_IO_URING=0 already cover the
-        # common paths; do not let an attribute-shape change in uvloop crash the
-        # worker boot hook.
-        pass
-
-
 def configure_ray_worker_logging() -> None:
     """
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
@@ -1426,7 +1278,10 @@ def configure_ray_worker_logging() -> None:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+            message = record.getMessage()
+            if record.exc_info is not None and record.exc_info[1] is not None:
+                message = f"{message}\n{format_exception_text(record.exc_info[1])}"
+            logger.opt(depth=6).log(level, message)
 
     logging.root.handlers = [_InterceptHandler()]
     level = getattr(logging, level_name, logging.INFO)
@@ -1446,16 +1301,16 @@ def initialize_ray(cfg: DictConfig):
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,
-    # BEFORE the C++ CoreWorker builds an async actor's concurrency-group event loop.
-    # It forces CPython stock asyncio (no uvloop/libuv) in EVERY worker -- the only
-    # reliable place to cover the RolloutCoordinator concurrency-group loop that
-    # SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor __init__ reset.
+    # BEFORE the C++ CoreWorker builds actor threads. It installs the inherited
+    # host-memory policy and forces CPython stock asyncio (no uvloop/libuv) in every
+    # worker -- the only reliable place to cover concurrency-group loops that are
+    # created before an actor constructor can reset their event-loop policy.
     # Referenced by fully-qualified name string (importable in every worker via the
     # editable skyrl_train install) so Ray does not have to cloudpickle it.
     ray.init(
         runtime_env={
             "env_vars": env_vars,
-            "worker_process_setup_hook": "skyrl_train.utils.utils._force_stock_asyncio_in_worker",
+            "worker_process_setup_hook": "skyrl_train.worker_setup.configure_worker_process",
         }
     )
 
@@ -1533,14 +1388,11 @@ def torch_dtype_to_str(dtype: torch.dtype) -> str:
 
 
 def str_to_torch_dtype(dtype: str) -> torch.dtype:
-    if dtype == "bfloat16":
-        return torch.bfloat16
-    elif dtype == "float16":
-        return torch.float16
-    elif dtype == "float32":
-        return torch.float32
-    else:
-        return torch.dtype(dtype)
+    name = dtype.removeprefix("torch.")
+    value = getattr(torch, name, None)
+    if not isinstance(value, torch.dtype):
+        raise ValueError(f"unsupported torch dtype: {dtype!r}")
+    return value
 
 
 def format_gib(mem_bytes: int) -> str:

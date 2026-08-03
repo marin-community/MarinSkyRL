@@ -27,39 +27,16 @@ from skyrl_train.distributed.cp_utils import (
     cp_load_balance_indices,
 )
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
+from skyrl_train.models.grug_moe import (
+    GRUG_MOE_MODEL_TYPE,
+    GRUG_SUPPORTED_ATTENTION_BACKENDS,
+    validate_grug_training_strategy,
+)
+from skyrl_train.utils.flash_attention import (
+    flash_pad_input,
+    flash_unpad_input,
+)
 from packaging.version import Version
-
-# --- Stage 2 (FSDP2 CP): guarded flash-attn import ---------------------------
-# The CP path runs through SDPA ring attention, not flash-attn varlen, so the
-# environment that loads the model need NOT have flash-attn installed. Previously
-# `from flash_attn.bert_padding import pad_input, unpad_input` was an
-# unconditional module-level import that broke `import model_wrapper` in any
-# env without flash-attn. We make it lazy: try the import; if it fails, bind
-# `pad_input`/`unpad_input` to shims that raise ONLY if actually called (every
-# call site is gated on `attn_implementation == "flash_attention_2"` or
-# `use_sample_packing`, both of which are off on the sdpa/CP path). `_HAS_FLASH`
-# records availability for tests / diagnostics.
-try:
-    from flash_attn.bert_padding import pad_input, unpad_input  # noqa: F401
-
-    _HAS_FLASH = True
-except ImportError:  # flash-attn not installed (e.g. the CP/sdpa-only env)
-    _HAS_FLASH = False
-
-    def _flash_missing(*args, **kwargs):
-        raise ImportError(
-            "flash_attn is not installed but a flash-attn-only code path "
-            "(sample packing / pad_input / unpad_input) was invoked. Install "
-            "flash-attn, or use attn_backend='sdpa'/'flex' with "
-            "use_sample_packing=false (the CP path)."
-        )
-
-    def pad_input(*args, **kwargs):  # noqa: F811
-        return _flash_missing(*args, **kwargs)
-
-    def unpad_input(*args, **kwargs):  # noqa: F811
-        return _flash_missing(*args, **kwargs)
-
 
 # Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now
 # lives in skyrl_train.utils.hf_load_retry (dependency-light) so the Megatron
@@ -107,6 +84,40 @@ def resolve_attn_implementation(
             "supported under context parallel (G2)."
         )
     return impl
+
+
+def validate_grug_training_options(
+    *,
+    model_type: str | None,
+    attn_implementation: str,
+    use_sample_packing: bool,
+    lora_rank: int,
+    load_in_4bit: bool,
+    sequence_parallel_size: int,
+    context_parallel_size: int,
+    moe_router_replay: bool,
+    moe_grouped_gemm: bool,
+    use_grouped_mm: bool,
+    use_liger_kernel: bool,
+) -> None:
+    """Validate the deliberately narrow supported Grug training surface."""
+
+    if model_type != GRUG_MOE_MODEL_TYPE:
+        return
+    unsupported = {
+        "attention backend": attn_implementation not in GRUG_SUPPORTED_ATTENTION_BACKENDS,
+        "sample packing": use_sample_packing,
+        "LoRA": lora_rank > 0,
+        "4-bit loading": load_in_4bit,
+        "sequence parallelism": sequence_parallel_size > 1,
+        "context parallelism": context_parallel_size > 1,
+        "router replay/R3": moe_router_replay,
+        "grouped MoE": moe_grouped_gemm or use_grouped_mm,
+        "Liger kernels": use_liger_kernel,
+    }
+    enabled = [name for name, is_enabled in unsupported.items() if is_enabled]
+    if enabled:
+        raise ValueError("Grug FSDP2 training does not support: " + ", ".join(enabled))
 
 
 def _cp_mask_dict_supported(model) -> bool:
@@ -368,6 +379,7 @@ class HFModelWrapper(nn.Module):
         context_parallel_size: int = 1,
         cp_mesh=None,
         cp_rotate_method: str = "allgather",
+        training_strategy: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -399,6 +411,23 @@ class HFModelWrapper(nn.Module):
             )
 
         if isinstance(pretrain_or_model, str):
+            local_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            model_type = getattr(local_config, "model_type", None)
+            validate_grug_training_strategy(model_type, training_strategy)
+            validate_grug_training_options(
+                model_type=model_type,
+                attn_implementation=self.attn_implementation,
+                use_sample_packing=use_sample_packing,
+                lora_rank=lora_rank,
+                load_in_4bit=load_in_4bit,
+                sequence_parallel_size=sequence_parallel_size,
+                context_parallel_size=context_parallel_size,
+                moe_router_replay=moe_router_replay,
+                moe_grouped_gemm=moe_grouped_gemm,
+                use_grouped_mm=use_grouped_mm,
+                use_liger_kernel=use_liger_kernel,
+            )
+
             # Qwen3-Next GatedDeltaNet kernel routing (Stage 7/8): when the fla
             # overlay is mounted, the broken fla-0.5.0 wheel would crash the
             # qwen3_next modeling import — mask fla off BEFORE from_pretrained so
@@ -741,10 +770,12 @@ class HFModelWrapper(nn.Module):
                 # max_seqlen); >= 2.7 adds a 5th `seqused`. We only consume the
                 # first two, so star the tail to stay version-agnostic (the SIF
                 # ships flash_attn 2.6.3 -> 4-tuple).
-                sequences_fwd, nnz_indices, *_ = unpad_input(sequences.unsqueeze(-1), attention_mask=attention_mask)
+                sequences_fwd, nnz_indices, *_ = flash_unpad_input(
+                    sequences.unsqueeze(-1), attention_mask=attention_mask
+                )
                 # (nnz, 1) -> (1, nnz)
                 sequences_fwd = sequences_fwd.transpose(0, 1)
-                position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
+                position_ids_fwd, *_ = flash_unpad_input(position_ids.unsqueeze(-1), attention_mask)
                 # (nnz, 1) -> (1, nnz)
                 position_ids_fwd = position_ids_fwd.transpose(0, 1)
                 attention_mask_fwd = None  # no attention mask with FA 2
@@ -1086,7 +1117,7 @@ class HFModelWrapper(nn.Module):
             # add padding back - postprocess logprobs to be compatible with original tensor
             batch_size, seqlen = attention_mask.shape
             # (1, nnz-1) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
-            log_probs = pad_input(
+            log_probs = flash_pad_input(
                 log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
             ).squeeze(-1)
 
@@ -1127,7 +1158,7 @@ class HFModelWrapper(nn.Module):
                     entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
                 )  # shape can be (1, nnz) - with packing or (B,S) - without packing
             if self.use_sample_packing:
-                entropy_BS = pad_input(
+                entropy_BS = flash_pad_input(
                     entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
                 ).squeeze(-1)  # (1, nnz) -> (B, S)
 
@@ -1443,10 +1474,12 @@ def _get_critic_model(
                 with torch.no_grad():
                     # remove padding. `unpad_input` expects 3 dimensional tensor
                     # version-agnostic unpack (flash_attn 2.6 -> 4-tuple, 2.7+ -> 5-tuple)
-                    input_ids_fwd, nnz_indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask=attention_mask)
+                    input_ids_fwd, nnz_indices, *_ = flash_unpad_input(
+                        input_ids.unsqueeze(-1), attention_mask=attention_mask
+                    )
                     # (nnz, 1) -> (1, nnz)
                     input_ids_fwd = input_ids_fwd.transpose(0, 1)
-                    position_ids_fwd, *_ = unpad_input(position_ids.unsqueeze(-1), attention_mask=attention_mask)
+                    position_ids_fwd, *_ = flash_unpad_input(position_ids.unsqueeze(-1), attention_mask=attention_mask)
                     # (nnz, 1) -> (1, nnz)
                     position_ids_fwd = position_ids_fwd.transpose(0, 1)
                     # don't use attention mask with FA2
@@ -1582,7 +1615,9 @@ def _get_critic_model(
                 # add padding back - postprocess logits to be compatible with original tensors
                 batch_size, seqlen = attention_mask.shape
                 # (1, nnz, 1) -> (nnz, 1) -> (batch_size, seqlen, 1)
-                values_BSH = pad_input(values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen)
+                values_BSH = flash_pad_input(
+                    values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                )
 
             # Stage 4: strip the CP right-pad so values return to [B, S] before the
             # :-1 trim and action slice land on the real response tokens (no-op cp=1).

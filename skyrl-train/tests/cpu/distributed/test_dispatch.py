@@ -14,6 +14,9 @@ from ray import ObjectRef
 import pytest
 
 
+pytestmark = pytest.mark.usefixtures("ray_module")
+
+
 @ray.remote
 class RayActor:
     def __init__(self, rank: int, dp_rank: int):

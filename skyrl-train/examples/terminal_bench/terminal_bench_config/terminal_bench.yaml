@@ -1,10 +1,4 @@
-# Default terminal bench config.
-# All fields are overridden via CLI (+terminal_bench_config.harbor.name=... etc.)
-# This file provides sane defaults so Hydra doesn't error on missing keys.
 
-# PRM (Process Reward Model) - mid-trial thrashing detection
-# Set prm.name to a registered PRM to enable (e.g., "thrashing_detector").
-# When null/empty, no PRM is used and no turn_callback is injected.
 prm:
   name: null
   window_size: 6
@@ -12,8 +6,6 @@ prm:
   min_turns: 10
   check_interval: 3
 
-# Post-training trace upload to HuggingFace
-# When enabled, the OT-Agent launcher uploads Harbor traces after training completes.
 trace_upload:
   enabled: false
   repo_org: DCAgent

@@ -4,6 +4,7 @@ Unit tests for cloud storage I/O utilities.
 
 import os
 import tempfile
+from pathlib import Path
 import pytest
 from unittest.mock import patch, Mock
 import torch
@@ -378,6 +379,27 @@ class TestContextManagers:
             with local_read_dir(non_existent_path):
                 pass
 
+    @patch("skyrl_train.utils.io.io._get_filesystem")
+    def test_local_read_dir_cloud_directory_preserves_root_contents(self, mock_get_filesystem):
+        """Cloud directory reads expose checkpoint metadata at the returned directory root."""
+
+        class DirectoryFilesystem:
+            def _strip_protocol(self, path):
+                # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
+                return path.removeprefix("s3://").rstrip("/")
+
+            def get(self, source, destination, recursive):
+                destination_root = Path(destination)
+                if not source.endswith("/"):
+                    destination_root /= Path(source).name
+                destination_root.mkdir(parents=True, exist_ok=True)
+                (destination_root / ".metadata").write_text("checkpoint metadata")
+
+        mock_get_filesystem.return_value = DirectoryFilesystem()
+
+        with local_read_dir("s3://bucket/checkpoints/global_step_12/policy") as read_dir:
+            assert (Path(read_dir) / ".metadata").is_file()
+
 
 class TestUploadDownload:
     """Test upload and download directory functions."""
@@ -386,6 +408,33 @@ class TestUploadDownload:
         """Test that upload_directory validates destination is a cloud path."""
         with pytest.raises(ValueError, match="Destination must be a cloud path"):
             upload_directory("/local/src", "/local/dst")
+
+    @patch("skyrl_train.utils.io.io._get_filesystem")
+    def test_upload_directory_preserves_destination_contents(self, mock_get_filesystem):
+        """Cloud directory uploads land at the destination root even when the prefix already exists."""
+
+        class DirectoryFilesystem:
+            def __init__(self):
+                self.destination_roots = []
+
+            def _strip_protocol(self, path):
+                # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
+                return path.removeprefix("s3://").rstrip("/")
+
+            def put(self, source, destination, recursive):
+                destination_root = destination
+                if not source.endswith("/"):
+                    destination_root = f"{destination}/{Path(source).name}"
+                self.destination_roots.append(destination_root)
+
+        filesystem = DirectoryFilesystem()
+        mock_get_filesystem.return_value = filesystem
+
+        with tempfile.TemporaryDirectory() as source_dir:
+            (Path(source_dir) / ".metadata").write_text("checkpoint metadata")
+            upload_directory(source_dir, "s3://bucket/checkpoints/global_step_12/policy")
+
+        assert filesystem.destination_roots == ["bucket/checkpoints/global_step_12/policy"]
 
     def test_download_directory_validates_cloud_path(self):
         """Test that download_directory validates source is a cloud path."""

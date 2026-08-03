@@ -1,5 +1,15 @@
 # utility functions used for CPU tests
 
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import types
+from contextlib import contextmanager
+from datetime import timedelta
+from unittest.mock import patch
+
+import torch.distributed as dist
 from skyrl_train.config.utils import get_default_config
 from omegaconf import OmegaConf
 
@@ -44,3 +54,63 @@ def example_dummy_config():
     OmegaConf.update(cfg, "generator", generator_overrides)
 
     return cfg
+
+
+@contextmanager
+def gloo_process_group(rank: int, world_size: int, port: int, *, timeout_seconds: int | None = None):
+    """Initialize and reliably tear down a local Gloo process group."""
+    rendezvous_env = {
+        "MASTER_ADDR": "127.0.0.1",
+        "MASTER_PORT": str(port),
+        "RANK": str(rank),
+        "WORLD_SIZE": str(world_size),
+    }
+    with patch.dict(os.environ, rendezvous_env):
+        kwargs = {"timeout": timedelta(seconds=timeout_seconds)} if timeout_seconds is not None else {}
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size, **kwargs)
+        try:
+            yield
+        finally:
+            dist.barrier()
+            dist.destroy_process_group()
+
+
+def stub_megatron_modules() -> None:
+    """Install stub `megatron` submodules when megatron is not installed.
+
+    Several skyrl_train megatron modules import `megatron.core` names at module
+    load, but the functions the CPU tests exercise never call into them. The CPU
+    CI environment has no megatron, so the stubs let those modules import. No-op
+    when the real megatron is importable, so a real-megatron env is untouched.
+    Idempotent: missing attributes are added to already-installed stubs.
+    """
+    try:
+        if importlib.util.find_spec("megatron") is not None:
+            return
+    except ValueError:
+        # A spec-less stub from an earlier call/test is already installed.
+        pass
+
+    stub_attrs = {
+        "megatron": {},
+        "megatron.core": {},
+        "megatron.core.parallel_state": {},
+        "megatron.core.pipeline_parallel": {"get_forward_backward_func": lambda: None},
+        "megatron.core.distributed": {
+            "DistributedDataParallel": type("DistributedDataParallel", (), {}),
+            "finalize_model_grads": lambda *args, **kwargs: None,
+        },
+        "megatron.core.transformer": {},
+        "megatron.core.transformer.module": {"Float16Module": type("Float16Module", (), {})},
+        "megatron.core.optimizer": {"ChainedOptimizer": type("ChainedOptimizer", (), {})},
+        "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},
+        "megatron.core.packed_seq_params": {"PackedSeqParams": type("PackedSeqParams", (), {})},
+    }
+    for name, members in stub_attrs.items():
+        module = sys.modules.setdefault(name, types.ModuleType(name))
+        # Give stubs a spec so later find_spec("megatron") calls see a normal
+        # module instead of raising ValueError on a spec-less one.
+        if getattr(module, "__spec__", None) is None:
+            module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        for attr, value in members.items():
+            setattr(module, attr, value)

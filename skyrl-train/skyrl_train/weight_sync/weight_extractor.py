@@ -5,7 +5,41 @@ from typing import Iterator
 
 import torch
 
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, is_grug_router_bias
+
 from .base import WeightChunk
+
+
+def weight_sync_dtype(model_type: str, name: str, default: torch.dtype) -> torch.dtype:
+    """Return the wire dtype for one canonical HF state entry."""
+
+    if is_grug_router_bias(model_type, name):
+        return torch.float32
+    return default
+
+
+def prepare_weight_sync_tensor(
+    model_type: str,
+    name: str,
+    tensor: torch.Tensor,
+    target_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Cast an extracted tensor and stage replicated CUDA-only state."""
+
+    if is_grug_router_bias(model_type, name):
+        return tensor.to(
+            device=torch.cuda.current_device(),
+            dtype=target_dtype,
+            non_blocking=True,
+        )
+    return tensor.to(target_dtype)
+
+
+def validate_weight_sync_mode(model_type: str, *, fuse_weights: bool) -> None:
+    """Reject transport modes that cannot preserve a model's state contract."""
+
+    if model_type == GRUG_MOE_MODEL_TYPE and fuse_weights:
+        raise ValueError("Grug FSDP2 weight sync does not support fused weights")
 
 
 class WeightExtractor(ABC):

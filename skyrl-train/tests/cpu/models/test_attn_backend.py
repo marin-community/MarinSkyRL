@@ -1,8 +1,7 @@
 """Stage 2 (FSDP2 CP) CPU tests for the configurable attention backend.
 
-Run (avoiding the conftest session-autouse ray_init() hang on login nodes):
-    python -m pytest -p no:cacheprovider --confcutdir tests/cpu/models \
-        tests/cpu/models/test_attn_backend.py
+Run from `skyrl-train/`:
+    uv run --frozen pytest tests/cpu/models/test_attn_backend.py
 
 Covers the three Stage-2 invariants:
   1. attn_backend="auto" resolves EXACTLY as the pre-Stage-2 logic (G1).
@@ -17,6 +16,13 @@ import importlib
 import sys
 
 import pytest
+
+
+FLASH_IMPORT_MODULES = (
+    "skyrl_train.model_wrapper",
+    "skyrl_train.models.grug_moe",
+    "skyrl_train.utils.flash_attention",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,37 +75,28 @@ def test_import_succeeds_with_flash_absent(monkeypatch):
             raise ImportError("simulated: flash_attn not installed")
         return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    # Drop any cached copy so the module body re-executes under the blocked import.
-    for mod in list(sys.modules):
-        if mod == "skyrl_train.model_wrapper":
-            del sys.modules[mod]
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", fake_import)
+        for mod in FLASH_IMPORT_MODULES:
+            sys.modules.pop(mod, None)
 
-    mw = importlib.import_module("skyrl_train.model_wrapper")
-    importlib.reload(mw)
+        mw = importlib.import_module("skyrl_train.model_wrapper")
+        importlib.reload(mw)
+        flash_attention = importlib.import_module("skyrl_train.utils.flash_attention")
 
-    assert mw._HAS_FLASH is False, "flash should be reported absent under the blocked import"
+        assert "simulated: flash_attn not installed" in str(flash_attention.FLASH_ATTN_IMPORT_ERROR)
+        with pytest.raises(ImportError):
+            mw.flash_pad_input(None)
+        with pytest.raises(ImportError):
+            mw.flash_unpad_input(None)
+        assert mw.resolve_attn_implementation(attn_backend="sdpa") == "sdpa"
 
-    # The shims exist and raise ONLY when called (not at import time).
-    with pytest.raises(ImportError):
-        mw.pad_input(None)
-    with pytest.raises(ImportError):
-        mw.unpad_input(None)
-
-    # The sdpa path resolves without touching flash.
-    assert mw.resolve_attn_implementation(attn_backend="sdpa") == "sdpa"
-
-
-def test_import_then_reload_restores_flash_state():
-    """After the monkeypatched test, reloading normally restores real state."""
-    for mod in list(sys.modules):
-        if mod == "skyrl_train.model_wrapper":
-            del sys.modules[mod]
-    mw = importlib.import_module("skyrl_train.model_wrapper")
-    # _HAS_FLASH reflects the actual env (True in the SIF, may be False elsewhere);
-    # either way the module imports cleanly.
-    assert hasattr(mw, "_HAS_FLASH")
-    assert callable(mw.resolve_attn_implementation)
+    # Do not leave the simulated import failure cached for later tests.
+    for mod in FLASH_IMPORT_MODULES:
+        sys.modules.pop(mod, None)
+    importlib.import_module("skyrl_train.model_wrapper")
+    flash_attention = importlib.import_module("skyrl_train.utils.flash_attention")
+    assert "simulated: flash_attn not installed" not in str(flash_attention.FLASH_ATTN_IMPORT_ERROR)
 
 
 # ---------------------------------------------------------------------------

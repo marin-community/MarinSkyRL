@@ -1,8 +1,21 @@
+import traceback
 from typing import Any, Dict, List, Optional, Union
+
+from loguru import logger
 
 POSITIVE_RESPONSE_COLOR = "green"
 NEGATIVE_RESPONSE_COLOR = "yellow"
 BASE_PROMPT_COLOR = "cyan"
+
+
+def format_exception_text(error: BaseException) -> str:
+    """Format an exception without retaining it in a queued logging record."""
+    return "".join(traceback.format_exception(type(error), error, error.__traceback__)).rstrip()
+
+
+def log_exception_as_text(context: str, error: BaseException) -> None:
+    """Emit a traceback as text so Loguru never needs to pickle the exception."""
+    logger.error("{}:\n{}", context, format_exception_text(error))
 
 
 def _color_block_format_and_kwargs(

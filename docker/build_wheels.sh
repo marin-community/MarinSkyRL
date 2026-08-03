@@ -43,7 +43,7 @@ WHEELHOUSE="$SCRIPT_DIR/wheelhouse"
 
 # The production gpu-rl image is linux/amd64 ONLY (CoreWeave H100 / x86 CUDA).
 PLATFORM="${PLATFORM:-linux/amd64}"
-BUILDER_NAME="${BUILDER_NAME:-openthoughts-builder}"
+BUILDER_NAME="${BUILDER_NAME:-marin-gpu-rl-builder}"
 
 echo "============================================"
 echo "gpu-rl wheelhouse build"

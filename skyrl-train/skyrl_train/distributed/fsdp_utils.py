@@ -28,11 +28,12 @@ from torch.distributed.distributed_c10d import _set_pg_timeout
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
+from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
 from torch.distributed.device_mesh import init_device_mesh
 from collections import OrderedDict
 
-from skyrl_train.utils.constants import get_worker_nccl_timeout_s
 
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
@@ -272,7 +273,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             DEFAULT False keeps the a3 (non-EP) production path byte-identical.
     """
     import torch.distributed as dist
-    from torch.distributed.tensor import distribute_tensor
 
     if ep_enabled:
         # Documented, robust FSDP2 full-state-dict loader (torchtitan-style). It broadcasts the
@@ -319,8 +319,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # _split_tensor extraction is purely local). No submesh-scoped collective
         # is interleaved, so the historical global-vs-submesh desync cannot recur.
         # ------------------------------------------------------------------
-        from torch.distributed.tensor import DTensor
-
         rank = dist.get_rank()
         device = torch.device("cuda", torch.cuda.current_device())
 
@@ -499,9 +497,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
     if dist.get_rank() == 0:
         for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
             full_param = full_param.detach().cuda()
-            mesh = sharded_param.device_mesh
             dist.broadcast(full_param, src=0)
-            sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
+            if isinstance(sharded_param, DTensor):
+                sharded_tensor = distribute_tensor(full_param, sharded_param.device_mesh, sharded_param.placements)
+            else:
+                sharded_tensor = full_param
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
                 param_name,
@@ -513,9 +513,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
     else:
         for param_name, sharded_param in meta_sharded_sd.items():
             full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
-            mesh = sharded_param.device_mesh
             dist.broadcast(full_tensor, src=0)
-            sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
+            if isinstance(sharded_param, DTensor):
+                sharded_tensor = distribute_tensor(full_tensor, sharded_param.device_mesh, sharded_param.placements)
+            else:
+                sharded_tensor = full_tensor
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
                 param_name,
@@ -859,29 +861,29 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
     return total_norm
 
 
-def _apply_worker_nccl_timeout_to_submesh_pgs(device_mesh) -> None:
-    """Set every submesh process group's collective timeout to the worker NCCL timeout.
-
-    ``init_device_mesh`` builds one sub-``ProcessGroup`` per mesh dim with ``new_group()``,
-    which does not inherit the WORLD PG's timeout: each sub-PG takes NCCL's default 600s.
-    The WORLD PG is initialized with ``SKYRL_WORKER_NCCL_TIMEOUT_IN_S`` (see ``worker.py``),
-    so without this the fsdp/ep/cp/ddp submesh collectives run under a much shorter watchdog
-    than the world collectives do. Weight-extract gathers over the fsdp submesh are preceded
-    by GIL-heavy per-expert conversion whose per-rank skew can exceed 600s on large MoE
-    models, tripping the shorter watchdog and aborting the run. Aligning every submesh PG to
-    the worker timeout keeps a single, adequate liveness bound across all process groups.
-    """
+def _apply_collective_timeout_to_submesh_process_groups(
+    device_mesh: DeviceMesh,
+    timeout_seconds: int,
+) -> None:
+    """Override independent submesh defaults with the requested collective deadline."""
     dim_names = device_mesh.mesh_dim_names
     if not dim_names:
         return
-    timeout = timedelta(seconds=get_worker_nccl_timeout_s())
+    timeout = timedelta(seconds=timeout_seconds)
     for dim_name in dim_names:
         pg = device_mesh.get_group(dim_name)
         if pg is not None:
             _set_pg_timeout(timeout, pg)
 
 
-def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type="cuda"):
+def create_device_mesh(
+    world_size: int,
+    fsdp_size: int,
+    timeout_seconds: int,
+    ep_size: int = 1,
+    cp_size: int = 1,
+    device_type: str = "cuda",
+) -> DeviceMesh:
     """Build the FSDP2 device mesh.
 
     Dim-order contract (root-dim indices, low → high): ``ddp`` < ``fsdp`` < ``cp`` < ``ep``.
@@ -904,9 +906,9 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
       UNCHANGED — the today 1-D ``["fsdp"]`` or 2-D ``["ddp","fsdp"]`` mesh,
       byte-identical to before EP/CP (flag-off invariant G1).
     - ``cp_size > 1``, ``ep_size <= 1``: 3-D ``["ddp","fsdp","cp"]`` of shape
-      ``(ddp, fsdp, cp_size)``. E.g. ``create_device_mesh(4, 2, cp_size=2)`` → ``(1, 2, 2)``.
+      ``(ddp, fsdp, cp_size)``. E.g. ``create_device_mesh(4, 2, 600, cp_size=2)`` → ``(1, 2, 2)``.
     - ``ep_size > 1``, ``cp_size <= 1``: 3-D ``["ddp","fsdp","ep"]`` of shape
-      ``(ddp, fsdp, ep_size)``. E.g. ``create_device_mesh(4, 2, ep_size=2)`` → ``(1, 2, 2)``.
+      ``(ddp, fsdp, ep_size)``. E.g. ``create_device_mesh(4, 2, 600, ep_size=2)`` → ``(1, 2, 2)``.
     - ``cp_size > 1`` and ``ep_size > 1``: 4-D ``["ddp","fsdp","cp","ep"]`` of shape
       ``(ddp, fsdp, cp_size, ep_size)``.
 
@@ -915,6 +917,7 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
     load balancer (zigzag token offset).
 
     The total mesh numel always equals ``world_size`` (asserted below).
+    ``timeout_seconds`` is applied to every mesh-dimension process group.
     """
     if ep_size <= 1 and cp_size <= 1:
         if fsdp_size < 0 or fsdp_size >= world_size:
@@ -923,7 +926,7 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
             device_mesh = init_device_mesh(
                 device_type, mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
             )
-        _apply_worker_nccl_timeout_to_submesh_pgs(device_mesh)
+        _apply_collective_timeout_to_submesh_process_groups(device_mesh, timeout_seconds)
         return device_mesh
 
     # CP and/or EP active: build a 3-D or 4-D mesh keeping fsdp < cp < ep.
@@ -955,7 +958,7 @@ def create_device_mesh(world_size, fsdp_size, ep_size=1, cp_size=1, device_type=
         f"mesh_shape={tuple(mesh_shape)} numel={math.prod(mesh_shape)} != world_size={world_size}"
     )
     device_mesh = init_device_mesh(device_type, mesh_shape=tuple(mesh_shape), mesh_dim_names=mesh_dim_names)
-    _apply_worker_nccl_timeout_to_submesh_pgs(device_mesh)
+    _apply_collective_timeout_to_submesh_process_groups(device_mesh, timeout_seconds)
     return device_mesh
 
 
@@ -1016,9 +1019,6 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     1-D-Shard paths) this returns ``dt.full_tensor()`` unchanged — byte-identical
     to before, so the non-EP path is untouched.
     """
-    from torch.distributed.tensor import DTensor
-    from torch.distributed.tensor.placement_types import Shard, _StridedShard
-
     if not isinstance(dt, DTensor):
         return dt
     placements = dt.placements

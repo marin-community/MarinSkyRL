@@ -123,15 +123,24 @@ def test_inode_replacement_resets_even_when_not_smaller(tmp_path):
     assert store.entries_for_trial(str(p), "A") == []  # old trial gone after rotation
 
 
-def test_transient_read_failure_keeps_cached_entries(tmp_path):
-    """A stat/open failure (file transiently gone) returns the already-recovered entries,
-    not [] — a filesystem hiccup must not blank out rollout data mid-generation."""
+def test_transient_read_failure_recovers_without_reset(tmp_path):
+    """A transient open failure (file briefly gone) returns [] for the blip, but the
+    cursor and index survive — once the file is back, the data returns in full with no
+    rotation reset and no re-ingest. (The store retains byte spans, not payloads, so it
+    cannot serve rows while the file is unreadable.)"""
     p = tmp_path / "literal.jsonl"
+    away = tmp_path / "literal.jsonl.away"
     _write(p, [_entry("A", 1.0, [10])])
     store = LiteralLogStore()
     assert len(store.entries_for_trial(str(p), "A")) == 1
-    os.remove(p)  # now unreadable
-    assert len(store.entries_for_trial(str(p), "A")) == 1  # cached view survives
+    offset_before = store._state.offset
+
+    os.rename(p, away)  # transiently unreadable at the indexed path
+    assert store.entries_for_trial(str(p), "A") == []
+    assert store._state.offset == offset_before  # cursor not blanked by the hiccup
+
+    os.rename(away, p)  # blip over (same inode)
+    assert len(store.entries_for_trial(str(p), "A")) == 1
     assert len(store.all_entries(str(p))) == 1
 
 
@@ -202,9 +211,48 @@ def test_path_change_resets_state(tmp_path):
     assert [e["trial_id"] for e in store.all_entries(str(p2))] == ["B", "B"]
 
 
+def test_ingest_does_not_retain_payload_bytes(tmp_path):
+    """Ingesting the shared log must retain an O(1)-per-row index, NOT the row payloads.
+
+    Every RolloutCoordinator ingests the ONE shared log while release_trial only fires
+    for the trials THAT process consumes, so any per-payload retention grows without
+    bound with the log (measured: 4 coordinators each permanently held the other
+    coordinators' ~3/4 of a 98 GB log as parsed objects, ~85 GiB/h of RSS growth).
+    Here trial B plays the foreign trial this process never consumes: after ingest, the
+    store's retained containers must stay tiny relative to B's payload bytes, while B's
+    rows remain fully readable on demand."""
+    p = tmp_path / "literal.jsonl"
+    rows = [_entry("A", 0.0, [1])]
+    for i in range(50):
+        e = _entry("B", float(i + 1), [i])
+        e["request"]["messages"][0]["content"] = "x" * 20_000  # ~20 KB payload per row
+        rows.append(e)
+    _write(p, rows)
+    file_size = os.path.getsize(p)
+
+    store = LiteralLogStore()
+    assert len(store.entries_for_trial(str(p), "A")) == 1  # triggers full ingest
+
+    state = store._state
+    seen = set()
+    retained = 0
+    for container in [state.spans, *state.by_trial.values()]:
+        for obj in [container, *container, *(x for span in container for x in span)]:
+            if id(obj) not in seen:
+                seen.add(id(obj))
+                retained += sys.getsizeof(obj)
+    assert retained < file_size * 0.05, f"index retained {retained} B of a {file_size} B log"
+
+    # The foreign trial's payloads are still fully recoverable on demand.
+    foreign = store.entries_for_trial(str(p), "B")
+    assert len(foreign) == 50
+    assert foreign[0]["request"]["messages"][0]["content"] == "x" * 20_000
+
+
 def test_release_trial_frees_rows_from_both_index_and_flat_list(tmp_path):
     """release_trial drops a consumed trial's rows from BOTH by_trial and the flat
-    entries list, so the row dicts are actually freed (bounding memory to in-flight)."""
+    file-order span list, so the trial is gone from every view (bounding the index to
+    in-flight + foreign trials)."""
     entries = [_entry("A", 1.0, [10]), _entry("B", 1.1, [20]), _entry("A", 2.0, [11])]
     p = tmp_path / "literal.jsonl"
     _write(p, entries)

@@ -8,12 +8,5 @@ expert_tensor_parallel_size: 1
 
 model_config_kwargs: {}
 
-# kwargs to override the Megatron TransformerConfig object
 transformer_config_kwargs: {}
-# Sequence-dim chunk size for the vocab-parallel logprob computation (ref forward).
-# An int activates the numerically-exact chunked path (ChunkedDistributedLogprob),
-# bounding peak memory regardless of sequence length; null materializes the whole
-# [B, S, vocab//TP] fp32 exp at once, which OOMs on long sequences. Default ON (1024)
-# to match the policy; for sequences <= chunk_size the chunked path == the unchunked
-# result, so short-sequence runs are unaffected.
 logprob_chunk_size: 1024

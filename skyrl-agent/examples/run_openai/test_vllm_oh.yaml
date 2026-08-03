@@ -22,7 +22,6 @@ data:
 generator:
   infer_backend: openai_server
   backend_config: 
-    # TODO: model_name need not be in config
     model_name: Qwen/Qwen3-32B
     api_url: http://localhost:8000
     model_max_len: 40960
@@ -33,7 +32,6 @@ generator:
     temperature: 1
     top_p: 1
     max_tokens: 32768
-  # not needed for inference
   val_config:
     num_trajectories: 1
     sampling_params:
@@ -50,4 +48,3 @@ dispatcher:
   scheduler: naive
   max_parallel_agents: 32
   max_eval_parallel_agents: 32
-

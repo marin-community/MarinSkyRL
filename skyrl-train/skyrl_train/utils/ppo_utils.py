@@ -406,17 +406,22 @@ class BaseFunctionRegistry:
             raise ValueError(f"{cls._function_type} '{name}' not registered")
 
     @classmethod
-    def reset(cls):
-        """Resets the registry (useful for testing purposes)."""
-        if ray.is_initialized() and cls._ray_actor is not None:
+    def shutdown_actor(cls):
+        """Force-stop the registry actor without clearing local functions."""
+        if ray.is_initialized():
             try:
                 actor = ray.get_actor(cls._actor_name)  # this raises exception if the actor is stale
                 ray.kill(actor)
             except ValueError:
                 pass  # Actor may already be gone
-        cls._functions.clear()
         cls._ray_actor = None
         cls._synced_to_actor = False
+
+    @classmethod
+    def reset(cls):
+        """Resets the registry (useful for testing purposes)."""
+        cls.shutdown_actor()
+        cls._functions.clear()
 
     @classmethod
     def repopulate(cls):
@@ -552,6 +557,46 @@ def _safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> 
     """
     y = torch.clamp(delta.to(torch.float32), -clip, clip).exp()
     return y.to(out_dtype or delta.dtype)
+
+
+TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
+
+
+def compute_tis_diagnostics(
+    old_action_log_probs: torch.Tensor,
+    rollout_action_logprobs: Optional[torch.Tensor],
+    loss_mask: torch.Tensor,
+    cap: float,
+) -> dict:
+    """TIS importance-ratio diagnostics for a policy training micro-batch.
+
+    Mask-weighted means of the importance ratio exp(old_lp - rollout_lp) over
+    response tokens. At an on-policy step the ratio should be ~1.0; a large
+    deviation or a heavy capped fraction at `cap` (tis_imp_ratio_cap) signals
+    that the rollout logprobs are misaligned to the training tokens.
+
+    Always returns the full TIS_DIAG_KEYS set — including the fallback branch
+    when rollout logprobs are absent — so every rank contributes identical keys
+    to the per-key all_reduce(status) (mismatched keysets deadlock NCCL).
+    Callers gate on use_tis; this function does not read config.
+    """
+    if rollout_action_logprobs is None:
+        # Rollout logprobs can legitimately be absent (the trainer degrades TIS
+        # gracefully when the generator returns none). Emit neutral values under
+        # the same keys so the keyset stays identical across ranks.
+        values = (1.0, 0.0, 0.0)
+        return dict(zip(TIS_DIAG_KEYS, values, strict=True))
+    with torch.no_grad():
+        cap = float(cap)
+        delta = (old_action_log_probs - rollout_action_logprobs).float()
+        imp = _safe_exp_delta(delta)
+        m = loss_mask.float()
+        values = (
+            masked_mean(imp, m).item(),  # imp_ratio_mean
+            masked_mean((imp > cap).float(), m).item(),  # imp_ratio_capped_fraction
+            masked_mean(delta.abs(), m).item(),  # log_ratio_abs_mean
+        )
+        return dict(zip(TIS_DIAG_KEYS, values, strict=True))
 
 
 def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10) -> dict:

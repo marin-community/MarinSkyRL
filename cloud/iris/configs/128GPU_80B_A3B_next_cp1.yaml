@@ -3,12 +3,16 @@ entrypoint: examples.terminal_bench.entrypoints.main_tbench
 config_groups:
   terminal_bench_config: terminal_bench
 
+context_budget:
+  request_window_tokens: 98304
+  max_new_tokens_per_turn: 16384
+  max_turns: 999999
+
 terminal_bench:
   trials_dir: s3://marin-us-east-02a/iris/80b-next-cp1/trace_jobs
 
   harbor:
     name: terminus-2
-    max_episodes: 999999
     enable_summarize: false
     store_all_messages: true
     trajectory_config:
@@ -69,8 +73,6 @@ terminal_bench:
       - ContextLengthExceededError
 
   model_info:
-    max_input_tokens: 97232
-    max_output_tokens: 16384
 
   archiving:
     enabled: false
@@ -108,13 +110,10 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
-  max_prompt_length: 98304
 
   eval_interval: 999999
   eval_before_train: false
-  ckpt_interval: 1
   resume_mode: latest
-  hf_save_interval: 5
   hf_hub_repo_id: null
   hf_hub_private: false
   hf_hub_revision: main
@@ -138,12 +137,6 @@ trainer:
       max_grad_norm: 0.9
       optimizer_kwargs:
         foreach: false
-    # Megatron backend geometry (trainer.strategy=megatron). DERIVED, UNVALIDATED.
-    # Qwen3-Next-80B-A3B (qwen3_next: 48 layers, 16 heads, 2 KV, 512 experts, hidden 2048;
-    # HYBRID linear-attention). 64 training GPUs: TP8 x PP1 x CP1 = 8 MP (intra-node),
-    # DP=8; EP8 over 512 experts. PP=1 chosen deliberately to avoid pipelining the hybrid
-    # linear-attention stack. NOTE: num_key_value_heads=2 < TP=8 -> Megatron replicates KV
-    # heads (TP % KV == 0). logprob_chunk_size caps the vocab-parallel logprob peak at 98k ctx.
     megatron_config:
       tensor_model_parallel_size: 8
       pipeline_model_parallel_size: 1
@@ -231,16 +224,13 @@ generator:
   enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
-  max_turns: 999999
 
   sampling_params:
-    max_generate_length: 16384
     temperature: 0.7
     top_p: 0.95
     top_k: 20
 
   engine_init_kwargs:
-    max_model_len: 98304
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     disable_custom_all_reduce: true
     enable_return_routed_experts: true
@@ -270,7 +260,6 @@ extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   SKYRL_TIS_SERVED_ID_SPLICE: "1"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
-  LD_LIBRARY_PATH: /opt/marin/envs/rl/lib
   NCCL_DEBUG: WARN
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET

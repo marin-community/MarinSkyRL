@@ -31,6 +31,8 @@ import sys
 import torch
 import torch.distributed as dist
 
+from tests.distributed_runtime_constants import GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
+
 
 def _log(msg):
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -103,7 +105,12 @@ def main():
     assert n_swapped == cfg.num_hidden_layers, f"expected {cfg.num_hidden_layers} swaps, got {n_swapped}"
 
     # ---- EP=1 mesh + FSDP2 wrap (apply_ep is NOT called for ep_size==1).
-    device_mesh = create_device_mesh(world_size=world, fsdp_size=fsdp_size, ep_size=1)
+    device_mesh = create_device_mesh(
+        world_size=world,
+        fsdp_size=fsdp_size,
+        timeout_seconds=GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+        ep_size=1,
+    )
     if rank == 0:
         _log(f"device_mesh: {device_mesh} (ep_size=1 => no 'ep' dim => apply_ep skipped)")
 

@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
 try:
@@ -59,8 +61,9 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.models.grug_moe import is_grug_router_bias
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs, ensure_token_ids_in_sse_chunk
-from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
+from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
 from packaging import version
 
@@ -224,7 +227,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
     executor_backend = kwargs.get("distributed_executor_backend")
     logger.info(
         f"setup_envvars_for_vllm: distributed_executor_backend={executor_backend}, "
-        f"SKYRL_ENABLE_NUMA_AFFINITY={os.environ.get('SKYRL_ENABLE_NUMA_AFFINITY', '<unset>')}, "
+        f"{NUMA_AFFINITY_ENV}={os.environ.get(NUMA_AFFINITY_ENV, '<unset>')}, "
         f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}, "
         f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
     )
@@ -688,8 +691,8 @@ class WorkerWrap:
         fused/sharded params; here we read those internal params back and rebuild
         the HF view so the trainer's post-step HF tensors can be compared
         tensor-by-tensor). Returns, per requested HF name, this worker's
-        contribution as a CPU fp32 tensor plus the rank coordinates so the caller
-        can assemble across TP/EP shards.
+        contribution as a CPU fp32 tensor plus the live engine dtype and rank
+        coordinates so the caller can assemble across TP/EP shards.
 
         Supported HF name forms (Qwen1.5-MoE / Qwen2MoE vLLM layout):
           * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
@@ -740,7 +743,13 @@ class WorkerWrap:
             try:
                 # 1. Direct (replicated) match: router gate, norms, etc.
                 if name in all_params:
-                    entry = {"found": True, "mode": "direct", "tensor": _cpu(all_params[name])}
+                    tensor = all_params[name]
+                    entry = {
+                        "found": True,
+                        "mode": "direct",
+                        "dtype": torch_dtype_to_str(tensor.dtype),
+                        "tensor": _cpu(tensor),
+                    }
                     out[name] = entry
                     continue
 
@@ -780,6 +789,7 @@ class WorkerWrap:
                         "mode": "expert",
                         "owner_ep": owner_ep,
                         "local_e": local_e,
+                        "dtype": torch_dtype_to_str(t.dtype),
                         "tensor": _cpu(t),
                     }
                     out[name] = entry
@@ -1035,8 +1045,11 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
-    async def abort_generation(self) -> None:
-        raise NotImplementedError("Abort generation is only supported for AsyncVLLMInferenceEngine.")
+    async def pause_generation(self) -> None:
+        raise NotImplementedError("Pausing generation is only supported for AsyncVLLMInferenceEngine.")
+
+    async def resume_generation(self) -> None:
+        raise NotImplementedError("Resuming generation is only supported for AsyncVLLMInferenceEngine.")
 
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -2181,40 +2194,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         stats["engine_id"] = self._stats_engine_id
         return stats
 
-    async def abort_generation(self) -> None:
-        """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort".
-        """
+    async def pause_generation(self) -> None:
+        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
         engine = self._get_engine()
-        # Collect all request IDs currently tracked by the scheduler/output processor
-        unfinished_request_ids = list(engine.output_processor.request_states.keys())
-        if unfinished_request_ids:
-            # DRAIN the engine to idle before returning. The caller (weight sync) then moves model
-            # params onto the `meta` device (vLLM layerwise reload); a decode that steps after this
-            # returns would hit `_C::rms_norm` on a meta tensor -> EngineCore crash (enforce_eager)
-            # or a freed-buffer read (cudagraph). engine.abort() -> output_processor.abort_requests()
-            # DIRECTLY pops request_states, so we LOOP (re-snapshot -> re-abort) until idle: a one-shot
-            # abort stalled because stragglers / late arrivals landed after the first snapshot and were
-            # never aborted (the 60s-timeout teardown hit at the 35B weight sync). Re-aborting each
-            # iteration converges. NON-FATAL on the (now-unlikely) 600s deadline: log loudly + proceed
-            # rather than tear down a multi-hour job -- a residual straggler is masked by cudagraph, and
-            # a genuine 600s wedge is already a lost engine that teardown would not recover.
-            drain_deadline = time.monotonic() + 600.0
-            while engine.output_processor.has_unfinished_requests():
-                straggler_ids = list(engine.output_processor.request_states.keys())
-                if straggler_ids:
-                    await engine.abort(straggler_ids)
-                if time.monotonic() > drain_deadline:
-                    logger.warning(
-                        "abort_generation: %d requests still unfinished after 600s of draining; "
-                        "proceeding with the weight reload anyway (wedged engine, not a normal drain).",
-                        len(engine.output_processor.request_states),
-                    )
-                    break
-                await asyncio.sleep(0.02)
-        await engine.reset_prefix_cache()  # avoid KV-cache pollution
-        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
+        outstanding_requests = len(engine.output_processor.request_states)
+        # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
+        # mode it aborts running/waiting requests, waits for the scheduler to reach
+        # its paused state, and clears the KV/prefix cache before returning. Unlike
+        # AsyncLLM.abort(), it cannot report success merely because the frontend
+        # output_processor already removed the request IDs.
+        await engine.pause_generation(mode="abort", clear_cache=True)
+        logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
+
+    async def resume_generation(self) -> None:
+        """Release the EngineCore scheduler after the weight reload completes."""
+        await self._get_engine().resume_generation()
 
 
 class _MinimalRequest:
@@ -2252,6 +2246,12 @@ class VLLMWeightTransferReceiver:
         self.model_config = model_config
         self.device = device
 
+    def _is_fp32_grug_router_bias(self, name: str, dtype: torch.dtype) -> bool:
+        hf_config = getattr(self.model_config, "hf_text_config", None)
+        if hf_config is None:
+            hf_config = getattr(self.model_config, "hf_config", None)
+        return is_grug_router_bias(getattr(hf_config, "model_type", None), name) and dtype == torch.float32
+
     def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights and yield (name, tensor) tuples.
 
@@ -2273,7 +2273,7 @@ class VLLMWeightTransferReceiver:
         _fuse = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
-            if not _fuse:
+            if not _fuse and not self._is_fp32_grug_router_bias(name, dtype):
                 assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
             # Always receive in sender's dtype, load_weights handles conversion
             weight = torch.empty(shape, dtype=dtype, device="cuda")
@@ -2319,7 +2319,10 @@ class VLLMWeightTransferReceiver:
             physical_gpu_id = str(props.uuid)
             for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
                 dtype = str_to_torch_dtype(dtype_str)
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                if not self._is_fp32_grug_router_bias(name, dtype):
+                    assert dtype == self.model_config.dtype, (
+                        f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                    )
 
                 handle = ipc_handle[physical_gpu_id]
                 device_id = self.device.index

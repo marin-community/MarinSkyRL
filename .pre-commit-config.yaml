@@ -1,7 +1,4 @@
-# Lint and formatting live in `infra/pre-commit.py` (the shared marin-style ruff checks),
-# not here. This config carries only the secret scan, which marin-style does not cover.
 repos:
-  # Detect secrets and sensitive information
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.24.2
     hooks:

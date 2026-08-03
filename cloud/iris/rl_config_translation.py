@@ -13,9 +13,15 @@ Usage::
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import base64
+import binascii
+import copy
+import fsspec
+import json
+import os
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import yaml
 
@@ -23,6 +29,258 @@ from cloud.iris.paths import resolve_paths_in_dict
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
+RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
+RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
+
+_CONTEXT_BUDGET_FIELDS = frozenset(
+    {
+        "request_window_tokens",
+        "max_new_tokens_per_turn",
+        "max_turns",
+    }
+)
+
+_DERIVED_CONTEXT_FIELDS = (
+    ("trainer", "max_prompt_length"),
+    ("generator", "max_input_length"),
+    ("generator", "max_turns"),
+    ("generator", "sampling_params", "max_generate_length"),
+    ("generator", "engine_init_kwargs", "max_model_len"),
+    ("terminal_bench", "harbor", "max_episodes"),
+    ("terminal_bench", "harbor", "max_turns"),
+    ("terminal_bench", "model_info", "max_input_tokens"),
+    ("terminal_bench", "model_info", "max_output_tokens"),
+)
+
+
+@dataclass(frozen=True)
+class ContextBudget:
+    """One coherent token budget for an Iris RL rollout request."""
+
+    request_window_tokens: int
+    max_new_tokens_per_turn: int
+    max_turns: int
+
+    @property
+    def max_input_tokens(self) -> int:
+        """Return the input allowance after reserving one complete response."""
+        return self.request_window_tokens - self.max_new_tokens_per_turn
+
+    @property
+    def opencode_limit_output(self) -> int:
+        """OpenCode's per-request output cap (mirrors harbor ``_resolve_model_limit``)."""
+        return min(self.max_new_tokens_per_turn, max(1, self.max_input_tokens - 1))
+
+    @property
+    def opencode_limit_context(self) -> int:
+        """OpenCode's sliding-window / compaction-trigger size.
+
+        Mirrors the formula in ``harbor/src/harbor/agents/installed/opencode.py``
+        ``_resolve_model_limit``: ``context = window - output - margin`` where
+        ``margin`` reserves a small safety band so ``context + output`` stays
+        strictly below the engine's prompt cap.
+        """
+        output = self.opencode_limit_output
+        margin = min(1024, max(0, self.max_input_tokens - output - 1))
+        return max(1, self.max_input_tokens - output - margin)
+
+    def as_dict(self) -> Dict[str, int]:
+        """Return the persisted representation, including derived client input."""
+        return {
+            "request_window_tokens": self.request_window_tokens,
+            "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
+            "max_turns": self.max_turns,
+            "max_input_tokens": self.max_input_tokens,
+            "opencode_limit_context": self.opencode_limit_context,
+            "opencode_limit_output": self.opencode_limit_output,
+        }
+
+
+def _path_is_declared(mapping: Dict[str, Any], path: tuple[str, ...]) -> bool:
+    value: Any = mapping
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return False
+        value = value[key]
+    return True
+
+
+def _validate_no_derived_context_fields(raw: Dict[str, Any], config_path: Path) -> None:
+    declared = [".".join(path) for path in _DERIVED_CONTEXT_FIELDS if _path_is_declared(raw, path)]
+    if declared:
+        raise ValueError(
+            f"{config_path} declares derived context fields: {', '.join(declared)}. "
+            "Declare only context_budget instead."
+        )
+
+
+def _remove_derived_context_fields(raw: Dict[str, Any]) -> None:
+    for path in _DERIVED_CONTEXT_FIELDS:
+        parent: Any = raw
+        for key in path[:-1]:
+            if not isinstance(parent, dict) or key not in parent:
+                parent = None
+                break
+            parent = parent[key]
+        if isinstance(parent, dict):
+            parent.pop(path[-1], None)
+
+
+def _require_positive_integer(value: Any, field_name: str, config_path: Path) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{config_path}: context_budget.{field_name} must be a positive integer, got {value!r}")
+    return value
+
+
+def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBudget:
+    """Validate and resolve the single public context budget declaration.
+
+    The request window includes the prompt and the current response. The derived
+    client input limit therefore reserves the complete per-turn output allowance.
+    """
+    _validate_no_derived_context_fields(raw, config_path)
+    config = raw.get("context_budget")
+    if not isinstance(config, dict):
+        raise ValueError(f"{config_path}: context_budget must be a mapping")
+
+    unknown = set(config) - _CONTEXT_BUDGET_FIELDS
+    if unknown:
+        raise ValueError(f"{config_path}: unknown context_budget fields: {', '.join(sorted(unknown))}")
+    missing = _CONTEXT_BUDGET_FIELDS - set(config)
+    if missing:
+        raise ValueError(f"{config_path}: missing context_budget fields: {', '.join(sorted(missing))}")
+
+    budget = ContextBudget(
+        request_window_tokens=_require_positive_integer(
+            config["request_window_tokens"], "request_window_tokens", config_path
+        ),
+        max_new_tokens_per_turn=_require_positive_integer(
+            config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
+        ),
+        max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
+    )
+    if budget.max_input_tokens <= 0:
+        raise ValueError(
+            f"{config_path}: request_window_tokens ({budget.request_window_tokens}) must exceed "
+            f"max_new_tokens_per_turn ({budget.max_new_tokens_per_turn})"
+        )
+    return budget
+
+
+def _materialize_context_budget(
+    raw: Dict[str, Any], budget: ContextBudget
+) -> tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Return SkyRL sections populated from one resolved context budget."""
+    trainer = copy.deepcopy(raw.get("trainer", {}))
+    generator = copy.deepcopy(raw.get("generator", {}))
+    terminal_bench = copy.deepcopy(raw.get("terminal_bench"))
+    materialized_raw = copy.deepcopy(raw)
+
+    trainer["max_prompt_length"] = budget.max_input_tokens
+    generator["max_input_length"] = budget.max_input_tokens
+    generator["max_turns"] = budget.max_turns
+    generator.setdefault("sampling_params", {})["max_generate_length"] = budget.max_new_tokens_per_turn
+    generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.request_window_tokens
+
+    if terminal_bench is not None:
+        terminal_bench.setdefault("harbor", {})["max_turns"] = budget.max_turns
+        model_info = terminal_bench.get("model_info") or {}
+        model_info["max_input_tokens"] = budget.max_input_tokens
+        model_info["max_output_tokens"] = budget.max_new_tokens_per_turn
+        terminal_bench["model_info"] = model_info
+
+    materialized_raw["context_budget"] = budget.as_dict()
+    materialized_raw["trainer"] = copy.deepcopy(trainer)
+    materialized_raw["generator"] = copy.deepcopy(generator)
+    if terminal_bench is not None:
+        materialized_raw["terminal_bench"] = copy.deepcopy(terminal_bench)
+    return trainer, generator, terminal_bench, materialized_raw
+
+
+def _override_key(override: str) -> str:
+    key, separator, _value = override.lstrip("+").partition("=")
+    if not separator:
+        raise ValueError(f"Invalid SkyRL override {override!r}; expected KEY=VALUE")
+    return key
+
+
+def apply_context_budget_overrides(
+    parsed: "ParsedRLConfig", overrides: List[str]
+) -> tuple["ParsedRLConfig", List[str]]:
+    """Resolve high-level context overrides and reject derived-field overrides.
+
+    `--skyrl_override` is the existing user-facing launcher mechanism. Context
+    values are consumed here instead of reaching Hydra, whose schema deliberately
+    has no `context_budget` node.
+    """
+    values = parsed.context_budget.as_dict()
+    passthrough: List[str] = []
+    derived_names = {".".join(path) for path in _DERIVED_CONTEXT_FIELDS}
+
+    for override in overrides:
+        key = _override_key(override)
+        if key.startswith("context_budget."):
+            field_name = key.removeprefix("context_budget.")
+            if field_name not in _CONTEXT_BUDGET_FIELDS:
+                raise ValueError(f"Unsupported context budget override {key!r}")
+            raw_value = override.partition("=")[2]
+            try:
+                values[field_name] = int(raw_value)
+            except ValueError as error:
+                raise ValueError(f"{key} must be an integer, got {raw_value!r}") from error
+            continue
+        if key in derived_names:
+            raise ValueError(
+                f"{key} is derived from context_budget and cannot be overridden directly. "
+                "Override context_budget.request_window_tokens, context_budget.max_new_tokens_per_turn, "
+                "or context_budget.max_turns instead."
+            )
+        passthrough.append(override)
+
+    raw = copy.deepcopy(parsed.raw)
+    raw["trainer"] = copy.deepcopy(parsed.trainer)
+    raw["generator"] = copy.deepcopy(parsed.generator)
+    if parsed.terminal_bench is not None:
+        raw["terminal_bench"] = copy.deepcopy(parsed.terminal_bench)
+    _remove_derived_context_fields(raw)
+    raw["context_budget"] = {field: values[field] for field in _CONTEXT_BUDGET_FIELDS}
+    budget = resolve_context_budget(raw, parsed.config_path)
+    trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, budget)
+    return (
+        replace(
+            parsed,
+            raw=materialized_raw,
+            trainer=trainer,
+            generator=generator,
+            terminal_bench=terminal_bench,
+            context_budget=budget,
+            tensor_parallel_size=generator.get("inference_engine_tensor_parallel_size", 1),
+        ),
+        passthrough,
+    )
+
+
+def write_resolved_context_budget(budget: ContextBudget, destination: Path | str, config_path: Path) -> Path | str:
+    """Persist the resolved context contract for an Iris RL launch."""
+    payload = (
+        json.dumps(
+            {
+                "config_path": str(config_path),
+                "context_budget": budget.as_dict(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    if isinstance(destination, Path):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(payload)
+        return destination
+    with fsspec.open(destination, "w") as artifact:
+        artifact.write(payload)
+    return destination
+
 
 # =============================================================================
 # SkyRL Internal Engine Kwargs - DO NOT SET IN YAML CONFIGS
@@ -113,6 +371,7 @@ class ParsedRLConfig:
 
     config_path: Path
     raw: Dict[str, Any]
+    context_budget: ContextBudget
     entrypoint: str
     config_groups: Dict[str, str] = field(default_factory=dict)
     trainer: Dict[str, Any] = field(default_factory=dict)
@@ -182,6 +441,27 @@ def resolve_rl_config_path(raw_path: str) -> Path:
     )
 
 
+def materialize_rl_config(
+    config_path: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Materialize a launcher-forwarded RL config inside the task container."""
+    environment = os.environ if environment is None else environment
+    payload = environment.get(RL_CONFIG_PAYLOAD_ENV)
+    if payload is None:
+        return config_path
+
+    try:
+        contents = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError(f"Invalid base64 in {RL_CONFIG_PAYLOAD_ENV}") from error
+
+    destination = Path(config_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(contents)
+    return str(destination)
+
+
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
@@ -197,13 +477,13 @@ def parse_rl_config(
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
 
+    context_budget = resolve_context_budget(raw, path)
+
     entrypoint = raw.get("entrypoint", "skyrl_train.entrypoints.main_base")
     config_groups = raw.get("config_groups", {})
-    trainer = raw.get("trainer", {})
-    generator = raw.get("generator", {})
+    trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
-    terminal_bench = raw.get("terminal_bench")
     teacher = raw.get("teacher")
 
     # data.kind is a launcher-only routing key (parquet vs. terminal_bench tasks); pop it
@@ -231,7 +511,8 @@ def parse_rl_config(
 
     return ParsedRLConfig(
         config_path=path,
-        raw=raw,
+        raw=materialized_raw,
+        context_budget=context_budget,
         entrypoint=entrypoint,
         config_groups=config_groups,
         trainer=trainer,
