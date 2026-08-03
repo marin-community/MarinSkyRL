@@ -207,6 +207,7 @@ ignore = [
 "tests/cpu/generators/test_normalize_prompt_token_ids.py" = ["E402"]
 "tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
 "tests/cpu/models/test_models.py" = ["E402"]
+"tests/cpu/test_ray_metrics.py" = ["E402"]
 "examples/terminal_bench/_harbor_compat.py" = ["F401"]
 
 [pytest]
