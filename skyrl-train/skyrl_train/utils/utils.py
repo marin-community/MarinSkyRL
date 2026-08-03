@@ -1375,8 +1375,8 @@ def initialize_ray(cfg: DictConfig):
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,
     # BEFORE the C++ CoreWorker builds actor threads. It installs the inherited
     # host-memory policy and forces CPython stock asyncio (no uvloop/libuv) in every
-    # worker -- the only reliable place to cover the RolloutCoordinator concurrency-
-    # group loop that SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor reset.
+    # worker -- the only reliable place to cover concurrency-group loops that are
+    # created before an actor constructor can reset their event-loop policy.
     # Referenced by fully-qualified name string (importable in every worker via the
     # editable skyrl_train install) so Ray does not have to cloudpickle it.
     ray.init(

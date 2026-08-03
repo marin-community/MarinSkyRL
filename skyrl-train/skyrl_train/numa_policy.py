@@ -10,7 +10,6 @@ from ctypes import CDLL, POINTER, Structure, byref, c_char_p, c_int, c_ulong, c_
 from ctypes.util import find_library
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 _MEMORY_POLICY_NAMES = {
@@ -36,7 +35,7 @@ class _Bitmask(Structure):
 
 
 def is_numa_affinity_enabled() -> bool:
-    """Return whether explicit NUMA placement is enabled."""
+    """Return whether ``SKYRL_ENABLE_NUMA_AFFINITY`` is set to ``1``."""
     return os.environ.get("SKYRL_ENABLE_NUMA_AFFINITY", "0") == "1"
 
 
@@ -127,11 +126,8 @@ def host_memory_nodes(cpu_topology: dict[int, tuple[int, ...]], allowed_nodes: s
     return nodes
 
 
-def set_host_memory_policy() -> Optional[tuple[int, ...]]:
-    """Restrict this thread and its future children to host-memory NUMA nodes."""
-    if not is_numa_affinity_enabled():
-        return None
-
+def install_host_memory_policy() -> tuple[int, ...]:
+    """Bind this thread and future children to host-memory nodes and return them."""
     target_memory_nodes = host_memory_nodes(cpu_numa_topology(), allowed_memory_nodes())
     _set_membind(target_memory_nodes)
     return target_memory_nodes

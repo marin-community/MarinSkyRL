@@ -24,10 +24,10 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 
 from skyrl_train.numa_policy import (
+    install_host_memory_policy,
     is_numa_affinity_enabled,
     load_libnuma,
     parse_numa_range_list,
-    set_host_memory_policy,
 )
 
 
@@ -216,14 +216,15 @@ def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
     return node_cpus if node_cpus else None
 
 
-def physical_gpu_id_for_local_rank(cuda_visible_devices: Optional[str], local_rank: int) -> int:
-    """Resolve a physical GPU ordinal from a Ray worker's visible-device view."""
+def physical_gpu_id_for_worker(cuda_visible_devices: Optional[str], launcher_local_rank: int) -> int:
+    """Resolve the physical GPU assigned to a Ray worker."""
     devices = [device for device in (cuda_visible_devices or "").split(",") if device]
     if not devices:
-        return local_rank
-    if local_rank >= len(devices):
-        raise RuntimeError(f"local rank {local_rank} is outside CUDA_VISIBLE_DEVICES={','.join(devices)}")
-    return int(devices[local_rank])
+        return launcher_local_rank
+    visible_rank = 0 if len(devices) == 1 else launcher_local_rank
+    if visible_rank >= len(devices):
+        raise RuntimeError(f"local rank {visible_rank} is outside CUDA_VISIBLE_DEVICES={','.join(devices)}")
+    return int(devices[visible_rank])
 
 
 def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]) -> Optional[int]:
@@ -326,9 +327,7 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
         raise RuntimeError(f"could not detect NUMA topology for physical GPU {gpu_id}")
 
     cpu_list, numa_node = affinity
-    target_memory_nodes = set_host_memory_policy()
-    if target_memory_nodes is None:
-        raise RuntimeError("NUMA affinity was disabled while configuring a GPU worker")
+    target_memory_nodes = install_host_memory_policy()
     if numa_node not in target_memory_nodes:
         raise RuntimeError(
             f"GPU {gpu_id}'s CPU NUMA node {numa_node} is outside the allowed host-memory nodes {target_memory_nodes}"

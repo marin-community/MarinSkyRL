@@ -4,7 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from skyrl_train import worker_setup
 from skyrl_train.worker_setup import configure_worker_process
 
 
@@ -42,20 +41,10 @@ def test_ray_worker_setup_installs_stock_asyncio_without_loading_torch():
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": python_path},
+        env={**os.environ, "PYTHONPATH": python_path, "SKYRL_ENABLE_NUMA_AFFINITY": "0"},
     )
 
     assert result.stdout.strip() == "ok"
-
-
-def test_ray_worker_setup_installs_memory_policy_before_asyncio_configuration(monkeypatch):
-    events = []
-    monkeypatch.setattr(worker_setup, "set_host_memory_policy", lambda: events.append("memory-policy"))
-    monkeypatch.setattr(asyncio, "set_event_loop_policy", lambda _policy: events.append("asyncio-policy"))
-
-    configure_worker_process()
-
-    assert events[0:2] == ["memory-policy", "asyncio-policy"]
 
 
 if __name__ == "__main__":

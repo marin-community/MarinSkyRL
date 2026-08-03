@@ -1,8 +1,13 @@
 import pytest
 
 from skyrl_train import numa_policy
-from skyrl_train.numa_policy import allowed_memory_nodes, cpu_numa_topology, host_memory_nodes, set_host_memory_policy
-from skyrl_train.utils.numa import physical_gpu_id_for_local_rank
+from skyrl_train.numa_policy import (
+    allowed_memory_nodes,
+    cpu_numa_topology,
+    host_memory_nodes,
+    install_host_memory_policy,
+)
+from skyrl_train.utils.numa import physical_gpu_id_for_worker
 
 
 def test_host_memory_nodes_exclude_memory_only_nodes():
@@ -32,18 +37,17 @@ def test_allowed_memory_nodes_read_cpuset_mask(tmp_path):
 
 
 def test_host_memory_policy_binds_to_allowed_cpu_nodes(monkeypatch):
-    monkeypatch.setenv("SKYRL_ENABLE_NUMA_AFFINITY", "1")
     monkeypatch.setattr(numa_policy, "cpu_numa_topology", lambda: {0: (0, 1), 1: (2, 3)})
     monkeypatch.setattr(numa_policy, "allowed_memory_nodes", lambda: {0, 1, 4, 12})
     installed_policies = []
     monkeypatch.setattr(numa_policy, "_set_membind", installed_policies.append)
 
-    assert set_host_memory_policy() == (0, 1)
+    assert install_host_memory_policy() == (0, 1)
     assert installed_policies == [(0, 1)]
 
 
 @pytest.mark.parametrize(
-    ("cuda_visible_devices", "local_rank", "physical_gpu_id"),
+    ("cuda_visible_devices", "launcher_local_rank", "physical_gpu_id"),
     [
         (None, 2, 2),
         ("", 3, 3),
@@ -51,10 +55,10 @@ def test_host_memory_policy_binds_to_allowed_cpu_nodes(monkeypatch):
         ("2,0,3,1", 2, 3),
     ],
 )
-def test_physical_gpu_id_follows_visible_device_mapping(cuda_visible_devices, local_rank, physical_gpu_id):
-    assert physical_gpu_id_for_local_rank(cuda_visible_devices, local_rank) == physical_gpu_id
+def test_physical_gpu_id_follows_visible_device_mapping(cuda_visible_devices, launcher_local_rank, physical_gpu_id):
+    assert physical_gpu_id_for_worker(cuda_visible_devices, launcher_local_rank) == physical_gpu_id
 
 
 def test_physical_gpu_id_rejects_rank_outside_visible_devices():
     with pytest.raises(RuntimeError, match="outside CUDA_VISIBLE_DEVICES"):
-        physical_gpu_id_for_local_rank("2", 1)
+        physical_gpu_id_for_worker("2,3", 2)

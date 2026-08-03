@@ -32,6 +32,7 @@ from skyrl_train.utils.utils import (
     policy_spread_bundles,
     policy_per_gpu_bundles_enabled,
 )
+from skyrl_train.utils.numa import physical_gpu_id_for_worker
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.utils.utils import validate_cfg
@@ -65,29 +66,16 @@ def _make_cfg() -> DictConfig:
 
 
 def _probe_device_id(self):
-    """Run inside each actor: apply the fix's pinning decision and return the
-    resulting physical placement + NUMA binding.
-
-    DistributedTorchRayActor.__init__ (the fix) only *writes* os.environ[
-    "LOCAL_RANK"] (= resolve_pinned_local_rank()); the actual
-    torch.cuda.set_device() + _set_numa_affinity() run later in the strategy's
-    setup_distributed(). This probe reproduces exactly that production sequence
-    (set_device(LOCAL_RANK) then _set_numa_affinity(rank)) so what we measure is
-    precisely where the fix's LOCAL_RANK lands the device + CPU/NUMA mask.
-    """
+    """Return the device and NUMA placement installed by the actor constructor."""
     import torch as _torch
     from skyrl_train.utils.utils import get_physical_gpu_id as _uuid
 
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ.get("RANK", "-1"))
+    physical_gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), self.get_node_local_rank())
 
-    # Pin exactly as setup_distributed() does (consumes the fix's LOCAL_RANK).
+    # Pin exactly as setup_distributed() does (consumes the constructor's LOCAL_RANK).
     _torch.cuda.set_device(local_rank)
-    # Apply the same NUMA binding the worker does, keyed off the physical id.
-    try:
-        self._set_numa_affinity(rank)
-    except Exception:
-        pass
 
     dev = _torch.cuda.current_device()
     # CPU affinity mask the NUMA bind produced (evidence the bind ran + is
@@ -106,7 +94,7 @@ def _probe_device_id(self):
 
         gpu_map = _enumerate_gpus_from_sysfs()
         if gpu_map is not None:
-            gpu_numa_node = gpu_map.get(local_rank)
+            gpu_numa_node = gpu_map.get(physical_gpu_id)
     except Exception:
         pass
 

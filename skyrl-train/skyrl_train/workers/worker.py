@@ -24,7 +24,7 @@ from ray.util.placement_group import (
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
-from skyrl_train.utils.numa import physical_gpu_id_for_local_rank, set_numa_affinity_for_gpu
+from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
@@ -138,9 +138,7 @@ class DistributedTorchRayActor:
                 ray.get_gpu_ids(),
             )
 
-        cuda_devices = [device for device in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if device]
-        numa_local_rank = 0 if len(cuda_devices) == 1 else local_rank
-        self._configure_numa_placement(numa_local_rank)
+        self._configure_numa_placement(local_rank)
 
         os.environ["LOCAL_RANK"] = resolve_pinned_local_rank(
             noset_visible_devices=_noset,
@@ -314,9 +312,9 @@ class DistributedTorchRayActor:
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
 
-    def _configure_numa_placement(self, local_rank):
+    def _configure_numa_placement(self, launcher_local_rank):
         """Install host-memory placement before CUDA or model initialization."""
-        gpu_id = physical_gpu_id_for_local_rank(os.environ.get("CUDA_VISIBLE_DEVICES"), local_rank)
+        gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), launcher_local_rank)
         set_numa_affinity_for_gpu(gpu_id)
 
 
