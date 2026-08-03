@@ -69,6 +69,15 @@ from urllib.parse import urlparse
 
 import yaml
 from iris.client import IrisClient
+from iris.cluster.constraints import (
+    CLUSTER_CONSTRAINT_KEY,
+    Constraint,
+    ConstraintOp,
+    infer_preemptible_constraint,
+    preemptible_constraint,
+)
+from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
+from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
@@ -172,6 +181,37 @@ class IrisLaunchOutcome:
     job_id: str
     job_state: str
     exit_code: int
+
+
+def _gpu_resources(gpu_variant: str, gpu_count: int, *, cpu: float, memory: str, disk: str) -> ResourceSpec:
+    resources = ResourceSpec(cpu=cpu, memory=memory, disk=disk)
+    resources.device = gpu_device(gpu_variant, gpu_count)
+    return resources
+
+
+def _gpu_multinode(gpu_variant: str, gpu_count: int, replicas: int) -> CoschedulingConfig | None:
+    if replicas <= 1:
+        return None
+    level = gpu_gang_coscheduling_level(gpu_variant, gpu_count, replicas)
+    return CoschedulingConfig(group_by=level)
+
+
+def _gpu_constraints(
+    resources: job_pb2.ResourceSpecProto,
+    *,
+    replicas: int,
+    preemptible: bool | None,
+    target_cluster: str | None,
+) -> list[Constraint]:
+    constraints = []
+    if preemptible is not None:
+        constraints.append(preemptible_constraint(preemptible))
+    if target_cluster:
+        constraints.append(Constraint.create(key=CLUSTER_CONSTRAINT_KEY, op=ConstraintOp.EQ, value=target_cluster))
+    inferred = infer_preemptible_constraint(resources, replicas, constraints)
+    if inferred is not None:
+        constraints.append(inferred)
+    return constraints
 
 
 def _resolved_data_path(locator: DataLocator) -> str:
@@ -2212,31 +2252,34 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     # ``.proto`` are gone). The provider bundle is now built by the module-level
     # ``iris.cluster.composer.provider_bundle(config)``, and ``LocalCluster``
     # moved to ``iris.cluster.local_cluster``. The job-build helpers
-    # (build_resources / build_job_constraints / resolve_multinode_defaults /
-    # EnvironmentSpec / Entrypoint / job_pb2) and the ``IrisClient.remote(...)`` /
+    # (ResourceSpec / constraints / EnvironmentSpec / Entrypoint / job_pb2) and
+    # the ``IrisClient.remote(...)`` /
     # ``client.submit(...)`` surface are UNCHANGED — see how the marin CLI itself
     # now submits in iris/cli/job.py + iris/cli/connect.py, which this mirrors.
     from iris.cluster.types import EnvironmentSpec, Entrypoint
-    from iris.cli.job import build_resources, build_job_constraints, resolve_multinode_defaults
 
     # Per-task resources: whole node, all GPUs (no co-tenant → exclusive).
-    resources = build_resources(None, gpu_spec, cpu=args.cpu, memory=args.memory, disk=args.disk)
+    resources = _gpu_resources(
+        args.gpu_variant,
+        args.gpus_per_node,
+        cpu=args.cpu,
+        memory=args.memory,
+        disk=args.disk,
+    )
 
     # Multi-node gang: replicas=num_nodes; for GPUs with replicas>1 this returns
     # CoschedulingConfig(group_by="leafgroup") — co-schedule all nodes on one IB
     # leaf fabric, atomically (Kueue gang admission on cw-us-east-02a).
-    replicas, coscheduling = resolve_multinode_defaults(None, args.gpu_variant, args.num_nodes)
+    replicas = args.num_nodes
+    coscheduling = _gpu_multinode(args.gpu_variant, args.gpus_per_node, replicas)
 
     resources_proto = resources.to_proto()
     # --target-cluster (federated submission) appends a `cluster EQ <peer>` constraint
     # so the marin meta-scheduler DELEGATES the whole job to the peer child (see the
     # submission block below). None on the default direct path (byte-identical).
-    constraints = build_job_constraints(
-        resources_proto=resources_proto,
-        tpu_variants=[],
+    constraints = _gpu_constraints(
+        resources_proto,
         replicas=replicas,
-        regions=None,
-        zone=None,
         preemptible=args.preemptible,
         target_cluster=args.target_cluster,
     )
