@@ -373,7 +373,11 @@ def parse_args() -> argparse.Namespace:
         default=24.0,
         help="Only include jobs submitted within this many hours; 0 means all history (default: 24).",
     )
-    parser.add_argument("--user", default=DEFAULT_USER, help=f"Iris user to monitor (default: {DEFAULT_USER}).")
+    parser.add_argument(
+        "--user",
+        default=DEFAULT_USER,
+        help=f"Iris user to monitor and whose per-cluster budget is reported (default: {DEFAULT_USER}).",
+    )
     parser.add_argument("--all-users", action="store_true", help="Discover active RL jobs for every user.")
     parser.add_argument(
         "--jupiter-run",
@@ -450,6 +454,11 @@ def run_iris(cluster: Cluster, arguments: list[str], *, timeout: int = 300) -> s
         environment=environment,
         timeout=timeout,
     )
+
+
+def command_error_message(result: subprocess.CompletedProcess[str], *, tail: int = ERROR_DETAIL_CHARS) -> str:
+    """Flatten a failed command's output into one tail-trimmed line."""
+    return (result.stderr or result.stdout).strip().replace("\n", " ")[-tail:]
 
 
 def entrypoint_text(raw: str) -> str:
@@ -538,8 +547,7 @@ def discover_rl_jobs(
     )
     result = run_iris(cluster, ["query", sql, "-f", "csv"])
     if result.returncode:
-        message = (result.stderr or result.stdout).strip().replace("\n", " ")
-        return [], [f"{cluster.name}: discovery failed: {message[-ERROR_DETAIL_CHARS:]}"]
+        return [], [f"{cluster.name}: discovery failed: {command_error_message(result)}"]
 
     jobs: list[IrisRlJob] = []
     try:
@@ -573,6 +581,69 @@ def discover_rl_jobs(
     return jobs, []
 
 
+@dataclass(frozen=True)
+class UserBudget:
+    """One user's Iris budget on one cluster: consumed (spent) vs allotted (limit)."""
+
+    user: str
+    cluster: str
+    spent: int | None
+    limit: int | None
+    max_band: str | None
+    note: str | None = None
+
+
+def _budget_field(line: str, key: str) -> str | None:
+    """Return the trimmed value after ``key:`` on a budget output line, else None."""
+    stripped = line.strip()
+    prefix = f"{key}:"
+    return stripped.removeprefix(prefix).strip() if stripped.startswith(prefix) else None
+
+
+def fetch_user_budget(cluster: Cluster, user: str) -> UserBudget:
+    """Query one cluster controller for the user's current budget spend."""
+    result = run_iris(cluster, ["user", "budget", "get", user])
+    if result.returncode:
+        message = command_error_message(result)
+        note = "no budget set" if "No budget found" in message else f"query failed: {message}"
+        return UserBudget(user, cluster.name, None, None, None, note)
+
+    spent: int | None = None
+    limit: int | None = None
+    max_band: str | None = None
+    for line in result.stdout.splitlines():
+        if (value := _budget_field(line, "Spent")) is not None:
+            spent = int(value) if value else None
+        elif (value := _budget_field(line, "Limit")) is not None:
+            limit = int(value) if value else None
+        elif (value := _budget_field(line, "Max band")) is not None:
+            max_band = value or None
+    return UserBudget(user, cluster.name, spent, limit, max_band)
+
+
+def fetch_user_budgets(user: str, progress: ProgressReporter) -> list[UserBudget]:
+    """Fetch the user's budget across every configured CoreWeave cluster."""
+    progress.phase(f"fetching Iris budget for {user} across {len(CLUSTERS)} cluster(s)")
+    return [fetch_user_budget(cluster, user) for cluster in CLUSTERS]
+
+
+def budget_line(budget: UserBudget) -> str:
+    """Render one cluster's budget as a compact consumed-vs-allotted line."""
+    if budget.note:
+        return f"{budget.cluster}  {budget.note}"
+    spent = f"{budget.spent:,}" if budget.spent is not None else "—"
+    limit_value = f"{budget.limit:,}" if budget.limit is not None else "—"
+    pct = f" ({budget.spent / budget.limit:.0%})" if budget.limit and budget.spent is not None else ""
+    return f"{budget.cluster}  spent={spent} / limit={limit_value}{pct}  band={budget.max_band or '—'}"
+
+
+def render_budget_section(user: str, budgets: list[UserBudget]) -> str:
+    """Render the per-cluster Iris budget block for the status report."""
+    lines = [f"## Iris budget — user={user}"]
+    lines.extend(budget_line(budget) for budget in budgets)
+    return "\n".join(lines)
+
+
 def job_directory(bundle_root: Path, job: MonitoredJob) -> Path:
     """Return the shared canonical evidence directory for this RL job."""
     return job_bundle(bundle_root, job.cluster.name, job.bundle_job_id).directory
@@ -596,8 +667,7 @@ def fetch_finelog(job: IrisRlJob, destination: Path, *, scope: FinelogScope = "c
     stderr_path = destination / "finelog.stderr"
     stderr_path.write_text(result.stderr)
     if result.returncode:
-        message = (result.stderr or result.stdout).strip().replace("\n", " ")
-        return "unavailable", f"finelog: {message[-180:]}"
+        return "unavailable", f"finelog: {command_error_message(result, tail=180)}"
     (destination / "finelog.log").write_text(result.stdout)
     return f"{len(result.stdout.splitlines()):,} lines", None
 
@@ -611,7 +681,7 @@ def job_pods(job: IrisRlJob) -> list[tuple[str, str]]:
         timeout=120,
     )
     if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout).strip()[-ERROR_DETAIL_CHARS:])
+        raise RuntimeError(command_error_message(result))
     return sorted(
         (
             item["metadata"]["name"],
@@ -631,7 +701,7 @@ def fetch_complete_pod_log(base: list[str], pod: str, destination: Path) -> None
     )
     destination.write_text(result.stdout)
     if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout).strip()[-ERROR_DETAIL_CHARS:])
+        raise RuntimeError(command_error_message(result))
 
 
 def fetch_complete_ray_logs(base: list[str], pod: str, destination: Path) -> int:
@@ -1487,6 +1557,7 @@ def publish_report(
     rows: list[list[object]],
     job_report: dict[str, JobReportValue],
     errors: list[MonitorError],
+    budgets: list[UserBudget],
     progress: ProgressReporter,
 ) -> None:
     """Render, persist, and print one fleet status report."""
@@ -1507,7 +1578,8 @@ def publish_report(
     )
     error_summary = f"Monitor errors: {len(errors)}; details: {error_report_path}"
     heading = f"# RL status — {checked_at.isoformat()}; Iris submitted={window}{filter_suffix}"
-    report = f"{heading}\n\n{table}\n\n{error_summary}\n"
+    budget_section = f"{render_budget_section(args.user, budgets)}\n\n" if budgets else ""
+    report = f"{heading}\n\n{budget_section}{table}\n\n{error_summary}\n"
     report_path = report_directory / f"{timestamp}.md"
     report_path.write_text(report)
     (report_directory / "latest.md").write_text(report)
@@ -1516,13 +1588,14 @@ def publish_report(
         {
             "checked_at": checked_at.isoformat(),
             "jobs": {key: asdict(value) for key, value in job_report.items()},
+            "budgets": [asdict(budget) for budget in budgets],
             "report": str(report_path),
             "error_count": len(errors),
             "error_report": str(error_report_path),
         },
     )
     progress.phase("report written; printing status table")
-    print(f"{heading}\n\n{terminal_table}\n\n{error_summary}")
+    print(f"{heading}\n\n{budget_section}{terminal_table}\n\n{error_summary}")
 
 
 def main() -> int:
@@ -1552,6 +1625,9 @@ def main() -> int:
     synced_jobs = sync_per_job_evidence(settings, jobs, progress)
     synced_jobs = apply_iris_trace_budget(settings, synced_jobs, progress)
     report_data = collect_report_data(settings, synced_jobs, errors)
+    budgets: list[UserBudget] = []
+    if not args.all_users and not args.jupiter_only:
+        budgets = fetch_user_budgets(args.user, progress)
     publish_report(
         args,
         report_directory,
@@ -1559,6 +1635,7 @@ def main() -> int:
         report_data.rows,
         report_data.jobs,
         report_data.errors,
+        budgets,
         progress,
     )
     return 0

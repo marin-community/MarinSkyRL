@@ -555,6 +555,7 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
         lambda *_args, **_kwargs: (_ for _ in ()).throw(LookupError("unexpected raw sync exception")),
     )
     monkeypatch.setattr(watch_coreweave_rl, "write_job_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(watch_coreweave_rl, "fetch_user_budgets", lambda *_args, **_kwargs: [])
 
     assert watch_coreweave_rl.main() == 0
 
@@ -643,6 +644,70 @@ def test_rl_effective_state_classifies_placement(state, task_state, expected):
     )
 
     assert watch_coreweave_rl.effective_state(job) == expected
+
+
+def test_fetch_user_budget_parses_spent_limit_and_band(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    # The CLI emits controller/tunnel preamble lines before the key:value block.
+    output = (
+        "I20260803 controller tunnel ready\n"
+        "User:      benjaminfeuer\n"
+        "Limit:     1000000\n"
+        "Spent:     487818\n"
+        "Max band:  interactive\n"
+    )
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=""),
+    )
+
+    budget = watch_coreweave_rl.fetch_user_budget(cluster, "benjaminfeuer")
+
+    assert budget == watch_coreweave_rl.UserBudget(
+        "benjaminfeuer", "cw-rno2a", spent=487818, limit=1000000, max_band="interactive"
+    )
+
+
+def test_fetch_user_budget_reports_no_budget_set_when_unset(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-us-east-02a", Path("/tmp/kubeconfig"), None)
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(
+            arguments,
+            1,
+            stdout="",
+            stderr="Traceback ...\nconnectrpc.errors.ConnectError: No budget found for user benjaminfeuer\n",
+        ),
+    )
+
+    budget = watch_coreweave_rl.fetch_user_budget(cluster, "benjaminfeuer")
+
+    assert budget.spent is None and budget.limit is None
+    assert budget.note == "no budget set"
+
+
+def test_budget_line_shows_consumed_allotted_and_percent():
+    budget = watch_coreweave_rl.UserBudget("benjaminfeuer", "cw-rno2a", 487818, 1000000, "interactive")
+
+    line = watch_coreweave_rl.budget_line(budget)
+
+    # Pins the computed formatting (thousands grouping, percent), not the prose layout.
+    assert "spent=487,818" in line
+    assert "limit=1,000,000" in line
+    assert "49%" in line
+    assert "band=interactive" in line
+
+
+def test_budget_line_omits_percent_when_limit_missing():
+    budget = watch_coreweave_rl.UserBudget("benjaminfeuer", "cw-rno2a", 500, None, "interactive")
+
+    line = watch_coreweave_rl.budget_line(budget)
+
+    assert "spent=500" in line
+    assert "limit=—" in line
+    assert "%" not in line
 
 
 def _remote_trace_objects():
