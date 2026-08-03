@@ -1783,20 +1783,14 @@ def normalize(args: argparse.Namespace) -> None:
     except FileNotFoundError as error:
         raise SystemExit(str(error)) from error
 
-    try:
-        relative_path = source.relative_to(PROJECT_ROOT)
-    except ValueError:
-        contents = source.read_bytes()
-        digest = hashlib.sha256(contents).hexdigest()[:16]
-        suffix = source.suffix or ".yaml"
-        args.rl_config = str(source)
-        args.rl_config_launch = RlConfigLaunch(
-            task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
-            payload=base64.b64encode(contents).decode("ascii"),
-        )
-    else:
-        args.rl_config = str(relative_path)
-        args.rl_config_launch = RlConfigLaunch(task_path=str(relative_path), payload=None)
+    contents = source.read_bytes()
+    digest = hashlib.sha256(contents).hexdigest()[:16]
+    suffix = source.suffix or ".yaml"
+    args.rl_config = str(source)
+    args.rl_config_launch = RlConfigLaunch(
+        task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
+        payload=base64.b64encode(contents).decode("ascii"),
+    )
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -1861,7 +1855,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # Cross-cluster ingress (opencode-RL literal capture): forward the ingress flags to
     # the in-pod runner (cloud.iris.training_driver), which stands up the RecordProxy + registers
     # + mints the capability URL. Only emitted under --ingress-mode controller; the
-    # default (direct) path adds nothing (byte-identical run_rl invocation).
+    # default (direct) path adds nothing (byte-identical training-driver invocation).
     if getattr(args, "ingress_mode", "direct") == "controller":
         train_cmd.extend(["--ingress_mode", "controller"])
         if getattr(args, "ingress_host", None):
@@ -1954,7 +1948,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
     # Fix: forward --train-data to the controller so it can run the SAME extraction
     # on EVERY node before Ray starts, populating the identical node-local path on
-    # all pods. Idempotent (on_exist=skip) — rank-0's later run_rl re-resolve is a
+    # all pods. Idempotent (on_exist=skip) — rank 0's later training-driver re-resolve is a
     # cheap no-op.
     if args.train_data and args.train_data != "[]" and not args.data_sources_json:
         controller_cmd.extend(["--train-data", args.train_data])

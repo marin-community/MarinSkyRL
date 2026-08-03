@@ -279,7 +279,7 @@ def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):
     assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
 
 
-def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
+def test_rl_config_is_materialized_for_the_task(tmp_path):
     args = _args(tmp_path, "opencode", ["--job-name", "external-config"])
     source = Path(args.rl_config).resolve()
 
@@ -295,6 +295,19 @@ def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
     assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
     assert str(source) not in command[-1]
+
+
+def test_in_tree_rl_config_is_embedded_in_the_runtime_bundle_environment(tmp_path):
+    source = _REPO_ROOT / "cloud/iris/configs/delphi_math_rl_ifeval.yaml"
+    args = create_parser().parse_args(["--rl_config", str(source), "--model_path", "model"])
+
+    normalize(args)
+
+    launch = args.rl_config_launch
+    task_copy = tmp_path / "task" / "config.yaml"
+    materialize_rl_config(str(task_copy), launch.task_environment())
+    assert launch.task_path.startswith(f"{RL_CONFIG_TASK_DIR}/")
+    assert task_copy.read_bytes() == source.read_bytes()
 
 
 def test_missing_rl_config_fails_during_normalization():

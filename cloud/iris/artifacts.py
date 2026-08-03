@@ -129,7 +129,7 @@ def materialize(
     validate: Callable[[set[str], str], None] | None = None,
 ) -> MaterializedArtifact:
     """Materialize one immutable artifact into its declared node-local path."""
-    filesystem, remote_inventory = _source_inventory(source.uri)
+    _, remote_inventory = _source_inventory(source.uri)
     inventory = tuple(entry for _, entry in remote_inventory)
     target = Path(source.local_path).resolve()
     if _materialization_matches(target, source, inventory):
@@ -140,7 +140,9 @@ def materialize(
     backup: Path | None = None
     try:
         staging.rmdir()
-        _copy_inventory(filesystem, remote_inventory, staging)
+        copied_inventory = copy_tree(source.uri, staging)
+        if copied_inventory != inventory:
+            raise ValueError(f"Artifact source changed while it was being staged: {source.uri}")
         if validate is not None:
             validate({entry.path for entry in inventory}, source.uri)
         manifest = {

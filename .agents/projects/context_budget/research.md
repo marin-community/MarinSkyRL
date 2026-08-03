@@ -1,7 +1,7 @@
 # Research
 
 - `cloud/iris/rl_config_translation.py` parses each Iris YAML and is the only
-  supported source for Hydra arguments in `cloud/iris/run_rl.py`.
+  supported source for Hydra arguments in `cloud/iris/training_driver.py`.
 - `skyrl-train/skyrl_train/config/ppo_base_config.yaml` defines the downstream
   defaults: `trainer.max_prompt_length`, `generator.max_input_length`,
   `generator.max_turns`, and `generator.sampling_params.max_generate_length`.

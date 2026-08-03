@@ -31,8 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
-import fsspec
-
+from cloud.iris.artifacts import fs_and_path
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.rl_config_translation import (
     apply_context_budget_overrides,
@@ -221,7 +220,8 @@ class LocalRLRunner:
             hydra_args.extend(skyrl_overrides)
 
         if self.config.resolved_config_uri:
-            with fsspec.open(self.config.resolved_config_uri, "w") as destination:
+            filesystem, path = fs_and_path(self.config.resolved_config_uri)
+            with filesystem.open(path, "w") as destination:
                 json.dump(
                     {
                         "entrypoint": parsed.entrypoint,
