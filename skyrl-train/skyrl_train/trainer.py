@@ -75,6 +75,7 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
@@ -479,7 +480,7 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
-                    with Timer("generate", self.all_timings):
+                    with Timer("generate", self.all_timings), critical_phase("rollout_or_inference_wait"):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
                     if self.cfg.trainer.step_wise_training:
@@ -556,7 +557,7 @@ class RayPPOTrainer:
 
                     # 4. train policy/critic model
                     # Policy model is backloaded to GPU during training
-                    with Timer("train_critic_and_policy", self.all_timings):
+                    with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
                         status = self.train_critic_and_policy(training_input)
 
                     # 5. sync weights to inference engines (must happen before callbacks)
@@ -652,6 +653,7 @@ class RayPPOTrainer:
                 # 10. Update progress bar and global step
                 pbar.update(1)
                 last_completed_step = self.global_step
+                record_policy_step(self.global_step)
                 self.global_step += 1
 
                 del training_input, generator_output
@@ -1195,6 +1197,7 @@ class RayPPOTrainer:
 
         if not self.cfg.trainer.step_wise_training:
             validate_generator_output(len(input_batch["prompts"]), generator_output)
+        record_generated_work(generator_output["response_ids"], generator_output.get("is_last_step"))
 
         return generator_output
 
@@ -1882,17 +1885,34 @@ class RayPPOTrainer:
             self._cleanup_old_checkpoints()
 
     def _cleanup_old_checkpoints(self):
+        max_ckpts = self.cfg.trainer.max_ckpts_to_keep
+        # Disabled (the default): keep all checkpoints. The payload is a no-op at
+        # this value, so skip the per-node Ray lease entirely. Leasing a fresh
+        # worker on every node with hard affinity can fail on a CPU-saturated
+        # cluster for no benefit.
+        if max_ckpts < 0:
+            return
+
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
-        run_on_each_node(
-            self._node_ids,
-            cleanup_old_checkpoints,
-            self.cfg.trainer.ckpt_path,
-            self.cfg.trainer.max_ckpts_to_keep,
-        )
-        # run on driver as well
-        # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
-        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
+        try:
+            run_on_each_node(
+                self._node_ids,
+                cleanup_old_checkpoints,
+                self.cfg.trainer.ckpt_path,
+                max_ckpts,
+            )
+        except ray.exceptions.RayError as e:
+            # Best-effort: cleanup runs only after a successful checkpoint save,
+            # so any per-node dispatch failure -- worker lease failure, worker or
+            # node death, or a failure raised inside the remote task -- is logged
+            # rather than propagated. The checkpoint is already on disk; cleanup
+            # must not kill the run.
+            logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
+
+        # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
+        # suffices; the per-node fan-out above only matters for node-local dirs.
+        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, max_ckpts)
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

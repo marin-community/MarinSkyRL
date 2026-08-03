@@ -6,7 +6,7 @@ Covers the robust two-tier alignment added to fix silent TIS misalignment:
      it surfaces as tis/lcs_fallback_fraction instead of silently degrading TIS.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/generators/test_tis_alignment.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/generators/test_tis_alignment.py
 """
 
 import math

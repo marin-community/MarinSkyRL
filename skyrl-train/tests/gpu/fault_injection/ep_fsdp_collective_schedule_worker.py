@@ -51,6 +51,7 @@ from tests.collective_schedule_matrix import (
     RoutingMode,
     collective_schedule_case,
 )
+from tests.distributed_runtime_constants import GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
 
 
 DIM = 64
@@ -297,7 +298,12 @@ def _run_ep_fsdp_collective_schedule_case(
     world_size = dist.get_world_size()
     device = torch.device("cuda", torch.cuda.current_device())
     ep_size, fsdp_size = _mesh_sizes(world_size, ep_size, fsdp_size)
-    device_mesh = create_device_mesh(world_size, fsdp_size=fsdp_size, ep_size=ep_size)
+    device_mesh = create_device_mesh(
+        world_size,
+        fsdp_size=fsdp_size,
+        timeout_seconds=GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+        ep_size=ep_size,
+    )
     mesh_dim_names = tuple(device_mesh.mesh_dim_names)
     fsdp_coordinate = tuple(device_mesh.get_coordinate())[mesh_dim_names.index("fsdp")]
 

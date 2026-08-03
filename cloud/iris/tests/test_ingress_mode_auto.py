@@ -1,4 +1,4 @@
-"""Unit tests for the ``--ingress-mode auto`` derivation in cloud/iris/launch_rl_iris.py.
+"""Unit tests for the ``--ingress-mode auto`` derivation in cloud/iris/iris_backend.py.
 
 Proves that controller-ingress is auto-enabled ONLY for the opencode harness on a CoreWeave
 target, that an EXPLICIT ``--ingress-mode`` always wins over the ``auto`` derivation, and that
@@ -20,7 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.launch_rl_iris import (  # noqa: E402
+from cloud.iris.iris_backend import (  # noqa: E402
     _rl_config_needs_controller_ingress,
     autoconfigure_ingress,
     create_parser,

@@ -1,6 +1,6 @@
 # Debugging log for out-of-tree RL configs
 
-Make `launch_rl_iris.py` accept a readable absolute RL config outside the repository without shipping a stale duplicate.
+Make `iris_backend.py` accept a readable absolute RL config outside the repository without shipping a stale duplicate.
 
 ## Initial status
 
@@ -47,7 +47,7 @@ of turning the forwarded payload back into a file before parsing it.
 
 ## Changes to make
 
-Move payload decoding and file creation into `rl_config_translation.py`, call it from `run_rl.py`,
+Move payload decoding and file creation into `rl_config_translation.py`, call it from `training_driver.py`,
 and have the regression test pass the launcher's environment mapping through that worker helper.
 
 ## Results

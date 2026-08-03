@@ -15,7 +15,7 @@ The generator field added to `ppo_base_config.yaml`
 See notes/RL/skyrl/vllm_dcp_rollout_stages/{README,stage0_config_scaffold_scope}.md.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/generators/test_dcp_config.py -v
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/generators/test_dcp_config.py -v
 """
 
 from types import SimpleNamespace

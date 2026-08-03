@@ -205,7 +205,8 @@ These operations are read-only and preserve information that disappears when the
 - `docs/debug-log-warmed-collective-divergence.md`
 - `docs/debug-log-collective-phase-diagnostics.md`
 - `skyrl-train/tests/gpu/fault_injection/nccl_collective_contract.py`
-- `skyrl-train/tests/gpu/fault_injection/multi_node_ep_fsdp_traffic.py`
+- `skyrl-train/tests/gpu/fault_injection/multi_node_ep_fsdp_worker.py`
+- `skyrl-train/tests/gpu/fault_injection/multi_node_phase_divergence_worker.py`
 
 ## Update protocol
 

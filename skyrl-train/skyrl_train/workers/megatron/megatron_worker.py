@@ -321,7 +321,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.profiler: Profiler = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
             self.actor_module, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
         )
@@ -723,7 +722,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         self.actor_module: List[nn.Module] = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):

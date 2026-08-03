@@ -88,8 +88,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         # NOTE (erictang000): the Deepspeed backend only offloads optimizer states + fp32 params to GPU, so
         # bf16 weights remain on GPU at all times. We thus absorb `offload_optimizer` and `offload_model` into `kwargs`
         # and do not pass them down to the strategy.
-        # TODO (erictang000): this is where this was getting called previously - do we need to do this every time?
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):
@@ -293,7 +291,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
 
 class DeepSpeedCriticWorkerBase(CriticWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):

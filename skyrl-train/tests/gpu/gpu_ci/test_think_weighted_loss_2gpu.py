@@ -12,7 +12,7 @@ Validates on real GPUs (2 GPUs, fsdp2 policy worker):
      (the byte-identical contract, exercised through the real worker).
 
 Run with:
-    uv run --isolated --extra dev --extra deepspeed pytest \
+    uv run --isolated --group dev --extra deepspeed pytest \
         tests/gpu/gpu_ci/test_think_weighted_loss_2gpu.py
 (or via tests/gpu/run_think_weighted_loss_2gpu.sbatch on Jupiter reformo)
 """

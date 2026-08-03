@@ -9,24 +9,27 @@ Detection strategy (in priority order):
 2. Pure sysfs + numactl (no nvidia-smi needed — enumerates NVIDIA PCI devices, reads
    their NUMA nodes, then maps GPU NUMA nodes to CPU NUMA nodes via distance matrix)
 
-Activation: Set SKYRL_ENABLE_NUMA_AFFINITY=1 in the environment. When unset, all functions
-are no-ops to avoid interfering with systems that don't need NUMA binding.
+Activation: Set SKYRL_ENABLE_NUMA_AFFINITY=1 in the environment to install CPU and memory
+affinity. Topology queries and placement diagnostics remain available when it is unset.
 """
 
 import os
 import re
 import subprocess
-from ctypes import CDLL, Structure, POINTER, c_ulong, c_char_p, c_int
-from ctypes.util import find_library
+from collections import Counter
+from ctypes import POINTER, c_int, c_ulong, c_void_p, get_errno
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Collection, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-
-def is_numa_affinity_enabled() -> bool:
-    """Check if NUMA affinity binding is enabled via environment variable."""
-    return os.environ.get("SKYRL_ENABLE_NUMA_AFFINITY", "0") == "1"
+from skyrl_train.numa_policy import (
+    cpu_numa_topology,
+    install_host_memory_policy,
+    is_numa_affinity_enabled,
+    load_libnuma,
+    parse_linux_range_list,
+)
 
 
 def _nvidia_smi_env() -> Dict[str, str]:
@@ -93,22 +96,47 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
                 break
 
         if cpu_affinity_str is not None and numa_node is not None:
-            cpus = _parse_cpu_range(cpu_affinity_str)
+            cpus = parse_linux_range_list(cpu_affinity_str)
             gpu_map[gpu_idx] = (cpus, numa_node)
 
     return gpu_map if gpu_map else None
 
 
-def _parse_cpu_range(cpu_str: str) -> List[int]:
-    """Parse CPU range string like '0-71' or '0-71,144-215' into list of CPU IDs."""
-    cpus = []
-    for part in cpu_str.split(","):
-        if "-" in part:
-            start, end = part.split("-", 1)
-            cpus.extend(range(int(start), int(end) + 1))
-        else:
-            cpus.append(int(part))
-    return cpus
+# ---------------------------------------------------------------------------
+# Placement diagnostics
+# ---------------------------------------------------------------------------
+
+
+def memory_nodes_for_range(address: int, length: int, *, max_pages: int = 256) -> Dict[int, int]:
+    """Return sampled physical NUMA node IDs mapped to their page counts."""
+    if address <= 0 or length <= 0:
+        raise ValueError("address and length must be positive")
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    first_page = address - address % page_size
+    last_page = (address + length - 1) // page_size * page_size
+    page_count = (last_page - first_page) // page_size + 1
+    if page_count <= max_pages:
+        page_indices = list(range(page_count))
+    elif max_pages == 1:
+        page_indices = [page_count // 2]
+    else:
+        page_indices = sorted({index * (page_count - 1) // (max_pages - 1) for index in range(max_pages)})
+
+    pages = (c_void_p * len(page_indices))(*(first_page + index * page_size for index in page_indices))
+    statuses = (c_int * len(page_indices))()
+    libnuma = load_libnuma()
+    libnuma.move_pages.argtypes = [c_int, c_ulong, POINTER(c_void_p), POINTER(c_int), POINTER(c_int), c_int]
+    libnuma.move_pages.restype = c_int
+    if libnuma.move_pages(0, len(page_indices), pages, None, statuses, 0) != 0:
+        errno = get_errno()
+        raise OSError(errno, os.strerror(errno))
+    failed_statuses = [status for status in statuses if status < 0]
+    if failed_statuses:
+        raise OSError(-failed_statuses[0], os.strerror(-failed_statuses[0]))
+    return dict(Counter(int(status) for status in statuses))
 
 
 # ---------------------------------------------------------------------------
@@ -156,52 +184,25 @@ def _enumerate_gpus_from_sysfs() -> Optional[Dict[int, int]]:
     return result
 
 
-@lru_cache(maxsize=1)
-def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
-    """Parse numactl --hardware to get NUMA node -> CPU list mapping.
-
-    Returns:
-        Dict mapping NUMA node ID to list of CPU IDs (only nodes with CPUs),
-        or None on failure.
-    """
-    try:
-        result = subprocess.run(
-            ["numactl", "--hardware"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-
-    node_cpus = {}
-    for line in result.stdout.splitlines():
-        # Match lines like "node 0 cpus: 0 1 2 3 ... 71"
-        match = re.match(r"^node\s+(\d+)\s+cpus:\s*(.+)$", line)
-        if match:
-            node_id = int(match.group(1))
-            cpu_str = match.group(2).strip()
-            if cpu_str:
-                cpus = [int(c) for c in cpu_str.split()]
-                if cpus:
-                    node_cpus[node_id] = cpus
-
-    if node_cpus:
-        node_summary = {k: f"{v[0]}-{v[-1]}" for k, v in sorted(node_cpus.items())}
-        logger.debug(f"NUMA: numactl found {len(node_cpus)} nodes with CPUs: {node_summary}")
-    return node_cpus if node_cpus else None
+def physical_gpu_id_for_worker(cuda_visible_devices: Optional[str], resolved_local_rank: int) -> int:
+    """Resolve the physical GPU assigned to a Ray worker."""
+    devices = [device for device in (cuda_visible_devices or "").split(",") if device]
+    if not devices:
+        return resolved_local_rank
+    visible_rank = 0 if len(devices) == 1 else resolved_local_rank
+    if visible_rank >= len(devices):
+        raise RuntimeError(f"local rank {visible_rank} is outside CUDA_VISIBLE_DEVICES={','.join(devices)}")
+    return int(devices[visible_rank])
 
 
-def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]) -> Optional[int]:
+def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_node_ids: Collection[int]) -> Optional[int]:
     """Find the CPU NUMA node closest to a GPU NUMA node using the kernel distance matrix.
 
     On GH200, GPU NUMA nodes (4, 12, 20, 28) have no CPUs — their HBM memory lives
     there. The closest CPU NUMA node (0, 1, 2, 3) is the one on the same SoC,
     determined by reading /sys/devices/system/node/nodeN/distance.
     """
-    if gpu_numa_node in cpu_nodes:
+    if gpu_numa_node in cpu_node_ids:
         return gpu_numa_node  # GPU NUMA node has CPUs directly
 
     # Read distance from gpu_numa_node to all other nodes
@@ -216,7 +217,7 @@ def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[in
     # Find the CPU node with the smallest distance
     best_node = None
     best_dist = float("inf")
-    for node_id in cpu_nodes:
+    for node_id in cpu_node_ids:
         if node_id < len(distances) and distances[node_id] < best_dist:
             best_dist = distances[node_id]
             best_node = node_id
@@ -241,18 +242,16 @@ def _get_affinity_via_sysfs_numactl(gpu_physical_id: int) -> Optional[Tuple[List
 
     gpu_numa = gpu_numa_map[gpu_physical_id]
 
-    numactl = _parse_numactl_hardware()
-    if not numactl:
-        return None
+    topology = cpu_numa_topology()
 
     # Direct match: GPU's NUMA node has CPUs
-    if gpu_numa in numactl:
-        return (numactl[gpu_numa], gpu_numa)
+    if gpu_numa in topology:
+        return (list(topology[gpu_numa]), gpu_numa)
 
     # GH200 case: GPU NUMA node is HBM-only, find closest CPU NUMA node
-    closest = _find_closest_cpu_numa_node(gpu_numa, numactl)
+    closest = _find_closest_cpu_numa_node(gpu_numa, topology.keys())
     if closest is not None:
-        return (numactl[closest], closest)
+        return (list(topology[closest]), closest)
 
     return None
 
@@ -285,37 +284,33 @@ def get_gpu_cpu_affinity(gpu_physical_id: int) -> Optional[Tuple[List[int], int]
 
 
 def set_numa_affinity_for_gpu(gpu_id: int) -> None:
-    """Set CPU and memory affinity for the calling process to match a GPU's NUMA node.
+    """Install GPU-local CPU affinity and an LPDDR-only policy when enabled.
 
-    This binds the process to the CPUs closest to the specified GPU and sets the
-    memory allocation policy to prefer the GPU's NUMA node.
-
-    Args:
-        gpu_id: Physical GPU index.
-
-    No-op if:
-        - SKYRL_ENABLE_NUMA_AFFINITY != "1"
-        - GPU NUMA topology cannot be detected
-        - libnuma is not available
+    The disabled path is a no-op. Once enabled, topology discovery, memory-policy
+    installation, and CPU binding are strict contracts: an undetectable or
+    disallowed topology and an empty CPU overlap raise ``RuntimeError``.
     """
     if not is_numa_affinity_enabled():
-        return
+        return None
 
     affinity = get_gpu_cpu_affinity(gpu_id)
     if affinity is None:
-        logger.warning(f"NUMA affinity: could not detect topology for GPU {gpu_id}")
-        return
+        raise RuntimeError(f"could not detect NUMA topology for physical GPU {gpu_id}")
 
     cpu_list, numa_node = affinity
+    target_memory_nodes = install_host_memory_policy()
+    if numa_node not in target_memory_nodes:
+        raise RuntimeError(
+            f"GPU {gpu_id}'s CPU NUMA node {numa_node} is outside the allowed host-memory nodes {target_memory_nodes}"
+        )
 
-    # Try os.sched_setaffinity (doesn't need libnuma)
     target_cpus = set(cpu_list)
     try:
         allowed_cpus = os.sched_getaffinity(0)
-    except (OSError, AttributeError):
-        allowed_cpus = None
+    except (OSError, AttributeError) as error:
+        raise RuntimeError("could not read the worker's allowed CPU set") from error
 
-    if allowed_cpus is not None and not target_cpus.issubset(allowed_cpus):
+    if not target_cpus.issubset(allowed_cpus):
         overlap = target_cpus & allowed_cpus
         logger.warning(
             f"NUMA affinity: target CPUs {cpu_list[0]}-{cpu_list[-1]} (NUMA {numa_node}) "
@@ -328,10 +323,7 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
             target_cpus = overlap
             logger.info(f"NUMA affinity: falling back to {len(overlap)} overlapping CPUs for GPU {gpu_id}")
         else:
-            logger.warning(
-                f"NUMA affinity: no overlap between target and allowed CPUs for GPU {gpu_id}, skipping CPU binding"
-            )
-            return
+            raise RuntimeError(f"GPU {gpu_id}'s CPU NUMA node {numa_node} has no CPUs in the worker's allowed CPU set")
 
     try:
         os.sched_setaffinity(0, target_cpus)
@@ -339,37 +331,5 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> None:
             f"NUMA affinity: bound process to CPUs {min(target_cpus)}-{max(target_cpus)} "
             f"(NUMA node {numa_node}) for GPU {gpu_id}"
         )
-    except (OSError, AttributeError) as e:
-        logger.warning(f"NUMA affinity: os.sched_setaffinity failed: {e}")
-        return
-
-    # Also set memory binding via libnuma if available
-    _set_membind_via_libnuma(numa_node)
-
-
-def _set_membind_via_libnuma(numa_node: int) -> None:
-    """Set memory binding policy to prefer the specified NUMA node using libnuma."""
-    try:
-        libnuma = CDLL(find_library("numa"))
-    except (OSError, TypeError):
-        # libnuma not installed — CPU affinity is already set, memory binding is optional
-        return
-
-    class bitmask_t(Structure):
-        _fields_ = [
-            ("size", c_ulong),
-            ("maskp", POINTER(c_ulong)),
-        ]
-
-    try:
-        libnuma.numa_parse_nodestring.argtypes = [c_char_p]
-        libnuma.numa_parse_nodestring.restype = POINTER(bitmask_t)
-        libnuma.numa_set_preferred.argtypes = [c_int]
-        libnuma.numa_set_preferred.restype = None
-
-        # Use numa_set_preferred (soft) instead of numa_set_membind (hard)
-        # to avoid OOM when the local NUMA node is full
-        libnuma.numa_set_preferred(c_int(numa_node))
-        logger.debug(f"NUMA affinity: set memory preferred to NUMA node {numa_node}")
-    except Exception as e:
-        logger.debug(f"NUMA affinity: libnuma membind failed: {e}")
+    except (OSError, AttributeError) as error:
+        raise RuntimeError(f"could not bind GPU {gpu_id}'s worker to CPUs {sorted(target_cpus)}") from error
