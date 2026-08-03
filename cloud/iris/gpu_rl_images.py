@@ -1,4 +1,4 @@
-"""Immutable GPU-RL image registry and cluster-aware selection."""
+"""Legacy image registry for native-kernel jobs outside the standard launcher."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ CLUSTER_ARCHITECTURES = {
 
 
 def image_for_cluster(cluster: str, strategy: str | None) -> GpuRlImage:
-    """Return the immutable image matching an execution cluster and trainer strategy."""
+    """Return the legacy image matching an execution cluster and trainer strategy."""
     try:
         architecture = CLUSTER_ARCHITECTURES[cluster]
     except KeyError as error:

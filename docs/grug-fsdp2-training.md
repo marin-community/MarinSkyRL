@@ -15,12 +15,12 @@ tokens, and model outputs are defined at valid query positions. Sample packing,
 trainer EP/CP, R3/router replay, grouped MoE, LoRA/4-bit loading, and PKO remain
 unsupported.
 
-## Runtime image
+## Runtime support
 
-Grug serving requires the Marin vLLM fork at commit `4b55591306c9`. Resolve the
-cluster's standard image from `cloud/iris/gpu_rl_images.py` and verify that it
-contains this fork. If it does not, pass an explicit verified image by immutable
-digest.
+Grug serving still requires the Marin vLLM fork at commit `4b55591306c9`. The
+standard frozen Iris environment uses the upstream vLLM wheel and therefore does
+not support Grug serving yet. Publish the fork as architecture-specific wheels or
+upstream the required changes before selecting this model in an image-free run.
 
 ## Query bias
 

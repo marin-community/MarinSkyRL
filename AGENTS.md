@@ -68,8 +68,9 @@ NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 `cpu` and `cuda` are mutually exclusive PyTorch wheel profiles because Python extras cannot replace a base
 dependency. GPU-only component extras such as `vllm`, `megatron`, and `deepspeed` imply `cuda`, so callers name
 the component rather than its hardware consequence. `fsdp` adds TorchTitan for the expert-parallel FSDP path.
-Native vLLM, FlashAttention, TransformerEngine, Mamba, and CUDA artifacts remain Docker image construction
-concerns; the extras describe their Python closure.
+The Iris launcher installs the selected GPU profile from `uv.lock` in the standard task image. Native
+artifacts must be available from the configured wheel sources for every supported architecture; do not
+hide missing wheels in a custom runtime image.
 
 ## Lint
 

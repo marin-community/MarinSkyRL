@@ -18,7 +18,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
     build_skyrl_flag_env,
@@ -29,6 +28,7 @@ from cloud.iris.iris_backend import (  # noqa: E402
     resolve_node_resource_requests,
     resolve_launch_defaults,
 )
+from cloud.iris.runtime_environment import RuntimeProfile  # noqa: E402
 from cloud.iris.rl_config_translation import (  # noqa: E402
     RL_CONFIG_TASK_DIR,
     materialize_rl_config,
@@ -339,10 +339,11 @@ def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
     assert re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", first)
 
 
-def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
+def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries():
     args = create_parser().parse_args(["--rl_config", "x", "--model_path", "y"])
 
-    assert args.task_image is None
+    assert args.runtime_commit is None
+    assert args.runtime_profile is None
     assert args.max_retries == 6
     assert args.memory == "auto"
     assert args.disk == "auto"
@@ -368,28 +369,29 @@ def _strategy_args(tmp_path: Path, strategy: str, extra: list[str] | None = None
     return create_parser().parse_args(args + (extra or []))
 
 
-def test_megatron_config_selects_the_megatron_image(tmp_path):
+def test_megatron_config_selects_the_megatron_profile(tmp_path):
     args = _strategy_args(tmp_path, "megatron")
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
+    assert args.runtime_profile is RuntimeProfile.MEGATRON
+    assert args.runtime_commit
 
 
-def test_non_megatron_config_selects_the_plain_image(tmp_path):
+def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     args = _strategy_args(tmp_path, "fsdp2")
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", "fsdp2").reference
+    assert args.runtime_profile is RuntimeProfile.FSDP
 
 
-def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
+def test_config_without_a_declared_strategy_selects_the_fsdp_profile(tmp_path):
     args = _args(tmp_path, "opencode")
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", None).reference
+    assert args.runtime_profile is RuntimeProfile.FSDP
 
 
 def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
@@ -397,19 +399,21 @@ def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
+    assert args.runtime_profile is RuntimeProfile.MEGATRON
 
 
-def test_explicit_task_image_overrides_strategy_selection(tmp_path):
-    args = _strategy_args(tmp_path, "megatron", ["--task-image", "ghcr.io/example/custom@sha256:abc"])
+def test_explicit_runtime_profile_must_match_strategy(tmp_path):
+    args = _strategy_args(tmp_path, "megatron", ["--runtime-profile", "fsdp"])
 
-    resolve_launch_defaults(args)
+    with pytest.raises(SystemExit, match="does not match trainer.strategy"):
+        resolve_launch_defaults(args)
 
-    assert args.task_image == "ghcr.io/example/custom@sha256:abc"
 
-
-@pytest.mark.parametrize("strategy", ["fsdp2", "megatron"])
-def test_east08_selects_an_arm64_image(tmp_path, strategy):
+@pytest.mark.parametrize(
+    ("strategy", "profile"),
+    [("fsdp2", RuntimeProfile.FSDP), ("megatron", RuntimeProfile.MEGATRON)],
+)
+def test_runtime_profile_is_portable_to_arm_cluster(tmp_path, strategy, profile):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
     args = _strategy_args(
         tmp_path,
@@ -428,12 +432,10 @@ def test_east08_selects_an_arm64_image(tmp_path, strategy):
 
     resolve_launch_defaults(args)
 
-    expected_image = image_for_cluster("cw-us-east-08a", strategy)
-    assert expected_image.architecture is ImageArchitecture.ARM64
-    assert args.task_image == expected_image.reference
+    assert args.runtime_profile is profile
 
 
-def test_federated_target_cluster_controls_image_architecture(tmp_path):
+def test_federated_target_cluster_keeps_training_profile(tmp_path):
     cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
     args = _strategy_args(
         tmp_path,
@@ -452,7 +454,7 @@ def test_federated_target_cluster_controls_image_architecture(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-08a", "megatron").reference
+    assert args.runtime_profile is RuntimeProfile.MEGATRON
 
 
 def test_parser_rejects_removed_harbor_source_override():

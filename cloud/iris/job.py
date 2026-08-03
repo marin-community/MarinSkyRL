@@ -4,20 +4,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import importlib.metadata
 import json
 import posixpath
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
 
 from iris.client import JobFailedError
 
-from cloud.iris.gpu_rl_images import CLUSTER_ARCHITECTURES, GPU_RL_IMAGES, GpuRlImage
 from cloud.iris.artifacts import (
     CHECKPOINT_MARKER_FILENAME,
     fs_and_path,
@@ -25,6 +20,7 @@ from cloud.iris.artifacts import (
     relative_object_key,
     validate_hf_export,
 )
+from cloud.iris.runtime_environment import installed_commit
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
     AttemptState,
@@ -45,61 +41,10 @@ class JobBackend(Protocol):
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome: ...
 
 
-def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
-    launcher_commit = _installed_launcher_commit()
-    if launcher_commit != runtime.launcher_commit:
-        raise ValueError(
-            f"Installed launcher commit {launcher_commit} does not match requested {runtime.launcher_commit}"
-        )
-    matches = [image for image in GPU_RL_IMAGES.values() if image.reference == runtime.task_image]
-    if len(matches) != 1:
-        raise ValueError(f"Task image is not registered by this launcher: {runtime.task_image}")
-    image = matches[0]
-    if image.source_commit != runtime.trainer_commit:
-        raise ValueError(
-            f"Task image embeds trainer commit {image.source_commit}, not requested {runtime.trainer_commit}"
-        )
-    architecture = CLUSTER_ARCHITECTURES.get(cluster)
-    if architecture is None:
-        raise ValueError(f"No GPU architecture is registered for cluster {cluster!r}")
-    if image.architecture != architecture:
-        raise ValueError(
-            f"Task image architecture {image.architecture} is incompatible with cluster {cluster} ({architecture})"
-        )
-    return image
-
-
-def _installed_launcher_commit() -> str:
-    try:
-        direct_url = importlib.metadata.distribution("marinskyrl").read_text("direct_url.json")
-    except importlib.metadata.PackageNotFoundError:
-        direct_url = None
-    if direct_url:
-        direct_url_value = json.loads(direct_url)
-        commit = direct_url_value.get("vcs_info", {}).get("commit_id")
-        if commit:
-            return str(commit)
-        parsed_url = urlparse(direct_url_value.get("url", ""))
-        if parsed_url.scheme == "file":
-            checkout = Path(unquote(parsed_url.path))
-            if (checkout / ".git").exists() and (checkout / "pyproject.toml").exists():
-                return subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=checkout,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
-    repository_root = Path(__file__).resolve().parents[2]
-    if not (repository_root / ".git").exists() or not (repository_root / "pyproject.toml").exists():
-        raise RuntimeError("Installed marinskyrl wheel has no VCS commit identity in direct_url.json")
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+def _validate_runtime(runtime: RuntimeIdentity) -> None:
+    launcher_commit = installed_commit()
+    if launcher_commit != runtime.commit:
+        raise ValueError(f"Installed launcher commit {launcher_commit} does not match requested {runtime.commit}")
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
@@ -182,7 +127,7 @@ def execute_job(
 ) -> SkyRLTerminalResponse:
     """Validate, submit, monitor, and commit one MarinSkyRL artifact attempt."""
     request = spec.request
-    _registered_image(request.runtime, spec.execution.target_cluster or spec.execution.cluster)
+    _validate_runtime(request.runtime)
     if _path_exists(request.output.terminal_manifest_uri):
         raise ValueError(f"Terminal manifest is immutable and already exists: {request.output.terminal_manifest_uri}")
 

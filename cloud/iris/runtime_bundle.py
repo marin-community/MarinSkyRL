@@ -1,4 +1,4 @@
-"""Build the launcher-revision runtime bundle synchronized into task images."""
+"""Build the launcher-revision runtime bundle synchronized into Iris tasks."""
 
 from __future__ import annotations
 

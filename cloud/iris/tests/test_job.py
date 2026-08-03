@@ -12,7 +12,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from cloud.iris import job  # noqa: E402
+from cloud.iris import job, runtime_environment  # noqa: E402
 from cloud.iris.job import JobBackend, execute_job  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
@@ -27,8 +27,8 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLTerminalResponse,
     SkyRLTopology,
 )
-from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
+from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
 from cloud.iris.runtime_bundle import build_runtime_bundle  # noqa: E402
 from iris.client import JobFailedError  # noqa: E402
@@ -92,7 +92,6 @@ scale_groups:
 
 
 def _spec(tmp_path: Path) -> SkyRLJobSpec:
-    image = GPU_RL_IMAGES[(ImageArchitecture.ARM64, ImageVariant.STANDARD)]
     output = tmp_path / "output"
     return SkyRLJobSpec(
         request=SkyRLLaunchRequest(
@@ -100,9 +99,8 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
             attempt_id="attempt-1",
             config_yaml="trainer:\n  strategy: fsdp2\n  placement:\n    colocate_all: true\n",
             runtime=RuntimeIdentity(
-                launcher_commit=_repository_commit(),
-                task_image=image.reference,
-                trainer_commit=image.source_commit,
+                commit=_repository_commit(),
+                profile=RuntimeProfile.FSDP,
             ),
             model=ModelLocator(
                 uri=(tmp_path / "input-model").as_uri(),
@@ -369,12 +367,25 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
 
 
-def test_installed_launcher_commit_uses_an_editable_checkout(monkeypatch) -> None:
+def test_installed_commit_uses_an_editable_checkout(monkeypatch) -> None:
     class Distribution:
         def read_text(self, name: str) -> str:
             assert name == "direct_url.json"
             return json.dumps({"url": _REPOSITORY_ROOT.as_uri(), "dir_info": {"editable": True}})
 
-    monkeypatch.setattr(job.importlib.metadata, "distribution", lambda name: Distribution())
+    monkeypatch.setattr(runtime_environment.importlib.metadata, "distribution", lambda name: Distribution())
 
-    assert job._installed_launcher_commit() == _repository_commit()
+    assert runtime_environment.installed_commit() == _repository_commit()
+
+
+def test_task_setup_uses_one_frozen_checkout_for_launcher_and_training() -> None:
+    commit = "a" * 40
+
+    script = task_setup_script(commit, RuntimeProfile.FSDP)
+
+    assert f"fetch --depth=1 origin {commit}" in script
+    assert f'git -C "$checkout" rev-parse HEAD)" = {commit}' in script
+    assert '--project "$checkout"' in script
+    assert "--frozen" in script
+    assert "--extra fsdp --extra vllm --extra telemetry" in script
+    assert "--no-install-package flash-attn" in script
