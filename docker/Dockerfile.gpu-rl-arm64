@@ -275,8 +275,8 @@ RUN chmod 0755 /usr/local/bin/sync-gpu-rl-env
 RUN cd ${SKYRL_HOME} && \
     git init -q -b main && \
     git remote add origin https://github.com/marin-community/MarinSkyRL.git && \
-    git -c user.email=build@marin.community -c user.name=gpu-rl-build add -A && \
-    git -c user.email=build@marin.community -c user.name=gpu-rl-build commit -q -m "baked gpu-rl image content @ ${GITSHA}" && \
+    git -c user.email=gpu-rl-build@marin.local -c user.name=gpu-rl-build add -A && \
+    git -c user.email=gpu-rl-build@marin.local -c user.name=gpu-rl-build commit -q -m "baked gpu-rl image content @ ${GITSHA}" && \
     echo "/opt/skyrl git tree baked @ $(git -C ${SKYRL_HOME} rev-parse HEAD) (origin=marin-community/MarinSkyRL, source @ ${GITSHA})"
 
 # =============================================================================
@@ -287,9 +287,7 @@ RUN cd ${SKYRL_HOME} && \
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the Iris launcher's registered
-# GPU_RL_PYTHON=/opt/marin/envs/rl/bin/python (cloud/iris/gpu_rl_images.py).
-# The standard and Megatron variants use this same path so the launcher and
-# runtime image cannot disagree about the interpreter location.
+# GPU_RL_ENV_DIR=/opt/marin/envs/rl (cloud/iris/gpu_rl_images.py).
 ENV RL_ENV_DIR=/opt/marin/envs/rl
 ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # =============================================================================

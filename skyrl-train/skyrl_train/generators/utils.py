@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
@@ -17,6 +18,11 @@ from skyrl_gym.metrics import aggregate_for_environment
 # training tensor still consumes a float, so callers replace UNALIGNED_LOGPROB
 # with 0.0 right before emitting; the metrics are computed BEFORE that step.
 UNALIGNED_LOGPROB = float("nan")
+BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
+_NUM_TRIALS_METRIC = "generate/num_trials"
+_NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
+_NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
+_NUM_MASKED_TRAJECTORIES_METRIC = "generate/num_masked_trajectories"
 
 
 def _lcs_alert_threshold() -> float:
@@ -652,6 +658,8 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         # stays keyset-stable and consistent with the per-trajectory emission.
         rollout_metrics["generate/tis/lcs_fallback_alert"] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
 
+    rollout_metrics.update(_merge_batch_failure_metrics(generator_outputs))
+
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -739,6 +747,62 @@ def get_rollout_metrics(
                 rollout_metrics[f"environment/{key}"] = value
 
     return rollout_metrics
+
+
+_BATCH_FAILURE_COUNT_KEYS = (
+    _NUM_TRIALS_METRIC,
+    _NUM_FAILED_INSTANCES_METRIC,
+    _NUM_FAILED_TRAJECTORIES_METRIC,
+    _NUM_MASKED_TRAJECTORIES_METRIC,
+)
+
+
+def _merge_batch_failure_metrics(generator_outputs: List[GeneratorOutput]) -> dict[str, float]:
+    """Sum failure counts across rollout groups and recompute their batch fraction."""
+    group_metrics = [
+        metrics
+        for metrics in (output.get("rollout_metrics") or {} for output in generator_outputs)
+        if _NUM_TRIALS_METRIC in metrics
+    ]
+    if not group_metrics:
+        return {}
+    for metrics in group_metrics:
+        missing = [key for key in _BATCH_FAILURE_COUNT_KEYS if key not in metrics]
+        if missing:
+            raise ValueError(f"Incomplete rollout failure metrics: missing {', '.join(missing)}")
+
+    merged = get_batch_failure_metrics(
+        sum(metrics[_NUM_TRIALS_METRIC] for metrics in group_metrics),
+        num_failed_trajectories=sum(metrics[_NUM_FAILED_TRAJECTORIES_METRIC] for metrics in group_metrics),
+        num_failed_instances=sum(metrics[_NUM_FAILED_INSTANCES_METRIC] for metrics in group_metrics),
+        num_masked_trajectories=sum(metrics[_NUM_MASKED_TRAJECTORIES_METRIC] for metrics in group_metrics),
+    )
+    error_keys = {key for metrics in group_metrics for key in metrics if key.startswith(BATCH_ERROR_METRIC_PREFIX)}
+    merged.update({key: sum(metrics.get(key, 0) for metrics in group_metrics) for key in error_keys})
+    return merged
+
+
+def get_batch_failure_metrics(
+    num_trials: int,
+    num_failed_trajectories: int,
+    num_failed_instances: int,
+    num_masked_trajectories: int,
+) -> Dict[str, float]:
+    """Describe failed and masked trajectories within a requested rollout group.
+
+    Args:
+        num_trials: Requested trajectories and denominator of the failure fraction.
+        num_failed_trajectories: Trajectories that did not complete successfully.
+        num_failed_instances: Distinct instances with at least one failed trajectory.
+        num_masked_trajectories: Trajectories excluded from the baseline.
+    """
+    return {
+        _NUM_TRIALS_METRIC: num_trials,
+        _NUM_FAILED_INSTANCES_METRIC: num_failed_instances,
+        _NUM_FAILED_TRAJECTORIES_METRIC: num_failed_trajectories,
+        _NUM_MASKED_TRAJECTORIES_METRIC: num_masked_trajectories,
+        ROLLOUT_FAILURE_FRACTION_METRIC: num_failed_trajectories / num_trials if num_trials else 0.0,
+    }
 
 
 def prepare_generator_input(

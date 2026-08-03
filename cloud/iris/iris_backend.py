@@ -1978,9 +1978,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
-    # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
-    # HF task dataset to the node-local $DCFT=/opt/openthoughts/tasks/ (gpu-rl image),
-    # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
+    # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() runs
+    # only on rank 0 (the head), so the Ray-scheduled rollout workers on
     # ranks 1..N-1 find an empty tasks dir and every rollout dies with
     # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
     # Fix: forward --train-data to the controller so it can run the SAME extraction

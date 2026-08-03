@@ -782,9 +782,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             wrapped_model = HFModelWrapper(
                 model_path,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=True,
+                # MuonH parameters and optimizer state stay in FP32. FSDP2's
+                # mixed-precision policy still casts forward compute to BF16.
+                bf16=not strategy.is_muonh_optimizer,
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
@@ -1190,9 +1190,9 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 model_path,
                 "critic",
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=True,
+                # MuonH requires FP32 parameters and optimizer state. Other
+                # critic optimizers retain the normal BF16 load path.
+                bf16=not strategy.is_muonh_optimizer,
                 lora_rank=self.cfg.trainer.critic.model.lora.rank,
                 lora_alpha=self.cfg.trainer.critic.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.critic.model.lora.dropout,
