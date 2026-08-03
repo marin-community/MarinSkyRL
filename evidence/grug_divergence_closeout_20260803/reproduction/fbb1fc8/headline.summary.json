@@ -1,0 +1,314 @@
+{
+  "arm_checks": {
+    "eager": {
+      "identity_contract": true,
+      "passed": true,
+      "selection_restore_ok": true,
+      "timed_route_and_allocation_contract": true,
+      "topology_equal_initial": true,
+      "topology_valid": true,
+      "warmup_state_restored": true,
+      "worker_identity_equal_initial_except_intervention": true
+    },
+    "grouped": {
+      "identity_contract": true,
+      "passed": true,
+      "selection_restore_ok": true,
+      "timed_route_and_allocation_contract": true,
+      "topology_equal_initial": true,
+      "topology_valid": true,
+      "warmup_state_restored": true,
+      "worker_identity_equal_initial_except_intervention": true
+    }
+  },
+  "baseline_contract": true,
+  "correctness_pass": false,
+  "created_utc": "2026-08-03T22:25:11.512956+00:00",
+  "eager_metrics": {
+    "allocated_tokens": 32817152,
+    "allocated_tokens_per_second": 4266.282437582675,
+    "allocated_tokens_per_second_per_gpu": 133.3213261744586,
+    "critical_rank": 31,
+    "critical_rank_expert_fraction": 0.7502004565720078,
+    "critical_rank_expert_phase_seconds": {
+      "backward": 5395.487860900879,
+      "forward": 375.21362780380247
+    },
+    "critical_rank_expert_seconds": 5770.701488704682,
+    "critical_rank_nonexpert_seconds": 1921.5112234463168,
+    "critical_rank_phase_seconds": {
+      "matched_backward": 6099.1086796875,
+      "matched_ce_loss": 11.382289215773344,
+      "matched_model_forward": 1581.14023828125
+    },
+    "critical_rank_phase_sum_seconds": 7691.631207184523,
+    "expert_partition_definition": "synchronized wall partitions into routed-block CUDA-stream spans on the critical rank and a nonnegative remainder containing every other operation, communication, and idle gap",
+    "gpu_seconds_per_logical_sequence": 60.095411813679675,
+    "logical_sequences_per_second": 0.532486574835581,
+    "loss_tokens": 24494588,
+    "matched_global_ce_loss": 2.0137084914302568,
+    "matched_gradient_numel_min": 2096173280,
+    "matched_gradient_tensors_min": 476,
+    "nonpadding_tokens": 25095420,
+    "nonpadding_tokens_per_second": 3262.444882778402,
+    "nonpadding_tokens_per_second_per_gpu": 101.95140258682507,
+    "peak_allocated_bytes_max": 40599964672,
+    "peak_reserved_bytes_max": 51143245824,
+    "phase_residual_definition": "synchronized worker wall minus the sum of mutually exclusive CUDA-stream events on the rank that set synchronized wall; includes Python/launch/barrier gaps",
+    "phase_residual_seconds": 0.5815049664752223,
+    "rpc_wall_seconds": 7692.680575618055,
+    "synchronized_wall_seconds": 7692.212712150998,
+    "worker_elapsed_max_seconds": 7692.212712150998,
+    "worker_elapsed_min_seconds": 7692.2092345310375,
+    "worker_elapsed_spread_seconds": 0.0034776199609041214
+  },
+  "embedded_semantic_check_matches_recomputed": true,
+  "final_topology_equal_initial": true,
+  "final_worker_identities_equal_initial": true,
+  "finish_contract": true,
+  "grouped_metrics": {
+    "allocated_tokens": 32817152,
+    "allocated_tokens_per_second": 60700.390756171364,
+    "allocated_tokens_per_second_per_gpu": 1896.8872111303551,
+    "critical_rank": 1,
+    "critical_rank_expert_fraction": 0.14226786900084648,
+    "critical_rank_expert_phase_seconds": {
+      "backward": 55.45227537536621,
+      "forward": 21.463642686367034
+    },
+    "critical_rank_expert_seconds": 76.91591806173325,
+    "critical_rank_nonexpert_seconds": 463.72560979636387,
+    "critical_rank_phase_seconds": {
+      "matched_backward": 284.59785034179686,
+      "matched_ce_loss": 0.5597973764538765,
+      "matched_model_forward": 255.35306762695313
+    },
+    "critical_rank_phase_sum_seconds": 540.5107153452038,
+    "expert_partition_definition": "synchronized wall partitions into routed-block CUDA-stream spans on the critical rank and a nonnegative remainder containing every other operation, communication, and idle gap",
+    "gpu_seconds_per_logical_sequence": 4.223761936391384,
+    "logical_sequences_per_second": 7.576184567669915,
+    "loss_tokens": 24494588,
+    "matched_global_ce_loss": 2.013707667627426,
+    "matched_gradient_numel_min": 2096173280,
+    "matched_gradient_tensors_min": 476,
+    "nonpadding_tokens": 25095420,
+    "nonpadding_tokens_per_second": 46417.854912889394,
+    "nonpadding_tokens_per_second_per_gpu": 1450.5579660277936,
+    "peak_allocated_bytes_max": 38400473600,
+    "peak_reserved_bytes_max": 51143245824,
+    "phase_residual_definition": "synchronized worker wall minus the sum of mutually exclusive CUDA-stream events on the rank that set synchronized wall; includes Python/launch/barrier gaps",
+    "phase_residual_seconds": 0.13081251289327156,
+    "rpc_wall_seconds": 540.9287731749937,
+    "synchronized_wall_seconds": 540.6415278580971,
+    "worker_elapsed_max_seconds": 540.6415278580971,
+    "worker_elapsed_min_seconds": 540.6395775610581,
+    "worker_elapsed_spread_seconds": 0.00195029703900218
+  },
+  "grouped_versus_eager_recomputed": {
+    "matched_global_ce": {
+      "checked": 1,
+      "max_abs_difference": 8.238028308404921E-7,
+      "max_allowance_ratio": 0.0001366759315280571,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    },
+    "representative_action_log_probs": {
+      "checked": 12288,
+      "max_abs_difference": 0.1936483383178711,
+      "max_allowance_ratio": 1.2135916499343056,
+      "nonfinite": 0,
+      "passed": false,
+      "violations": 3
+    },
+    "representative_gradients": {
+      "checked": 5184,
+      "max_abs_difference": 0.00008058547973632812,
+      "max_allowance_ratio": 0.04737719830200122,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    }
+  },
+  "hbm_fit": true,
+  "headline_valid": false,
+  "image": "ghcr.io/marin-community/marinskyrl@sha256:bf136bb210ded34b07b3583de7272f2c534df195bca556debbb38c0664640770",
+  "initial_topology": [
+    [
+      0,
+      "gb95ed0",
+      "c49d9bf8-600e-c7c3-5717-ffc4941761b0"
+    ],
+    [
+      1,
+      "gb95ed0",
+      "4b383ad9-4560-9b4e-781c-f3112895098a"
+    ],
+    [
+      2,
+      "gb95ed0",
+      "650bb761-2fe8-cdd9-a85e-47f17c7e41bb"
+    ],
+    [
+      3,
+      "gb95ed0",
+      "b6c15b9c-d262-40fe-0fa8-f6fad5256284"
+    ],
+    [
+      4,
+      "gb95ed0",
+      "59448729-0af8-218a-61e9-5cf7a086a5f7"
+    ],
+    [
+      5,
+      "gb95ed0",
+      "39de15aa-c282-56c2-4f41-10b3de03d632"
+    ],
+    [
+      6,
+      "gb95ed0",
+      "a37e2321-704d-1a10-a217-e12ba4a5bbc9"
+    ],
+    [
+      7,
+      "gb95ed0",
+      "57e92bc5-de90-9705-0b96-932a3086e696"
+    ],
+    [
+      8,
+      "g365604",
+      "33ba40c0-ff4c-343d-5c79-5fa0ebb37cab"
+    ],
+    [
+      9,
+      "g365604",
+      "4939195b-a154-d8c5-0bfc-f682314430f7"
+    ],
+    [
+      10,
+      "g365604",
+      "6efc7226-14bd-4fa7-048e-1b0a1e1947a2"
+    ],
+    [
+      11,
+      "g365604",
+      "bf62509d-5afc-7996-2971-89629fac3329"
+    ],
+    [
+      12,
+      "g365604",
+      "ee6bd864-4950-bbf6-60b8-295fca5d00a4"
+    ],
+    [
+      13,
+      "g365604",
+      "55cd2d6c-8d5c-347c-21ac-a7bab8a78b76"
+    ],
+    [
+      14,
+      "g365604",
+      "8f70f2ec-4dc0-00be-e1cd-610f035e16c7"
+    ],
+    [
+      15,
+      "g365604",
+      "6daed57b-03fc-3423-046e-2cf83ee34a4c"
+    ],
+    [
+      16,
+      "gb95ee0",
+      "c31efded-1cc5-c9a3-faa1-7e2ae513982a"
+    ],
+    [
+      17,
+      "gb95ee0",
+      "3e3befc1-fb4f-ccde-d33a-51099e7a297e"
+    ],
+    [
+      18,
+      "gb95ee0",
+      "402e6e9e-0f72-c29d-b268-a0cdc1d002df"
+    ],
+    [
+      19,
+      "gb95ee0",
+      "acffdf9b-dc7d-b65b-5871-c3711f86b1a0"
+    ],
+    [
+      20,
+      "gb95ee0",
+      "668f816f-51fe-8356-5027-f30cf3f07cc4"
+    ],
+    [
+      21,
+      "gb95ee0",
+      "fbe182c4-ac48-d8fc-d52d-11c1819517a6"
+    ],
+    [
+      22,
+      "gb95ee0",
+      "2fdf0416-b8e7-5eab-5197-ce95321d6c59"
+    ],
+    [
+      23,
+      "gb95ee0",
+      "09ec257f-990d-c130-3c07-e4f252e05259"
+    ],
+    [
+      24,
+      "gb95d80",
+      "802fbe76-8d6a-7de2-21a0-c85ec81b3e5a"
+    ],
+    [
+      25,
+      "gb95d80",
+      "d403a2ed-17db-e73e-a344-a6bc24558601"
+    ],
+    [
+      26,
+      "gb95d80",
+      "cf12afe4-d862-014b-6df2-d4a6ccf29b7b"
+    ],
+    [
+      27,
+      "gb95d80",
+      "7cdd2cf7-12a7-a3cb-fe28-2a5f2bc3f0ab"
+    ],
+    [
+      28,
+      "gb95d80",
+      "4f7a724f-5330-b632-e0f2-fdc3c2de6793"
+    ],
+    [
+      29,
+      "gb95d80",
+      "c5e6ce03-87e5-1d8d-19b3-c09c055ee51d"
+    ],
+    [
+      30,
+      "gb95d80",
+      "a8c28bfe-a5fb-dac0-6c2c-a745cff39d36"
+    ],
+    [
+      31,
+      "gb95d80",
+      "59fc7118-942e-4f32-22d0-f010ae7240c0"
+    ]
+  ],
+  "logical_batch_sha256": "e81f387763177ae55faccf9a2747c2568d59c6efcee7f10d752958771e95f50d",
+  "manifest_sha256": "5d2479bbbdcd4ca04a9f7d11de82ce42830fbae878d734cdc3c4a4f123f93b74",
+  "minimum_speedup": 1.1,
+  "model_revision": "a822321c2c21af099189e7116104b3cf5142c119",
+  "nonpadding_throughput_ratio": 14.22793536158026,
+  "payload_bytes": 11373171,
+  "payload_sha256": "f06f4d21722e23843758537f72f79c52d3ebb54120b7344ac1f2d622dcdf5546",
+  "performance_pass": true,
+  "result_sha256": "2bf1c1b9ec35ea37adb2180eae51988b49c19e2e34171188f012cdc9219af8e2",
+  "runtime_benchmark_sha256": "b46a8d3e2c0516032b8ca9466b047b911f0ec50d1a527df393878c2522049404",
+  "semantic_pass": false,
+  "source_revision": "fbb1fc8378601e0346d00d186809f10d1ad0360d",
+  "staging_contract": true,
+  "synchronized_wall_speedup": 14.22793536158026,
+  "uri": "s3://marin-us-east-02a/iris/grug-training-perf-gap/20260803/divergence-closeout-fbb1fc8/headline-paired-s1.json",
+  "world_size": 32
+}

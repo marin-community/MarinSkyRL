@@ -1,0 +1,175 @@
+{
+  "arm_checks": {
+    "eager_instrumented": {
+      "gradient_numel_min": 8384693120,
+      "gradient_tensors_min": 476,
+      "identity_contract": true,
+      "nonfinite_gradient_tensors_sum": 0,
+      "rank_order": true,
+      "selection_restore_ok": true,
+      "timed_route_and_allocation_contract": true,
+      "topology_equal_initial": true,
+      "warmup_state_restored": true,
+      "worker_identity_equal_initial_except_intervention": true
+    },
+    "eager_oracle": {
+      "gradient_numel_min": 8384693120,
+      "gradient_tensors_min": 476,
+      "identity_contract": true,
+      "nonfinite_gradient_tensors_sum": 0,
+      "rank_order": true,
+      "selection_restore_ok": true,
+      "timed_route_and_allocation_contract": true,
+      "topology_equal_initial": true,
+      "warmup_state_restored": true,
+      "worker_identity_equal_initial_except_intervention": true
+    },
+    "grouped_instrumented": {
+      "gradient_numel_min": 8384693120,
+      "gradient_tensors_min": 476,
+      "identity_contract": true,
+      "nonfinite_gradient_tensors_sum": 0,
+      "rank_order": true,
+      "selection_restore_ok": true,
+      "timed_route_and_allocation_contract": true,
+      "topology_equal_initial": true,
+      "warmup_state_restored": true,
+      "worker_identity_equal_initial_except_intervention": true
+    }
+  },
+  "arm_passes": {
+    "eager_instrumented": true,
+    "eager_oracle": true,
+    "grouped_instrumented": true
+  },
+  "baseline_empty_gradients": true,
+  "created_utc": "2026-08-03T18:49:25.507149+00:00",
+  "eager_instrumentation_oracle_recomputed": {
+    "matched_global_ce": {
+      "checked": 1,
+      "max_abs_difference": 0.0,
+      "max_allowance_ratio": 0.0,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    },
+    "representative_action_log_probs": {
+      "checked": 24,
+      "max_abs_difference": 0.0,
+      "max_allowance_ratio": 0.0,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    },
+    "representative_gradients": {
+      "checked": 1296,
+      "max_abs_difference": 0.00390625,
+      "max_allowance_ratio": 0.3073656941789267,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    }
+  },
+  "embedded_semantic_check_matches_recomputed": true,
+  "final_topology_equal_initial": true,
+  "final_worker_identities_equal_initial": true,
+  "finish_empty_gradients": true,
+  "finish_state_restored": true,
+  "grouped_versus_eager_recomputed": {
+    "matched_global_ce": {
+      "checked": 1,
+      "max_abs_difference": 0.0,
+      "max_allowance_ratio": 0.0,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    },
+    "representative_action_log_probs": {
+      "checked": 24,
+      "max_abs_difference": 0.0,
+      "max_allowance_ratio": 0.0,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    },
+    "representative_gradients": {
+      "checked": 1296,
+      "max_abs_difference": 0.009979724884033203,
+      "max_allowance_ratio": 0.7054788573413215,
+      "nonfinite": 0,
+      "passed": true,
+      "violations": 0
+    }
+  },
+  "image": "ghcr.io/marin-community/marinskyrl@sha256:bf136bb210ded34b07b3583de7272f2c534df195bca556debbb38c0664640770",
+  "initial_topology": [
+    [
+      0,
+      "g1cc352",
+      "2e6834f6-c5f1-bfd3-423f-b9f6002a19da"
+    ],
+    [
+      1,
+      "g1cc352",
+      "237dfd28-c99f-484f-4a66-aa2d4e861731"
+    ],
+    [
+      2,
+      "g1cc352",
+      "c9a58b69-da51-e8c6-02bc-bbe7e490476a"
+    ],
+    [
+      3,
+      "g1cc352",
+      "d3ab0553-9d00-222c-2a42-33b4e1f8fbbf"
+    ],
+    [
+      4,
+      "g1cc352",
+      "56832a3f-1349-b578-5be3-cd4c51d3bd25"
+    ],
+    [
+      5,
+      "g1cc352",
+      "51c2c5c3-f26f-a3ae-5db0-bde456fe65b4"
+    ],
+    [
+      6,
+      "g1cc352",
+      "d0494511-3df4-efc5-6d7c-8dcefbe2f5b7"
+    ],
+    [
+      7,
+      "g1cc352",
+      "18e548d5-b2ce-795f-e706-2e1621c4954b"
+    ]
+  ],
+  "logical_batch_sha256": "e81f387763177ae55faccf9a2747c2568d59c6efcee7f10d752958771e95f50d",
+  "manifest_sha256": "5d2479bbbdcd4ca04a9f7d11de82ce42830fbae878d734cdc3c4a4f123f93b74",
+  "model_revision": "a822321c2c21af099189e7116104b3cf5142c119",
+  "payload_bytes": 2586400,
+  "payload_sha256": "c5039fccf7b2988afd66020be40a828faac0b84a69dc387895df0532036eddb2",
+  "preflight_valid": true,
+  "result_sha256": "4f0534bbb19fe577a8c3c5b9876b555bb183f7499922c4606bb2b4731250c878",
+  "route_contract_recomputed": {
+    "acceptance_rule": "for every token/call/layer, changed selected-expert membership is explained only when the eager kth-vs-(k+1)th adjusted-logit margin is <= 2 * the maximum per-token adjusted-logit delta",
+    "changed_routed_allocation_fraction": 0.0,
+    "changed_routed_allocations": 0,
+    "changed_token_fraction": 0.0,
+    "changed_tokens": 0,
+    "max_changed_current_margin": 0.0,
+    "max_changed_reference_margin": 0.0,
+    "max_token_logit_delta": 0.0,
+    "ordered_slot_mismatches": 0,
+    "passed": true,
+    "rank_layers": 208,
+    "routed_allocations": 6665984,
+    "tokens": 1666496,
+    "unexplained_changed_tokens": 0
+  },
+  "runtime_benchmark_sha256": "b46a8d3e2c0516032b8ca9466b047b911f0ec50d1a527df393878c2522049404",
+  "semantic_pass": true,
+  "source_revision": "fbb1fc8378601e0346d00d186809f10d1ad0360d",
+  "uri": "s3://marin-us-east-02a/iris/grug-training-perf-gap/20260803/divergence-closeout-fbb1fc8/preflight-paired-s1.json",
+  "world_size": 8
+}
