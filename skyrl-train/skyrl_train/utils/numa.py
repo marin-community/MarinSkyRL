@@ -16,12 +16,32 @@ are no-ops to avoid interfering with systems that don't need NUMA binding.
 import os
 import re
 import subprocess
-from ctypes import CDLL, Structure, POINTER, c_ulong, c_char_p, c_int
+from collections import Counter
+from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p, get_errno, sizeof
 from ctypes.util import find_library
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
+
+
+_MEMORY_POLICY_NAMES = {
+    0: "default",
+    1: "preferred",
+    2: "bind",
+    3: "interleave",
+    4: "local",
+    5: "preferred-many",
+}
+
+
+@dataclass(frozen=True)
+class MemoryPolicy:
+    """Effective NUMA task policy for the calling thread."""
+
+    mode: str
+    nodes: tuple[int, ...]
 
 
 def is_numa_affinity_enabled() -> bool:
@@ -111,6 +131,67 @@ def _parse_cpu_range(cpu_str: str) -> List[int]:
     return cpus
 
 
+def current_memory_policy() -> MemoryPolicy:
+    """Return the calling thread's effective Linux NUMA task policy."""
+    library_path = find_library("numa")
+    if library_path is None:
+        raise RuntimeError("NUMA memory policy requires libnuma")
+    libnuma = CDLL(library_path, use_errno=True)
+    libnuma.numa_max_node.argtypes = []
+    libnuma.numa_max_node.restype = c_int
+    max_node = libnuma.numa_max_node()
+    if max_node < 0:
+        raise RuntimeError("libnuma could not determine the maximum NUMA node")
+
+    bits_per_word = 8 * sizeof(c_ulong)
+    word_count = (max_node + 1 + bits_per_word - 1) // bits_per_word
+    mask = (c_ulong * word_count)()
+    mode = c_int()
+    libnuma.get_mempolicy.argtypes = [POINTER(c_int), POINTER(c_ulong), c_ulong, c_void_p, c_ulong]
+    libnuma.get_mempolicy.restype = c_int
+    if libnuma.get_mempolicy(mode, mask, max_node + 1, None, 0) != 0:
+        errno = get_errno()
+        raise OSError(errno, os.strerror(errno))
+
+    nodes = tuple(node for node in range(max_node + 1) if mask[node // bits_per_word] & (1 << (node % bits_per_word)))
+    return MemoryPolicy(mode=_MEMORY_POLICY_NAMES.get(mode.value, f"unknown-{mode.value}"), nodes=nodes)
+
+
+def memory_nodes_for_range(address: int, length: int, *, max_pages: int = 256) -> Dict[int, int]:
+    """Sample the physical NUMA nodes backing a process-local address range."""
+    if address <= 0 or length <= 0:
+        raise ValueError("address and length must be positive")
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    first_page = address - address % page_size
+    last_page = (address + length - 1) // page_size * page_size
+    page_count = (last_page - first_page) // page_size + 1
+    if page_count <= max_pages:
+        page_indices = list(range(page_count))
+    elif max_pages == 1:
+        page_indices = [page_count // 2]
+    else:
+        page_indices = sorted({index * (page_count - 1) // (max_pages - 1) for index in range(max_pages)})
+
+    pages = (c_void_p * len(page_indices))(*(first_page + index * page_size for index in page_indices))
+    statuses = (c_int * len(page_indices))()
+    library_path = find_library("numa")
+    if library_path is None:
+        raise RuntimeError("NUMA page queries require libnuma")
+    libnuma = CDLL(library_path, use_errno=True)
+    libnuma.move_pages.argtypes = [c_int, c_ulong, POINTER(c_void_p), POINTER(c_int), POINTER(c_int), c_int]
+    libnuma.move_pages.restype = c_int
+    if libnuma.move_pages(0, len(page_indices), pages, None, statuses, 0) != 0:
+        errno = get_errno()
+        raise OSError(errno, os.strerror(errno))
+    failed_statuses = [status for status in statuses if status < 0]
+    if failed_statuses:
+        raise OSError(-failed_statuses[0], os.strerror(-failed_statuses[0]))
+    return dict(Counter(int(status) for status in statuses))
+
+
 # ---------------------------------------------------------------------------
 # Method 2: Pure sysfs + numactl (no nvidia-smi needed)
 # ---------------------------------------------------------------------------
@@ -192,6 +273,14 @@ def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
         node_summary = {k: f"{v[0]}-{v[-1]}" for k, v in sorted(node_cpus.items())}
         logger.debug(f"NUMA: numactl found {len(node_cpus)} nodes with CPUs: {node_summary}")
     return node_cpus if node_cpus else None
+
+
+def cpu_numa_topology() -> Dict[int, tuple[int, ...]]:
+    """Return NUMA nodes that contain CPUs and their CPU IDs."""
+    topology = _parse_numactl_hardware()
+    if topology is None:
+        raise RuntimeError("could not discover CPU-bearing NUMA nodes")
+    return {node: tuple(cpus) for node, cpus in topology.items()}
 
 
 def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]) -> Optional[int]:

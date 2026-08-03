@@ -1,5 +1,7 @@
 import asyncio
 import os
+import socket
+from collections import Counter
 from dataclasses import dataclass
 
 from loguru import logger
@@ -22,6 +24,7 @@ from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regre
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
+from skyrl_train.utils.numa import cpu_numa_topology, current_memory_policy, memory_nodes_for_range
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
@@ -371,6 +374,49 @@ class FSDPWeightExtractor(WeightExtractor):
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
+    def get_cpu_offload_numa_diag(self, max_pages: int = 4096) -> dict:
+        """Report the physical placement of persistent FSDP2 CPU-offload tensors."""
+        parameters = []
+        for parameter in self.model.model.parameters():
+            local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+            if local_parameter.device.type != "cpu" or not local_parameter.is_pinned() or local_parameter.numel() == 0:
+                continue
+            parameters.append(local_parameter)
+        parameters.sort(key=lambda parameter: parameter.numel() * parameter.element_size(), reverse=True)
+
+        page_nodes: Counter[int] = Counter()
+        sampled_tensors = 0
+        sampled_bytes = 0
+        remaining_pages = max_pages
+        for parameter in parameters:
+            if remaining_pages == 0:
+                break
+            tensor_bytes = parameter.numel() * parameter.element_size()
+            tensor_page_nodes = memory_nodes_for_range(
+                parameter.data_ptr(), tensor_bytes, max_pages=min(64, remaining_pages)
+            )
+            page_nodes.update(tensor_page_nodes)
+            sampled_tensors += 1
+            sampled_bytes += tensor_bytes
+            remaining_pages -= sum(tensor_page_nodes.values())
+
+        topology = cpu_numa_topology()
+        cpu_affinity = sorted(os.sched_getaffinity(0))
+        affinity_nodes = sorted(node for node, cpus in topology.items() if set(cpu_affinity).intersection(cpus))
+        policy = current_memory_policy()
+        return {
+            "rank": self._rank,
+            "host": socket.gethostname(),
+            "cpu_nodes": sorted(topology),
+            "cpu_affinity": cpu_affinity,
+            "affinity_nodes": affinity_nodes,
+            "memory_policy": {"mode": policy.mode, "nodes": list(policy.nodes)},
+            "page_nodes": dict(sorted(page_nodes.items())),
+            "sampled_pages": sum(page_nodes.values()),
+            "sampled_tensors": sampled_tensors,
+            "sampled_bytes": sampled_bytes,
+        }
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
