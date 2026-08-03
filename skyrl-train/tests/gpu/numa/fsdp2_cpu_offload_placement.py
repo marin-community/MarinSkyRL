@@ -41,6 +41,7 @@ def policy_config():
     cfg.trainer.algorithm.use_kl_in_reward = False
     cfg.trainer.gradient_checkpointing = False
     cfg.trainer.flash_attn = False
+    cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"
     return cfg
 
