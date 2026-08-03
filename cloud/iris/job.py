@@ -13,6 +13,7 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote, urlparse
 
 from iris.client import JobFailedError
 
@@ -74,9 +75,21 @@ def _installed_launcher_commit() -> str:
     except importlib.metadata.PackageNotFoundError:
         direct_url = None
     if direct_url:
-        commit = json.loads(direct_url).get("vcs_info", {}).get("commit_id")
+        direct_url_value = json.loads(direct_url)
+        commit = direct_url_value.get("vcs_info", {}).get("commit_id")
         if commit:
             return str(commit)
+        parsed_url = urlparse(direct_url_value.get("url", ""))
+        if parsed_url.scheme == "file":
+            checkout = Path(unquote(parsed_url.path))
+            if (checkout / ".git").exists() and (checkout / "pyproject.toml").exists():
+                return subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=checkout,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
     repository_root = Path(__file__).resolve().parents[2]
     if not (repository_root / ".git").exists() or not (repository_root / "pyproject.toml").exists():
         raise RuntimeError("Installed marinskyrl wheel has no VCS commit identity in direct_url.json")

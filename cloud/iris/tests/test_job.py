@@ -367,3 +367,14 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     job._write_json("result.json", {"state": "prepared"})
 
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
+
+
+def test_installed_launcher_commit_uses_an_editable_checkout(monkeypatch) -> None:
+    class Distribution:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return json.dumps({"url": _REPOSITORY_ROOT.as_uri(), "dir_info": {"editable": True}})
+
+    monkeypatch.setattr(job.importlib.metadata, "distribution", lambda name: Distribution())
+
+    assert job._installed_launcher_commit() == _repository_commit()
