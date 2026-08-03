@@ -24,6 +24,7 @@ from ray.util.placement_group import (
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
+from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
@@ -49,7 +50,12 @@ from skyrl_train.models.grug_query_bias import (
     query_bias_candidate_count,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
-from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
+from skyrl_train.utils.utils import (
+    configure_ray_worker_logging,
+    get_tcp_url,
+    resolve_actor_cuda_env,
+    resolve_pinned_local_rank,
+)
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -108,8 +114,6 @@ class DistributedTorchRayActor:
         # pin_to_ray_gpu_id (case 3) engages only on the per-GPU {GPU:1}-bundle policy PG,
         # where ray.get_gpu_ids() is a reliable distinct physical id per actor. The full
         # decision lives in resolve_pinned_local_rank() (pure / unit-tested).
-        from skyrl_train.utils.utils import resolve_pinned_local_rank, resolve_actor_cuda_env
-
         _noset = ray_noset_visible_devices()
 
         # Deterministic forced-CVD-mask pin (opt-in via policy_force_cvd_mask).
@@ -137,7 +141,7 @@ class DistributedTorchRayActor:
                 ray.get_gpu_ids(),
             )
 
-        os.environ["LOCAL_RANK"] = resolve_pinned_local_rank(
+        resolved_local_rank = resolve_pinned_local_rank(
             noset_visible_devices=_noset,
             cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
             ray_gpu_ids=ray.get_gpu_ids(),
@@ -145,6 +149,9 @@ class DistributedTorchRayActor:
             device_count=torch.cuda.device_count(),
             pin_to_ray_gpu_id=pin_to_ray_gpu_id,
         )
+        physical_gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), int(resolved_local_rank))
+        set_numa_affinity_for_gpu(physical_gpu_id)
+        os.environ["LOCAL_RANK"] = resolved_local_rank
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
@@ -308,39 +315,6 @@ class DistributedTorchRayActor:
 
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
-
-    def _set_numa_affinity(self, rank):
-        """Set CPU + memory affinity to match the GPU for this rank.
-
-        Uses shared NUMA utility that auto-detects GPU-to-CPU NUMA topology
-        via nvidia-smi topo. Handles GH200 unified memory correctly.
-
-        The NUMA binding must key off the PHYSICAL GPU id (sysfs/PCI-ordered,
-        as nvidia-smi sees it), not a positional/logical index. Resolution
-        order for the physical id:
-          1. CUDA_VISIBLE_DEVICES[rank] — when Ray masked CVD, its entries are
-             the physical ids this process can see (the historical path).
-          2. LOCAL_RANK env — when CVD is unset (SIF Ray) but device pinning
-             ran in __init__, LOCAL_RANK already holds the physical id we
-             selected (ray.get_gpu_ids()[0] in the per-GPU-bundle path), so
-             NUMA binds to the SAME physical GPU torch.cuda.set_device() chose.
-             This corrects the prior `gpu_id = rank` fallback, which on GH200
-             could bind a different physical socket than the device in use,
-             because logical (rank) and physical ordering differ.
-          3. positional rank — last resort if neither is available.
-        """
-        try:
-            from skyrl_train.utils.numa import set_numa_affinity_for_gpu
-
-            cuda_devs = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-            if cuda_devs[0]:
-                gpu_id = int(cuda_devs[rank])
-            else:
-                _lr = os.environ.get("LOCAL_RANK")
-                gpu_id = int(_lr) if _lr not in (None, "", "-1") else rank
-            set_numa_affinity_for_gpu(gpu_id)
-        except Exception as e:
-            logger.debug(f"NUMA affinity setup skipped: {e}")
 
 
 class Worker(DistributedTorchRayActor):

@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev pytest tests/cpu/utils/test_ppo_utils.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/utils/test_ppo_utils.py
 """
 
 import torch

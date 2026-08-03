@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_model_wrapper.py
+uv run --isolated --group dev pytest tests/gpu/gpu_ci/test_model_wrapper.py
 """
 
 from skyrl_train.model_wrapper import HFModelWrapper

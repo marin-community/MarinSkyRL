@@ -47,18 +47,22 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
+      - name: Install the CPU-only launcher
+        run: uv sync --frozen --group dev
       - name: Run iris launcher tests
+        run: uv run --frozen pytest cloud/iris/tests/ -q
+      - name: Verify the base dependency boundary
+        run: uv run --frozen pytest infra/tests/test_marinskyrl_packaging.py -q
+      - name: Exercise a clean built-wheel install
         run: |
-          uv run --no-project \
-            --with pytest --with pyyaml --with fsspec --with huggingface_hub --with universal-pathlib --with boto3 \
-            pytest cloud/iris/tests/ -q
+          uv build --wheel --out-dir dist
+          uv venv --python 3.12 /tmp/marinskyrl-base
+          uv pip install --python /tmp/marinskyrl-base/bin/python dist/marinskyrl-*.whl
+          cd /tmp
+          /tmp/marinskyrl-base/bin/marinskyrl --help
 
   skyrl_train_tests:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: ./skyrl-train
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -67,32 +71,28 @@ jobs:
       - name: Check the macOS CPU environment resolves
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
-        run: uv sync --frozen --dry-run --extra dev --python-platform aarch64-apple-darwin
+        run: uv sync --frozen --dry-run --group dev --extra cpu --python-platform aarch64-apple-darwin
       - name: Install skyrl-train
-        run: uv sync --frozen --extra dev --extra telemetry
+        run: uv sync --frozen --group dev --extra cpu --extra telemetry
       - name: Check the lockfile is current
         run: uv lock --check
       - name: Run cpu tests
         run: |
-          uv run --frozen pytest tests/cpu/ \
-            --deselect tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
-            --deselect tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
+          uv run --frozen pytest skyrl-train/tests/cpu/ \
+            --deselect skyrl-train/tests/cpu/inf_engines/test_inference_engine_client.py::test_generate_retry_no_gen_finish \
+            --deselect skyrl-train/tests/cpu/test_trainer.py::test_ppo_train_batch_calculations
 
   skyrl_train_macos_install:
     runs-on: macos-15
-    defaults:
-      run:
-        shell: bash
-        working-directory: ./skyrl-train
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
       - name: Install skyrl-train
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --group dev --extra cpu
       - name: Exercise local filesystem I/O
-        run: uv run --frozen pytest tests/cpu/utils/test_io.py
+        run: uv run --frozen pytest skyrl-train/tests/cpu/utils/test_io.py
 
   skyrl_gym_tests:
     runs-on: ubuntu-latest

@@ -17,6 +17,8 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -1054,6 +1056,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # edge is moot. See feedback_uvloop_libuv_019_pin.
     env_vars["RAY_USE_UVLOOP"] = "0"
 
+    # Ray's job runtime environment is the explicit contract for worker-wide
+    # settings. Forward NUMA placement when the launcher opts in so the early
+    # worker hook and actor constructors observe the same value as the driver.
+    if NUMA_AFFINITY_ENV in os.environ:
+        env_vars[NUMA_AFFINITY_ENV] = os.environ[NUMA_AFFINITY_ENV]
+
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #
     # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
@@ -1373,16 +1381,16 @@ def initialize_ray(cfg: DictConfig):
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,
-    # BEFORE the C++ CoreWorker builds an async actor's concurrency-group event loop.
-    # It forces CPython stock asyncio (no uvloop/libuv) in EVERY worker -- the only
-    # reliable place to cover the RolloutCoordinator concurrency-group loop that
-    # SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor __init__ reset.
+    # BEFORE the C++ CoreWorker builds actor threads. It installs the inherited
+    # host-memory policy and forces CPython stock asyncio (no uvloop/libuv) in every
+    # worker -- the only reliable place to cover concurrency-group loops that are
+    # created before an actor constructor can reset their event-loop policy.
     # Referenced by fully-qualified name string (importable in every worker via the
     # editable skyrl_train install) so Ray does not have to cloudpickle it.
     ray.init(
         runtime_env={
             "env_vars": env_vars,
-            "worker_process_setup_hook": "skyrl_train.worker_setup.force_stock_asyncio_in_worker",
+            "worker_process_setup_hook": "skyrl_train.worker_setup.configure_worker_process",
         }
     )
 

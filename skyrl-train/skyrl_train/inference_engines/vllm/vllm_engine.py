@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
 try:
@@ -225,7 +227,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
     executor_backend = kwargs.get("distributed_executor_backend")
     logger.info(
         f"setup_envvars_for_vllm: distributed_executor_backend={executor_backend}, "
-        f"SKYRL_ENABLE_NUMA_AFFINITY={os.environ.get('SKYRL_ENABLE_NUMA_AFFINITY', '<unset>')}, "
+        f"{NUMA_AFFINITY_ENV}={os.environ.get(NUMA_AFFINITY_ENV, '<unset>')}, "
         f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}, "
         f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
     )

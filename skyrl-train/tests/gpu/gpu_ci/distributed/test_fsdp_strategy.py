@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev pytest tests/gpu/gpu_ci/distributed/test_fsdp_strategy.py
+uv run --isolated --group dev pytest tests/gpu/gpu_ci/distributed/test_fsdp_strategy.py
 """
 
 from skyrl_train.model_wrapper import HFModelWrapper

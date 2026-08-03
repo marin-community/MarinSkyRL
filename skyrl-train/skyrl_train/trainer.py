@@ -1885,17 +1885,34 @@ class RayPPOTrainer:
             self._cleanup_old_checkpoints()
 
     def _cleanup_old_checkpoints(self):
+        max_ckpts = self.cfg.trainer.max_ckpts_to_keep
+        # Disabled (the default): keep all checkpoints. The payload is a no-op at
+        # this value, so skip the per-node Ray lease entirely. Leasing a fresh
+        # worker on every node with hard affinity can fail on a CPU-saturated
+        # cluster for no benefit.
+        if max_ckpts < 0:
+            return
+
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
-        run_on_each_node(
-            self._node_ids,
-            cleanup_old_checkpoints,
-            self.cfg.trainer.ckpt_path,
-            self.cfg.trainer.max_ckpts_to_keep,
-        )
-        # run on driver as well
-        # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
-        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
+        try:
+            run_on_each_node(
+                self._node_ids,
+                cleanup_old_checkpoints,
+                self.cfg.trainer.ckpt_path,
+                max_ckpts,
+            )
+        except ray.exceptions.RayError as e:
+            # Best-effort: cleanup runs only after a successful checkpoint save,
+            # so any per-node dispatch failure -- worker lease failure, worker or
+            # node death, or a failure raised inside the remote task -- is logged
+            # rather than propagated. The checkpoint is already on disk; cleanup
+            # must not kill the run.
+            logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
+
+        # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
+        # suffices; the per-node fan-out above only matters for node-local dirs.
+        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, max_ckpts)
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

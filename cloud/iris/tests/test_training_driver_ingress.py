@@ -1,6 +1,6 @@
 """Regression guard: controller-ingress must NOT overload OPENAI_BASE_URL.
 
-run_rl._ingress_context publishes the co-located served-model URL as the harbor-
+training_driver._ingress_context publishes the co-located served-model URL as the harbor-
 specific HARBOR_MODEL_ENDPOINT (which harbor's opencode config-writer reads). It must
 NEVER write OPENAI_BASE_URL — that var is reserved for genuine OpenAI traffic (the
 LLM-judge verifiers on the worker read it), so overloading it with the vLLM capability
@@ -8,7 +8,7 @@ URL would silently misroute every judge call to vLLM. This pins that contract (t
 b77d80e6 band-aid that clobbered OPENAI_BASE_URL is the exact regression guarded here).
 
 Run:
-    python -m pytest cloud/iris/tests/test_run_rl_ingress_env.py -v
+    python -m pytest cloud/iris/tests/test_training_driver_ingress.py -v
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris import ingress_utils, literal_proxy_utils  # noqa: E402
-from cloud.iris.run_rl import LocalRLConfig, LocalRLRunner  # noqa: E402
+from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner  # noqa: E402
 
 _FAKE_CAP_URL = "https://iris.oa.dev/proxy/t/faketoken/otagent-x/v1"
 

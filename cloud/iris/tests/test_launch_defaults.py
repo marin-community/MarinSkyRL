@@ -19,7 +19,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
-from cloud.iris.launch_rl_iris import (  # noqa: E402
+from cloud.iris.iris_backend import (  # noqa: E402
+    _ambient_in_cluster_client,
     build_skyrl_flag_env,
     build_task_command,
     create_parser,
@@ -32,7 +33,7 @@ from cloud.iris.rl_config_translation import (  # noqa: E402
     RL_CONFIG_TASK_DIR,
     materialize_rl_config,
 )
-from cloud.iris.start_rl_iris_controller import stage_model  # noqa: E402
+from cloud.iris.task_runtime import stage_model  # noqa: E402
 
 
 def _cluster_config(
@@ -103,6 +104,20 @@ def _pod_snapshot(
     }
 
 
+def test_nested_launch_reuses_the_ambient_iris_controller(tmp_path, monkeypatch):
+    calls = []
+    client = object()
+
+    monkeypatch.setenv("IRIS_CONTROLLER_URL", "http://iris-controller-svc:10000")
+    monkeypatch.setattr(
+        "cloud.iris.iris_backend.IrisClient.in_cluster",
+        lambda controller_url, *, workspace: calls.append((controller_url, workspace)) or client,
+    )
+
+    assert _ambient_in_cluster_client(tmp_path) is client
+    assert calls == [("http://iris-controller-svc:10000", tmp_path)]
+
+
 @pytest.mark.parametrize(("memory_request", "expected_memory"), [("auto", "764Gi"), ("900Gi", "900Gi")])
 def test_node_resource_requests_use_selected_gpu_shape_allocatable_resources(
     tmp_path, monkeypatch, memory_request, expected_memory
@@ -119,7 +134,7 @@ def test_node_resource_requests_use_selected_gpu_shape_allocatable_resources(
     ]
 
     monkeypatch.setattr(
-        "cloud.iris.launch_rl_iris.subprocess.run",
+        "cloud.iris.iris_backend.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes})),
     )
 
@@ -167,7 +182,7 @@ def test_node_resource_requests_fit_the_requested_gang_on_busy_nodes(
     pods.append(_pod_snapshot("finished", node="gpu-0", memory="900Gi", phase="Failed"))
 
     monkeypatch.setattr(
-        "cloud.iris.launch_rl_iris.subprocess.run",
+        "cloud.iris.iris_backend.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes + pods})),
     )
 
@@ -262,7 +277,7 @@ def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):
     assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
 
 
-def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
+def test_rl_config_is_materialized_for_the_task(tmp_path):
     args = _args(tmp_path, "opencode", ["--job-name", "external-config"])
     source = Path(args.rl_config).resolve()
 
@@ -278,6 +293,19 @@ def test_out_of_tree_rl_config_is_materialized_for_the_task(tmp_path):
     assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
     assert str(source) not in command[-1]
+
+
+def test_in_tree_rl_config_is_embedded_in_the_runtime_bundle_environment(tmp_path):
+    source = _REPO_ROOT / "cloud/iris/configs/delphi_math_rl_ifeval.yaml"
+    args = create_parser().parse_args(["--rl_config", str(source), "--model_path", "model"])
+
+    normalize(args)
+
+    launch = args.rl_config_launch
+    task_copy = tmp_path / "task" / "config.yaml"
+    materialize_rl_config(str(task_copy), launch.task_environment())
+    assert launch.task_path.startswith(f"{RL_CONFIG_TASK_DIR}/")
+    assert task_copy.read_bytes() == source.read_bytes()
 
 
 def test_missing_rl_config_fails_during_normalization():

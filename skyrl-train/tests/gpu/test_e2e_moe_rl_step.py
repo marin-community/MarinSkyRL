@@ -21,7 +21,7 @@ into the EP inference engine (the G4-4 oracle).
 
 Run (pytest)::
 
-    uv run --isolated --extra dev --extra vllm pytest tests/gpu/test_e2e_moe_rl_step.py
+    uv run --isolated --group dev --extra vllm pytest tests/gpu/test_e2e_moe_rl_step.py
 
 Or directly (no pytest, e.g. the cluster RL venv), from the ``skyrl-train`` dir::
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap a multi-node MarinSkyRL RL job on an iris GPU slice.
+"""Supervise one node of a multi-node MarinSkyRL Iris task.
 
 iris gang-schedules a multi-node job as N coscheduled tasks (one per node) and
 runs THIS SAME entrypoint on every node, injecting ``IRIS_TASK_ID`` /
@@ -35,7 +35,7 @@ import sys
 import tempfile
 import threading
 import time
-
+from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, validate_hf_export
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
@@ -95,7 +95,7 @@ RAY_START_HEAD_TIMEOUT = 300  # seconds
 
 
 def _log(msg: str) -> None:
-    print(f"[start_rl_iris_controller] {msg}", flush=True)
+    print(f"[task-runtime] {msg}", flush=True)
 
 
 def stage_train_data(train_data_json: str) -> None:
@@ -364,6 +364,30 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
 
 
+def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store HF export on this allocated node."""
+    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    artifact = materialize(source, validate=validate_hf_export)
+    _log(
+        f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"({len(artifact.files)} files, identity={source.identity})"
+    )
+
+
+def materialize_data_sources(data_sources_json: str) -> None:
+    """Copy immutable train and validation data locators onto this allocated node."""
+    sources = json.loads(data_sources_json)
+    if not isinstance(sources, list):
+        raise ValueError("--data-sources-json must contain a JSON list")
+    for value in sources:
+        source = ArtifactSource(uri=value["uri"], local_path=value["local_path"], identity=value["identity"])
+        artifact = materialize(source)
+        _log(
+            f"Dataset staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+            f"({len(artifact.files)} files, identity={source.identity})"
+        )
+
+
 # Special tokens the delphi_v0 reasoning protocol depends on; asserted present in the
 # tokenizer's vocab after the override so a lossy SFT export (fragmented-to-bytes tokens)
 # fails loud here instead of silently collapsing reward at the first rollout.
@@ -578,32 +602,11 @@ def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _fs_and_path(uri: str):
-    """Return (fsspec filesystem, path) for ``uri``. Uses default credential
-    discovery for the scheme (workload identity / instance creds / env keys).
-
-    For ``s3://`` the CoreWeave object store (marin-us-east-02a) REQUIRES
-    virtual-hosted addressing — path-style PutObject/CreateMultipartUpload get
-    rejected with ``PathStyleRequestNotAllowed``. s3fs otherwise defaults to
-    path-style for a custom endpoint_url, so pin the botocore
-    ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE`` env
-    (default ``virtual``) allows an override for a path-style store (e.g. GCS).
-    """
-    import fsspec
-
-    storage_options = None
-    if uri.startswith("s3://") or uri.startswith("s3a://"):
-        style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    fs, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
-    return fs, paths[0]
-
-
 def _pin_boto3_s3_addressing_style() -> None:
     """Pin virtual-hosted (hostname-based) S3 addressing for the boto3 code path,
     cluster-wide, via an AWS config file + ``AWS_CONFIG_FILE``.
 
-    Companion to the fsspec/s3fs pin in ``_fs_and_path``: the CoreWeave object
+    Companion to the fsspec/s3fs pin in ``fs_and_path``: the CoreWeave object
     store (marin-us-east-02a / R2) REJECTS path-style S3 requests with
     ``PathStyleRequestNotAllowed``. Ray's object-spill IO workers call a bare
     ``boto3.resource("s3")`` with NO botocore ``Config`` in child processes we
@@ -704,7 +707,7 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
         "num_tasks": _num_tasks(),
         "written_at": time.time(),
     }
-    fs, path = _fs_and_path(uri)
+    fs, path = fs_and_path(uri)
     # Bound the object-store PutObject with a hard per-attempt timeout via a DAEMON
     # thread + join(timeout) + bounded retries/backoff. An unbounded s3fs/fsspec put
     # has no connect/read timeout and hangs the head invisibly. A daemon thread (NOT a
@@ -772,7 +775,7 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
     treated as stale (from a prior iris task attempt) and ignored.
     """
     uri = _rendezvous_uri(rendezvous_dir)
-    fs, path = _fs_and_path(uri)
+    fs, path = fs_and_path(uri)
     deadline = time.time() + timeout
     threshold = (min_written_at - RENDEZVOUS_FRESHNESS_SLACK) if min_written_at else None
     _log(f"Polling for rendezvous {uri} (timeout {timeout}s)...")
@@ -803,7 +806,7 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
 def _set_marker(rendezvous_dir: str, name: str) -> None:
     uri = f"{rendezvous_dir.rstrip('/')}/{name}"
     try:
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         with fs.open(path, "w") as f:
             f.write(str(time.time()))
     except Exception as exc:
@@ -813,7 +816,7 @@ def _set_marker(rendezvous_dir: str, name: str) -> None:
 def _marker_exists(rendezvous_dir: str, name: str, min_written_at: float | None = None) -> bool:
     uri = f"{rendezvous_dir.rstrip('/')}/{name}"
     try:
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         if not fs.exists(path):
             return False
         if min_written_at is None:
@@ -830,7 +833,7 @@ def clear_rendezvous(rendezvous_dir: str) -> None:
     for name in (RENDEZVOUS_FILENAME, DONE_FILENAME):
         uri = f"{rendezvous_dir.rstrip('/')}/{name}"
         try:
-            fs, path = _fs_and_path(uri)
+            fs, path = fs_and_path(uri)
             if fs.exists(path):
                 fs.rm(path)
                 _log(f"Removed {uri}")
@@ -1118,7 +1121,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
     )
     try:
         uri = f"{rendezvous_dir.rstrip('/')}/term_artifacts/{task_id}_{ts}.txt"
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         with fs.open(path, "w") as f:
             f.write(summary)
         _log(f"[term-capture] wrote termination artifact -> {uri}")
@@ -1133,7 +1136,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # DELETES these node-local logs with the pod. This periodically (+ on SIGTERM) uploads
 # THIS node's session logs to the object store under the job's rendezvous prefix, keyed
 # by node id, reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous
-# / spill / term-artifact writers already use (_fs_and_path). Per-node: each pod writes
+# / spill / term-artifact writers already use fs_and_path. Per-node: each pod writes
 # its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
@@ -1154,7 +1157,7 @@ def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str)
         return
     dest_base = f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
     try:
-        fs, dest_path = _fs_and_path(dest_base)
+        fs, dest_path = fs_and_path(dest_base)
     except Exception as exc:  # noqa: BLE001 - best-effort
         _log(f"[ray-log-sync] cannot resolve dest {dest_base} ({exc}) [{reason}]")
         return
@@ -1269,8 +1272,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
                 "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
         _log(
-            "[start_rl_iris_controller] Ray head subprocess returned; writing rendezvous "
-            f"-> {_rendezvous_uri(args.rendezvous_dir)}"
+            f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
@@ -1426,6 +1428,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "rollouts on a multi-node slice with no shared filesystem.",
     )
     parser.add_argument(
+        "--data-sources-json",
+        default="",
+        help="Immutable object-store data locators to materialize before Ray starts.",
+    )
+    parser.add_argument(
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
         help="HF repo ID of the policy model to pre-download into the node-local HF "
@@ -1444,6 +1451,21 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "in-datacenter) instead of pulling them from HF Hub. Missing/empty/incomplete "
         "source -> clean fallback to the HF snapshot_download prestage. Set by the "
         "launcher (auto-derived from the repo id).",
+    )
+    parser.add_argument(
+        "--model-source-uri",
+        default="",
+        help="Object-store HF export to materialize on every node before Ray starts.",
+    )
+    parser.add_argument(
+        "--model-local-path",
+        default="",
+        help="Deterministic node-local directory for --model-source-uri.",
+    )
+    parser.add_argument(
+        "--model-source-identity",
+        default="",
+        help="Immutable producer identity recorded beside the staged export.",
     )
     parser.add_argument(
         "--policy-chat-template",
@@ -1500,6 +1522,12 @@ def main() -> None:
     # with FileNotFoundError on task.toml. See stage_train_data docstring.
     if args.train_data:
         stage_train_data(args.train_data)
+    if args.data_sources_json:
+        materialize_data_sources(args.data_sources_json)
+    if args.model_source_uri:
+        if not args.model_local_path or not args.model_source_identity:
+            raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
+        materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:

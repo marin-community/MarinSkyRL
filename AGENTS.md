@@ -18,29 +18,34 @@ alone rather than churning it.
 
 ## Repo map
 
-Four independent packages, each with its own `pyproject.toml`, lockfile, and virtualenv.
-There is deliberately **no root uv workspace** — do not add one.
+The root `marinskyrl` distribution owns the launcher and trainer dependency graph. It is deliberately a
+single project, not a uv workspace. `skyrl-gym/` and `skyrl-tx/` remain independent packages with their own
+lockfiles and virtualenvs.
 
 | package | status | what it is |
 | --- | --- | --- |
-| `skyrl-train/` | **primary** | The trainer. Ray + FSDP2/DeepSpeed/Megatron policy training with vLLM/SGLang rollouts. Largest test suite (`tests/cpu/`, `tests/gpu/`). Nearly all work happens here. |
-| `skyrl-gym/` | active | Gymnasium-style RL environments (gsm8k, aime, …) and their reward functions. A dependency of `skyrl-train`. |
+| repository root | **primary** | The `marinskyrl` launcher and trainer distribution. Its frozen lock owns the CPU launcher, vLLM/FSDP2, and Megatron closures. |
+| `skyrl-train/` | bundled | Trainer source, examples, and CPU/GPU tests included in the root wheel. |
+| `skyrl-gym/` | bundled + independent | Gymnasium-style RL environments included in the root wheel; its standalone package remains independently testable. |
 | `skyrl-tx/` | active | A JAX/Flax inference + fine-tuning engine (`tx`), independent of the trainer. Has its own CI. |
 | `skyrl-agent/` | dormant | An older agent-harness snapshot. Not built, not tested, not linted. |
 
 ## Install and test
 
-Every package uses `uv` and is built and tested from **its own directory**.
+Run launcher and trainer commands from the repository root. The base install is CPU-only; select an image-build
+extra only when resolving a GPU training environment.
 
 ```bash
-# skyrl-train (CPU tests -- what PR CI runs)
-cd skyrl-train
-uv sync --frozen --extra dev
-uv run --frozen pytest tests/cpu/
+# Root launcher + skyrl-train CPU tests (what PR CI runs)
+uv sync --frozen --group dev --extra cpu --extra telemetry
+uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
 
-# skyrl-train (GPU tests -- needs an 8-GPU node; not run in PR CI)
-uv run --isolated --extra dev --extra vllm --extra deepspeed \
-    pytest -s tests/gpu/gpu_ci -m "not (sglang or integrations or megatron)"
+# FSDP2/vLLM image closure (GPU tests need an 8-GPU node; not run in PR CI)
+uv sync --frozen --extra fsdp --extra vllm --group dev
+uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not (integrations or megatron)"
+
+# Megatron image closure (select it together with the common training closure)
+uv sync --frozen --extra vllm --extra megatron --group dev
 
 # skyrl-gym
 cd skyrl-gym
@@ -52,17 +57,19 @@ cd skyrl-tx
 uv run --extra tinker --extra dev pytest --forked -s tests
 ```
 
-Training runs go through Hydra, from `skyrl-train/`:
+Training runs go through Hydra. Commands that need the examples package run with `skyrl-train/` as the working
+directory while retaining the root project:
 
 ```bash
-uv run examples/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
+uv run --project .. examples/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
 NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 ```
 
-`vllm` is `skyrl-train`'s only inference extra. The `sglang`, `mcore`, and `flashrl` extras were
-removed: each pinned a `torch` or `transformers` version that the base package's own requirements
-exclude, so none of them could be installed and their presence alone made `uv lock` unsolvable.
-Production runs none of them.
+`cpu` and `cuda` are mutually exclusive PyTorch wheel profiles because Python extras cannot replace a base
+dependency. GPU-only component extras such as `vllm`, `megatron`, and `deepspeed` imply `cuda`, so callers name
+the component rather than its hardware consequence. `fsdp` adds TorchTitan for the expert-parallel FSDP path.
+Native vLLM, FlashAttention, TransformerEngine, Mamba, and CUDA artifacts remain Docker image construction
+concerns; the extras describe their Python closure.
 
 ## Lint
 

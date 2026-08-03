@@ -9,7 +9,11 @@ from pathlib import Path
 from harbor.utils.artifact_writer import ArtifactWriter
 
 UPLOAD_TIMEOUT = 0.05
-VALIDATION_TIMEOUT = 2.0
+# The worker must prove liveness after the 50 ms upload deadline, but import and
+# thread scheduling inside a loaded cross-architecture image builder can take a
+# few seconds. Keep the end-to-end gate bounded without making scheduler latency
+# part of the Harbor contract.
+VALIDATION_TIMEOUT = 10.0
 # The fake object-store stall must outlive the validation bound so only Harbor's
 # upload deadline can free the worker in time for the follow-up write.
 OBJECT_STORE_STALL_TIMEOUT = 30.0
