@@ -31,6 +31,10 @@ threads are created, then repeats it alongside GPU-local CPU affinity in the act
 FSDP2 initialization. The late lifecycle calls were removed because they cannot affect storage FSDP2 already
 created.
 
+The fixed contract passed on Jupiter job 1219635 at commit `682cc277`, using the r5 production SIF with the Titan
+overlay. All four ranks reported `bind` over LPDDR nodes 0–3 and a single GPU-local CPU-affinity node. Each rank's
+3,601 sampled pinned FSDP2 pages resided entirely on that local LPDDR node; no sampled page resided in HBM.
+
 ## Future work
 
 - [ ] Determine whether correcting host-memory placement changes wedge incidence; do not infer causality from
