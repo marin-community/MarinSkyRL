@@ -447,7 +447,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._grug_benchmark_open_phase = None
         self._grug_benchmark_parent_phase = None
 
-    def _grug_benchmark_install_expert_hooks(self):
+    def _grug_benchmark_install_expert_hooks(self, paired_route_mode: str | None = None):
         """Time routed blocks and retain exact per-layer route loads.
 
         The sparse block is a common module boundary for both the eager and
@@ -462,10 +462,39 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         modules = [module for module in self.model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
         if not modules:
             raise RuntimeError("routed-block attribution found no GrugMoeSparseMoeBlock modules")
+        if paired_route_mode not in {None, "capture", "compare"}:
+            raise ValueError(f"unknown paired route mode: {paired_route_mode}")
         self._grug_benchmark_expert_events = {"forward": [], "backward": []}
         self._grug_benchmark_open_expert_span = None
         self._grug_benchmark_route_loads = [None] * len(modules)
         self._grug_benchmark_route_calls = [0] * len(modules)
+        self._grug_benchmark_route_mode = paired_route_mode
+        if paired_route_mode == "capture":
+            if hasattr(self, "_grug_benchmark_route_reference"):
+                raise RuntimeError("paired route reference already exists")
+            self._grug_benchmark_route_reference = [[] for _ in modules]
+        elif paired_route_mode == "compare":
+            reference = getattr(self, "_grug_benchmark_route_reference", None)
+            if reference is None or len(reference) != len(modules):
+                raise RuntimeError("paired route comparison has no compatible eager reference")
+            self._grug_benchmark_route_comparison = [
+                {
+                    "tokens": 0,
+                    "routed_allocations": 0,
+                    "changed_tokens": 0,
+                    "changed_routed_allocations": 0,
+                    "ordered_slot_mismatches": 0,
+                    "unexplained_changed_tokens": 0,
+                    "logit_numel": 0,
+                    "logit_abs_sum": 0.0,
+                    "max_token_logit_delta": 0.0,
+                    "reference_margin_min": math.inf,
+                    "current_margin_min": math.inf,
+                    "max_changed_reference_margin": 0.0,
+                    "max_changed_current_margin": 0.0,
+                }
+                for _ in modules
+            ]
 
         def begin(kind: str):
             parent = getattr(self, "_grug_benchmark_parent_phase", None)
@@ -503,6 +532,74 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 accumulated = torch.zeros_like(loads)
                 self._grug_benchmark_route_loads[layer_index] = accumulated
             accumulated.add_(loads)
+            route_mode = self._grug_benchmark_route_mode
+            if route_mode == "capture":
+                with torch.no_grad():
+                    self._grug_benchmark_route_reference[layer_index].append(
+                        {
+                            "adjusted_logits": (output.router_logits + router.bias).detach().clone(),
+                            "selected_experts": selected_experts.detach().clone(),
+                        }
+                    )
+            elif route_mode == "compare":
+                call_index = self._grug_benchmark_route_calls[layer_index]
+                references = self._grug_benchmark_route_reference[layer_index]
+                if call_index >= len(references):
+                    raise RuntimeError(f"paired route layer {layer_index} has too many grouped calls")
+                reference = references[call_index]
+                with torch.no_grad():
+                    current_logits = (output.router_logits + router.bias).detach()
+                    reference_logits = reference["adjusted_logits"]
+                    reference_selected = reference["selected_experts"]
+                    if (
+                        current_logits.shape != reference_logits.shape
+                        or selected_experts.shape != reference_selected.shape
+                    ):
+                        raise RuntimeError(f"paired route layer {layer_index} changed tensor shapes")
+                    logit_delta = (current_logits.float() - reference_logits.float()).abs()
+                    token_delta = logit_delta.amax(dim=-1)
+                    reference_top = torch.topk(reference_logits.float(), k=router.top_k + 1, dim=-1, sorted=True).values
+                    current_top = torch.topk(current_logits.float(), k=router.top_k + 1, dim=-1, sorted=True).values
+                    reference_margin = reference_top[:, router.top_k - 1] - reference_top[:, router.top_k]
+                    current_margin = current_top[:, router.top_k - 1] - current_top[:, router.top_k]
+                    reference_membership = torch.zeros(
+                        (selected_experts.shape[0], router.num_experts),
+                        dtype=torch.bool,
+                        device=selected_experts.device,
+                    )
+                    current_membership = torch.zeros_like(reference_membership)
+                    reference_membership.scatter_(1, reference_selected.long(), True)
+                    current_membership.scatter_(1, selected_experts.long(), True)
+                    symmetric_difference = (reference_membership ^ current_membership).sum(dim=-1)
+                    changed = symmetric_difference != 0
+                    unexplained = changed & (reference_margin > 2 * token_delta)
+                    comparison = self._grug_benchmark_route_comparison[layer_index]
+                    comparison["tokens"] += int(selected_experts.shape[0])
+                    comparison["routed_allocations"] += int(selected_experts.numel())
+                    comparison["changed_tokens"] += int(changed.sum().item())
+                    comparison["changed_routed_allocations"] += int(symmetric_difference.sum().item() // 2)
+                    comparison["ordered_slot_mismatches"] += int((selected_experts != reference_selected).sum().item())
+                    comparison["unexplained_changed_tokens"] += int(unexplained.sum().item())
+                    comparison["logit_numel"] += int(logit_delta.numel())
+                    comparison["logit_abs_sum"] += float(logit_delta.sum().item())
+                    comparison["max_token_logit_delta"] = max(
+                        comparison["max_token_logit_delta"], float(token_delta.max().item())
+                    )
+                    comparison["reference_margin_min"] = min(
+                        comparison["reference_margin_min"], float(reference_margin.min().item())
+                    )
+                    comparison["current_margin_min"] = min(
+                        comparison["current_margin_min"], float(current_margin.min().item())
+                    )
+                    if bool(changed.any().item()):
+                        comparison["max_changed_reference_margin"] = max(
+                            comparison["max_changed_reference_margin"],
+                            float(reference_margin[changed].max().item()),
+                        )
+                        comparison["max_changed_current_margin"] = max(
+                            comparison["max_changed_current_margin"],
+                            float(current_margin[changed].max().item()),
+                        )
             self._grug_benchmark_route_calls[layer_index] += 1
 
         handles = []
@@ -539,12 +636,40 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         route_calls = list(self._grug_benchmark_route_calls)
         self._grug_benchmark_route_loads = None
         self._grug_benchmark_route_calls = None
+        route_mode = self._grug_benchmark_route_mode
+        self._grug_benchmark_route_mode = None
+        route_reference_calls = None
+        route_comparison = None
+        if route_mode == "capture":
+            route_reference_calls = [len(calls) for calls in self._grug_benchmark_route_reference]
+        elif route_mode == "compare":
+            route_reference_calls = [len(calls) for calls in self._grug_benchmark_route_reference]
+            if route_reference_calls != route_calls:
+                raise RuntimeError(
+                    f"paired eager/grouped route call counts differ: eager={route_reference_calls}, grouped={route_calls}"
+                )
+            route_comparison = []
+            for layer_index, comparison in enumerate(self._grug_benchmark_route_comparison):
+                logit_numel = comparison.pop("logit_numel")
+                logit_abs_sum = comparison.pop("logit_abs_sum")
+                comparison["layer"] = layer_index
+                comparison["changed_token_fraction"] = comparison["changed_tokens"] / comparison["tokens"]
+                comparison["changed_routed_allocation_fraction"] = (
+                    comparison["changed_routed_allocations"] / comparison["routed_allocations"]
+                )
+                comparison["mean_logit_abs_difference"] = logit_abs_sum / logit_numel
+                route_comparison.append(comparison)
+            del self._grug_benchmark_route_reference
+            del self._grug_benchmark_route_comparison
         return {
             "module_count": module_count,
             "phase_seconds": phase_seconds,
             "call_counts": call_counts,
             "route_calls_per_layer": route_calls,
             "route_loads_per_layer": route_loads,
+            "paired_route_mode": route_mode,
+            "paired_route_reference_calls": route_reference_calls,
+            "paired_route_comparison": route_comparison,
             "boundary": (
                 "CUDA-stream time inside GrugMoeSparseMoeBlock initial forwards plus full module backward "
                 "spans; includes routing, route materialization, dispatch/sort, routed expert kernels, and "
@@ -622,6 +747,84 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             "rank": int(torch.distributed.get_rank()),
             "allocated_bytes": int(torch.cuda.memory_allocated()),
             "reserved_bytes": int(torch.cuda.memory_reserved()),
+        }
+
+    def grug_benchmark_prepare_paired_baseline(self):
+        """Freeze one model/RNG baseline for sequential eager/grouped arms."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before preparing paired arms")
+        if hasattr(self, "_grug_benchmark_paired_baseline"):
+            raise RuntimeError("paired benchmark baseline is already prepared")
+        modules = [module for module in self.model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
+        if not modules or any(module.experts.use_grouped_mm for module in modules):
+            raise RuntimeError("paired benchmark must prepare from the eager expert path")
+        self.optimizer.zero_grad(set_to_none=True)
+        cpu_rng_state = torch.get_rng_state().clone()
+        cuda_rng_state = torch.cuda.get_rng_state().clone()
+        baseline = {
+            "state_hash": self._grug_benchmark_state_hash(self.model.state_dict()),
+            "cpu_rng_state": cpu_rng_state,
+            "cuda_rng_state": cuda_rng_state,
+        }
+        self._grug_benchmark_paired_baseline = baseline
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash": baseline["state_hash"],
+            "cpu_rng_sha256": hashlib.sha256(cpu_rng_state.numpy().tobytes()).hexdigest(),
+            "cuda_rng_sha256": hashlib.sha256(cuda_rng_state.cpu().numpy().tobytes()).hexdigest(),
+            "gradient_tensors": sum(parameter.grad is not None for parameter in self.model.parameters()),
+            "sparse_blocks": len(modules),
+        }
+
+    def grug_benchmark_select_paired_experts(self, implementation: str):
+        """Select one paired arm and restore its exact initial RNG/gradient state."""
+
+        baseline = getattr(self, "_grug_benchmark_paired_baseline", None)
+        if baseline is None:
+            raise RuntimeError("prepare the paired benchmark baseline first")
+        if implementation not in {"eager", "grouped"}:
+            raise ValueError(f"unknown paired expert implementation: {implementation}")
+        modules = [module for module in self.model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
+        if not modules:
+            raise RuntimeError("paired benchmark found no sparse blocks")
+        grouped = implementation == "grouped"
+        for module in modules:
+            module.experts.use_grouped_mm = grouped
+        self.optimizer.zero_grad(set_to_none=True)
+        torch.set_rng_state(baseline["cpu_rng_state"])
+        torch.cuda.set_rng_state(baseline["cuda_rng_state"])
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "implementation": implementation,
+            "sparse_blocks": len(modules),
+            "selected_blocks": sum(module.experts.use_grouped_mm == grouped for module in modules),
+            "gradient_tensors": sum(parameter.grad is not None for parameter in self.model.parameters()),
+            "cpu_rng_restored": bool(torch.equal(torch.get_rng_state(), baseline["cpu_rng_state"])),
+            "cuda_rng_restored": bool(torch.equal(torch.cuda.get_rng_state(), baseline["cuda_rng_state"])),
+        }
+
+    def grug_benchmark_finish_paired_baseline(self):
+        """Prove paired arms left model state unchanged and restore eager mode."""
+
+        baseline = getattr(self, "_grug_benchmark_paired_baseline", None)
+        if baseline is None:
+            raise RuntimeError("prepare the paired benchmark baseline first")
+        modules = [module for module in self.model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
+        state_hash_after = self._grug_benchmark_state_hash(self.model.state_dict())
+        self.optimizer.zero_grad(set_to_none=True)
+        for module in modules:
+            module.experts.use_grouped_mm = False
+        torch.set_rng_state(baseline["cpu_rng_state"])
+        torch.cuda.set_rng_state(baseline["cuda_rng_state"])
+        del self._grug_benchmark_paired_baseline
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash_before": baseline["state_hash"],
+            "state_hash_after": state_hash_after,
+            "gradient_tensors": sum(parameter.grad is not None for parameter in self.model.parameters()),
+            "eager_blocks": sum(not module.experts.use_grouped_mm for module in modules),
+            "sparse_blocks": len(modules),
         }
 
     @classmethod
@@ -1284,15 +1487,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         flat.shape[0],
                     )
                     product_routed_output = product_routed["output"]
-                    detailed["product_routed_input_exact"] = bool(
-                        torch.equal(product_routed["input"], routed_input)
-                    )
-                    detailed["product_routed_counts_exact"] = bool(
-                        torch.equal(product_routed["counts"], counts)
-                    )
-                    detailed["product_routed_vs_manual_grouped"] = difference(
-                        product_routed_output, grouped_stages[-1]
-                    )
+                    detailed["product_routed_input_exact"] = bool(torch.equal(product_routed["input"], routed_input))
+                    detailed["product_routed_counts_exact"] = bool(torch.equal(product_routed["counts"], counts))
+                    detailed["product_routed_vs_manual_grouped"] = difference(product_routed_output, grouped_stages[-1])
                     detailed["manual_grouped_vs_product_grouped"] = difference(
                         manual_grouped_output, grouped_output.reshape_as(manual_grouped_output)
                     )
@@ -1465,7 +1662,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             "profile_artifact_gzip": profile_artifact_gzip,
         }
 
-    def grug_benchmark_run_staged_matched_ce(self, profile: bool = False, expert_attribution: bool = False):
+    def grug_benchmark_run_staged_matched_ce(
+        self,
+        profile: bool = False,
+        expert_attribution: bool = False,
+        paired_route_mode: str | None = None,
+    ):
         """Time the common fixed-replay CE forward and backward, without Adam."""
 
         if not hasattr(self, "_grug_benchmark_batch"):
@@ -1477,7 +1679,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         expert_handles = []
         expert_module_count = 0
         if expert_attribution:
-            expert_handles, expert_module_count = self._grug_benchmark_install_expert_hooks()
+            expert_handles, expert_module_count = self._grug_benchmark_install_expert_hooks(paired_route_mode)
+        elif paired_route_mode is not None:
+            raise ValueError("paired route comparison requires expert attribution")
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
         if torch.distributed.is_initialized():

@@ -45,6 +45,23 @@ GPUS_PER_NODE = 8
 HEADLINE_SEQUENCES = 4096
 WORLD_SIZES = {"preflight": 8, "headline": 32}
 MICROBATCHES_PER_RANK = {"preflight": 1, "headline": 128}
+OUTPUT_RTOL = 4e-2
+OUTPUT_ATOL = 4e-3
+LOSS_RTOL = 2e-3
+LOSS_ATOL = 2e-3
+GRADIENT_RTOL = 8e-2
+GRADIENT_ATOL = 1e-4
+CAUSAL_LOCALIZATION = {
+    "result_s3_uri": (
+        "s3://marin-us-east-02a/iris/grug-training-perf-gap/20260803/divergence-closeout-53d420e/localization-s3.json"
+    ),
+    "payload_sha256": "976566dc1aa8a882db12326fa84be3d30dbeb2d20565933fbeb7265530e25a3f",
+    "result_sha256": "d890dc2cb8938b6607b4a98a60cfc9476e187695dbc48f6dba599c8a15cb9782",
+    "route_dependent_gradient_check": (
+        "all eight layer-zero selected-expert probes are bitwise exact for output, input gradient, "
+        "and gate/up/down weight gradients"
+    ),
+}
 TENSOR_FIELDS = (
     "action_log_probs",
     "advantages",
@@ -68,7 +85,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--logical-batch-sha256", required=True)
     parser.add_argument("--attention-backend", choices=("eager", "flash_attention_2"), required=True)
     parser.add_argument("--expert-implementation", choices=("eager", "grouped"), required=True)
-    parser.add_argument("--objective", choices=("operational", "matched_ce", "localize"), required=True)
+    parser.add_argument(
+        "--objective",
+        choices=("operational", "matched_ce", "paired_matched_ce", "localize"),
+        required=True,
+    )
     parser.add_argument("--mode", choices=("preflight", "headline"), required=True)
     parser.add_argument("--result-s3-uri", required=True)
     parser.add_argument("--sample", type=int, required=True)
@@ -346,6 +367,387 @@ def upload_result(client, uri: str, result: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def normalized_worker_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    """Remove only the eager/grouped intervention from one worker identity."""
+
+    return {key: value for key, value in identity.items() if key not in {"expert_implementation", "native_grouped_mm"}}
+
+
+def require_rank_order(items: list[dict[str, Any]], world_size: int, label: str) -> None:
+    ranks = [item.get("rank") for item in items]
+    if ranks != list(range(world_size)):
+        raise RuntimeError(f"{label} returned wrong rank order: {ranks}")
+
+
+def run_paired_matched_arm(
+    *,
+    policy,
+    arm_name: str,
+    implementation: str,
+    expert_attribution: bool,
+    paired_route_mode: str | None,
+    mode: str,
+    sequence_length: int,
+    world_size: int,
+    global_loss_tokens: int,
+    manifest: dict[str, Any],
+    staged: list[dict[str, Any]],
+    baseline_topology: list[dict[str, Any]],
+    baseline_identities: list[dict[str, Any]],
+    baseline_state_hashes: list[str],
+) -> dict[str, Any]:
+    """Run one arm without replacing its actors, model shards, replay, or GPUs."""
+
+    selection = ray.get(
+        policy.async_run_ray_method(
+            "pass_through",
+            "grug_benchmark_select_paired_experts",
+            implementation,
+        )
+    )
+    require_rank_order(selection, world_size, f"paired arm {arm_name} selection")
+    for rank, item in enumerate(selection):
+        if (
+            item["rank"] != rank
+            or item["implementation"] != implementation
+            or item["selected_blocks"] != item["sparse_blocks"]
+            or item["gradient_tensors"] != 0
+            or not item["cpu_rng_restored"]
+            or not item["cuda_rng_restored"]
+        ):
+            raise RuntimeError(f"paired arm {arm_name} did not restore rank {rank}: {item}")
+
+    topology = ray.get(policy.async_run_ray_method("pass_through", "get_device_placement_diag"))
+    assert_topology(topology, mode)
+    if topology != baseline_topology:
+        raise RuntimeError(f"paired arm {arm_name} changed rank/GPU topology")
+    identities = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_identity"))
+    require_rank_order(identities, world_size, f"paired arm {arm_name} identity")
+    for rank, (identity, baseline) in enumerate(zip(identities, baseline_identities)):
+        if identity["expert_implementation"] != implementation:
+            raise RuntimeError(f"paired arm {arm_name} selected the wrong rank {rank} expert path: {identity}")
+        if normalized_worker_identity(identity) != normalized_worker_identity(baseline):
+            raise RuntimeError(f"paired arm {arm_name} changed rank {rank} worker identity")
+
+    warmup = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_warmup_matched_ce"))
+    require_rank_order(warmup, world_size, f"paired arm {arm_name} warmup")
+    for rank, item in enumerate(warmup):
+        if (
+            item["rank"] != rank
+            or item["state_hash_before"] != baseline_state_hashes[rank]
+            or item["state_hash_after"] != baseline_state_hashes[rank]
+        ):
+            raise RuntimeError(f"paired arm {arm_name} changed rank {rank} state during warmup: {item}")
+
+    memory_before = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_reset_peak_memory"))
+    require_rank_order(memory_before, world_size, f"paired arm {arm_name} memory reset")
+    rpc_started = time.perf_counter()
+    timed = ray.get(
+        policy.async_run_ray_method(
+            "pass_through",
+            "grug_benchmark_run_staged_matched_ce",
+            False,
+            expert_attribution,
+            paired_route_mode,
+        )
+    )
+    require_rank_order(timed, world_size, f"paired arm {arm_name} timed result")
+    rpc_elapsed = time.perf_counter() - rpc_started
+    for item in timed:
+        profile_artifact = item.pop("profile_artifact_gzip")
+        if profile_artifact is not None:
+            raise RuntimeError(f"paired arm {arm_name} unexpectedly returned a profile")
+
+    expected_microbatches = MICROBATCHES_PER_RANK[mode]
+    for rank, (item, identity) in enumerate(zip(timed, identities)):
+        if item["rank"] != rank or item["microbatches"] != expected_microbatches:
+            raise RuntimeError(f"paired arm {arm_name} completed the wrong rank/microbatch count: {item}")
+        if item["gradient_tensors"] <= 0 or item["gradient_numel"] <= 0:
+            raise RuntimeError(f"paired arm {arm_name} rank {rank} produced no gradients")
+        if item["nonfinite_gradient_tensors"] != 0:
+            raise RuntimeError(f"paired arm {arm_name} rank {rank} produced non-finite gradients")
+        evidence = item["expert_attribution"]
+        if not expert_attribution:
+            if evidence is not None:
+                raise RuntimeError(f"paired arm {arm_name} unexpectedly returned expert attribution")
+            continue
+        expected_blocks = identity["num_hidden_layers"]
+        expected_calls = expected_blocks * expected_microbatches
+        if evidence is None or evidence["module_count"] != expected_blocks:
+            raise RuntimeError(f"paired arm {arm_name} missed rank {rank} routed blocks")
+        if evidence["call_counts"] != {"forward": expected_calls, "backward": expected_calls}:
+            raise RuntimeError(f"paired arm {arm_name} returned wrong rank {rank} routed call counts")
+        if evidence["route_calls_per_layer"] != [expected_microbatches] * expected_blocks:
+            raise RuntimeError(f"paired arm {arm_name} returned wrong rank {rank} route call counts")
+        expected_route_mode = paired_route_mode if mode == "preflight" else None
+        if evidence["paired_route_mode"] != expected_route_mode:
+            raise RuntimeError(f"paired arm {arm_name} returned wrong rank {rank} paired-route mode")
+        if (
+            expected_route_mode is not None
+            and evidence["paired_route_reference_calls"] != [expected_microbatches] * expected_blocks
+        ):
+            raise RuntimeError(f"paired arm {arm_name} returned wrong rank {rank} route-reference calls")
+        if expected_route_mode == "capture" and evidence["paired_route_comparison"] is not None:
+            raise RuntimeError(f"paired arm {arm_name} compared routes while capturing its reference")
+        if expected_route_mode == "compare" and len(evidence["paired_route_comparison"] or []) != expected_blocks:
+            raise RuntimeError(f"paired arm {arm_name} missed rank {rank} route comparisons")
+        expected_layer_load = expected_microbatches * sequence_length * identity["num_experts_per_tok"]
+        if any(
+            len(layer_loads) != identity["num_local_experts"] or sum(layer_loads) != expected_layer_load
+            for layer_loads in evidence["route_loads_per_layer"]
+        ):
+            raise RuntimeError(f"paired arm {arm_name} returned wrong rank {rank} routed work")
+
+    elapsed_values = [item["elapsed_seconds"] for item in timed]
+    synchronized_wall = max(elapsed_values)
+    critical = max(timed, key=lambda item: item["elapsed_seconds"])
+    phase_sum = sum(critical["phase_seconds"].values())
+    allocated_tokens = sum(item["allocated_tokens"] for item in staged)
+    nonpad_tokens = sum(item["nonpad_tokens"] for item in staged)
+    loss_tokens = sum(item["loss_tokens"] for item in staged)
+    logical_sequences = int(manifest["batch"]["batch_size"]) if mode == "headline" else world_size
+    metrics = {
+        "synchronized_wall_seconds": synchronized_wall,
+        "rpc_wall_seconds": rpc_elapsed,
+        "worker_elapsed_min_seconds": min(elapsed_values),
+        "worker_elapsed_max_seconds": max(elapsed_values),
+        "worker_elapsed_spread_seconds": max(elapsed_values) - min(elapsed_values),
+        "gpu_seconds_per_logical_sequence": synchronized_wall * world_size / logical_sequences,
+        "logical_sequences_per_second": logical_sequences / synchronized_wall,
+        "allocated_tokens": allocated_tokens,
+        "nonpadding_tokens": nonpad_tokens,
+        "loss_tokens": loss_tokens,
+        "allocated_tokens_per_second": allocated_tokens / synchronized_wall,
+        "nonpadding_tokens_per_second": nonpad_tokens / synchronized_wall,
+        "allocated_tokens_per_second_per_gpu": allocated_tokens / synchronized_wall / world_size,
+        "nonpadding_tokens_per_second_per_gpu": nonpad_tokens / synchronized_wall / world_size,
+        "critical_rank": critical["rank"],
+        "critical_rank_phase_seconds": critical["phase_seconds"],
+        "critical_rank_phase_sum_seconds": phase_sum,
+        "phase_residual_seconds": synchronized_wall - phase_sum,
+        "phase_residual_definition": (
+            "synchronized worker wall minus the sum of mutually exclusive CUDA-stream events on the rank "
+            "that set synchronized wall; includes Python/launch/barrier gaps"
+        ),
+        "peak_allocated_bytes_max": max(item["peak_allocated_bytes"] for item in timed),
+        "peak_reserved_bytes_max": max(item["peak_reserved_bytes"] for item in timed),
+    }
+    if expert_attribution:
+        expert_phase_seconds = critical["expert_attribution"]["phase_seconds"]
+        expert_seconds = sum(expert_phase_seconds.values())
+        expert_residual = synchronized_wall - expert_seconds
+        if expert_residual < 0:
+            raise RuntimeError(
+                f"paired arm {arm_name} expert spans exceed synchronized wall: "
+                f"expert={expert_seconds}, wall={synchronized_wall}"
+            )
+        metrics.update(
+            {
+                "critical_rank_expert_seconds": expert_seconds,
+                "critical_rank_expert_phase_seconds": expert_phase_seconds,
+                "critical_rank_nonexpert_seconds": expert_residual,
+                "critical_rank_expert_fraction": expert_seconds / synchronized_wall,
+                "expert_partition_definition": (
+                    "synchronized wall partitions into routed-block CUDA-stream spans on the critical rank "
+                    "and a nonnegative remainder containing every other operation, communication, and idle gap"
+                ),
+            }
+        )
+    timed_loss_tokens = sum(item["local_loss_tokens"] for item in timed)
+    if timed_loss_tokens != global_loss_tokens or timed_loss_tokens != loss_tokens:
+        raise RuntimeError(
+            f"paired arm {arm_name} loss-token accounting disagrees: "
+            f"timed={timed_loss_tokens}, configured={global_loss_tokens}, staged={loss_tokens}"
+        )
+    metrics["matched_global_ce_loss"] = sum(item["local_loss_sum"] for item in timed) / timed_loss_tokens
+    metrics["matched_gradient_tensors_min"] = min(item["gradient_tensors"] for item in timed)
+    metrics["matched_gradient_numel_min"] = min(item["gradient_numel"] for item in timed)
+    return {
+        "arm": arm_name,
+        "expert_implementation": implementation,
+        "expert_attribution_in_timed_sample": expert_attribution,
+        "selection_restore": selection,
+        "topology": topology,
+        "worker_identities": identities,
+        "warmup_restore": warmup,
+        "memory_before_timing": memory_before,
+        "timed_workers": timed,
+        "metrics": metrics,
+    }
+
+
+def _empty_comparison() -> dict[str, Any]:
+    return {
+        "checked": 0,
+        "nonfinite": 0,
+        "violations": 0,
+        "max_abs_difference": 0.0,
+        "max_allowance_ratio": 0.0,
+    }
+
+
+def _record_close(summary: dict[str, Any], actual: float, expected: float, *, rtol: float, atol: float) -> None:
+    summary["checked"] += 1
+    if not math.isfinite(actual) or not math.isfinite(expected):
+        summary["nonfinite"] += 1
+        summary["violations"] += 1
+        summary["max_allowance_ratio"] = math.inf
+        return
+    difference = abs(actual - expected)
+    allowance = atol + rtol * abs(expected)
+    summary["max_abs_difference"] = max(summary["max_abs_difference"], difference)
+    summary["max_allowance_ratio"] = max(summary["max_allowance_ratio"], difference / allowance)
+    summary["violations"] += int(difference > allowance)
+
+
+def compare_paired_numeric(candidate: dict[str, Any], reference: dict[str, Any]) -> dict[str, Any]:
+    """Compare one same-actor arm without deciding how gradients gate semantics."""
+
+    output = _empty_comparison()
+    gradient = _empty_comparison()
+    if len(candidate["timed_workers"]) != len(reference["timed_workers"]):
+        raise RuntimeError("paired numeric worker counts differ")
+    for candidate_worker, reference_worker in zip(candidate["timed_workers"], reference["timed_workers"]):
+        if candidate_worker["rank"] != reference_worker["rank"]:
+            raise RuntimeError("paired numeric worker ranks differ")
+        candidate_output = candidate_worker["representative_action_log_probs"]
+        reference_output = reference_worker["representative_action_log_probs"]
+        if len(candidate_output) != len(reference_output):
+            raise RuntimeError("paired representative output counts differ")
+        for actual, expected in zip(candidate_output, reference_output):
+            _record_close(output, actual, expected, rtol=OUTPUT_RTOL, atol=OUTPUT_ATOL)
+
+        candidate_gradients = candidate_worker["representative_gradients"]
+        reference_gradients = reference_worker["representative_gradients"]
+        if sorted(candidate_gradients) != sorted(reference_gradients):
+            raise RuntimeError("paired representative gradient names differ")
+        for name, candidate_gradient in candidate_gradients.items():
+            reference_gradient = reference_gradients[name]
+            if candidate_gradient["local_numel"] != reference_gradient["local_numel"]:
+                raise RuntimeError(f"paired representative gradient shard differs: {name}")
+            for field in ("l2_norm", "max_abs"):
+                _record_close(
+                    gradient,
+                    candidate_gradient[field],
+                    reference_gradient[field],
+                    rtol=GRADIENT_RTOL,
+                    atol=GRADIENT_ATOL,
+                )
+            if len(candidate_gradient["samples"]) != len(reference_gradient["samples"]):
+                raise RuntimeError(f"paired representative gradient sample count differs: {name}")
+            for actual, expected in zip(candidate_gradient["samples"], reference_gradient["samples"]):
+                _record_close(gradient, actual, expected, rtol=GRADIENT_RTOL, atol=GRADIENT_ATOL)
+
+    loss = _empty_comparison()
+    _record_close(
+        loss,
+        candidate["metrics"]["matched_global_ce_loss"],
+        reference["metrics"]["matched_global_ce_loss"],
+        rtol=LOSS_RTOL,
+        atol=LOSS_ATOL,
+    )
+    for summary in (output, loss, gradient):
+        summary["passed"] = summary["violations"] == 0 and summary["nonfinite"] == 0
+    return {
+        "representative_action_log_probs": output,
+        "matched_global_ce": loss,
+        "representative_gradients": gradient,
+    }
+
+
+def summarize_route_contract(grouped_arm: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "rank_layers": 0,
+        "tokens": 0,
+        "routed_allocations": 0,
+        "changed_tokens": 0,
+        "changed_routed_allocations": 0,
+        "ordered_slot_mismatches": 0,
+        "unexplained_changed_tokens": 0,
+        "max_token_logit_delta": 0.0,
+        "max_changed_reference_margin": 0.0,
+        "max_changed_current_margin": 0.0,
+    }
+    for worker in grouped_arm["timed_workers"]:
+        comparisons = worker["expert_attribution"]["paired_route_comparison"]
+        if not comparisons:
+            raise RuntimeError(f"rank {worker['rank']} returned no paired route comparisons")
+        for comparison in comparisons:
+            summary["rank_layers"] += 1
+            for key in (
+                "tokens",
+                "routed_allocations",
+                "changed_tokens",
+                "changed_routed_allocations",
+                "ordered_slot_mismatches",
+                "unexplained_changed_tokens",
+            ):
+                summary[key] += comparison[key]
+            for key in (
+                "max_token_logit_delta",
+                "max_changed_reference_margin",
+                "max_changed_current_margin",
+            ):
+                summary[key] = max(summary[key], comparison[key])
+    summary["changed_token_fraction"] = summary["changed_tokens"] / summary["tokens"]
+    summary["changed_routed_allocation_fraction"] = (
+        summary["changed_routed_allocations"] / summary["routed_allocations"]
+    )
+    summary["passed"] = summary["unexplained_changed_tokens"] == 0
+    summary["acceptance_rule"] = (
+        "for every token/call/layer, changed selected-expert membership is explained only when the eager "
+        "kth-vs-(k+1)th adjusted-logit margin is <= 2 * the maximum per-token adjusted-logit delta"
+    )
+    return summary
+
+
+def validate_paired_arms(arms: list[dict[str, Any]], mode: str) -> dict[str, Any]:
+    by_name = {arm["arm"]: arm for arm in arms}
+    tolerances = {
+        "representative_action_log_probs": {"rtol": OUTPUT_RTOL, "atol": OUTPUT_ATOL},
+        "matched_global_ce": {"rtol": LOSS_RTOL, "atol": LOSS_ATOL},
+        "representative_gradients": {"rtol": GRADIENT_RTOL, "atol": GRADIENT_ATOL},
+    }
+    if mode == "preflight":
+        oracle = compare_paired_numeric(by_name["eager_instrumented"], by_name["eager_oracle"])
+        grouped = compare_paired_numeric(by_name["grouped_instrumented"], by_name["eager_instrumented"])
+        routes = summarize_route_contract(by_name["grouped_instrumented"])
+        passed = (
+            oracle["representative_action_log_probs"]["passed"]
+            and oracle["matched_global_ce"]["passed"]
+            and oracle["representative_gradients"]["passed"]
+            and grouped["representative_action_log_probs"]["passed"]
+            and grouped["matched_global_ce"]["passed"]
+            and routes["passed"]
+        )
+        return {
+            "verdict": "pass" if passed else "fail",
+            "kind": "confirmatory_eight_h100_semantic_gate",
+            "tolerances": tolerances,
+            "causal_localization_prerequisite": CAUSAL_LOCALIZATION,
+            "eager_instrumentation_oracle": oracle,
+            "grouped_versus_eager": grouped,
+            "route_contract": routes,
+            "grouped_representative_gradients_are_observational": True,
+            "gradient_acceptance": (
+                "the pinned selected-expert localization probe is exact; the full backward is nonempty and "
+                "finite on every rank; grouped/eager representative differences are reported because accepted "
+                "near-boundary route changes make downstream gradients discontinuous"
+            ),
+        }
+
+    pair = compare_paired_numeric(by_name["grouped"], by_name["eager"])
+    passed = pair["representative_action_log_probs"]["passed"] and pair["matched_global_ce"]["passed"]
+    return {
+        "verdict": "pass" if passed else "fail",
+        "kind": "headline_same_allocation_pair_check",
+        "tolerances": tolerances,
+        "grouped_versus_eager": pair,
+        "representative_gradients_are_observational": True,
+        "route_contract": "preflight gate prerequisite; full headline routes are not retained",
+    }
+
+
 def main() -> None:
     args = parse_args()
     if args.profile_s3_uri is not None and args.mode != "preflight":
@@ -354,6 +756,10 @@ def main() -> None:
         args.mode != "preflight" or args.expert_implementation != "eager" or args.profile_s3_uri is not None
     ):
         raise ValueError("localization requires unprofiled preflight mode starting from eager experts")
+    if args.objective == "paired_matched_ce" and (
+        args.expert_implementation != "eager" or args.profile_s3_uri is not None or args.expert_attribution
+    ):
+        raise ValueError("paired matched CE requires eager initialization and owns its unprofiled arm attribution")
     if args.expert_attribution and args.objective != "matched_ce":
         raise ValueError("expert attribution is defined only for the matched_ce boundary")
     world_size = WORLD_SIZES[args.mode]
@@ -405,6 +811,7 @@ def main() -> None:
             topology = ray.get(policy.async_run_ray_method("pass_through", "get_device_placement_diag"))
             assert_topology(topology, args.mode)
             identities = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_identity"))
+            require_rank_order(identities, world_size, "initial worker identity")
             expected_backend = args.attention_backend
             for identity in identities:
                 if identity["model_revision"] != args.model_revision:
@@ -427,6 +834,7 @@ def main() -> None:
                 actor.grug_benchmark_stage_batch.remote(batch) for actor, batch in zip(policy._actor_handlers, batches)
             ]
             staged = ray.get(stage_refs)
+            require_rank_order(staged, world_size, "replay staging")
             for rank, (evidence, batch) in enumerate(zip(staged, batches)):
                 expected_hashes, expected_shapes = field_identity(batch)
                 if evidence["rank"] != rank:
@@ -504,6 +912,125 @@ def main() -> None:
                     ),
                     flush=True,
                 )
+                return
+
+            if args.objective == "paired_matched_ce":
+                baseline = ray.get(
+                    policy.async_run_ray_method("pass_through", "grug_benchmark_prepare_paired_baseline")
+                )
+                require_rank_order(baseline, world_size, "paired baseline")
+                baseline_hashes = []
+                for rank, (item, identity) in enumerate(zip(baseline, identities)):
+                    if (
+                        item["rank"] != rank
+                        or item["gradient_tensors"] != 0
+                        or item["sparse_blocks"] != identity["num_hidden_layers"]
+                    ):
+                        raise RuntimeError(f"paired baseline is invalid on rank {rank}: {item}")
+                    baseline_hashes.append(item["state_hash"])
+                arm_specs = (
+                    (
+                        ("eager_oracle", "eager", False, None),
+                        ("eager_instrumented", "eager", True, "capture"),
+                        ("grouped_instrumented", "grouped", True, "compare"),
+                    )
+                    if args.mode == "preflight"
+                    else (
+                        ("eager", "eager", True, None),
+                        ("grouped", "grouped", True, None),
+                    )
+                )
+                arms = [
+                    run_paired_matched_arm(
+                        policy=policy,
+                        arm_name=arm_name,
+                        implementation=implementation,
+                        expert_attribution=expert_attribution,
+                        paired_route_mode=paired_route_mode if args.mode == "preflight" else None,
+                        mode=args.mode,
+                        sequence_length=sequence_length,
+                        world_size=world_size,
+                        global_loss_tokens=global_loss_tokens,
+                        manifest=manifest,
+                        staged=staged,
+                        baseline_topology=topology,
+                        baseline_identities=identities,
+                        baseline_state_hashes=baseline_hashes,
+                    )
+                    for arm_name, implementation, expert_attribution, paired_route_mode in arm_specs
+                ]
+                finish = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_finish_paired_baseline"))
+                require_rank_order(finish, world_size, "paired finish")
+                for rank, item in enumerate(finish):
+                    if (
+                        item["rank"] != rank
+                        or item["state_hash_before"] != baseline_hashes[rank]
+                        or item["state_hash_after"] != baseline_hashes[rank]
+                        or item["gradient_tensors"] != 0
+                        or item["eager_blocks"] != item["sparse_blocks"]
+                    ):
+                        raise RuntimeError(f"paired finish is invalid on rank {rank}: {item}")
+                final_topology = ray.get(policy.async_run_ray_method("pass_through", "get_device_placement_diag"))
+                final_identities = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_identity"))
+                require_rank_order(final_identities, world_size, "final worker identity")
+                if final_topology != topology or final_identities != identities:
+                    raise RuntimeError("paired benchmark did not restore its initial actor/GPU identity")
+                semantic_check = validate_paired_arms(arms, args.mode)
+                result = {
+                    "schema_version": 1,
+                    "created_utc": dt.datetime.now(dt.UTC).isoformat(),
+                    "benchmark": "marinskyrl_grug_fixed_replay_paired_matched_ce",
+                    "objective": args.objective,
+                    "mode": args.mode,
+                    "sample": args.sample,
+                    "source_revision": args.source_revision,
+                    "image": args.image,
+                    "model": args.model,
+                    "model_revision": args.model_revision,
+                    "attention_backend": args.attention_backend,
+                    "world_size": world_size,
+                    "manifest_s3_uri": args.manifest_s3_uri,
+                    "manifest_sha256": args.manifest_sha256,
+                    "logical_batch_sha256": args.logical_batch_sha256,
+                    "manifest_batch": manifest["batch"],
+                    "manifest_batch_metadata": manifest["batch_metadata"],
+                    "config": OmegaConf.to_container(cfg, resolve=True),
+                    "initial_topology": topology,
+                    "initial_worker_identities": identities,
+                    "staging": staged,
+                    "paired_baseline": baseline,
+                    "arms": arms,
+                    "semantic_check": semantic_check,
+                    "paired_finish": finish,
+                    "final_topology": final_topology,
+                    "final_worker_identities": final_identities,
+                    "runtime_benchmark_path": str(Path(__file__).resolve()),
+                    "runtime_benchmark_sha256": sha256_file(Path(__file__).resolve()),
+                    "timing_boundary": (
+                        f"{len(arms)} sequential arms on one unchanged Ray actor group and rank/GPU mapping; every arm "
+                        "restores the same model, replay, CPU RNG, CUDA RNG, and empty-gradient baseline, warms "
+                        "its selected expert path, then times synchronized next-token forward, global "
+                        "token-weighted CE, backward, and FSDP collectives; excludes Adam"
+                    ),
+                }
+                payload_sha256 = upload_result(client, args.result_s3_uri, result)
+                print(
+                    "GRUG_PAIRED_BENCHMARK_RESULT="
+                    + json.dumps(
+                        {
+                            "result_s3_uri": args.result_s3_uri,
+                            "payload_sha256": payload_sha256,
+                            "result_sha256": result["result_sha256"],
+                            "arm_metrics": {arm["arm"]: arm["metrics"] for arm in arms},
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                if semantic_check["verdict"] != "pass":
+                    raise RuntimeError(
+                        f"paired {args.mode} semantic check failed after artifact upload: {args.result_s3_uri}"
+                    )
                 return
 
             warmup_method = (
