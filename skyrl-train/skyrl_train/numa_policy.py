@@ -44,7 +44,7 @@ def is_numa_affinity_enabled() -> bool:
     return os.environ.get("SKYRL_ENABLE_NUMA_AFFINITY", "0") == "1"
 
 
-def parse_numa_range_list(value: str) -> list[int]:
+def parse_linux_range_list(value: str) -> list[int]:
     """Expand a Linux NUMA range list such as ``0-3,12``."""
     if not value:
         return []
@@ -122,7 +122,7 @@ def allowed_memory_nodes(status_path: Path = Path("/proc/self/status")) -> set[i
     with status_path.open() as status_file:
         for line in status_file:
             if line.startswith("Mems_allowed_list:"):
-                return set(parse_numa_range_list(line.split(":", 1)[1].strip()))
+                return set(parse_linux_range_list(line.split(":", 1)[1].strip()))
     raise RuntimeError(f"{status_path} does not expose Mems_allowed_list")
 
 

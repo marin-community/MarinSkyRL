@@ -28,7 +28,7 @@ from skyrl_train.numa_policy import (
     install_host_memory_policy,
     is_numa_affinity_enabled,
     load_libnuma,
-    parse_numa_range_list,
+    parse_linux_range_list,
 )
 
 
@@ -96,7 +96,7 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
                 break
 
         if cpu_affinity_str is not None and numa_node is not None:
-            cpus = parse_numa_range_list(cpu_affinity_str)
+            cpus = parse_linux_range_list(cpu_affinity_str)
             gpu_map[gpu_idx] = (cpus, numa_node)
 
     return gpu_map if gpu_map else None
@@ -237,10 +237,7 @@ def _get_affinity_via_sysfs_numactl(gpu_physical_id: int) -> Optional[Tuple[List
 
     gpu_numa = gpu_numa_map[gpu_physical_id]
 
-    try:
-        topology = cpu_numa_topology()
-    except RuntimeError:
-        return None
+    topology = cpu_numa_topology()
 
     # Direct match: GPU's NUMA node has CPUs
     if gpu_numa in topology:
