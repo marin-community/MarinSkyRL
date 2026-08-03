@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.worker_setup import configure_worker_process
 
 
@@ -41,7 +42,7 @@ def test_ray_worker_setup_installs_stock_asyncio_without_loading_torch():
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": python_path, "SKYRL_ENABLE_NUMA_AFFINITY": "0"},
+        env={**os.environ, "PYTHONPATH": python_path, NUMA_AFFINITY_ENV: "0"},
     )
 
     assert result.stdout.strip() == "ok"

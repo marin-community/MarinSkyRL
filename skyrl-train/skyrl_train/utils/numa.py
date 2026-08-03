@@ -179,12 +179,12 @@ def _enumerate_gpus_from_sysfs() -> Optional[Dict[int, int]]:
     return result
 
 
-def physical_gpu_id_for_worker(cuda_visible_devices: Optional[str], launcher_local_rank: int) -> int:
+def physical_gpu_id_for_worker(cuda_visible_devices: Optional[str], resolved_local_rank: int) -> int:
     """Resolve the physical GPU assigned to a Ray worker."""
     devices = [device for device in (cuda_visible_devices or "").split(",") if device]
     if not devices:
-        return launcher_local_rank
-    visible_rank = 0 if len(devices) == 1 else launcher_local_rank
+        return resolved_local_rank
+    visible_rank = 0 if len(devices) == 1 else resolved_local_rank
     if visible_rank >= len(devices):
         raise RuntimeError(f"local rank {visible_rank} is outside CUDA_VISIBLE_DEVICES={','.join(devices)}")
     return int(devices[visible_rank])

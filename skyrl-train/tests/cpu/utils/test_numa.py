@@ -62,7 +62,7 @@ def test_runtime_environment_forwards_numa_activation(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("cuda_visible_devices", "launcher_local_rank", "physical_gpu_id"),
+    ("cuda_visible_devices", "resolved_local_rank", "physical_gpu_id"),
     [
         (None, 2, 2),
         ("", 3, 3),
@@ -70,8 +70,8 @@ def test_runtime_environment_forwards_numa_activation(monkeypatch):
         ("2,0,3,1", 2, 3),
     ],
 )
-def test_physical_gpu_id_follows_visible_device_mapping(cuda_visible_devices, launcher_local_rank, physical_gpu_id):
-    assert physical_gpu_id_for_worker(cuda_visible_devices, launcher_local_rank) == physical_gpu_id
+def test_physical_gpu_id_follows_resolved_device_mapping(cuda_visible_devices, resolved_local_rank, physical_gpu_id):
+    assert physical_gpu_id_for_worker(cuda_visible_devices, resolved_local_rank) == physical_gpu_id
 
 
 def test_physical_gpu_id_rejects_rank_outside_visible_devices():
