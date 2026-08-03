@@ -17,6 +17,8 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -1057,8 +1059,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # Ray's job runtime environment is the explicit contract for worker-wide
     # settings. Forward NUMA placement when the launcher opts in so the early
     # worker hook and actor constructors observe the same value as the driver.
-    if "SKYRL_ENABLE_NUMA_AFFINITY" in os.environ:
-        env_vars["SKYRL_ENABLE_NUMA_AFFINITY"] = os.environ["SKYRL_ENABLE_NUMA_AFFINITY"]
+    if NUMA_AFFINITY_ENV in os.environ:
+        env_vars[NUMA_AFFINITY_ENV] = os.environ[NUMA_AFFINITY_ENV]
 
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #

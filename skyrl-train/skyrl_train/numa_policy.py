@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 MEMORY_POLICY_BIND = "bind"
+NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 
 
 _MEMORY_POLICY_NAMES = {
@@ -40,8 +41,7 @@ class _Bitmask(Structure):
 
 
 def is_numa_affinity_enabled() -> bool:
-    """Return whether ``SKYRL_ENABLE_NUMA_AFFINITY`` is set to ``1``."""
-    return os.environ.get("SKYRL_ENABLE_NUMA_AFFINITY", "0") == "1"
+    return os.environ.get(NUMA_AFFINITY_ENV, "0") == "1"
 
 
 def parse_linux_range_list(value: str) -> list[int]:

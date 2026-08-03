@@ -50,7 +50,12 @@ from skyrl_train.models.grug_query_bias import (
     query_bias_candidate_count,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
-from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
+from skyrl_train.utils.utils import (
+    configure_ray_worker_logging,
+    get_tcp_url,
+    resolve_actor_cuda_env,
+    resolve_pinned_local_rank,
+)
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -109,8 +114,6 @@ class DistributedTorchRayActor:
         # pin_to_ray_gpu_id (case 3) engages only on the per-GPU {GPU:1}-bundle policy PG,
         # where ray.get_gpu_ids() is a reliable distinct physical id per actor. The full
         # decision lives in resolve_pinned_local_rank() (pure / unit-tested).
-        from skyrl_train.utils.utils import resolve_pinned_local_rank, resolve_actor_cuda_env
-
         _noset = ray_noset_visible_devices()
 
         # Deterministic forced-CVD-mask pin (opt-in via policy_force_cvd_mask).
@@ -312,7 +315,7 @@ class DistributedTorchRayActor:
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
 
-    def _configure_numa_placement(self, launcher_local_rank):
+    def _configure_numa_placement(self, launcher_local_rank: int) -> None:
         """Install host-memory placement before CUDA or model initialization."""
         gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), launcher_local_rank)
         set_numa_affinity_for_gpu(gpu_id)

@@ -4,6 +4,7 @@ from tests.cpu.util import example_dummy_config
 
 from skyrl_train import numa_policy
 from skyrl_train.numa_policy import (
+    NUMA_AFFINITY_ENV,
     allowed_memory_nodes,
     host_memory_nodes,
     install_host_memory_policy,
@@ -53,11 +54,11 @@ def test_host_memory_policy_binds_to_allowed_cpu_nodes(monkeypatch):
 
 def test_runtime_environment_forwards_numa_activation(monkeypatch):
     monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
-    monkeypatch.setenv("SKYRL_ENABLE_NUMA_AFFINITY", "1")
+    monkeypatch.setenv(NUMA_AFFINITY_ENV, "1")
 
     env = prepare_runtime_environment(example_dummy_config())
 
-    assert env["SKYRL_ENABLE_NUMA_AFFINITY"] == "1"
+    assert env[NUMA_AFFINITY_ENV] == "1"
 
 
 @pytest.mark.parametrize(

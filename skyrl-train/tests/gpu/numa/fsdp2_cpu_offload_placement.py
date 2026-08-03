@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from ray.util.placement_group import placement_group
 
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.numa_policy import MEMORY_POLICY_BIND
+from skyrl_train.numa_policy import MEMORY_POLICY_BIND, NUMA_AFFINITY_ENV
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -49,7 +49,7 @@ def policy_config():
 
 
 def main() -> int:
-    os.environ["SKYRL_ENABLE_NUMA_AFFINITY"] = "1"
+    os.environ[NUMA_AFFINITY_ENV] = "1"
     cfg = policy_config()
     initialize_ray(cfg)
     try:
