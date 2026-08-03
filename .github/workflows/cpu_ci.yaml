@@ -49,6 +49,8 @@ jobs:
           activate-environment: true
       - name: Install the CPU-only launcher
         run: uv sync --frozen --group dev
+      - name: Exercise the Iris CLI dependency boundary
+        run: uv run --frozen iris --help
       - name: Run iris launcher tests
         run: uv run --frozen pytest cloud/iris/tests/ -q
       - name: Verify the base dependency boundary
@@ -91,6 +93,12 @@ jobs:
           activate-environment: true
       - name: Install skyrl-train
         run: uv sync --frozen --group dev --extra cpu
+      - name: Exercise macOS operator entrypoints
+        run: |
+          uv run --frozen python -c "import boto3, botocore, s3fs"
+          uv run --frozen python -c "from connectrpc._client_sync import SyncClient; SyncClient()"
+          uv run --frozen iris --help
+          uv run --frozen python scripts/iris/watch_coreweave_rl.py --help
       - name: Exercise local filesystem I/O
         run: uv run --frozen pytest skyrl-train/tests/cpu/utils/test_io.py
 

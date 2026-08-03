@@ -19,6 +19,7 @@ dependencies = [
     "hydra-core==1.3.2",
     "jaxtyping",
     "loguru",
+    "marin-finelog==0.2.19.dev30724030287",
     "marin-finelog-server==0.2.17.dev30664483151",
     "marin-iris==0.2.70.dev30755316227",
     "marin-iris-native==0.1.5.dev30223685542",
@@ -159,11 +160,6 @@ no-build-isolation-package = [
 override-dependencies = [
     "transformer-engine-cu13 ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
-    "botocore==1.43.48 ; sys_platform == 'linux'",
-    "boto3==1.43.48 ; sys_platform == 'linux'",
-    "s3transfer==0.19.1 ; sys_platform == 'linux'",
-    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
-    "s3fs==2026.4.0 ; sys_platform == 'linux'",
     "fsspec==2026.4.0",
     "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
     "humming-kernels[cu12]==0.1.4 ; sys_platform == 'linux'",
@@ -171,6 +167,14 @@ override-dependencies = [
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
+    "opentelemetry-api ; sys_platform != 'linux'",
+]
+constraint-dependencies = [
+    "botocore==1.42.97 ; sys_platform == 'linux'",
+    "boto3==1.42.97 ; sys_platform == 'linux'",
+    "s3transfer==0.16.1 ; sys_platform == 'linux'",
+    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
+    "s3fs==2026.4.0 ; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
