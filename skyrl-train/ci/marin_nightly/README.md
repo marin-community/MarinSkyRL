@@ -43,7 +43,7 @@ The training run needs the digest-pinned GPU-RL task image and takes its knobs f
 environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside that image:
 
 ```bash
-NIGHTLY_RL_ENV=/opt/marinskyrl/envs/rl MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
+NIGHTLY_RL_ENV=/opt/marin/envs/rl MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
 
 To exercise the whole path — provision, train, gate, tear down — trigger the workflow:

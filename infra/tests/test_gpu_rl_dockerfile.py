@@ -8,6 +8,8 @@ import subprocess
 
 import pytest
 
+from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR
+
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
@@ -27,6 +29,17 @@ def test_runtime_image_exposes_source_and_harbor_provenance(dockerfile_path: Pat
 
     assert 'org.opencontainers.image.revision="${GITSHA}"' in dockerfile
     assert 'org.marin.harbor-commit="${HARBOR_COMMIT}"' in dockerfile
+
+
+@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
+def test_gpu_rl_images_install_to_registered_environment(dockerfile_path: Path) -> None:
+    environment_declarations = [
+        line.removeprefix("ENV RL_ENV_DIR=")
+        for line in dockerfile_path.read_text().splitlines()
+        if line.startswith("ENV RL_ENV_DIR=")
+    ]
+
+    assert environment_declarations == [GPU_RL_ENV_DIR]
 
 
 def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:

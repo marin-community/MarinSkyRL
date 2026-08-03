@@ -132,7 +132,7 @@ kexec() { kubectl exec -n "$NS" "$POD" -c "$CONTAINER" -- bash -lc "$1"; }
 # Resolve a python WITH boto3 inside the pod. The container's PATH may not expose a bare
 # `python` (e.g. the megatron `task` container only has it under a venv), so probe the usual
 # interpreters and require `import boto3` to succeed. Fall back to `python` if nothing matches.
-PYBIN=$(kexec 'for p in python python3 /opt/marinskyrl/.venv/bin/python /opt/marinskyrl/envs/rl/bin/python /usr/local/bin/python3 /usr/bin/python3; do ("$p" -c "import boto3" >/dev/null 2>&1) && { echo "$p"; break; }; done' 2>/dev/null | tr -d '\r' | head -1)
+PYBIN=$(kexec 'for p in python python3 /opt/*/envs/rl/bin/python /usr/local/bin/python3 /usr/bin/python3; do ("$p" -c "import boto3" >/dev/null 2>&1) && { echo "$p"; break; }; done' 2>/dev/null | tr -d '\r' | head -1)
 [ -z "$PYBIN" ] && PYBIN=python
 echo "[peek] in-pod python: $PYBIN" >&2
 

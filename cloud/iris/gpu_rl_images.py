@@ -8,6 +8,8 @@ from enum import StrEnum
 
 IMAGE_REPOSITORY = "ghcr.io/marin-community/marinskyrl"
 MEGATRON_STRATEGY = "megatron"
+GPU_RL_ENV_DIR = "/opt/marin/envs/rl"
+GPU_RL_PYTHON = f"{GPU_RL_ENV_DIR}/bin/python"
 
 
 class ImageArchitecture(StrEnum):

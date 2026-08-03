@@ -16,8 +16,9 @@ readonly RESHARD_SCRIPT="$SCRIPT_DIR/reshard_fsdp2_to_hf.py"
 # No default on purpose. Deployed digests live in cloud/iris/gpu_rl_images.py, and a
 # second copy here could drift from that registry.
 : "${TASK_IMAGE:?Set TASK_IMAGE to an immutable gpu-rl image reference from cloud/iris/gpu_rl_images.py.}"
+: "${RL_PYTHON:?Set RL_PYTHON to GPU_RL_PYTHON from cloud/iris/gpu_rl_images.py.}"
 readonly TASK_IMAGE
-readonly RL_PYTHON="${RL_PYTHON:-/opt/marinskyrl/envs/rl/bin/python}"
+readonly RL_PYTHON
 readonly S3_PREFIX="${S3_PREFIX:-s3://marin-us-east-02a/iris/delphi-1e23-wc50m-rl-d1-rlvrmath-32gpu/checkpoints/global_step_101/policy}"
 readonly HF_REPO="${HF_REPO:-laion/delphi-1e23-wc50m-rl-d1-rlvrmath-32gpu}"
 readonly WORLD_SIZE="${WORLD_SIZE:-16}"

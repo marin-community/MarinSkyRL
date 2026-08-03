@@ -9,8 +9,8 @@ launcher). It combines:
     (controller tunnel, IrisClient.submit, --secrets-env injection, --no-wait,
     job-name, max-retries, workspace source-sync to /app).
 
-The target is GPU (not TPU), and the gpu-rl image is a conda-venv image
-(/opt/marinskyrl/envs/rl), so this launcher drives the iris SDK's GPU helpers
+The target is GPU (not TPU), and the gpu-rl image provides a uv-managed environment
+(/opt/marin/envs/rl), so this launcher drives the iris SDK's GPU helpers
 (build_resources(gpu=...), gpu_device, the leafgroup-coscheduling
 ``resolve_multinode_defaults``) directly rather than going through a TPU-shaped
 base launcher.
@@ -82,7 +82,7 @@ from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, validate_ray_spill_dir
-from cloud.iris.gpu_rl_images import image_for_cluster
+from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR, GPU_RL_PYTHON, image_for_cluster
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
@@ -519,8 +519,6 @@ def resolve_node_resource_requests(
     return resolved
 
 
-# The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
-RL_PYTHON = "/opt/marinskyrl/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
 # In-container source sync target. Iris syncs the minimal build_runtime_bundle()
 # workspace to /app and sets IRIS_WORKDIR=/app. The runtime controller code is
@@ -1843,9 +1841,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     The full pipeline that runs inside each task container:
       cd /app
       && export SKYRL_HOME + PYTHONPATH (live cloud.iris, baked skyrl_train)
-      && <RL_PYTHON> cloud/iris/task_runtime.py
+      && <GPU_RL_PYTHON> cloud/iris/task_runtime.py
             --ray-port ... --rendezvous-dir ...
-            -- <RL_PYTHON> -m cloud.iris.training_driver --rl_config ... --num_nodes N ...
+            -- <GPU_RL_PYTHON> -m cloud.iris.training_driver --rl_config ... --num_nodes N ...
 
     Rank 0 (IRIS_TASK_ID==0) starts the Ray head and runs training_driver.py (which, with
     RAY_ADDRESS set + --num_nodes>1, attaches to the cluster instead of starting a
@@ -1862,7 +1860,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         raise RuntimeError("normalize() must resolve --rl_config before building the task command")
     task_rl_config = rl_config_launch.task_path
     train_cmd: List[str] = [
-        RL_PYTHON,
+        GPU_RL_PYTHON,
         "-m",
         "cloud.iris.training_driver",
         "--rl_config",
@@ -1964,7 +1962,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
-        RL_PYTHON,
+        GPU_RL_PYTHON,
         "cloud/iris/task_runtime.py",
         "--ray-port",
         str(args.ray_port),
@@ -1980,9 +1978,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
-    # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
-    # HF task dataset to the node-local $DCFT=/opt/marinskyrl/tasks/ (gpu-rl image),
-    # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
+    # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() runs
+    # only on rank 0 (the head), so the Ray-scheduled rollout workers on
     # ranks 1..N-1 find an empty tasks dir and every rollout dies with
     # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
     # Fix: forward --train-data to the controller so it can run the SAME extraction
@@ -2074,21 +2071,21 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if getattr(args, "ingress_mode", "direct") == "controller":
         ispec = getattr(args, "iris_ref", None) or DEFAULT_IRIS_VERSION
         iris_refresh = (
-            f"_BOTO_BAKED=$(uv pip freeze --python {shlex.quote(RL_PYTHON)} 2>/dev/null | "
+            f"_BOTO_BAKED=$(uv pip freeze --python {shlex.quote(GPU_RL_PYTHON)} 2>/dev/null | "
             f"grep -iE '^(botocore|boto3|s3transfer|awscli)==' | tr '\\n' ' ' || true); "
             f'echo "[rl-iris] boto baked pins: $_BOTO_BAKED"; '
-            f"uv pip install --python {shlex.quote(RL_PYTHON)} {shlex.quote(ispec)}; "
+            f"uv pip install --python {shlex.quote(GPU_RL_PYTHON)} {shlex.quote(ispec)}; "
             f'if [ -n "$_BOTO_BAKED" ]; then uv pip install --python '
-            f"{shlex.quote(RL_PYTHON)} --no-deps $_BOTO_BAKED; fi; "
-            f'{RL_PYTHON} -c "import importlib.metadata as m; '
+            f"{shlex.quote(GPU_RL_PYTHON)} --no-deps $_BOTO_BAKED; fi; "
+            f'{GPU_RL_PYTHON} -c "import importlib.metadata as m; '
             f"import iris.cluster.client.endpoint_client, iris.cluster.client.job_info, "
             f"iris.rpc.controller_connect, iris.cluster.types; "
             f"print('[rl-iris] marin-iris now', m.version('marin-iris'), "
             f"'(controller-ingress import OK)')\"; "
-            f'{RL_PYTHON} -c "import botocore; from botocore.docs.utils import '
+            f'{GPU_RL_PYTHON} -c "import botocore; from botocore.docs.utils import '
             f"DocumentModifiedShape; print('[rl-iris] boto cluster intact: botocore', "
             f'botocore.__version__)"; '
-            f'{RL_PYTHON} -c "import torch, vllm, flash_attn, flash_attn_2_cuda; '
+            f'{GPU_RL_PYTHON} -c "import torch, vllm, flash_attn, flash_attn_2_cuda; '
             f"print('[rl-iris] post-iris pins intact: torch', torch.__version__, "
             f"'vllm', vllm.__version__)\"; "
         )
@@ -2113,8 +2110,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # and the trainer's TileLang agree on the location; a config-set value wins.
     # TILELANG_CACHE_MODEL_PATH lets the shim derive the model component of the key.
     sync_py = "cloud/iris/tilelang_cache_sync.py"
-    tl_down = f"{RL_PYTHON} {sync_py} --down || true"
-    tl_up = f"{RL_PYTHON} {sync_py} --up || true"
+    tl_down = f"{GPU_RL_PYTHON} {sync_py} --down || true"
+    tl_up = f"{GPU_RL_PYTHON} {sync_py} --up || true"
     # The controller is run as a BACKGROUND child + `wait` (not `exec`) so we can
     # (a) run --up at exit via the bash EXIT trap and (b) FORWARD SIGTERM/SIGINT to
     # the controller — preserving the old `exec` graceful-shutdown path (rank-0's Ray
@@ -2288,7 +2285,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
 
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
-    env_vars: dict[str, str] = {}
+    env_vars: dict[str, str] = {"LD_LIBRARY_PATH": f"{GPU_RL_ENV_DIR}/lib"}
     # MarinSkyRL runtime-knob flags (deslop stage 3) -> SKYRL_* env vars. Seeded
     # FIRST (below the config extra_env) so a config's explicit extra_env value still
     # OVERRIDES a flag; an all-defaults launch contributes {} (byte-identical).
@@ -2532,7 +2529,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             # a venv at $IRIS_WORKDIR/.venv. That venv is a plain PyPI resolve -- no CUDA
             # stack, no ray, no boto3 -- and iris puts it FIRST on $PATH, so a bare
             # `python` or `ray` in a task pod resolves to it instead of the image's real
-            # env at /opt/marinskyrl/envs/rl. Everything here already uses absolute
+            # env at /opt/marin/envs/rl. Everything here already uses absolute
             # interpreter paths to route around that; the sync itself is pure cost on a
             # fully baked image, and the shadow venv has repeatedly cost debugging time.
             #

@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from cloud.iris.gpu_rl_images import GPU_RL_PYTHON  # noqa: E402
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS, ClusterConfig  # noqa: E402
 from scripts.iris.iris_ops import DNS_ATTEMPTS, DNS_INITIAL_BACKOFF, job_id_parts  # noqa: E402
 
@@ -40,7 +41,6 @@ LOGGER = logging.getLogger(__name__)
 NAMESPACE = "iris"
 TASK_SECRET = "iris-task-env"
 RAY_LOG_DIR = "/tmp/ray/session_latest/logs"
-GPU_RL_PYTHON = "/opt/marinskyrl/envs/rl/bin/python"
 RAY_LOG_PATTERNS = (
     "worker-*.out",
     "worker-*.err",
