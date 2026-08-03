@@ -126,7 +126,7 @@ trainer:
 
   enable_db_registration: false
 
-  project_name: OpenThoughts-Agent
+  project_name: MarinSkyRL
   log_level: INFO
   tracker_commit_each_step: true
   logger: wandb

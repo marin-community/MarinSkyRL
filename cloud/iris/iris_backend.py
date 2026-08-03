@@ -2374,10 +2374,10 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     # CoreWeave has egress). SkyRL's wandb.init passes project= but NOT entity=
     # (MarinSkyRL tracking.py), so without WANDB_ENTITY the run silently lands in the
     # API key's DEFAULT entity (e.g. nyu-dice-lab), not the team org. Default both to
-    # the OT-Agent team here so every run lands in
-    # dogml/OpenThoughts-Agent; an explicitly-set launch-host WANDB_ENTITY/PROJECT wins.
+    # Default both so every run lands in dogml/MarinSkyRL; an explicitly-set
+    # launch-host WANDB_ENTITY/PROJECT wins.
     os.environ.setdefault("WANDB_ENTITY", "dogml")
-    os.environ.setdefault("WANDB_PROJECT", "OpenThoughts-Agent")
+    os.environ.setdefault("WANDB_PROJECT", "MarinSkyRL")
     for k in (
         "HF_TOKEN",
         "WANDB_API_KEY",
