@@ -102,15 +102,14 @@ def _config(
     cfg.trainer.policy.fsdp_config.use_grouped_mm = False
     cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
     cfg.trainer.policy.optimizer_config.lr = 3.0e-2
-    cfg.trainer.policy.optimizer_config.weight_decay = 123.0
+    cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+    cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     cfg.trainer.policy.optimizer_config.optimizer_kwargs = {
         "adam_lr": 4.0e-3,
         "momentum": 0.95,
         "nesterov": True,
         "backend_steps": 5,
-        "beta1": 0.9,
-        "beta2": 0.95,
         "epsilon": 1.0e-8,
         "muon_epsilon": 1.0e-8,
     }

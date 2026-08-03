@@ -82,13 +82,10 @@ def _optimizer(model: nn.Module, fixture):
         model.named_parameters(),
         _Config(
             lr=float(fixture["metadata_shared_lr"]),
-            weight_decay=123.0,
-            adam_betas=(0.1, 0.2),
+            weight_decay=0.0,
+            adam_betas=(0.9, 0.95),
             optimizer_kwargs={
                 "adam_lr": float(fixture["metadata_adam_lr"]),
-                "weight_decay": 456.0,
-                "adam_weight_decay": 789.0,
-                "muon_weight_decay": 321.0,
             },
         ),
     )
@@ -179,8 +176,8 @@ def test_fsdp_strategy_selects_only_explicit_muonh(monkeypatch):
         config = _Config(
             optimizer="MuonH",
             lr=0.03,
-            weight_decay=123.0,
-            adam_betas=(0.1, 0.2),
+            weight_decay=0.0,
+            adam_betas=(0.9, 0.95),
             max_grad_norm=0.0,
             offload_after_step=False,
             num_warmup_steps=0,
@@ -199,6 +196,20 @@ def test_fsdp_strategy_selects_only_explicit_muonh(monkeypatch):
 
     assert isinstance(optimizer, GrugMuonH)
     assert strategy.is_muonh_optimizer
+
+
+def test_muonh_rejects_nonzero_weight_decay():
+    with np.load(FIXTURE, allow_pickle=False) as fixture:
+        model = _TinyGrug(fixture)
+        config = _Config(
+            lr=0.03,
+            weight_decay=0.01,
+            adam_betas=(0.9, 0.95),
+            optimizer_kwargs={},
+        )
+
+        with pytest.raises(ValueError, match="requires weight_decay=0"):
+            build_grug_muonh(model.named_parameters(), config)
 
 
 def test_fsdp_strategy_rejects_muonh_with_expert_parallelism(monkeypatch):

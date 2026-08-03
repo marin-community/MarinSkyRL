@@ -44,8 +44,8 @@ def _optimizer_config() -> _Config:
     return _Config(
         optimizer="MuonH",
         lr=0.03,
-        weight_decay=999.0,
-        adam_betas=(0.1, 0.2),
+        weight_decay=0.0,
+        adam_betas=(0.9, 0.95),
         max_grad_norm=0.0,
         offload_after_step=False,
         num_warmup_steps=0,

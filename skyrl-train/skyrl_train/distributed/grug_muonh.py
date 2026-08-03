@@ -44,6 +44,11 @@ _QUINTIC_COEFFICIENTS = (
     (2.8366, -3.0525, 1.2012),
 )
 _HYPERBALL_EPS = 1e-10
+_DEFAULT_ADAM_LR = 6e-4
+_DEFAULT_BETAS = (0.9, 0.95)
+_DEFAULT_EPS = 1e-8
+_DEFAULT_MOMENTUM = 0.95
+_DEFAULT_MUON_STEPS = 5
 
 type MuonRoute = Literal["muonh", "adamh", "adam"]
 
@@ -191,10 +196,10 @@ class MuonH(Optimizer):
         params: Iterable[Tensor],
         *,
         lr: float,
-        momentum: float = 0.95,
+        momentum: float = _DEFAULT_MOMENTUM,
         nesterov: bool = True,
-        ns_steps: int = 5,
-        eps: float = 1e-8,
+        ns_steps: int = _DEFAULT_MUON_STEPS,
+        eps: float = _DEFAULT_EPS,
     ) -> None:
         defaults = {
             "lr": lr,
@@ -251,8 +256,8 @@ class AdamH(Optimizer):
         params: Iterable[Tensor],
         *,
         lr: float,
-        betas: tuple[float, float] = (0.9, 0.95),
-        eps: float = 1e-8,
+        betas: tuple[float, float] = _DEFAULT_BETAS,
+        eps: float = _DEFAULT_EPS,
     ) -> None:
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": 0.0}
         super().__init__(params, defaults)
@@ -311,14 +316,13 @@ class GrugMuonH(Optimizer):
         adam_params: Iterable[Tensor],
         *,
         lr: float,
-        adam_lr: float = 6e-4,
-        momentum: float = 0.95,
+        adam_lr: float = _DEFAULT_ADAM_LR,
+        momentum: float = _DEFAULT_MOMENTUM,
         nesterov: bool = True,
-        ns_steps: int = 5,
-        beta1: float = 0.9,
-        beta2: float = 0.95,
-        eps: float = 1e-8,
-        muon_eps: float = 1e-8,
+        ns_steps: int = _DEFAULT_MUON_STEPS,
+        betas: tuple[float, float] = _DEFAULT_BETAS,
+        eps: float = _DEFAULT_EPS,
+        muon_eps: float = _DEFAULT_EPS,
     ) -> None:
         muonh_params = list(muonh_params)
         adamh_params = list(adamh_params)
@@ -336,10 +340,10 @@ class GrugMuonH(Optimizer):
             ns_steps=ns_steps,
             eps=muon_eps,
         )
-        self.adamh = AdamH(adamh_params, lr=lr, betas=(beta1, beta2), eps=eps)
+        self.adamh = AdamH(adamh_params, lr=lr, betas=betas, eps=eps)
         # This must remain the shipped optimizer. It is intentionally Adam, not
         # AdamW, and weight decay is therefore absent rather than inherited.
-        self.adam = Adam(adam_params, lr=adam_lr, betas=(beta1, beta2), eps=eps) if adam_params else None
+        self.adam = Adam(adam_params, lr=adam_lr, betas=betas, eps=eps) if adam_params else None
 
         all_params = list(chain(muonh_params, adamh_params, adam_params))
         super().__init__(all_params, defaults={"lr": lr, "weight_decay": 0.0})
@@ -431,33 +435,33 @@ def build_grug_muonh(
         "momentum",
         "nesterov",
         "backend_steps",
-        "beta1",
-        "beta2",
         "epsilon",
         "muon_epsilon",
-        # Weight decay is recognized only so a global-style mapping cannot leak
-        # into any child. The value is deliberately ignored.
-        "weight_decay",
-        "adam_weight_decay",
-        "muon_weight_decay",
     }
     unknown = sorted(set(extra) - known)
     if unknown:
         raise ValueError(f"Unknown MuonH optimizer_kwargs: {unknown}")
+
+    weight_decay = float(optim_config.get("weight_decay", 0.0))
+    if weight_decay != 0.0:
+        raise ValueError(f"MuonH requires weight_decay=0, got {weight_decay}")
+    raw_betas = tuple(float(value) for value in optim_config.get("adam_betas", _DEFAULT_BETAS))
+    if len(raw_betas) != 2:
+        raise ValueError(f"MuonH adam_betas must contain two values, got {raw_betas}")
+    betas = (raw_betas[0], raw_betas[1])
 
     optimizer = GrugMuonH(
         parameters["muonh"],
         parameters["adamh"],
         parameters["adam"],
         lr=float(optim_config.lr),
-        adam_lr=float(extra.get("adam_lr", 6e-4)),
-        momentum=float(extra.get("momentum", 0.95)),
+        adam_lr=float(extra.get("adam_lr", _DEFAULT_ADAM_LR)),
+        momentum=float(extra.get("momentum", _DEFAULT_MOMENTUM)),
         nesterov=bool(extra.get("nesterov", True)),
-        ns_steps=int(extra.get("backend_steps", 5)),
-        beta1=float(extra.get("beta1", 0.9)),
-        beta2=float(extra.get("beta2", 0.95)),
-        eps=float(extra.get("epsilon", 1e-8)),
-        muon_eps=float(extra.get("muon_epsilon", 1e-8)),
+        ns_steps=int(extra.get("backend_steps", _DEFAULT_MUON_STEPS)),
+        betas=betas,
+        eps=float(extra.get("epsilon", _DEFAULT_EPS)),
+        muon_eps=float(extra.get("muon_epsilon", _DEFAULT_EPS)),
     )
     optimizer._muonh_param_names = names["muonh"]  # type: ignore[attr-defined]
     optimizer._adamh_param_names = names["adamh"]  # type: ignore[attr-defined]
