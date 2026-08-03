@@ -71,20 +71,30 @@ CoreWeave/Iris arms hit the same fan-out but their nodes have CPU headroom
 `RayPPOTrainer` (bypass `__init__`, following `test_resume_overshoot.py`):
 
 1. `max_ckpts_to_keep = -1` with a multi-node `_node_ids` list dispatches no Ray
-   task and makes no driver-side cleanup call. The dispatch boundary
-   (`run_on_each_node`) is the externally observable behavior under test, because
-   the bug is precisely unwanted Ray leasing on a saturated cluster.
-2. When the fan-out raises `WorkerCrashedError`, `_cleanup_old_checkpoints`
-   returns normally rather than propagating. This is a "does not raise" test; the
-   contract is that best-effort cleanup after a successful save cannot kill a
-   training run.
+   task. `run_on_each_node` (the Ray lease boundary) is patched and asserted not
+   called; this is the only faithful check, because once the fan-out is wrapped
+   in `except RayError` a "does it raise" check passes whether or not the early
+   return exists.
+2. When the fan-out raises `WorkerCrashedError`, the driver-side cleanup pass
+   still runs and removes old checkpoints (asserted on a real temp dir), so a
+   shared `ckpt_path` is still pruned.
 
 A unit test on `cleanup_old_checkpoints` alone passes today and misses both,
 because the defect is in the dispatch and its error handling, not the payload.
 
 ## Results
 
-Pending implementation and `tests/cpu/` run.
+`RayPPOTrainer._cleanup_old_checkpoints` now returns before any Ray work when
+`max_ckpts_to_keep < 0`, wraps the per-node fan-out in `except RayError` so a
+worker lease failure or node loss is logged rather than propagated, and keeps
+the driver-side cleanup call so a shared `ckpt_path` is still pruned. The stale
+"it's ok because it's idempotent" comment was replaced.
+
+Regression tests in `skyrl-train/tests/cpu/test_checkpoint_cleanup.py`:
+no dispatch when cleanup is disabled, and the driver-side pass still removes
+old checkpoints after a `WorkerCrashedError`. Both fail against the pre-fix
+code and pass after it; the full `tests/cpu/` suite is green and
+`infra/pre-commit.py` is clean.
 
 ## Future work
 

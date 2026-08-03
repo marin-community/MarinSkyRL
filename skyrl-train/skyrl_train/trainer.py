@@ -1889,7 +1889,7 @@ class RayPPOTrainer:
         # Disabled (the default): keep all checkpoints. The payload is a no-op at
         # this value, so skip the per-node Ray lease entirely. Leasing a fresh
         # worker on every node with hard affinity can fail on a CPU-saturated
-        # cluster (the Jupiter GH200 failure mode) for no benefit.
+        # cluster for no benefit.
         if max_ckpts < 0:
             return
 
@@ -1902,10 +1902,12 @@ class RayPPOTrainer:
                 self.cfg.trainer.ckpt_path,
                 max_ckpts,
             )
-        except Exception as e:
-            # Best-effort housekeeping after a successful save: a failed per-node
-            # lease (e.g. saturated workers) must not kill a run whose checkpoint
-            # is already on disk.
+        except ray.exceptions.RayError as e:
+            # Best-effort: cleanup runs only after a successful checkpoint save,
+            # so any per-node dispatch failure -- worker lease failure, worker or
+            # node death, or a failure raised inside the remote task -- is logged
+            # rather than propagated. The checkpoint is already on disk; cleanup
+            # must not kill the run.
             logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
 
         # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
