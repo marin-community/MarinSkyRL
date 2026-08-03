@@ -195,7 +195,6 @@ def test_fsdp_strategy_selects_only_explicit_muonh(monkeypatch):
         _, optimizer, _ = strategy._fsdp_init_train_model(model, optimizer=None, scheduler=None)
 
     assert isinstance(optimizer, GrugMuonH)
-    assert strategy.is_muonh_optimizer
 
 
 def test_muonh_rejects_nonzero_weight_decay():

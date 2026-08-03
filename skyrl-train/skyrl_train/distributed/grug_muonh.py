@@ -23,7 +23,6 @@ https://github.com/NVIDIA-NeMo/Emerging-Optimizers
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from itertools import chain
 from typing import Any, Literal, Protocol
 
 import torch
@@ -33,7 +32,7 @@ from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.optim import Adam
 from torch.optim.optimizer import Optimizer
 
-from skyrl_train.distributed.muon_hybrid import _MergedState
+from skyrl_train.distributed.muon_hybrid import _CompositeOptimizer
 
 
 _QUINTIC_COEFFICIENTS = (
@@ -59,7 +58,12 @@ class _OptimizerConfig(Protocol):
     def get(self, key: str, default: object = None) -> object: ...
 
 
-def newton_schulz_quintic(matrix: Tensor, *, steps: int = 5, eps: float = 1e-8) -> Tensor:
+def newton_schulz_quintic(
+    matrix: Tensor,
+    *,
+    steps: int = _DEFAULT_MUON_STEPS,
+    eps: float = _DEFAULT_EPS,
+) -> Tensor:
     """Return Marin's BF16 quintic direction for a matrix or expert stack."""
     if matrix.ndim not in (2, 3):
         raise ValueError(f"Newton--Schulz requires rank 2 or 3, got shape {tuple(matrix.shape)}")
@@ -169,7 +173,7 @@ def _matrix_delta(
     *,
     lr: float,
     muon_steps: int | None = None,
-    muon_eps: float = 1e-8,
+    muon_eps: float = _DEFAULT_EPS,
     clamp_final_norm: bool,
 ) -> Tensor:
     """Compute a HyperBall delta with global dense or local expert semantics."""
@@ -306,7 +310,7 @@ class AdamH(Optimizer):
         return loss
 
 
-class GrugMuonH(Optimizer):
+class GrugMuonH(_CompositeOptimizer):
     """One scheduler/checkpoint surface over MuonH, AdamH, and plain Adam."""
 
     def __init__(
@@ -345,28 +349,8 @@ class GrugMuonH(Optimizer):
         # AdamW, and weight decay is therefore absent rather than inherited.
         self.adam = Adam(adam_params, lr=adam_lr, betas=betas, eps=eps) if adam_params else None
 
-        all_params = list(chain(muonh_params, adamh_params, adam_params))
-        super().__init__(all_params, defaults={"lr": lr, "weight_decay": 0.0})
-        self.param_groups = list(chain.from_iterable(child.param_groups for child in self._children))
-        self.state = _MergedState(self._children)
-
-    @property
-    def _children(self) -> list[Optimizer]:
-        return [child for child in (self.muonh, self.adamh, self.adam) if child is not None]
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-        for child in self._children:
-            child.step()
-        return loss
-
-    def zero_grad(self, set_to_none: bool = True):
-        for child in self._children:
-            child.zero_grad(set_to_none=set_to_none)
+        children = [child for child in (self.muonh, self.adamh, self.adam) if child is not None]
+        super().__init__(children, defaults={"lr": lr, "weight_decay": 0.0})
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -384,10 +368,7 @@ class GrugMuonH(Optimizer):
         if self.adam is not None:
             assert adam_state is not None
             self.adam.load_state_dict(adam_state)
-        # Optimizer.load_state_dict replaces each child's param-group mapping. Refresh
-        # the composite view so a restored scheduler mutates the live child groups.
-        self.param_groups = list(chain.from_iterable(child.param_groups for child in self._children))
-        self.state = _MergedState(self._children)
+        self._refresh_composite_views()
 
 
 def grug_muonh_route(name: str, parameter: Tensor) -> MuonRoute:
