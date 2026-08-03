@@ -1,9 +1,34 @@
+from __future__ import annotations
+
 import json
 import sys
+from pathlib import Path
+from typing import Any
 
+import pandas as pd
 import pytest
 
 from rl_cleanup import parse_skyrl_metrics
+
+
+def write_trial_result(trace_jobs_dir: Path, result: dict[str, Any]) -> None:
+    trial_dir = trace_jobs_dir / result["trial_name"]
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(json.dumps(result))
+
+
+def timing_frame(**seconds: float) -> pd.DataFrame:
+    return pd.DataFrame([{f"timing/{name}": value for name, value in seconds.items()}])
+
+
+def span_named(spans: list[parse_skyrl_metrics.TimingSpan], name: str) -> parse_skyrl_metrics.TimingSpan:
+    (span,) = [span for span in spans if span.name == name]
+    return span
+
+
+def phase_named(summary: parse_skyrl_metrics.TrialPhaseSummary, name: str) -> parse_skyrl_metrics.TrialPhase:
+    (phase,) = [phase for phase in summary.phases if phase.name == name]
+    return phase
 
 
 def test_default_parser_reads_agentic_wandb_json(tmp_path):
@@ -155,6 +180,378 @@ def test_missing_explicit_trace_directory_fails_loudly(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match=str(missing_trace_dir)):
         parse_skyrl_metrics.main()
+
+
+def test_parsed_trial_reports_a_duration_for_every_harbor_phase(tmp_path):
+    trace_jobs_dir = tmp_path / "trace_jobs"
+    write_trial_result(
+        trace_jobs_dir,
+        {
+            "task_name": "task-1",
+            "trial_name": "trial-1",
+            "environment_setup": {
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:01:18Z",
+            },
+            "agent_setup": {
+                "started_at": "2026-01-01T00:01:18Z",
+                "finished_at": "2026-01-01T00:01:39Z",
+            },
+            "agent_execution": {
+                "started_at": "2026-01-01T00:01:39Z",
+                "finished_at": "2026-01-01T00:02:12Z",
+            },
+            "verifier": {
+                "started_at": "2026-01-01T00:02:12Z",
+                "finished_at": "2026-01-01T00:02:13Z",
+            },
+        },
+    )
+
+    (trial,) = parse_skyrl_metrics.parse_result_files(trace_jobs_dir)
+
+    assert trial["environment_setup_duration"] == 78.0
+    assert trial["agent_setup_duration"] == 21.0
+    assert trial["agent_execution_duration"] == 33.0
+    assert trial["verifier_duration"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "environment_setup_field",
+    [
+        pytest.param({}, id="phase-absent"),
+        pytest.param({"environment_setup": None}, id="phase-null"),
+        pytest.param(
+            {"environment_setup": {"started_at": "2026-01-01T00:00:00Z"}},
+            id="phase-never-finished",
+        ),
+        pytest.param(
+            {"environment_setup": {"started_at": "just after lunch", "finished_at": "2026-01-01T00:01:18Z"}},
+            id="phase-unparseable-timestamp",
+        ),
+    ],
+)
+def test_unusable_phase_timing_leaves_the_duration_empty(tmp_path, environment_setup_field):
+    trace_jobs_dir = tmp_path / "trace_jobs"
+    write_trial_result(
+        trace_jobs_dir,
+        {
+            "task_name": "task-1",
+            "trial_name": "trial-1",
+            "agent_execution": {
+                "started_at": "2026-01-01T00:01:39Z",
+                "finished_at": "2026-01-01T00:02:12Z",
+            },
+            **environment_setup_field,
+        },
+    )
+
+    (trial,) = parse_skyrl_metrics.parse_result_files(trace_jobs_dir)
+
+    assert trial["environment_setup_duration"] is None
+    # A phase that cannot be timed must not cost the trial its other phases.
+    assert trial["agent_execution_duration"] == 33.0
+
+
+def test_a_phase_that_spells_utc_both_ways_is_still_measured():
+    # Stripping the trailing `Z` would leave one of these naive and the other aware, so
+    # subtracting them would raise and the phase would read as untimed.
+    assert (
+        parse_skyrl_metrics.span_duration(
+            {"started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:01:00+00:00"}
+        )
+        == 60.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("span", "expected"),
+    [
+        pytest.param("not a timing block", None, id="wrong-shape"),
+        pytest.param(
+            {"started_at": "2026-01-01T00:00:00", "finished_at": "2026-01-01T00:01:00+00:00"},
+            None,
+            id="mixed-naive-aware",
+        ),
+    ],
+)
+def test_unusable_timing_block_has_no_duration(span, expected):
+    assert parse_skyrl_metrics.span_duration(span) is expected
+
+
+def test_nested_optimizer_span_is_measured_against_its_container_not_the_step():
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(step=100.0, generate=60.0, train_critic_and_policy=30.0, policy_train=28.0)
+    )
+
+    policy_train = span_named(spans, "policy_train")
+    assert policy_train.within == "train_critic_and_policy"
+    assert policy_train.share_of_within == pytest.approx(28.0 / 30.0)
+    # Charging both to the step would spend 58% of it twice over.
+    assert span_named(spans, "train_critic_and_policy").share_of_within == pytest.approx(0.3)
+
+
+def test_synchronous_tree_attributes_optimizer_work_straight_to_the_step():
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(step=100.0, generate=60.0, fwd_logprobs_values_reward=10.0, train_critic_and_policy=30.0)
+    )
+
+    assert span_named(spans, "fwd_logprobs_values_reward").within == "step"
+    assert span_named(spans, "train_critic_and_policy").within == "step"
+
+
+def test_asynchronous_tree_attributes_optimizer_work_to_the_training_span():
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(
+            step=100.0,
+            wait_for_generation_buffer=55.0,
+            run_training=40.0,
+            fwd_logprobs_values_reward=10.0,
+            train_critic_and_policy=30.0,
+        )
+    )
+
+    assert span_named(spans, "fwd_logprobs_values_reward").within == "run_training"
+    assert span_named(spans, "train_critic_and_policy").within == "run_training"
+    assert span_named(spans, "run_training").within == "step"
+
+
+def test_work_between_steps_reports_no_share_of_the_step():
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(step=100.0, generate=90.0, save_checkpoints=45.0, eval=20.0)
+    )
+
+    for name in ("save_checkpoints", "eval"):
+        span = span_named(spans, name)
+        assert span.within is None
+        assert span.share_of_within is None
+
+
+def test_undeclared_span_is_reported_without_a_share():
+    spans = parse_skyrl_metrics.summarize_timing_spans(timing_frame(step=100.0, some_new_trainer_phase=25.0))
+
+    span = span_named(spans, "some_new_trainer_phase")
+    assert span.within is None
+    assert span.share_of_within is None
+    assert span.mean_seconds == pytest.approx(25.0)
+
+
+def test_unattributed_span_covers_the_step_time_no_child_claims():
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(step=100.0, generate=60.0, sync_weights=10.0, save_checkpoints=45.0)
+    )
+
+    unattributed = span_named(spans, "unattributed")
+    assert unattributed.within == "step"
+    # The 45 s checkpoint save is outside the step and must not shrink the remainder.
+    assert unattributed.mean_seconds == pytest.approx(30.0)
+    assert unattributed.share_of_within == pytest.approx(0.3)
+
+
+def test_a_span_that_skips_a_step_still_leaves_the_children_summing_to_the_step():
+    # `sync_weights` runs on one of the two steps. Averaging its share over that step alone,
+    # while the remainder charges the step it skipped as zero, summed the children to 110%.
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        pd.DataFrame(
+            [
+                {"timing/step": 100.0, "timing/generate": 60.0, "timing/sync_weights": 50.0},
+                {"timing/step": 100.0, "timing/generate": 60.0, "timing/sync_weights": None},
+            ]
+        )
+    )
+
+    sync_weights = span_named(spans, "sync_weights")
+    assert sync_weights.share_of_within == pytest.approx(0.25)
+    # The average and the step count still describe the one step on which it ran.
+    assert sync_weights.mean_seconds == pytest.approx(50.0)
+    assert sync_weights.steps == 1
+    children = [span for span in spans if span.within == "step"]
+    assert sum(span.share_of_within for span in children) == pytest.approx(1.0)
+
+
+def test_children_that_sum_past_the_step_are_reported_as_overlap():
+    # A trainer that runs a child alongside the step rather than inside it, which nothing in
+    # harbor or the Timer contract forbids, leaves the step with a negative remainder.
+    spans = parse_skyrl_metrics.summarize_timing_spans(
+        timing_frame(step=100.0, generate=145.0, train_critic_and_policy=20.0, sync_weights=10.0)
+    )
+
+    overlap = span_named(spans, "overlap")
+    assert overlap.within == "step"
+    assert overlap.mean_seconds == pytest.approx(75.0)
+    # A step whose parts do not fit inside it has no idle remainder to take a share of.
+    assert overlap.share_of_within is None
+    assert not any(span.name == "unattributed" for span in spans)
+    assert span_named(spans, "generate").share_of_within == pytest.approx(1.45)
+
+
+def test_trial_phase_shares_are_taken_against_trial_wall_clock():
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": 200.0,
+                    "environment_setup_duration": 100.0,
+                    "agent_setup_duration": 20.0,
+                    "agent_execution_duration": 60.0,
+                    "verifier_duration": 10.0,
+                }
+            ]
+        )
+    )
+
+    assert summary is not None
+    assert summary.measured_trials == 1
+    assert phase_named(summary, "environment_setup").share_of_trial == pytest.approx(0.5)
+    assert phase_named(summary, "verifier").share_of_trial == pytest.approx(0.05)
+    assert phase_named(summary, "unattributed").share_of_trial == pytest.approx(0.05)
+
+
+def test_shares_skip_trials_that_never_recorded_their_own_finish():
+    # A trial the sandbox quota kills times its setup phase and then stops, so it can reach the
+    # numerator of a share while contributing nothing to the denominator.
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": 200.0,
+                    "environment_setup_duration": 100.0,
+                    "agent_setup_duration": 20.0,
+                    "agent_execution_duration": 60.0,
+                    "verifier_duration": 10.0,
+                },
+                {
+                    "trial_duration": None,
+                    "environment_setup_duration": 100.0,
+                    "agent_setup_duration": None,
+                    "agent_execution_duration": None,
+                    "verifier_duration": None,
+                },
+            ]
+        )
+    )
+
+    assert summary is not None
+    assert summary.measured_trials == 1
+    assert summary.total_trials == 2
+    environment_setup = phase_named(summary, "environment_setup")
+    # Both setup durations are evidence about the phase and stay in its median and total.
+    assert environment_setup.trials == 2
+    assert environment_setup.total_seconds == pytest.approx(200.0)
+    # Only the finished trial has a wall clock to be a share of, so the share stays at 100 of 200 s.
+    assert environment_setup.share_of_trial == pytest.approx(0.5)
+    assert phase_named(summary, "unattributed").share_of_trial == pytest.approx(0.05)
+
+
+def test_multi_step_trial_still_reports_the_phases_it_records():
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": 300.0,
+                    "environment_setup_duration": 90.0,
+                    "agent_setup_duration": 30.0,
+                    # Harbor records these per step on a multi-step trial, not on the trial.
+                    "agent_execution_duration": None,
+                    "verifier_duration": None,
+                }
+            ]
+        )
+    )
+
+    assert summary is not None
+    assert [phase.name for phase in summary.phases] == ["environment_setup", "agent_setup", "unattributed"]
+    assert phase_named(summary, "environment_setup").trials == 1
+    assert phase_named(summary, "unattributed").share_of_trial == pytest.approx(0.6)
+
+
+def test_phases_are_still_reported_when_the_trial_wall_clock_is_missing():
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": None,
+                    "environment_setup_duration": 90.0,
+                    "agent_setup_duration": 30.0,
+                    "agent_execution_duration": None,
+                    "verifier_duration": None,
+                }
+            ]
+        )
+    )
+
+    assert summary is not None
+    assert phase_named(summary, "environment_setup").total_seconds == pytest.approx(90.0)
+    # Without a denominator the report must withhold shares rather than invent one.
+    assert phase_named(summary, "environment_setup").share_of_trial is None
+    assert [phase.name for phase in summary.phases] == ["environment_setup", "agent_setup"]
+
+
+def test_phases_that_overlap_report_the_excess_instead_of_a_negative_share():
+    # Harbor times each phase independently and does not hold the four to the trial's own span,
+    # so a phase that runs alongside another leaves the trial with less time than its phases sum
+    # to. Subtracting them anyway printed a negative share and phases summing past 100%.
+    summary = parse_skyrl_metrics.summarize_trial_phases(
+        pd.DataFrame(
+            [
+                {
+                    "trial_duration": 100.0,
+                    "environment_setup_duration": 80.0,
+                    "agent_setup_duration": 40.0,
+                    "agent_execution_duration": 30.0,
+                    "verifier_duration": 5.0,
+                }
+            ]
+        )
+    )
+
+    assert summary is not None
+    overlap = phase_named(summary, "overlap")
+    assert overlap.total_seconds == pytest.approx(55.0)
+    assert overlap.share_of_trial is None
+    assert not any(phase.name == "unattributed" for phase in summary.phases)
+
+
+def test_report_publishes_the_trial_phase_breakdown(tmp_path, monkeypatch):
+    log_path = tmp_path / "terminus-trainer.out"
+    log_path.write_text(
+        'WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.5, "trainer/global_step": 1, '
+        '"timing/step": 100.0, "timing/generate": 60.0, "timing/train_critic_and_policy": 30.0, '
+        '"timing/policy_train": 28.0, "timing/save_checkpoints": 45.0, "timing/eval": 20.0}\n'
+    )
+    trace_jobs_dir = tmp_path / "trace_jobs"
+    write_trial_result(
+        trace_jobs_dir,
+        {
+            "task_name": "task-1",
+            "trial_name": "trial-1",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:03:20Z",
+            "environment_setup": {"started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:01:40Z"},
+            "agent_setup": {"started_at": "2026-01-01T00:01:40Z", "finished_at": "2026-01-01T00:02:00Z"},
+            "agent_execution": {"started_at": "2026-01-01T00:02:00Z", "finished_at": "2026-01-01T00:03:00Z"},
+            "verifier": {"started_at": "2026-01-01T00:03:00Z", "finished_at": "2026-01-01T00:03:10Z"},
+        },
+    )
+    output_path = tmp_path / "results"
+    monkeypatch.setattr(parse_skyrl_metrics, "generate_reward_plot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(parse_skyrl_metrics, "generate_turn_count_plot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["parse_skyrl_metrics.py", str(log_path), str(output_path), "--trace_jobs_dir", str(trace_jobs_dir)],
+    )
+
+    parse_skyrl_metrics.main()
+
+    report = (output_path / "report.md").read_text()
+    assert "| environment_setup | 100.0 | 100.0 | 100.0 | 50.0% | 1 |" in report
+    assert "| unattributed | — | — | 10.0 | 5.0% | — |" in report
+    assert "| policy_train | `train_critic_and_policy` | 28.0 | 93.3% | 1 |" in report
+    # Charging every span to the step summed these five to 183% of a 100 s step.
+    assert "| unattributed | `step` | 10.0 | 10.0% | 1 |" in report
+    assert "| save_checkpoints | outside `step` | 45.0 | — | 1 |" in report
+    assert "| eval | outside `step` | 20.0 | — | 1 |" in report
 
 
 def test_checkpoint_selection_calculates_trailing_five_ema():
