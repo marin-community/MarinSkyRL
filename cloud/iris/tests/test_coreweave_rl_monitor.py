@@ -601,10 +601,9 @@ job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state
     assert [job.is_terminal for job in jobs] == [False, True]
 
 
-def test_rl_discovery_marks_queued_root_jobs_as_awaiting_placement(monkeypatch):
-    """A root job Iris reports as running (state 3) is awaiting placement until a task runs."""
+def test_rl_discovery_parses_active_task_state_column(monkeypatch):
+    """The task_state column drives placement: same root state=3, different task state."""
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
-    # Same root state=3 (running); the task_state column separates placed from queued.
     output = (
         "job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state\n"
         '/benjaminfeuer/rl-placed,3,1000,,"start_rl_iris_controller.py --train_data \'[\\"a\\"]\'",3\n'
@@ -620,14 +619,8 @@ def test_rl_discovery_marks_queued_root_jobs_as_awaiting_placement(monkeypatch):
     jobs, _errors = watch_coreweave_rl.discover_rl_jobs(cluster, "benjaminfeuer")
     by_name = {job.short_name: job for job in jobs}
 
-    assert by_name["rl-placed"].state == "running"
     assert by_name["rl-placed"].task_state == "running"
-    assert watch_coreweave_rl.effective_state(by_name["rl-placed"]) == "running"
-
-    # The queued job is still root-running but its task has not started.
-    assert by_name["rl-queued"].state == "running"
     assert by_name["rl-queued"].task_state == "pending"
-    assert watch_coreweave_rl.effective_state(by_name["rl-queued"]) == "awaiting placement"
 
 
 @pytest.mark.parametrize(

@@ -117,6 +117,11 @@ STATE_NAMES = {
     7: "worker_failed",
     8: "unschedulable",
 }
+# Display state for an active job whose task has not been placed on a node yet.
+AWAITING_PLACEMENT = "awaiting placement"
+# Iris active states that precede running; a root job or task in one of these
+# has not been placed on a node yet.
+PRE_RUNNING_STATES = frozenset({"pending", "building"})
 RL_ENTRYPOINT_MARKERS = ("start_rl_iris_controller.py", "cloud.iris.run_rl")
 TRIALS_URI_PATTERN = re.compile(
     r"(?:terminal_bench_config\.trials_dir=|--trials-dir(?:=|\s+))"
@@ -161,6 +166,8 @@ class RlJob:
     entrypoint: str
     dataset: str = "—"
     finished_at_ms: int | None = None
+    # Highest active task state from the Iris tasks table (pending/building/
+    # running); None when no task is active, e.g. a terminal job.
     task_state: str | None = None
 
     @property
@@ -507,17 +514,21 @@ def discover_rl_jobs(
 ) -> tuple[list[IrisRlJob], list[str]]:
     where_user = "" if user is None else f" AND j.job_id LIKE '/{user}/%'"
     where_submission = "" if submitted_since_ms is None else f" AND j.submitted_at_ms >= {submitted_since_ms}"
+    # Iris reports the root RL job as running (state 3) as soon as it is
+    # accepted, which can be long before any workload task is placed on a
+    # node. Resolve the highest active task state from ACTIVE_STATES so the
+    # codes stay in one place; the CASE checks them high-to-low.
+    task_state_case = (
+        "CASE "
+        + " ".join(
+            f"WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state={code}) THEN {code} "
+            for code in sorted(ACTIVE_STATES, reverse=True)
+        )
+        + "ELSE NULL END AS task_state "
+    )
     sql = (
         "SELECT j.job_id, j.state, j.submitted_at_ms, j.finished_at_ms, jc.entrypoint_json, "
-        # Iris reports the root RL job as running (state 3) as soon as it is
-        # accepted, which can be long before any workload task is placed on a
-        # node. The highest active task state distinguishes "controller
-        # accepted" from "workload actually placed".
-        "CASE "
-        "WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state=3) THEN 3 "
-        "WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state=2) THEN 2 "
-        "WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state=1) THEN 1 "
-        "ELSE NULL END AS task_state "
+        f"{task_state_case}"
         "FROM jobs j JOIN job_config jc ON j.job_id=jc.job_id "
         "WHERE ("
         f"j.state IN ({','.join(str(state) for state in sorted(ACTIVE_STATES))}) "
@@ -1023,7 +1034,7 @@ def _monitor_error(scope: str, operation: str, error: object) -> MonitorError:
 def _state_cell(state: str) -> StyledCell:
     if state in {"running", "succeeded"}:
         tone = "success"
-    elif state in {"pending", "building", "awaiting placement"}:
+    elif state == AWAITING_PLACEMENT:
         tone = "warning"
     else:
         tone = "error"
@@ -1038,10 +1049,10 @@ def effective_state(job: RlJob) -> str:
     task state distinguishes a job that is merely queued from one whose pods are
     up and consuming resources.
     """
-    if job.state in {"pending", "building"}:
-        return "awaiting placement"
-    if job.state == "running" and job.task_state in {"pending", "building"}:
-        return "awaiting placement"
+    if job.state in PRE_RUNNING_STATES:
+        return AWAITING_PLACEMENT
+    if job.state == "running" and job.task_state in PRE_RUNNING_STATES:
+        return AWAITING_PLACEMENT
     return job.state
 
 
