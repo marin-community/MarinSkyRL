@@ -10,7 +10,7 @@ launcher). It combines:
     job-name, max-retries, workspace source-sync to /app).
 
 The target is GPU (not TPU), and the gpu-rl image is a conda-venv image
-(/opt/openthoughts/envs/rl), so this launcher drives the iris SDK's GPU helpers
+(/opt/marinskyrl/envs/rl), so this launcher drives the iris SDK's GPU helpers
 (build_resources(gpu=...), gpu_device, the leafgroup-coscheduling
 ``resolve_multinode_defaults``) directly rather than going through a TPU-shaped
 base launcher.
@@ -520,7 +520,7 @@ def resolve_node_resource_requests(
 
 
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
-RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
+RL_PYTHON = "/opt/marinskyrl/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
 # In-container source sync target. Iris syncs the minimal build_runtime_bundle()
 # workspace to /app and sets IRIS_WORKDIR=/app. The runtime controller code is
@@ -1981,7 +1981,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
     # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
-    # HF task dataset to the node-local $DCFT=/opt/openthoughts/tasks/ (gpu-rl image),
+    # HF task dataset to the node-local $DCFT=/opt/marinskyrl/tasks/ (gpu-rl image),
     # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
     # ranks 1..N-1 find an empty tasks dir and every rollout dies with
     # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
@@ -2532,7 +2532,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             # a venv at $IRIS_WORKDIR/.venv. That venv is a plain PyPI resolve -- no CUDA
             # stack, no ray, no boto3 -- and iris puts it FIRST on $PATH, so a bare
             # `python` or `ray` in a task pod resolves to it instead of the image's real
-            # env at /opt/openthoughts/envs/rl. Everything here already uses absolute
+            # env at /opt/marinskyrl/envs/rl. Everything here already uses absolute
             # interpreter paths to route around that; the sync itself is pure cost on a
             # fully baked image, and the shadow venv has repeatedly cost debugging time.
             #

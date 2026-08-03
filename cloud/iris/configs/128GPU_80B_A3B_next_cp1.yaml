@@ -260,7 +260,7 @@ extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   SKYRL_TIS_SERVED_ID_SPLICE: "1"
   VLLM_ATTENTION_BACKEND: FLASH_ATTN
-  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
+  LD_LIBRARY_PATH: /opt/marinskyrl/envs/rl/lib
   NCCL_DEBUG: WARN
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET

@@ -40,7 +40,7 @@ LOGGER = logging.getLogger(__name__)
 NAMESPACE = "iris"
 TASK_SECRET = "iris-task-env"
 RAY_LOG_DIR = "/tmp/ray/session_latest/logs"
-GPU_RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
+GPU_RL_PYTHON = "/opt/marinskyrl/envs/rl/bin/python"
 RAY_LOG_PATTERNS = (
     "worker-*.out",
     "worker-*.err",

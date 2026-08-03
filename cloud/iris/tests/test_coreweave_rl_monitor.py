@@ -416,7 +416,7 @@ def test_ray_log_inventory_uses_explicit_python_for_rl_images(monkeypatch):
             ["kubectl"],
             "pod",
             "task",
-            python_executable="/opt/openthoughts/envs/rl/bin/python",
+            python_executable="/opt/marinskyrl/envs/rl/bin/python",
         )
         == []
     )
