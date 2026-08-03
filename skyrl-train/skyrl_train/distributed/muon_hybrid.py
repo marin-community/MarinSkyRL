@@ -26,7 +26,7 @@ full-tensor NS result within bf16 tolerance.
 
 from collections.abc import Mapping
 from itertools import chain
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, Optional
 
 import torch
 from torch import Tensor
@@ -75,6 +75,38 @@ class _MergedState(Mapping):
         return any(len(c.state) for c in self._children)
 
 
+class _CompositeOptimizer(Optimizer):
+    """Expose child optimizers through one scheduler and offload surface."""
+
+    def __init__(self, children: Iterable[Optimizer], defaults: dict[str, Any]) -> None:
+        self._children = tuple(children)
+        if not self._children:
+            raise ValueError("a composite optimizer requires at least one child")
+        all_params = list(
+            chain.from_iterable(group["params"] for child in self._children for group in child.param_groups)
+        )
+        super().__init__(all_params, defaults=defaults)
+        self._refresh_composite_views()
+
+    def _refresh_composite_views(self) -> None:
+        self.param_groups = list(chain.from_iterable(child.param_groups for child in self._children))
+        self.state = _MergedState(self._children)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for child in self._children:
+            child.step()
+        return loss
+
+    def zero_grad(self, set_to_none: bool = True):
+        for child in self._children:
+            child.zero_grad(set_to_none=set_to_none)
+
+
 def is_muon_param(name: str, param: Tensor) -> bool:
     """Return True iff ``param`` should be optimized by Muon.
 
@@ -98,7 +130,7 @@ def is_muon_param(name: str, param: Tensor) -> bool:
     return True
 
 
-class HybridMuon(Optimizer):
+class HybridMuon(_CompositeOptimizer):
     """Composite optimizer: Muon on 2-D hidden weights, AdamW on the rest.
 
     Subclasses ``torch.optim.Optimizer`` (required: ``LRScheduler`` does an
@@ -159,35 +191,8 @@ class HybridMuon(Optimizer):
             else None
         )
 
-        # Satisfy Optimizer's bookkeeping with the union of params, then delegate
-        # param_groups/state to the children so per-group lr mutation + per-param
-        # offload route to the real child optimizers.
-        all_params = list(chain(muon_params, adamw_params))
-        super().__init__(all_params, defaults={"lr": muon_lr})
-        # ``param_groups`` is a plain list whose *elements* are the children's
-        # live group dicts → pg["lr"] = x and group.setdefault("initial_lr", ..)
-        # mutate the child group in place.
-        self.param_groups = list(chain.from_iterable(c.param_groups for c in self._children))
-        self.state = _MergedState(self._children)
-
-    # --- children iteration helper ----------------------------------------
-    @property
-    def _children(self) -> List[torch.optim.Optimizer]:
-        return [c for c in (self.muon, self.adamw) if c is not None]
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-        for c in self._children:
-            c.step()
-        return loss
-
-    def zero_grad(self, set_to_none: bool = True):
-        for c in self._children:
-            c.zero_grad(set_to_none=set_to_none)
+        children = [child for child in (self.muon, self.adamw) if child is not None]
+        super().__init__(children, defaults={"lr": muon_lr})
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -199,6 +204,7 @@ class HybridMuon(Optimizer):
         self.muon.load_state_dict(sd["muon"])
         if self.adamw is not None and sd.get("adamw") is not None:
             self.adamw.load_state_dict(sd["adamw"])
+        self._refresh_composite_views()
 
 
 def build_hybrid_muon(named_parameters, optim_config) -> HybridMuon:

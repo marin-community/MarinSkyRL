@@ -230,24 +230,26 @@ class Timer:
         self.update_dict = update_dict
 
     def __enter__(self):
-        self.start_time = time.time()
+        self.start_time = time.monotonic()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
+        duration = time.monotonic() - self.start_time
+        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
     async def __aenter__(self):
-        self.start_time = time.time()
+        self.start_time = time.monotonic()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
+        duration = time.monotonic() - self.start_time
+        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
 
 def get_system_memory_metrics() -> dict:
