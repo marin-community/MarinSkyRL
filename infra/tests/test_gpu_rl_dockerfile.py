@@ -180,7 +180,6 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
     """Exercise the shared dependency gate against representative reports."""
     report = tmp_path / "pip-check"
     common = [
-        "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed",
         "The package `gcsfs` requires `fsspec>=2026.6.0`, but `2026.4.0` is installed",
         "The package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed",
     ]
