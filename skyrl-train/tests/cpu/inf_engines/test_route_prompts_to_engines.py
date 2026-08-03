@@ -2,7 +2,7 @@
 Test for route_prompts_to_engines function that routes prompts to inference engines in inference engine client.
 
 Run with:
-uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_route_prompts_to_engines.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_route_prompts_to_engines.py
 """
 
 from unittest.mock import patch

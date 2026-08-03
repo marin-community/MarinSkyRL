@@ -46,7 +46,7 @@ CPU tests
 .. code-block:: bash
 
     cd skyrl-train # make sure you are in the correct directory
-    uv run --isolated --extra dev pytest tests/cpu
+    uv run --isolated --group dev --extra cpu pytest tests/cpu
 
 GPU tests
 ~~~~~~~~~
@@ -67,7 +67,7 @@ Finally, you can run the tests by running the following command:
 
 .. code-block:: bash
 
-    uv run --isolated --extra dev --extra vllm pytest tests/gpu
+    uv run --isolated --group dev --extra vllm pytest tests/gpu
 
 
 SkyRL-gym

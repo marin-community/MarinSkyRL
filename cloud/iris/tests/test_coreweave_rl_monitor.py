@@ -555,6 +555,7 @@ def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypa
         lambda *_args, **_kwargs: (_ for _ in ()).throw(LookupError("unexpected raw sync exception")),
     )
     monkeypatch.setattr(watch_coreweave_rl, "write_job_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(watch_coreweave_rl, "fetch_user_budgets", lambda *_args, **_kwargs: [])
 
     assert watch_coreweave_rl.main() == 0
 
@@ -580,9 +581,9 @@ def test_rl_discovery_skips_iris_preamble_and_parses_terminal_states(
 ):
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
     output = """I20260722 controller tunnel ready
-job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json
-/benjaminfeuer/rl-live,3,1000,,"start_rl_iris_controller.py --train_data '[\\"live\\"]'"
-/benjaminfeuer/rl-failed,5,900,1500,"start_rl_iris_controller.py --train_data '[\\"failed\\"]'"
+job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state
+/benjaminfeuer/rl-live,3,1000,,"task_runtime.py --train_data '[\\"live\\"]'",3
+/benjaminfeuer/rl-failed,5,900,1500,"task_runtime.py --train_data '[\\"failed\\"]'",
 """
 
     def fake_run_iris(_cluster, arguments, **_kwargs):
@@ -599,6 +600,114 @@ job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json
     assert errors == []
     assert [job.short_name for job in jobs] == ["rl-live", "rl-failed"]
     assert [job.is_terminal for job in jobs] == [False, True]
+
+
+def test_rl_discovery_parses_active_task_state_column(monkeypatch):
+    """The task_state column drives placement: same root state=3, different task state."""
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    output = (
+        "job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state\n"
+        '/benjaminfeuer/rl-placed,3,1000,,"task_runtime.py --train_data \'[\\"a\\"]\'",3\n'
+        '/benjaminfeuer/rl-queued,3,900,,"task_runtime.py --train_data \'[\\"b\\"]\'",1\n'
+    )
+
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=""),
+    )
+
+    jobs, _errors = watch_coreweave_rl.discover_rl_jobs(cluster, "benjaminfeuer")
+    by_name = {job.short_name: job for job in jobs}
+
+    assert by_name["rl-placed"].task_state == "running"
+    assert by_name["rl-queued"].task_state == "pending"
+
+
+@pytest.mark.parametrize(
+    ("state", "task_state", "expected"),
+    [
+        ("pending", None, "awaiting placement"),
+        ("building", None, "awaiting placement"),
+        ("running", "pending", "awaiting placement"),
+        ("running", "building", "awaiting placement"),
+        ("running", "running", "running"),
+        ("running", None, "running"),
+        ("succeeded", None, "succeeded"),
+        ("failed", None, "failed"),
+    ],
+)
+def test_rl_effective_state_classifies_placement(state, task_state, expected):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    job = watch_coreweave_rl.IrisRlJob(
+        cluster, "/user/rl-job", state, 0, "", dataset="DCAgent/tasks", task_state=task_state
+    )
+
+    assert watch_coreweave_rl.effective_state(job) == expected
+
+
+def test_fetch_user_budget_parses_spent_limit_and_band(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    # The CLI emits controller/tunnel preamble lines before the key:value block.
+    output = (
+        "I20260803 controller tunnel ready\n"
+        "User:      benjaminfeuer\n"
+        "Limit:     1000000\n"
+        "Spent:     487818\n"
+        "Max band:  interactive\n"
+    )
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=""),
+    )
+
+    budget = watch_coreweave_rl.fetch_user_budget(cluster, "benjaminfeuer")
+
+    assert budget == watch_coreweave_rl.UserBudget(
+        "benjaminfeuer", "cw-rno2a", spent=487818, limit=1000000, max_band="interactive"
+    )
+
+
+def test_fetch_user_budget_reports_no_budget_set_when_unset(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-us-east-02a", Path("/tmp/kubeconfig"), None)
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(
+            arguments,
+            1,
+            stdout="",
+            stderr="Traceback ...\nconnectrpc.errors.ConnectError: No budget found for user benjaminfeuer\n",
+        ),
+    )
+
+    budget = watch_coreweave_rl.fetch_user_budget(cluster, "benjaminfeuer")
+
+    assert budget.spent is None and budget.limit is None
+    assert budget.note == "no budget set"
+
+
+def test_budget_line_shows_consumed_allotted_and_percent():
+    budget = watch_coreweave_rl.UserBudget("benjaminfeuer", "cw-rno2a", 487818, 1000000, "interactive")
+
+    line = watch_coreweave_rl.budget_line(budget)
+
+    # Pins the computed formatting (thousands grouping, percent), not the prose layout.
+    assert "spent=487,818" in line
+    assert "limit=1,000,000" in line
+    assert "49%" in line
+    assert "band=interactive" in line
+
+
+def test_budget_line_omits_percent_when_limit_missing():
+    budget = watch_coreweave_rl.UserBudget("benjaminfeuer", "cw-rno2a", 500, None, "interactive")
+
+    line = watch_coreweave_rl.budget_line(budget)
+
+    assert "spent=500" in line
+    assert "limit=—" in line
+    assert "%" not in line
 
 
 def _remote_trace_objects():

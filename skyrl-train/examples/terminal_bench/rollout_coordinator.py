@@ -59,7 +59,7 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
-from skyrl_train.worker_setup import force_stock_asyncio_in_worker
+from skyrl_train.worker_setup import configure_worker_process
 
 
 def _log():
@@ -157,7 +157,7 @@ class RolloutCoordinator:
         shard_idx: int,
         num_coordinators: int,
     ):
-        force_stock_asyncio_in_worker()
+        configure_worker_process()
         from examples.terminal_bench.terminal_bench_generator import (
             TerminalBenchGenerator,
         )

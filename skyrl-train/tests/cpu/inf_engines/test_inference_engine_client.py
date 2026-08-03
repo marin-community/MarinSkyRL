@@ -3,7 +3,7 @@ Test for `skyrl-train/skyrl_train/inference_engines/inference_engine_client.py` 
 that can be mocked. Also tests for `skyrl-train/skyrl_train/inference_engines/utils.py`.
 
 Run with:
-uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_inference_engine_client.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_inference_engine_client.py
 """
 
 from http import HTTPStatus

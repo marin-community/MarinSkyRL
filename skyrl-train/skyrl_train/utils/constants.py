@@ -23,9 +23,9 @@ def get_worker_nccl_timeout_s() -> int:
     return int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S", DEFAULT_WORKER_NCCL_TIMEOUT_IN_S))
 
 
-def get_nccl_monitor_heartbeat_timeout(value: str | int | None = None) -> int:
+def get_nccl_monitor_heartbeat_timeout(value: int | None = None) -> int:
     """Validate the requested NCCL monitor heartbeat deadline."""
-    timeout = int(DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT if value is None else value)
+    timeout = DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT if value is None else value
     if timeout <= 0:
         raise ValueError("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC must be positive")
     return timeout

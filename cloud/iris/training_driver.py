@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""In-container MarinSkyRL RL training runner (Iris path).
+"""Drive SkyRL training from rank zero of an Iris-managed Ray cluster.
 
 Runs on rank 0 inside the gpu-rl container after the controller
-(``start_rl_iris_controller.py``) has bootstrapped one cross-node Ray cluster and
+(``task_runtime.py``) has bootstrapped one cross-node Ray cluster and
 exported ``RAY_ADDRESS``. This runner parses the RL config, resolves HF task data,
 builds the SkyRL Hydra args, and execs the MarinSkyRL entrypoint attached to that
 Ray cluster (SkyRL's bare ``ray.init()`` honors ``RAY_ADDRESS``).
 
 Usage::
 
-    python -m cloud.iris.run_rl \
+    python -m cloud.iris.training_driver \
         --rl_config configs/56gpu_qwen3_8b.yaml \
         --train_data '["org/my-dataset"]' \
         --model_path Qwen/Qwen3-8B \
@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -30,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
+from cloud.iris.artifacts import fs_and_path
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.rl_config_translation import (
     apply_context_budget_overrides,
@@ -57,6 +59,7 @@ class LocalRLConfig:
     train_data: List[str] = field(default_factory=list)
     val_data: List[str] = field(default_factory=list)
     experiments_dir: str = "experiments"
+    resolved_config_uri: str | None = None
     gpus: int = 4
     cpus: int = 0  # 0 = auto-detect
     # Multi-node placement. The external controller has already bootstrapped one
@@ -216,6 +219,19 @@ class LocalRLRunner:
         if skyrl_overrides:
             hydra_args.extend(skyrl_overrides)
 
+        if self.config.resolved_config_uri:
+            filesystem, path = fs_and_path(self.config.resolved_config_uri)
+            with filesystem.open(path, "w") as destination:
+                json.dump(
+                    {
+                        "entrypoint": parsed.entrypoint,
+                        "hydra_args": hydra_args,
+                        "source_config": str(parsed.config_path),
+                    },
+                    destination,
+                    sort_keys=True,
+                )
+
         if self.config.dry_run:
             print("\n[DRY RUN] Would execute SkyRL with:")
             print(get_skyrl_command_preview(parsed.entrypoint, hydra_args))
@@ -362,7 +378,7 @@ class LocalRLRunner:
                 self._literal_log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
                 injected = True  # dummy key already published above (decoupled from ingress)
                 print(
-                    f"[run_rl] ingress_mode=controller record_literal="
+                    f"[training-driver] ingress_mode=controller record_literal="
                     f"{self.config.record_literal} target_cluster="
                     f"{self.config.target_cluster or '(direct)'}: registered "
                     f"{endpoint_name} -> {register_address} "
@@ -435,7 +451,7 @@ class LocalRLRunner:
         if not ray_address:
             print(
                 "ERROR: RAY_ADDRESS is not set. This runner attaches to a Ray cluster "
-                "bootstrapped by start_rl_iris_controller.py; run it via that controller.",
+                "bootstrapped by task_runtime.py; run it via that controller.",
                 file=sys.stderr,
             )
             return 1
@@ -545,6 +561,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Directory for experiment outputs.",
     )
     parser.add_argument("--experiments-dir", dest="experiments_dir", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--resolved-config-uri",
+        default=None,
+        help="Durable JSON destination for the exact SkyRL entry point and Hydra arguments.",
+    )
 
     parser.add_argument("--dry_run", action="store_true", help="Print config and command without running.")
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", help=argparse.SUPPRESS)
@@ -613,6 +634,7 @@ def main() -> None:
         train_data=train_data,
         val_data=val_data,
         experiments_dir=args.experiments_dir,
+        resolved_config_uri=args.resolved_config_uri,
         gpus=args.gpus,
         cpus=args.cpus,
         num_nodes=int(args.num_nodes),

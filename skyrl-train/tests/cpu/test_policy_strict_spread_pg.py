@@ -9,7 +9,7 @@ assert that:
   - it stays OFF for the use_ref_model=True case and the colocate_all case,
   - the bundle list reserves exactly `policy_num_nodes` whole-node bundles.
 
-uv run --isolated --extra dev pytest tests/cpu/test_policy_strict_spread_pg.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/test_policy_strict_spread_pg.py
 """
 
 from omegaconf import OmegaConf

@@ -20,7 +20,7 @@ Asserts the engine-launch wiring, with NO GPU and NO real Ray actor / vLLM init:
 See notes/RL/skyrl/vllm_dcp_rollout_stages/stage1_vllm_support_and_plumbing_scope.md.
 
 Run:
-    uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_dcp_plumbing.py -v
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_dcp_plumbing.py -v
 """
 
 import sys

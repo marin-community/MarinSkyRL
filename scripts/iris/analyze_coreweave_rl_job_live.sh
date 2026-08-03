@@ -5,7 +5,7 @@
 # WHY: agentic RL (terminal_bench / Harbor) writes per-trial rollout artifacts (the literal agent
 # trajectory + prompts/responses + verifier_output + result.json reward) to
 # terminal_bench_config.trials_dir. Our jobs launch with a REMOTE object-store trials_dir
-# (s3://marin-us-east-02a/iris/<job>/trace_jobs via launch_rl_iris.py --trials-dir auto) — DURABLE (survives
+# (s3://marin-us-east-02a/iris/<job>/trace_jobs via iris_backend.py --trials-dir auto) — DURABLE (survives
 # pod GC), unlike the old node-local ephemeral path (trials_dir: null). NOTE: the default store moved
 # R2 (s3://marin-na) -> CW (s3://marin-us-east-02a) on 2026-07-05 (marin c7caecc95a). The rank-0 pod carries the
 # cluster-injected creds + AWS_ENDPOINT_URL (iris-task-env Secret), but the LAUNCH HOST (Mac) does

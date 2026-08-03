@@ -2,7 +2,7 @@
 
 Run on an otherwise idle node with at least four GPUs:
 
-    uv run --isolated --extra dev --extra vllm \
+    uv run --isolated --group dev --extra vllm \
         pytest -s tests/gpu/fault_injection/nccl_collective_contract.py
 
 The controller launches disposable torchrun gangs for one healthy EP collective
@@ -16,6 +16,7 @@ import argparse
 import os
 import signal
 import time
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 
@@ -25,25 +26,29 @@ import torch.distributed as dist
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
-from skyrl_train.utils.constants import DEFAULT_NCCL_TRACE_BUFFER_SIZE
+from skyrl_train.utils.nccl_environment import nccl_diagnostics_environment
 from tests.gpu.fault_injection.collective_payloads import (
-    CollectiveGroup,
+    MeshCollectives,
     run_verified_all_gather,
     run_verified_all_to_all,
+    warm_ep_and_fsdp_communicators,
 )
+from tests.gpu.fault_injection.fault_injection_paths import SKYRL_TRAIN_ROOT
 from tests.gpu.fault_injection.single_node_runtime import (
     REAP_TIMEOUT_SECONDS,
     REQUIRES_FOUR_CUDA_DEVICES,
-    SKYRL_TRAIN_ROOT,
     WORLD_SIZE,
 )
-from tests.torchrun_process import (
-    TorchrunGang,
-    TorchrunResult,
-    TorchrunTimeoutError,
+from tests.nccl_environment import (
     disable_nccl_communicator_nonblocking,
-    launch_torchrun,
     nccl_communicator_nonblocking_environment,
+)
+from tests.process_gang import (
+    CONTROL_POLL_SECONDS,
+    ProcessGangResult,
+    launch_torchrun,
+    run_after_rank_readiness,
+    signal_rank_ready_and_wait_for_start,
 )
 
 
@@ -53,11 +58,11 @@ FSDP_ALL_GATHER_VALUES = 2
 DIVERGENT_EP_RANKS = frozenset({0, 3})
 DIVERGENT_FSDP_RANKS = frozenset(range(WORLD_SIZE)) - DIVERGENT_EP_RANKS
 COLLECTIVE_TIMEOUT_SECONDS = 8
+# Detect a stalled watchdog thread inside the collective deadline. This is not
+# a collective-progress timeout.
+HEARTBEAT_TIMEOUT_SECONDS = 5
 SETUP_TIMEOUT_SECONDS = 180
 RUN_TIMEOUT_SECONDS = 45
-CONTROL_POLL_SECONDS = 0.1
-START_SENTINEL = "start"
-READY_SENTINEL_PREFIX = "ready-"
 ACTIVE_SENTINEL_PREFIX = "active-"
 CONTROL_DIRECTORY_ENV_VAR = "SKYRL_FAULT_CONTROL_DIR"
 COMMUNICATOR_NONBLOCKING_ENVIRONMENT = nccl_communicator_nonblocking_environment(COLLECTIVE_TIMEOUT_SECONDS)
@@ -83,12 +88,6 @@ FAULT_MODES = (
 )
 
 
-def _wait_for_start(control_dir: Path) -> None:
-    start_path = control_dir / START_SENTINEL
-    while not start_path.exists():
-        time.sleep(CONTROL_POLL_SECONDS)
-
-
 def _hold_out(mode: RunMode, rank: int) -> None:
     print(f"FAULT_INJECTION_WITHHELD mode={mode.value} rank={rank}", flush=True)
     signal.pause()
@@ -99,126 +98,125 @@ def _wait_for_peer_activity(control_dir: Path) -> None:
         time.sleep(CONTROL_POLL_SECONDS)
 
 
-def _warm_ep_and_fsdp_communicators(
-    *,
-    ep: CollectiveGroup,
-    fsdp: CollectiveGroup,
-) -> None:
-    for _ in range(WARMUP_ROUNDS):
-        run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
-        run_verified_all_gather(fsdp, input_values_per_rank=FSDP_ALL_GATHER_VALUES)
-    dist.barrier()
-    print(f"COMMUNICATOR_WARMUP_COMPLETED rank={ep.rank} rounds={WARMUP_ROUNDS}", flush=True)
+def _mesh_collectives(rank: int, device: torch.device) -> MeshCollectives:
+    mesh = create_device_mesh(
+        WORLD_SIZE,
+        fsdp_size=2,
+        ep_size=2,
+        timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS,
+    )
+    return MeshCollectives.from_mesh(mesh, rank, device)
 
 
-def _worker(mode: RunMode) -> None:
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    control_dir = Path(os.environ[CONTROL_DIRECTORY_ENV_VAR])
-
-    init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
-    device = torch.device("cuda", local_rank)
-    ep = None
-    fsdp = None
-    if mode in (RunMode.EP_ALL_TO_ALL, RunMode.WARMED_PHASE_DIVERGENCE, RunMode.SUBGROUP_NONARRIVAL):
-        mesh = create_device_mesh(WORLD_SIZE, fsdp_size=2, ep_size=2)
-        ep = CollectiveGroup.from_process_group(mesh["ep"].get_group(), rank, device)
-        if mode is RunMode.WARMED_PHASE_DIVERGENCE:
-            fsdp = CollectiveGroup.from_process_group(mesh["fsdp"].get_group(), rank, device)
-            _warm_ep_and_fsdp_communicators(
-                ep=ep,
-                fsdp=fsdp,
-            )
-
+def _await_fault_start(mode: RunMode, rank: int, control_directory: Path) -> None:
     print(
         f"FAULT_INJECTION_READY mode={mode.value} rank={rank} "
         f"requested_timeout={COLLECTIVE_TIMEOUT_SECONDS} backend={dist.get_backend()}",
         flush=True,
     )
-    (control_dir / f"{READY_SENTINEL_PREFIX}{rank}").touch()
-    _wait_for_start(control_dir)
+    signal_rank_ready_and_wait_for_start(control_directory, rank)
 
-    if mode is RunMode.EP_ALL_TO_ALL:
-        assert ep is not None
-        run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
-        print(f"EP_ALL_TO_ALL_COMPLETED rank={rank}", flush=True)
-        dist.destroy_process_group()
-        return
-    if mode is RunMode.WARMED_PHASE_DIVERGENCE:
-        assert ep is not None
-        assert fsdp is not None
-        if rank in DIVERGENT_EP_RANKS:
-            assert not set(ep.ranks).issubset(DIVERGENT_EP_RANKS)
-            print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=ep-all-to-all", flush=True)
-            run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
-        else:
-            assert not set(fsdp.ranks).issubset(DIVERGENT_FSDP_RANKS)
-            print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank} phase=fsdp-all-gather", flush=True)
-            run_verified_all_gather(fsdp, input_values_per_rank=FSDP_ALL_GATHER_VALUES)
-    elif mode is RunMode.SUBGROUP_NONARRIVAL:
-        if rank == 0:
-            assert ep is not None
-            print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
-            dist.all_reduce(torch.ones(1, device=device), group=ep.process_group)
-        else:
-            _hold_out(mode, rank)
-    elif mode is RunMode.WORLD_NONARRIVAL:
-        if rank == 0:
-            _hold_out(mode, rank)
-        else:
-            print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
-            dist.all_reduce(torch.ones(1, device=device))
-    elif mode is RunMode.RANK_EXIT:
-        if rank == 0:
-            print(f"FAULT_INJECTION_EXIT mode={mode.value} rank={rank}", flush=True)
-            _wait_for_peer_activity(control_dir)
-            os._exit(17)
-        print(f"FAULT_INJECTION_ACTIVE mode={mode.value} rank={rank}", flush=True)
-        work = dist.all_reduce(torch.ones(1, device=device), async_op=True)
-        (control_dir / f"{ACTIVE_SENTINEL_PREFIX}{rank}").touch()
-        work.wait()
-    else:  # pragma: no cover - argparse constrains worker invocations
-        raise ValueError(f"unknown fault mode: {mode}")
 
+def _report_unexpected_completion(mode: RunMode, rank: int) -> None:
     print(f"FAULT_INJECTION_UNEXPECTED_COMPLETION mode={mode.value} rank={rank}", flush=True)
-    dist.destroy_process_group()
 
 
-def _wait_for_all_ranks_ready(gang: TorchrunGang) -> None:
-    deadline = time.monotonic() + SETUP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        ready_ranks = {
-            path.name.removeprefix(READY_SENTINEL_PREFIX) for path in gang.directory.glob(f"{READY_SENTINEL_PREFIX}*")
-        }
-        if len(ready_ranks) == WORLD_SIZE:
-            return
-        if gang.process.poll() is not None:
-            pytest.fail(
-                f"torchrun exited during setup with code {gang.process.returncode}; output:\n{gang.output()}",
-                pytrace=False,
-            )
-        time.sleep(CONTROL_POLL_SECONDS)
+def _run_ep_all_to_all(rank: int, device: torch.device, control_directory: Path) -> None:
+    ep = _mesh_collectives(rank, device).ep
+    _await_fault_start(RunMode.EP_ALL_TO_ALL, rank, control_directory)
+    run_verified_all_to_all(ep, EP_ALL_TO_ALL_VALUES)
+    print(f"EP_ALL_TO_ALL_COMPLETED rank={rank}", flush=True)
 
-    reaped = gang.kill_and_reap()
-    pytest.fail(
-        f"not all ranks completed setup within {SETUP_TIMEOUT_SECONDS}s; "
-        f"process group reaped={reaped}; output:\n{gang.output()}",
-        pytrace=False,
+
+def _run_warmed_phase_divergence(rank: int, device: torch.device, control_directory: Path) -> None:
+    collectives = _mesh_collectives(rank, device)
+    warm_ep_and_fsdp_communicators(
+        collectives,
+        rounds=WARMUP_ROUNDS,
+        ep_values_per_rank=EP_ALL_TO_ALL_VALUES,
+        fsdp_values_per_rank=FSDP_ALL_GATHER_VALUES,
     )
+    print(f"COMMUNICATOR_WARMUP_COMPLETED rank={rank} rounds={WARMUP_ROUNDS}", flush=True)
+    _await_fault_start(RunMode.WARMED_PHASE_DIVERGENCE, rank, control_directory)
+
+    if rank in DIVERGENT_EP_RANKS:
+        assert not set(collectives.ep.ranks).issubset(DIVERGENT_EP_RANKS)
+        print(
+            f"FAULT_INJECTION_ACTIVE mode={RunMode.WARMED_PHASE_DIVERGENCE.value} rank={rank} phase=ep-all-to-all",
+            flush=True,
+        )
+        run_verified_all_to_all(collectives.ep, EP_ALL_TO_ALL_VALUES)
+    else:
+        assert not set(collectives.fsdp.ranks).issubset(DIVERGENT_FSDP_RANKS)
+        print(
+            f"FAULT_INJECTION_ACTIVE mode={RunMode.WARMED_PHASE_DIVERGENCE.value} rank={rank} phase=fsdp-all-gather",
+            flush=True,
+        )
+        run_verified_all_gather(collectives.fsdp, input_values_per_rank=FSDP_ALL_GATHER_VALUES)
+    _report_unexpected_completion(RunMode.WARMED_PHASE_DIVERGENCE, rank)
 
 
-def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> TorchrunResult:
+def _run_subgroup_nonarrival(rank: int, device: torch.device, control_directory: Path) -> None:
+    ep = _mesh_collectives(rank, device).ep
+    _await_fault_start(RunMode.SUBGROUP_NONARRIVAL, rank, control_directory)
+    if rank == 0:
+        print(f"FAULT_INJECTION_ACTIVE mode={RunMode.SUBGROUP_NONARRIVAL.value} rank={rank}", flush=True)
+        dist.all_reduce(torch.ones(1, device=device), group=ep.process_group)
+    else:
+        _hold_out(RunMode.SUBGROUP_NONARRIVAL, rank)
+    _report_unexpected_completion(RunMode.SUBGROUP_NONARRIVAL, rank)
+
+
+def _run_world_nonarrival(rank: int, device: torch.device, control_directory: Path) -> None:
+    _await_fault_start(RunMode.WORLD_NONARRIVAL, rank, control_directory)
+    if rank == 0:
+        _hold_out(RunMode.WORLD_NONARRIVAL, rank)
+    else:
+        print(f"FAULT_INJECTION_ACTIVE mode={RunMode.WORLD_NONARRIVAL.value} rank={rank}", flush=True)
+        dist.all_reduce(torch.ones(1, device=device))
+    _report_unexpected_completion(RunMode.WORLD_NONARRIVAL, rank)
+
+
+def _run_rank_exit(rank: int, device: torch.device, control_directory: Path) -> None:
+    _await_fault_start(RunMode.RANK_EXIT, rank, control_directory)
+    if rank == 0:
+        print(f"FAULT_INJECTION_EXIT mode={RunMode.RANK_EXIT.value} rank={rank}", flush=True)
+        _wait_for_peer_activity(control_directory)
+        os._exit(17)
+    print(f"FAULT_INJECTION_ACTIVE mode={RunMode.RANK_EXIT.value} rank={rank}", flush=True)
+    work = dist.all_reduce(torch.ones(1, device=device), async_op=True)
+    (control_directory / f"{ACTIVE_SENTINEL_PREFIX}{rank}").touch()
+    work.wait()
+    _report_unexpected_completion(RunMode.RANK_EXIT, rank)
+
+
+WORKERS_BY_MODE: dict[RunMode, Callable[[int, torch.device, Path], None]] = {
+    RunMode.EP_ALL_TO_ALL: _run_ep_all_to_all,
+    RunMode.WARMED_PHASE_DIVERGENCE: _run_warmed_phase_divergence,
+    RunMode.SUBGROUP_NONARRIVAL: _run_subgroup_nonarrival,
+    RunMode.WORLD_NONARRIVAL: _run_world_nonarrival,
+    RunMode.RANK_EXIT: _run_rank_exit,
+}
+
+
+def _worker(mode: RunMode) -> None:
+    rank = int(os.environ["RANK"])
+    control_directory = Path(os.environ[CONTROL_DIRECTORY_ENV_VAR])
+    init_worker_process_group_with_device(timeout_seconds=COLLECTIVE_TIMEOUT_SECONDS)
+    try:
+        device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
+        WORKERS_BY_MODE[mode](rank, device, control_directory)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> ProcessGangResult:
     env = os.environ.copy()
     env.update(
-        {
-            "SKYRL_WORKER_NCCL_TIMEOUT_IN_S": str(COLLECTIVE_TIMEOUT_SECONDS),
-            "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
-            "TORCH_NCCL_ENABLE_MONITORING": "1",
-            "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "5",
-            "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
-            "TORCH_FR_BUFFER_SIZE": str(DEFAULT_NCCL_TRACE_BUFFER_SIZE),
-            "TORCH_NCCL_TRACE_BUFFER_SIZE": str(DEFAULT_NCCL_TRACE_BUFFER_SIZE),
-        }
+        nccl_diagnostics_environment(
+            heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
+        )
     )
     if communicator_mode is CommunicatorMode.NONBLOCKING:
         env.update(COMMUNICATOR_NONBLOCKING_ENVIRONMENT)
@@ -234,12 +232,12 @@ def _run(mode: RunMode, *, communicator_mode: CommunicatorMode) -> TorchrunResul
         reap_timeout_seconds=REAP_TIMEOUT_SECONDS,
         control_directory_environment_variable=CONTROL_DIRECTORY_ENV_VAR,
     ) as gang:
-        _wait_for_all_ranks_ready(gang)
-        (gang.directory / START_SENTINEL).touch()
-        try:
-            return gang.wait(RUN_TIMEOUT_SECONDS)
-        except TorchrunTimeoutError as error:
-            pytest.fail(f"{mode.value} did not finish after setup: {error}", pytrace=False)
+        return run_after_rank_readiness(
+            gang,
+            expected_ranks=WORLD_SIZE,
+            setup_timeout_seconds=SETUP_TIMEOUT_SECONDS,
+            run_timeout_seconds=RUN_TIMEOUT_SECONDS,
+        )
 
 
 @pytest.mark.parametrize("mode", FAULT_MODES)

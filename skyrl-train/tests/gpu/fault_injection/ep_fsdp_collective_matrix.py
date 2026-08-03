@@ -20,16 +20,16 @@ from tests.collective_schedule_matrix import (
     COLLECTIVE_SCHEDULE_SUCCESS_MARKER,
     CollectiveScheduleCase,
 )
+from tests.gpu.fault_injection.fault_injection_paths import SKYRL_TRAIN_ROOT
 from tests.gpu.fault_injection.single_node_runtime import (
     REAP_TIMEOUT_SECONDS,
     REQUIRES_FOUR_CUDA_DEVICES,
-    SKYRL_TRAIN_ROOT,
     WORLD_SIZE,
 )
-from tests.torchrun_process import (
-    TorchrunResult,
-    TorchrunTimeoutError,
-    disable_nccl_communicator_nonblocking,
+from tests.nccl_environment import disable_nccl_communicator_nonblocking
+from tests.process_gang import (
+    ProcessGangResult,
+    ProcessGangTimeoutError,
     launch_torchrun,
 )
 
@@ -38,7 +38,7 @@ RUN_TIMEOUT_SECONDS = 240
 WORKER_PATH = SKYRL_TRAIN_ROOT / "tests/gpu/fault_injection/ep_fsdp_collective_schedule_worker.py"
 
 
-def _run_case(case: CollectiveScheduleCase) -> TorchrunResult:
+def _run_case(case: CollectiveScheduleCase) -> ProcessGangResult:
     environment = os.environ.copy()
     disable_nccl_communicator_nonblocking(environment)
     with launch_torchrun(
@@ -52,7 +52,7 @@ def _run_case(case: CollectiveScheduleCase) -> TorchrunResult:
     ) as gang:
         try:
             return gang.wait(RUN_TIMEOUT_SECONDS)
-        except TorchrunTimeoutError as error:
+        except ProcessGangTimeoutError as error:
             pytest.fail(f"collective schedule case {case.name!r} did not finish: {error}", pytrace=False)
 
 
