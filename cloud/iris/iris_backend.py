@@ -235,7 +235,9 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str) -> list[str]:
     role_overrides = (
         f"++trainer.placement.colocate_all={str(role_plan.colocate_all).lower()}",
         f"++trainer.placement.policy_num_nodes={role_plan.policy_num_nodes}",
+        f"++trainer.placement.ref_num_nodes={role_plan.policy_num_nodes}",
         f"++trainer.placement.policy_num_gpus_per_node={role_plan.policy_num_gpus_per_node}",
+        f"++trainer.placement.ref_num_gpus_per_node={role_plan.policy_num_gpus_per_node}",
         f"++generator.num_inference_engines={role_plan.num_inference_engines}",
         f"++generator.inference_engine_tensor_parallel_size={role_plan.inference_engine_tensor_parallel_size}",
         f"++trainer.train_batch_size={role_plan.train_batch_size}",
@@ -2528,7 +2530,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             job_state = iris_job_state_name(status.state)
         except KeyboardInterrupt:
             print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
-            client.terminate_job(job.job_id)
+            job.terminate()
             exit_code = 130
             job_state = "cancelled"
         print(f"[rl-iris] Job exit: {exit_code}", flush=True)

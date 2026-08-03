@@ -204,7 +204,10 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
 
     assert json.loads(argv[argv.index("--train-data") + 1]) == ["/tmp/iceball-gsm8k/train.parquet"]
     overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
+    assert "++trainer.placement.policy_num_nodes=1" in overrides
+    assert "++trainer.placement.ref_num_nodes=1" in overrides
     assert "++trainer.placement.policy_num_gpus_per_node=4" in overrides
+    assert "++trainer.placement.ref_num_gpus_per_node=4" in overrides
     assert "++generator.num_inference_engines=4" in overrides
     assert "++trainer.train_batch_size=16" in overrides
     assert "++trainer.seed=7" in overrides
