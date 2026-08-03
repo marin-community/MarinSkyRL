@@ -990,6 +990,7 @@ def ray_start_head(
     ray_port: int,
     spill_target: RaySpillTarget,
 ) -> None:
+    spill_target.prepare()
     cmd = [
         _ray_bin(),
         "start",
@@ -1014,6 +1015,7 @@ def ray_start_worker(
     node_ip: str,
     spill_target: RaySpillTarget,
 ) -> None:
+    spill_target.prepare()
     cmd = [
         _ray_bin(),
         "start",

@@ -56,3 +56,14 @@ def test_remote_spilling_rejects_local_directory_override():
             RaySpillBackend.R2,
             "/local/nvme/ray-spill",
         )
+
+
+def test_ray_worker_creates_its_local_spill_directory(tmp_path, monkeypatch):
+    spill_dir = tmp_path / "ray-spill"
+    commands = []
+    monkeypatch.setattr(runtime.subprocess, "run", lambda command, **_kwargs: commands.append(command))
+
+    runtime.ray_start_worker("10.0.0.1", 6379, "10.0.0.2", LocalRaySpillTarget(str(spill_dir)))
+
+    assert spill_dir.is_dir()
+    assert f"--object-spilling-directory={spill_dir}" in commands[0]
