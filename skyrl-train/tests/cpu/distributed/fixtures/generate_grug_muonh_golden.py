@@ -135,16 +135,10 @@ for step_index in range(STEPS):
     for identifier, path in paths.items():
         fixture[f"parameter_{step_index + 1}__{identifier}"] = torch_layout(identifier, get(params, path))
         if routes[identifier] == "muonh":
-            fixture[f"momentum_{step_index + 1}__{identifier}"] = torch_layout(
-                identifier, get(muon_momentum, path)
-            )
+            fixture[f"momentum_{step_index + 1}__{identifier}"] = torch_layout(identifier, get(muon_momentum, path))
         elif routes[identifier] == "adamh":
-            fixture[f"adamh_mu_{step_index + 1}__{identifier}"] = torch_layout(
-                identifier, get(adamh_state.mu, path)
-            )
-            fixture[f"adamh_nu_{step_index + 1}__{identifier}"] = torch_layout(
-                identifier, get(adamh_state.nu, path)
-            )
+            fixture[f"adamh_mu_{step_index + 1}__{identifier}"] = torch_layout(identifier, get(adamh_state.mu, path))
+            fixture[f"adamh_nu_{step_index + 1}__{identifier}"] = torch_layout(identifier, get(adamh_state.nu, path))
         else:
             fixture[f"adam_mu_{step_index + 1}__{identifier}"] = torch_layout(identifier, get(adam_state.mu, path))
             fixture[f"adam_nu_{step_index + 1}__{identifier}"] = torch_layout(identifier, get(adam_state.nu, path))
