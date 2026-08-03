@@ -125,7 +125,9 @@ docs = [
 ]
 dev = [
     "litellm",
+    "marin-rigging[prometheus]==0.2.70.dev30755316227",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
+    "prometheus-client",
     "pytest>=8.4",
     "pytest-asyncio",
     "universal-pathlib",
