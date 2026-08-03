@@ -450,8 +450,8 @@ RUN if [ "${INSTALL_MEGATRON}" = "0" ]; then \
 
 # The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +
 # the S3 rendezvous/checkpoint boto3 path) comes ENTIRELY through the frozen lock:
-# Root pyproject.toml declares s3fs==2026.4.0 (→ aiobotocore 3.7.0, raising
-# the botocore cap), smart_open==8.0.0, and boto3, so `uv sync --frozen` above
+# Root pyproject.toml declares s3fs, smart_open, and boto3; the frozen lock resolves
+# them to s3fs 2026.4.0, smart_open 8.0.1, and boto3 1.43.48. `uv sync --frozen`
 # produces the whole stack — NO post-hoc pip (that was the drift vector). Assert it
 # built correctly (imports + a boto3 S3 client ctor, which is exactly where the
 # `compute_endpoint_resolver_builtin_defaults() missing 3 positional args` botocore

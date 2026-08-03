@@ -124,9 +124,6 @@ docs = [
     "sphinx-rtd-theme>=2.0.0",
 ]
 dev = [
-    "boto3",
-    "fsspec",
-    "huggingface-hub",
     "litellm",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
     "pytest>=8.4",

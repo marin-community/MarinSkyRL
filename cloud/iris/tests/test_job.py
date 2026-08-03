@@ -91,7 +91,7 @@ scale_groups:
     return config
 
 
-def _envelope(tmp_path: Path) -> SkyRLJobSpec:
+def _spec(tmp_path: Path) -> SkyRLJobSpec:
     image = GPU_RL_IMAGES[(ImageArchitecture.ARM64, ImageVariant.STANDARD)]
     output = tmp_path / "output"
     return SkyRLJobSpec(
@@ -176,7 +176,7 @@ def _write_terminal_training_outputs(envelope: SkyRLJobSpec) -> None:
 
 
 def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
     _write_terminal_training_outputs(envelope)
     backend = FakeLaunchBackend(
         IrisLaunchOutcome(
@@ -199,7 +199,7 @@ def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
 
 
 def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
 
     argv = job_launch_argv(envelope, "config.yaml")
 
@@ -212,7 +212,7 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
 
 
 def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> None:
-    argv = job_launch_argv(_envelope(tmp_path), "config.yaml")
+    argv = job_launch_argv(_spec(tmp_path), "config.yaml")
 
     args = create_parser().parse_args(argv)
 
@@ -224,7 +224,7 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
 
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
     locator = DataLocator(
         uri=envelope.request.train_data[0].uri,
         identity="bad",
@@ -241,7 +241,7 @@ def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) 
 
 
 def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
     backend = FakeLaunchBackend(
         IrisLaunchOutcome(
             job_id="01KFAILED",
@@ -260,7 +260,7 @@ def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Pa
 
 
 def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
     status = job_pb2.JobStatus(state=job_pb2.JOB_STATE_KILLED, error="Terminated by user")
     backend = FailedLaunchBackend(JobFailedError(JobName.from_string("/power/iceball-test"), status))
 
@@ -275,7 +275,7 @@ def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
 
 
 def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
     terminal = Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://"))
     terminal.parent.mkdir(parents=True)
     terminal.write_text("{}")
@@ -333,7 +333,7 @@ def test_runtime_bundle_contains_controller_without_training_environment() -> No
 
 
 def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, capsys) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _spec(tmp_path)
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(asdict(envelope)))
 

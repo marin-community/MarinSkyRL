@@ -68,6 +68,7 @@ from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import yaml
+from iris.client import IrisClient
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
@@ -496,15 +497,13 @@ APP_DIR = "/app"
 
 @dataclass(frozen=True)
 class RlConfigLaunch:
-    """Task path and optional environment payload for one RL config."""
+    """Task path and environment payload for one RL config."""
 
     task_path: str
-    payload: str | None
+    payload: str
 
     def task_environment(self) -> dict[str, str]:
-        """Return the environment needed to materialize an external config."""
-        if self.payload is None:
-            return {}
+        """Return the environment needed to materialize the config."""
         return {RL_CONFIG_PAYLOAD_ENV: self.payload}
 
 
@@ -2217,7 +2216,6 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     # EnvironmentSpec / Entrypoint / job_pb2) and the ``IrisClient.remote(...)`` /
     # ``client.submit(...)`` surface are UNCHANGED — see how the marin CLI itself
     # now submits in iris/cli/job.py + iris/cli/connect.py, which this mirrors.
-    from iris.client import IrisClient
     from iris.cluster.config import load_config
     from iris.cluster.composer import provider_bundle
     from iris.cluster.local_cluster import LocalCluster
@@ -2445,7 +2443,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
 
     @_contextmanager
     def _direct_client():
-        if ambient_client := _ambient_in_cluster_client(IrisClient, workspace):
+        if ambient_client := _ambient_in_cluster_client(workspace):
             with ambient_client as client:
                 yield client
             return
@@ -2545,12 +2543,12 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
         )
 
 
-def _ambient_in_cluster_client(client_type: Any, workspace: Path) -> Any | None:
-    """Connect child launches to the controller already assigned to an Iris task."""
+def _ambient_in_cluster_client(workspace: Path) -> IrisClient | None:
+    """Connect a nested launch to the controller assigned to its coordinator task."""
     controller_url = os.environ.get("IRIS_CONTROLLER_URL")
     if not controller_url:
         return None
-    return client_type.in_cluster(controller_url, workspace=workspace)
+    return IrisClient.in_cluster(controller_url, workspace=workspace)
 
 
 def main(argv: list[str] | None = None) -> int:

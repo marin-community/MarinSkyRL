@@ -104,19 +104,17 @@ def _pod_snapshot(
     }
 
 
-def test_artifact_launch_reuses_the_ambient_iris_controller(tmp_path, monkeypatch):
+def test_nested_launch_reuses_the_ambient_iris_controller(tmp_path, monkeypatch):
     calls = []
     client = object()
 
-    class ClientType:
-        @classmethod
-        def in_cluster(cls, controller_url, *, workspace):
-            calls.append((controller_url, workspace))
-            return client
-
     monkeypatch.setenv("IRIS_CONTROLLER_URL", "http://iris-controller-svc:10000")
+    monkeypatch.setattr(
+        "cloud.iris.iris_backend.IrisClient.in_cluster",
+        lambda controller_url, *, workspace: calls.append((controller_url, workspace)) or client,
+    )
 
-    assert _ambient_in_cluster_client(ClientType, tmp_path) is client
+    assert _ambient_in_cluster_client(tmp_path) is client
     assert calls == [("http://iris-controller-svc:10000", tmp_path)]
 
 
