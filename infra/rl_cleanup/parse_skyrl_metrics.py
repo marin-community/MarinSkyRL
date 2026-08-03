@@ -27,6 +27,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -78,6 +79,8 @@ TIMING_PARENTS: dict[str, str | None] = {
 
 UNATTRIBUTED_ROW = "unattributed"
 OVERLAP_ROW = "overlap"
+TIMING_PREFIX = "timing/"
+STEP_SPAN = "step"
 
 
 @dataclass(frozen=True)
@@ -553,19 +556,21 @@ def resolve_trace_jobs_dir(log_folder: Path, requested_dir: str | None) -> Path 
     return find_trace_jobs_dir(log_folder)
 
 
-def span_duration(span: dict[str, Any]) -> float | None:
+def span_duration(span: Mapping[str, Any] | None) -> float | None:
     """Return the seconds between `started_at` and `finished_at`, or None when they cannot be read.
 
     Harbor writes that pair on each phase's TimingInfo block and on the trial result itself, so
     the same arithmetic measures a phase and the trial that contains it.
     """
+    if not isinstance(span, Mapping):
+        return None
     started_at = span.get("started_at")
     finished_at = span.get("finished_at")
     if not started_at or not finished_at:
         return None
     try:
         return (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 
@@ -626,7 +631,7 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
         # Timing
         trial["trial_duration"] = span_duration(data)
         for phase_name in TRIAL_PHASES:
-            trial[f"{phase_name}_duration"] = span_duration(data.get(phase_name) or {})
+            trial[f"{phase_name}_duration"] = span_duration(data.get(phase_name))
 
         results.append(trial)
 
@@ -995,61 +1000,59 @@ def resolve_timing_parent(name: str, recorded: set[str]) -> str | None:
 
 
 def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
-    """
-    Summarize every `timing/*` column against the span that contains it.
+    """Summarize recorded timing spans using the declared containment tree.
 
-    Dividing each span by `timing/step` overstates the run: `policy_train` is inside
-    `train_critic_and_policy`, and checkpointing, export and evaluation sit outside the step
-    span altogether. Measuring a span against its own container keeps siblings summing toward
-    their parent, and the trailing `unattributed` row carries the part of the step that no
-    child covers. Where a trainer runs a child alongside the step rather than inside it, the
-    children sum past the step and an `overlap` row carries the excess instead.
+    Each span's share uses its nearest recorded parent. The `unattributed` row carries step
+    time that no direct child covers. Where direct children sum past the step, an `overlap`
+    row carries the excess instead.
 
     Rows run depth-first from `step`, longest sibling first, then the spans that run outside
     `step`, then any column `TIMING_PARENTS` does not declare.
     """
-    recorded = {column.removeprefix("timing/") for column in df.columns if column.startswith("timing/")}
-    if "step" not in recorded:
+    recorded = {column.removeprefix(TIMING_PREFIX) for column in df.columns if column.startswith(TIMING_PREFIX)}
+    if STEP_SPAN not in recorded:
         return []
 
     def mean_seconds(name: str) -> float:
-        return float(df[f"timing/{name}"].mean())
+        return float(df[f"{TIMING_PREFIX}{name}"].mean())
 
     def summarize(name: str, parent: str | None) -> TimingSpan:
-        seconds = df[f"timing/{name}"]
+        seconds = df[f"{TIMING_PREFIX}{name}"]
         # A step on which a span did not run is a step on which it took no time, which is how the
         # remainder below counts it too, so a parent's children and its remainder sum to the parent.
-        share = float((seconds.fillna(0.0) / df[f"timing/{parent}"]).mean()) if parent is not None else None
+        share = (
+            float((seconds.fillna(0.0) / df[f"{TIMING_PREFIX}{parent}"]).mean()) if parent is not None else None
+        )
         return TimingSpan(name, parent, float(seconds.mean()), share, int(seconds.count()))
 
     children: dict[str | None, list[str]] = defaultdict(list)
     for name in recorded & set(TIMING_PARENTS):
-        if name != "step":
+        if name != STEP_SPAN:
             children[resolve_timing_parent(name, recorded)].append(name)
     for siblings in children.values():
         siblings.sort(key=lambda name: (-mean_seconds(name), name))
 
-    rows = [summarize("step", None)]
+    rows = [summarize(STEP_SPAN, None)]
 
     def append_subtree(parent: str) -> None:
         for child in children[parent]:
             rows.append(summarize(child, parent))
             append_subtree(child)
 
-    append_subtree("step")
+    append_subtree(STEP_SPAN)
 
-    step_seconds = df["timing/step"]
-    covered = df[[f"timing/{child}" for child in children["step"]]].fillna(0.0).sum(axis=1)
+    step_seconds = df[f"{TIMING_PREFIX}{STEP_SPAN}"]
+    covered = df[[f"{TIMING_PREFIX}{child}" for child in children[STEP_SPAN]]].fillna(0.0).sum(axis=1)
     unattributed = step_seconds - covered
     mean_unattributed = float(unattributed.mean())
     steps = int(step_seconds.count())
     if mean_unattributed < 0:
         # The children sum past the step, so this trainer ran one of them alongside the step
         # rather than inside it. The excess is neither idle step time nor a share of anything.
-        rows.append(TimingSpan(OVERLAP_ROW, "step", -mean_unattributed, None, steps))
+        rows.append(TimingSpan(OVERLAP_ROW, STEP_SPAN, -mean_unattributed, None, steps))
     else:
         share = float((unattributed / step_seconds).mean())
-        rows.append(TimingSpan(UNATTRIBUTED_ROW, "step", mean_unattributed, share, steps))
+        rows.append(TimingSpan(UNATTRIBUTED_ROW, STEP_SPAN, mean_unattributed, share, steps))
 
     for root in children[None]:
         rows.append(summarize(root, None))
@@ -1067,7 +1070,7 @@ def _timing_within_label(span: TimingSpan) -> str:
         return f"`{span.within}`"
     if span.name not in TIMING_PARENTS:
         return "not declared"
-    return "—" if span.name == "step" else "outside `step`"
+    return "—" if span.name == STEP_SPAN else "outside `step`"
 
 
 def generate_markdown_report(

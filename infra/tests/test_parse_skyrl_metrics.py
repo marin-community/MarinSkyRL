@@ -233,6 +233,21 @@ def test_a_phase_that_spells_utc_both_ways_is_still_measured():
     )
 
 
+@pytest.mark.parametrize(
+    ("span", "expected"),
+    [
+        pytest.param("not a timing block", None, id="wrong-shape"),
+        pytest.param(
+            {"started_at": "2026-01-01T00:00:00", "finished_at": "2026-01-01T00:01:00+00:00"},
+            None,
+            id="mixed-naive-aware",
+        ),
+    ],
+)
+def test_unusable_timing_block_has_no_duration(span, expected):
+    assert parse_skyrl_metrics.span_duration(span) is expected
+
+
 def test_nested_optimizer_span_is_measured_against_its_container_not_the_step():
     spans = parse_skyrl_metrics.summarize_timing_spans(
         timing_frame(step=100.0, generate=60.0, train_critic_and_policy=30.0, policy_train=28.0)
