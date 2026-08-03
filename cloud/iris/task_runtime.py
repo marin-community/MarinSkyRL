@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap a multi-node MarinSkyRL RL job on an iris GPU slice.
+"""Supervise one node of a multi-node MarinSkyRL Iris task.
 
 iris gang-schedules a multi-node job as N coscheduled tasks (one per node) and
 runs THIS SAME entrypoint on every node, injecting ``IRIS_TASK_ID`` /
@@ -25,6 +25,7 @@ local path — opened via ``fsspec``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -34,9 +35,31 @@ import sys
 import tempfile
 import threading
 import time
-
+from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, validate_hf_export
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
+from cloud.iris.ray_storage import (
+    DEFAULT_RAY_SPILL_DIR,
+    LocalRaySpillTarget,
+    R2RaySpillTarget,
+    RaySpillBackend,
+    RaySpillTarget,
+    validate_ray_spill_dir,
+)
+
+try:
+    from skyrl_train.ray_metrics import ray_metrics_telemetry
+except ImportError as error:
+    # An installed rigging without the telemetry submodule raises ImportError, not
+    # ModuleNotFoundError; the name check still keeps a failure inside these packages visible.
+    if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
+        raise
+    _RAY_METRICS_UNAVAILABLE_REASON = str(error)
+
+    def ray_metrics_telemetry(node_ip: str, metrics_port: int):
+        _log(f"Ray metric forwarding is unavailable: {_RAY_METRICS_UNAVAILABLE_REASON}")
+        return contextlib.nullcontext()
+
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
@@ -72,7 +95,7 @@ RAY_START_HEAD_TIMEOUT = 300  # seconds
 
 
 def _log(msg: str) -> None:
-    print(f"[start_rl_iris_controller] {msg}", flush=True)
+    print(f"[task-runtime] {msg}", flush=True)
 
 
 def stage_train_data(train_data_json: str) -> None:
@@ -341,6 +364,30 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
 
 
+def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store HF export on this allocated node."""
+    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    artifact = materialize(source, validate=validate_hf_export)
+    _log(
+        f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"({len(artifact.files)} files, identity={source.identity})"
+    )
+
+
+def materialize_data_sources(data_sources_json: str) -> None:
+    """Copy immutable train and validation data locators onto this allocated node."""
+    sources = json.loads(data_sources_json)
+    if not isinstance(sources, list):
+        raise ValueError("--data-sources-json must contain a JSON list")
+    for value in sources:
+        source = ArtifactSource(uri=value["uri"], local_path=value["local_path"], identity=value["identity"])
+        artifact = materialize(source)
+        _log(
+            f"Dataset staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+            f"({len(artifact.files)} files, identity={source.identity})"
+        )
+
+
 # Special tokens the delphi_v0 reasoning protocol depends on; asserted present in the
 # tokenizer's vocab after the override so a lossy SFT export (fragmented-to-bytes tokens)
 # fails loud here instead of silently collapsing reward at the first rollout.
@@ -555,32 +602,11 @@ def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _fs_and_path(uri: str):
-    """Return (fsspec filesystem, path) for ``uri``. Uses default credential
-    discovery for the scheme (workload identity / instance creds / env keys).
-
-    For ``s3://`` the CoreWeave object store (marin-us-east-02a) REQUIRES
-    virtual-hosted addressing — path-style PutObject/CreateMultipartUpload get
-    rejected with ``PathStyleRequestNotAllowed``. s3fs otherwise defaults to
-    path-style for a custom endpoint_url, so pin the botocore
-    ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE`` env
-    (default ``virtual``) allows an override for a path-style store (e.g. GCS).
-    """
-    import fsspec
-
-    storage_options = None
-    if uri.startswith("s3://") or uri.startswith("s3a://"):
-        style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    fs, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
-    return fs, paths[0]
-
-
 def _pin_boto3_s3_addressing_style() -> None:
     """Pin virtual-hosted (hostname-based) S3 addressing for the boto3 code path,
     cluster-wide, via an AWS config file + ``AWS_CONFIG_FILE``.
 
-    Companion to the fsspec/s3fs pin in ``_fs_and_path``: the CoreWeave object
+    Companion to the fsspec/s3fs pin in ``fs_and_path``: the CoreWeave object
     store (marin-us-east-02a / R2) REJECTS path-style S3 requests with
     ``PathStyleRequestNotAllowed``. Ray's object-spill IO workers call a bare
     ``boto3.resource("s3")`` with NO botocore ``Config`` in child processes we
@@ -681,7 +707,7 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
         "num_tasks": _num_tasks(),
         "written_at": time.time(),
     }
-    fs, path = _fs_and_path(uri)
+    fs, path = fs_and_path(uri)
     # Bound the object-store PutObject with a hard per-attempt timeout via a DAEMON
     # thread + join(timeout) + bounded retries/backoff. An unbounded s3fs/fsspec put
     # has no connect/read timeout and hangs the head invisibly. A daemon thread (NOT a
@@ -749,7 +775,7 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
     treated as stale (from a prior iris task attempt) and ignored.
     """
     uri = _rendezvous_uri(rendezvous_dir)
-    fs, path = _fs_and_path(uri)
+    fs, path = fs_and_path(uri)
     deadline = time.time() + timeout
     threshold = (min_written_at - RENDEZVOUS_FRESHNESS_SLACK) if min_written_at else None
     _log(f"Polling for rendezvous {uri} (timeout {timeout}s)...")
@@ -780,7 +806,7 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
 def _set_marker(rendezvous_dir: str, name: str) -> None:
     uri = f"{rendezvous_dir.rstrip('/')}/{name}"
     try:
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         with fs.open(path, "w") as f:
             f.write(str(time.time()))
     except Exception as exc:
@@ -790,7 +816,7 @@ def _set_marker(rendezvous_dir: str, name: str) -> None:
 def _marker_exists(rendezvous_dir: str, name: str, min_written_at: float | None = None) -> bool:
     uri = f"{rendezvous_dir.rstrip('/')}/{name}"
     try:
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         if not fs.exists(path):
             return False
         if min_written_at is None:
@@ -807,7 +833,7 @@ def clear_rendezvous(rendezvous_dir: str) -> None:
     for name in (RENDEZVOUS_FILENAME, DONE_FILENAME):
         uri = f"{rendezvous_dir.rstrip('/')}/{name}"
         try:
-            fs, path = _fs_and_path(uri)
+            fs, path = fs_and_path(uri)
             if fs.exists(path):
                 fs.rm(path)
                 _log(f"Removed {uri}")
@@ -858,65 +884,35 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-# --- R2 object-store spilling ----------------------------------------------------
-# Ray spills its object store to /tmp/ray/session*/ray_spilled_objects on LOCAL
-# disk when plasma overflows. The async RL generator over-produces rollouts during
-# the slow first training step, so the spill can grow past the kubelet's
-# ephemeral-storage limit and EVICT rank-0. CoreWeave task pods carry R2 (S3-compat)
-# creds + endpoint in env (AWS_ENDPOINT_URL / AWS_*_KEY / AWS_REGION=auto), so we
-# redirect Ray's spill to s3://marin-us-east-02a/... instead of local disk. Requires
-# boto3 in the rl env (baked into the gpu-rl image).
+# --- Ray object-store spilling ---------------------------------------------------
+# Training-step arguments are reconstructible and latency-sensitive. Local scratch
+# avoids durable cross-region traffic; R2 remains an explicit emergency opt-in.
 #
-# Set on the HEAD ONLY. `object_spilling_config` lives in Ray's `_system_config`,
-# which Ray REJECTS on a worker `ray start --address=...` ("System config parameters
-# can only be set on the head node"). The head's config propagates cluster-wide via
-# GCS, and each worker raylet still spills its OWN objects per-node — the smart_open
-# backend appends "_<node_id>" to the prefix so nodes never collide.
-# Gate: OT_AGENT_RAY_SPILL_TO_R2 (default "1" = on); set to "0" for local /tmp.
+# R2's object_spilling_config is set on the head and propagates through GCS; Ray
+# rejects that system config on workers. Local spill directories are CLI flags
+# passed independently to every node.
 # Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
 # within a run share one prefix without colliding across jobs.
-RAY_SPILL_BUFFER_SIZE = 100 * 1024 * 1024  # 100MB multipart buffer (>=1MB recommended for remote)
-
-
-def _ray_spill_uri(rendezvous_dir: str | None) -> str | None:
-    """Per-job R2 spill prefix derived from the rendezvous dir, or None if R2 spilling
-    is disabled / no rendezvous dir is available (single-node runs with no s3 dir fall
-    back to local /tmp spilling)."""
-    if os.environ.get("OT_AGENT_RAY_SPILL_TO_R2", "1") != "1":
-        return None
+def _ray_spill_target(
+    rendezvous_dir: str | None,
+    backend: RaySpillBackend,
+    local_spill_dir: str,
+) -> RaySpillTarget:
+    """Resolve one valid local or remote Ray spill target."""
+    if backend is RaySpillBackend.LOCAL:
+        return LocalRaySpillTarget(location=validate_ray_spill_dir(local_spill_dir))
+    if local_spill_dir != DEFAULT_RAY_SPILL_DIR:
+        raise ValueError("--ray-spill-dir only applies to --ray-spill-backend=local")
     if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
-        return None
-    # SELF-GATE on boto3: Ray's smart_open spill backend imports boto3 directly. On an
-    # image without boto3, return None -> clean fallback to local /tmp spill (no
-    # `ray start` crash). R2 spilling AUTO-ACTIVATES once the image ships boto3.
+        raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
+    # Ray's smart_open spill backend imports boto3 directly.
     try:
         import boto3  # noqa: F401
-    except ImportError:
-        _log(
-            "WARNING: boto3 missing -> Ray R2 object-spilling DISABLED (local /tmp fallback); "
-            "rebuild gpu-rl image with boto3 (Dockerfile.gpu-rl) to enable. This run risks "
-            "the ephemeral-storage eviction if its object store spills > the --disk limit."
-        )
-        return None
-    return f"{rendezvous_dir.rstrip('/')}/ray_spill"
-
-
-def _ray_spill_flags(spill_uri: str | None) -> list[str]:
-    """Build the `--system-config` flag that redirects Ray object spilling to R2.
-
-    The object_spilling_config VALUE is itself a JSON STRING (double-encoded), per Ray's
-    system-config schema. min_spilling_size=0 forces every overflow to spill remotely
-    rather than buffering small objects locally first."""
-    if not spill_uri:
-        return []
-    spilling_config = json.dumps(
-        {
-            "type": "smart_open",
-            "params": {"uri": spill_uri, "buffer_size": RAY_SPILL_BUFFER_SIZE},
-        }
-    )
-    system_config = json.dumps({"object_spilling_config": spilling_config, "min_spilling_size": 0})
-    return [f"--system-config={system_config}"]
+    except ImportError as error:
+        raise RuntimeError(
+            "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
+        ) from error
+    return R2RaySpillTarget(location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
 
 
 # --- Ray cgroup-aware memory ----------------------------------------------------
@@ -989,7 +985,11 @@ def _ray_mem_flags() -> list[str]:
     return flags
 
 
-def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) -> None:
+def ray_start_head(
+    head_ip: str,
+    ray_port: int,
+    spill_target: RaySpillTarget,
+) -> None:
     cmd = [
         _ray_bin(),
         "start",
@@ -999,20 +999,21 @@ def ray_start_head(head_ip: str, ray_port: int, spill_uri: str | None = None) ->
         "--dashboard-host=0.0.0.0",
         *_ray_port_flags(),
         *_ray_mem_flags(),
-        *_ray_spill_flags(spill_uri),
+        *spill_target.head_flags(),
     ]
-    if spill_uri:
-        _log(f"Ray object spilling -> R2 prefix {spill_uri} (no local /tmp spill)")
+    _log(spill_target.description())
     _log(f"Starting Ray HEAD: {' '.join(cmd)}")
     t0 = time.time()
     subprocess.run(cmd, check=True, timeout=RAY_START_HEAD_TIMEOUT)
     _log(f"Ray HEAD subprocess returned (exit 0) in {time.time() - t0:.1f}s")
 
 
-def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str | None = None) -> None:
-    # NOTE: do NOT pass _ray_spill_flags here — `--system-config` is head-only in Ray
-    # (see the R2-spill block comment). The head's config propagates to this worker via
-    # GCS; the worker still spills its own objects per-node.
+def ray_start_worker(
+    head_ip: str,
+    ray_port: int,
+    node_ip: str,
+    spill_target: RaySpillTarget,
+) -> None:
     cmd = [
         _ray_bin(),
         "start",
@@ -1020,12 +1021,9 @@ def ray_start_worker(head_ip: str, ray_port: int, node_ip: str, spill_uri: str |
         f"--node-ip-address={node_ip}",
         *_ray_port_flags(),
         *_ray_mem_flags(),
+        *spill_target.worker_flags(),
     ]
-    if spill_uri:
-        _log(
-            f"Ray object spilling -> R2 prefix {spill_uri} (cluster config from head; "
-            f"this worker spills per-node, no local /tmp spill)"
-        )
+    _log(spill_target.description())
     _log(f"Starting Ray WORKER: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
@@ -1123,7 +1121,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
     )
     try:
         uri = f"{rendezvous_dir.rstrip('/')}/term_artifacts/{task_id}_{ts}.txt"
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         with fs.open(path, "w") as f:
             f.write(summary)
         _log(f"[term-capture] wrote termination artifact -> {uri}")
@@ -1138,7 +1136,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # DELETES these node-local logs with the pod. This periodically (+ on SIGTERM) uploads
 # THIS node's session logs to the object store under the job's rendezvous prefix, keyed
 # by node id, reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous
-# / spill / term-artifact writers already use (_fs_and_path). Per-node: each pod writes
+# / spill / term-artifact writers already use fs_and_path. Per-node: each pod writes
 # its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
@@ -1159,7 +1157,7 @@ def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str)
         return
     dest_base = f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
     try:
-        fs, dest_path = _fs_and_path(dest_base)
+        fs, dest_path = fs_and_path(dest_base)
     except Exception as exc:  # noqa: BLE001 - best-effort
         _log(f"[ray-log-sync] cannot resolve dest {dest_base} ({exc}) [{reason}]")
         return
@@ -1256,7 +1254,11 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     if num_tasks > 1 and args.rendezvous_dir:
         clear_rendezvous(args.rendezvous_dir)
 
-    ray_start_head(head_ip, ray_port, spill_uri=_ray_spill_uri(args.rendezvous_dir))
+    ray_start_head(
+        head_ip,
+        ray_port,
+        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
+    )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
     # Start the periodic Ray session-log -> object-store sync now that the session dir
@@ -1270,8 +1272,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
                 "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
         _log(
-            "[start_rl_iris_controller] Ray head subprocess returned; writing rendezvous "
-            f"-> {_rendezvous_uri(args.rendezvous_dir)}"
+            f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
@@ -1285,26 +1286,27 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
-    env = training_driver_env(derived_gloo_ifname)
-    env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
-    env["PYTHONUNBUFFERED"] = "1"
+    with ray_metrics_telemetry(head_ip, RAY_METRICS_EXPORT_PORT):
+        env = training_driver_env(derived_gloo_ifname)
+        env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
+        env["PYTHONUNBUFFERED"] = "1"
 
-    _log("Launching MarinSkyRL training driver:")
-    _log("  " + " ".join(train_argv))
-    sys.stdout.flush()
-    sys.stderr.flush()
+        _log("Launching MarinSkyRL training driver:")
+        _log("  " + " ".join(train_argv))
+        sys.stdout.flush()
+        sys.stderr.flush()
 
-    # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
-    # `process` here arms its driver-teardown path (the closure reads this value).
-    process = subprocess.Popen(train_argv, env=env, start_new_session=True)
+        # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
+        # `process` here arms its driver-teardown path (the closure reads this value).
+        process = subprocess.Popen(train_argv, env=env, start_new_session=True)
 
-    exit_code = process.wait()
-    if exit_code != 0:
-        capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
-    # Final flush of this node's Ray session logs before teardown reaps them.
-    if ray_log_sync_stop is not None:
-        ray_log_sync_stop.set()
-    sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        exit_code = process.wait()
+        if exit_code != 0:
+            capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
+        # Final flush of this node's Ray session logs before teardown reaps them.
+        if ray_log_sync_stop is not None:
+            ray_log_sync_stop.set()
+        sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
         _set_marker(args.rendezvous_dir, DONE_FILENAME)
@@ -1332,7 +1334,12 @@ def run_worker(args: argparse.Namespace) -> int:
     ray_port = int(payload.get("port", args.ray_port))
     ray_address = f"{head_ip}:{ray_port}"
 
-    ray_start_worker(head_ip, ray_port, node_ip, spill_uri=_ray_spill_uri(args.rendezvous_dir))
+    ray_start_worker(
+        head_ip,
+        ray_port,
+        node_ip,
+        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
+    )
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
 
@@ -1357,14 +1364,15 @@ def run_worker(args: argparse.Namespace) -> int:
     # Block until the head publishes the done marker (training finished) or we
     # are signalled. The training driver on rank 0 schedules actors onto this
     # node's GPUs; this process just keeps the Ray node alive.
-    while not stop.is_set():
-        if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
-            _log(f"Worker rank {rank} saw head done-marker; shutting down.")
-            break
-        time.sleep(POLL_INTERVAL)
-    # Final flush of this worker node's Ray session logs before Ray teardown.
-    ray_log_sync_stop.set()
-    sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
+    with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT):
+        while not stop.is_set():
+            if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
+                _log(f"Worker rank {rank} saw head done-marker; shutting down.")
+                break
+            time.sleep(POLL_INTERVAL)
+        # Final flush of this worker node's Ray session logs before Ray teardown.
+        ray_log_sync_stop.set()
+        sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
     return 0
 
@@ -1380,6 +1388,19 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         type=int,
         default=int(os.environ.get("OT_AGENT_IRIS_RAY_PORT", "6379")),
         help="Port the Ray head binds (default 6379).",
+    )
+    parser.add_argument(
+        "--ray-spill-dir",
+        type=validate_ray_spill_dir,
+        default=DEFAULT_RAY_SPILL_DIR,
+        help=f"Node-local Ray object-spill directory for the local backend (default {DEFAULT_RAY_SPILL_DIR}).",
+    )
+    parser.add_argument(
+        "--ray-spill-backend",
+        type=RaySpillBackend,
+        choices=list(RaySpillBackend),
+        default=RaySpillBackend.LOCAL,
+        help="Ray object-spill backend (default local; r2 requires an s3:// rendezvous directory).",
     )
     parser.add_argument(
         "--rendezvous-dir",
@@ -1407,6 +1428,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "rollouts on a multi-node slice with no shared filesystem.",
     )
     parser.add_argument(
+        "--data-sources-json",
+        default="",
+        help="Immutable object-store data locators to materialize before Ray starts.",
+    )
+    parser.add_argument(
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
         help="HF repo ID of the policy model to pre-download into the node-local HF "
@@ -1425,6 +1451,21 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "in-datacenter) instead of pulling them from HF Hub. Missing/empty/incomplete "
         "source -> clean fallback to the HF snapshot_download prestage. Set by the "
         "launcher (auto-derived from the repo id).",
+    )
+    parser.add_argument(
+        "--model-source-uri",
+        default="",
+        help="Object-store HF export to materialize on every node before Ray starts.",
+    )
+    parser.add_argument(
+        "--model-local-path",
+        default="",
+        help="Deterministic node-local directory for --model-source-uri.",
+    )
+    parser.add_argument(
+        "--model-source-identity",
+        default="",
+        help="Immutable producer identity recorded beside the staged export.",
     )
     parser.add_argument(
         "--policy-chat-template",
@@ -1481,6 +1522,12 @@ def main() -> None:
     # with FileNotFoundError on task.toml. See stage_train_data docstring.
     if args.train_data:
         stage_train_data(args.train_data)
+    if args.data_sources_json:
+        materialize_data_sources(args.data_sources_json)
+    if args.model_source_uri:
+        if not args.model_local_path or not args.model_source_identity:
+            raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
+        materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:

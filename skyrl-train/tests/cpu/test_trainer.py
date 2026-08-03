@@ -1,5 +1,5 @@
 """
-uv  run --isolated --extra dev pytest tests/cpu/test_trainer.py
+uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 """
 
 import gc

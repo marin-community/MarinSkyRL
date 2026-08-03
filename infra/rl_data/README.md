@@ -3,11 +3,11 @@
 `python -m infra.rl_data` turns a pinned RLVR source into a local SkyRL train/validation
 artifact. Run `python -m infra.rl_data --help` for the current source list.
 
-Run it from the repository root in the `skyrl-train` environment so the selected tokenizer,
-`datasets`, and `skyrl-gym` verifier contracts are available:
+Run it from the repository root so the selected tokenizer, `datasets`, and `skyrl-gym`
+verifier contracts are available from the root environment:
 
 ```bash
-uv run --project skyrl-train python -m infra.rl_data \
+uv run python -m infra.rl_data \
   --source rlvr_math --revision <source-commit> \
   --validation-source math500 --validation-revision <validation-commit> \
   --tokenizer <training-tokenizer> --max-prompt-tokens 4096 \

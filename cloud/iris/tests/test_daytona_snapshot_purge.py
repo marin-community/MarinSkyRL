@@ -1,4 +1,4 @@
-"""Behavior tests for the pre-launch Daytona snapshot purge in cloud/iris/launch_rl_iris.py.
+"""Behavior tests for the pre-launch Daytona snapshot purge in cloud/iris/iris_backend.py.
 
 Proves the purge rule that keeps the RL Daytona org under its snapshot quota: only
 harbor-minted (``harbor__*``) snapshots idle past ``STALE_SNAPSHOT_MAX_AGE`` are deleted,
@@ -22,7 +22,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import cloud.iris.launch_rl_iris as launcher  # noqa: E402
+import cloud.iris.iris_backend as launcher  # noqa: E402
 
 
 @dataclass

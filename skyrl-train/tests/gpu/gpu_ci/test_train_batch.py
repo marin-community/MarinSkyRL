@@ -1,7 +1,3 @@
-"""
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_train_batch.py
-"""
-
 from skyrl_train.training_batch import TrainingInputBatch
 import torch
 

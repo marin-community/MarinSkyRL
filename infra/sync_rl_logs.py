@@ -17,7 +17,7 @@ For a given job it syncs:
 Ray-log layouts:
   Agentic jobs publish per-run Ray logs under `iris/<slug>/run-<ts>/ray_session_logs/`; the run dir is
   auto-discovered (newest `run-*`). Non-agentic multi-node RL jobs instead rendezvous through a shared
-  `--rendezvous-dir` (`launch_rl_iris.py`, e.g. `s3://marin-us-east-02a/iris/rl-rdv/<job>`) and write
+  `--rendezvous-dir` (`iris_backend.py`, e.g. `s3://marin-us-east-02a/iris/rl-rdv/<job>`) and write
   their Ray logs under THAT prefix — there is no `run-*` dir. For those, pass `--rendezvous-dir` with the
   same URI you launched with, or let the tool auto-derive it from the finelog (the launcher prints
   `Rendezvous: <uri>`), so non-agentic jobs sync with no extra flags as long as the finelog is fetched.
@@ -57,13 +57,13 @@ from scripts.iris.coreweave_clusters import (  # noqa: E402
     COREWEAVE_KUBECONFIG,
     COREWEAVE_OBJECT_ENDPOINT,
 )
+from infra.artifact_files import LOG_SUFFIXES  # noqa: E402
 
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
 ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
-LOG_SUFFIXES = (".log", ".out", ".err", ".jsonl", ".txt")
 IRIS_CANDIDATES = [
     "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
     "/Users/benjaminfeuer/Documents/marin/.venv/bin/iris",
@@ -382,7 +382,7 @@ def argument_parser() -> argparse.ArgumentParser:
         "--rendezvous_dir",
         dest="rendezvous_dir",
         default=None,
-        help="non-agentic RL rendezvous URI (the same one passed to launch_rl_iris.py, e.g. "
+        help="non-agentic RL rendezvous URI (the same one passed to iris_backend.py, e.g. "
         "s3://marin-us-east-02a/iris/rl-rdv/<job>); its ray_session_logs are synced. "
         "Omit to auto-derive from the finelog.",
     )

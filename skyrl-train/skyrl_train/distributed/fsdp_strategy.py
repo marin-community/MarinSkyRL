@@ -21,6 +21,7 @@ from skyrl_train.distributed.grug_muonh import build_grug_muonh
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
+from skyrl_train.utils.constants import get_worker_nccl_timeout_s
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -133,6 +134,7 @@ class FSDPStrategy(DistributedStrategy):
         self.device_mesh = create_device_mesh(
             world_size=self.world_size,
             fsdp_size=self.fsdp_config.fsdp_size,
+            timeout_seconds=get_worker_nccl_timeout_s(),
             ep_size=ep_size,
             cp_size=cp_size,
         )

@@ -15,6 +15,14 @@ REWARD_KEYS = ("reward/avg_raw_reward", "loss/avg_final_rewards")
 POLICY_LOSS_KEYS = ("policy/policy_loss", "policy_loss")
 GRAD_NORM_KEYS = ("policy/raw_grad_norm", "raw_grad_norm")
 ENTROPY_KEYS = ("policy/policy_entropy", "policy_entropy")
+TIS_EXACT_MATCH_KEYS = (
+    "generate/tis/exact_match_fraction",
+    "tis/exact_match_fraction",
+    "policy/tis/exact_match_fraction",
+)
+POLICY_LOG_RATIO_ABS_MEAN_KEYS = ("policy/log_ratio_abs_mean", "log_ratio_abs_mean")
+POLICY_LOG_RATIO_ABS_P99_KEYS = ("policy/log_ratio_abs_p99", "log_ratio_abs_p99")
+POLICY_LOG_RATIO_ABS_MAX_KEYS = ("policy/log_ratio_abs_max", "log_ratio_abs_max")
 
 
 def metric_value(metrics: dict[str, Any], *names: str) -> Any | None:

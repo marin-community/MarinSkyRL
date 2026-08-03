@@ -32,6 +32,7 @@ import torch.distributed as dist
 
 from skyrl_train.distributed.fsdp_utils import apply_ep, create_device_mesh
 from skyrl_train.models.layers.moe import MoE
+from tests.distributed_runtime_constants import GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
 
 
 # Tiny config: num_experts // ep_size = 8 // 2 = 4 (clean).
@@ -245,7 +246,12 @@ def main():
     # EP=2, fsdp_size=2 → (ddp=1, ep=2, fsdp=2). We exercise the EP submesh directly
     # (FSDP wrap of the non-expert params is covered by the integration path; this
     # test isolates the EP all_to_all correctness).
-    device_mesh = create_device_mesh(world_size=world_size, fsdp_size=2, ep_size=2)
+    device_mesh = create_device_mesh(
+        world_size=world_size,
+        fsdp_size=2,
+        timeout_seconds=GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+        ep_size=2,
+    )
 
     for dtype in (torch.float32, torch.bfloat16):
         if rank == 0:
