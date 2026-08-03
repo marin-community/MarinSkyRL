@@ -2216,9 +2216,6 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     # EnvironmentSpec / Entrypoint / job_pb2) and the ``IrisClient.remote(...)`` /
     # ``client.submit(...)`` surface are UNCHANGED — see how the marin CLI itself
     # now submits in iris/cli/job.py + iris/cli/connect.py, which this mirrors.
-    from iris.cluster.config import load_config
-    from iris.cluster.composer import provider_bundle
-    from iris.cluster.local_cluster import LocalCluster
     from iris.cluster.types import EnvironmentSpec, Entrypoint
     from iris.cli.job import build_resources, build_job_constraints, resolve_multinode_defaults
 
@@ -2447,6 +2444,10 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             with ambient_client as client:
                 yield client
             return
+        from iris.cluster.composer import provider_bundle
+        from iris.cluster.config import load_config
+        from iris.cluster.local_cluster import LocalCluster
+
         # Direct submission to --cluster's own controller. On CoreWeave the loopback SSH
         # tunnel presents as the trusted local_admin identity (no IAP login needed) —
         # byte-identical to before.
