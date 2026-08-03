@@ -56,7 +56,7 @@ allocation was released after successful readback.
 - Result URI: `s3://marin-us-east-02a/iris/grug-training-perf-gap/20260803/divergence-closeout-2dd905e/headline-paired-s1.json`
 - Remote run script SHA-256: `b939c36ff22cac6f98b48eca09730481d90fd353b8d320fc7ec70fddbca168aa`
 - Iris launcher SHA-256: `28f7ca3235a43d6c4174d644034a9cb617da2448cad1567118142e154aae7817`
-- Independent reader SHA-256: `e95301b20c4fd028249b6a72a05536d0c7995b269f8cc5e62997d844a53a4221`
+- Independent reader SHA-256: `78b2133facfa1dbe4d37d931a38f1d0496b496639d33c51cf5e6ca8e35279717`
 - Independent readback launcher SHA-256: `1e8d815c2aa09d3e4a70b97d64f1c408aaaf8c59b7020c5e23845fe920eb02d1`
 
 The readback launcher requires a clean evidence worktree and proves that the
