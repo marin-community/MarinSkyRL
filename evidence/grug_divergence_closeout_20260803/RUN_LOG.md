@@ -148,8 +148,11 @@ Four High reviews found the bounded blocked conclusion correct. Material
 provenance and reporting findings were addressed by archiving the exact launch
 chain, recording the registry tag-to-digest binding, and running CPU Iris job
 `/romain/grug-paired-strict-readback-2dd905e-s1-20260803`. Its verifier asserted
-every external pin and independently recomputed all numeric semantic checks from
-raw samples, reproducing the 1,995 output violations and the failed verdict.
+every external pin and recomputed all numeric semantic checks from
+raw samples out of process, reproducing the 1,995 output violations and the
+failed verdict. The verifier deliberately archives the frozen comparison
+formulas. It detects inconsistent embedded records, pin drift, and artifact
+corruption, but it would not detect a formula defect shared with the driver.
 See `VALIDATION_AND_REVIEW.md`. MarinSkyRL #276 remains unchanged.
 
 ## Publication

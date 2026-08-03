@@ -16,6 +16,12 @@ also recomputes all 12,288 action-log-probability checks, the CE check, and all
 5,184 representative-gradient checks from the raw arm samples. It requires the
 recomputed records to equal the embedded frozen-harness records.
 
+This is an out-of-process consistency readback, not an independent numerical
+implementation. The archived verifier intentionally copies the predeclared
+comparison formulas and tolerances. It catches artifact corruption, external
+pin drift, and inconsistency between raw samples and embedded records; it would
+not catch a comparison-formula defect shared with the driver.
+
 CPU Iris job
 `/romain/grug-paired-strict-readback-2dd905e-s1-20260803` succeeded. It confirmed
 `embedded_semantic_check_matches_recomputed=true`, structural correctness pass,
@@ -72,6 +78,13 @@ disposable diagnostic harness, but no evidence or measurement error. Its log is
 The harness is not part of PR #276. Pruning or refactoring executed source after
 the run would weaken the source-to-artifact chain, so those findings remain
 recorded as evidence-branch debt.
+
+The terminal-commit advisory review log is
+`/tmp/marin-style-lint/grug-eager-grouped-divergence-closeout-20260802/20260803T051731-p3z4p5wr`.
+One meta lane timed out at 600 seconds; the command still completed and emitted
+the other lanes' findings. It identified the shared comparison-formula copy as
+a limitation of the strict reader. The limitation is now explicit above; it
+does not weaken the separate artifact, pin, structure, or metric readback.
 
 ## Four High goal reviews
 
