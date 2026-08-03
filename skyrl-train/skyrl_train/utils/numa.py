@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 
 from skyrl_train.numa_policy import (
+    cpu_numa_topology,
     install_host_memory_policy,
     is_numa_affinity_enabled,
     load_libnuma,
@@ -178,44 +179,6 @@ def _enumerate_gpus_from_sysfs() -> Optional[Dict[int, int]]:
     return result
 
 
-@lru_cache(maxsize=1)
-def _parse_numactl_hardware() -> Optional[Dict[int, List[int]]]:
-    """Parse numactl --hardware to get NUMA node -> CPU list mapping.
-
-    Returns:
-        Dict mapping NUMA node ID to list of CPU IDs (only nodes with CPUs),
-        or None on failure.
-    """
-    try:
-        result = subprocess.run(
-            ["numactl", "--hardware"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-
-    node_cpus = {}
-    for line in result.stdout.splitlines():
-        # Match lines like "node 0 cpus: 0 1 2 3 ... 71"
-        match = re.match(r"^node\s+(\d+)\s+cpus:\s*(.+)$", line)
-        if match:
-            node_id = int(match.group(1))
-            cpu_str = match.group(2).strip()
-            if cpu_str:
-                cpus = [int(c) for c in cpu_str.split()]
-                if cpus:
-                    node_cpus[node_id] = cpus
-
-    if node_cpus:
-        node_summary = {k: f"{v[0]}-{v[-1]}" for k, v in sorted(node_cpus.items())}
-        logger.debug(f"NUMA: numactl found {len(node_cpus)} nodes with CPUs: {node_summary}")
-    return node_cpus if node_cpus else None
-
-
 def physical_gpu_id_for_worker(cuda_visible_devices: Optional[str], launcher_local_rank: int) -> int:
     """Resolve the physical GPU assigned to a Ray worker."""
     devices = [device for device in (cuda_visible_devices or "").split(",") if device]
@@ -274,18 +237,19 @@ def _get_affinity_via_sysfs_numactl(gpu_physical_id: int) -> Optional[Tuple[List
 
     gpu_numa = gpu_numa_map[gpu_physical_id]
 
-    numactl = _parse_numactl_hardware()
-    if not numactl:
+    try:
+        topology = cpu_numa_topology()
+    except RuntimeError:
         return None
 
     # Direct match: GPU's NUMA node has CPUs
-    if gpu_numa in numactl:
-        return (numactl[gpu_numa], gpu_numa)
+    if gpu_numa in topology:
+        return (list(topology[gpu_numa]), gpu_numa)
 
     # GH200 case: GPU NUMA node is HBM-only, find closest CPU NUMA node
-    closest = _find_closest_cpu_numa_node(gpu_numa, numactl)
+    closest = _find_closest_cpu_numa_node(gpu_numa, {node: list(cpus) for node, cpus in topology.items()})
     if closest is not None:
-        return (numactl[closest], closest)
+        return (list(topology[closest]), closest)
 
     return None
 

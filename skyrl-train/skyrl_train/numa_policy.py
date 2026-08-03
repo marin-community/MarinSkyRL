@@ -6,16 +6,21 @@ free of Ray, PyTorch, and package imports that transitively load either runtime.
 
 import os
 import re
+import subprocess
 from ctypes import CDLL, POINTER, Structure, byref, c_char_p, c_int, c_ulong, c_void_p, get_errno, sizeof
 from ctypes.util import find_library
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+
+
+MEMORY_POLICY_BIND = "bind"
 
 
 _MEMORY_POLICY_NAMES = {
     0: "default",
     1: "preferred",
-    2: "bind",
+    2: MEMORY_POLICY_BIND,
     3: "interleave",
     4: "local",
     5: "preferred-many",
@@ -84,26 +89,32 @@ def current_memory_policy() -> MemoryPolicy:
     return MemoryPolicy(mode=_MEMORY_POLICY_NAMES.get(mode.value, f"unknown-{mode.value}"), nodes=nodes)
 
 
-def cpu_numa_topology(node_root: Path = Path("/sys/devices/system/node")) -> dict[int, tuple[int, ...]]:
-    """Return each CPU-bearing NUMA node and the logical CPUs it contains."""
+def parse_numactl_hardware(output: str) -> dict[int, tuple[int, ...]]:
+    """Parse ``numactl --hardware`` output into CPU-bearing NUMA nodes."""
     topology = {}
-    try:
-        node_paths = node_root.iterdir()
-    except OSError as error:
-        raise RuntimeError("could not discover CPU-bearing NUMA nodes") from error
-    for node_path in node_paths:
-        match = re.fullmatch(r"node(\d+)", node_path.name)
+    for line in output.splitlines():
+        match = re.match(r"^node\s+(\d+)\s+cpus:\s*(.*)$", line)
         if match is None:
             continue
-        try:
-            cpus = tuple(parse_numa_range_list((node_path / "cpulist").read_text().strip()))
-        except (OSError, ValueError) as error:
-            raise RuntimeError(f"could not read NUMA CPU list from {node_path / 'cpulist'}") from error
+        cpus = tuple(int(cpu) for cpu in match.group(2).split())
         if cpus:
             topology[int(match.group(1))] = cpus
+    return dict(sorted(topology.items()))
+
+
+@lru_cache(maxsize=1)
+def cpu_numa_topology() -> dict[int, tuple[int, ...]]:
+    """Return each CPU-bearing NUMA node and the logical CPUs it contains."""
+    try:
+        result = subprocess.run(["numactl", "--hardware"], capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        raise RuntimeError("could not query NUMA hardware") from error
+    if result.returncode != 0:
+        raise RuntimeError(f"numactl --hardware failed: {result.stderr.strip()}")
+    topology = parse_numactl_hardware(result.stdout)
     if not topology:
         raise RuntimeError("could not discover CPU-bearing NUMA nodes")
-    return dict(sorted(topology.items()))
+    return topology
 
 
 def allowed_memory_nodes(status_path: Path = Path("/proc/self/status")) -> set[int]:
@@ -152,5 +163,5 @@ def _set_membind(nodes: tuple[int, ...]) -> None:
         libnuma.numa_bitmask_free(mask)
 
     policy = current_memory_policy()
-    if policy.mode != "bind" or policy.nodes != nodes:
+    if policy.mode != MEMORY_POLICY_BIND or policy.nodes != nodes:
         raise RuntimeError(f"failed to install host-memory policy: requested={nodes} effective={policy}")

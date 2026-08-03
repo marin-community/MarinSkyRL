@@ -414,8 +414,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
             page_nodes.update(tensor_page_nodes)
             sampled_tensors += 1
-            sampled_bytes += tensor_bytes
-            remaining_pages -= sum(tensor_page_nodes.values())
+            sampled_page_count = sum(tensor_page_nodes.values())
+            sampled_bytes += sampled_page_count * os.sysconf("SC_PAGE_SIZE")
+            remaining_pages -= sampled_page_count
 
         topology = cpu_numa_topology()
         cpu_affinity = tuple(sorted(os.sched_getaffinity(0)))

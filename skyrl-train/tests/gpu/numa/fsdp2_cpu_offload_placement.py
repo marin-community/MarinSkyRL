@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from ray.util.placement_group import placement_group
 
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.numa_policy import MEMORY_POLICY_BIND
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -78,7 +79,7 @@ def main() -> int:
         policy_nodes = set(diagnostic.memory_policy.nodes)
         page_nodes = set(diagnostic.page_nodes)
         affinity_nodes = diagnostic.affinity_nodes
-        assert diagnostic.memory_policy.mode == "bind", diagnostic
+        assert diagnostic.memory_policy.mode == MEMORY_POLICY_BIND, diagnostic
         assert policy_nodes == cpu_nodes, diagnostic
         assert diagnostic.sampled_pages > 0, diagnostic
         assert page_nodes <= cpu_nodes, diagnostic

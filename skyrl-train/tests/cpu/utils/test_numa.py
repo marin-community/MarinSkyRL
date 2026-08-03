@@ -3,9 +3,9 @@ import pytest
 from skyrl_train import numa_policy
 from skyrl_train.numa_policy import (
     allowed_memory_nodes,
-    cpu_numa_topology,
     host_memory_nodes,
     install_host_memory_policy,
+    parse_numactl_hardware,
 )
 from skyrl_train.utils.numa import physical_gpu_id_for_worker
 
@@ -21,12 +21,14 @@ def test_host_memory_nodes_fail_when_slurm_disallows_lpddr():
         host_memory_nodes({0: (0, 1), 1: (2, 3)}, {4, 12})
 
 
-def test_cpu_numa_topology_ignores_memory_only_nodes(tmp_path):
-    for node, cpulist in ((0, "0-3"), (4, ""), (12, ""), (1, "4-7")):
-        node_path = tmp_path / f"node{node}"
-        node_path.mkdir()
-        (node_path / "cpulist").write_text(cpulist)
-    assert cpu_numa_topology(tmp_path) == {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)}
+def test_numactl_topology_ignores_memory_only_nodes():
+    output = """node 0 cpus: 0 1 2 3
+node 1 cpus: 4 5 6 7
+node 4 cpus:
+node 12 cpus:
+"""
+
+    assert parse_numactl_hardware(output) == {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)}
 
 
 def test_allowed_memory_nodes_read_cpuset_mask(tmp_path):
