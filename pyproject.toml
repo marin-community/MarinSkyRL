@@ -255,6 +255,7 @@ ignore = [
 "skyrl-train/tests/cpu/generators/test_normalize_prompt_token_ids.py" = ["E402"]
 "skyrl-train/tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
 "skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
+"skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]
 "skyrl-train/examples/terminal_bench/_harbor_compat.py" = ["F401"]
 
 [tool.pytest.ini_options]

@@ -1,3 +1,11 @@
+import pytest
+
+# `prometheus_client` and `rigging.telemetry` both come from the optional `telemetry` extra.
+# The documented CPU install (`uv sync --frozen --extra dev`) omits it, and an unguarded
+# import here aborts collection for the whole suite rather than this module alone.
+pytest.importorskip("prometheus_client")
+pytest.importorskip("rigging.telemetry")
+
 from prometheus_client.parser import text_string_to_metric_families
 from rigging import telemetry
 

@@ -11,7 +11,9 @@ from loguru import logger
 
 try:
     from rigging import telemetry
-except ModuleNotFoundError as error:
+except ImportError as error:
+    # An installed rigging without the telemetry submodule raises ImportError, not
+    # ModuleNotFoundError; the name check still keeps a failure inside rigging visible.
     if error.name != "rigging":
         raise
     from skyrl_train import inert_telemetry as telemetry
