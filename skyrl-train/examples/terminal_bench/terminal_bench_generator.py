@@ -12,6 +12,7 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import (
+    BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
@@ -820,7 +821,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     num_failed_instances=num_trials,
                     num_masked_trajectories=num_trials,
                 ),
-                f"generate/errors/{exception_type}": num_trials,
+                f"{BATCH_ERROR_METRIC_PREFIX}{exception_type}": num_trials,
             },
             "rollout_logprobs": None,
             "exclude_from_baseline": [True for _ in range(num_trials)],  # Infrastructure failure
@@ -1148,7 +1149,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Pre-populate with zeros so every configured exception appears as a
         # consistent time-series on dashboards, then overlay actual counts.
         for exc_type in self._tracked_exceptions:
-            rollout_metrics[f"generate/errors/{exc_type}"] = 0
+            rollout_metrics[f"{BATCH_ERROR_METRIC_PREFIX}{exc_type}"] = 0
 
         exception_counts: Dict[str, int] = {}
         for output in all_outputs:
@@ -1157,11 +1158,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         if exception_counts:
             logger.info(f"Exception breakdown: {exception_counts}")
             for exc_type, count in exception_counts.items():
-                rollout_metrics[f"generate/errors/{exc_type}"] = count
+                rollout_metrics[f"{BATCH_ERROR_METRIC_PREFIX}{exc_type}"] = count
 
-        # The wording is a parsed contract: extract_batch_errors in infra/rl_cleanup
-        # re-derives these counts from this line, and returns an empty report rather
-        # than an error once the pattern stops matching.
         log_fn = logger.warning if num_failed_trajectories else logger.info
         log_fn(
             f"Batch generation complete: {num_trials - num_failed_trajectories}/{num_trials} successful, "

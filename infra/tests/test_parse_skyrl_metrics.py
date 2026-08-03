@@ -25,6 +25,37 @@ def test_default_parser_reads_agentic_wandb_json(tmp_path):
     assert result.serialization is parse_skyrl_metrics.MetricSerialization.WANDB_JSON
 
 
+def test_reward_plot_uses_the_structured_rollout_failure_fraction(tmp_path, monkeypatch):
+    captured = {}
+    real_subplots = parse_skyrl_metrics.plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        figure, axes = real_subplots(*args, **kwargs)
+        captured["axes"] = axes
+        return figure, axes
+
+    monkeypatch.setattr(parse_skyrl_metrics.plt, "subplots", capture_subplots)
+
+    parse_skyrl_metrics.generate_reward_plot(
+        {
+            "run": [
+                {
+                    "trainer/global_step": 7,
+                    "reward/avg_raw_reward": 0.75,
+                    "policy/policy_entropy": 0.4,
+                    "policy/raw_grad_norm": 1.2,
+                    "generate/failed_trajectory_fraction": 0.25,
+                }
+            ]
+        },
+        tmp_path / "reward.png",
+    )
+
+    assert len(captured["axes"]) == 3
+    failure_axis = captured["axes"][2]
+    assert list(failure_axis.lines[0].get_ydata()) == [0.25]
+
+
 def test_legacy_python_dict_log_is_auto_detected(tmp_path, monkeypatch):
     log_path = tmp_path / "trainer.out"
     log_path.write_text(
@@ -154,53 +185,3 @@ def test_checkpoint_selection_rejects_an_invalid_reward():
             [{"trainer/global_step": 40, "reward/avg_raw_reward": "not-a-reward"}],
             save_every=20,
         )
-
-
-def _agentic_step_log(completion_prefix: str = "Batch generation complete:") -> str:
-    """One step of an agentic run as Ray forwards it to the driver.
-
-    Each line carries an ANSI colour code and the Ray actor prefix that
-    ``extract_batch_errors`` strips. Two generator workers split a 64-trial
-    batch and 40 of those trials died in sandbox provisioning.
-    """
-    lines = []
-    for pid in (48213, 48214):
-        actor = f"\x1b[36m(TerminalBenchGenerator pid={pid}, ip=10.0.5.12)\x1b[0m"
-        source = "terminal_bench.terminal_bench_generator:generate -"
-        lines.append(
-            f"{actor} 2026-07-30 21:14:52.117 | INFO | {source} "
-            "Exception breakdown: {'DaytonaValidationError': 20}"
-        )
-        lines.append(
-            f"{actor} 2026-07-30 21:14:52.118 | WARNING | {source} "
-            f"{completion_prefix} 12/32 successful, 4 failed instances, 20 masked (excluded from baseline)"
-        )
-    return "\n".join(lines)
-
-
-def test_batch_errors_are_read_back_through_ray_prefixes_and_ansi_codes():
-    # The totals do not reconcile, and pinning that is the point: total_instances
-    # and total_successful count trajectories, total_failed counts instances, so
-    # 24 successful and 8 failed do not add up to 64.
-    assert parse_skyrl_metrics.extract_batch_errors(_agentic_step_log()) == {
-        1: {
-            "batch_errors/total_batches": 2,
-            "batch_errors/total_instances": 64,
-            "batch_errors/total_successful": 24,
-            "batch_errors/total_failed": 8,
-            "batch_errors/total_masked": 40,
-            "batch_errors/avg_DaytonaValidationError": 20.0,
-            "batch_errors/total_DaytonaValidationError": 40,
-        }
-    }
-
-
-def test_a_reworded_completion_line_silently_drops_the_step():
-    # Pins the bug, not the intent: the counts are re-derived from the generator's
-    # log wording rather than from the metrics it emits, so a reworded line drops
-    # the step and takes the exception breakdown, which still parses, down with it.
-    # Reading generate/num_failed_trajectories off the mirrored metrics instead
-    # would fix this, and should change this assertion.
-    reworded = _agentic_step_log(completion_prefix="Batch generation finished:")
-
-    assert parse_skyrl_metrics.extract_batch_errors(reworded) == {}

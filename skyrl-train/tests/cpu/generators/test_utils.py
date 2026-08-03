@@ -845,7 +845,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 @pytest.mark.parametrize(
     "num_trials,num_failed,expected_fraction",
     [
-        (64, 40, 0.625),  # the step that motivated the metric: 40 sandbox failures
+        (64, 40, 0.625),
         (64, 0, 0.0),  # a healthy batch still reports the series rather than omitting it
         (64, 64, 1.0),  # the orchestrator-failure path, where every trial is reported failed
         (0, 0, 0.0),  # an empty batch has no denominator to divide by
@@ -883,7 +883,15 @@ def test_failure_counts_stay_separate_from_the_fraction():
     }
 
 
-def _generated_group(num_trials: int, num_failed: int) -> dict:
+def _generated_group(num_trials: int, num_failed: int, error_type: str = "SandboxError") -> dict:
+    failure_metrics = get_batch_failure_metrics(
+        num_trials,
+        num_failed_trajectories=num_failed,
+        num_failed_instances=num_failed,
+        num_masked_trajectories=num_failed,
+    )
+    if num_failed:
+        failure_metrics[f"generate/errors/{error_type}"] = num_failed
     return {
         "prompt_token_ids": [[1] for _ in range(num_trials)],
         "response_ids": [[2, 3] for _ in range(num_trials)],
@@ -891,12 +899,7 @@ def _generated_group(num_trials: int, num_failed: int) -> dict:
         "loss_masks": [[1, 1] for _ in range(num_trials)],
         "stop_reasons": ["error" if i < num_failed else "stop" for i in range(num_trials)],
         "rollout_logprobs": None,
-        "rollout_metrics": get_batch_failure_metrics(
-            num_trials,
-            num_failed_trajectories=num_failed,
-            num_failed_instances=num_failed,
-            num_masked_trajectories=num_failed,
-        ),
+        "rollout_metrics": failure_metrics,
     }
 
 
@@ -906,11 +909,15 @@ def test_failure_metrics_survive_concatenation():
     # survive this merge never reaches the tracker. The groups are deliberately
     # unequal: the fraction has to come from the summed totals, not from averaging
     # 0.75 and 0.0 to 0.375.
-    merged = concatenate_generator_outputs([_generated_group(4, 3), _generated_group(2, 0)])
+    merged = concatenate_generator_outputs(
+        [_generated_group(4, 3), _generated_group(2, 1, error_type="ContextLengthExceededError")]
+    )
 
     assert merged["rollout_metrics"]["generate/num_trials"] == 6
-    assert merged["rollout_metrics"]["generate/num_failed_trajectories"] == 3
-    assert merged["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(0.5)
+    assert merged["rollout_metrics"]["generate/num_failed_trajectories"] == 4
+    assert merged["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(4 / 6)
+    assert merged["rollout_metrics"]["generate/errors/SandboxError"] == 3
+    assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
 
 
 def test_generators_that_report_no_trials_get_no_failure_series():

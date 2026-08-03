@@ -41,6 +41,8 @@ import pandas as pd
 
 from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
 
+ROLLOUT_FAILURE_FRACTION_METRIC = "generate/failed_trajectory_fraction"
+
 
 @dataclass(frozen=True)
 class CheckpointSelection:
@@ -346,105 +348,6 @@ def _write_best_checkpoint_report(output: TextIO, selection: CheckpointSelection
                 f"{'yes' if step in eligible else ''} |\n"
             )
         output.write("\n")
-
-
-def extract_batch_errors(log_content: str) -> dict[int, dict[str, float]]:
-    """
-    Extract per-step batch error statistics from log content.
-
-    Parses "Exception breakdown" and "Batch generation complete" lines,
-    groups them by training step (using "Step N:" markers), and returns
-    averaged error counts per step.
-
-    Returns:
-        {step_number: {"AgentTimeoutError": avg_per_batch,
-                        "ContextLengthExceededError": avg_per_batch,
-                        "total_batches": N, "total_failed": M, ...}}
-    """
-    content = strip_ansi(log_content)
-
-    # Remove Ray actor prefix from each line
-    lines = content.split("\n")
-    cleaned_lines = []
-    for line in lines:
-        match = re.match(r"\([^)]+\)\s*(.*)", line)
-        cleaned_lines.append(match.group(1) if match else line)
-
-    # Walk through lines, track current step, collect events
-    step_marker_re = re.compile(r"Step (\d+):")
-    exception_re = re.compile(r"Exception breakdown: (\{.*\})")
-    batch_re = re.compile(
-        r"Batch generation complete: (\d+)/(\d+) successful, "
-        r"(\d+) failed instances, (\d+) masked"
-    )
-
-    # Events before step 1's marker belong to step 1
-    current_step = 1
-    # {step: {"batches": [...], "exceptions": [...]}}
-    step_events: dict[int, dict[str, list]] = defaultdict(lambda: {"batches": [], "exceptions": []})
-
-    for line in cleaned_lines:
-        sm = step_marker_re.search(line)
-        if sm:
-            current_step = int(sm.group(1))
-            continue
-
-        em = exception_re.search(line)
-        if em:
-            try:
-                import ast
-
-                exc_dict = ast.literal_eval(em.group(1))
-                step_events[current_step]["exceptions"].append(exc_dict)
-            except Exception:
-                pass
-            continue
-
-        bm = batch_re.search(line)
-        if bm:
-            step_events[current_step]["batches"].append(
-                {
-                    "successful": int(bm.group(1)),
-                    "total": int(bm.group(2)),
-                    "failed": int(bm.group(3)),
-                    "masked": int(bm.group(4)),
-                }
-            )
-
-    # Aggregate per step
-    result = {}
-    for step, events in step_events.items():
-        batches = events["batches"]
-        exceptions = events["exceptions"]
-        n_batches = len(batches)
-        if n_batches == 0:
-            continue
-
-        # Sum up all exception types across batches in this step
-        exc_totals: dict[str, int] = defaultdict(int)
-        for exc in exceptions:
-            for exc_type, count in exc.items():
-                exc_totals[exc_type] += count
-
-        total_failed = sum(b["failed"] for b in batches)
-        total_masked = sum(b["masked"] for b in batches)
-        total_successful = sum(b["successful"] for b in batches)
-        total_instances = sum(b["total"] for b in batches)
-
-        agg: dict[str, float] = {
-            "batch_errors/total_batches": n_batches,
-            "batch_errors/total_instances": total_instances,
-            "batch_errors/total_successful": total_successful,
-            "batch_errors/total_failed": total_failed,
-            "batch_errors/total_masked": total_masked,
-        }
-        for exc_type, total in exc_totals.items():
-            agg[f"batch_errors/avg_{exc_type}"] = total / n_batches
-            agg[f"batch_errors/total_{exc_type}"] = total
-
-        result[step] = agg
-
-    return result
 
 
 def find_trace_jobs_dir(log_folder: Path) -> Path | None:
@@ -785,12 +688,6 @@ def process_log_file(log_path: Path) -> ProcessedLog:
     if not metrics:
         metrics = extract_metrics_blocks(content)
         serialization = MetricSerialization.PYTHON_DICT
-
-    batch_errors = extract_batch_errors(content)
-    for metric in metrics:
-        step = metric.get("trainer/global_step")
-        if step is not None and step in batch_errors:
-            metric.update(batch_errors[step])
 
     # Extract a short name from the filename
     name = log_path.stem
@@ -1138,15 +1035,17 @@ def _find_pass_at_key(metrics_list: list[dict[str, Any]]) -> str | None:
 
 
 def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
-    """Plot reward and available stability, TIS, and batch-error metrics."""
+    """Plot reward and available stability, TIS, and rollout-failure metrics."""
     has_logratio = any(any("policy/log_ratio_abs" in k for k in m) for metrics in all_data.values() for m in metrics)
-    has_batch_errors = any(any(k.startswith("batch_errors/") for k in m) for metrics in all_data.values() for m in metrics)
-    n_panels = 2 + int(has_logratio) + int(has_batch_errors)
+    has_failure_fraction = any(
+        any(ROLLOUT_FAILURE_FRACTION_METRIC in m for m in metrics) for metrics in all_data.values()
+    )
+    n_panels = 2 + int(has_logratio) + int(has_failure_fraction)
     fig, axes = plt.subplots(n_panels, 1, figsize=(10, 4 * n_panels), sharex=True)
     ax_reward = axes[0]
     ax_collapse = axes[1]
     ax_lr = axes[2] if has_logratio else None
-    ax_errors = axes[2 + int(has_logratio)] if has_batch_errors else None
+    ax_failures = axes[2 + int(has_logratio)] if has_failure_fraction else None
 
     for log_name, metrics in all_data.items():
         if not metrics:
@@ -1194,18 +1093,9 @@ def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path:
                 steps, lr_max, color=color, linewidth=1, linestyle="--", alpha=0.5, label=f"{log_name} |logr| max"
             )
 
-        if ax_errors is not None:
-            timeouts = [m.get("batch_errors/avg_AgentTimeoutError", 0) for m in metrics]
-            context_errors = [m.get("batch_errors/avg_ContextLengthExceededError", 0) for m in metrics]
-            ax_errors.plot(steps, timeouts, color=color, linewidth=2, label=f"{log_name} timeouts")
-            ax_errors.plot(
-                steps,
-                context_errors,
-                color=color,
-                linewidth=1.5,
-                linestyle="--",
-                label=f"{log_name} context length",
-            )
+        if ax_failures is not None:
+            failure_fraction = [m.get(ROLLOUT_FAILURE_FRACTION_METRIC, float("nan")) for m in metrics]
+            ax_failures.plot(steps, failure_fraction, color=color, linewidth=2, label=log_name)
 
     ax_reward.set_ylabel("Avg Raw Reward")
     ax_reward.set_title("Average Reward vs Training Step (EMA solid, raw faint)")
@@ -1225,11 +1115,11 @@ def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path:
         ax_lr.grid(True, alpha=0.3)
         ax_lr.legend(loc="best", fontsize="small")
 
-    if ax_errors is not None:
-        ax_errors.set_ylabel("Errors / Batch")
-        ax_errors.set_title("Agent Timeout and Context-Length Errors")
-        ax_errors.grid(True, alpha=0.3)
-        ax_errors.legend(loc="best", fontsize="small")
+    if ax_failures is not None:
+        ax_failures.set_ylabel("Failed Trajectories / Requested Trajectories")
+        ax_failures.set_title("Rollout Failure Fraction")
+        ax_failures.grid(True, alpha=0.3)
+        ax_failures.legend(loc="best", fontsize="small")
 
     axes[-1].set_xlabel("Training Step")
     fig.tight_layout()

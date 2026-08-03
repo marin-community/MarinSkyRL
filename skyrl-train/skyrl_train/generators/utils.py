@@ -17,6 +17,12 @@ from skyrl_gym.metrics import aggregate_for_environment
 # training tensor still consumes a float, so callers replace UNALIGNED_LOGPROB
 # with 0.0 right before emitting; the metrics are computed BEFORE that step.
 UNALIGNED_LOGPROB = float("nan")
+BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
+_NUM_TRIALS_METRIC = "generate/num_trials"
+_NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
+_NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
+_NUM_MASKED_TRAJECTORIES_METRIC = "generate/num_masked_trajectories"
+_FAILED_TRAJECTORY_FRACTION_METRIC = "generate/failed_trajectory_fraction"
 
 
 def _lcs_alert_threshold() -> float:
@@ -652,25 +658,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         # stays keyset-stable and consistent with the per-trajectory emission.
         rollout_metrics["generate/tis/lcs_fallback_alert"] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
 
-    # Preserve the batch failure counts for the same reason: get_rollout_metrics
-    # derives nothing from them, and the fully-async trainer reads rollout metrics
-    # off this result only. Sum the counts and recompute the fraction from those
-    # totals — averaging the per-group fractions would weight unequal groups equally.
-    failure_counts = [
-        rm
-        for rm in (output.get("rollout_metrics") or {} for output in generator_outputs)
-        if "generate/num_trials" in rm
-    ]
-    if failure_counts:
-        totals = {key: sum(rm.get(key, 0) for rm in failure_counts) for key in _BATCH_FAILURE_COUNT_KEYS}
-        rollout_metrics.update(
-            get_batch_failure_metrics(
-                totals["generate/num_trials"],
-                num_failed_trajectories=totals["generate/num_failed_trajectories"],
-                num_failed_instances=totals["generate/num_failed_instances"],
-                num_masked_trajectories=totals["generate/num_masked_trajectories"],
-            )
-        )
+    rollout_metrics.update(_merge_batch_failure_metrics(generator_outputs))
 
     result["rollout_metrics"] = rollout_metrics
 
@@ -761,12 +749,25 @@ def get_rollout_metrics(
     return rollout_metrics
 
 
-_BATCH_FAILURE_COUNT_KEYS = (
-    "generate/num_trials",
-    "generate/num_failed_instances",
-    "generate/num_failed_trajectories",
-    "generate/num_masked_trajectories",
-)
+def _merge_batch_failure_metrics(generator_outputs: List[GeneratorOutput]) -> dict[str, float]:
+    """Sum failure counts across rollout groups and recompute their batch fraction."""
+    group_metrics = [
+        metrics
+        for metrics in (output.get("rollout_metrics") or {} for output in generator_outputs)
+        if _NUM_TRIALS_METRIC in metrics
+    ]
+    if not group_metrics:
+        return {}
+
+    merged = get_batch_failure_metrics(
+        sum(metrics.get(_NUM_TRIALS_METRIC, 0) for metrics in group_metrics),
+        num_failed_trajectories=sum(metrics.get(_NUM_FAILED_TRAJECTORIES_METRIC, 0) for metrics in group_metrics),
+        num_failed_instances=sum(metrics.get(_NUM_FAILED_INSTANCES_METRIC, 0) for metrics in group_metrics),
+        num_masked_trajectories=sum(metrics.get(_NUM_MASKED_TRAJECTORIES_METRIC, 0) for metrics in group_metrics),
+    )
+    error_keys = {key for metrics in group_metrics for key in metrics if key.startswith(BATCH_ERROR_METRIC_PREFIX)}
+    merged.update({key: sum(metrics.get(key, 0) for metrics in group_metrics) for key in error_keys})
+    return merged
 
 
 def get_batch_failure_metrics(
@@ -775,23 +776,20 @@ def get_batch_failure_metrics(
     num_failed_instances: int,
     num_masked_trajectories: int,
 ) -> Dict[str, float]:
-    """Failure counts for one generated batch, plus the fraction of it they cost.
-
-    The denominator is one ``generate`` call, which is the whole training batch on
-    the synchronous trainer and a single rollout group on the fully asynchronous
-    one. It is emitted alongside the counts, so merging several batches means
-    summing the counts and calling this again with the totals.
+    """Describe failed and masked trajectories within a requested rollout group.
 
     Args:
-        num_trials: Trajectories the batch asked for; the denominator.
+        num_trials: Requested trajectories and denominator of the failure fraction.
+        num_failed_trajectories: Trajectories that did not complete successfully.
         num_failed_instances: Distinct instances with at least one failed trajectory.
+        num_masked_trajectories: Trajectories excluded from the baseline.
     """
     return {
-        "generate/num_trials": num_trials,
-        "generate/num_failed_instances": num_failed_instances,
-        "generate/num_failed_trajectories": num_failed_trajectories,
-        "generate/num_masked_trajectories": num_masked_trajectories,
-        "generate/failed_trajectory_fraction": num_failed_trajectories / num_trials if num_trials else 0.0,
+        _NUM_TRIALS_METRIC: num_trials,
+        _NUM_FAILED_INSTANCES_METRIC: num_failed_instances,
+        _NUM_FAILED_TRAJECTORIES_METRIC: num_failed_trajectories,
+        _NUM_MASKED_TRAJECTORIES_METRIC: num_masked_trajectories,
+        _FAILED_TRAJECTORY_FRACTION_METRIC: num_failed_trajectories / num_trials if num_trials else 0.0,
     }
 
 
