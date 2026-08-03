@@ -107,7 +107,7 @@ ARG NVCC_THREADS=2
 ARG INSTALL_MEGATRON=0
 # Harbor (agentic rollout) is installed after the trainer lock. Change this pin in source rather
 # than overriding it at build time.
-ARG HARBOR_COMMIT=1ffb4003f202daadcb7e407f449bd62278b5e8e1
+ARG HARBOR_COMMIT=ad6e612d385379d3168638f6bfb2cf4a56cedbf9
 ARG FASTAPI_VERSION=0.136.1
 ARG OTEL_EXPORTER_VERSION=1.44.0
 
@@ -468,7 +468,7 @@ RUN if [ "${INSTALL_MEGATRON}" = "0" ]; then \
 # The S3 client stack for the cloud.iris controller (Ray S3 object-spilling +
 # the S3 rendezvous/checkpoint boto3 path) comes ENTIRELY through the frozen lock:
 # Root pyproject.toml declares s3fs, smart_open, and boto3; the frozen lock resolves
-# them to s3fs 2026.4.0, smart_open 8.0.1, and boto3 1.43.48. `uv sync --frozen`
+# them to s3fs 2026.4.0, smart_open 8.0.1, and boto3 1.42.97. `uv sync --frozen`
 # produces the whole stack — NO post-hoc pip (that was the drift vector). Assert it
 # built correctly (imports + a boto3 S3 client ctor, which is exactly where the
 # `compute_endpoint_resolver_builtin_defaults() missing 3 positional args` botocore
@@ -478,7 +478,7 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
 # The pip-check gate below always prints the full conflict report. Standard
-# ARM64 has the three AMD64 metadata conflicts plus PyTorch's cusparselt wheel
+# ARM64 has the two AMD64 metadata conflicts plus PyTorch's cusparselt wheel
 # platform diagnostic. Megatron adds its three bridge diagnostics and the
 # TransformerEngine platform diagnostic. The shared validator enumerates each;
 # native imports above validate the selected ARM64 CUDA runtime.
