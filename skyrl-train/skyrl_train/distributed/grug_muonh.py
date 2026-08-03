@@ -172,7 +172,7 @@ def _matrix_delta(
     direction: Tensor,
     *,
     lr: float,
-    muon_steps: int | None = None,
+    ns_steps: int | None = None,
     muon_eps: float = _DEFAULT_EPS,
     clamp_final_norm: bool,
 ) -> Tensor:
@@ -181,8 +181,8 @@ def _matrix_delta(
     direction_value, direction_is_local_experts = _materialize_for_matrix_math(direction)
     if parameter_is_local_experts != direction_is_local_experts:
         raise RuntimeError("parameter and optimizer direction have incompatible DTensor layouts")
-    if muon_steps is not None:
-        direction_value = _muon_direction(direction_value, steps=muon_steps, eps=muon_eps)
+    if ns_steps is not None:
+        direction_value = _muon_direction(direction_value, steps=ns_steps, eps=muon_eps)
     delta = _hyperball_delta(
         parameter_value,
         direction_value,
@@ -244,7 +244,7 @@ class MuonH(Optimizer):
                     parameter,
                     direction,
                     lr=group["lr"],
-                    muon_steps=group["ns_steps"],
+                    ns_steps=group["ns_steps"],
                     muon_eps=group["eps"],
                     clamp_final_norm=True,
                 )

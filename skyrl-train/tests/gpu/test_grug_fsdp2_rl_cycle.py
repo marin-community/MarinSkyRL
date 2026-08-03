@@ -34,6 +34,7 @@ TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
 SERVING_EXPERT_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
 LM_HEAD_NAME = "lm_head.weight"
+ROUTER_NAME = "model.layers.0.mlp.router.weight"
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,7 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
         "model.layers.0.self_attn.q_proj.weight",
         STACKED_EXPERT_NAME,
         LM_HEAD_NAME,
-        "model.layers.0.mlp.router.weight",
+        ROUTER_NAME,
     ]
     return _RepresentativeNames(
         bias_names=biases,
@@ -288,9 +289,7 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
                     continue
                 assert entry["found"], (name, entry)
                 found[name] = True
-                expected_dtype = (
-                    "float32" if name in training.bias_names or name.endswith(".mlp.router.weight") else "bfloat16"
-                )
+                expected_dtype = "float32" if name in training.bias_names or name == ROUTER_NAME else "bfloat16"
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
                 expected = (
                     training.weights[STACKED_EXPERT_NAME][0] if name == SERVING_EXPERT_NAME else training.weights[name]

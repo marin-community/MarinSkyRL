@@ -13,18 +13,19 @@ gradients, three steps, MuonH/AdamH LR `0.03`, Adam LR `0.004`, momentum
 epsilons `1e-8`. Final matrix axes are transposed when saved to match PyTorch
 layout. The recipe applies no weight decay.
 
-The [full generator at the preserved validation commit](https://github.com/marin-community/MarinSkyRL/blob/0792437b14c712331102b39ca7e3e73d118e6d14/skyrl-train/tests/cpu/distributed/fixtures/grug_muonh_jax_golden.md)
-includes the complete parameter tree, routing keys, state extraction, and
-layout conversion. The runtime contract requires `weight_decay=0`; the golden
-fixture uses that value explicitly. From the MarinSkyRL repository root, save
-that generator as `/tmp/generate_grug_muonh_golden.py`, archive the pinned Marin revision to
-`/tmp/marin-grug-muonh-61a4a8c`, then run:
+[`generate_grug_muonh_golden.py`](generate_grug_muonh_golden.py) contains the
+complete parameter tree, routing keys, state extraction, and layout conversion.
+The JAX reference receives nonzero weight decay to confirm that Marin's recipe
+does not apply it. The MarinSkyRL runtime rejects nonzero weight decay so an
+operator cannot mistake the ignored setting for active decay.
+
+Archive the pinned Marin revision to `/tmp/marin-grug-muonh-61a4a8c`, then run:
 
 ```sh
 cd skyrl-train/tests/cpu/distributed/fixtures
 PYTHONPATH=/tmp/marin-grug-muonh-61a4a8c:/tmp/marin-grug-muonh-61a4a8c/lib/levanter/src \
   uv run --project /tmp/marin-grug-muonh-61a4a8c --no-sync \
-  python /tmp/generate_grug_muonh_golden.py
+  python generate_grug_muonh_golden.py
 sha256sum grug_muonh_jax_golden.npz
 ```
 
