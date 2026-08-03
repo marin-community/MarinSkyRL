@@ -1270,8 +1270,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
                 "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
         _log(
-            "[task-runtime] Ray head subprocess returned; writing rendezvous "
-            f"-> {_rendezvous_uri(args.rendezvous_dir)}"
+            f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
