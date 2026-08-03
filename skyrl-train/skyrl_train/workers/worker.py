@@ -149,7 +149,8 @@ class DistributedTorchRayActor:
             device_count=torch.cuda.device_count(),
             pin_to_ray_gpu_id=pin_to_ray_gpu_id,
         )
-        self._configure_numa_placement(int(resolved_local_rank))
+        physical_gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), int(resolved_local_rank))
+        set_numa_affinity_for_gpu(physical_gpu_id)
         os.environ["LOCAL_RANK"] = resolved_local_rank
         self.sequence_parallel_size: int = sequence_parallel_size
 
@@ -314,11 +315,6 @@ class DistributedTorchRayActor:
 
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
-
-    def _configure_numa_placement(self, resolved_local_rank: int) -> None:
-        """Install host-memory placement before CUDA or model initialization."""
-        gpu_id = physical_gpu_id_for_worker(os.environ.get("CUDA_VISIBLE_DEVICES"), resolved_local_rank)
-        set_numa_affinity_for_gpu(gpu_id)
 
 
 class Worker(DistributedTorchRayActor):

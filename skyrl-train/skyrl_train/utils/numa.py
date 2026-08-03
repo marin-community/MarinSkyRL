@@ -102,6 +102,11 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
     return gpu_map if gpu_map else None
 
 
+# ---------------------------------------------------------------------------
+# Placement diagnostics
+# ---------------------------------------------------------------------------
+
+
 def memory_nodes_for_range(address: int, length: int, *, max_pages: int = 256) -> Dict[int, int]:
     """Return sampled physical NUMA node IDs mapped to their page counts."""
     if address <= 0 or length <= 0:
@@ -279,7 +284,12 @@ def get_gpu_cpu_affinity(gpu_physical_id: int) -> Optional[Tuple[List[int], int]
 
 
 def set_numa_affinity_for_gpu(gpu_id: int) -> None:
-    """Install GPU-local CPU affinity and an LPDDR-only policy when enabled."""
+    """Install GPU-local CPU affinity and an LPDDR-only policy when enabled.
+
+    The disabled path is a no-op. Once enabled, topology discovery, memory-policy
+    installation, and CPU binding are strict contracts: an undetectable or
+    disallowed topology and an empty CPU overlap raise ``RuntimeError``.
+    """
     if not is_numa_affinity_enabled():
         return None
 
