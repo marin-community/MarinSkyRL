@@ -65,8 +65,7 @@ RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and t
 DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
 IRIS_CANDIDATES = [
-    "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
-    "/Users/benjaminfeuer/Documents/marin/.venv/bin/iris",
+    os.path.expanduser("~/Documents/marin/.venv/bin/iris"),
     "iris",
 ]
 

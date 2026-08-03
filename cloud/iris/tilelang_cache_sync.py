@@ -60,7 +60,7 @@ is unset (e.g. the 30B-coder runs, which use no GDN/TileLang) both modes are a
 clean no-op. A missing cache key is ALSO a no-op, so the shim is harmless even
 if wired unconditionally.
 
-Standalone by design (no OT-Agent imports) so it runs identically from the pod's
+Standalone by design (no launcher imports) so it runs identically from the pod's
 bash wrapper regardless of PYTHONPATH state.
 """
 

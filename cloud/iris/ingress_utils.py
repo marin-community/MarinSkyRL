@@ -35,7 +35,7 @@ refreshes the token across harbor RE-SPAWNS (resume / campaign refills), not
 across trials within one running harbor process. A harbor run that stays up
 longer than the token TTL will outlive its token — keep individual harbor runs
 under 24h, or re-spawn to re-mint. There is no per-trial base_url resolution hook
-in the current OT-Agent->harbor plumbing.
+in the current launcher->harbor plumbing.
 """
 
 from __future__ import annotations

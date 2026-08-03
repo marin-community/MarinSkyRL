@@ -60,10 +60,11 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Mapping, Sequence, TypeVar
 
 # --- iris invocation ------------------------------------------------------
-# The CoreWeave GPU (k8s) backend needs a `kubernetes` install that the bare
-# marin `.venv` lacks; the otagent env has it AND ships the iris CLI, so use
-# that binary by default. Override with $IRIS_BIN if it ever moves.
-IRIS_BIN = os.environ.get("IRIS_BIN", "/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris")
+# The iris CLI lives in the marin repo's uv-managed .venv (editable install).
+# Sync with the controller extra for CoreWeave (k8s) support:
+#   cd ~/Documents/marin && uv sync --package marin-iris --extra controller
+# Override with $IRIS_BIN if the marin checkout lives elsewhere.
+IRIS_BIN = os.environ.get("IRIS_BIN", os.path.expanduser("~/Documents/marin/.venv/bin/iris"))
 DEFAULT_CLUSTER = "cw-us-east-02a"  # the GPU RL cluster; use "marin" for TPU jobs
 DEFAULT_BUNDLE_ROOT = Path.home() / "Documents" / "iris-job-bundles"
 

@@ -1,7 +1,7 @@
 """literal_proxy_utils.py — co-located RecordProxy wiring for literal-token capture.
 
 Drives harbor's LITERAL-TOKEN trace machinery (``harbor.literal.proxy.RecordProxy``)
-from the OT-Agent launch path. When ``--record_literal`` is set, the RL / datagen
+from the RL launch path. When ``--record_literal`` is set, the RL / datagen
 launchers co-locate a :class:`~harbor.literal.proxy.RecordProxy` alongside the
 on-cluster vLLM server and route the agent's inference endpoint THROUGH the proxy.
 The proxy transparently injects ``return_token_ids=True`` / ``logprobs=True`` into

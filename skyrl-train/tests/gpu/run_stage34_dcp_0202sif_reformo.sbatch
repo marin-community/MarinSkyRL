@@ -44,7 +44,7 @@ WT="${WT:-/e/scratch/jureap59/feuer1/vllm_dcp_wt}"
 SIF="${SIF:-/e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3.sif}"
 MODEL="${DCP_PARITY_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 
-export DCFT=/e/scratch/jureap59/feuer1/OpenThoughts-Agent
+export DCFT=/e/scratch/jureap59/feuer1/MarinSkyRL
 WORKDIR="$DCFT"
 cd "$WORKDIR"
 module load GCC/14.3.0 nvidia-compilers/25.9-CUDA-13 2>/dev/null || true

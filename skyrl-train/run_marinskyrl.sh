@@ -11,8 +11,8 @@ EVAL_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--Open
 
 CHAT_TEMPLATE_PATH="/home/ec2-user/SkyRL/skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2"
 TRIALS_DIR="/home/ec2-user/trials_run"
-CKPTS_DIR="/home/ec2-user/otagent/ckpts"
-EXPORTS_DIR="/home/ec2-user/otagent/exports"
+CKPTS_DIR="/home/ec2-user/marinskyrl/ckpts"
+EXPORTS_DIR="/home/ec2-user/marinskyrl/exports"
 
 # Run SkyRL command
 python -m examples.terminal_bench.entrypoints.main_tbench \
@@ -60,7 +60,7 @@ python -m examples.terminal_bench.entrypoints.main_tbench \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger=wandb \
   trainer.project_name=dc-agent \
-  trainer.run_name=otagent-rl \
+  trainer.run_name=marinskyrl-rl \
   trainer.resume_mode=latest \
   generator.backend=vllm \
   generator.run_engines_locally=true \

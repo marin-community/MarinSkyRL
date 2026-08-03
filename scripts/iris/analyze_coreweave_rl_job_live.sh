@@ -50,7 +50,7 @@
 # from the iris job_id display name. With no match the script lists candidate rl pods.
 #
 # ENV: PEEK_KUBECONFIG (default ~/.kube/coreweave-iris), NS (default iris), CONTAINER (default task),
-#      PEEK_CLUSTER (default cw-us-east-02a), IRIS_BIN (default the otagent cw-capable iris),
+#      PEEK_CLUSTER (default cw-us-east-02a), IRIS_BIN (default the marin .venv cw-capable iris),
 #      PEEK_OUT (output root for pull/frdump when no positional root is supplied),
 #      PEEK_TRIALS_S3 (override the remote trials_dir; default s3://marin-us-east-02a/iris/<jobname>/trace_jobs),
 #      PEEK_MAX_OBJECT_BYTES (pull: skip any single object larger than this; default 20MB=20971520,
@@ -67,8 +67,8 @@ export KUBECONFIG="${PEEK_KUBECONFIG:-$HOME/.kube/coreweave-iris}"
 NS="${NS:-iris}"
 CONTAINER="${CONTAINER:-task}"
 CLUSTER="${PEEK_CLUSTER:-cw-us-east-02a}"
-# Default to the OTAGENT iris (the marin .venv iris has a broken `kubernetes` import → cannot drive cw).
-IRIS_BIN="${IRIS_BIN:-/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris}"
+# Default to the marin .venv iris (sync with: cd ~/Documents/marin && uv sync --package marin-iris --extra controller).
+IRIS_BIN="${IRIS_BIN:-$HOME/Documents/marin/.venv/bin/iris}"
 PEEK_OUT="${PEEK_OUT:-}"
 
 resolve_output_root() {

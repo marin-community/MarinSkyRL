@@ -990,7 +990,7 @@ def autoconfigure_ingress(args: argparse.Namespace) -> None:
 def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
     """Fail loud BEFORE submit when ``--ingress-mode controller`` would produce a
     capability URL a Daytona sandbox CANNOT reach — the Exp2 opencode-RL blocker
-    (ported from OT-Agent 8fdabb12, extended for the federated remediation).
+    (ported from commit 8fdabb12, extended for the federated remediation).
 
     opencode runs in a Daytona sandbox and reaches the co-located vLLM over the public
     internet at ``https://<ingress_host>/proxy/t/<token>/<endpoint>/v1``. The endpoint
@@ -2183,7 +2183,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
 
     # Load --secrets-env into os.environ on the launch host (so launch-host
     # hooks see it) AND collect them for injection into the task. Reuse the
-    # (file overrides shell; same semantics as the OT-Agent iris launchers).
+    # (file overrides shell; same semantics as the iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
     if _rl_config_is_agentic(args.rl_config):

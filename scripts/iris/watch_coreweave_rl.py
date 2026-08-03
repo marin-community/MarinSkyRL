@@ -450,7 +450,6 @@ def run_iris(cluster: Cluster, arguments: list[str], *, timeout: int = 300) -> s
     return run_iris_command(
         arguments,
         cluster=cluster.name,
-        iris_bin="/Users/benjaminfeuer/miniconda3/envs/otagent/bin/iris",
         environment=environment,
         timeout=timeout,
     )

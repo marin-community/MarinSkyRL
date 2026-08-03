@@ -17,7 +17,7 @@ set -eo pipefail
 ulimit -c 0
 ulimit -n 65536 2>/dev/null || true
 
-export DCFT=/e/scratch/jureap59/feuer1/OpenThoughts-Agent
+export DCFT=/e/scratch/jureap59/feuer1/MarinSkyRL
 WORKDIR="$DCFT"
 SKYRL="$DCFT/SkyRL/skyrl-train"
 PY="$DCFT/envs/rl/bin/python"

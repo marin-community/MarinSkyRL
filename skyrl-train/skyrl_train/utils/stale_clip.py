@@ -2,7 +2,7 @@
 
 Hypothesis (formed from observed grad-spike + entropy-jump correlated with
 stale_min increments in late-training, low-entropy regimes on the
-OpenThoughts-Agent fully-async RL stack):
+MarinSkyRL fully-async RL stack):
 
   When the batch lacks an on-policy anchor (``stale_min > 0``) AND the
   policy has concentrated (rolling-window mean entropy below a threshold),

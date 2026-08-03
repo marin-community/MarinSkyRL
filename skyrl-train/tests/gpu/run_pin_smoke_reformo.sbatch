@@ -33,7 +33,7 @@ set -eo pipefail
 ulimit -c 0
 ulimit -n 65536 2>/dev/null || true
 
-export DCFT=/e/scratch/jureap59/feuer1/OpenThoughts-Agent
+export DCFT=/e/scratch/jureap59/feuer1/MarinSkyRL
 WORKDIR="$DCFT"
 WT=/e/scratch/jureap59/feuer1/tmp_pinning_smoke/SkyRL
 SIF=/e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm.sif

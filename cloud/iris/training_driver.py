@@ -265,7 +265,7 @@ class LocalRLRunner:
     def _ingress_context(self) -> Iterator[None]:
         """Guarded controller-ingress standup around the SkyRL subprocess.
 
-        Mirrors the OT-Agent RLJobRunner controller-ingress path, consolidated into the
+        Mirrors the RLJobRunner controller-ingress path, consolidated into the
         canonical MarinSkyRL runner:
 
           1. co-locate harbor's RecordProxy (``record_literal``) in front of the local

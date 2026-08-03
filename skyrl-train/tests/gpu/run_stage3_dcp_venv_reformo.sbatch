@@ -36,12 +36,12 @@ ulimit -c 0
 ulimit -n 65536 2>/dev/null || true
 
 WT="${WT:-/e/scratch/jureap59/feuer1/vllm_dcp_wt}"
-VENV="${VENV:-/e/scratch/jureap59/feuer1/OpenThoughts-Agent/envs/rl}"
+VENV="${VENV:-/e/scratch/jureap59/feuer1/MarinSkyRL/envs/rl}"
 PY="$VENV/bin/python"
 MODEL="${DCP_PARITY_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 ATTN="${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}"
 
-export DCFT=/e/scratch/jureap59/feuer1/OpenThoughts-Agent
+export DCFT=/e/scratch/jureap59/feuer1/MarinSkyRL
 WORKDIR="$DCFT"
 cd "$WORKDIR"
 module load GCC/14.3.0 nvidia-compilers/25.9-CUDA-13 2>/dev/null || true
