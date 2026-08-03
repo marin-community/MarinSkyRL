@@ -57,7 +57,12 @@ allocation was released after successful readback.
 - Remote run script SHA-256: `b939c36ff22cac6f98b48eca09730481d90fd353b8d320fc7ec70fddbca168aa`
 - Iris launcher SHA-256: `28f7ca3235a43d6c4174d644034a9cb617da2448cad1567118142e154aae7817`
 - Independent reader SHA-256: `e95301b20c4fd028249b6a72a05536d0c7995b269f8cc5e62997d844a53a4221`
-- Independent readback launcher SHA-256: `312f4370e8c8bc52d6277e82200756137e2a8c22967e73ecbb4710cfda575b9c`
+- Independent readback launcher SHA-256: `1e8d815c2aa09d3e4a70b97d64f1c408aaaf8c59b7020c5e23845fe920eb02d1`
+
+The readback launcher requires a clean evidence worktree and proves that the
+executed source commit is an ancestor of its current HEAD. This permits later
+evidence-only commits while the immutable image digest continues to pin the
+code that ran.
 
 Iris accepted the exact production-priority request. All four nodes joined one
 32-GPU Ray actor group. At `2026-08-03T02:20:35Z`, cgroup memory was 63--67 GiB
