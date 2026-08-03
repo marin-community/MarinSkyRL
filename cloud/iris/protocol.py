@@ -95,6 +95,7 @@ class IrisLaunchOptions:
     priority: str
     max_retries: int
     job_name: str
+    wandb_entity: str | None
 
 
 @dataclass(frozen=True)

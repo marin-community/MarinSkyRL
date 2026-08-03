@@ -155,6 +155,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
             priority="interactive",
             max_retries=3,
             job_name="iceball-test-attempt-1",
+            wandb_entity="marin-community",
         ),
     )
 
@@ -219,6 +220,7 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
     assert args.cpu == 128
     assert args.memory == "800GB"
     assert args.disk == "4TB"
+    assert args.wandb_entity == "marin-community"
 
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:

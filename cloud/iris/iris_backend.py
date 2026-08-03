@@ -300,6 +300,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str) -> list[str]:
         argv.extend(["--target-cluster", execution.target_cluster])
     if execution.parent_cluster_config:
         argv.extend(["--parent-cluster-config", execution.parent_cluster_config])
+    if execution.wandb_entity:
+        argv.extend(["--wandb-entity", execution.wandb_entity])
     for override in request.overrides:
         argv.extend(["--skyrl-override", override])
     return argv
@@ -1499,6 +1501,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="KEY=VALUE env file injected into the task (HF_TOKEN, WANDB_API_KEY, etc.). "
         "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
     )
+    parser.add_argument(
+        "--wandb-entity",
+        default=None,
+        help="W&B entity for this run. Overrides the launch host's ambient WANDB_ENTITY.",
+    )
     # ----------------------------------------------------------------------- #
     # MarinSkyRL runtime-knob flags (deslop stage 3). Each promotes a live      #
     # SKYRL_* runtime env var to a first-class CLI flag. ALL default to None    #
@@ -2347,6 +2354,8 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
         v = os.environ.get(k)
         if v:
             env_vars[k] = v
+    if args.wandb_entity:
+        env_vars["WANDB_ENTITY"] = args.wandb_entity
 
     # Federated controller-ingress pod plumbing (opencode-RL literal capture): the in-pod
     # worker mints the capability token at the PARENT (marin/iris.oa.dev) for the mirrored
