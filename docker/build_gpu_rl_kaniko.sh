@@ -9,6 +9,9 @@
 # architecture — the crane release asset, the platform crane selects out of the
 # multi-arch kaniko manifest, and the wheel MANIFEST platform tag — is derived
 # from `uname -m` rather than hardcoded.
+# SHELLOPTS can carry xtrace across Bash processes, so disable it before reading
+# registry credentials from the environment.
+set +x
 set -euo pipefail
 
 : "${GITSHA:?}"

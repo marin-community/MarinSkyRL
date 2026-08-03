@@ -53,6 +53,7 @@ import torch.distributed as dist
 import skyrl_train.model_wrapper as _mw
 import skyrl_train.distributed.cp_utils as _cp
 from skyrl_train.model_wrapper import HFModelWrapper
+from tests.distributed_runtime_constants import GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -385,7 +386,13 @@ def test3_cp_ep_moe(world_size, rank):
     # exercises the expert-DTensor slice over a 4-D mesh (the Stage-3 concern);
     # experts shard over the ep submesh (fsdp is size-1 here).
     try:
-        mesh4d = create_device_mesh(world_size=world_size, fsdp_size=1, ep_size=2, cp_size=2)
+        mesh4d = create_device_mesh(
+            world_size=world_size,
+            fsdp_size=1,
+            timeout_seconds=GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            ep_size=2,
+            cp_size=2,
+        )
     except Exception as e:
         if rank == 0:
             print(f"[TEST3] create_device_mesh(4-D) FAILED: {e!r}")

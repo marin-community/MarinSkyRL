@@ -5,9 +5,9 @@ This file defines MarinSkyRL's package commands and accelerator-test boundaries.
 
 ## Package suites
 
-Use the package-specific commands in [`AGENTS.md`](AGENTS.md#install-and-test). MarinSkyRL has no root `uv`
-workspace; run each package in its own environment. The workflow files under `.github/workflows/` are
-authoritative for exact CI commands.
+Use the commands in [`AGENTS.md`](AGENTS.md#install-and-test). The root `marinskyrl` project owns launcher and
+trainer installs; `skyrl-gym` and `skyrl-tx` retain their independent test environments. The workflow files
+under `.github/workflows/` are authoritative for exact CI commands.
 
 ## GPU suites
 

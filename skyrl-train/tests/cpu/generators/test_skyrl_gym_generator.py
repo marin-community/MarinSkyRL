@@ -1,5 +1,5 @@
 """
-uv run --extra dev --isolated pytest tests/cpu/generators/test_skyrl_gym_generator.py
+uv run --group dev --extra cpu --isolated pytest tests/cpu/generators/test_skyrl_gym_generator.py
 """
 
 import pytest
@@ -276,6 +276,52 @@ async def test_agent_loop_single_turn(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+@pytest.mark.parametrize("retokenize_chat_history", [False, True])
+async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+    retokenize_chat_history,
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = retokenize_chat_history
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = AssertionError("an overlong initial prompt must not enter the environment")
+    mock_llm.generate.side_effect = AssertionError("an overlong initial prompt must not reach inference")
+    mock_tokenizer.apply_chat_template.side_effect = lambda *_args, **_kwargs: [1, 2, 3, 4, 5]
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+    if retokenize_chat_history:
+        generator.custom_chat_template = "<custom>"
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Initial input"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=8,
+        max_input_length=4,
+    )
+
+    assert output.prompt_ids == [1, 2, 3, 4, 5]
+    assert output.response_ids == []
+    assert output.loss_mask == []
+    assert output.rollout_logprobs == []
+    assert output.reward == (0.0 if retokenize_chat_history else [])
+    assert output.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
 async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg):
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
@@ -386,6 +432,12 @@ def test_get_metrics_from_generator_output():
     uids = ["a", "b"]
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
     assert avg_score == 1.0
+    assert pass_at_n == 0.5
+
+    generator_output["response_ids"] = [[], [3, 4]]
+    generator_output["rewards"] = [[], [0.0, 1.0]]
+    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
+    assert avg_score == 0.5
     assert pass_at_n == 0.5
 
 

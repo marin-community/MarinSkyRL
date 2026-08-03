@@ -13,7 +13,7 @@ Validates on real GPUs (2 GPUs, deepspeed policy worker):
      take the identical loss code path; only the advantage values differ.
 
 Run with:
-    uv run --isolated --extra dev --extra deepspeed pytest \
+    uv run --isolated --group dev --extra deepspeed pytest \
         tests/gpu/gpu_ci/test_pbs_advantage_2gpu.py
 """
 

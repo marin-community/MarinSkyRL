@@ -7,7 +7,7 @@ Covers:
 - Regression: non-streaming path still returns ``JSONResponse``
 
 Run with:
-  uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_streaming.py
+  uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_streaming.py
 """
 
 import json

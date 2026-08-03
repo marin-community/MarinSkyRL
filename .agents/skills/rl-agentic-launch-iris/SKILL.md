@@ -6,7 +6,7 @@ description: Validate, submit, and observe agentic MarinSkyRL training on Iris w
 # Launch agentic RL on Iris
 
 Read `.agents/ops/coreweave.md`, the selected configuration, and the current
-`cloud.iris.launch_rl_iris` interface before constructing a command. Resolve cluster, image,
+`cloud.iris.iris_backend` interface before constructing a command. Resolve cluster, image,
 credentials, capacity, retry policy, and artifact destinations at execution time.
 
 ## Workflow

@@ -8,7 +8,7 @@ Run it on an otherwise idle node with at least four GPUs:
 
 ```bash
 cd skyrl-train
-uv run --isolated --extra dev --extra vllm \
+uv run --isolated --group dev --extra vllm \
   pytest -s tests/gpu/fault_injection/nccl_collective_contract.py
 ```
 
@@ -32,7 +32,7 @@ Run only the warmed production divergence experiment with:
 
 ```bash
 cd skyrl-train
-uv run --isolated --extra dev --extra vllm \
+uv run --isolated --group dev --extra vllm \
   pytest -s tests/gpu/fault_injection/nccl_collective_contract.py \
   -k warmed_production_phase_divergence
 ```
@@ -72,7 +72,7 @@ its filename deliberately remains outside pytest's default `test_*.py` discovery
 
 ## Four-node EP/FSDP traffic
 
-`multi_node_ep_fsdp_traffic.py` is a direct torchrun worker for a 16-rank mesh: four ranks per node, EP4 within
+`multi_node_ep_fsdp_worker.py` is a direct torchrun worker for a 16-rank mesh: four ranks per node, EP4 within
 each node, and FSDP4 across nodes. It rejects an allocation whose physical placement does not match that
 contract. It then verifies FSDP all-gather, reduce-scatter, and all-reduce payloads at several sizes; alternates
 those operations with node-local EP all-to-all; and repeats the cross-node traffic with one late-arriving rank
@@ -89,10 +89,46 @@ srun --nodes=4 --ntasks=4 --ntasks-per-node=1 bash -c '
   torchrun --nnodes=4 --nproc-per-node=4 \
     --node-rank="$SLURM_NODEID" \
     --master-addr="$MASTER_ADDR" --master-port="$MASTER_PORT" \
-    --module tests.gpu.fault_injection.multi_node_ep_fsdp_traffic
+    --module tests.gpu.fault_injection.multi_node_ep_fsdp_worker
 '
 ```
 
 Run from `skyrl-train/` in the same image and environment used by policy workers. The run passes only when one
 rank prints `MULTI_NODE_EP_FSDP_TRAFFIC_OK` and every torchrun agent exits zero. A hang is a failure; the
 process-group timeout is three minutes, so the enclosing cluster job needs a longer independent deadline.
+
+## Four-node permanent phase divergence
+
+`multi_node_nccl_contract.py` controls the dedicated `multi_node_phase_divergence_worker.py`; together they are
+the destructive counterpart to the healthy traffic test. They use the same 16-rank EP4/FSDP4 placement and
+blocking communicator mode. After every rank completes three EP all-to-all and
+inter-node FSDP all-gather warmup rounds, rank 0 enters an FSDP all-gather while the other 15 ranks enter EP
+all-to-all. Twelve ranks complete unaffected EP groups and remain alive; rank 0 and its three EP peers wait for
+participants that never arrive. The test passes only if the configured ProcessGroupNCCL deadline converts that
+permanent phase divergence into a nonzero gang exit.
+
+Run the pytest controller on the Slurm host directly from the batch process of an otherwise idle allocation
+containing exactly four four-GPU nodes. Do not put the controller inside Apptainer and do not wrap pytest in
+`srun`: it needs the host's `scontrol` and `srun`, and it owns the Slurm step and its bounded cleanup:
+
+```bash
+PYTHONPATH=<checkout>/skyrl-train /path/to/host/python -m pytest -s \
+  <checkout>/skyrl-train/tests/gpu/fault_injection/multi_node_nccl_contract.py \
+  --confcutdir=<checkout>/skyrl-train/tests/gpu/fault_injection \
+  --node-agent-command-prefix='apptainer exec --nv --pwd / <policy.sif>'
+```
+
+The controller enters the policy image only for its remote node agents, so the 16 ranks use the production
+PyTorch, CUDA, NCCL, and TorchTitan stack while orchestration remains on the Slurm host. It allows five minutes
+for rendezvous, mesh construction, and healthy warmup. It starts a separate
+two-minute fault deadline only after all 16 ranks report ready. Either deadline kills and reaps the disposable
+Slurm step under a separate bounded reap deadline and includes its captured output in the failure. A passing run emits
+16 warmup records, 16 readiness records with effective timeout and group membership, 16 fault-entry records,
+and 12 unaffected-EP completion records; no blocked collective may return normally.
+
+Pass the policy-image command through `--node-agent-command-prefix`. The controller prepends it to every remote
+node-agent command and invokes the image's `python`, so all four nodes use the same explicit policy runtime.
+Omitting the prefix fails before launch. The host Python needs this checkout and its test dependencies, but it
+is not the runtime under test. See
+`.agents/ops/jupiter/` for the current Jupiter policy-runtime command and GPFS-safe launch procedure.
+The `--confcutdir` boundary also prevents unrelated GPU fixtures from becoming host-controller dependencies.

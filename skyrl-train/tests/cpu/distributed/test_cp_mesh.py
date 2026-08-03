@@ -30,6 +30,7 @@ import os
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from tests.cpu.util import gloo_process_group
+from tests.distributed_runtime_constants import CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
 
 try:
     import pytest
@@ -70,7 +71,12 @@ def test_cp_mesh_divisibility_asserts():
     # cp_size does not divide world_size.
     raised = False
     try:
-        create_device_mesh(world_size=6, fsdp_size=1, cp_size=4)
+        create_device_mesh(
+            world_size=6,
+            fsdp_size=1,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=4,
+        )
     except AssertionError:
         raised = True
     assert raised, "cp_size not dividing world_size must raise"
@@ -78,7 +84,12 @@ def test_cp_mesh_divisibility_asserts():
     # fsdp_size * cp_size > world_size (ddp would be 0 / non-integer).
     raised = False
     try:
-        create_device_mesh(world_size=4, fsdp_size=4, cp_size=2)
+        create_device_mesh(
+            world_size=4,
+            fsdp_size=4,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=2,
+        )
     except AssertionError:
         raised = True
     assert raised, "fsdp_size*cp_size not dividing world_size must raise"
@@ -86,7 +97,13 @@ def test_cp_mesh_divisibility_asserts():
     # cp*ep*fsdp numel mismatch.
     raised = False
     try:
-        create_device_mesh(world_size=4, fsdp_size=2, cp_size=2, ep_size=2)
+        create_device_mesh(
+            world_size=4,
+            fsdp_size=2,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=2,
+            ep_size=2,
+        )
     except AssertionError:
         raised = True
     assert raised, "fsdp*cp*ep > world_size must raise"
@@ -101,19 +118,37 @@ def test_cp_mesh_divisibility_asserts():
 def _shape_worker(rank, world_size):
     with gloo_process_group(rank, world_size, 29557):
         # #1 (G1): cp_size=1 on a single fsdp group → UNCHANGED 1-D ["fsdp"].
-        m_1d = create_device_mesh(world_size=4, fsdp_size=4, cp_size=1, device_type="cpu")
+        m_1d = create_device_mesh(
+            world_size=4,
+            fsdp_size=4,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=1,
+            device_type="cpu",
+        )
         assert m_1d.mesh_dim_names == ("fsdp",), f"#1 1-D names={m_1d.mesh_dim_names}"
         assert tuple(m_1d.mesh.shape) == (4,), f"#1 1-D shape={tuple(m_1d.mesh.shape)}"
         assert "cp" not in m_1d.mesh_dim_names, "#1 cp dim must NOT be emitted at cp_size=1"
 
         # #1 (G1): cp_size=1 with fsdp_size=2 → UNCHANGED 2-D ["ddp","fsdp"].
-        m_2d = create_device_mesh(world_size=4, fsdp_size=2, cp_size=1, device_type="cpu")
+        m_2d = create_device_mesh(
+            world_size=4,
+            fsdp_size=2,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=1,
+            device_type="cpu",
+        )
         assert m_2d.mesh_dim_names == ("ddp", "fsdp"), f"#1 2-D names={m_2d.mesh_dim_names}"
         assert tuple(m_2d.mesh.shape) == (2, 2), f"#1 2-D shape={tuple(m_2d.mesh.shape)}"
         assert "cp" not in m_2d.mesh_dim_names
 
         # #2: cp_size=2 → ["ddp","fsdp","cp"], numel==world.
-        m_cp = create_device_mesh(world_size=4, fsdp_size=2, cp_size=2, device_type="cpu")
+        m_cp = create_device_mesh(
+            world_size=4,
+            fsdp_size=2,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=2,
+            device_type="cpu",
+        )
         assert m_cp.mesh_dim_names == ("ddp", "fsdp", "cp"), f"#2 names={m_cp.mesh_dim_names}"
         assert tuple(m_cp.mesh.shape) == (1, 2, 2), f"#2 shape={tuple(m_cp.mesh.shape)}"
         assert m_cp.mesh.numel() == world_size, f"#2 numel={m_cp.mesh.numel()} != {world_size}"
@@ -129,7 +164,14 @@ def _shape_worker(rank, world_size):
 def _shape_worker_cp_ep(rank, world_size):
     with gloo_process_group(rank, world_size, 29558):
         # #3: cp=2, ep=2, fsdp=2 on 8 ranks → (ddp=1, fsdp=2, cp=2, ep=2).
-        mesh = create_device_mesh(world_size=8, fsdp_size=2, cp_size=2, ep_size=2, device_type="cpu")
+        mesh = create_device_mesh(
+            world_size=8,
+            fsdp_size=2,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=2,
+            ep_size=2,
+            device_type="cpu",
+        )
         assert mesh.mesh_dim_names == ("ddp", "fsdp", "cp", "ep"), f"#3 names={mesh.mesh_dim_names}"
         assert tuple(mesh.mesh.shape) == (1, 2, 2, 2), f"#3 shape={tuple(mesh.mesh.shape)}"
         assert mesh.mesh.numel() == world_size, f"#3 numel={mesh.mesh.numel()} != {world_size}"
@@ -148,7 +190,13 @@ def _cp_group_worker(rank, world_size):
         # #5: cp_size=2 on 4 ranks → (ddp=1, fsdp=2, cp=2). The cp group this rank
         # belongs to must have world size == cp_size and contiguous, disjoint members.
         cp_size = 2
-        mesh = create_device_mesh(world_size=4, fsdp_size=2, cp_size=cp_size, device_type="cpu")
+        mesh = create_device_mesh(
+            world_size=4,
+            fsdp_size=2,
+            timeout_seconds=CPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS,
+            cp_size=cp_size,
+            device_type="cpu",
+        )
         cp_group = mesh["cp"].get_group()
         assert dist.get_world_size(cp_group) == cp_size, (
             f"#5 cp_group world_size={dist.get_world_size(cp_group)} != cp_size={cp_size}"

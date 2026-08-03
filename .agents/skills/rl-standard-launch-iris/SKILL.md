@@ -5,7 +5,7 @@ description: Validate, submit, and observe standard MarinSkyRL training on Iris 
 
 # Launch standard RL on Iris
 
-Read the selected configuration and current `cloud.iris.launch_rl_iris` interface. Resolve images,
+Read the selected configuration and current `cloud.iris.iris_backend` interface. Resolve images,
 resources, retries, names, capacity, and artifact destinations at execution time.
 
 ## Workflow

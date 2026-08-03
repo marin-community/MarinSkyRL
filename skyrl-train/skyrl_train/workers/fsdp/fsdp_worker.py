@@ -1,5 +1,7 @@
 import asyncio
 import os
+import socket
+from collections import Counter
 from dataclasses import dataclass
 
 from loguru import logger
@@ -22,6 +24,8 @@ from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regre
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
+from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
+from skyrl_train.utils.numa import memory_nodes_for_range
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
@@ -46,6 +50,82 @@ class GrugValidationSnapshot:
     rank: int
     attention_backend: str
     weights: dict[str, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class FSDPCpuOffloadNumaDiagnostics:
+    """Observed placement of persistent FSDP2 CPU-offload tensors."""
+
+    rank: int
+    host: str
+    cpu_nodes: tuple[int, ...]
+    cpu_affinity: tuple[int, ...]
+    affinity_nodes: tuple[int, ...]
+    memory_policy: MemoryPolicy
+    page_nodes: dict[int, int]
+    sampled_pages: int
+    sampled_tensors: int
+    sampled_bytes: int
+
+
+@dataclass(frozen=True)
+class _ParameterPageSample:
+    page_nodes: dict[int, int]
+    tensor_count: int
+    byte_count: int
+
+
+def _pinned_cpu_parameters_by_size(model: torch.nn.Module) -> list[torch.Tensor]:
+    parameters = []
+    for parameter in model.parameters():
+        local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+        if local_parameter.device.type == "cpu" and local_parameter.is_pinned() and local_parameter.numel() > 0:
+            parameters.append(local_parameter)
+    return sorted(parameters, key=lambda parameter: parameter.numel() * parameter.element_size(), reverse=True)
+
+
+def _sample_parameter_page_nodes(parameters: list[torch.Tensor], max_pages: int) -> _ParameterPageSample:
+    page_nodes: Counter[int] = Counter()
+    sampled_tensors = 0
+    sampled_bytes = 0
+    remaining_pages = max_pages
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    for parameter in parameters:
+        if remaining_pages == 0:
+            break
+        tensor_page_nodes = memory_nodes_for_range(
+            parameter.data_ptr(),
+            parameter.numel() * parameter.element_size(),
+            max_pages=min(64, remaining_pages),
+        )
+        page_nodes.update(tensor_page_nodes)
+        sampled_tensors += 1
+        sampled_page_count = sum(tensor_page_nodes.values())
+        sampled_bytes += sampled_page_count * page_size
+        remaining_pages -= sampled_page_count
+    return _ParameterPageSample(
+        page_nodes=dict(sorted(page_nodes.items())),
+        tensor_count=sampled_tensors,
+        byte_count=sampled_bytes,
+    )
+
+
+def _build_cpu_offload_numa_diagnostics(rank: int, page_sample: _ParameterPageSample) -> FSDPCpuOffloadNumaDiagnostics:
+    topology = cpu_numa_topology()
+    cpu_affinity = tuple(sorted(os.sched_getaffinity(0)))
+    affinity_nodes = tuple(sorted(node for node, cpus in topology.items() if set(cpu_affinity).intersection(cpus)))
+    return FSDPCpuOffloadNumaDiagnostics(
+        rank=rank,
+        host=socket.gethostname(),
+        cpu_nodes=tuple(sorted(topology)),
+        cpu_affinity=cpu_affinity,
+        affinity_nodes=affinity_nodes,
+        memory_policy=current_memory_policy(),
+        page_nodes=page_sample.page_nodes,
+        sampled_pages=sum(page_sample.page_nodes.values()),
+        sampled_tensors=page_sample.tensor_count,
+        sampled_bytes=page_sample.byte_count,
+    )
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -371,8 +451,13 @@ class FSDPWeightExtractor(WeightExtractor):
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
+    def get_cpu_offload_numa_diagnostics(self, max_pages: int = 4096) -> FSDPCpuOffloadNumaDiagnostics:
+        """Report the physical placement of persistent FSDP2 CPU-offload tensors."""
+        parameters = _pinned_cpu_parameters_by_size(self.model.model)
+        page_sample = _sample_parameter_page_nodes(parameters, max_pages)
+        return _build_cpu_offload_numa_diagnostics(self._rank, page_sample)
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
             self.model, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
         )
@@ -1069,7 +1154,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
 class FSDPCriticWorkerBase(CriticWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
             self.model, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
         )
@@ -1169,7 +1253,6 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
 
 class FSDPRefWorkerBase(RefWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):

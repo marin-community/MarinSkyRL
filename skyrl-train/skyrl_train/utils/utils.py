@@ -17,16 +17,15 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
-    DEFAULT_NCCL_TRACE_BUFFER_SIZE,
-    DEFAULT_WORKER_NCCL_TIMEOUT_IN_S,
-    get_nccl_monitor_heartbeat_timeout,
-    get_worker_nccl_timeout_s,
 )
 from .logging_utils import format_exception_text
+from .nccl_environment import worker_nccl_environment
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
@@ -1056,6 +1055,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # edge is moot. See feedback_uvloop_libuv_019_pin.
     env_vars["RAY_USE_UVLOOP"] = "0"
 
+    # Ray's job runtime environment is the explicit contract for worker-wide
+    # settings. Forward NUMA placement when the launcher opts in so the early
+    # worker hook and actor constructors observe the same value as the driver.
+    if NUMA_AFFINITY_ENV in os.environ:
+        env_vars[NUMA_AFFINITY_ENV] = os.environ[NUMA_AFFINITY_ENV]
+
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #
     # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
@@ -1082,84 +1087,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # boot in case import ordering races the runtime-env injection.
     env_vars["UV_USE_IO_URING"] = "0"
 
-    # ---------------------------------------------------------------------
-    # NCCL flight-recorder + finite-timeout instrumentation (Option A diag).
-    #
-    # The 80B R3 router-replay run (job 673119, EP=8xFSDP=6, 48-GPU policy)
-    # HARD-deadlocked at the first policy_train backward micro-iteration on an
-    # EP all-to-all / router-replay-recompute MoE-backward collective and spun
-    # ~115 min with NO watchdog teardown. Root cause of the *silent* spin:
-    # without TORCH_NCCL_ASYNC_ERROR_HANDLING the NCCL watchdog never tears the
-    # process down on a stuck collective, and with no flight recorder there is
-    # no per-rank stuck-collective trace.
-    #
-    # These vars enable the flight recorder and two independent failure bounds:
-    # the process-group watchdog times out an unfinished collective, while the
-    # monitor terminates the process if that watchdog itself stops heartbeating
-    # inside a CUDA/NCCL call. The latter is required for a hard liveness bound;
-    # async error handling alone cannot recover a wedged watchdog thread.
-    #
-    # These are propagated to EVERY Ray worker (policy/ref/inference) via the
-    # ray runtime env, the same path as RAY_USE_UVLOOP above. (NCCL_DEBUG /
-    # NCCL_DEBUG_SUBSYS are forced to INFO AFTER
-    # the launcher-env forwarding loop below -- see the override there -- because
-    # the OT-Agent launcher exports NCCL_DEBUG=WARN, which the forwarding loop
-    # would otherwise copy in and clobber an INFO set here.)
-    #
-    # Flight-recorder buffer size: torch 2.9 renamed TORCH_NCCL_TRACE_BUFFER_SIZE
-    # -> TORCH_FR_BUFFER_SIZE (old name still honored as a deprecated alias). Set
-    # both so the recorder is enabled regardless of the torch version in the SIF.
-    env_vars["TORCH_FR_BUFFER_SIZE"] = str(DEFAULT_NCCL_TRACE_BUFFER_SIZE)
-    env_vars["TORCH_NCCL_TRACE_BUFFER_SIZE"] = str(DEFAULT_NCCL_TRACE_BUFFER_SIZE)
-    env_vars["TORCH_NCCL_DUMP_ON_TIMEOUT"] = "1"
-    env_vars["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-    # Flight-recorder dump-on-timeout target. This MUST resolve to a path that is
-    # WRITABLE inside the worker process (per-pod on CoreWeave; per-node scratch on
-    # Jupiter). It was previously a hardcoded Jupiter ABSOLUTE path
-    # (/e/data1/.../nccl_trace/673_relaunch_rank), which on the CoreWeave pods does
-    # NOT exist -> FlightRecorder.cpp:21 "Error opening file for writing Flight
-    # Recorder debug info" on EVERY rank => the next-repro pickle was never written
-    # (2026-06-28 MoE NCCL hang: both arms wedged, zero FR dump). Now derive it from
-    # the launcher/yaml env (the iris configs set TORCH_NCCL_DEBUG_INFO_TEMP_FILE /
-    # TORCH_FR_DUMP_TEMP_FILE in extra_env) and DEFAULT to an in-pod /tmp dir that is
-    # writable everywhere. torch 2.9 renamed the cvar TORCH_NCCL_DEBUG_INFO_TEMP_FILE
-    # -> TORCH_FR_DUMP_TEMP_FILE (old name deprecated-but-honored); set BOTH so the
-    # dump lands regardless of the torch version baked in the image.
-    _fr_dump_path = (
-        os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
-        or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
-        or "/tmp/nccl_fr_rank"
-    )
-    env_vars["TORCH_FR_DUMP_TEMP_FILE"] = _fr_dump_path
-    env_vars["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] = _fr_dump_path
-    # Finite NCCL collective timeout, forwarded to the Ray workers. Resolved via
-    # the SINGLE canonical accessor (skyrl_train.utils.constants.
-    # get_worker_nccl_timeout_s: env override, else DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
-    # = 1800). Read back by constants.SKYRL_WORKER_NCCL_TIMEOUT_IN_S and applied at
-    # torch.distributed.init_process_group(timeout=...) in worker.py; the EP / FSDP
-    # device-mesh sub-groups receive the same timeout explicitly in
-    # fsdp_utils.py. Raised (was constants
-    # default 600 / here a 1200 floor) to 1800 so a stuck EP all-to-all or a slow
-    # 80B first-step forward / rank-0 full-state-dict materialize aborts (with a
-    # flight recorder dump) rather than SIGABRTing on the old watchdog. A config
-    # that sets a larger value (extra_env) gets it — the env var is the override.
-    try:
-        _cfg_nccl_timeout = get_worker_nccl_timeout_s()
-    except (TypeError, ValueError):
-        _cfg_nccl_timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
-    env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(_cfg_nccl_timeout)
-    _requested_heartbeat_timeout = get_nccl_monitor_heartbeat_timeout(
-        os.environ.get("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC")
-    )
-    _monitor_heartbeat_timeout = min(_requested_heartbeat_timeout, _cfg_nccl_timeout)
-    if _monitor_heartbeat_timeout != _requested_heartbeat_timeout:
-        logger.warning(
-            "Capping TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC from {} to the {}-second collective timeout",
-            _requested_heartbeat_timeout,
-            _cfg_nccl_timeout,
-        )
-    env_vars["TORCH_NCCL_ENABLE_MONITORING"] = "1"
-    env_vars["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] = str(_monitor_heartbeat_timeout)
+    env_vars.update(worker_nccl_environment())
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
@@ -1375,16 +1303,16 @@ def initialize_ray(cfg: DictConfig):
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,
-    # BEFORE the C++ CoreWorker builds an async actor's concurrency-group event loop.
-    # It forces CPython stock asyncio (no uvloop/libuv) in EVERY worker -- the only
-    # reliable place to cover the RolloutCoordinator concurrency-group loop that
-    # SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor __init__ reset.
+    # BEFORE the C++ CoreWorker builds actor threads. It installs the inherited
+    # host-memory policy and forces CPython stock asyncio (no uvloop/libuv) in every
+    # worker -- the only reliable place to cover concurrency-group loops that are
+    # created before an actor constructor can reset their event-loop policy.
     # Referenced by fully-qualified name string (importable in every worker via the
     # editable skyrl_train install) so Ray does not have to cloudpickle it.
     ray.init(
         runtime_env={
             "env_vars": env_vars,
-            "worker_process_setup_hook": "skyrl_train.worker_setup.force_stock_asyncio_in_worker",
+            "worker_process_setup_hook": "skyrl_train.worker_setup.configure_worker_process",
         }
     )
 

@@ -23,7 +23,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.start_rl_iris_controller import (  # noqa: E402
+from cloud.iris.task_runtime import (  # noqa: E402
     _iface_for_ip,
     pin_socket_ifname,
     training_driver_env,

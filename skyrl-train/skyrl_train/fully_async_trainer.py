@@ -32,6 +32,7 @@ from typing import List, Optional, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 
 
 @dataclass
@@ -653,7 +654,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("step", self.all_timings):
                     # 1. Wait until we have enough groups buffered.
                     cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
-                    with Timer("wait_for_generation_buffer", self.all_timings):
+                    with (
+                        Timer("wait_for_generation_buffer", self.all_timings),
+                        critical_phase("rollout_or_inference_wait"),
+                    ):
                         buffer_pbar = tqdm(
                             total=self.mini_batch_size,
                             initial=0,
@@ -668,6 +672,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         while len(cur_generation_group_mini_batch) < self.mini_batch_size:
                             # We do finish-time FIFO here (not schedule-time FIFO)
                             cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                            record_rollout_buffer(
+                                generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize
+                            )
                             buffer_pbar.update(1)
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                         buffer_pbar.close()
@@ -803,6 +810,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 pbar.update(1)
 
                 last_completed_step = self.global_step
+                record_policy_step(self.global_step)
                 self.global_step += 1
 
                 # 9. Notify generation workers that the capacity has increased, unblocking them.
@@ -942,7 +950,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model
-        with Timer("train_critic_and_policy", self.all_timings):
+        with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
@@ -990,6 +998,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                 else:
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                record_generated_work(
+                    cur_generator_output["response_ids"],
+                    cur_generator_output.get("is_last_step"),
+                )
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 # Prefer the actual global_step captured at first vLLM inference (more accurate
@@ -1029,8 +1041,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         generator_output=cur_generator_output,
                         uid=uids[0],
                         global_step_when_scheduled=staleness_step,
-                    )
+                    ),
                 )
+                record_rollout_buffer(generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:

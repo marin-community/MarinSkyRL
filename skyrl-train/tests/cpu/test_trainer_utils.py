@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
 from skyrl_train.utils.trainer_utils import (
