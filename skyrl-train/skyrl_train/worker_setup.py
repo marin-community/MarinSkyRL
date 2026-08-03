@@ -8,10 +8,13 @@ so CUDA cannot be initialized against the driver's device view first.
 import asyncio
 import os
 
+from skyrl_train.numa_policy import set_host_memory_policy
+
 
 def force_stock_asyncio_in_worker() -> None:
-    """Use stock asyncio and disable uvloop's libuv paths in Ray workers."""
+    """Install process-wide prerequisites before Ray creates actor threads."""
 
+    set_host_memory_policy()
     os.environ["UV_USE_IO_URING"] = "0"
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 

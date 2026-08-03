@@ -21,7 +21,15 @@ pinned FSDP2 parameters, and requires an LPDDR-only binding with GPU-local place
 
 ## Results
 
-Pending.
+The pre-fix contract failed on Jupiter job 1216544, one four-GPU GH200 node, after initializing the production
+FSDP2 policy-worker path. The worker still had the default memory policy after its pinned offload shards existed;
+3,601 sampled pages were spread across LPDDR nodes 0, 1, and 2. This validates the test's red state without
+relying on the separate production OOM.
+
+The implementation installs an LPDDR-only hard memory policy in Ray's worker-process setup hook, before actor
+threads are created, then repeats it alongside GPU-local CPU affinity in the actor constructor before CUDA or
+FSDP2 initialization. The late lifecycle calls were removed because they cannot affect storage FSDP2 already
+created.
 
 ## Future work
 

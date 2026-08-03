@@ -24,7 +24,8 @@ from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regre
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
-from skyrl_train.utils.numa import cpu_numa_topology, current_memory_policy, memory_nodes_for_range
+from skyrl_train.numa_policy import cpu_numa_topology, current_memory_policy
+from skyrl_train.utils.numa import memory_nodes_for_range
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
@@ -418,7 +419,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         }
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
             self.model, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
         )
@@ -1115,7 +1115,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
 class FSDPCriticWorkerBase(CriticWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(
             self.model, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
         )
@@ -1215,7 +1214,6 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
 
 class FSDPRefWorkerBase(RefWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True, **kwargs):
