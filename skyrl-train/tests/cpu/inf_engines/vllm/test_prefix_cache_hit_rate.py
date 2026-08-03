@@ -4,8 +4,7 @@ Run with:
 uv run --frozen pytest tests/cpu/inf_engines/vllm/test_prefix_cache_hit_rate.py
 """
 
-import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -90,15 +89,14 @@ def test_the_peak_covers_iterations_the_median_skips():
     assert accumulator.samples == []
 
 
-def test_the_fake_carries_the_same_fields_as_vllms_prefix_cache_stats():
+def test_the_rate_accepts_vllms_real_prefix_cache_stats():
     """A wrong field name caused this bug, and a hand-written fake cannot catch that alone.
 
-    Skipped in CPU CI, which has no vLLM. It runs wherever the vllm extra is installed and
-    fails on the next vLLM bump that renames or drops one of these counters.
+    Skipped in CPU CI, which has no vLLM. It runs wherever the vLLM extra is installed and
+    fails if a vLLM bump removes the counters this calculation reads.
     """
     pytest.importorskip("vllm")
     from vllm.v1.metrics.stats import PrefixCacheStats
 
-    assert {f.name for f in dataclasses.fields(FakePrefixCacheStats)} == {
-        f.name for f in dataclasses.fields(PrefixCacheStats)
-    }
+    stats = replace(PrefixCacheStats(), requests=1, queries=1000, hits=250)
+    assert prefix_cache_hit_rate_percent(stats) == 25.0

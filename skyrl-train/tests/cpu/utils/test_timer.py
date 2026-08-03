@@ -4,7 +4,7 @@ Run with:
 uv run --frozen pytest tests/cpu/utils/test_timer.py
 """
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import pytest
 

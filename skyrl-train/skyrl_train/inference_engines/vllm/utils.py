@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, List, Optional, Protocol
+from typing import Any, Dict, Protocol
 
 
 class PrefixCacheStatsLike(Protocol):
@@ -9,7 +9,7 @@ class PrefixCacheStatsLike(Protocol):
     hits: int
 
 
-def prefix_cache_hit_rate_percent(stats: PrefixCacheStatsLike) -> Optional[float]:
+def prefix_cache_hit_rate_percent(stats: PrefixCacheStatsLike) -> float | None:
     """Share of queried prefix tokens that were already cached, as a percentage.
 
     `PrefixCacheStats` counts tokens, not requests: `queries` is how many were looked up and
@@ -35,9 +35,9 @@ class PrefixCacheHitRateAccumulator:
 
     def __init__(self) -> None:
         self.peak: float = 0.0
-        self.samples: List[float] = []
+        self.samples: list[float] = []
 
-    def observe(self, stats: Optional[PrefixCacheStatsLike], is_active: bool) -> None:
+    def observe(self, stats: PrefixCacheStatsLike | None, is_active: bool) -> None:
         """Fold one scheduler iteration in, where `is_active` means it had queued or running work."""
         if stats is None:
             return
