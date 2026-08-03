@@ -86,7 +86,8 @@ failed and its three gang siblings `cosched_failed`. The later Ray zombie and
 SIGKILL messages are shutdown cleanup, not the cause.
 
 The independent reader verified the 11,373,214-byte object and its canonical
-digest. Initial and final topology and worker identities match. Selection and
+digest. Initial and final topology and worker identities match within the
+recorded actor group. Selection and
 warmup restore checks pass. Both arms have 476 finite nonempty gradient tensors
 and at least 2,096,173,280 gradient elements per rank. Baseline and finish
 gradients are empty, and the final model state is restored. The structural
@@ -104,8 +105,8 @@ The invalid pair nevertheless records these observational timings:
 
 | Arm | Synchronized wall | Nonpadding tokens/s | Routed expert time | Non-routed time | Peak allocated HBM | Total GPU-s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| eager | 6,866.115339 s | 3,654.966 | 5,675.614517 s | 1,190.500822 s | 37.574300 GiB | 219,715.691 |
-| grouped | 364.986519 s | 68,757.115 | 75.493324 s | 289.493195 s | 35.763228 GiB | 11,679.569 |
+| eager, critical rank 17 | 6,866.115339 s | 3,654.966 | 5,675.614517 s | 1,190.500822 s | 37.574300 GiB | 219,715.691 |
+| grouped, critical rank 8 | 364.986519 s | 68,757.115 | 75.493324 s | 289.493195 s | 35.763228 GiB | 11,679.569 |
 
 The observed wall and throughput ratio is `18.811970x`, with an observed
 208,036.122-GPU-second difference. These are not a causal recovery claim
@@ -116,12 +117,37 @@ per 1,600 GiB task, roughly 1.89 TiB physical RAM available per node, no swap,
 and zero memory-pressure or OOM events. Peak reserved HBM was 47.648438 GiB in
 both arms.
 
+The routed and non-routed values are each a wall partition on that arm's own
+critical rank. They are not a matched cross-rank component attribution.
+
+The eight-H100 gate checked 24 representative action log probabilities. The
+headline checked 12,288 under the same frozen rule. The gate's pass therefore
+had much less coverage of the full replay distribution; its maximum output
+allowance ratio was already `0.559959`.
+
 The exact remaining discriminator is a full-headline, per-token route
 membership comparison under the already recorded adjusted-logit margin rule.
-The completed headline intentionally did not retain routes. Obtaining that
-evidence would require changing the frozen headline diagnostics and running a
-second 32-H100 pair. That is a new substantive cycle beyond the one gate and
-one pair authorized by this closeout; changing the output tolerance after
-seeing this result is also forbidden. The bounded outcome is therefore to
-leave #7903 open with this failed validity evidence. MarinSkyRL #276 remains
-unchanged.
+The frozen implementation retains every eager microbatch's full adjusted-logit
+tensor and selected-expert IDs in device memory until the grouped comparison.
+Headline mode has 128 microbatches per rank versus one in the gate, so enabling
+the existing route mechanism would scale that retained state by 128x and would
+change both HBM headroom and the measured program. The predeclared contract
+therefore kept full route adjudication in the gate. This was a bounded harness
+choice, and it leaves a real headline evidence gap.
+
+Obtaining that evidence requires changed diagnostics and a second 32-H100 pair.
+The next pair is acceptable only if the unchanged output, CE, identity, state,
+gradient-finiteness, and oracle rules all pass and route comparison reports zero
+unexplained changed tokens, unless a replacement contract is separately
+authorized and recorded before new data. Route explanation alone cannot
+retroactively validate this pair or its `18.811970x` observation. A second cycle
+is beyond the one gate and one pair authorized here; changing the output
+tolerance after seeing this result is also forbidden.
+
+Four High reviews found the bounded blocked conclusion correct. Material
+provenance and reporting findings were addressed by archiving the exact launch
+chain, recording the registry tag-to-digest binding, and running CPU Iris job
+`/romain/grug-paired-strict-readback-2dd905e-s1-20260803`. Its verifier asserted
+every external pin and independently recomputed all numeric semantic checks from
+raw samples, reproducing the 1,995 output violations and the failed verdict.
+See `VALIDATION_AND_REVIEW.md`. MarinSkyRL #276 remains unchanged.
