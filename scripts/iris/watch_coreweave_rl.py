@@ -161,6 +161,7 @@ class RlJob:
     entrypoint: str
     dataset: str = "—"
     finished_at_ms: int | None = None
+    task_state: str | None = None
 
     @property
     def short_name(self) -> str:
@@ -507,7 +508,16 @@ def discover_rl_jobs(
     where_user = "" if user is None else f" AND j.job_id LIKE '/{user}/%'"
     where_submission = "" if submitted_since_ms is None else f" AND j.submitted_at_ms >= {submitted_since_ms}"
     sql = (
-        "SELECT j.job_id, j.state, j.submitted_at_ms, j.finished_at_ms, jc.entrypoint_json "
+        "SELECT j.job_id, j.state, j.submitted_at_ms, j.finished_at_ms, jc.entrypoint_json, "
+        # Iris reports the root RL job as running (state 3) as soon as it is
+        # accepted, which can be long before any workload task is placed on a
+        # node. The highest active task state distinguishes "controller
+        # accepted" from "workload actually placed".
+        "CASE "
+        "WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state=3) THEN 3 "
+        "WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state=2) THEN 2 "
+        "WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=j.job_id AND t.state=1) THEN 1 "
+        "ELSE NULL END AS task_state "
         "FROM jobs j JOIN job_config jc ON j.job_id=jc.job_id "
         "WHERE ("
         f"j.state IN ({','.join(str(state) for state in sorted(ACTIVE_STATES))}) "
@@ -534,6 +544,7 @@ def discover_rl_jobs(
             submitted_at_ms = int(row["submitted_at_ms"])
         except (KeyError, ValueError):
             continue
+        task_state_value = row.get("task_state")
         jobs.append(
             IrisRlJob(
                 cluster=cluster,
@@ -543,6 +554,9 @@ def discover_rl_jobs(
                 entrypoint=entrypoint,
                 dataset=dataset_from_entrypoint(entrypoint),
                 finished_at_ms=int(row["finished_at_ms"]) if row.get("finished_at_ms") else None,
+                task_state=(
+                    STATE_NAMES.get(int(task_state_value), f"state-{task_state_value}") if task_state_value else None
+                ),
             )
         )
     return jobs, []
@@ -1009,11 +1023,26 @@ def _monitor_error(scope: str, operation: str, error: object) -> MonitorError:
 def _state_cell(state: str) -> StyledCell:
     if state in {"running", "succeeded"}:
         tone = "success"
-    elif state in {"pending", "building"}:
+    elif state in {"pending", "building", "awaiting placement"}:
         tone = "warning"
     else:
         tone = "error"
     return StyledCell(state, tone)
+
+
+def effective_state(job: RlJob) -> str:
+    """Return ``awaiting placement`` when the workload has not started running.
+
+    Iris marks the root RL job running (state 3) as soon as the controller is
+    accepted, which can be long before any task is placed on a node. The active
+    task state distinguishes a job that is merely queued from one whose pods are
+    up and consuming resources.
+    """
+    if job.state in {"pending", "building"}:
+        return "awaiting placement"
+    if job.state == "running" and job.task_state in {"pending", "building"}:
+        return "awaiting placement"
+    return job.state
 
 
 def job_filter_values(job: MonitoredJob, *, now_ms: int) -> dict[str, str]:
@@ -1024,7 +1053,7 @@ def job_filter_values(job: MonitoredJob, *, now_ms: int) -> dict[str, str]:
         "name": job.short_name,
         "dataset": job.dataset,
         "type": "RL",
-        "state": job.state,
+        "state": effective_state(job),
         "submitted": datetime.fromtimestamp(job.submitted_at_ms / 1000, UTC).strftime("%m-%d %H:%M"),
         "duration": format_duration(job.submitted_at_ms, job.finished_at_ms, now_ms=now_ms),
     }
@@ -1055,7 +1084,7 @@ def report_row(job: MonitoredJob, artifacts: ArtifactResult, directory: Path) ->
     return [
         f"{job.cluster.name}/{job.short_name}",
         job.dataset,
-        _state_cell(job.state),
+        _state_cell(effective_state(job)),
         step_display,
         display_metric(reward),
         display_metric(policy_loss),
@@ -1408,7 +1437,7 @@ def build_job_report_entry(settings: MonitorSettings, synced: SyncedJob) -> JobR
         row = [
             f"{job.cluster.name}/{job.short_name}",
             job.dataset,
-            _state_cell(job.state),
+            _state_cell(effective_state(job)),
             "—",
             "—",
             "—",
