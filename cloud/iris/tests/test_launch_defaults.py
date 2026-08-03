@@ -19,7 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
-from cloud.iris.launch_rl_iris import (  # noqa: E402
+from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
     build_skyrl_flag_env,
     build_task_command,
@@ -33,7 +33,7 @@ from cloud.iris.rl_config_translation import (  # noqa: E402
     RL_CONFIG_TASK_DIR,
     materialize_rl_config,
 )
-from cloud.iris.start_rl_iris_controller import stage_model  # noqa: E402
+from cloud.iris.task_runtime import stage_model  # noqa: E402
 
 
 def _cluster_config(
@@ -136,7 +136,7 @@ def test_node_resource_requests_use_selected_gpu_shape_allocatable_resources(
     ]
 
     monkeypatch.setattr(
-        "cloud.iris.launch_rl_iris.subprocess.run",
+        "cloud.iris.iris_backend.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes})),
     )
 
@@ -184,7 +184,7 @@ def test_node_resource_requests_fit_the_requested_gang_on_busy_nodes(
     pods.append(_pod_snapshot("finished", node="gpu-0", memory="900Gi", phase="Failed"))
 
     monkeypatch.setattr(
-        "cloud.iris.launch_rl_iris.subprocess.run",
+        "cloud.iris.iris_backend.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps({"items": nodes + pods})),
     )
 

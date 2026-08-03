@@ -133,7 +133,7 @@ def test_gpu_rl_images_validate_the_same_harbor_runtime() -> None:
 
 
 def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -> None:
-    """Exercise the Dockerfile's dependency gate against representative reports."""
+    """Exercise the shared dependency gate against representative reports."""
     report = tmp_path / "pip-check"
     common = [
         "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed",

@@ -48,7 +48,7 @@ DEFAULT_EXPORT_TRAIN_DATA = '["DCAgent/exp_rpt_curriculum-easy"]'
 
 
 def build_command(args: argparse.Namespace) -> list[str]:
-    """Return the launch_rl_iris command that performs an export-only run."""
+    """Return the Iris backend command that performs an export-only run."""
     ckpt_root = args.ckpt_path.rstrip("/")
     resume_path = f"{ckpt_root}/global_step_{args.step}"
     export_path = args.export_path or f"{ckpt_root.rsplit('/', 1)[0]}/exports"
@@ -73,7 +73,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
-        "cloud.iris.launch_rl_iris",
+        "cloud.iris.iris_backend",
         "--rl_config",
         args.rl_config,
         "--model_path",

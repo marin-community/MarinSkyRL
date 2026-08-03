@@ -259,7 +259,7 @@ RUN cd ${SKYRL_HOME} && \
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the OT-Agent iris launcher's hardcoded
-# RL_PYTHON=/opt/openthoughts/envs/rl/bin/python (rl/cloud/launch_rl_iris.py) —
+# RL_PYTHON=/opt/openthoughts/envs/rl/bin/python (cloud/iris/iris_backend.py) —
 # the same path the standard FSDP2 gpu-rl image uses. Building it under
 # /opt/skyrl/envs/rl made every task die with
 # "/opt/openthoughts/envs/rl/bin/python: No such file or directory".
@@ -460,9 +460,11 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
-# The pip-check gate below always prints the full conflict report. AMD64 has
-# exactly three known metadata conflicts: aiobotocore/botocore, Harbor's
+# The pip-check gate below always prints the full conflict report. Standard
+# AMD64 has three known metadata conflicts: aiobotocore/botocore, Harbor's
 # gcsfs/fsspec pair, and vLLM/quack-kernels' mutually exclusive CUTLASS bounds.
+# Megatron adds its three bridge diagnostics and two TransformerEngine metadata
+# diagnostics, all enumerated by the shared validator.
 # Runtime import and dependency-metadata gates above validate the selected
 # implementations. The root lock
 # resolves the launch and Megatron OpenTelemetry constraints together, and the
@@ -513,8 +515,7 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python cloudpickle py-spy memray &
 # =============================================================================
 # Environment configuration
 # =============================================================================
-# The baked editable skyrl-train is importable; the launcher prepends the runtime-
-# synced source so it wins. Only the skyrl-train tree is on the path.
+# The baked editable skyrl-train tree is the trainer source used at runtime.
 ENV PYTHONPATH="${SKYRL_HOME}/skyrl-train"
 
 RUN echo "ulimit -n 65535" >> /etc/profile.d/skyrl-ulimit.sh

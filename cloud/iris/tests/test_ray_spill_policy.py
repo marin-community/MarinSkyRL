@@ -7,7 +7,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris import start_rl_iris_controller as controller  # noqa: E402
+from cloud.iris import task_runtime as runtime  # noqa: E402
 from cloud.iris.ray_storage import (  # noqa: E402
     DEFAULT_RAY_SPILL_DIR,
     LocalRaySpillTarget,
@@ -17,13 +17,13 @@ from cloud.iris.ray_storage import (  # noqa: E402
 
 
 def test_remote_spilling_requires_explicit_opt_in():
-    local = controller._ray_spill_target(
+    local = runtime._ray_spill_target(
         "s3://marin-us-east-02a/iris/rl-rdv/job",
         RaySpillBackend.LOCAL,
         DEFAULT_RAY_SPILL_DIR,
     )
 
-    remote = controller._ray_spill_target(
+    remote = runtime._ray_spill_target(
         "s3://marin-us-east-02a/iris/rl-rdv/job",
         RaySpillBackend.R2,
         DEFAULT_RAY_SPILL_DIR,
@@ -37,7 +37,7 @@ def test_remote_spilling_fails_when_backend_dependency_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "boto3", None)
 
     with pytest.raises(RuntimeError, match="requires boto3"):
-        controller._ray_spill_target(
+        runtime._ray_spill_target(
             "s3://marin-us-east-02a/iris/rl-rdv/job",
             RaySpillBackend.R2,
             DEFAULT_RAY_SPILL_DIR,
@@ -46,12 +46,12 @@ def test_remote_spilling_fails_when_backend_dependency_is_missing(monkeypatch):
 
 def test_remote_spilling_rejects_non_s3_rendezvous():
     with pytest.raises(ValueError, match="requires an s3:// rendezvous directory"):
-        controller._ray_spill_target("/shared/rendezvous/job", RaySpillBackend.R2, DEFAULT_RAY_SPILL_DIR)
+        runtime._ray_spill_target("/shared/rendezvous/job", RaySpillBackend.R2, DEFAULT_RAY_SPILL_DIR)
 
 
 def test_remote_spilling_rejects_local_directory_override():
     with pytest.raises(ValueError, match="only applies.*local"):
-        controller._ray_spill_target(
+        runtime._ray_spill_target(
             "s3://marin-us-east-02a/iris/rl-rdv/job",
             RaySpillBackend.R2,
             "/local/nvme/ray-spill",

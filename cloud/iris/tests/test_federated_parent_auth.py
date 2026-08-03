@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import cloud.iris.launch_rl_iris as launcher  # noqa: E402
+import cloud.iris.iris_backend as launcher  # noqa: E402
 
 
 def _args() -> argparse.Namespace:

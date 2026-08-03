@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap a multi-node MarinSkyRL RL job on an iris GPU slice.
+"""Supervise one node of a multi-node MarinSkyRL Iris task.
 
 iris gang-schedules a multi-node job as N coscheduled tasks (one per node) and
 runs THIS SAME entrypoint on every node, injecting ``IRIS_TASK_ID`` /
@@ -35,11 +35,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
-
-import fsspec
-
-from cloud.iris.export_contract import SOURCE_MANIFEST_FILENAME, relative_object_key, validate_hf_export
+from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, validate_hf_export
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
@@ -97,7 +93,7 @@ RAY_START_HEAD_TIMEOUT = 300  # seconds
 
 
 def _log(msg: str) -> None:
-    print(f"[start_rl_iris_controller] {msg}", flush=True)
+    print(f"[task-runtime] {msg}", flush=True)
 
 
 def stage_train_data(train_data_json: str) -> None:
@@ -366,76 +362,28 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     raise RuntimeError(f"model prestage failed after 6 attempts for {model_path}: {last_err}")
 
 
-@dataclass(frozen=True)
-class StagedFile:
-    path: str
-    size: int
-
-
-@dataclass(frozen=True)
-class StagedSource:
-    uri: str
-    local_path: str
-    identity: str
-
-
-def _materialize_object_store_tree(source_uri: str, local_path: str) -> list[StagedFile]:
-    """Copy one object-store tree and return its verified file inventory."""
-    filesystem, source_path = _fs_and_path(source_uri)
-    files = sorted(path for path in filesystem.find(source_path) if not filesystem.isdir(path))
-    if not files:
-        raise ValueError(f"Object-store source contains no files: {source_uri}")
-
-    target = os.path.abspath(local_path)
-    os.makedirs(target, exist_ok=True)
-    copied: list[StagedFile] = []
-    for source_file in files:
-        relative = relative_object_key(source_path, source_file)
-        destination = os.path.join(target, relative)
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        expected_size = int(filesystem.info(source_file)["size"])
-        if not os.path.exists(destination) or os.path.getsize(destination) != expected_size:
-            filesystem.get_file(source_file, destination)
-        actual_size = os.path.getsize(destination)
-        if actual_size != expected_size:
-            raise ValueError(f"Staging size mismatch for {relative}: expected {expected_size}, found {actual_size}")
-        copied.append(StagedFile(path=relative, size=actual_size))
-
-    return copied
-
-
-def _record_staged_source(source: StagedSource, copied: list[StagedFile], kind: str) -> None:
-    manifest = {
-        "source_uri": source.uri,
-        "source_identity": source.identity,
-        "files": [asdict(entry) for entry in copied],
-    }
-    target = os.path.abspath(source.local_path)
-    with open(os.path.join(target, SOURCE_MANIFEST_FILENAME), "w") as destination:
-        json.dump(manifest, destination, sort_keys=True)
+def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Copy and validate an object-store HF export on this allocated node."""
+    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    artifact = materialize(source, validate=validate_hf_export)
     _log(
-        f"{kind} staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {target} "
-        f"({len(copied)} files, identity={source.identity})"
+        f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"({len(artifact.files)} files, identity={source.identity})"
     )
 
 
-def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
-    """Copy and validate an object-store HF export on this allocated node."""
-    source = StagedSource(uri=source_uri, local_path=local_path, identity=source_identity)
-    copied = _materialize_object_store_tree(source.uri, source.local_path)
-    validate_hf_export({entry.path for entry in copied}, source_uri)
-    _record_staged_source(source, copied, "Model export")
-
-
 def materialize_data_sources(data_sources_json: str) -> None:
-    """Copy immutable training-data locators onto this allocated node."""
+    """Copy immutable train and validation data locators onto this allocated node."""
     sources = json.loads(data_sources_json)
     if not isinstance(sources, list):
         raise ValueError("--data-sources-json must contain a JSON list")
     for value in sources:
-        source = StagedSource(uri=value["uri"], local_path=value["local_path"], identity=value["identity"])
-        copied = _materialize_object_store_tree(source.uri, source.local_path)
-        _record_staged_source(source, copied, "Training data")
+        source = ArtifactSource(uri=value["uri"], local_path=value["local_path"], identity=value["identity"])
+        artifact = materialize(source)
+        _log(
+            f"Dataset staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+            f"({len(artifact.files)} files, identity={source.identity})"
+        )
 
 
 # Special tokens the delphi_v0 reasoning protocol depends on; asserted present in the
@@ -652,30 +600,11 @@ def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _fs_and_path(uri: str):
-    """Return (fsspec filesystem, path) for ``uri``. Uses default credential
-    discovery for the scheme (workload identity / instance creds / env keys).
-
-    For ``s3://`` the CoreWeave object store (marin-us-east-02a) REQUIRES
-    virtual-hosted addressing — path-style PutObject/CreateMultipartUpload get
-    rejected with ``PathStyleRequestNotAllowed``. s3fs otherwise defaults to
-    path-style for a custom endpoint_url, so pin the botocore
-    ``addressing_style`` explicitly. The ``OT_AGENT_S3_ADDRESSING_STYLE`` env
-    (default ``virtual``) allows an override for a path-style store (e.g. GCS).
-    """
-    storage_options = None
-    if uri.startswith("s3://") or uri.startswith("s3a://"):
-        style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    fs, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
-    return fs, paths[0]
-
-
 def _pin_boto3_s3_addressing_style() -> None:
     """Pin virtual-hosted (hostname-based) S3 addressing for the boto3 code path,
     cluster-wide, via an AWS config file + ``AWS_CONFIG_FILE``.
 
-    Companion to the fsspec/s3fs pin in ``_fs_and_path``: the CoreWeave object
+    Companion to the fsspec/s3fs pin in ``fs_and_path``: the CoreWeave object
     store (marin-us-east-02a / R2) REJECTS path-style S3 requests with
     ``PathStyleRequestNotAllowed``. Ray's object-spill IO workers call a bare
     ``boto3.resource("s3")`` with NO botocore ``Config`` in child processes we
@@ -776,7 +705,7 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
         "num_tasks": _num_tasks(),
         "written_at": time.time(),
     }
-    fs, path = _fs_and_path(uri)
+    fs, path = fs_and_path(uri)
     # Bound the object-store PutObject with a hard per-attempt timeout via a DAEMON
     # thread + join(timeout) + bounded retries/backoff. An unbounded s3fs/fsspec put
     # has no connect/read timeout and hangs the head invisibly. A daemon thread (NOT a
@@ -844,7 +773,7 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
     treated as stale (from a prior iris task attempt) and ignored.
     """
     uri = _rendezvous_uri(rendezvous_dir)
-    fs, path = _fs_and_path(uri)
+    fs, path = fs_and_path(uri)
     deadline = time.time() + timeout
     threshold = (min_written_at - RENDEZVOUS_FRESHNESS_SLACK) if min_written_at else None
     _log(f"Polling for rendezvous {uri} (timeout {timeout}s)...")
@@ -875,7 +804,7 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
 def _set_marker(rendezvous_dir: str, name: str) -> None:
     uri = f"{rendezvous_dir.rstrip('/')}/{name}"
     try:
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         with fs.open(path, "w") as f:
             f.write(str(time.time()))
     except Exception as exc:
@@ -885,7 +814,7 @@ def _set_marker(rendezvous_dir: str, name: str) -> None:
 def _marker_exists(rendezvous_dir: str, name: str, min_written_at: float | None = None) -> bool:
     uri = f"{rendezvous_dir.rstrip('/')}/{name}"
     try:
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         if not fs.exists(path):
             return False
         if min_written_at is None:
@@ -902,7 +831,7 @@ def clear_rendezvous(rendezvous_dir: str) -> None:
     for name in (RENDEZVOUS_FILENAME, DONE_FILENAME):
         uri = f"{rendezvous_dir.rstrip('/')}/{name}"
         try:
-            fs, path = _fs_and_path(uri)
+            fs, path = fs_and_path(uri)
             if fs.exists(path):
                 fs.rm(path)
                 _log(f"Removed {uri}")
@@ -1190,7 +1119,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
     )
     try:
         uri = f"{rendezvous_dir.rstrip('/')}/term_artifacts/{task_id}_{ts}.txt"
-        fs, path = _fs_and_path(uri)
+        fs, path = fs_and_path(uri)
         with fs.open(path, "w") as f:
             f.write(summary)
         _log(f"[term-capture] wrote termination artifact -> {uri}")
@@ -1205,7 +1134,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # DELETES these node-local logs with the pod. This periodically (+ on SIGTERM) uploads
 # THIS node's session logs to the object store under the job's rendezvous prefix, keyed
 # by node id, reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous
-# / spill / term-artifact writers already use (_fs_and_path). Per-node: each pod writes
+# / spill / term-artifact writers already use fs_and_path. Per-node: each pod writes
 # its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
@@ -1226,7 +1155,7 @@ def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str)
         return
     dest_base = f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
     try:
-        fs, dest_path = _fs_and_path(dest_base)
+        fs, dest_path = fs_and_path(dest_base)
     except Exception as exc:  # noqa: BLE001 - best-effort
         _log(f"[ray-log-sync] cannot resolve dest {dest_base} ({exc}) [{reason}]")
         return
@@ -1341,7 +1270,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
                 "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
         _log(
-            "[start_rl_iris_controller] Ray head subprocess returned; writing rendezvous "
+            "[task-runtime] Ray head subprocess returned; writing rendezvous "
             f"-> {_rendezvous_uri(args.rendezvous_dir)}"
         )
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port)

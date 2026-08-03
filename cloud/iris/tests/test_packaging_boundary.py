@@ -9,12 +9,12 @@ import sys
 REPOSITORY_ROOT = Path(__file__).parents[3]
 
 
-def test_importing_artifact_protocol_does_not_import_training_stacks() -> None:
+def test_importing_job_does_not_import_training_stacks() -> None:
     program = """
 import json
 import sys
 
-import cloud.iris.artifact_protocol
+import cloud.iris.job
 
 blocked = ("flash_attn", "ray", "skyrl_train", "torch", "vllm")
 print(json.dumps(sorted(name for name in blocked if name in sys.modules)))

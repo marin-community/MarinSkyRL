@@ -581,8 +581,8 @@ def test_rl_discovery_skips_iris_preamble_and_parses_terminal_states(
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
     output = """I20260722 controller tunnel ready
 job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json
-/benjaminfeuer/rl-live,3,1000,,"start_rl_iris_controller.py --train_data '[\\"live\\"]'"
-/benjaminfeuer/rl-failed,5,900,1500,"start_rl_iris_controller.py --train_data '[\\"failed\\"]'"
+/benjaminfeuer/rl-live,3,1000,,"task_runtime.py --train_data '[\\"live\\"]'"
+/benjaminfeuer/rl-failed,5,900,1500,"task_runtime.py --train_data '[\\"failed\\"]'"
 """
 
     def fake_run_iris(_cluster, arguments, **_kwargs):

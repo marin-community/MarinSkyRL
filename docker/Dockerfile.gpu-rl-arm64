@@ -115,6 +115,7 @@ ARG OTEL_EXPORTER_VERSION=1.44.0
 # STAGE 1: wheel-builder — compile the vLLM FORK + flash-attn into wheels (nvcc)
 # =============================================================================
 FROM ${BASE_IMAGE} AS wheel-builder
+ARG TORCHVISION_VERSION
 
 # kaniko builds for the architecture it runs on. Fail in seconds if this file was
 # scheduled onto an amd64 builder rather than after a two-hour nvcc compile that
@@ -122,7 +123,6 @@ FROM ${BASE_IMAGE} AS wheel-builder
 RUN test "$(uname -m)" = aarch64 || { echo "Dockerfile.gpu-rl-arm64 needs an aarch64 builder, got $(uname -m)" >&2; exit 1; }
 
 ARG TORCH_VERSION
-ARG TORCHVISION_VERSION
 ARG FLASH_ATTN_VERSION
 ARG VLLM_FORK_REPO
 ARG VLLM_FORK_COMMIT
@@ -288,7 +288,7 @@ RUN cd ${SKYRL_HOME} && \
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
 # RL venv path MUST match the OT-Agent iris launcher's hardcoded
-# RL_PYTHON=/opt/openthoughts/envs/rl/bin/python (rl/cloud/launch_rl_iris.py) —
+# RL_PYTHON=/opt/openthoughts/envs/rl/bin/python (cloud/iris/iris_backend.py) —
 # the same path the standard FSDP2 gpu-rl image uses. Building it under
 # /opt/skyrl/envs/rl made every task die with
 # "/opt/openthoughts/envs/rl/bin/python: No such file or directory".
@@ -481,9 +481,11 @@ RUN ${RL_ENV_DIR}/bin/python -c "import boto3, smart_open, s3fs; print('boto3', 
     ${RL_ENV_DIR}/bin/python -c "import boto3; boto3.client('s3', endpoint_url='https://example.invalid'); print('boto3 s3 client ctor OK (compute_endpoint_resolver skew cleared)')"
 
 # Harbor and vLLM share FastAPI and OpenTelemetry; pin their validated overlap.
-# The pip-check gate below always prints the full conflict report. ARM64 has the
-# three AMD64 metadata conflicts plus PyTorch's cusparselt wheel platform
-# diagnostic. Native imports above validate the selected ARM64 CUDA runtime.
+# The pip-check gate below always prints the full conflict report. Standard
+# ARM64 has the three AMD64 metadata conflicts plus PyTorch's cusparselt wheel
+# platform diagnostic. Megatron adds its three bridge diagnostics and the
+# TransformerEngine platform diagnostic. The shared validator enumerates each;
+# native imports above validate the selected ARM64 CUDA runtime.
 #
 # `analysis` and `datasets` were core harbor dependencies until 74d76ecb split
 # them into extras, so every image up to that pin already carried them. Naming
@@ -523,8 +525,7 @@ RUN uv pip install --python ${RL_ENV_DIR}/bin/python cloudpickle py-spy memray &
 # =============================================================================
 # Environment configuration
 # =============================================================================
-# The baked editable skyrl-train is importable; the launcher prepends the runtime-
-# synced source so it wins. Only the skyrl-train tree is on the path.
+# The baked editable skyrl-train tree is the trainer source used at runtime.
 ENV PYTHONPATH="${SKYRL_HOME}/skyrl-train"
 
 RUN echo "ulimit -n 65535" >> /etc/profile.d/skyrl-ulimit.sh

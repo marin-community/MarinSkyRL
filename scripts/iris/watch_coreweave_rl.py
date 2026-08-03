@@ -117,7 +117,7 @@ STATE_NAMES = {
     7: "worker_failed",
     8: "unschedulable",
 }
-RL_ENTRYPOINT_MARKERS = ("start_rl_iris_controller.py", "cloud.iris.run_rl")
+RL_ENTRYPOINT_MARKERS = ("task_runtime.py", "cloud.iris.training_driver")
 TRIALS_URI_PATTERN = re.compile(
     r"(?:terminal_bench_config\.trials_dir=|--trials-dir(?:=|\s+))"
     r"(?P<uri>s3://[^\s'\"\\]+)"

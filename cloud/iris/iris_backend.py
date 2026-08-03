@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Launch a MarinSkyRL RL training job on Marin's Iris GPU cluster (CoreWeave).
+"""Submit MarinSkyRL training jobs to Marin's Iris GPU clusters.
 
 This is the GPU/Iris analog of ``rl/cloud/launch_rl_cloud.py`` (the SkyPilot RL
 launcher). It combines:
-  - the RL-job structure from ``launch_rl_cloud.py`` (gpu-rl venv, run_rl.py
+  - the RL-job structure from ``launch_rl_cloud.py`` (gpu-rl venv, training_driver.py
     entrypoint, rl_config / model_path / train_data / overrides), and
   - the Iris SDK submission mechanics from ``eval/cloud/launch_eval_iris.py``
     (controller tunnel, IrisClient.submit, --secrets-env injection, --no-wait,
@@ -30,15 +30,15 @@ This launcher requests ``--num-nodes N`` whole GPU nodes exclusively: one Iris
 task per node (``replicas=N``), holding the selected node shape's GPUs with no
 co-tenants. The RL topology (one cross-node Ray
 cluster, NCCL over IB) is wired by an in-container controller
-(``cloud/iris/start_rl_iris_controller.py``): rank 0 starts the Ray head and
+(``cloud/iris/task_runtime.py``): rank 0 starts the Ray head and
 publishes its IP to a shared rendezvous; ranks 1..N-1 join; then rank 0 runs the
-MarinSkyRL driver (``cloud.iris.run_rl --num_nodes N``) attached to that cluster.
+MarinSkyRL driver (``cloud.iris.training_driver --num_nodes N``) attached to that cluster.
 
 Usage
 -----
     set -a; source "${DC_AGENT_SECRET_ENV:?see .claude/secret.md}"; set +a
 
-    python -m cloud.iris.launch_rl_iris \
+    python -m cloud.iris.iris_backend \
         --rl_config cloud/iris/configs/<config>.yaml \
         --model_path Qwen/Qwen3-8B \
         --train_data '["mlfoundations-dev/dataset"]' \
@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime
 import hashlib
 import json
@@ -61,12 +62,13 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import yaml
+from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, validate_ray_spill_dir
@@ -74,7 +76,8 @@ from cloud.iris.gpu_rl_images import image_for_cluster
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
-from cloud.iris.task_bundle import build_task_bundle
+from cloud.iris.runtime_bundle import build_runtime_bundle
+from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
 # selected cluster's live nodes after CLI parsing.
@@ -168,6 +171,108 @@ class IrisLaunchOutcome:
     job_id: str
     job_state: str
     exit_code: int
+
+
+def _resolved_data_path(locator: DataLocator) -> str:
+    relative = Path(locator.relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Data relative_path must stay below its source root: {locator.relative_path!r}")
+    return os.path.join(locator.local_path, *relative.parts)
+
+
+def job_launch_argv(spec: SkyRLJobSpec, config_path: str) -> list[str]:
+    """Adapt the typed job request to the legacy Iris launcher CLI."""
+    request = spec.request
+    execution = spec.execution
+    data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
+    role_plan = request.topology.role_plan
+    role_overrides = (
+        f"++trainer.placement.colocate_all={str(role_plan.colocate_all).lower()}",
+        f"++trainer.placement.policy_num_nodes={role_plan.policy_num_nodes}",
+        f"++trainer.placement.policy_num_gpus_per_node={role_plan.policy_num_gpus_per_node}",
+        f"++generator.num_inference_engines={role_plan.num_inference_engines}",
+        f"++generator.inference_engine_tensor_parallel_size={role_plan.inference_engine_tensor_parallel_size}",
+        f"++trainer.train_batch_size={role_plan.train_batch_size}",
+        f"++trainer.policy_mini_batch_size={role_plan.policy_mini_batch_size}",
+        f"++trainer.micro_train_batch_size_per_gpu={role_plan.micro_train_batch_size_per_gpu}",
+        f"++generator.n_samples_per_prompt={role_plan.n_samples_per_prompt}",
+    )
+    argv = [
+        "--rl_config",
+        config_path,
+        "--model_path",
+        request.model.local_path,
+        "--model-source-uri",
+        request.model.uri,
+        "--model-source-identity",
+        request.model.identity,
+        "--train-data",
+        json.dumps([_resolved_data_path(locator) for locator in request.train_data]),
+        "--val-data",
+        json.dumps([_resolved_data_path(locator) for locator in request.validation_data]),
+        "--data-sources-json",
+        json.dumps(data_sources, sort_keys=True),
+        "--num-nodes",
+        str(request.topology.num_nodes),
+        "--gpus-per-node",
+        str(request.topology.gpus_per_node),
+        "--gpu-variant",
+        request.topology.gpu_variant,
+        "--cpu",
+        str(execution.cpu),
+        "--memory",
+        execution.memory,
+        "--disk",
+        execution.disk,
+        "--cluster",
+        execution.cluster,
+        "--cluster-config",
+        execution.cluster_config,
+        "--task-image",
+        request.runtime.task_image,
+        "--priority",
+        execution.priority,
+        "--max-retries",
+        str(execution.max_retries),
+        "--job-name",
+        execution.job_name,
+        "--resolved-config-uri",
+        request.output.resolved_config_uri,
+        "--skyrl-override",
+        f"++trainer.ckpt_path={request.output.checkpoint_root}",
+        "--skyrl-override",
+        f"++trainer.export_path={request.output.export_root}",
+        "--skyrl-override",
+        "++trainer.resume_mode=latest",
+        "--skyrl-override",
+        f"++trainer.seed={request.seed}",
+    ]
+    for override in role_overrides:
+        argv.extend(["--skyrl-override", override])
+    if execution.target_cluster:
+        argv.extend(["--target-cluster", execution.target_cluster])
+    if execution.parent_cluster_config:
+        argv.extend(["--parent-cluster-config", execution.parent_cluster_config])
+    for override in request.overrides:
+        argv.extend(["--skyrl-override", override])
+    return argv
+
+
+class IrisBackend:
+    """Submit typed MarinSkyRL jobs through the existing Iris launcher."""
+
+    def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
+        resolved_launch_args(job_launch_argv(spec, config_path))
+
+    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
+        args = resolved_launch_args(job_launch_argv(spec, config_path))
+        with contextlib.redirect_stdout(sys.stderr):
+            return launch(args)
+
+
+def iris_job_state_name(state: int) -> str:
+    """Return the protocol spelling for an Iris job state enum."""
+    return job_pb2.JobState.Name(state).removeprefix("JOB_STATE_").lower()
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -376,7 +481,7 @@ def resolve_node_resource_requests(
 # The gpu-rl image's RL venv (deps-only: torch 2.11 + vLLM fork + skyrl editable).
 RL_PYTHON = "/opt/openthoughts/envs/rl/bin/python"
 SKYRL_HOME = "/opt/skyrl"
-# In-container source sync target. Iris syncs the minimal build_task_bundle()
+# In-container source sync target. Iris syncs the minimal build_runtime_bundle()
 # workspace to /app and sets IRIS_WORKDIR=/app. The runtime controller code is
 # self-contained there; no repository checkout is required in-pod.
 #
@@ -1173,7 +1278,7 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Seconds the worker ranks poll for rank-0's Ray-head rendezvous file "
-        "(forwarded to start_rl_iris_controller.py --rendezvous-timeout). Unset = the "
+        "(forwarded to task_runtime.py --rendezvous-timeout). Unset = the "
         "controller default (1800s). RAISE it (e.g. 3600) for a big model whose rank-0 "
         "pre-stage/snapshot_download can legitimately take >30 min, so a SLOW-but-not-hung "
         "head prestage completes inside the window instead of the workers timing out and "
@@ -1705,11 +1810,11 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     The full pipeline that runs inside each task container:
       cd /app
       && export SKYRL_HOME + PYTHONPATH (live cloud.iris, baked skyrl_train)
-      && <RL_PYTHON> cloud/iris/start_rl_iris_controller.py
+      && <RL_PYTHON> cloud/iris/task_runtime.py
             --ray-port ... --rendezvous-dir ...
-            -- <RL_PYTHON> -m cloud.iris.run_rl --rl_config ... --num_nodes N ...
+            -- <RL_PYTHON> -m cloud.iris.training_driver --rl_config ... --num_nodes N ...
 
-    Rank 0 (IRIS_TASK_ID==0) starts the Ray head and runs run_rl.py (which, with
+    Rank 0 (IRIS_TASK_ID==0) starts the Ray head and runs training_driver.py (which, with
     RAY_ADDRESS set + --num_nodes>1, attaches to the cluster instead of starting a
     local one). Workers join Ray and park. We invoke the gpu-rl venv python by
     absolute path so it is used regardless of whichever venv iris's setup phase
@@ -1717,7 +1822,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     """
     total_gpus = args.num_nodes * args.gpus_per_node
 
-    # The MarinSkyRL training command rank 0 runs (run_rl.py owns config parse,
+    # The MarinSkyRL training command rank 0 runs (training_driver.py owns config parse,
     # hydra-arg build, HF data resolution, and the SkyRL entrypoint launch).
     rl_config_launch = args.rl_config_launch
     if not isinstance(rl_config_launch, RlConfigLaunch):
@@ -1726,7 +1831,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     train_cmd: List[str] = [
         RL_PYTHON,
         "-m",
-        "cloud.iris.run_rl",
+        "cloud.iris.training_driver",
         "--rl_config",
         task_rl_config,
         "--model_path",
@@ -1754,7 +1859,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         train_cmd.extend(["--skyrl_override", override])
 
     # Cross-cluster ingress (opencode-RL literal capture): forward the ingress flags to
-    # the in-pod runner (cloud.iris.run_rl), which stands up the RecordProxy + registers
+    # the in-pod runner (cloud.iris.training_driver), which stands up the RecordProxy + registers
     # + mints the capability URL. Only emitted under --ingress-mode controller; the
     # default (direct) path adds nothing (byte-identical run_rl invocation).
     if getattr(args, "ingress_mode", "direct") == "controller":
@@ -1827,7 +1932,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
         RL_PYTHON,
-        "cloud/iris/start_rl_iris_controller.py",
+        "cloud/iris/task_runtime.py",
         "--ray-port",
         str(args.ray_port),
         "--ray-spill-dir",
@@ -1842,7 +1947,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
-    # Per-NODE task-dataset staging. run_rl.py's resolve_rl_train_data() extracts the
+    # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
     # HF task dataset to the node-local $DCFT=/opt/openthoughts/tasks/ (gpu-rl image),
     # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
     # ranks 1..N-1 find an empty tasks dir and every rollout dies with
@@ -2124,7 +2229,6 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     from iris.cluster.local_cluster import LocalCluster
     from iris.cluster.types import EnvironmentSpec, Entrypoint
     from iris.cli.job import build_resources, build_job_constraints, resolve_multinode_defaults
-    from iris.rpc import job_pb2
 
     # Per-task resources: whole node, all GPUs (no co-tenant → exclusive).
     resources = build_resources(None, gpu_spec, cpu=args.cpu, memory=args.memory, disk=args.disk)
@@ -2222,7 +2326,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     # object store moved R2 (s3://marin-na) -> CW (s3://marin-us-east-02a) on
     # 2026-07-05 (marin c7caecc95a) — pods now inject CW creds+AWS_ENDPOINT_URL and
     # can no longer reach R2. Let the cluster-injected creds win; the
-    # fsspec rendezvous in start_rl_iris_controller.py uses default credential
+    # fsspec rendezvous in task_runtime.py uses default credential
     # discovery and picks them up.
     #
     # Daytona credentials MUST be forwarded: agentic RL (terminal_bench / Harbor)
@@ -2343,7 +2447,7 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
         )
     from contextlib import contextmanager as _contextmanager
 
-    workspace = build_task_bundle()
+    workspace = build_runtime_bundle()
 
     @_contextmanager
     def _direct_client():
@@ -2431,9 +2535,9 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
             flush=True,
         )
         try:
-            status = job.wait(stream_logs=True, timeout=float("inf"))
+            status = job.wait(stream_logs=True, timeout=float("inf"), raise_on_failure=False)
             exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1
-            job_state = job_pb2.JobState.Name(status.state).removeprefix("JOB_STATE_").lower()
+            job_state = iris_job_state_name(status.state)
         except KeyboardInterrupt:
             print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
             client.terminate_job(job.job_id)

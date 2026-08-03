@@ -12,35 +12,54 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from cloud.iris import artifact_protocol  # noqa: E402
-from cloud.iris.artifact_protocol import (  # noqa: E402
-    ArtifactLaunchEnvelope,
+from cloud.iris import job  # noqa: E402
+from cloud.iris.job import JobBackend, execute_job  # noqa: E402
+from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
     DataLocator,
     IrisLaunchOptions,
-    LaunchBackend,
     ModelLocator,
     RuntimeIdentity,
     SkyRLLaunchRequest,
+    SkyRLJobSpec,
     SkyRLOutputPaths,
     SkyRLRolePlan,
     SkyRLTerminalResponse,
     SkyRLTopology,
-    _launcher_argv,
-    launch_artifact,
 )
 from cloud.iris.gpu_rl_images import GPU_RL_IMAGES, ImageArchitecture, ImageVariant  # noqa: E402
-from cloud.iris.launch_rl_iris import IrisLaunchOutcome, create_parser  # noqa: E402
-from cloud.iris.start_rl_iris_controller import materialize_model_export  # noqa: E402
-from cloud.iris.task_bundle import build_task_bundle  # noqa: E402
+from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
+from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
+from cloud.iris.runtime_bundle import build_runtime_bundle  # noqa: E402
+from iris.client import JobFailedError  # noqa: E402
+from iris.cluster.types import JobName  # noqa: E402
+from iris.rpc import job_pb2  # noqa: E402
 
 
 @dataclass(frozen=True)
-class FakeLaunchBackend(LaunchBackend):
+class FakeLaunchBackend(JobBackend):
     outcome: IrisLaunchOutcome
 
-    def launch(self, argv: list[str]) -> IrisLaunchOutcome:
+    def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
+        assert spec.request.config_yaml
+        assert Path(config_path).is_file()
+
+    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
+        self.validate(spec, config_path)
         return self.outcome
+
+
+@dataclass(frozen=True)
+class FailedLaunchBackend(JobBackend):
+    error: JobFailedError
+
+    def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
+        assert spec.request.config_yaml
+        assert Path(config_path).is_file()
+
+    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
+        self.validate(spec, config_path)
+        raise self.error
 
 
 def _repository_commit() -> str:
@@ -72,10 +91,10 @@ scale_groups:
     return config
 
 
-def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
+def _envelope(tmp_path: Path) -> SkyRLJobSpec:
     image = GPU_RL_IMAGES[(ImageArchitecture.ARM64, ImageVariant.STANDARD)]
     output = tmp_path / "output"
-    return ArtifactLaunchEnvelope(
+    return SkyRLJobSpec(
         request=SkyRLLaunchRequest(
             run_id="iceball-test",
             attempt_id="attempt-1",
@@ -142,7 +161,7 @@ def _envelope(tmp_path: Path) -> ArtifactLaunchEnvelope:
     )
 
 
-def _write_terminal_training_outputs(envelope: ArtifactLaunchEnvelope) -> None:
+def _write_terminal_training_outputs(envelope: SkyRLJobSpec) -> None:
     output = Path(envelope.request.output.checkpoint_root.removeprefix("file://"))
     output.mkdir(parents=True)
     (output / "latest_ckpt_global_step.txt").write_text("8")
@@ -156,7 +175,7 @@ def _write_terminal_training_outputs(envelope: ArtifactLaunchEnvelope) -> None:
     resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
 
 
-def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> None:
+def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path)
     _write_terminal_training_outputs(envelope)
     backend = FakeLaunchBackend(
@@ -167,7 +186,7 @@ def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> Non
         )
     )
 
-    response = launch_artifact(envelope, backend=backend)
+    response = execute_job(envelope, backend=backend)
 
     assert response.state == AttemptState.SUCCEEDED
     assert response.model is not None
@@ -182,7 +201,7 @@ def test_launch_artifact_commits_validated_terminal_model(tmp_path: Path) -> Non
 def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path)
 
-    argv = _launcher_argv(envelope, "config.yaml")
+    argv = job_launch_argv(envelope, "config.yaml")
 
     assert json.loads(argv[argv.index("--train-data") + 1]) == ["/tmp/iceball-gsm8k/train.parquet"]
     overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
@@ -193,7 +212,7 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
 
 
 def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> None:
-    argv = _launcher_argv(_envelope(tmp_path), "config.yaml")
+    argv = job_launch_argv(_envelope(tmp_path), "config.yaml")
 
     args = create_parser().parse_args(argv)
 
@@ -212,16 +231,16 @@ def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) 
         local_path="/tmp/iceball-gsm8k",
         relative_path="../escape.parquet",
     )
-    envelope = ArtifactLaunchEnvelope(
+    envelope = SkyRLJobSpec(
         request=replace(envelope.request, train_data=(locator,)),
         execution=envelope.execution,
     )
 
     with pytest.raises(ValueError, match="stay below"):
-        _launcher_argv(envelope, "config.yaml")
+        job_launch_argv(envelope, "config.yaml")
 
 
-def test_launch_artifact_failure_records_attempt_without_terminal_model(tmp_path: Path) -> None:
+def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path)
     backend = FakeLaunchBackend(
         IrisLaunchOutcome(
@@ -231,7 +250,7 @@ def test_launch_artifact_failure_records_attempt_without_terminal_model(tmp_path
         )
     )
 
-    response = launch_artifact(envelope, backend=backend)
+    response = execute_job(envelope, backend=backend)
 
     assert response.state == AttemptState.FAILED
     assert response.model is None
@@ -240,14 +259,29 @@ def test_launch_artifact_failure_records_attempt_without_terminal_model(tmp_path
     assert json.loads(attempt.read_text())["response"]["iris_job_state"] == "failed"
 
 
-def test_launch_artifact_rejects_overwriting_terminal_manifest(tmp_path: Path) -> None:
+def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    status = job_pb2.JobStatus(state=job_pb2.JOB_STATE_KILLED, error="Terminated by user")
+    backend = FailedLaunchBackend(JobFailedError(JobName.from_string("/power/iceball-test"), status))
+
+    response = execute_job(envelope, backend=backend)
+
+    assert response.state == AttemptState.FAILED
+    assert response.iris_job_id == "/power/iceball-test"
+    assert response.iris_job_state == "killed"
+    assert response.failure == "Iris job reached killed"
+    attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
+    assert json.loads(attempt.read_text())["response"] == asdict(response)
+
+
+def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path)
     terminal = Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://"))
     terminal.parent.mkdir(parents=True)
     terminal.write_text("{}")
 
     with pytest.raises(ValueError, match="immutable and already exists"):
-        launch_artifact(envelope, dry_run=True)
+        execute_job(envelope, dry_run=True)
 
 
 def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Path) -> None:
@@ -270,13 +304,32 @@ def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Pa
     }
 
 
-def test_task_bundle_contains_controller_without_training_environment() -> None:
-    workspace = build_task_bundle()
+def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_bytes(b"new weights")
+    (source / "tokenizer.json").write_text("{}")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    (destination / "stale.bin").write_bytes(b"old weights")
 
-    assert (workspace / "cloud" / "iris" / "start_rl_iris_controller.py").is_file()
+    materialize_model_export(source.as_uri(), str(destination), "sft-step@new")
+
+    assert not (destination / "stale.bin").exists()
+    assert (destination / "model.safetensors").read_bytes() == b"new weights"
+
+
+def test_runtime_bundle_contains_controller_without_training_environment() -> None:
+    workspace = build_runtime_bundle()
+
+    assert (workspace / "cloud" / "iris" / "task_runtime.py").is_file()
     assert (workspace / "chat_templates" / "delphi_v0.jinja2").is_file()
     assert not (workspace / "skyrl-train").exists()
     assert not (workspace / "cloud" / "iris" / "tests").exists()
+    assert not (workspace / "cloud" / "iris" / "job.py").exists()
+    assert not (workspace / "cloud" / "iris" / "iris_backend.py").exists()
+    assert not (workspace / "cloud" / "iris" / "protocol.py").exists()
 
 
 def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -284,7 +337,7 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(asdict(envelope)))
 
-    def fake_launch(_envelope: ArtifactLaunchEnvelope, *, dry_run: bool) -> SkyRLTerminalResponse:
+    def fake_launch(_spec: SkyRLJobSpec, *, dry_run: bool) -> SkyRLTerminalResponse:
         assert dry_run
         print("human launcher log")
         return SkyRLTerminalResponse(
@@ -298,9 +351,9 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
             failure=None,
         )
 
-    monkeypatch.setattr(artifact_protocol, "launch_artifact", fake_launch)
+    monkeypatch.setattr(job, "execute_job", fake_launch)
 
-    exit_code = artifact_protocol.main(["iris", "launch", "--request", str(request_path), "--dry-run"])
+    exit_code = job.main(["iris", "launch", "--request", str(request_path), "--dry-run"])
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -311,6 +364,6 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
 def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
-    artifact_protocol._write_json("result.json", {"state": "prepared"})
+    job._write_json("result.json", {"state": "prepared"})
 
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""In-container MarinSkyRL RL training runner (Iris path).
+"""Drive SkyRL training from rank zero of an Iris-managed Ray cluster.
 
 Runs on rank 0 inside the gpu-rl container after the controller
-(``start_rl_iris_controller.py``) has bootstrapped one cross-node Ray cluster and
+(``task_runtime.py``) has bootstrapped one cross-node Ray cluster and
 exported ``RAY_ADDRESS``. This runner parses the RL config, resolves HF task data,
 builds the SkyRL Hydra args, and execs the MarinSkyRL entrypoint attached to that
 Ray cluster (SkyRL's bare ``ray.init()`` honors ``RAY_ADDRESS``).
 
 Usage::
 
-    python -m cloud.iris.run_rl \
+    python -m cloud.iris.training_driver \
         --rl_config configs/56gpu_qwen3_8b.yaml \
         --train_data '["org/my-dataset"]' \
         --model_path Qwen/Qwen3-8B \
@@ -378,7 +378,7 @@ class LocalRLRunner:
                 self._literal_log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
                 injected = True  # dummy key already published above (decoupled from ingress)
                 print(
-                    f"[run_rl] ingress_mode=controller record_literal="
+                    f"[training-driver] ingress_mode=controller record_literal="
                     f"{self.config.record_literal} target_cluster="
                     f"{self.config.target_cluster or '(direct)'}: registered "
                     f"{endpoint_name} -> {register_address} "
@@ -451,7 +451,7 @@ class LocalRLRunner:
         if not ray_address:
             print(
                 "ERROR: RAY_ADDRESS is not set. This runner attaches to a Ray cluster "
-                "bootstrapped by start_rl_iris_controller.py; run it via that controller.",
+                "bootstrapped by task_runtime.py; run it via that controller.",
                 file=sys.stderr,
             )
             return 1
