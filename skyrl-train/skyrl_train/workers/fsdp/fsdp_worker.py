@@ -75,14 +75,6 @@ class _ParameterPageSample:
     byte_count: int
 
 
-@dataclass(frozen=True)
-class _ProcessNumaPlacement:
-    cpu_nodes: tuple[int, ...]
-    cpu_affinity: tuple[int, ...]
-    affinity_nodes: tuple[int, ...]
-    memory_policy: MemoryPolicy
-
-
 def _pinned_cpu_parameters_by_size(model: torch.nn.Module) -> list[torch.Tensor]:
     parameters = []
     for parameter in model.parameters():
@@ -118,15 +110,21 @@ def _sample_parameter_page_nodes(parameters: list[torch.Tensor], max_pages: int)
     )
 
 
-def _process_numa_placement() -> _ProcessNumaPlacement:
+def _build_cpu_offload_numa_diagnostics(rank: int, page_sample: _ParameterPageSample) -> FSDPCpuOffloadNumaDiagnostics:
     topology = cpu_numa_topology()
     cpu_affinity = tuple(sorted(os.sched_getaffinity(0)))
     affinity_nodes = tuple(sorted(node for node, cpus in topology.items() if set(cpu_affinity).intersection(cpus)))
-    return _ProcessNumaPlacement(
+    return FSDPCpuOffloadNumaDiagnostics(
+        rank=rank,
+        host=socket.gethostname(),
         cpu_nodes=tuple(sorted(topology)),
         cpu_affinity=cpu_affinity,
         affinity_nodes=affinity_nodes,
         memory_policy=current_memory_policy(),
+        page_nodes=page_sample.page_nodes,
+        sampled_pages=sum(page_sample.page_nodes.values()),
+        sampled_tensors=page_sample.tensor_count,
+        sampled_bytes=page_sample.byte_count,
     )
 
 
@@ -457,19 +455,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """Report the physical placement of persistent FSDP2 CPU-offload tensors."""
         parameters = _pinned_cpu_parameters_by_size(self.model.model)
         page_sample = _sample_parameter_page_nodes(parameters, max_pages)
-        placement = _process_numa_placement()
-        return FSDPCpuOffloadNumaDiagnostics(
-            rank=self._rank,
-            host=socket.gethostname(),
-            cpu_nodes=placement.cpu_nodes,
-            cpu_affinity=placement.cpu_affinity,
-            affinity_nodes=placement.affinity_nodes,
-            memory_policy=placement.memory_policy,
-            page_nodes=page_sample.page_nodes,
-            sampled_pages=sum(page_sample.page_nodes.values()),
-            sampled_tensors=page_sample.tensor_count,
-            sampled_bytes=page_sample.byte_count,
-        )
+        return _build_cpu_offload_numa_diagnostics(self._rank, page_sample)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(

@@ -1,5 +1,7 @@
 import pytest
 
+from tests.cpu.util import example_dummy_config
+
 from skyrl_train import numa_policy
 from skyrl_train.numa_policy import (
     allowed_memory_nodes,
@@ -8,6 +10,7 @@ from skyrl_train.numa_policy import (
     parse_numactl_hardware,
 )
 from skyrl_train.utils.numa import physical_gpu_id_for_worker
+from skyrl_train.utils.utils import prepare_runtime_environment
 
 
 def test_host_memory_nodes_exclude_memory_only_nodes():
@@ -46,6 +49,15 @@ def test_host_memory_policy_binds_to_allowed_cpu_nodes(monkeypatch):
 
     assert install_host_memory_policy() == (0, 1)
     assert installed_policies == [(0, 1)]
+
+
+def test_runtime_environment_forwards_numa_activation(monkeypatch):
+    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
+    monkeypatch.setenv("SKYRL_ENABLE_NUMA_AFFINITY", "1")
+
+    env = prepare_runtime_environment(example_dummy_config())
+
+    assert env["SKYRL_ENABLE_NUMA_AFFINITY"] == "1"
 
 
 @pytest.mark.parametrize(

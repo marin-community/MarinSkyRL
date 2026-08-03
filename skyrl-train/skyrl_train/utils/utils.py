@@ -1054,6 +1054,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # edge is moot. See feedback_uvloop_libuv_019_pin.
     env_vars["RAY_USE_UVLOOP"] = "0"
 
+    # Ray's job runtime environment is the explicit contract for worker-wide
+    # settings. Forward NUMA placement when the launcher opts in so the early
+    # worker hook and actor constructors observe the same value as the driver.
+    if "SKYRL_ENABLE_NUMA_AFFINITY" in os.environ:
+        env_vars["SKYRL_ENABLE_NUMA_AFFINITY"] = os.environ["SKYRL_ENABLE_NUMA_AFFINITY"]
+
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #
     # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
