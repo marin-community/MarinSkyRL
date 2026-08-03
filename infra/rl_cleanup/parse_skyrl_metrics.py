@@ -41,8 +41,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
-
-ROLLOUT_FAILURE_FRACTION_METRIC = "generate/failed_trajectory_fraction"
+from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 
 # Harbor writes one TimingInfo block per phase on every trial result, in execution order.
 TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier")

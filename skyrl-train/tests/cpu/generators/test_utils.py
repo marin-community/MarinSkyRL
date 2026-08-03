@@ -845,7 +845,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 @pytest.mark.parametrize(
     "num_trials,num_failed,expected_fraction",
     [
-        (64, 40, 0.625),
+        (10, 4, 0.4),
         (64, 0, 0.0),  # a healthy batch still reports the series rather than omitting it
         (64, 64, 1.0),  # the orchestrator-failure path, where every trial is reported failed
         (0, 0, 0.0),  # an empty batch has no denominator to divide by
@@ -927,3 +927,11 @@ def test_generators_that_report_no_trials_get_no_failure_series():
 
     assert "generate/num_trials" not in merged["rollout_metrics"]
     assert "generate/failed_trajectory_fraction" not in merged["rollout_metrics"]
+
+
+def test_partial_failure_metrics_are_rejected_during_concatenation():
+    group = _generated_group(2, 1)
+    del group["rollout_metrics"]["generate/num_masked_trajectories"]
+
+    with pytest.raises(ValueError, match="generate/num_masked_trajectories"):
+        concatenate_generator_outputs([group])

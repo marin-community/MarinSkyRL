@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
@@ -22,7 +23,6 @@ _NUM_TRIALS_METRIC = "generate/num_trials"
 _NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
 _NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
 _NUM_MASKED_TRAJECTORIES_METRIC = "generate/num_masked_trajectories"
-_FAILED_TRAJECTORY_FRACTION_METRIC = "generate/failed_trajectory_fraction"
 
 
 def _lcs_alert_threshold() -> float:
@@ -749,6 +749,14 @@ def get_rollout_metrics(
     return rollout_metrics
 
 
+_BATCH_FAILURE_COUNT_KEYS = (
+    _NUM_TRIALS_METRIC,
+    _NUM_FAILED_INSTANCES_METRIC,
+    _NUM_FAILED_TRAJECTORIES_METRIC,
+    _NUM_MASKED_TRAJECTORIES_METRIC,
+)
+
+
 def _merge_batch_failure_metrics(generator_outputs: List[GeneratorOutput]) -> dict[str, float]:
     """Sum failure counts across rollout groups and recompute their batch fraction."""
     group_metrics = [
@@ -758,12 +766,16 @@ def _merge_batch_failure_metrics(generator_outputs: List[GeneratorOutput]) -> di
     ]
     if not group_metrics:
         return {}
+    for metrics in group_metrics:
+        missing = [key for key in _BATCH_FAILURE_COUNT_KEYS if key not in metrics]
+        if missing:
+            raise ValueError(f"Incomplete rollout failure metrics: missing {', '.join(missing)}")
 
     merged = get_batch_failure_metrics(
-        sum(metrics.get(_NUM_TRIALS_METRIC, 0) for metrics in group_metrics),
-        num_failed_trajectories=sum(metrics.get(_NUM_FAILED_TRAJECTORIES_METRIC, 0) for metrics in group_metrics),
-        num_failed_instances=sum(metrics.get(_NUM_FAILED_INSTANCES_METRIC, 0) for metrics in group_metrics),
-        num_masked_trajectories=sum(metrics.get(_NUM_MASKED_TRAJECTORIES_METRIC, 0) for metrics in group_metrics),
+        sum(metrics[_NUM_TRIALS_METRIC] for metrics in group_metrics),
+        num_failed_trajectories=sum(metrics[_NUM_FAILED_TRAJECTORIES_METRIC] for metrics in group_metrics),
+        num_failed_instances=sum(metrics[_NUM_FAILED_INSTANCES_METRIC] for metrics in group_metrics),
+        num_masked_trajectories=sum(metrics[_NUM_MASKED_TRAJECTORIES_METRIC] for metrics in group_metrics),
     )
     error_keys = {key for metrics in group_metrics for key in metrics if key.startswith(BATCH_ERROR_METRIC_PREFIX)}
     merged.update({key: sum(metrics.get(key, 0) for metrics in group_metrics) for key in error_keys})
@@ -789,7 +801,7 @@ def get_batch_failure_metrics(
         _NUM_FAILED_INSTANCES_METRIC: num_failed_instances,
         _NUM_FAILED_TRAJECTORIES_METRIC: num_failed_trajectories,
         _NUM_MASKED_TRAJECTORIES_METRIC: num_masked_trajectories,
-        _FAILED_TRAJECTORY_FRACTION_METRIC: num_failed_trajectories / num_trials if num_trials else 0.0,
+        ROLLOUT_FAILURE_FRACTION_METRIC: num_failed_trajectories / num_trials if num_trials else 0.0,
     }
 
 
