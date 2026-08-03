@@ -15,6 +15,7 @@ from ray.util.placement_group import placement_group
 
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
 
 
@@ -54,8 +55,6 @@ def main() -> int:
         group = placement_group([{"GPU": 1, "CPU": 1} for _ in range(WORLD_SIZE)], strategy="PACK")
         get_ray_pg_ready_with_timeout(group, timeout=120)
 
-        from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-
         policy = PPORayActorGroup(
             cfg,
             num_nodes=1,
@@ -69,23 +68,23 @@ def main() -> int:
             force_cvd_mask=True,
         )
         ray.get(policy.async_init_model(MODEL))
-        diagnostics = ray.get(policy.async_run_ray_method("pass_through", "get_cpu_offload_numa_diag"))
+        diagnostics = ray.get(policy.async_run_ray_method("pass_through", "get_cpu_offload_numa_diagnostics"))
     finally:
         ray.shutdown()
 
-    for diagnostic in sorted(diagnostics, key=lambda item: item["rank"]):
+    for diagnostic in sorted(diagnostics, key=lambda item: item.rank):
         print(diagnostic, flush=True)
-        cpu_nodes = set(diagnostic["cpu_nodes"])
-        policy_nodes = set(diagnostic["memory_policy"]["nodes"])
-        page_nodes = set(diagnostic["page_nodes"])
-        affinity_nodes = diagnostic["affinity_nodes"]
-        assert diagnostic["memory_policy"]["mode"] == "bind", diagnostic
+        cpu_nodes = set(diagnostic.cpu_nodes)
+        policy_nodes = set(diagnostic.memory_policy.nodes)
+        page_nodes = set(diagnostic.page_nodes)
+        affinity_nodes = diagnostic.affinity_nodes
+        assert diagnostic.memory_policy.mode == "bind", diagnostic
         assert policy_nodes == cpu_nodes, diagnostic
-        assert diagnostic["sampled_pages"] > 0, diagnostic
+        assert diagnostic.sampled_pages > 0, diagnostic
         assert page_nodes <= cpu_nodes, diagnostic
         assert len(affinity_nodes) == 1, diagnostic
-        local_pages = diagnostic["page_nodes"].get(affinity_nodes[0], 0)
-        assert local_pages / diagnostic["sampled_pages"] >= 0.95, diagnostic
+        local_pages = diagnostic.page_nodes.get(affinity_nodes[0], 0)
+        assert local_pages / diagnostic.sampled_pages >= 0.95, diagnostic
 
     print(f"FSDP2_CPU_OFFLOAD_NUMA_OK world={WORLD_SIZE} model={MODEL}", flush=True)
     return 0

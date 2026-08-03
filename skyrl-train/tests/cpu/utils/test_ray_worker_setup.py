@@ -5,12 +5,12 @@ import sys
 from pathlib import Path
 
 from skyrl_train import worker_setup
-from skyrl_train.worker_setup import force_stock_asyncio_in_worker
+from skyrl_train.worker_setup import configure_worker_process
 
 
 def _run_worker_setup_probe() -> None:
-    force_stock_asyncio_in_worker()
-    force_stock_asyncio_in_worker()
+    configure_worker_process()
+    configure_worker_process()
 
     assert os.environ["UV_USE_IO_URING"] == "0"
     assert isinstance(asyncio.get_event_loop_policy(), asyncio.DefaultEventLoopPolicy)
@@ -48,13 +48,14 @@ def test_ray_worker_setup_installs_stock_asyncio_without_loading_torch():
     assert result.stdout.strip() == "ok"
 
 
-def test_ray_worker_setup_installs_host_memory_policy_before_actor_threads(monkeypatch):
-    calls = []
-    monkeypatch.setattr(worker_setup, "set_host_memory_policy", lambda: calls.append("memory-policy"))
+def test_ray_worker_setup_installs_memory_policy_before_asyncio_configuration(monkeypatch):
+    events = []
+    monkeypatch.setattr(worker_setup, "set_host_memory_policy", lambda: events.append("memory-policy"))
+    monkeypatch.setattr(asyncio, "set_event_loop_policy", lambda _policy: events.append("asyncio-policy"))
 
-    force_stock_asyncio_in_worker()
+    configure_worker_process()
 
-    assert calls == ["memory-policy"]
+    assert events[0:2] == ["memory-policy", "asyncio-policy"]
 
 
 if __name__ == "__main__":

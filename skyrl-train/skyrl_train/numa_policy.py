@@ -40,7 +40,10 @@ def is_numa_affinity_enabled() -> bool:
     return os.environ.get("SKYRL_ENABLE_NUMA_AFFINITY", "0") == "1"
 
 
-def _parse_range_list(value: str) -> list[int]:
+def parse_numa_range_list(value: str) -> list[int]:
+    """Expand a Linux NUMA range list such as ``0-3,12``."""
+    if not value:
+        return []
     values = []
     for part in value.split(","):
         if "-" in part:
@@ -51,12 +54,17 @@ def _parse_range_list(value: str) -> list[int]:
     return values
 
 
-def current_memory_policy() -> MemoryPolicy:
-    """Return the calling thread's effective Linux NUMA task policy."""
+def load_libnuma() -> CDLL:
+    """Load libnuma with syscall errno capture enabled."""
     library_path = find_library("numa")
     if library_path is None:
         raise RuntimeError("NUMA memory policy requires libnuma")
-    libnuma = CDLL(library_path, use_errno=True)
+    return CDLL(library_path, use_errno=True)
+
+
+def current_memory_policy() -> MemoryPolicy:
+    """Return the calling thread's effective Linux NUMA task policy."""
+    libnuma = load_libnuma()
     libnuma.numa_max_node.argtypes = []
     libnuma.numa_max_node.restype = c_int
     max_node = libnuma.numa_max_node()
@@ -78,7 +86,7 @@ def current_memory_policy() -> MemoryPolicy:
 
 
 def cpu_numa_topology(node_root: Path = Path("/sys/devices/system/node")) -> dict[int, tuple[int, ...]]:
-    """Return CPU-bearing NUMA nodes without invoking external programs."""
+    """Return each CPU-bearing NUMA node and the logical CPUs it contains."""
     topology = {}
     try:
         node_paths = node_root.iterdir()
@@ -89,9 +97,9 @@ def cpu_numa_topology(node_root: Path = Path("/sys/devices/system/node")) -> dic
         if match is None:
             continue
         try:
-            cpus = tuple(_parse_range_list((node_path / "cpulist").read_text().strip()))
-        except (OSError, ValueError):
-            continue
+            cpus = tuple(parse_numa_range_list((node_path / "cpulist").read_text().strip()))
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"could not read NUMA CPU list from {node_path / 'cpulist'}") from error
         if cpus:
             topology[int(match.group(1))] = cpus
     if not topology:
@@ -104,7 +112,7 @@ def allowed_memory_nodes(status_path: Path = Path("/proc/self/status")) -> set[i
     with status_path.open() as status_file:
         for line in status_file:
             if line.startswith("Mems_allowed_list:"):
-                return set(_parse_range_list(line.split(":", 1)[1].strip()))
+                return set(parse_numa_range_list(line.split(":", 1)[1].strip()))
     raise RuntimeError(f"{status_path} does not expose Mems_allowed_list")
 
 
@@ -131,10 +139,7 @@ def set_host_memory_policy() -> Optional[tuple[int, ...]]:
 
 def _set_membind(nodes: tuple[int, ...]) -> None:
     """Restrict future allocations to CPU-bearing NUMA nodes."""
-    library_path = find_library("numa")
-    if library_path is None:
-        raise RuntimeError("NUMA affinity is enabled but libnuma is unavailable")
-    libnuma = CDLL(library_path)
+    libnuma = load_libnuma()
     libnuma.numa_parse_nodestring.argtypes = [c_char_p]
     libnuma.numa_parse_nodestring.restype = POINTER(_Bitmask)
     libnuma.numa_set_membind.argtypes = [POINTER(_Bitmask)]

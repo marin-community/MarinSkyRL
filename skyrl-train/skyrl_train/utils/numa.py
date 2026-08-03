@@ -17,9 +17,7 @@ import os
 import re
 import subprocess
 from collections import Counter
-from ctypes import CDLL, POINTER, c_int, c_ulong, c_void_p, get_errno
-from ctypes.util import find_library
-from dataclasses import dataclass
+from ctypes import POINTER, c_int, c_ulong, c_void_p, get_errno
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
@@ -27,18 +25,10 @@ from loguru import logger
 
 from skyrl_train.numa_policy import (
     is_numa_affinity_enabled,
+    load_libnuma,
+    parse_numa_range_list,
     set_host_memory_policy,
 )
-
-
-@dataclass(frozen=True)
-class NumaPlacement:
-    """NUMA placement installed for one GPU worker."""
-
-    gpu_id: int
-    cpu_node: int
-    cpu_ids: tuple[int, ...]
-    host_memory_nodes: tuple[int, ...]
 
 
 def _nvidia_smi_env() -> Dict[str, str]:
@@ -105,26 +95,14 @@ def _parse_nvidia_smi_topo() -> Optional[Dict[int, Tuple[List[int], int]]]:
                 break
 
         if cpu_affinity_str is not None and numa_node is not None:
-            cpus = _parse_cpu_range(cpu_affinity_str)
+            cpus = parse_numa_range_list(cpu_affinity_str)
             gpu_map[gpu_idx] = (cpus, numa_node)
 
     return gpu_map if gpu_map else None
 
 
-def _parse_cpu_range(cpu_str: str) -> List[int]:
-    """Parse CPU range string like '0-71' or '0-71,144-215' into list of CPU IDs."""
-    cpus = []
-    for part in cpu_str.split(","):
-        if "-" in part:
-            start, end = part.split("-", 1)
-            cpus.extend(range(int(start), int(end) + 1))
-        else:
-            cpus.append(int(part))
-    return cpus
-
-
 def memory_nodes_for_range(address: int, length: int, *, max_pages: int = 256) -> Dict[int, int]:
-    """Sample the physical NUMA nodes backing a process-local address range."""
+    """Return sampled physical NUMA node IDs mapped to their page counts."""
     if address <= 0 or length <= 0:
         raise ValueError("address and length must be positive")
     if max_pages <= 0:
@@ -143,10 +121,7 @@ def memory_nodes_for_range(address: int, length: int, *, max_pages: int = 256) -
 
     pages = (c_void_p * len(page_indices))(*(first_page + index * page_size for index in page_indices))
     statuses = (c_int * len(page_indices))()
-    library_path = find_library("numa")
-    if library_path is None:
-        raise RuntimeError("NUMA page queries require libnuma")
-    libnuma = CDLL(library_path, use_errno=True)
+    libnuma = load_libnuma()
     libnuma.move_pages.argtypes = [c_int, c_ulong, POINTER(c_void_p), POINTER(c_int), POINTER(c_int), c_int]
     libnuma.move_pages.restype = c_int
     if libnuma.move_pages(0, len(page_indices), pages, None, statuses, 0) != 0:
@@ -341,10 +316,10 @@ def get_gpu_cpu_affinity(gpu_physical_id: int) -> Optional[Tuple[List[int], int]
     return None
 
 
-def set_numa_affinity_for_gpu(gpu_id: int) -> Optional[NumaPlacement]:
-    """Install a GPU-local CPU affinity and an LPDDR-only memory policy."""
+def set_numa_affinity_for_gpu(gpu_id: int) -> None:
+    """Install GPU-local CPU affinity and an LPDDR-only policy when enabled."""
     if not is_numa_affinity_enabled():
-        return
+        return None
 
     affinity = get_gpu_cpu_affinity(gpu_id)
     if affinity is None:
@@ -352,7 +327,8 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> Optional[NumaPlacement]:
 
     cpu_list, numa_node = affinity
     target_memory_nodes = set_host_memory_policy()
-    assert target_memory_nodes is not None
+    if target_memory_nodes is None:
+        raise RuntimeError("NUMA affinity was disabled while configuring a GPU worker")
     if numa_node not in target_memory_nodes:
         raise RuntimeError(
             f"GPU {gpu_id}'s CPU NUMA node {numa_node} is outside the allowed host-memory nodes {target_memory_nodes}"
@@ -387,10 +363,3 @@ def set_numa_affinity_for_gpu(gpu_id: int) -> Optional[NumaPlacement]:
         )
     except (OSError, AttributeError) as error:
         raise RuntimeError(f"could not bind GPU {gpu_id}'s worker to CPUs {sorted(target_cpus)}") from error
-
-    return NumaPlacement(
-        gpu_id=gpu_id,
-        cpu_node=numa_node,
-        cpu_ids=tuple(sorted(target_cpus)),
-        host_memory_nodes=target_memory_nodes,
-    )

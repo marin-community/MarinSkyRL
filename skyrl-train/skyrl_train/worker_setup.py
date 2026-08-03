@@ -11,7 +11,7 @@ import os
 from skyrl_train.numa_policy import set_host_memory_policy
 
 
-def force_stock_asyncio_in_worker() -> None:
+def configure_worker_process() -> None:
     """Install process-wide prerequisites before Ray creates actor threads."""
 
     set_host_memory_policy()

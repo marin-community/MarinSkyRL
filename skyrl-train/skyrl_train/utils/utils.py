@@ -1373,16 +1373,16 @@ def initialize_ray(cfg: DictConfig):
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,
-    # BEFORE the C++ CoreWorker builds an async actor's concurrency-group event loop.
-    # It forces CPython stock asyncio (no uvloop/libuv) in EVERY worker -- the only
-    # reliable place to cover the RolloutCoordinator concurrency-group loop that
-    # SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor __init__ reset.
+    # BEFORE the C++ CoreWorker builds actor threads. It installs the inherited
+    # host-memory policy and forces CPython stock asyncio (no uvloop/libuv) in every
+    # worker -- the only reliable place to cover the RolloutCoordinator concurrency-
+    # group loop that SIGABRT'd job 927538 despite RAY_USE_UVLOOP=0 + the actor reset.
     # Referenced by fully-qualified name string (importable in every worker via the
     # editable skyrl_train install) so Ray does not have to cloudpickle it.
     ray.init(
         runtime_env={
             "env_vars": env_vars,
-            "worker_process_setup_hook": "skyrl_train.worker_setup.force_stock_asyncio_in_worker",
+            "worker_process_setup_hook": "skyrl_train.worker_setup.configure_worker_process",
         }
     )
 

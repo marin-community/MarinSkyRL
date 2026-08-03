@@ -21,8 +21,6 @@ def test_cpu_numa_topology_ignores_memory_only_nodes(tmp_path):
         node_path = tmp_path / f"node{node}"
         node_path.mkdir()
         (node_path / "cpulist").write_text(cpulist)
-    (tmp_path / "online").write_text("0-12")
-
     assert cpu_numa_topology(tmp_path) == {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)}
 
 
