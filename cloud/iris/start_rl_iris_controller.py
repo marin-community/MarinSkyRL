@@ -50,7 +50,8 @@ from cloud.iris.ray_storage import (
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
 except ImportError as error:
-    # A rigging that predates the telemetry submodule raises ImportError, not ModuleNotFoundError.
+    # An installed rigging without the telemetry submodule raises ImportError, not
+    # ModuleNotFoundError; the name check still keeps a failure inside these packages visible.
     if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
         raise
     _RAY_METRICS_UNAVAILABLE_REASON = str(error)

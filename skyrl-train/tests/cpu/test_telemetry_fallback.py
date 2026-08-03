@@ -1,33 +1,31 @@
-"""Covers the ImportError guard in ``skyrl_train/telemetry.py``; delete both together."""
+"""The optional-rigging fallback in ``skyrl_train/telemetry.py``."""
 
 import os
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 _SKYRL_TRAIN_ROOT = Path(__file__).resolve().parents[2]
 
+_USE_INERT_BACKEND = """
+import skyrl_train.inert_telemetry
+import skyrl_train.telemetry as trainer_telemetry
 
-def test_rigging_without_telemetry_submodule_leaves_the_trainer_signals_inert(tmp_path: Path) -> None:
+assert trainer_telemetry.telemetry is skyrl_train.inert_telemetry
+trainer_telemetry.record_policy_step(7)
+with trainer_telemetry.critical_phase("train_step"):
+    pass
+"""
+
+
+def test_rigging_without_telemetry_submodule_falls_back_to_inert(tmp_path: Path) -> None:
     (tmp_path / "rigging").mkdir()
     (tmp_path / "rigging" / "__init__.py").write_text("")
 
     # Shadowing the installed rigging takes a stub package on PYTHONPATH and a fresh
     # interpreter, because skyrl_train.telemetry binds its backend once, at import.
-    script = textwrap.dedent(
-        """
-        import skyrl_train.inert_telemetry
-        import skyrl_train.telemetry as trainer_telemetry
-
-        assert trainer_telemetry.telemetry is skyrl_train.inert_telemetry
-        trainer_telemetry.record_policy_step(7)
-        with trainer_telemetry.critical_phase("train_step"):
-            pass
-        """
-    )
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", _USE_INERT_BACKEND],
         cwd=_SKYRL_TRAIN_ROOT,
         env=os.environ | {"PYTHONPATH": str(tmp_path)},
         capture_output=True,
