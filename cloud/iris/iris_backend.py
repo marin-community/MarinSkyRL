@@ -1013,13 +1013,13 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
         CoreWeave is ALLOWED iff ``--target-cluster`` is set and ``--ingress-host`` is
         the marin host.
 
-    Escape hatch (once a further remediation is wired): ``OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1``.
+    Escape hatch (once a further remediation is wired): ``SKYRL_IRIS_ALLOW_INGRESS_HOST_MISMATCH=1``.
     """
     if getattr(args, "ingress_mode", "direct") != "controller":
         return
-    if os.environ.get("OTAGENT_ALLOW_INGRESS_HOST_MISMATCH") == "1":
+    if os.environ.get("SKYRL_IRIS_ALLOW_INGRESS_HOST_MISMATCH") == "1":
         print(
-            "[rl-iris] WARNING: OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1 — skipping the "
+            "[rl-iris] WARNING: SKYRL_IRIS_ALLOW_INGRESS_HOST_MISMATCH=1 — skipping the "
             "controller-ingress reachability guard.",
             flush=True,
         )
@@ -1046,7 +1046,7 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
                 "the job through the marin meta-scheduler (keep --ingress-host iris.oa.dev), "
                 "so marin delegates it to the peer and federation-proxies /proxy.\n"
                 "  Override (only once another remediation is wired): "
-                "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
+                "SKYRL_IRIS_ALLOW_INGRESS_HOST_MISMATCH=1."
             )
         if ingress_host and ingress_host != "iris.oa.dev":
             raise SystemExit(
@@ -1063,7 +1063,7 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"[rl-iris] BLOCKED: --ingress-host {ingress_host} does not match this "
             f"cluster's controller host {dash_host} (--cluster={cluster}). Override with "
-            "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
+            "SKYRL_IRIS_ALLOW_INGRESS_HOST_MISMATCH=1."
         )
 
 
@@ -1132,7 +1132,7 @@ def prepare_federated_parent_credentials(args: argparse.Namespace) -> str | None
 
 
 def _default_secrets_env() -> Optional[str]:
-    cand = os.environ.get("OT_AGENT_SECRETS_ENV") or os.path.expanduser("~/Documents/secrets.env")
+    cand = os.environ.get("SKYRL_IRIS_SECRETS_ENV") or os.path.expanduser("~/Documents/secrets.env")
     return cand if os.path.isfile(cand) else None
 
 
@@ -1488,7 +1488,7 @@ def create_parser() -> argparse.ArgumentParser:
         help="In-pod path to the parent (marin) cluster YAML the in-pod worker mints "
         "against, if it differs from the launch-host --parent-cluster-config path. "
         "Defaults to the launch-host resolved marin.yaml path (must be materialized "
-        "in-pod — see the OTAGENT_PARENT_CONTROLLER_CONFIG forwarding NOTE).",
+        "in-pod — see the SKYRL_IRIS_PARENT_CONTROLLER_CONFIG forwarding NOTE).",
     )
     parser.add_argument(
         "--secrets-env",
@@ -1496,7 +1496,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="secrets_env",
         default=_default_secrets_env(),
         help="KEY=VALUE env file injected into the task (HF_TOKEN, WANDB_API_KEY, etc.). "
-        "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
+        "Defaults to $SKYRL_IRIS_SECRETS_ENV, else ~/Documents/secrets.env.",
     )
     parser.add_argument(
         "--iris-ref",
@@ -1903,7 +1903,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             train_cmd.extend(["--target_cluster", args.target_cluster])
             # Parent (marin) config the in-pod worker mints against. Prefer an explicit
             # in-pod path; else pass the resolved marin.yaml path (must be materialized
-            # in-pod — see the OTAGENT_PARENT_CONTROLLER_CONFIG env forwarding + NOTE).
+            # in-pod — see the SKYRL_IRIS_PARENT_CONTROLLER_CONFIG env forwarding + NOTE).
             parent_cfg_in_pod = getattr(args, "parent_controller_config_in_pod", None) or (
                 args.parent_cluster_config or _resolve_parent_cluster_config(args.cluster_config)
             )
@@ -2341,8 +2341,8 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
                 env_vars[_fr_cvar] = _new
                 print(f"[rl-iris] FR-slug re-scope: {_fr_cvar} {_old} -> {_new}", flush=True)
     if args.rendezvous_dir:
-        env_vars["OT_AGENT_IRIS_RENDEZVOUS_DIR"] = args.rendezvous_dir
-    env_vars["OT_AGENT_IRIS_RAY_PORT"] = str(args.ray_port)
+        env_vars["SKYRL_IRIS_IRIS_RENDEZVOUS_DIR"] = args.rendezvous_dir
+    env_vars["SKYRL_IRIS_IRIS_RAY_PORT"] = str(args.ray_port)
     # Forward the launch host's secrets (mirrors launch_eval_iris.py passthrough).
     #
     # IMPORTANT — do NOT forward AWS_*/R2_* here. The cw-us-east-02a cluster

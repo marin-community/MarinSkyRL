@@ -98,7 +98,7 @@ class LocalRLRunner:
         # Set by _ingress_context when record_literal stands up the co-located
         # RecordProxy. Threaded into the SkyRL Hydra cfg (see run()) for the SAME
         # process-boundary reason as _minted_agent_api_base: literal_proxy_utils
-        # publishes the log path via os.environ["OTAGENT_LITERAL_LOG_PATH"] in THIS
+        # publishes the log path via os.environ["SKYRL_IRIS_LITERAL_LOG_PATH"] in THIS
         # driver, but the generator (which reads it to correlate opencode rollout
         # details / rebuild chat_history) runs in a pre-existing Ray worker that never
         # inherits this env → without the cfg thread every opencode trajectory loses
@@ -375,7 +375,7 @@ class LocalRLRunner:
                 # published on os.environ, to thread it into the cfg alongside
                 # agent_api_base (same Ray process-boundary — see run()). None when
                 # record_literal is off (null CM), keeping the direct path byte-identical.
-                self._literal_log_path = os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+                self._literal_log_path = os.environ.get("SKYRL_IRIS_LITERAL_LOG_PATH")
                 injected = True  # dummy key already published above (decoupled from ingress)
                 print(
                     f"[training-driver] ingress_mode=controller record_literal="
@@ -605,7 +605,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--parent_controller_config",
         default="",
         help="Parent (marin) cluster YAML for federated parent-minting; also honored via "
-        "the OTAGENT_PARENT_CONTROLLER_CONFIG env.",
+        "the SKYRL_IRIS_PARENT_CONTROLLER_CONFIG env.",
     )
     parser.add_argument("--parent-controller-config", dest="parent_controller_config", help=argparse.SUPPRESS)
     parser.add_argument(

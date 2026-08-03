@@ -658,7 +658,7 @@ class _ParentControllerClient:
         # building the client. In-pod on CoreWeave there is no cached `iris login`
         # (~/.config/marin/credentials/<cluster>.json) and no marin-allowlisted ambient
         # service account, so without this the IAP mint fails UNAUTHENTICATED. If the
-        # launcher forwarded the operator's login record via OTAGENT_MARIN_CREDENTIALS_JSON,
+        # launcher forwarded the operator's login record via SKYRL_IRIS_MARIN_CREDENTIALS_JSON,
         # materialize it to the path rigging's load_credentials() reads; otherwise this is
         # a no-op and rigging falls back to ambient SA creds (the deploy-choice alternative).
         materialize_parent_credentials()
@@ -737,8 +737,8 @@ class _ParentControllerClient:
 
 
 # Env vars the production wiring reads for the parent (marin) controller.
-PARENT_CONTROLLER_CONFIG_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG"
-PARENT_INGRESS_HOST_ENV = "OTAGENT_PARENT_INGRESS_HOST"
+PARENT_CONTROLLER_CONFIG_ENV = "SKYRL_IRIS_PARENT_CONTROLLER_CONFIG"
+PARENT_INGRESS_HOST_ENV = "SKYRL_IRIS_PARENT_INGRESS_HOST"
 DEFAULT_PARENT_INGRESS_HOST = "iris.oa.dev"
 
 # The launcher may forward the parent (marin) cluster YAML *content* so the in-pod
@@ -747,13 +747,13 @@ DEFAULT_PARENT_INGRESS_HOST = "iris.oa.dev"
 # does not resolve in-pod. marin.yaml carries no secrets (signing_key is a
 # gcp-secret:// reference resolved server-side; images/storage are ghcr/gs refs), so
 # forwarding its content is safe and unconditional on the federated path.
-PARENT_CONTROLLER_CONFIG_YAML_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG_YAML"
+PARENT_CONTROLLER_CONFIG_YAML_ENV = "SKYRL_IRIS_PARENT_CONTROLLER_CONFIG_YAML"
 
 # The launcher may forward the operator's cached `iris login` record (the JSON at
 # ~/.config/marin/credentials/<cluster>.json, carrying edge_refresh_token) so the in-pod
 # worker can mint at marin. SECRET: it contains a long-lived refresh token, so forwarding
 # is opt-in on the launch side; the pod materializes it to the path load_credentials reads.
-PARENT_CREDENTIALS_JSON_ENV = "OTAGENT_MARIN_CREDENTIALS_JSON"
+PARENT_CREDENTIALS_JSON_ENV = "SKYRL_IRIS_MARIN_CREDENTIALS_JSON"
 
 
 def materialize_parent_credentials() -> Optional[str]:

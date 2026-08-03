@@ -287,7 +287,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
         # Shared RecordProxy literal-log path, resolved cfg-FIRST then env-fallback for
         # the SAME Ray process-boundary reason as agent_api_base above: run_rl publishes
-        # it on os.environ['OTAGENT_LITERAL_LOG_PATH'] in the driver, but THIS generator
+        # it on os.environ['SKYRL_IRIS_LITERAL_LOG_PATH'] in the driver, but THIS generator
         # is constructed inside a Ray worker that never inherits that late env mutation,
         # so the driver threads it through the cfg as terminal_bench_config.literal_log_path.
         # None when record_literal is off / direct launch → the opencode correlation +
@@ -298,7 +298,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             _cfg_literal_log = str(terminal_bench_cfg.get("literal_log_path", "") or "").strip()
         except Exception:  # pragma: no cover - defensive: cfg may not be a mapping
             _cfg_literal_log = ""
-        self._literal_log_path = _cfg_literal_log or os.environ.get("OTAGENT_LITERAL_LOG_PATH") or None
+        self._literal_log_path = _cfg_literal_log or os.environ.get("SKYRL_IRIS_LITERAL_LOG_PATH") or None
         # Incremental, trial-indexed reader over that shared log (owns its own lock +
         # typed cursor state). Read-only; the writer is the external harbor RecordProxy.
         self._literal_log_store = LiteralLogStore()
@@ -1379,7 +1379,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         No-op (returns the input unchanged) when: rollout_details already populated
         (terminus native), collect_rollout_details off, no correlation id present, or no
-        proxy log path published (``OTAGENT_LITERAL_LOG_PATH``). Never synthesizes.
+        proxy log path published (``SKYRL_IRIS_LITERAL_LOG_PATH``). Never synthesizes.
         """
         if rollout_details:
             return rollout_details
@@ -1391,7 +1391,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         if not trial_id:
             return rollout_details
         # cfg-threaded path (Ray-boundary-safe) with an env fallback for direct launches.
-        log_path = self._literal_log_path or os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+        log_path = self._literal_log_path or os.environ.get("SKYRL_IRIS_LITERAL_LOG_PATH")
         if not log_path:
             return rollout_details
         # Per-trial indexed lookup (O(this trial's entries)). The RecordProxy also
@@ -1464,7 +1464,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         Returns ``None`` (caller then drops the trajectory honestly, exactly as the
         pre-existing ``KeyError`` branch did) when: rollout-detail collection is off, no
         correlation id is present, no proxy-log path is published
-        (``OTAGENT_LITERAL_LOG_PATH``), no matching completion-bearing record exists, or
+        (``SKYRL_IRIS_LITERAL_LOG_PATH``), no matching completion-bearing record exists, or
         the recovered request carries no usable ``messages``. Never synthesizes content.
         """
         if not self._collect_rollout_details:
@@ -1475,7 +1475,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         if not trial_id:
             return None
         # cfg-threaded path (Ray-boundary-safe) with an env fallback for direct launches.
-        log_path = self._literal_log_path or os.environ.get("OTAGENT_LITERAL_LOG_PATH")
+        log_path = self._literal_log_path or os.environ.get("SKYRL_IRIS_LITERAL_LOG_PATH")
         if not log_path:
             return None
         # Per-trial indexed lookup (O(this trial's entries)); already trial-scoped, so the

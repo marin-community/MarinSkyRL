@@ -352,6 +352,6 @@ def maybe_serve_literal_proxy(
     # per-trial x-ot-trial-id. This is the worker-side file the proxy APPENDS to (the
     # staging path when experiments_dir is remote, else the direct log); the correlator
     # reads it locally, never the gs:// upload. Single source of truth for the path.
-    os.environ["OTAGENT_LITERAL_LOG_PATH"] = str(log_path)
+    os.environ["SKYRL_IRIS_LITERAL_LOG_PATH"] = str(log_path)
     with serve_record_proxy(upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri) as proxy_endpoint:
         yield proxy_endpoint

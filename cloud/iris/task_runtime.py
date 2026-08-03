@@ -183,7 +183,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
         return False
 
     endpoint = os.environ.get("AWS_ENDPOINT_URL")
-    style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
+    style = os.environ.get("SKYRL_IRIS_S3_ADDRESSING_STYLE", "virtual")
     client = boto3.client("s3", endpoint_url=endpoint, config=Config(s3={"addressing_style": style}))
 
     # List every seeded object under the prefix (paginated).
@@ -618,11 +618,11 @@ def _pin_boto3_s3_addressing_style() -> None:
     inherits it.
 
     R2 credentials/region/endpoint come from env vars independently of the config
-    file. Env-overridable via ``OT_AGENT_S3_ADDRESSING_STYLE`` (default
+    file. Env-overridable via ``SKYRL_IRIS_S3_ADDRESSING_STYLE`` (default
     ``virtual``; set ``path``/``auto`` for a path-style store). If an operator
     already exported ``AWS_CONFIG_FILE``, we RESPECT it and skip.
     """
-    style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
+    style = os.environ.get("SKYRL_IRIS_S3_ADDRESSING_STYLE", "virtual")
     existing = os.environ.get("AWS_CONFIG_FILE")
     if existing and os.path.exists(existing):
         _log(
@@ -927,7 +927,7 @@ def _ray_spill_target(
 RAY_OBJECT_STORE_CAP_GIB = 96  # bounded plasma; default can be ~30% of *detected* RAM (huge if host is misread)
 # Per-job override (env) for the plasma cap, in GiB. Default = RAY_OBJECT_STORE_CAP_GIB
 # (96). The min(., cgroup//8) OOM guard below still applies as the HARD ceiling.
-_RAY_STORE_CAP_ENV = "OT_AGENT_RAY_OBJECT_STORE_CAP_GIB"
+_RAY_STORE_CAP_ENV = "SKYRL_IRIS_RAY_OBJECT_STORE_CAP_GIB"
 
 
 def _cgroup_mem_limit_bytes() -> int | None:
@@ -1138,7 +1138,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # by node id, reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous
 # / spill / term-artifact writers already use fs_and_path. Per-node: each pod writes
 # its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
-# OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
+# SKYRL_IRIS_RAY_LOG_SYNC (default "1"); interval SKYRL_IRIS_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
 
 
@@ -1148,7 +1148,7 @@ def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str)
     raises; per-file so one bad file can't abort the rest."""
     if not rendezvous_dir:
         return
-    if os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+    if os.environ.get("SKYRL_IRIS_RAY_LOG_SYNC", "1") != "1":
         return
     import glob
 
@@ -1184,11 +1184,11 @@ def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Ev
     """Start a daemon thread that periodically uploads this node's Ray session logs.
     Returns the stop Event (set it to stop). No-op (returns a set-able event) when
     disabled / no rendezvous dir. Fires a first upload after a short warmup so the
-    sync is confirmable during bring-up, then every OT_AGENT_RAY_LOG_SYNC_INTERVAL_S."""
+    sync is confirmable during bring-up, then every SKYRL_IRIS_RAY_LOG_SYNC_INTERVAL_S."""
     stop = threading.Event()
-    if not rendezvous_dir or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+    if not rendezvous_dir or os.environ.get("SKYRL_IRIS_RAY_LOG_SYNC", "1") != "1":
         return stop
-    interval = int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300"))
+    interval = int(os.environ.get("SKYRL_IRIS_RAY_LOG_SYNC_INTERVAL_S", "300"))
     if interval <= 0:
         return stop
 
@@ -1269,7 +1269,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         if not args.rendezvous_dir:
             raise ValueError(
                 "Multi-node iris slice (IRIS_NUM_TASKS>1) requires --rendezvous-dir "
-                "(or OT_AGENT_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
+                "(or SKYRL_IRIS_IRIS_RENDEZVOUS_DIR) so worker ranks can find the head IP."
             )
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
@@ -1326,7 +1326,7 @@ def run_worker(args: argparse.Namespace) -> int:
 
     if not args.rendezvous_dir:
         raise ValueError(
-            "Worker rank requires --rendezvous-dir (or OT_AGENT_IRIS_RENDEZVOUS_DIR) to discover the head IP."
+            "Worker rank requires --rendezvous-dir (or SKYRL_IRIS_IRIS_RENDEZVOUS_DIR) to discover the head IP."
         )
 
     payload = poll_rendezvous(args.rendezvous_dir, args.rendezvous_timeout, min_written_at=worker_start)
@@ -1386,7 +1386,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--ray-port",
         type=int,
-        default=int(os.environ.get("OT_AGENT_IRIS_RAY_PORT", "6379")),
+        default=int(os.environ.get("SKYRL_IRIS_IRIS_RAY_PORT", "6379")),
         help="Port the Ray head binds (default 6379).",
     )
     parser.add_argument(
@@ -1404,9 +1404,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--rendezvous-dir",
-        default=os.environ.get("OT_AGENT_IRIS_RENDEZVOUS_DIR"),
+        default=os.environ.get("SKYRL_IRIS_IRIS_RENDEZVOUS_DIR"),
         help="Shared object-store/dir for the head/worker rendezvous (gs://, s3://, "
-        "or a shared path). Defaults to $OT_AGENT_IRIS_RENDEZVOUS_DIR.",
+        "or a shared path). Defaults to $SKYRL_IRIS_IRIS_RENDEZVOUS_DIR.",
     )
     parser.add_argument(
         "--rendezvous-timeout",
@@ -1422,7 +1422,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--train-data",
-        default=os.environ.get("OT_AGENT_IRIS_TRAIN_DATA", ""),
+        default=os.environ.get("SKYRL_IRIS_IRIS_TRAIN_DATA", ""),
         help="JSON list of train_data HF dataset(s) to stage (extract to the node-local "
         "task dir) on EVERY node before Ray starts. Required for agentic terminal_bench "
         "rollouts on a multi-node slice with no shared filesystem.",
@@ -1434,7 +1434,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--prestage-model",
-        default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
+        default=os.environ.get("SKYRL_IRIS_IRIS_PRESTAGE_MODEL", ""),
         help="HF repo ID of the policy model to pre-download into the node-local HF "
         "cache on EVERY node before Ray starts. Object-store URIs are unsupported; "
         "use --model-warm-source for an S3 mirror. Set by the launcher when the config "
@@ -1443,7 +1443,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--model-warm-source",
-        default=os.environ.get("OT_AGENT_MODEL_WARM_SOURCE", ""),
+        default=os.environ.get("SKYRL_IRIS_MODEL_WARM_SOURCE", ""),
         help="Optional in-region CW-object-store prefix (s3://marin-us-east-02a/models/"
         "<org>--<name>) that a one-time seed job (scripts/iris/mirror_hf_to_s3.py) has "
         "populated with the model weights. When set AND --prestage-model is set, the "
@@ -1469,7 +1469,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--policy-chat-template",
-        default=os.environ.get("OT_AGENT_IRIS_POLICY_CHAT_TEMPLATE", ""),
+        default=os.environ.get("SKYRL_IRIS_IRIS_POLICY_CHAT_TEMPLATE", ""),
         help="Repo-relative path to a chat-template jinja to FORCE onto the policy "
         "tokenizer's cached tokenizer_config.json + chat_template.jinja on EVERY node "
         "before Ray (delphi single-turn RLVR: the SFT repo ships no template). Requires "

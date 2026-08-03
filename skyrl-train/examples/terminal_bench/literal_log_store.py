@@ -4,7 +4,7 @@ The "literal log" is how an opencode rollout recovers its per-token training sig
 opencode is a CLI agent that talks to vLLM over its own transport and bypasses harbor's
 ``Chat``, so its ``TrialResult`` comes back with empty ``rollout_details``. A co-located
 RecordProxy (external, in harbor) appends one JSON line per served request to a single
-shared file at ``$OTAGENT_LITERAL_LOG_PATH``, each line carrying the ``x-ot-trial-id``
+shared file at ``$SKYRL_IRIS_LITERAL_LOG_PATH``, each line carrying the ``x-ot-trial-id``
 correlation id plus the served ``prompt_token_ids`` / ``completion_token_ids`` /
 ``logprobs``. ``TerminalBenchGenerator`` reads this log, filtered by trial id, to rebuild
 rollout_details and chat_history (see the two ``_maybe_*_opencode_*`` helpers).
