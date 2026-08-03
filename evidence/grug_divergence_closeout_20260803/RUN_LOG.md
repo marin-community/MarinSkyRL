@@ -56,17 +56,72 @@ allocation was released after successful readback.
 - Result URI: `s3://marin-us-east-02a/iris/grug-training-perf-gap/20260803/divergence-closeout-2dd905e/headline-paired-s1.json`
 - Remote run script SHA-256: `b939c36ff22cac6f98b48eca09730481d90fd353b8d320fc7ec70fddbca168aa`
 - Iris launcher SHA-256: `28f7ca3235a43d6c4174d644034a9cb617da2448cad1567118142e154aae7817`
-- Independent reader SHA-256: `78b2133facfa1dbe4d37d931a38f1d0496b496639d33c51cf5e6ca8e35279717`
-- Independent readback launcher SHA-256: `1e8d815c2aa09d3e4a70b97d64f1c408aaaf8c59b7020c5e23845fe920eb02d1`
+- Result payload SHA-256: `0f62a8123a280edaf6692ab1db0c01d82b644c8c46906316421f63cc22f2fa8a`
+- Canonical result SHA-256: `2c1ef16927846e2ea031077064fd61b84e63bd707b9ec63904169096cb3fbe0c`
+- Independent diagnostic reader SHA-256: `ac941919681b7b4c535cdf684b03640473dda79c8e2ae5f9120ade1e370b4d80`
+- Independent readback launcher SHA-256: `7f6043650273f54f0e18d0c08ed3cee9f8413e6032909b969da96802d521eb65`
+- Independent summary SHA-256: `c9a21098f9529997e534bbe8a1da7b06eee390860c3f6c44e192207ef03dae70`
+- Readback job: `/romain/grug-paired-readback-2dd905e-s1-20260803`
+- Headline verdict: fail
 
 The readback launcher requires a clean evidence worktree and proves that the
 executed source commit is an ancestor of its current HEAD. This permits later
 evidence-only commits while the immutable image digest continues to pin the
 code that ran.
 
+The pre-run reader (`78b2133facfa1dbe4d37d931a38f1d0496b496639d33c51cf5e6ca8e35279717`)
+stopped immediately on a failed semantic verdict. After the uploaded result
+failed, the diagnostic reader changed only that early exit into explicit
+`semantic_pass=false` and `headline_valid=false` fields so it could continue
+checking identity, state, gradients, and metrics. It did not change any
+tolerance or acceptance calculation. The launcher added Iris's required
+`--enable-extra-resources` declaration after the first CPU submission was
+rejected before job creation; no accelerator reran.
+
 Iris accepted the exact production-priority request. All four nodes joined one
-32-GPU Ray actor group. At `2026-08-03T02:20:35Z`, cgroup memory was 63--67 GiB
-per node against the 1,600 GiB limit, and every node reported zero `high`,
-`max`, `oom`, `oom_kill`, and `oom_group_kill` events. The job was still
-running the expected long eager arm when this entry was written. Final metrics
-and independent readback remain pending.
+32-GPU Ray actor group. The eager and grouped arms both finished, the result
+was uploaded, and only then did the driver exit nonzero because the
+predeclared headline semantic check failed. Iris consequently marked task 0
+failed and its three gang siblings `cosched_failed`. The later Ray zombie and
+SIGKILL messages are shutdown cleanup, not the cause.
+
+The independent reader verified the 11,373,214-byte object and its canonical
+digest. Initial and final topology and worker identities match. Selection and
+warmup restore checks pass. Both arms have 476 finite nonempty gradient tensors
+and at least 2,096,173,280 gradient elements per rank. Baseline and finish
+gradients are empty, and the final model state is restored. The structural
+correctness verdict is therefore pass.
+
+The semantic verdict is fail. Matched global CE differs by only
+`0.0000329718` and passes at `0.005470` of its allowance. All 5,184 sampled
+representative-gradient checks pass, with maximum allowance ratio `0.810618`.
+However, 1,995 of 12,288 representative action log probabilities violate the
+predeclared `rtol=4e-2, atol=4e-3` tolerance. Their maximum absolute difference
+is `1.955252`, or `30.610567` times the allowance. The headline result is not
+semantically valid.
+
+The invalid pair nevertheless records these observational timings:
+
+| Arm | Synchronized wall | Nonpadding tokens/s | Routed expert time | Non-routed time | Peak allocated HBM | Total GPU-s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| eager | 6,866.115339 s | 3,654.966 | 5,675.614517 s | 1,190.500822 s | 37.574300 GiB | 219,715.691 |
+| grouped | 364.986519 s | 68,757.115 | 75.493324 s | 289.493195 s | 35.763228 GiB | 11,679.569 |
+
+The observed wall and throughput ratio is `18.811970x`, with an observed
+208,036.122-GPU-second difference. These are not a causal recovery claim
+because the action-output contract failed.
+
+Memory remained safe throughout. Direct samples showed 63--67 GiB cgroup use
+per 1,600 GiB task, roughly 1.89 TiB physical RAM available per node, no swap,
+and zero memory-pressure or OOM events. Peak reserved HBM was 47.648438 GiB in
+both arms.
+
+The exact remaining discriminator is a full-headline, per-token route
+membership comparison under the already recorded adjusted-logit margin rule.
+The completed headline intentionally did not retain routes. Obtaining that
+evidence would require changing the frozen headline diagnostics and running a
+second 32-H100 pair. That is a new substantive cycle beyond the one gate and
+one pair authorized by this closeout; changing the output tolerance after
+seeing this result is also forbidden. The bounded outcome is therefore to
+leave #7903 open with this failed validity evidence. MarinSkyRL #276 remains
+unchanged.
