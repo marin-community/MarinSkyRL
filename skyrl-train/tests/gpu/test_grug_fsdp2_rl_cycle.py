@@ -162,7 +162,7 @@ def _training_batch(prompts: list[list[int]], rollout) -> TrainingInputBatch:
     return _make_training_batch(sequences, torch.tensor(rollout["response_logprobs"], dtype=torch.float32))
 
 
-def _engine_client(cfg, model_path: str, shared_pg) -> InferenceEngineClient:
+def _engine_client(cfg, model_path: str) -> InferenceEngineClient:
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     engines = create_ray_wrapped_inference_engines(
         num_inference_engines=cfg.generator.num_inference_engines,
@@ -175,7 +175,7 @@ def _engine_client(cfg, model_path: str, shared_pg) -> InferenceEngineClient:
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
         enforce_eager=True,
-        shared_pg=shared_pg,
+        shared_pg=None,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
         inference_engine_enable_sleep=False,
         async_engine=True,
@@ -317,7 +317,7 @@ def _run_full_cycle(
     available_gpus = int(ray.cluster_resources().get("GPU", 0))
     if available_gpus < NUM_GPUS:
         pytest.skip(f"topology requires {NUM_GPUS} Ray GPUs, found {available_gpus}")
-    client = _engine_client(cfg, model_path, None)
+    client = _engine_client(cfg, model_path)
     try:
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % len(prompt_pattern)] for idx in range(cfg.trainer.train_batch_size)]

@@ -782,9 +782,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             wrapped_model = HFModelWrapper(
                 model_path,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # Marin stores MuonH parameters and optimizer state in FP32;
-                # FSDP2's mixed-precision policy still casts forward compute to BF16.
-                # Every pre-existing optimizer keeps its BF16 load path.
+                # MuonH parameters and optimizer state stay in FP32. FSDP2's
+                # mixed-precision policy still casts forward compute to BF16.
                 bf16=not strategy.is_muonh_optimizer,
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
