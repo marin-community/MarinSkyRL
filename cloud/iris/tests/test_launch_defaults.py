@@ -293,6 +293,7 @@ def test_rl_config_is_materialized_for_the_task(tmp_path):
     assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
     assert str(source) not in command[-1]
+    assert "source /app/marinskyrl/.iris-runtime-env" in command[-1]
 
 
 def test_in_tree_rl_config_is_embedded_in_the_runtime_bundle_environment(tmp_path):

@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlparse
 
 MARINSKYRL_REPOSITORY = "https://github.com/marin-community/MarinSkyRL.git"
 MARINSKYRL_TASK_ROOT = "/app/marinskyrl"
+MARINSKYRL_RUNTIME_ENV = f"{MARINSKYRL_TASK_ROOT}/.iris-runtime-env"
 
 
 class RuntimeProfile(StrEnum):
@@ -58,6 +59,7 @@ def _checkout_commit(checkout: Path) -> str:
 def task_setup_script(commit: str, profile: RuntimeProfile) -> str:
     """Build the Iris setup script for a frozen SkyRL checkout and dependency profile."""
     checkout = MARINSKYRL_TASK_ROOT
+    runtime_env = MARINSKYRL_RUNTIME_ENV
     extras = (profile.value, "vllm", "telemetry")
     extra_flags = " ".join(f"--extra {shlex.quote(extra)}" for extra in extras)
     return f"""set -euo pipefail
@@ -74,5 +76,9 @@ UV_PROJECT_ENVIRONMENT="$IRIS_VENV" uv sync \
   --no-group dev \
   {extra_flags} \
   --no-install-package flash-attn
-"$IRIS_VENV/bin/python" -c "import torch, vllm; print('[rl-iris] frozen runtime ready:', torch.__version__, vllm.__version__)"
+cuda_library_path="$("$IRIS_VENV/bin/python" -c "import site; from pathlib import Path; print(':'.join(str(path) for root in site.getsitepackages() for path in sorted((Path(root) / 'nvidia').glob('*/lib')) if path.is_dir()))")"
+test -n "$cuda_library_path"
+printf 'export LD_LIBRARY_PATH=%q${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\n' "$cuda_library_path" > {shlex.quote(runtime_env)}
+source {shlex.quote(runtime_env)}
+"$IRIS_VENV/bin/python" -c "import torch, vllm; import vllm._C; print('[rl-iris] frozen runtime ready:', torch.__version__, vllm.__version__)"
 """

@@ -28,7 +28,7 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLTopology,
 )
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
-from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
+from cloud.iris.runtime_environment import MARINSKYRL_RUNTIME_ENV, RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
 from cloud.iris.runtime_bundle import build_runtime_bundle  # noqa: E402
 from iris.client import JobFailedError  # noqa: E402
@@ -391,3 +391,6 @@ def test_task_setup_uses_one_frozen_checkout_for_launcher_and_training() -> None
     assert "--frozen" in script
     assert "--extra fsdp --extra vllm --extra telemetry" in script
     assert "--no-install-package flash-attn" in script
+    assert f"> {MARINSKYRL_RUNTIME_ENV}" in script
+    assert f"source {MARINSKYRL_RUNTIME_ENV}" in script
+    assert "import vllm._C" in script

@@ -87,6 +87,7 @@ from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 from cloud.iris.runtime_environment import (
+    MARINSKYRL_RUNTIME_ENV,
     MARINSKYRL_TASK_ROOT,
     RuntimeProfile,
     installed_commit,
@@ -2098,6 +2099,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         f"set -e; cd {APP_DIR}; "
         f"{iris_verification}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
+        f"source {shlex.quote(MARINSKYRL_RUNTIME_ENV)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"export VLLM_USE_V1=1; "
         f"{gdn_branch}"
