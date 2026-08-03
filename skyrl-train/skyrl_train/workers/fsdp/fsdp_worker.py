@@ -1049,7 +1049,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     TOKEN_GROUP_ALIGN_SIZE_M,
                 )
             source = torch.vstack((hidden_states, hidden_states.new_zeros(hidden_states.shape[-1])))
-            padded_input = source.index_select(0, permuted_indices.long())
+            # Torchtitan leaves padded slots at -1 so they select the appended
+            # zero row through normal Python indexing.  index_select rejects
+            # those negative indices on CUDA and is not equivalent here.
+            padded_input = source[permuted_indices.long()]
             offsets = torch.cumsum(padded_counts, dim=0, dtype=torch.int32)
             padded_gate = torch._grouped_mm(
                 padded_input.bfloat16(), gate_weight.bfloat16().transpose(-2, -1), offs=offsets
