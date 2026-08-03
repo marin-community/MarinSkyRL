@@ -9,8 +9,8 @@ Detection strategy (in priority order):
 2. Pure sysfs + numactl (no nvidia-smi needed — enumerates NVIDIA PCI devices, reads
    their NUMA nodes, then maps GPU NUMA nodes to CPU NUMA nodes via distance matrix)
 
-Activation: Set SKYRL_ENABLE_NUMA_AFFINITY=1 in the environment. When unset, all functions
-are no-ops to avoid interfering with systems that don't need NUMA binding.
+Activation: Set SKYRL_ENABLE_NUMA_AFFINITY=1 in the environment to install CPU and memory
+affinity. Topology queries and placement diagnostics remain available when it is unset.
 """
 
 import os
@@ -19,7 +19,7 @@ import subprocess
 from collections import Counter
 from ctypes import POINTER, c_int, c_ulong, c_void_p, get_errno
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Collection, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -190,14 +190,14 @@ def physical_gpu_id_for_worker(cuda_visible_devices: Optional[str], launcher_loc
     return int(devices[visible_rank])
 
 
-def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[int]]) -> Optional[int]:
+def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_node_ids: Collection[int]) -> Optional[int]:
     """Find the CPU NUMA node closest to a GPU NUMA node using the kernel distance matrix.
 
     On GH200, GPU NUMA nodes (4, 12, 20, 28) have no CPUs — their HBM memory lives
     there. The closest CPU NUMA node (0, 1, 2, 3) is the one on the same SoC,
     determined by reading /sys/devices/system/node/nodeN/distance.
     """
-    if gpu_numa_node in cpu_nodes:
+    if gpu_numa_node in cpu_node_ids:
         return gpu_numa_node  # GPU NUMA node has CPUs directly
 
     # Read distance from gpu_numa_node to all other nodes
@@ -212,7 +212,7 @@ def _find_closest_cpu_numa_node(gpu_numa_node: int, cpu_nodes: Dict[int, List[in
     # Find the CPU node with the smallest distance
     best_node = None
     best_dist = float("inf")
-    for node_id in cpu_nodes:
+    for node_id in cpu_node_ids:
         if node_id < len(distances) and distances[node_id] < best_dist:
             best_dist = distances[node_id]
             best_node = node_id
@@ -244,7 +244,7 @@ def _get_affinity_via_sysfs_numactl(gpu_physical_id: int) -> Optional[Tuple[List
         return (list(topology[gpu_numa]), gpu_numa)
 
     # GH200 case: GPU NUMA node is HBM-only, find closest CPU NUMA node
-    closest = _find_closest_cpu_numa_node(gpu_numa, {node: list(cpus) for node, cpus in topology.items()})
+    closest = _find_closest_cpu_numa_node(gpu_numa, topology.keys())
     if closest is not None:
         return (list(topology[closest]), closest)
 

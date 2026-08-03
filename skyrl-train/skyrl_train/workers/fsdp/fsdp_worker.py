@@ -68,6 +68,21 @@ class FSDPCpuOffloadNumaDiagnostics:
     sampled_bytes: int
 
 
+@dataclass(frozen=True)
+class _ParameterPageSample:
+    page_nodes: dict[int, int]
+    tensor_count: int
+    byte_count: int
+
+
+@dataclass(frozen=True)
+class _ProcessNumaPlacement:
+    cpu_nodes: tuple[int, ...]
+    cpu_affinity: tuple[int, ...]
+    affinity_nodes: tuple[int, ...]
+    memory_policy: MemoryPolicy
+
+
 def _pinned_cpu_parameters_by_size(model: torch.nn.Module) -> list[torch.Tensor]:
     parameters = []
     for parameter in model.parameters():
@@ -77,7 +92,7 @@ def _pinned_cpu_parameters_by_size(model: torch.nn.Module) -> list[torch.Tensor]
     return sorted(parameters, key=lambda parameter: parameter.numel() * parameter.element_size(), reverse=True)
 
 
-def _sample_parameter_page_nodes(parameters: list[torch.Tensor], max_pages: int) -> tuple[dict[int, int], int, int]:
+def _sample_parameter_page_nodes(parameters: list[torch.Tensor], max_pages: int) -> _ParameterPageSample:
     page_nodes: Counter[int] = Counter()
     sampled_tensors = 0
     sampled_bytes = 0
@@ -96,14 +111,23 @@ def _sample_parameter_page_nodes(parameters: list[torch.Tensor], max_pages: int)
         sampled_page_count = sum(tensor_page_nodes.values())
         sampled_bytes += sampled_page_count * page_size
         remaining_pages -= sampled_page_count
-    return dict(sorted(page_nodes.items())), sampled_tensors, sampled_bytes
+    return _ParameterPageSample(
+        page_nodes=dict(sorted(page_nodes.items())),
+        tensor_count=sampled_tensors,
+        byte_count=sampled_bytes,
+    )
 
 
-def _process_numa_placement() -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], MemoryPolicy]:
+def _process_numa_placement() -> _ProcessNumaPlacement:
     topology = cpu_numa_topology()
     cpu_affinity = tuple(sorted(os.sched_getaffinity(0)))
     affinity_nodes = tuple(sorted(node for node, cpus in topology.items() if set(cpu_affinity).intersection(cpus)))
-    return tuple(sorted(topology)), cpu_affinity, affinity_nodes, current_memory_policy()
+    return _ProcessNumaPlacement(
+        cpu_nodes=tuple(sorted(topology)),
+        cpu_affinity=cpu_affinity,
+        affinity_nodes=affinity_nodes,
+        memory_policy=current_memory_policy(),
+    )
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -432,19 +456,19 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def get_cpu_offload_numa_diagnostics(self, max_pages: int = 4096) -> FSDPCpuOffloadNumaDiagnostics:
         """Report the physical placement of persistent FSDP2 CPU-offload tensors."""
         parameters = _pinned_cpu_parameters_by_size(self.model.model)
-        page_nodes, sampled_tensors, sampled_bytes = _sample_parameter_page_nodes(parameters, max_pages)
-        cpu_nodes, cpu_affinity, affinity_nodes, policy = _process_numa_placement()
+        page_sample = _sample_parameter_page_nodes(parameters, max_pages)
+        placement = _process_numa_placement()
         return FSDPCpuOffloadNumaDiagnostics(
             rank=self._rank,
             host=socket.gethostname(),
-            cpu_nodes=cpu_nodes,
-            cpu_affinity=cpu_affinity,
-            affinity_nodes=affinity_nodes,
-            memory_policy=policy,
-            page_nodes=page_nodes,
-            sampled_pages=sum(page_nodes.values()),
-            sampled_tensors=sampled_tensors,
-            sampled_bytes=sampled_bytes,
+            cpu_nodes=placement.cpu_nodes,
+            cpu_affinity=placement.cpu_affinity,
+            affinity_nodes=placement.affinity_nodes,
+            memory_policy=placement.memory_policy,
+            page_nodes=page_sample.page_nodes,
+            sampled_pages=sum(page_sample.page_nodes.values()),
+            sampled_tensors=page_sample.tensor_count,
+            sampled_bytes=page_sample.byte_count,
         )
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
