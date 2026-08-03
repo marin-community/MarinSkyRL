@@ -580,9 +580,9 @@ def test_rl_discovery_skips_iris_preamble_and_parses_terminal_states(
 ):
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
     output = """I20260722 controller tunnel ready
-job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json
-/benjaminfeuer/rl-live,3,1000,,"task_runtime.py --train_data '[\\"live\\"]'"
-/benjaminfeuer/rl-failed,5,900,1500,"task_runtime.py --train_data '[\\"failed\\"]'"
+job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state
+/benjaminfeuer/rl-live,3,1000,,"task_runtime.py --train_data '[\\"live\\"]'",3
+/benjaminfeuer/rl-failed,5,900,1500,"task_runtime.py --train_data '[\\"failed\\"]'",
 """
 
     def fake_run_iris(_cluster, arguments, **_kwargs):
@@ -599,6 +599,50 @@ job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json
     assert errors == []
     assert [job.short_name for job in jobs] == ["rl-live", "rl-failed"]
     assert [job.is_terminal for job in jobs] == [False, True]
+
+
+def test_rl_discovery_parses_active_task_state_column(monkeypatch):
+    """The task_state column drives placement: same root state=3, different task state."""
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    output = (
+        "job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state\n"
+        '/benjaminfeuer/rl-placed,3,1000,,"task_runtime.py --train_data \'[\\"a\\"]\'",3\n'
+        '/benjaminfeuer/rl-queued,3,900,,"task_runtime.py --train_data \'[\\"b\\"]\'",1\n'
+    )
+
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=""),
+    )
+
+    jobs, _errors = watch_coreweave_rl.discover_rl_jobs(cluster, "benjaminfeuer")
+    by_name = {job.short_name: job for job in jobs}
+
+    assert by_name["rl-placed"].task_state == "running"
+    assert by_name["rl-queued"].task_state == "pending"
+
+
+@pytest.mark.parametrize(
+    ("state", "task_state", "expected"),
+    [
+        ("pending", None, "awaiting placement"),
+        ("building", None, "awaiting placement"),
+        ("running", "pending", "awaiting placement"),
+        ("running", "building", "awaiting placement"),
+        ("running", "running", "running"),
+        ("running", None, "running"),
+        ("succeeded", None, "succeeded"),
+        ("failed", None, "failed"),
+    ],
+)
+def test_rl_effective_state_classifies_placement(state, task_state, expected):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    job = watch_coreweave_rl.IrisRlJob(
+        cluster, "/user/rl-job", state, 0, "", dataset="DCAgent/tasks", task_state=task_state
+    )
+
+    assert watch_coreweave_rl.effective_state(job) == expected
 
 
 def _remote_trace_objects():
