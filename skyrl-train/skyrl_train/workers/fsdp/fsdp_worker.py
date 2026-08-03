@@ -1195,12 +1195,23 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 routed_input = flat.index_select(0, sorted_token_indices)
                 counts = torch.bincount(flat_experts, minlength=module.experts.num_experts)
 
+                product_routed: dict[str, object] = {}
+
+                def capture_product_routed(_experts, expert_args, expert_output):
+                    product_routed["input"] = expert_args[0]
+                    product_routed["counts"] = expert_args[1]
+                    product_routed["output"] = expert_output
+
+                expert_handle = module.experts.register_forward_hook(capture_product_routed)
                 was_grouped = module.experts.use_grouped_mm
                 module.experts.use_grouped_mm = True
                 try:
                     grouped_output = module._forward_grouped(flat, selected_experts, combine_weights).reshape(shape)
                 finally:
                     module.experts.use_grouped_mm = was_grouped
+                    expert_handle.remove()
+                if set(product_routed) != {"input", "counts", "output"}:
+                    raise RuntimeError(f"layer {layer_index} did not capture the product grouped expert output")
 
                 sorted_logits = torch.topk(
                     router_output.router_logits + module.router.bias,
@@ -1272,8 +1283,28 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         sorted_token_indices,
                         flat.shape[0],
                     )
+                    product_routed_output = product_routed["output"]
+                    detailed["product_routed_input_exact"] = bool(
+                        torch.equal(product_routed["input"], routed_input)
+                    )
+                    detailed["product_routed_counts_exact"] = bool(
+                        torch.equal(product_routed["counts"], counts)
+                    )
+                    detailed["product_routed_vs_manual_grouped"] = difference(
+                        product_routed_output, grouped_stages[-1]
+                    )
                     detailed["manual_grouped_vs_product_grouped"] = difference(
                         manual_grouped_output, grouped_output.reshape_as(manual_grouped_output)
+                    )
+                    repeated_product_combine = combine_routed(
+                        product_routed_output,
+                        combine_weights,
+                        order,
+                        sorted_token_indices,
+                        flat.shape[0],
+                    )
+                    detailed["repeated_combine_vs_product_grouped"] = difference(
+                        repeated_product_combine, grouped_output.reshape_as(repeated_product_combine)
                     )
                     probe_expert = int(torch.argmax(counts).item())
                     probe_start = int(counts[:probe_expert].sum().item())
