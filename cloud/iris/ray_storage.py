@@ -47,11 +47,14 @@ class LocalRaySpillTarget:
             raise RuntimeError(f"Could not create Ray spill directory {self.location!r}: {error}") from error
 
     def shell_preflight(self) -> str:
+        # Keep this independent of Python startup: it must fail before the controller
+        # interpreter imports MarinSkyRL. prepare_node repeats the same contract at Ray's
+        # immediate subprocess boundary.
         quoted_path = shlex.quote(self.location)
-        error = shlex.quote(
+        error_message = shlex.quote(
             f"[rl-iris] Could not prepare local Ray spill directory {self.location!r} before controller startup"
         )
-        return f"if ! mkdir -p -- {quoted_path} || [ ! -d {quoted_path} ]; then echo {error} >&2; exit 1; fi; "
+        return f"if ! mkdir -p -- {quoted_path} || [ ! -d {quoted_path} ]; then echo {error_message} >&2; exit 1; fi; "
 
     def head_flags(self) -> list[str]:
         return [f"{_RAY_LOCAL_SPILL_FLAG}={self.location}"]
