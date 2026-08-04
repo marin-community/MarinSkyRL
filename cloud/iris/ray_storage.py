@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -86,3 +87,13 @@ def validate_ray_spill_dir(path: str) -> str:
     if not os.path.isabs(path) or "://" in path:
         raise ValueError(f"Ray spill directory must be an absolute local path, got {path!r}")
     return path
+
+
+def ray_spill_shell_preflight(backend: RaySpillBackend, local_spill_dir: str) -> str:
+    """Return the per-pod shell guard that runs before the Python controller."""
+    if backend is not RaySpillBackend.LOCAL:
+        return ""
+    path = validate_ray_spill_dir(local_spill_dir)
+    quoted_path = shlex.quote(path)
+    error = shlex.quote(f"[rl-iris] Could not prepare local Ray spill directory {path!r} before controller startup")
+    return f"if ! mkdir -p -- {quoted_path} || [ ! -d {quoted_path} ]; then echo {error} >&2; exit 1; fi; "

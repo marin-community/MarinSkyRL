@@ -81,7 +81,12 @@ from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
-from cloud.iris.ray_storage import DEFAULT_RAY_SPILL_DIR, RaySpillBackend, validate_ray_spill_dir
+from cloud.iris.ray_storage import (
+    DEFAULT_RAY_SPILL_DIR,
+    RaySpillBackend,
+    ray_spill_shell_preflight,
+    validate_ray_spill_dir,
+)
 from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR, GPU_RL_PYTHON, image_for_cluster
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
@@ -2091,18 +2096,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             f"'vllm', vllm.__version__)\"; "
         )
     ctrl = shlex.join(controller_cmd)
-    spill_preflight = ""
-    if args.ray_spill_backend is RaySpillBackend.LOCAL:
-        spill_dir = shlex.quote(args.ray_spill_dir)
-        spill_error = shlex.quote(
-            f"[rl-iris] Could not prepare local Ray spill directory {args.ray_spill_dir!r} before controller startup"
-        )
-        # Run outside task_runtime so every pod establishes Ray's filesystem contract
-        # before importing or starting any MarinSkyRL controller code. The controller
-        # repeats this check immediately before `ray start` as defense in depth.
-        spill_preflight = (
-            f"if ! mkdir -p -- {spill_dir} || [ ! -d {spill_dir} ]; then echo {spill_error} >&2; exit 1; fi; "
-        )
+    # Run outside task_runtime so every pod establishes Ray's filesystem contract
+    # before importing or starting any MarinSkyRL controller code. The controller
+    # repeats this check immediately before `ray start` as defense in depth.
+    spill_preflight = ray_spill_shell_preflight(args.ray_spill_backend, args.ray_spill_dir)
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
     # SKYRL_GDN_FLASHQLA=1 lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
     # kernels on the first GPU forward into the node-local, ephemeral TileLang cache
