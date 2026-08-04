@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from cloud.iris.paths import PROJECT_ROOT
+
 BUNDLE_FILE_MANIFEST = Path("cloud/iris/runtime_bundle_files.txt")
 BUNDLE_IDENTITY_FILE = ".marinskyrl-runtime.json"
 DISTRIBUTION_NAME = "marinskyrl"
@@ -78,6 +80,8 @@ def _installed_checkout() -> Path:
     if parsed_url.scheme != "file":
         raise RuntimeError("Installed marinskyrl distribution does not identify a local checkout")
     checkout = Path(unquote(parsed_url.path)).resolve()
+    if not checkout.is_dir():
+        raise RuntimeError(f"Installed marinskyrl checkout is missing: {checkout}")
     root = _checkout_root(checkout)
     if root is None:
         raise RuntimeError(f"Installed marinskyrl checkout is missing or invalid: {checkout}")
@@ -147,7 +151,7 @@ def _sha256(path: Path) -> str:
 
 def validate_bundled_runtime(workspace: Path | None = None) -> str:
     """Verify the files synced into an Iris task and return their launcher commit."""
-    root = workspace or Path(__file__).resolve().parents[2]
+    root = workspace or PROJECT_ROOT
     identity_path = root / BUNDLE_IDENTITY_FILE
     if not identity_path.is_file():
         raise RuntimeError(f"Runtime bundle identity is missing: {identity_path}")

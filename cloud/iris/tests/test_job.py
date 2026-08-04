@@ -72,10 +72,6 @@ def _git_commit(root: Path) -> str:
     ).stdout.strip()
 
 
-def _repository_commit() -> str:
-    return _git_commit(_REPOSITORY_ROOT)
-
-
 def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
     checkout = tmp_path / "checkout"
     runtime_package = checkout / "cloud" / "iris"
@@ -134,7 +130,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
             attempt_id="attempt-1",
             config_yaml="trainer:\n  strategy: fsdp2\n  placement:\n    colocate_all: true\n",
             runtime=RuntimeIdentity(
-                launcher_commit=_repository_commit(),
+                launcher_commit=_git_commit(_REPOSITORY_ROOT),
                 task_image=image.reference,
                 trainer_commit=image.source_commit,
             ),
