@@ -19,6 +19,8 @@ class RaySpillBackend(StrEnum):
 class RaySpillTarget(Protocol):
     location: str
 
+    def prepare_node(self) -> None: ...
+
     def head_flags(self) -> list[str]: ...
 
     def worker_flags(self) -> list[str]: ...
@@ -32,6 +34,12 @@ class LocalRaySpillTarget:
 
     def __post_init__(self) -> None:
         validate_ray_spill_dir(self.location)
+
+    def prepare_node(self) -> None:
+        try:
+            os.makedirs(self.location, exist_ok=True)
+        except OSError as error:
+            raise RuntimeError(f"Could not create Ray spill directory {self.location!r}: {error}") from error
 
     def head_flags(self) -> list[str]:
         return [f"{_RAY_LOCAL_SPILL_FLAG}={self.location}"]
@@ -50,6 +58,9 @@ class R2RaySpillTarget:
     def __post_init__(self) -> None:
         if not self.location.startswith("s3://"):
             raise ValueError(f"R2 Ray spill target must use s3://, got {self.location!r}")
+
+    def prepare_node(self) -> None:
+        return
 
     def head_flags(self) -> list[str]:
         spilling_config = json.dumps(
