@@ -89,6 +89,10 @@ jobs:
       - name: Run ${{ matrix.lane }}
         run: |
           set -o pipefail
+          TASK_ENV=()
+          if [[ "${{ matrix.lane }}" == "gsm8k-h100" ]]; then
+            TASK_ENV=(-e MODEL "$MODEL" -e MAX_STEPS "$MAX_STEPS")
+          fi
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
             --job-name "$JOB_NAME" \
@@ -96,8 +100,7 @@ jobs:
             --cpu "${{ matrix.cpu }}" --memory "${{ matrix.memory }}" --disk 200GB \
             --no-sync \
             --timeout "${{ matrix.iris_timeout }}" \
-            -e MODEL "$MODEL" \
-            -e MAX_STEPS "$MAX_STEPS" \
+            "${TASK_ENV[@]}" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Stop any Iris job the run left behind

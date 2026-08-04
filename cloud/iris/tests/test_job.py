@@ -457,8 +457,6 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "vllm",
         "--extra",
         "telemetry",
-        "--no-install-package",
-        "flash-attn",
     ]
     assert runtime_file.read_text().startswith("export LD_LIBRARY_PATH=")
     assert "vllm.cumem_allocator" in probe.read_text()

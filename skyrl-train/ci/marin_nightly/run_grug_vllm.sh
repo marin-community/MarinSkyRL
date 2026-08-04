@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate the locked Marin vLLM wheel by loading a real Grug checkpoint and generating tokens.
+# Validate the locked Marin vLLM wheel through rollout, FSDP2 update, weight broadcast, and another rollout.
 set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

@@ -37,8 +37,7 @@ UV_PROJECT_ENVIRONMENT="$environment" uv sync \
   "${dependency_group[@]}" \
   --extra "$profile" \
   --extra vllm \
-  --extra telemetry \
-  --no-install-package flash-attn
+  --extra telemetry
 
 python="$environment/bin/python"
 cuda_library_path="$("$python" -c "import site; from pathlib import Path; print(':'.join(str(path) for root in site.getsitepackages() for path in sorted((Path(root) / 'nvidia').glob('*/lib')) if path.is_dir()))")"

@@ -1358,7 +1358,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime-commit",
         default=None,
-        help="Exact MarinSkyRL commit. Defaults to the installed launcher revision.",
+        help="Installed MarinSkyRL launcher commit. An explicit value must match that revision.",
     )
     parser.add_argument(
         "--runtime-profile",
@@ -2032,9 +2032,6 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             f"iris.rpc.controller_connect, iris.cluster.types; "
             f"print('[rl-iris] locked marin-iris', m.version('marin-iris'), "
             f"'(controller-ingress import OK)')\"; "
-            f'{RL_PYTHON} -c "import botocore; from botocore.docs.utils import '
-            f"DocumentModifiedShape; print('[rl-iris] boto cluster intact: botocore', "
-            f'botocore.__version__)"; '
         )
     ctrl = shlex.join(controller_cmd)
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
