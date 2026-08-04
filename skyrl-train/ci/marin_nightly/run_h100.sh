@@ -8,18 +8,19 @@
 # takes a step, and weights sync back into the inference engine. It says nothing about
 # model quality, and is not meant to.
 #
-# The scheduled workflow runs inside the digest-pinned production GPU-RL image. NIGHTLY_RL_ENV
-# selects that image's validated torch/vLLM environment while this checkout supplies the trainer
-# source and Hydra configuration. The flags below spell out what examples/gsm8k/run_gsm8k.sh
-# would have passed, sized for one GPU.
+# The scheduled workflow runs in the cluster's standard Iris task image. This script creates the
+# same frozen root environment used by normal image-free launches before exercising the trainer.
+# The flags below spell out what examples/gsm8k/run_gsm8k.sh would have passed, sized for one GPU.
 set -euo pipefail
 
+REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
 LOG="${LOG:-$PWD/nightly-run.log}"
 SPEC="${SPEC:-ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json}"
-NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:?set NIGHTLY_RL_ENV to the validated GPU-RL environment}"
+NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env}"
+RUNTIME_ENV_FILE="$NIGHTLY_RL_ENV/marinskyrl-runtime.sh"
 PYTHON="$NIGHTLY_RL_ENV/bin/python"
 
 # The defaults below are the behavioural shape the shipped gate spec is calibrated against: 30
@@ -41,10 +42,18 @@ LR="${LR:-2.0e-6}"
 TRAIN_ROWS="${TRAIN_ROWS:-2000}"
 VAL_ROWS="${VAL_ROWS:-16}"
 
-cd "$(dirname "$0")/../.."   # skyrl-train/
+echo "::: resolving the frozen MarinSkyRL runtime"
+bash "$REPOSITORY_ROOT/cloud/iris/bootstrap_runtime.sh" \
+  "$REPOSITORY_ROOT" \
+  "$NIGHTLY_RL_ENV" \
+  "$RUNTIME_ENV_FILE" \
+  fsdp \
+  production
+source "$RUNTIME_ENV_FILE"
 
-# The nightly exercises checked-out trainer and environment source ahead of the image's baked
-# fallback. Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling
+cd "$REPOSITORY_ROOT/skyrl-train"
+
+# Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling
 # environment package before setting the source paths.
 rm -rf skyrl-gym
 cp -R ../skyrl-gym skyrl-gym
@@ -54,7 +63,7 @@ echo "::: GPU and driver"
 nvidia-smi --query-gpu=name,driver_version --format=csv
 
 test -x "$PYTHON"
-echo "::: using the validated GPU-RL environment at ${NIGHTLY_RL_ENV}"
+echo "::: using the frozen root environment at ${NIGHTLY_RL_ENV}"
 "$PYTHON" -c "import torch, vllm; print(f'torch {torch.__version__} | vllm {vllm.__version__}')"
 
 echo "::: preparing a ${TRAIN_ROWS}-prompt GSM8K slice"

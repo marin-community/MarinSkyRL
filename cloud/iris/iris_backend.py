@@ -1709,19 +1709,11 @@ def _load_rl_config_yaml(rl_config_path: str) -> dict:
 
 
 def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
-    """Read a top-level ``extra_env:`` mapping from the RL config YAML.
+    """Return normalized task environment variables declared by an RL config.
 
-    The Iris path has no ``container:`` block, so any SLURM-style
-    ``container.extra_env`` shell-export plumbing never
-    runs — without this, env declared in the YAML is silently
-    dropped and only the launcher's hardcoded passthrough (HF/WANDB/DAYTONA) reaches
-    the pod. This forwards a top-level ``extra_env:`` block (and, defensively,
-    ``container.extra_env`` if a ported config still carries one) into the iris
-    EnvironmentSpec so e.g. EPDIAG probe arms + R3/DCP guard env take effect.
-
-    Values are coerced to str (YAML may parse "1"/true as int/bool). Returns {} if
-    the file is unreadable or declares no extra_env (byte-identical behavior for the
-    existing extra_env-less iris configs).
+    Top-level ``extra_env`` values take precedence over a ported
+    ``container.extra_env`` mapping. Unreadable or empty configurations return no
+    overrides.
     """
     try:
         raw = _load_rl_config_yaml(rl_config_path)
@@ -1839,19 +1831,10 @@ def normalize(args: argparse.Namespace) -> None:
 
 
 def build_task_command(args: argparse.Namespace) -> List[str]:
-    """Build the in-container command, multi-node-aware.
+    """Build the per-replica command for a resolved RL launch.
 
-    The full pipeline that runs inside each task container:
-      cd /app
-      && export SKYRL_HOME + PYTHONPATH
-      && <RL_PYTHON> cloud/iris/task_runtime.py
-            --ray-port ... --rendezvous-dir ...
-            -- <RL_PYTHON> -m cloud.iris.training_driver --rl_config ... --num_nodes N ...
-
-    Rank 0 (IRIS_TASK_ID==0) starts the Ray head and runs training_driver.py (which, with
-    RAY_ADDRESS set + --num_nodes>1, attaches to the cluster instead of starting a
-    local one). Workers join Ray and park. Iris activates the frozen task venv
-    before invoking this command.
+    Rank zero starts Ray and runs training; the remaining replicas join the Ray
+    cluster and wait for the terminal result.
     """
     total_gpus = args.num_nodes * args.gpus_per_node
 
@@ -2367,8 +2350,8 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
     # authenticate to iris.oa.dev. We forward the config path + any launch-host IAP cred
     # env so the in-pod _ParentControllerClient can re-mint the IAP OIDC token.
     #
-    # The parent config file is not baked into the gpu-rl image, so forward its contents
-    # for in-pod materialization. Federated controller ingress always forwards the cached
+    # The parent config file is not part of the task bundle, so forward its contents for
+    # in-pod materialization. Federated controller ingress always forwards the cached
     # Marin login record after prepare_federated_parent_credentials() has minted a token
     # from it locally. Direct submission (no --target-cluster) forwards none of this.
     if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
@@ -2385,8 +2368,8 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
         )
         if parent_cfg:
             env_vars[PARENT_CONTROLLER_CONFIG_ENV] = parent_cfg
-            # marin.yaml is not baked into the gpu-rl image and is not part of the
-            # synced workspace, so the path above won't resolve in-pod. Forward the
+            # marin.yaml is not part of the synced workspace, so the path above won't
+            # resolve in-pod. Forward the
             # file CONTENT (write-from-env, mirroring the cached login record) so the
             # in-pod worker (materialize_parent_controller_config) writes it to a real
             # path and repoints the env. marin.yaml carries no secrets (signing_key is

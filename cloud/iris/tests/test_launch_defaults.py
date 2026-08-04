@@ -18,6 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from cloud.iris import iris_backend  # noqa: E402
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
     build_skyrl_flag_env,
@@ -370,13 +371,15 @@ def _strategy_args(tmp_path: Path, strategy: str, extra: list[str] | None = None
     return create_parser().parse_args(args + (extra or []))
 
 
-def test_megatron_config_selects_the_megatron_profile(tmp_path):
+def test_megatron_config_selects_the_megatron_profile(tmp_path, monkeypatch):
+    expected_commit = "b" * 40
+    monkeypatch.setattr(iris_backend, "installed_commit", lambda: expected_commit)
     args = _strategy_args(tmp_path, "megatron")
 
     resolve_launch_defaults(args)
 
     assert args.runtime_profile is RuntimeProfile.MEGATRON
-    assert args.runtime_commit
+    assert args.runtime_commit == expected_commit
 
 
 def test_fsdp_config_selects_the_fsdp_profile(tmp_path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, replace
@@ -28,7 +29,7 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLTopology,
 )
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
-from cloud.iris.runtime_environment import MARINSKYRL_RUNTIME_ENV, RuntimeProfile, task_setup_script  # noqa: E402
+from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
 from cloud.iris.runtime_bundle import build_runtime_bundle  # noqa: E402
 from iris.client import JobFailedError  # noqa: E402
@@ -383,17 +384,82 @@ def test_installed_commit_uses_an_editable_checkout(monkeypatch) -> None:
     assert runtime_environment.installed_commit() == _repository_commit()
 
 
-def test_task_setup_uses_one_frozen_checkout_for_launcher_and_training() -> None:
-    commit = "a" * 40
+def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    bootstrap = source / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT
+    bootstrap.parent.mkdir(parents=True)
+    bootstrap.write_bytes((_REPOSITORY_ROOT / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT).read_bytes())
+    bootstrap.chmod(0o755)
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "bootstrap fixture"], cwd=source, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
-    script = task_setup_script(commit, RuntimeProfile.FSDP)
+    checkout = tmp_path / "checkout"
+    runtime_file = checkout / ".iris-runtime-env"
+    environment = tmp_path / "environment"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (environment / "bin").mkdir(parents=True)
+    cuda_library_path = tmp_path / "cuda" / "lib"
+    cuda_library_path.mkdir(parents=True)
+    uv_args = tmp_path / "uv-args"
+    probe = tmp_path / "probe"
 
-    assert f"fetch --depth=1 origin {commit}" in script
-    assert f'git -C "$checkout" rev-parse HEAD)" = {commit}' in script
-    assert '--project "$checkout"' in script
-    assert "--frozen" in script
-    assert "--extra fsdp --extra vllm --extra telemetry" in script
-    assert "--no-install-package flash-attn" in script
-    assert f"> {MARINSKYRL_RUNTIME_ENV}" in script
-    assert f"source {MARINSKYRL_RUNTIME_ENV}" in script
-    assert "import vllm._C" in script
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_UV_ARGS"\n')
+    fake_uv.chmod(0o755)
+    fake_python = environment / "bin" / "python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        '  *"import site"*) printf "%s\\n" "$FAKE_CUDA_LIBRARY_PATH" ;;\n'
+        '  *) printf "%s\\n" "$2" > "$FAKE_PROBE" ;;\n'
+        "esac\n"
+    )
+    fake_python.chmod(0o755)
+
+    monkeypatch.setattr(runtime_environment, "MARINSKYRL_REPOSITORY", str(source))
+    monkeypatch.setattr(runtime_environment, "MARINSKYRL_TASK_ROOT", str(checkout))
+    monkeypatch.setattr(runtime_environment, "MARINSKYRL_RUNTIME_ENV", str(runtime_file))
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "IRIS_VENV": str(environment),
+        "FAKE_UV_ARGS": str(uv_args),
+        "FAKE_CUDA_LIBRARY_PATH": str(cuda_library_path),
+        "FAKE_PROBE": str(probe),
+    }
+
+    subprocess.run(["bash", "-c", task_setup_script(commit, RuntimeProfile.FSDP)], env=env, check=True)
+
+    assert runtime_environment._checkout_commit(checkout) == commit
+    assert uv_args.read_text().splitlines() == [
+        "sync",
+        "--project",
+        str(checkout),
+        "--frozen",
+        "--link-mode",
+        "symlink",
+        "--no-group",
+        "dev",
+        "--extra",
+        "fsdp",
+        "--extra",
+        "vllm",
+        "--extra",
+        "telemetry",
+        "--no-install-package",
+        "flash-attn",
+    ]
+    assert runtime_file.read_text().startswith("export LD_LIBRARY_PATH=")
+    assert "vllm.cumem_allocator" in probe.read_text()
+    assert "GRUG_MOE_ARCHITECTURE" in probe.read_text()

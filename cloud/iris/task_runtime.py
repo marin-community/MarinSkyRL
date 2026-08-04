@@ -910,7 +910,7 @@ def _ray_spill_target(
         import boto3  # noqa: F401
     except ImportError as error:
         raise RuntimeError(
-            "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
+            "--ray-spill-backend=r2 requires boto3 in the locked runtime; use local spilling or fix the profile"
         ) from error
     return R2RaySpillTarget(location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
 

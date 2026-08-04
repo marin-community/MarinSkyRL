@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,11 @@ STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
 SERVING_EXPERT_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
 LM_HEAD_NAME = "lm_head.weight"
 ROUTER_NAME = "model.layers.0.mlp.router.weight"
+
+
+class _PolicyAttentionBackend(StrEnum):
+    EAGER = "eager"
+    FLASH_ATTENTION = "flash_attention_2"
 
 
 @dataclass(frozen=True)
@@ -75,12 +81,14 @@ def _write_tiny_checkpoint(path) -> None:
 
 def _config(
     model_path: str,
+    *,
+    policy_attention_backend: _PolicyAttentionBackend,
 ):
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model_path
     cfg.trainer.critic.model.path = ""
     cfg.trainer.strategy = "fsdp2"
-    cfg.trainer.flash_attn = True
+    cfg.trainer.flash_attn = policy_attention_backend is _PolicyAttentionBackend.FLASH_ATTENTION
     cfg.trainer.attn_backend = "auto"
     cfg.trainer.gradient_checkpointing = True
     cfg.trainer.gradient_checkpointing_use_reentrant = False
@@ -309,8 +317,10 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
 def _run_full_cycle(
     model_path: str,
     tmp_path: Path,
+    *,
+    policy_attention_backend: _PolicyAttentionBackend,
 ) -> None:
-    cfg = _config(model_path)
+    cfg = _config(model_path, policy_attention_backend=policy_attention_backend)
     initialize_ray(cfg)
     available_gpus = int(ray.cluster_resources().get("GPU", 0))
     if available_gpus < NUM_GPUS:
@@ -344,7 +354,7 @@ def _run_full_cycle(
             num_nodes=1,
             cfg=cfg,
         )
-        _assert_policy_attention_backend(policy, "flash_attention_2")
+        _assert_policy_attention_backend(policy, policy_attention_backend.value)
         training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
         checkpoint_names = [
             *training.bias_names,
@@ -389,10 +399,57 @@ def _run_full_cycle(
 
 
 @pytest.mark.vllm
-def test_grug_four_h100_disaggregated_rollout_train_broadcast_rollout(tmp_path):
+def test_grug_one_gpu_vllm_generation(tmp_path):
+    """Load the training checkpoint with Marin vLLM and generate real tokens."""
+
+    require_hoppers(1)
+
+    from vllm import LLM, SamplingParams  # noqa: PLC0415
+    from vllm.inputs import TokensPrompt  # noqa: PLC0415
+
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path)
+    engine = LLM(
+        model=str(model_path),
+        dtype="bfloat16",
+        enforce_eager=True,
+        gpu_memory_utilization=0.35,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        trust_remote_code=False,
+        disable_log_stats=True,
+    )
+    outputs = engine.generate(
+        prompts=[TokensPrompt(prompt_token_ids=[1, 17, 29, 5, 11, 3])],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=4, ignore_eos=True),
+    )
+
+    assert len(outputs) == 1
+    assert len(outputs[0].outputs) == 1
+    assert len(outputs[0].outputs[0].token_ids) == 4
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "policy_attention_backend",
+    [
+        pytest.param(_PolicyAttentionBackend.FLASH_ATTENTION, id="fused"),
+        pytest.param(_PolicyAttentionBackend.EAGER, id="eager"),
+    ],
+)
+def test_grug_four_gpu_disaggregated_rollout_train_broadcast_rollout(
+    tmp_path,
+    policy_attention_backend: _PolicyAttentionBackend,
+):
     """Exercise mixed-dtype Grug sync with trainer and rollout on disjoint GPUs."""
 
     require_hoppers(NUM_GPUS)
 
     _write_tiny_checkpoint(tmp_path)
-    _run_full_cycle(str(tmp_path), tmp_path)
+    _run_full_cycle(
+        str(tmp_path),
+        tmp_path,
+        policy_attention_backend=policy_attention_backend,
+    )

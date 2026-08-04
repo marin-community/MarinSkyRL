@@ -68,7 +68,7 @@ def validate_grug_vllm_support(hf_config: PretrainedConfig, supported_architectu
     if GRUG_MOE_ARCHITECTURE not in supported_architectures:
         raise RuntimeError(
             "The running vLLM build does not support GrugMoeForCausalLM. "
-            "Launch Grug with a Grug-capable image via --docker_image."
+            "Install the pinned Marin vLLM wheel from the root lockfile."
         )
 
 

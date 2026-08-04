@@ -17,10 +17,14 @@ unsupported.
 
 ## Runtime support
 
-Grug serving still requires the Marin vLLM fork at commit `4b55591306c9`. The
-standard frozen Iris environment uses the upstream vLLM wheel and therefore does
-not support Grug serving yet. Publish the fork as architecture-specific wheels or
-upstream the required changes before selecting this model in an image-free run.
+Grug serving uses the Marin vLLM wheels selected by the root `uv.lock`. The lock
+chooses immutable x86_64 and aarch64 assets for the H100 and GB200 execution
+platforms, respectively. The standard Iris environment verifies `vllm._C`, the
+cuMem allocator, and `GrugMoeForCausalLM` before training starts.
+
+The eager policy path does not require FlashAttention. Selecting the fused policy
+path still requires a compiled FlashAttention build compatible with the locked
+Torch and CUDA ABI.
 
 ## Query bias
 
