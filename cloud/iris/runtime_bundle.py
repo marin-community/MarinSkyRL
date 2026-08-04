@@ -38,12 +38,6 @@ class RuntimeBundleIdentity:
     files: tuple[RuntimeBundleFile, ...]
 
 
-@dataclass(frozen=True)
-class RuntimeBundleInputs:
-    source: LauncherSource
-    paths: tuple[Path, ...]
-
-
 def _git_output(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -178,25 +172,25 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
     return identity.launcher_commit
 
 
-def runtime_bundle_inputs(expected_launcher_commit: str) -> RuntimeBundleInputs:
+def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:
     """Validate and return the checkout files identified by a launch request."""
     source = launcher_source_at_commit(expected_launcher_commit)
     paths = _bundle_paths(source)
     _reject_uncommitted_runtime(source, paths)
-    return RuntimeBundleInputs(source=source, paths=paths)
+    return source, paths
 
 
 def build_runtime_bundle(expected_launcher_commit: str) -> Path:
     """Copy committed runtime files from the selected checkout into an Iris workspace."""
-    inputs = runtime_bundle_inputs(expected_launcher_commit)
+    source, paths = runtime_bundle_inputs(expected_launcher_commit)
 
     workspace = Path(tempfile.mkdtemp(prefix="marinskyrl-runtime-bundle-"))
     files: list[RuntimeBundleFile] = []
-    for relative_path in inputs.paths:
+    for relative_path in paths:
         destination = workspace / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(inputs.source.root / relative_path, destination)
+        shutil.copy2(source.root / relative_path, destination)
         files.append(RuntimeBundleFile(path=relative_path.as_posix(), sha256=_sha256(destination)))
-    identity = RuntimeBundleIdentity(launcher_commit=inputs.source.commit, files=tuple(files))
+    identity = RuntimeBundleIdentity(launcher_commit=source.commit, files=tuple(files))
     (workspace / BUNDLE_IDENTITY_FILE).write_text(json.dumps(asdict(identity), indent=2, sort_keys=True) + "\n")
     return workspace
