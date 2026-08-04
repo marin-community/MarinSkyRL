@@ -9,12 +9,13 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 BUNDLE_FILE_MANIFEST = Path("cloud/iris/runtime_bundle_files.txt")
 BUNDLE_IDENTITY_FILE = ".marinskyrl-runtime.json"
+DISTRIBUTION_NAME = "marinskyrl"
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,18 @@ class LauncherSource:
 
     root: Path
     commit: str
+
+
+@dataclass(frozen=True)
+class RuntimeBundleFile:
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class RuntimeBundleIdentity:
+    launcher_commit: str
+    files: tuple[RuntimeBundleFile, ...]
 
 
 def _git_output(root: Path, *args: str) -> str:
@@ -50,12 +63,12 @@ def _checkout_root(path: Path) -> Path | None:
     if not project_file.is_file() or not (root / BUNDLE_FILE_MANIFEST).is_file():
         return None
     project = tomllib.loads(project_file.read_text()).get("project", {})
-    return root if project.get("name") == "marinskyrl" else None
+    return root if project.get("name") == DISTRIBUTION_NAME else None
 
 
 def _installed_checkout() -> Path | None:
     try:
-        direct_url = importlib.metadata.distribution("marinskyrl").read_text("direct_url.json")
+        direct_url = importlib.metadata.distribution(DISTRIBUTION_NAME).read_text("direct_url.json")
     except importlib.metadata.PackageNotFoundError:
         return None
     if not direct_url:
@@ -77,6 +90,16 @@ def resolve_launcher_source() -> LauncherSource:
             "--reinstall-package marinskyrl`."
         )
     return LauncherSource(root=checkout, commit=_git_output(checkout, "rev-parse", "HEAD"))
+
+
+def launcher_source_at_commit(expected_launcher_commit: str) -> LauncherSource:
+    """Return the selected checkout after matching its commit to a launch request."""
+    source = resolve_launcher_source()
+    if source.commit != expected_launcher_commit:
+        raise ValueError(
+            f"Selected launcher checkout commit {source.commit} does not match requested {expected_launcher_commit}"
+        )
+    return source
 
 
 def _bundle_paths(source: LauncherSource) -> tuple[Path, ...]:
@@ -123,39 +146,36 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
     identity_path = root / BUNDLE_IDENTITY_FILE
     if not identity_path.is_file():
         raise RuntimeError(f"Runtime bundle identity is missing: {identity_path}")
-    identity = json.loads(identity_path.read_text())
-    launcher_commit = identity.get("launcher_commit")
-    files = identity.get("files")
-    if not isinstance(launcher_commit, str) or not isinstance(files, list):
+    value = json.loads(identity_path.read_text())
+    try:
+        identity = RuntimeBundleIdentity(
+            launcher_commit=value["launcher_commit"],
+            files=tuple(RuntimeBundleFile(**entry) for entry in value["files"]),
+        )
+    except (KeyError, TypeError):
         raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
-    for entry in files:
-        if (
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("path"), str)
-            or not isinstance(entry.get("sha256"), str)
-        ):
-            raise RuntimeError(f"Runtime bundle identity contains an invalid file entry: {identity_path}")
-        relative_path = Path(entry["path"])
+    if not isinstance(identity.launcher_commit, str) or any(
+        not isinstance(entry.path, str) or not isinstance(entry.sha256, str) for entry in identity.files
+    ):
+        raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
+    for entry in identity.files:
+        relative_path = Path(entry.path)
         if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise RuntimeError(f"Runtime bundle identity contains an unsafe path: {entry['path']}")
+            raise RuntimeError(f"Runtime bundle identity contains an unsafe path: {entry.path}")
         bundled_file = root / relative_path
-        if not bundled_file.is_file() or _sha256(bundled_file) != entry["sha256"]:
-            raise RuntimeError(f"Runtime bundle file does not match its recorded identity: {entry['path']}")
-    return launcher_commit
+        if not bundled_file.is_file() or _sha256(bundled_file) != entry.sha256:
+            raise RuntimeError(f"Runtime bundle file does not match its recorded identity: {entry.path}")
+    return identity.launcher_commit
 
 
 def _validated_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:
-    source = resolve_launcher_source()
-    if source.commit != expected_launcher_commit:
-        raise ValueError(
-            f"Selected launcher checkout commit {source.commit} does not match requested {expected_launcher_commit}"
-        )
+    source = launcher_source_at_commit(expected_launcher_commit)
     paths = _bundle_paths(source)
     _reject_uncommitted_runtime(source, paths)
     return source, paths
 
 
-def validate_runtime_bundle(expected_launcher_commit: str) -> None:
+def validate_runtime_bundle_inputs(expected_launcher_commit: str) -> None:
     """Reject a runtime bundle that cannot be identified by the requested commit."""
     _validated_bundle_inputs(expected_launcher_commit)
 
@@ -165,13 +185,12 @@ def build_runtime_bundle(expected_launcher_commit: str) -> Path:
     source, paths = _validated_bundle_inputs(expected_launcher_commit)
 
     workspace = Path(tempfile.mkdtemp(prefix="marinskyrl-runtime-bundle-"))
-    files: list[dict[str, str]] = []
+    files: list[RuntimeBundleFile] = []
     for relative_path in paths:
         destination = workspace / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source.root / relative_path, destination)
-        files.append({"path": relative_path.as_posix(), "sha256": _sha256(destination)})
-    (workspace / BUNDLE_IDENTITY_FILE).write_text(
-        json.dumps({"launcher_commit": source.commit, "files": files}, indent=2, sort_keys=True) + "\n"
-    )
+        files.append(RuntimeBundleFile(path=relative_path.as_posix(), sha256=_sha256(destination)))
+    identity = RuntimeBundleIdentity(launcher_commit=source.commit, files=tuple(files))
+    (workspace / BUNDLE_IDENTITY_FILE).write_text(json.dumps(asdict(identity), indent=2, sort_keys=True) + "\n")
     return workspace

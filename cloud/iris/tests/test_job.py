@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import sys
@@ -370,11 +369,6 @@ def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(tm
         "cloud/iris/__init__.py",
         "cloud/iris/task_runtime.py",
     }
-    task_runtime = next(entry for entry in identity["files"] if entry["path"] == "cloud/iris/task_runtime.py")
-    assert (
-        task_runtime["sha256"]
-        == hashlib.sha256((workspace / "cloud" / "iris" / "task_runtime.py").read_bytes()).hexdigest()
-    )
     assert runtime_bundle.validate_bundled_runtime(workspace) == commit
 
 
