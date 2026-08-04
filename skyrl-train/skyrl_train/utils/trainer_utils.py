@@ -405,10 +405,7 @@ def handle_replace_sampling(
                 replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
             )
             if generator_output.get("unshaped_rewards") is not None:
-                replacement_outcome = generator_output["unshaped_rewards"][replacement_idx]
-                generator_output["unshaped_rewards"][bad_idx] = (
-                    replacement_outcome.copy() if isinstance(replacement_outcome, list) else replacement_outcome
-                )
+                generator_output["unshaped_rewards"][bad_idx] = generator_output["unshaped_rewards"][replacement_idx]
             generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
             if generator_output["stop_reasons"]:
                 generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]

@@ -458,13 +458,13 @@ def detect_qwen3_5_empty_think_prefix(tokenizer, generation_prompt_ids: List[int
 @torch.no_grad()
 def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
     """
-    Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+    Get the mean optimization reward and `pass_at_n` from generator output.
 
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
     calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
     unique examples.
 
-    Rewards can be either per-trajectory or per-token. ``mean_raw_reward`` describes
+    Rewards can be either per-trajectory or per-token. The returned mean describes
     the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
     so optimization-specific shaping cannot change the task-success metric.
     """
@@ -472,32 +472,33 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    pass_rewards = generator_output.get("unshaped_rewards")
-    if pass_rewards is None:
-        pass_rewards = rewards
-    if len(pass_rewards) != len(rewards):
+    unshaped_rewards = generator_output.get("unshaped_rewards")
+    if unshaped_rewards is not None and len(unshaped_rewards) != len(rewards):
         raise ValueError(
             "`unshaped_rewards` must have one entry per trajectory: "
-            f"got {len(pass_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
+            f"got {len(unshaped_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
         )
 
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
-        # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
-        mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+        # For each trajectory, sum token rewards before computing the batch mean.
+        mean_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
     else:
-        mean_raw_reward = float(np.mean(rewards))
+        mean_reward = float(np.mean(rewards))
 
     # TODO: We should make metrics customizable by the environment.
     # Map from the example's uid to each trajectory's unshaped outcome on that example.
     uid_to_trajectory_rewards = defaultdict(list)
-    if pass_rewards and isinstance(pass_rewards[0], list):
-        # The terminal token carries the trajectory outcome for token-level rewards.
-        for i, trajectory_rewards in enumerate(pass_rewards):
+    if unshaped_rewards is not None:
+        for i, reward in enumerate(unshaped_rewards):
+            uid_to_trajectory_rewards[uids[i]].append(reward)
+    elif isinstance(rewards[0], list):
+        # Without an explicit outcome channel, preserve the existing token-reward behavior.
+        for i, trajectory_rewards in enumerate(rewards):
             terminal_reward = trajectory_rewards[-1] if trajectory_rewards else 0.0
             uid_to_trajectory_rewards[uids[i]].append(terminal_reward)
     else:
-        for i, reward in enumerate(pass_rewards):
+        for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
     # For each example, pass@n = 1 if any trajectory achieves a positive reward.
@@ -506,7 +507,7 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         uid_to_trajectory_rewards
     )
 
-    return mean_raw_reward, pass_at_n
+    return mean_reward, pass_at_n
 
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:

@@ -7,6 +7,8 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_generator_postpr
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.config.utils import get_default_config
@@ -132,6 +134,34 @@ def test_token_level_rewards():
 
     # Verify token-level rewards are unchanged
     assert result["rewards"] == per_token_rewards
+
+
+def test_pass_at_k_uses_unshaped_outcomes():
+    config = create_config(4)
+    config.generator.n_samples_per_prompt = 2
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1], [1], [2], [2]],
+        "response_ids": [[3], [4], [5], [6]],
+        "rewards": [0.2, 0.3, 0.4, 0.5],
+        "unshaped_rewards": [0.0, 1.0, 0.0, 0.0],
+        "loss_masks": [[1], [1], [1], [1]],
+        "stop_reasons": ["stop", "stop", "stop", "stop"],
+        "rollout_metrics": None,
+    }
+
+    trainer.postprocess_generator_output(generator_output, ["a", "a", "b", "b"])
+
+    assert trainer.all_metrics["reward/avg_pass_at_2"] == 0.5
+    assert trainer.all_metrics["reward/avg_raw_reward"] == pytest.approx(0.35)
 
     # Test length=2
     config = create_config(2)
