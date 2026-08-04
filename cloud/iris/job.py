@@ -43,10 +43,10 @@ class JobBackend(Protocol):
 
 
 def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
-    launcher_commit = _installed_launcher_commit()
+    launcher_commit = resolve_launcher_source().commit
     if launcher_commit != runtime.launcher_commit:
         raise ValueError(
-            f"Installed launcher commit {launcher_commit} does not match requested {runtime.launcher_commit}"
+            f"Selected launcher checkout commit {launcher_commit} does not match requested {runtime.launcher_commit}"
         )
     matches = [image for image in GPU_RL_IMAGES.values() if image.reference == runtime.task_image]
     if len(matches) != 1:
@@ -64,10 +64,6 @@ def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
             f"Task image architecture {image.architecture} is incompatible with cluster {cluster} ({architecture})"
         )
     return image
-
-
-def _installed_launcher_commit() -> str:
-    return resolve_launcher_source().commit
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:

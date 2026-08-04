@@ -117,6 +117,33 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_bundled_runtime(workspace: Path | None = None) -> str:
+    """Verify the files synced into an Iris task and return their launcher commit."""
+    root = workspace or Path(__file__).resolve().parents[2]
+    identity_path = root / BUNDLE_IDENTITY_FILE
+    if not identity_path.is_file():
+        raise RuntimeError(f"Runtime bundle identity is missing: {identity_path}")
+    identity = json.loads(identity_path.read_text())
+    launcher_commit = identity.get("launcher_commit")
+    files = identity.get("files")
+    if not isinstance(launcher_commit, str) or not isinstance(files, list):
+        raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
+    for entry in files:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("sha256"), str)
+        ):
+            raise RuntimeError(f"Runtime bundle identity contains an invalid file entry: {identity_path}")
+        relative_path = Path(entry["path"])
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(f"Runtime bundle identity contains an unsafe path: {entry['path']}")
+        bundled_file = root / relative_path
+        if not bundled_file.is_file() or _sha256(bundled_file) != entry["sha256"]:
+            raise RuntimeError(f"Runtime bundle file does not match its recorded identity: {entry['path']}")
+    return launcher_commit
+
+
 def _validated_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:
     source = resolve_launcher_source()
     if source.commit != expected_launcher_commit:

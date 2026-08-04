@@ -45,6 +45,7 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
+from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
@@ -1473,6 +1474,7 @@ def _print_env_snapshot() -> None:
 
 
 def main() -> None:
+    validate_bundled_runtime()
     args, train_argv = parse_args()
     _print_env_snapshot()
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)

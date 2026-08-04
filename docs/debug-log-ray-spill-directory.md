@@ -113,6 +113,7 @@ temporary checkout whose runtime bytes differ from the imported package.
 
 The console-script regression failed against the old implementation because it copied the imported package and
 accepted no expected commit. It now bundles the selected checkout's distinct marker and records matching hashes.
-Commit mismatch and dirty-runtime cases fail before launch side effects. The complete Iris suite passes 195 tests
+Commit mismatch and dirty-runtime cases fail before launch side effects. The complete Iris suite passes 194 tests
 with one conditional skip, and a built wheel contains both the hardening module and the checkout-owned file
-manifest. Hypothesis 5 is confirmed at the launcher boundary.
+manifest. The task runtime also verifies those hashes after Iris sync, before parsing launch arguments.
+Hypothesis 5 is confirmed at the launcher and task boundaries.

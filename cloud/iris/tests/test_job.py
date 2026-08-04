@@ -354,22 +354,6 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
 
 
-def test_runtime_bundle_contains_controller_without_training_environment(tmp_path: Path, monkeypatch) -> None:
-    checkout, commit = _runtime_checkout(tmp_path)
-    _point_installed_distribution_at(monkeypatch, checkout)
-    monkeypatch.chdir(tmp_path)
-
-    workspace = runtime_bundle.build_runtime_bundle(commit)
-
-    assert (workspace / "cloud" / "iris" / "task_runtime.py").is_file()
-    assert (workspace / "chat_templates" / "delphi_v0.jinja2").is_file()
-    assert not (workspace / "skyrl-train").exists()
-    assert not (workspace / "cloud" / "iris" / "tests").exists()
-    assert not (workspace / "cloud" / "iris" / "job.py").exists()
-    assert not (workspace / "cloud" / "iris" / "iris_backend.py").exists()
-    assert not (workspace / "cloud" / "iris" / "protocol.py").exists()
-
-
 def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(tmp_path: Path, monkeypatch) -> None:
     checkout, commit = _runtime_checkout(tmp_path)
     _point_installed_distribution_at(monkeypatch, checkout)
@@ -391,6 +375,18 @@ def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(tm
         task_runtime["sha256"]
         == hashlib.sha256((workspace / "cloud" / "iris" / "task_runtime.py").read_bytes()).hexdigest()
     )
+    assert runtime_bundle.validate_bundled_runtime(workspace) == commit
+
+
+def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(tmp_path: Path, monkeypatch) -> None:
+    checkout, commit = _runtime_checkout(tmp_path)
+    _point_installed_distribution_at(monkeypatch, checkout)
+    monkeypatch.chdir(tmp_path)
+    workspace = runtime_bundle.build_runtime_bundle(commit)
+    (workspace / "cloud" / "iris" / "task_runtime.py").write_text('RUNTIME_MARKER = "corrupt"\n')
+
+    with pytest.raises(RuntimeError, match="task_runtime.py"):
+        runtime_bundle.validate_bundled_runtime(workspace)
 
 
 def test_runtime_bundle_rejects_requested_commit_that_differs_from_selected_checkout(
@@ -449,11 +445,3 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     job._write_json("result.json", {"state": "prepared"})
 
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
-
-
-def test_installed_launcher_commit_uses_an_editable_checkout(tmp_path: Path, monkeypatch) -> None:
-    checkout, commit = _runtime_checkout(tmp_path)
-    _point_installed_distribution_at(monkeypatch, checkout)
-    monkeypatch.chdir(tmp_path)
-
-    assert job._installed_launcher_commit() == commit

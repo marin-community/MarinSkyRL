@@ -9,6 +9,7 @@ cloud/iris/paths.py
 cloud/iris/ray_storage.py
 cloud/iris/rl_config_translation.py
 cloud/iris/rl_data.py
+cloud/iris/runtime_bundle.py
 cloud/iris/task_runtime.py
 cloud/iris/training_driver.py
 chat_templates/delphi_v0.jinja2
