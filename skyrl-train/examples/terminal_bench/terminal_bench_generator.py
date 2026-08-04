@@ -234,6 +234,18 @@ class TerminalBenchAgentOutput:
     truncation_penalized: bool = False
 
 
+def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
+    """Clear every per-trajectory training and metric signal after failure."""
+    output.response_ids = [0]
+    output.stop_reason = "error"
+    output.loss_mask = [0]
+    output.prompt_ids = [0]
+    output.reward = 0
+    output.unshaped_reward = 0
+    output.rollout_logprobs = None
+    output.rollout_routed_experts = None
+
+
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
         self,
@@ -1041,27 +1053,14 @@ class TerminalBenchGenerator(GeneratorInterface):
             for output in all_outputs:
                 if output.stop_reason == "error":
                     # Error outputs already have correct exclude_from_baseline set
-                    output.response_ids = [0]
-                    output.loss_mask = [0]
-                    output.prompt_ids = [0]
-                    output.reward = 0
-                    output.unshaped_reward = 0
-                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
-                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
+                    _clear_failed_trajectory(output)
                 else:
                     successful_outputs.append(output)
         else:
             # Legacy mode: if any trajectory fails, zero entire group
             for output in all_outputs:
                 if output.trajectory_id.instance_id in failed_instance_ids:
-                    output.response_ids = [0]
-                    output.stop_reason = "error"
-                    output.loss_mask = [0]
-                    output.prompt_ids = [0]
-                    output.reward = 0
-                    output.unshaped_reward = 0
-                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
-                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
+                    _clear_failed_trajectory(output)
                     output.exclude_from_baseline = False  # Legacy: include in baseline
                 else:
                     successful_outputs.append(output)

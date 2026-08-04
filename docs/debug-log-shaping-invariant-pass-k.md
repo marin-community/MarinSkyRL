@@ -35,3 +35,9 @@
 - Changed-file lint and formatting: **passed**.
 
 The regression now evaluates two different shaped reward vectors over the same verifier outcomes. Their optimization-score means differ, while both report the same pass@2 value.
+
+## Advisory review
+
+- Fixed a propagation gap in dynamic replacement and filtering so sampled trajectories keep their corresponding unshaped outcomes.
+- Consolidated failed-trajectory clearing into one operation so training and metric reward channels reset together.
+- Retained the established `reward/avg_raw_reward` metric name to avoid breaking existing dashboards. Its docstring now distinguishes that optimization-reward mean from the new unshaped outcome channel.

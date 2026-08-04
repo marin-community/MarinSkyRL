@@ -386,6 +386,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
             3.0,
             4.0,
         ],  # uid1: [1.0, 2.0] (good), uid2: [1.0, 1.0] (bad), uid3: [3.0, 4.0] (good)
+        "unshaped_rewards": [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
         "loss_masks": [[1, 1]] * 6,
         "stop_reasons": ["length"] * 6,
         "rollout_metrics": None,
@@ -403,6 +404,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
     assert len(result_output["prompt_token_ids"]) == 6
     assert len(result_output["response_ids"]) == 6
     assert len(result_output["rewards"]) == 6
+    assert len(result_output["unshaped_rewards"]) == 6
     assert len(result_output["rollout_logprobs"]) == 6
     assert len(result_uids) == 6
 
@@ -410,6 +412,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
     uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
     # After replacement, uid2 indices should now contain UIDs from good samples
     assert len(uid2_indices) == 0  # uid2 should be completely replaced
+    assert result_output["unshaped_rewards"][2:4] in ([0.0, 1.0], [1.0, 0.0])
 
 
 def test_handle_replace_sampling_insufficient_good_samples():
@@ -637,6 +640,7 @@ def test_filter_generator_output():
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[7, 8], [9, 10], [11, 12]],
         "rewards": [1.0, 2.0, 3.0],
+        "unshaped_rewards": [0.0, 1.0, 0.0],
         "loss_masks": [[1, 1]] * 3,
         "stop_reasons": ["length", "length", "stop"],
         "rollout_metrics": {"metric": "value"},
@@ -649,6 +653,7 @@ def test_filter_generator_output():
     assert filtered["prompt_token_ids"] == [[1, 2], [5, 6]]
     assert filtered["response_ids"] == [[7, 8], [11, 12]]
     assert filtered["rewards"] == [1.0, 3.0]
+    assert filtered["unshaped_rewards"] == [0.0, 0.0]
     assert filtered["loss_masks"] == [[1, 1]] * 2
     assert filtered["stop_reasons"] == ["length", "stop"]
     assert filtered["rollout_metrics"] == {"metric": "value"}
