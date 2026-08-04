@@ -96,16 +96,6 @@ def resolve_launcher_source() -> LauncherSource:
     return LauncherSource(root=checkout, commit=_git_output(checkout, "rev-parse", "HEAD"))
 
 
-def launcher_source_at_commit(expected_launcher_commit: str) -> LauncherSource:
-    """Return the selected checkout after matching its commit to a launch request."""
-    source = resolve_launcher_source()
-    if source.commit != expected_launcher_commit:
-        raise ValueError(
-            f"Selected launcher checkout commit {source.commit} does not match requested {expected_launcher_commit}"
-        )
-    return source
-
-
 def _bundle_relative_path(value: str) -> Path:
     path = Path(value)
     if path.is_absolute() or ".." in path.parts:
@@ -182,7 +172,11 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
 
 def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:
     """Validate and return the checkout files identified by a launch request."""
-    source = launcher_source_at_commit(expected_launcher_commit)
+    source = resolve_launcher_source()
+    if source.commit != expected_launcher_commit:
+        raise ValueError(
+            f"Selected launcher checkout commit {source.commit} does not match requested {expected_launcher_commit}"
+        )
     paths = _bundle_paths(source)
     _reject_uncommitted_runtime(source, paths)
     return source, paths
