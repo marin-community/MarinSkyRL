@@ -55,6 +55,7 @@ def _git_output(root: Path, *args: str) -> str:
 
 
 def _checkout_root(path: Path) -> Path | None:
+    """Return the enclosing MarinSkyRL checkout, or None when the path is outside one."""
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         cwd=path,
@@ -108,6 +109,13 @@ def launcher_source_at_commit(expected_launcher_commit: str) -> LauncherSource:
     return source
 
 
+def _bundle_relative_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"Runtime bundle path must stay below its workspace: {value}")
+    return path
+
+
 def _bundle_paths(source: LauncherSource) -> tuple[Path, ...]:
     manifest = source.root / BUNDLE_FILE_MANIFEST
     paths: list[Path] = []
@@ -115,9 +123,7 @@ def _bundle_paths(source: LauncherSource) -> tuple[Path, ...]:
         value = line.strip()
         if not value or value.startswith("#"):
             continue
-        path = Path(value)
-        if path.is_absolute() or ".." in path.parts:
-            raise ValueError(f"Runtime bundle path must stay below the checkout: {value}")
+        path = _bundle_relative_path(value)
         if path in paths:
             raise ValueError(f"Runtime bundle manifest contains a duplicate path: {value}")
         if not (source.root / path).is_file():
@@ -165,9 +171,7 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
     ):
         raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
     for entry in identity.files:
-        relative_path = Path(entry.path)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise RuntimeError(f"Runtime bundle identity contains an unsafe path: {entry.path}")
+        relative_path = _bundle_relative_path(entry.path)
         bundled_file = root / relative_path
         if not bundled_file.is_file() or _sha256(bundled_file) != entry.sha256:
             raise RuntimeError(f"Runtime bundle file does not match its recorded identity: {entry.path}")
