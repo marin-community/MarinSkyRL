@@ -48,3 +48,41 @@ invoked for both head and worker; an existing directory remains valid; and a blo
 - [x] The image build validates imports, dependency metadata, and Docker assertions but does not start a
   multi-node Ray cluster. The CPU launcher tests also stop at the external-process boundary. The new regression
   covers the missing node-local side effect at that boundary without requiring a cluster allocation.
+
+## Reopened status
+
+Three jobs launched from the fixed revision failed with the same Ray fallback-directory error. Source and bundle
+inspection showed the fixed modules were present, but the first regression only mocked the external process and
+therefore did not validate Ray's own startup behavior.
+
+## Hypothesis 3
+
+Ray may interpret `--object-spilling-directory` as a parent for a generated session path rather than as the exact
+directory prepared by MarinSkyRL.
+
+## Results
+
+Refuted. Ray 2.51.1 turns the CLI value into a filesystem object-spilling configuration and passes that exact path
+to `determine_plasma_store_config` as its fallback directory. A disposable real `ray start --head` probe succeeded
+with a freshly created spill directory and showed the same path in the raylet's `--fallback_directory` argument.
+
+## Hypothesis 4
+
+Preparation inside the Python controller is not a reliable deployed boundary. Preparing the path in the Iris task
+shell, before Python starts, gives every pod an independent filesystem preflight while retaining the controller's
+immediate pre-Ray check.
+
+## Changes to make
+
+For local spilling, make the generated task shell create and validate the configured directory before changing into
+the application workspace or starting the controller. Fail with the exact path before controller execution when the
+directory cannot be created. Exercise the generated shell with a real temporary filesystem and an external
+controller probe; do not mock the shell or the preparation helper.
+
+## Results
+
+On unchanged `main`, the controller probe exited because the directory was absent, and a blocked path reached the
+controller without naming the path. Both red tests pass after adding the shell preflight. The focused spill and
+launcher suite passes 40 tests, and the complete Iris suite passes 192 tests with one existing conditional skip.
+Hypothesis 4 is confirmed at the generated task-shell boundary; the next operational validation is a single-node
+Iris bring-up before another multi-node E9 allocation.

@@ -1839,7 +1839,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     """Build the in-container command, multi-node-aware.
 
     The full pipeline that runs inside each task container:
-      cd /app
+      prepare the node-local Ray spill directory
+      && cd /app
       && export SKYRL_HOME + PYTHONPATH (live cloud.iris, baked skyrl_train)
       && <GPU_RL_PYTHON> cloud/iris/task_runtime.py
             --ray-port ... --rendezvous-dir ...
@@ -2090,6 +2091,18 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
             f"'vllm', vllm.__version__)\"; "
         )
     ctrl = shlex.join(controller_cmd)
+    spill_preflight = ""
+    if args.ray_spill_backend is RaySpillBackend.LOCAL:
+        spill_dir = shlex.quote(args.ray_spill_dir)
+        spill_error = shlex.quote(
+            f"[rl-iris] Could not prepare local Ray spill directory {args.ray_spill_dir!r} before controller startup"
+        )
+        # Run outside task_runtime so every pod establishes Ray's filesystem contract
+        # before importing or starting any MarinSkyRL controller code. The controller
+        # repeats this check immediately before `ray start` as defense in depth.
+        spill_preflight = (
+            f"if ! mkdir -p -- {spill_dir} || [ ! -d {spill_dir} ]; then echo {spill_error} >&2; exit 1; fi; "
+        )
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
     # SKYRL_GDN_FLASHQLA=1 lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
     # kernels on the first GPU forward into the node-local, ephemeral TileLang cache
@@ -2134,7 +2147,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         f"else exec {ctrl}; fi"
     )
     bash = (
-        f"set -e; cd {APP_DIR}; "
+        f"set -e; {spill_preflight}cd {APP_DIR}; "
         f"{iris_refresh}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
