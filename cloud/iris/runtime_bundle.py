@@ -161,13 +161,12 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
         ):
             raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
         files.append(RuntimeBundleFile(path=entry["path"], sha256=entry["sha256"]))
-    identity = RuntimeBundleIdentity(launcher_commit=launcher_commit, files=tuple(files))
-    for entry in identity.files:
+    for entry in files:
         relative_path = _bundle_relative_path(entry.path)
         bundled_file = root / relative_path
         if not bundled_file.is_file() or _sha256(bundled_file) != entry.sha256:
             raise RuntimeError(f"Runtime bundle file does not match its recorded identity: {entry.path}")
-    return identity.launcher_commit
+    return launcher_commit
 
 
 def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:

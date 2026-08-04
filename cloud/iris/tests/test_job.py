@@ -93,13 +93,18 @@ def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
     return checkout, _git_commit(checkout)
 
 
-def _point_installed_distribution_at(monkeypatch, checkout: Path) -> None:
+@pytest.fixture
+def runtime_checkout(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
+    checkout, commit = _runtime_checkout(tmp_path)
+
     class Distribution:
         def read_text(self, name: str) -> str:
             assert name == "direct_url.json"
             return json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
 
     monkeypatch.setattr(runtime_bundle.importlib.metadata, "distribution", lambda name: Distribution())
+    monkeypatch.chdir(tmp_path)
+    return checkout, commit
 
 
 def _cluster_config(tmp_path: Path) -> Path:
@@ -350,11 +355,10 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
 
 
-def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(tmp_path: Path, monkeypatch) -> None:
-    checkout, commit = _runtime_checkout(tmp_path)
-    _point_installed_distribution_at(monkeypatch, checkout)
-    monkeypatch.chdir(tmp_path)
-
+def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(
+    runtime_checkout: tuple[Path, str],
+) -> None:
+    _, commit = runtime_checkout
     workspace = runtime_bundle.build_runtime_bundle(commit)
 
     assert (workspace / "cloud" / "iris" / "task_runtime.py").read_text() == ('RUNTIME_MARKER = "selected-checkout"\n')
@@ -369,10 +373,10 @@ def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(tm
     assert runtime_bundle.validate_bundled_runtime(workspace) == commit
 
 
-def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(tmp_path: Path, monkeypatch) -> None:
-    checkout, commit = _runtime_checkout(tmp_path)
-    _point_installed_distribution_at(monkeypatch, checkout)
-    monkeypatch.chdir(tmp_path)
+def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(
+    runtime_checkout: tuple[Path, str],
+) -> None:
+    _, commit = runtime_checkout
     workspace = runtime_bundle.build_runtime_bundle(commit)
     (workspace / "cloud" / "iris" / "task_runtime.py").write_text('RUNTIME_MARKER = "corrupt"\n')
 
@@ -381,20 +385,14 @@ def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(tmp
 
 
 def test_runtime_bundle_rejects_requested_commit_that_differs_from_selected_checkout(
-    tmp_path: Path, monkeypatch
+    runtime_checkout: tuple[Path, str],
 ) -> None:
-    checkout, _ = _runtime_checkout(tmp_path)
-    _point_installed_distribution_at(monkeypatch, checkout)
-    monkeypatch.chdir(tmp_path)
-
     with pytest.raises(ValueError, match="does not match requested"):
         runtime_bundle.build_runtime_bundle("0" * 40)
 
 
-def test_runtime_bundle_rejects_uncommitted_runtime_bytes(tmp_path: Path, monkeypatch) -> None:
-    checkout, commit = _runtime_checkout(tmp_path)
-    _point_installed_distribution_at(monkeypatch, checkout)
-    monkeypatch.chdir(tmp_path)
+def test_runtime_bundle_rejects_uncommitted_runtime_bytes(runtime_checkout: tuple[Path, str]) -> None:
+    checkout, commit = runtime_checkout
     (checkout / "cloud" / "iris" / "task_runtime.py").write_text('RUNTIME_MARKER = "dirty"\n')
 
     with pytest.raises(RuntimeError, match="task_runtime.py"):
