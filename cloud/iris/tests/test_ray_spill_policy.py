@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -58,12 +59,42 @@ def test_remote_spilling_rejects_local_directory_override():
         )
 
 
-def test_ray_worker_creates_its_local_spill_directory(tmp_path, monkeypatch):
-    spill_dir = tmp_path / "ray-spill"
-    commands = []
-    monkeypatch.setattr(runtime.subprocess, "run", lambda command, **_kwargs: commands.append(command))
+@pytest.mark.parametrize("role", ["head", "worker"])
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_local_spill_directory_exists_before_ray_start(tmp_path, monkeypatch, role, preexisting):
+    spill_dir = tmp_path / "node-scratch" / "ray-spill"
+    if preexisting:
+        spill_dir.mkdir(parents=True)
+    directory_state_at_start = []
 
-    runtime.ray_start_worker("10.0.0.1", 6379, "10.0.0.2", LocalRaySpillTarget(str(spill_dir)))
+    def observe_ray_start(_command, **_kwargs):
+        directory_state_at_start.append(spill_dir.is_dir())
 
-    assert spill_dir.is_dir()
-    assert f"--object-spilling-directory={spill_dir}" in commands[0]
+    monkeypatch.setattr(runtime.subprocess, "run", observe_ray_start)
+    target = LocalRaySpillTarget(str(spill_dir))
+
+    if role == "head":
+        runtime.ray_start_head("10.0.0.1", 6379, target)
+    else:
+        runtime.ray_start_worker("10.0.0.1", 6379, "10.0.0.2", target)
+
+    assert directory_state_at_start == [True]
+
+
+def test_local_spill_directory_creation_failure_names_configured_path(tmp_path, monkeypatch):
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("file blocks directory creation")
+    spill_dir = blocked_parent / "ray-spill"
+
+    def reject_ray_start(_command, **_kwargs):
+        pytest.fail("ray start was invoked before its spill directory was prepared")
+
+    monkeypatch.setattr(runtime.subprocess, "run", reject_ray_start)
+
+    with pytest.raises(RuntimeError, match=re.escape(str(spill_dir))):
+        runtime.ray_start_worker(
+            "10.0.0.1",
+            6379,
+            "10.0.0.2",
+            LocalRaySpillTarget(str(spill_dir)),
+        )
