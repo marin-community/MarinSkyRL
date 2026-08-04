@@ -32,19 +32,19 @@ lockfiles and virtualenvs.
 
 ## Install and test
 
-Run launcher and trainer commands from the repository root. The base install is CPU-only; select an image-build
-extra only when resolving a GPU training environment.
+Run launcher and trainer commands from the repository root. The base install is CPU-only; select a GPU runtime
+profile only when resolving a training environment.
 
 ```bash
 # Root launcher + skyrl-train CPU tests (what PR CI runs)
 uv sync --frozen --group dev --extra cpu --extra telemetry
 uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
 
-# FSDP2/vLLM image closure (GPU tests need an 8-GPU node; not run in PR CI)
+# FSDP2/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
 uv sync --frozen --extra fsdp --extra vllm --group dev
 uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not (integrations or megatron)"
 
-# Megatron image closure (select it together with the common training closure)
+# Megatron runtime closure (select it together with the common training closure)
 uv sync --frozen --extra vllm --extra megatron --group dev
 
 # skyrl-gym
