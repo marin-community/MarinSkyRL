@@ -91,7 +91,7 @@ from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR, GPU_RL_PYTHON, image_for_cl
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
-from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source, validate_runtime_bundle_inputs
+from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source, runtime_bundle_inputs
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
@@ -308,7 +308,7 @@ class IrisBackend:
     """Submit typed MarinSkyRL jobs through the existing Iris launcher."""
 
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
-        validate_runtime_bundle_inputs(spec.request.runtime.launcher_commit)
+        runtime_bundle_inputs(spec.request.runtime.launcher_commit)
         resolved_launch_args(job_launch_argv(spec, config_path))
 
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
