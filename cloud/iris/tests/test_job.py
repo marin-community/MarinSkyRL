@@ -62,14 +62,18 @@ class FailedLaunchBackend(JobBackend):
         raise self.error
 
 
-def _repository_commit() -> str:
+def _git_commit(root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=_REPOSITORY_ROOT,
+        cwd=root,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def _repository_commit() -> str:
+    return _git_commit(_REPOSITORY_ROOT)
 
 
 def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
@@ -90,10 +94,7 @@ def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
     subprocess.run(["git", "config", "user.name", "MarinSkyRL tests"], cwd=checkout, check=True)
     subprocess.run(["git", "add", "."], cwd=checkout, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=checkout, check=True)
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    return checkout, commit
+    return checkout, _git_commit(checkout)
 
 
 def _point_installed_distribution_at(monkeypatch, checkout: Path) -> None:
