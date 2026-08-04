@@ -1840,6 +1840,16 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit("--gpus-per-node must be >= 1.")
 
 
+def _build_task_shell(
+    args: argparse.Namespace,
+    controller_cmd: list[str],
+    pythonpath: str,
+    iris_refresh: str,
+) -> list[str]:
+    """Wrap the node controller with per-pod storage and cache setup."""
+    return _build_task_shell(args, controller_cmd, pythonpath, iris_refresh)
+
+
 def build_task_command(args: argparse.Namespace) -> List[str]:
     """Build the in-container command, multi-node-aware.
 

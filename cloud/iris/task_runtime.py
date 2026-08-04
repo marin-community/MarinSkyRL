@@ -883,13 +883,6 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-# --- Ray object-store spilling ---------------------------------------------------
-# Training-step arguments are reconstructible and latency-sensitive. Local scratch
-# avoids durable cross-region traffic; R2 remains an explicit emergency opt-in.
-#
-# R2's object_spilling_config is set on the head and propagates through GCS; Ray
-# rejects that system config on workers. Local spill directories are CLI flags
-# passed independently to every node.
 # --- Ray cgroup-aware memory ----------------------------------------------------
 # In a memory-cgroup-limited pod, Ray can read the HOST's physical RAM (~2 TB via
 # /proc/meminfo) instead of the --memory cgroup limit, and size its plasma object
