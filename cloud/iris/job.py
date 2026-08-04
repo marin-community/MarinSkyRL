@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import importlib.metadata
 import json
 import posixpath
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
 
 from iris.client import JobFailedError
 
@@ -26,6 +22,7 @@ from cloud.iris.artifacts import (
     validate_hf_export,
 )
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
+from cloud.iris.runtime_bundle import resolve_launcher_source
 from cloud.iris.protocol import (
     AttemptState,
     RuntimeIdentity,
@@ -70,36 +67,7 @@ def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
 
 
 def _installed_launcher_commit() -> str:
-    try:
-        direct_url = importlib.metadata.distribution("marinskyrl").read_text("direct_url.json")
-    except importlib.metadata.PackageNotFoundError:
-        direct_url = None
-    if direct_url:
-        direct_url_value = json.loads(direct_url)
-        commit = direct_url_value.get("vcs_info", {}).get("commit_id")
-        if commit:
-            return str(commit)
-        parsed_url = urlparse(direct_url_value.get("url", ""))
-        if parsed_url.scheme == "file":
-            checkout = Path(unquote(parsed_url.path))
-            if (checkout / ".git").exists() and (checkout / "pyproject.toml").exists():
-                return subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=checkout,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
-    repository_root = Path(__file__).resolve().parents[2]
-    if not (repository_root / ".git").exists() or not (repository_root / "pyproject.toml").exists():
-        raise RuntimeError("Installed marinskyrl wheel has no VCS commit identity in direct_url.json")
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    return resolve_launcher_source().commit
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:

@@ -91,7 +91,7 @@ from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR, GPU_RL_PYTHON, image_for_cl
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
-from cloud.iris.runtime_bundle import build_runtime_bundle
+from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source, validate_runtime_bundle
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
@@ -308,12 +308,13 @@ class IrisBackend:
     """Submit typed MarinSkyRL jobs through the existing Iris launcher."""
 
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
+        validate_runtime_bundle(spec.request.runtime.launcher_commit)
         resolved_launch_args(job_launch_argv(spec, config_path))
 
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
         args = resolved_launch_args(job_launch_argv(spec, config_path))
         with contextlib.redirect_stdout(sys.stderr):
-            return launch(args)
+            return launch(args, spec.request.runtime.launcher_commit)
 
 
 def iris_job_state_name(state: int) -> str:
@@ -2192,8 +2193,9 @@ def resolved_launch_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
+def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunchOutcome:
     """Submit a normalized request and, unless detached, wait for its terminal state."""
+    workspace = build_runtime_bundle(expected_launcher_commit)
     parent_credentials_json = prepare_federated_parent_credentials(args)
 
     if not args.job_name:
@@ -2497,8 +2499,6 @@ def launch(args: argparse.Namespace) -> IrisLaunchOutcome:
         )
     from contextlib import contextmanager as _contextmanager
 
-    workspace = build_runtime_bundle()
-
     @_contextmanager
     def _direct_client():
         if ambient_client := _ambient_in_cluster_client(workspace):
@@ -2614,7 +2614,7 @@ def _ambient_in_cluster_client(workspace: Path) -> IrisClient | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    outcome = launch(resolved_launch_args(argv))
+    outcome = launch(resolved_launch_args(argv), resolve_launcher_source().commit)
     return outcome.exit_code
 
 

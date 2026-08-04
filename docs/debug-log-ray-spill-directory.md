@@ -86,3 +86,33 @@ controller without naming the path. Both red tests pass after adding the shell p
 launcher suite passes 40 tests, and the complete Iris suite passes 192 tests with one existing conditional skip.
 Hypothesis 4 is confirmed at the generated task-shell boundary; the next operational validation is a single-node
 Iris bring-up before another multi-node E9 allocation.
+
+## Root-cause correction
+
+The post-fix launches did not contain either fix. `build_runtime_bundle()` copied files from the imported
+`cloud.iris` package, and the `marinskyrl` console script imported a physical snapshot under `site-packages`
+rather than the checkout. The bundle reported the checkout's current Git revision separately, so its provenance
+looked current even when its Python files were stale. A task traceback proved the mismatch: its
+`task_runtime.py` line numbers existed only in the installed snapshot, not at the reported revision.
+
+## Hypothesis 5
+
+Selecting the checkout independently of Python import resolution, requiring the typed request's launcher commit
+to equal that checkout's `HEAD`, and rejecting uncommitted bundle inputs will make the bundle identity describe
+the bytes actually submitted. A manifest read from the selected checkout also prevents an old console-script
+snapshot from silently retaining an obsolete runtime file list.
+
+## Changes to make
+
+Resolve the source checkout from the current Git worktree or the installation's `direct_url.json`. Copy only the
+paths declared by that checkout, hash every copied file into a bundle identity record, and fail before Iris
+submission on a commit mismatch or dirty runtime input. Cover the original console-script shape with a separate
+temporary checkout whose runtime bytes differ from the imported package.
+
+## Results
+
+The console-script regression failed against the old implementation because it copied the imported package and
+accepted no expected commit. It now bundles the selected checkout's distinct marker and records matching hashes.
+Commit mismatch and dirty-runtime cases fail before launch side effects. The complete Iris suite passes 195 tests
+with one conditional skip, and a built wheel contains both the hardening module and the checkout-owned file
+manifest. Hypothesis 5 is confirmed at the launcher boundary.
