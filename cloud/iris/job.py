@@ -20,7 +20,7 @@ from cloud.iris.artifacts import (
     relative_object_key,
     validate_hf_export,
 )
-from cloud.iris.runtime_environment import installed_commit
+from cloud.iris.runtime_bundle import resolve_launcher_source
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
     AttemptState,
@@ -42,9 +42,9 @@ class JobBackend(Protocol):
 
 
 def _validate_runtime(runtime: RuntimeIdentity) -> None:
-    launcher_commit = installed_commit()
+    launcher_commit = resolve_launcher_source().commit
     if launcher_commit != runtime.commit:
-        raise ValueError(f"Installed launcher commit {launcher_commit} does not match requested {runtime.commit}")
+        raise ValueError(f"Selected launcher commit {launcher_commit} does not match requested {runtime.commit}")
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:

@@ -40,12 +40,12 @@ from cloud.iris.model_paths import is_object_store_model_path, unsupported_model
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
-    LocalRaySpillTarget,
-    R2RaySpillTarget,
     RaySpillBackend,
     RaySpillTarget,
+    resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
+from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
@@ -884,37 +884,6 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-# --- Ray object-store spilling ---------------------------------------------------
-# Training-step arguments are reconstructible and latency-sensitive. Local scratch
-# avoids durable cross-region traffic; R2 remains an explicit emergency opt-in.
-#
-# R2's object_spilling_config is set on the head and propagates through GCS; Ray
-# rejects that system config on workers. Local spill directories are CLI flags
-# passed independently to every node.
-# Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
-# within a run share one prefix without colliding across jobs.
-def _ray_spill_target(
-    rendezvous_dir: str | None,
-    backend: RaySpillBackend,
-    local_spill_dir: str,
-) -> RaySpillTarget:
-    """Resolve one valid local or remote Ray spill target."""
-    if backend is RaySpillBackend.LOCAL:
-        return LocalRaySpillTarget(location=validate_ray_spill_dir(local_spill_dir))
-    if local_spill_dir != DEFAULT_RAY_SPILL_DIR:
-        raise ValueError("--ray-spill-dir only applies to --ray-spill-backend=local")
-    if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
-        raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
-    # Ray's smart_open spill backend imports boto3 directly.
-    try:
-        import boto3  # noqa: F401
-    except ImportError as error:
-        raise RuntimeError(
-            "--ray-spill-backend=r2 requires boto3 in the locked runtime; use local spilling or fix the profile"
-        ) from error
-    return R2RaySpillTarget(location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
-
-
 # --- Ray cgroup-aware memory ----------------------------------------------------
 # In a memory-cgroup-limited pod, Ray can read the HOST's physical RAM (~2 TB via
 # /proc/meminfo) instead of the --memory cgroup limit, and size its plasma object
@@ -1259,7 +1228,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     ray_start_head(
         head_ip,
         ray_port,
-        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
+        resolve_ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
@@ -1340,7 +1309,7 @@ def run_worker(args: argparse.Namespace) -> int:
         head_ip,
         ray_port,
         node_ip,
-        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
+        resolve_ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
@@ -1505,6 +1474,7 @@ def _print_env_snapshot() -> None:
 
 
 def main() -> None:
+    validate_bundled_runtime()
     args, train_argv = parse_args()
     _print_env_snapshot()
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)

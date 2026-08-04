@@ -7,7 +7,9 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -297,6 +299,59 @@ def test_rl_config_is_materialized_for_the_task(tmp_path):
     assert "source /app/marinskyrl/.iris-runtime-env" in command[-1]
 
 
+def _spill_preflight_probe(tmp_path: Path, monkeypatch, spill_dir: Path) -> tuple[list[str], Path]:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    observation = tmp_path / "controller-started"
+    controller = tmp_path / "controller-probe"
+    controller.write_text('#!/bin/sh\ntest -d "$EXPECTED_SPILL_DIR" || exit 31\ntouch "$CONTROLLER_OBSERVATION"\n')
+    controller.chmod(0o755)
+    runtime_environment = app_dir / ".iris-runtime-env"
+    runtime_environment.write_text("true\n")
+    monkeypatch.setattr("cloud.iris.iris_backend.APP_DIR", str(app_dir))
+    monkeypatch.setattr("cloud.iris.iris_backend.MARINSKYRL_ACTIVATION_FILE", str(runtime_environment))
+    monkeypatch.setattr("cloud.iris.iris_backend.RL_PYTHON", str(controller))
+
+    args = _args(tmp_path, "opencode", ["--ray-spill-dir", str(spill_dir)])
+    normalize(args)
+    resolve_launch_defaults(args)
+    return build_task_command(args), observation
+
+
+def test_task_shell_prepares_local_spill_directory_before_controller(tmp_path, monkeypatch):
+    spill_dir = tmp_path / "node scratch" / "ray spill"
+    command, observation = _spill_preflight_probe(tmp_path, monkeypatch, spill_dir)
+    environment = {
+        **os.environ,
+        "EXPECTED_SPILL_DIR": str(spill_dir),
+        "CONTROLLER_OBSERVATION": str(observation),
+    }
+
+    completed = subprocess.run(command, env=environment, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+    assert spill_dir.is_dir()
+    assert observation.is_file()
+
+
+def test_task_shell_rejects_uncreatable_local_spill_directory_before_controller(tmp_path, monkeypatch):
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("blocks directory creation")
+    spill_dir = blocked_parent / "ray-spill"
+    command, observation = _spill_preflight_probe(tmp_path, monkeypatch, spill_dir)
+    environment = {
+        **os.environ,
+        "EXPECTED_SPILL_DIR": str(spill_dir),
+        "CONTROLLER_OBSERVATION": str(observation),
+    }
+
+    completed = subprocess.run(command, env=environment, capture_output=True, text=True)
+
+    assert completed.returncode != 0
+    assert str(spill_dir) in completed.stderr
+    assert not observation.exists()
+
+
 def test_in_tree_rl_config_is_embedded_in_the_runtime_bundle_environment(tmp_path):
     source = _REPO_ROOT / "cloud/iris/configs/delphi_math_rl_ifeval.yaml"
     args = create_parser().parse_args(["--rl_config", str(source), "--model_path", "model"])
@@ -373,7 +428,7 @@ def _strategy_args(tmp_path: Path, strategy: str, extra: list[str] | None = None
 
 def test_megatron_config_selects_the_megatron_profile(tmp_path, monkeypatch):
     expected_commit = "b" * 40
-    monkeypatch.setattr(iris_backend, "installed_commit", lambda: expected_commit)
+    monkeypatch.setattr(iris_backend, "resolve_launcher_source", lambda: SimpleNamespace(commit=expected_commit))
     args = _strategy_args(tmp_path, "megatron")
 
     resolve_launch_defaults(args)

@@ -14,6 +14,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from cloud.iris import job, runtime_environment  # noqa: E402
+from cloud.iris import runtime_bundle  # noqa: E402
 from cloud.iris.job import JobBackend, execute_job  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
@@ -31,7 +32,6 @@ from cloud.iris.protocol import (  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
-from cloud.iris.runtime_bundle import build_runtime_bundle  # noqa: E402
 from iris.client import JobFailedError  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
 from iris.rpc import job_pb2  # noqa: E402
@@ -63,14 +63,49 @@ class FailedLaunchBackend(JobBackend):
         raise self.error
 
 
-def _repository_commit() -> str:
+def _git_commit(root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=_REPOSITORY_ROOT,
+        cwd=root,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
+    checkout = tmp_path / "checkout"
+    runtime_package = checkout / "cloud" / "iris"
+    runtime_package.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text('[project]\nname = "marinskyrl"\nversion = "0.1.0"\n')
+    (runtime_package / "runtime_bundle_files.txt").write_text(
+        "cloud/iris/__init__.py\ncloud/iris/task_runtime.py\nchat_templates/delphi_v0.jinja2\n"
+    )
+    (runtime_package / "__init__.py").write_text("")
+    (runtime_package / "task_runtime.py").write_text('RUNTIME_MARKER = "selected-checkout"\n')
+    chat_templates = checkout / "chat_templates"
+    chat_templates.mkdir()
+    (chat_templates / "delphi_v0.jinja2").write_text("selected checkout template\n")
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.email", "tests@marin.community"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.name", "MarinSkyRL tests"], cwd=checkout, check=True)
+    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=checkout, check=True)
+    return checkout, _git_commit(checkout)
+
+
+@pytest.fixture
+def runtime_checkout(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
+    checkout, commit = _runtime_checkout(tmp_path)
+
+    class Distribution:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
+
+    monkeypatch.setattr(runtime_bundle.importlib.metadata, "distribution", lambda name: Distribution())
+    monkeypatch.chdir(tmp_path)
+    return checkout, commit
 
 
 def _cluster_config(tmp_path: Path) -> Path:
@@ -100,7 +135,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
             attempt_id="attempt-1",
             config_yaml="trainer:\n  strategy: fsdp2\n  placement:\n    colocate_all: true\n",
             runtime=RuntimeIdentity(
-                commit=_repository_commit(),
+                commit=_git_commit(_REPOSITORY_ROOT),
                 profile=RuntimeProfile.FSDP,
             ),
             model=ModelLocator(
@@ -324,16 +359,48 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
 
 
-def test_runtime_bundle_contains_controller_without_training_environment() -> None:
-    workspace = build_runtime_bundle()
+def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(
+    runtime_checkout: tuple[Path, str],
+) -> None:
+    _, commit = runtime_checkout
+    workspace = runtime_bundle.build_runtime_bundle(commit)
 
-    assert (workspace / "cloud" / "iris" / "task_runtime.py").is_file()
-    assert (workspace / "chat_templates" / "delphi_v0.jinja2").is_file()
-    assert not (workspace / "skyrl-train").exists()
-    assert not (workspace / "cloud" / "iris" / "tests").exists()
-    assert not (workspace / "cloud" / "iris" / "job.py").exists()
-    assert not (workspace / "cloud" / "iris" / "iris_backend.py").exists()
-    assert not (workspace / "cloud" / "iris" / "protocol.py").exists()
+    assert (workspace / "cloud" / "iris" / "task_runtime.py").read_text() == ('RUNTIME_MARKER = "selected-checkout"\n')
+    assert (workspace / "chat_templates" / "delphi_v0.jinja2").read_text() == "selected checkout template\n"
+    identity = json.loads((workspace / ".marinskyrl-runtime.json").read_text())
+    assert identity["launcher_commit"] == commit
+    assert {entry["path"] for entry in identity["files"]} == {
+        "chat_templates/delphi_v0.jinja2",
+        "cloud/iris/__init__.py",
+        "cloud/iris/task_runtime.py",
+    }
+    assert runtime_bundle.validate_bundled_runtime(workspace) == commit
+
+
+def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(
+    runtime_checkout: tuple[Path, str],
+) -> None:
+    _, commit = runtime_checkout
+    workspace = runtime_bundle.build_runtime_bundle(commit)
+    (workspace / "cloud" / "iris" / "task_runtime.py").write_text('RUNTIME_MARKER = "corrupt"\n')
+
+    with pytest.raises(RuntimeError, match="task_runtime.py"):
+        runtime_bundle.validate_bundled_runtime(workspace)
+
+
+def test_runtime_bundle_rejects_requested_commit_that_differs_from_selected_checkout(
+    runtime_checkout: tuple[Path, str],
+) -> None:
+    with pytest.raises(ValueError, match="does not match requested"):
+        runtime_bundle.build_runtime_bundle("0" * 40)
+
+
+def test_runtime_bundle_rejects_uncommitted_runtime_bytes(runtime_checkout: tuple[Path, str]) -> None:
+    checkout, commit = runtime_checkout
+    (checkout / "cloud" / "iris" / "task_runtime.py").write_text('RUNTIME_MARKER = "dirty"\n')
+
+    with pytest.raises(RuntimeError, match="task_runtime.py"):
+        runtime_bundle.build_runtime_bundle(commit)
 
 
 def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -371,17 +438,6 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     job._write_json("result.json", {"state": "prepared"})
 
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
-
-
-def test_installed_commit_uses_an_editable_checkout(monkeypatch) -> None:
-    class Distribution:
-        def read_text(self, name: str) -> str:
-            assert name == "direct_url.json"
-            return json.dumps({"url": _REPOSITORY_ROOT.as_uri(), "dir_info": {"editable": True}})
-
-    monkeypatch.setattr(runtime_environment.importlib.metadata, "distribution", lambda name: Distribution())
-
-    assert runtime_environment.installed_commit() == _repository_commit()
 
 
 def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monkeypatch) -> None:
@@ -429,7 +485,7 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
 
     monkeypatch.setattr(runtime_environment, "MARINSKYRL_REPOSITORY", str(source))
     monkeypatch.setattr(runtime_environment, "MARINSKYRL_TASK_ROOT", str(checkout))
-    monkeypatch.setattr(runtime_environment, "MARINSKYRL_RUNTIME_ENV", str(runtime_file))
+    monkeypatch.setattr(runtime_environment, "MARINSKYRL_ACTIVATION_FILE", str(runtime_file))
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -441,7 +497,7 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
 
     subprocess.run(["bash", "-c", task_setup_script(commit, RuntimeProfile.FSDP)], env=env, check=True)
 
-    assert runtime_environment._checkout_commit(checkout) == commit
+    assert _git_commit(checkout) == commit
     assert uv_args.read_text().splitlines() == [
         "sync",
         "--project",
