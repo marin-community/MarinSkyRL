@@ -67,29 +67,28 @@ def _checkout_root(path: Path) -> Path | None:
     return root if project.get("name") == DISTRIBUTION_NAME else None
 
 
-def _installed_checkout() -> Path | None:
+def _installed_checkout() -> Path:
     try:
         direct_url = importlib.metadata.distribution(DISTRIBUTION_NAME).read_text("direct_url.json")
-    except importlib.metadata.PackageNotFoundError:
-        return None
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError("Cannot locate an installed marinskyrl distribution outside a checkout") from error
     if not direct_url:
-        return None
+        raise RuntimeError("Installed marinskyrl distribution has no direct_url.json checkout identity")
     parsed_url = urlparse(json.loads(direct_url).get("url", ""))
     if parsed_url.scheme != "file":
-        return None
+        raise RuntimeError("Installed marinskyrl distribution does not identify a local checkout")
     checkout = Path(unquote(parsed_url.path)).resolve()
-    return _checkout_root(checkout)
+    root = _checkout_root(checkout)
+    if root is None:
+        raise RuntimeError(f"Installed marinskyrl checkout is missing or invalid: {checkout}")
+    return root
 
 
 def resolve_launcher_source() -> LauncherSource:
     """Resolve the checkout whose committed runtime bytes a launch will ship."""
-    checkout = _checkout_root(Path.cwd()) or _installed_checkout()
+    checkout = _checkout_root(Path.cwd())
     if checkout is None:
-        raise RuntimeError(
-            "Cannot locate the MarinSkyRL checkout for this launcher. Run from the intended checkout or reinstall "
-            "marinskyrl from it with `uv sync --frozen --group dev --extra cpu --extra telemetry "
-            "--reinstall-package marinskyrl`."
-        )
+        checkout = _installed_checkout()
     return LauncherSource(root=checkout, commit=_git_output(checkout, "rev-parse", "HEAD"))
 
 
@@ -153,17 +152,22 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
     if not identity_path.is_file():
         raise RuntimeError(f"Runtime bundle identity is missing: {identity_path}")
     value = json.loads(identity_path.read_text())
-    try:
-        identity = RuntimeBundleIdentity(
-            launcher_commit=value["launcher_commit"],
-            files=tuple(RuntimeBundleFile(**entry) for entry in value["files"]),
-        )
-    except (KeyError, TypeError):
+    if not isinstance(value, dict):
         raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
-    if not isinstance(identity.launcher_commit, str) or any(
-        not isinstance(entry.path, str) or not isinstance(entry.sha256, str) for entry in identity.files
-    ):
+    launcher_commit = value.get("launcher_commit")
+    file_values = value.get("files")
+    if not isinstance(launcher_commit, str) or not isinstance(file_values, list):
         raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
+    files: list[RuntimeBundleFile] = []
+    for entry in file_values:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("sha256"), str)
+        ):
+            raise RuntimeError(f"Runtime bundle identity is invalid: {identity_path}")
+        files.append(RuntimeBundleFile(path=entry["path"], sha256=entry["sha256"]))
+    identity = RuntimeBundleIdentity(launcher_commit=launcher_commit, files=tuple(files))
     for entry in identity.files:
         relative_path = _bundle_relative_path(entry.path)
         bundled_file = root / relative_path

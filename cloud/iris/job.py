@@ -22,7 +22,6 @@ from cloud.iris.artifacts import (
     validate_hf_export,
 )
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
-from cloud.iris.runtime_bundle import launcher_source_at_commit
 from cloud.iris.protocol import (
     AttemptState,
     RuntimeIdentity,
@@ -43,7 +42,6 @@ class JobBackend(Protocol):
 
 
 def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
-    launcher_source_at_commit(runtime.launcher_commit)
     matches = [image for image in GPU_RL_IMAGES.values() if image.reference == runtime.task_image]
     if len(matches) != 1:
         raise ValueError(f"Task image is not registered by this launcher: {runtime.task_image}")
