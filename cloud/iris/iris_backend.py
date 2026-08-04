@@ -84,7 +84,7 @@ from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
     RaySpillBackend,
-    ray_spill_shell_preflight,
+    resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
 from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR, GPU_RL_PYTHON, image_for_cluster
@@ -2099,7 +2099,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # Run outside task_runtime so every pod establishes Ray's filesystem contract
     # before importing or starting any MarinSkyRL controller code. The controller
     # repeats this check immediately before `ray start` as defense in depth.
-    spill_preflight = ray_spill_shell_preflight(args.ray_spill_backend, args.ray_spill_dir)
+    spill_preflight = resolve_ray_spill_target(
+        args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir
+    ).shell_preflight()
     # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
     # SKYRL_GDN_FLASHQLA=1 lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
     # kernels on the first GPU forward into the node-local, ephemeral TileLang cache

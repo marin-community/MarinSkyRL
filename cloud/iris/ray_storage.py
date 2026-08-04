@@ -22,6 +22,8 @@ class RaySpillTarget(Protocol):
 
     def prepare_node(self) -> None: ...
 
+    def shell_preflight(self) -> str: ...
+
     def head_flags(self) -> list[str]: ...
 
     def worker_flags(self) -> list[str]: ...
@@ -42,6 +44,13 @@ class LocalRaySpillTarget:
         except OSError as error:
             raise RuntimeError(f"Could not create Ray spill directory {self.location!r}: {error}") from error
 
+    def shell_preflight(self) -> str:
+        quoted_path = shlex.quote(self.location)
+        error = shlex.quote(
+            f"[rl-iris] Could not prepare local Ray spill directory {self.location!r} before controller startup"
+        )
+        return f"if ! mkdir -p -- {quoted_path} || [ ! -d {quoted_path} ]; then echo {error} >&2; exit 1; fi; "
+
     def head_flags(self) -> list[str]:
         return [f"{_RAY_LOCAL_SPILL_FLAG}={self.location}"]
 
@@ -61,7 +70,16 @@ class R2RaySpillTarget:
             raise ValueError(f"R2 Ray spill target must use s3://, got {self.location!r}")
 
     def prepare_node(self) -> None:
-        return
+        # Ray's smart_open spill backend imports boto3 inside each node process.
+        try:
+            import boto3  # noqa: F401
+        except ImportError as error:
+            raise RuntimeError(
+                "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
+            ) from error
+
+    def shell_preflight(self) -> str:
+        return ""
 
     def head_flags(self) -> list[str]:
         spilling_config = json.dumps(
@@ -89,11 +107,16 @@ def validate_ray_spill_dir(path: str) -> str:
     return path
 
 
-def ray_spill_shell_preflight(backend: RaySpillBackend, local_spill_dir: str) -> str:
-    """Return the per-pod shell guard that runs before the Python controller."""
-    if backend is not RaySpillBackend.LOCAL:
-        return ""
-    path = validate_ray_spill_dir(local_spill_dir)
-    quoted_path = shlex.quote(path)
-    error = shlex.quote(f"[rl-iris] Could not prepare local Ray spill directory {path!r} before controller startup")
-    return f"if ! mkdir -p -- {quoted_path} || [ ! -d {quoted_path} ]; then echo {error} >&2; exit 1; fi; "
+def resolve_ray_spill_target(
+    rendezvous_dir: str | None,
+    backend: RaySpillBackend,
+    local_spill_dir: str,
+) -> RaySpillTarget:
+    """Resolve one valid local or remote Ray spill target."""
+    if backend is RaySpillBackend.LOCAL:
+        return LocalRaySpillTarget(location=validate_ray_spill_dir(local_spill_dir))
+    if local_spill_dir != DEFAULT_RAY_SPILL_DIR:
+        raise ValueError("--ray-spill-dir only applies to --ray-spill-backend=local")
+    if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
+        raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
+    return R2RaySpillTarget(location=f"{rendezvous_dir.rstrip('/')}/ray_spill")

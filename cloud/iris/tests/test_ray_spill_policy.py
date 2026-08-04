@@ -14,17 +14,18 @@ from cloud.iris.ray_storage import (  # noqa: E402
     LocalRaySpillTarget,
     R2RaySpillTarget,
     RaySpillBackend,
+    resolve_ray_spill_target,
 )
 
 
 def test_remote_spilling_requires_explicit_opt_in():
-    local = runtime._ray_spill_target(
+    local = resolve_ray_spill_target(
         "s3://marin-us-east-02a/iris/rl-rdv/job",
         RaySpillBackend.LOCAL,
         DEFAULT_RAY_SPILL_DIR,
     )
 
-    remote = runtime._ray_spill_target(
+    remote = resolve_ray_spill_target(
         "s3://marin-us-east-02a/iris/rl-rdv/job",
         RaySpillBackend.R2,
         DEFAULT_RAY_SPILL_DIR,
@@ -37,22 +38,24 @@ def test_remote_spilling_requires_explicit_opt_in():
 def test_remote_spilling_fails_when_backend_dependency_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "boto3", None)
 
+    target = resolve_ray_spill_target(
+        "s3://marin-us-east-02a/iris/rl-rdv/job",
+        RaySpillBackend.R2,
+        DEFAULT_RAY_SPILL_DIR,
+    )
+
     with pytest.raises(RuntimeError, match="requires boto3"):
-        runtime._ray_spill_target(
-            "s3://marin-us-east-02a/iris/rl-rdv/job",
-            RaySpillBackend.R2,
-            DEFAULT_RAY_SPILL_DIR,
-        )
+        target.prepare_node()
 
 
 def test_remote_spilling_rejects_non_s3_rendezvous():
     with pytest.raises(ValueError, match="requires an s3:// rendezvous directory"):
-        runtime._ray_spill_target("/shared/rendezvous/job", RaySpillBackend.R2, DEFAULT_RAY_SPILL_DIR)
+        resolve_ray_spill_target("/shared/rendezvous/job", RaySpillBackend.R2, DEFAULT_RAY_SPILL_DIR)
 
 
 def test_remote_spilling_rejects_local_directory_override():
     with pytest.raises(ValueError, match="only applies.*local"):
-        runtime._ray_spill_target(
+        resolve_ray_spill_target(
             "s3://marin-us-east-02a/iris/rl-rdv/job",
             RaySpillBackend.R2,
             "/local/nvme/ray-spill",
