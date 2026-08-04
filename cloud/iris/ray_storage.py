@@ -39,6 +39,7 @@ class LocalRaySpillTarget:
             os.makedirs(self.location, exist_ok=True)
         except OSError as error:
             raise RuntimeError(f"Could not create Ray spill directory {self.location!r}: {error}") from error
+
     def head_flags(self) -> list[str]:
         return [f"{_RAY_LOCAL_SPILL_FLAG}={self.location}"]
 
@@ -59,6 +60,7 @@ class R2RaySpillTarget:
 
     def prepare_node(self) -> None:
         return
+
     def head_flags(self) -> list[str]:
         spilling_config = json.dumps(
             {
