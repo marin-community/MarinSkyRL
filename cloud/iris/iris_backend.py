@@ -1854,11 +1854,10 @@ def _build_task_shell(
     spill_preflight = resolve_ray_spill_target(
         args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir
     ).shell_preflight()
-    # TileLang JIT-cache warm-start shim (Fix A) — GDN/FlashQLA runs only.
+    # TileLang JIT-cache warm-start shim for GDN/FlashQLA runs only.
     # SKYRL_GDN_FLASHQLA=1 lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
-    # kernels on the first GPU forward into the node-local, ephemeral TileLang cache
-    # (~71 min cold on the first r4f run, x every one of the N gang pods — kaniko is
-    # CPU-only so they can't be baked into the image). This brackets the train command
+    # kernels on the first GPU forward into the node-local, ephemeral TileLang cache.
+    # Kaniko is CPU-only, so these kernels cannot be baked into the image. This brackets the train command
     # with a per-pod, per-NODE cache sync (the bash runs once per task pod / node, and
     # TileLang's cache is node-local, so one --down warms all 8 local GPU workers):
     #   --down BEFORE the controller -> pulls the keyed warm cache (seed cache.tgz +
@@ -1868,8 +1867,8 @@ def _build_task_shell(
     #          exit) -> uploads NEWLY-compiled hash-dirs as per-hash objects (race-free
     #          across the ~16 writers — content-addressed, no cache.tgz overwrite).
     # The shim self-gates on SKYRL_GDN_FLASHQLA and NEVER fails the job (best-effort;
-    # exits 0 even on S3 error). We ALSO branch here on SKYRL_GDN_FLASHQLA so a non-GDN
-    # run (e.g. 30B-coder) keeps the BYTE-IDENTICAL `exec <controller>` fast path.
+    # exits 0 even on S3 error). We ALSO branch here on SKYRL_GDN_FLASHQLA so non-GDN
+    # runs keep the BYTE-IDENTICAL `exec <controller>` fast path.
     # TILELANG_CACHE_DIR is exported (defaulting to TileLang's own default) so the shim
     # and the trainer's TileLang agree on the location; a config-set value wins.
     # TILELANG_CACHE_MODEL_PATH lets the shim derive the model component of the key.
