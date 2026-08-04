@@ -205,6 +205,9 @@ class TerminalBenchAgentOutput:
     loss_mask: List[int]
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
+    # Verifier outcome before optimization-specific reward shaping. This is the
+    # stable success signal for pass@k; failed/invalidated trajectories keep zero.
+    unshaped_reward: float = 0.0
     summarization_count: Optional[int] = None
     rollout_logprobs: Optional[List[float]] = None
     # MoE router-replay (Stage 1 capture rail): per-token [L, K] expert-selection
@@ -1042,6 +1045,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     output.loss_mask = [0]
                     output.prompt_ids = [0]
                     output.reward = 0
+                    output.unshaped_reward = 0
                     output.rollout_logprobs = None  # Clear logprobs to match response_ids length
                     output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
                 else:
@@ -1055,6 +1059,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     output.loss_mask = [0]
                     output.prompt_ids = [0]
                     output.reward = 0
+                    output.unshaped_reward = 0
                     output.rollout_logprobs = None  # Clear logprobs to match response_ids length
                     output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
                     output.exclude_from_baseline = False  # Legacy: include in baseline
@@ -1308,6 +1313,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
             "response_ids": [output.response_ids for output in all_outputs],
             "rewards": [output.reward for output in all_outputs],
+            "unshaped_rewards": [output.unshaped_reward for output in all_outputs],
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
@@ -2029,6 +2035,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
+            unshaped_reward=original_reward,
             rollout_logprobs=rollout_logprobs,
             rollout_routed_experts=rollout_routed_experts,
             summarization_count=summarization_count,

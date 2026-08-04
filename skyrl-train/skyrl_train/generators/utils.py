@@ -464,33 +464,44 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
     unique examples.
 
-    Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
+    Rewards can be either per-trajectory or per-token. ``mean_raw_reward`` describes
+    the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
+    so optimization-specific shaping cannot change the task-success metric.
     """
     rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    # TODO: We should make metrics customizable by the environment.
-    # Map from the example's uid to each trajectory's reward on that same example
-    uid_to_trajectory_rewards = defaultdict(list)
+    pass_rewards = generator_output.get("unshaped_rewards")
+    if pass_rewards is None:
+        pass_rewards = rewards
+    if len(pass_rewards) != len(rewards):
+        raise ValueError(
+            "`unshaped_rewards` must have one entry per trajectory: "
+            f"got {len(pass_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
+        )
+
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
         # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
         mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
-        # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
-        for i, cur_trajectory_rewards in enumerate(rewards):
-            # A prompt rejected before inference has no terminal token and contributes zero reward.
-            terminal_reward = cur_trajectory_rewards[-1] if cur_trajectory_rewards else 0.0
-            uid_to_trajectory_rewards[uids[i]].append(terminal_reward)
     else:
         mean_raw_reward = float(np.mean(rewards))
-        for i, reward in enumerate(rewards):
+
+    # TODO: We should make metrics customizable by the environment.
+    # Map from the example's uid to each trajectory's unshaped outcome on that example.
+    uid_to_trajectory_rewards = defaultdict(list)
+    if pass_rewards and isinstance(pass_rewards[0], list):
+        # The terminal token carries the trajectory outcome for token-level rewards.
+        for i, trajectory_rewards in enumerate(pass_rewards):
+            terminal_reward = trajectory_rewards[-1] if trajectory_rewards else 0.0
+            uid_to_trajectory_rewards[uids[i]].append(terminal_reward)
+    else:
+        for i, reward in enumerate(pass_rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
     # For each example, pass@n = 1 if any trajectory achieves a positive reward.
-    # With binary rewards, this means any success. With shaped rewards (e.g. pass_ratio),
-    # this means any partial progress. Using > 0.0 rather than >= 1.0 because shaped
-    # rewards may never reach 1.0 (e.g. 9/10 tests = 0.9).
+    # The explicit unshaped channel, when present, makes this invariant to reward shaping.
     pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0.0 for r in v)) / len(
         uid_to_trajectory_rewards
     )
