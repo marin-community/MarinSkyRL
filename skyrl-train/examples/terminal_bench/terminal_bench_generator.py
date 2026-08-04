@@ -235,7 +235,7 @@ class TerminalBenchAgentOutput:
 
 
 def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
-    """Clear every per-trajectory training and metric signal after failure."""
+    """Replace an invalidated trajectory with an aligned zero-reward stub."""
     output.response_ids = [0]
     output.stop_reason = "error"
     output.loss_mask = [0]
@@ -244,6 +244,11 @@ def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
     output.unshaped_reward = 0
     output.rollout_logprobs = None
     output.rollout_routed_experts = None
+    output.token_level_shaping = None
+    output.response_span_tags = None
+    output.reward_components = None
+    output.alignment_stats = None
+    output.truncation_penalized = False
 
 
 class TerminalBenchGenerator(GeneratorInterface):

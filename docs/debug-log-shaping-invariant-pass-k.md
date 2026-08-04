@@ -40,4 +40,5 @@ The regression now evaluates two different shaped reward vectors over the same v
 
 - Fixed a propagation gap in dynamic replacement and filtering so sampled trajectories keep their corresponding unshaped outcomes.
 - Consolidated failed-trajectory clearing into one operation so training and metric reward channels reset together.
+- Clear token-aligned shaping, span tags, reward components, and alignment summaries when a trajectory becomes a zero-reward stub.
 - Retained the established `reward/avg_raw_reward` metric name to avoid breaking existing dashboards. Its docstring now distinguishes that optimization-reward mean from the new unshaped outcome channel.
