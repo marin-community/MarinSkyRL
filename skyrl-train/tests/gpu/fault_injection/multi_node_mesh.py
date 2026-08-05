@@ -15,13 +15,13 @@ from torch.distributed.tensor import DeviceMesh
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from tests.gpu.fault_injection.collective_payloads import MeshCollectives
-
-
-EXPECTED_NODES = 4
-GPUS_PER_NODE = 4
-WORLD_SIZE = EXPECTED_NODES * GPUS_PER_NODE
-EP_SIZE = GPUS_PER_NODE
-FSDP_SIZE = EXPECTED_NODES
+from tests.gpu.fault_injection.multi_node_geometry import (
+    EP_SIZE,
+    EXPECTED_NODES,
+    FSDP_SIZE,
+    GPUS_PER_NODE,
+    WORLD_SIZE,
+)
 
 
 @dataclass(frozen=True)

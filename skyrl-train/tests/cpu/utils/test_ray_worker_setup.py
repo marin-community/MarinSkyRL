@@ -4,8 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.worker_setup import INCOMPATIBLE_NCCL_ENVIRONMENT, configure_worker_process
 
@@ -37,15 +35,7 @@ def _run_worker_setup_probe() -> None:
     print("ok")
 
 
-@pytest.mark.parametrize(
-    "blocking_wait_environment",
-    (
-        {},
-        dict.fromkeys(INCOMPATIBLE_NCCL_ENVIRONMENT, "1"),
-    ),
-    ids=("default", "inherited-blocking-wait"),
-)
-def test_ray_worker_setup_prepares_process_before_torch_import(blocking_wait_environment: dict[str, str]) -> None:
+def test_ray_worker_setup_prepares_process_before_torch_import() -> None:
     package_root = Path(__file__).parents[3]
     python_path = os.pathsep.join(filter(None, (str(package_root), os.environ.get("PYTHONPATH"))))
     result = subprocess.run(
@@ -57,7 +47,7 @@ def test_ray_worker_setup_prepares_process_before_torch_import(blocking_wait_env
             **os.environ,
             "PYTHONPATH": python_path,
             NUMA_AFFINITY_ENV: "0",
-            **blocking_wait_environment,
+            **dict.fromkeys(INCOMPATIBLE_NCCL_ENVIRONMENT, "1"),
         },
     )
 

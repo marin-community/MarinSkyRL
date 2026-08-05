@@ -19,19 +19,21 @@ from tests.gpu.fault_injection.collective_payloads import (
     warm_ep_and_fsdp_communicators,
 )
 from tests.gpu.fault_injection.multi_node_mesh import MeshRuntime, multi_node_mesh_runtime
+from tests.gpu.fault_injection.multi_node_phase_divergence_contract import (
+    ACTIVE_MARKER,
+    BLOCKING_WAIT_DISABLED_MARKER,
+    PROCESS_GROUP_TIMEOUT_SECONDS,
+    READY_MARKER,
+    UNAFFECTED_EP_COMPLETION_MARKER,
+    UNEXPECTED_COMPLETION_MARKER,
+    WARMUP_MARKER,
+)
 from tests.process_gang import signal_rank_ready_and_wait_for_start
 from tests.nccl_environment import disable_nccl_communicator_nonblocking
 
 
-PROCESS_GROUP_TIMEOUT_SECONDS = 60
 WARMUP_ROUNDS = 3
 PAYLOAD_MIB = 1
-WARMUP_MARKER = "MULTI_NODE_COMMUNICATOR_WARMUP_COMPLETED"
-READY_MARKER = "MULTI_NODE_FAULT_READY"
-ACTIVE_MARKER = "MULTI_NODE_FAULT_ACTIVE"
-BLOCKING_WAIT_DISABLED_MARKER = "blocking_wait=None"
-UNAFFECTED_EP_COMPLETION_MARKER = "MULTI_NODE_UNAFFECTED_EP_COMPLETED"
-UNEXPECTED_COMPLETION_MARKER = "MULTI_NODE_FAULT_UNEXPECTED_COMPLETION"
 
 
 def _build_and_warm_communicators(runtime: MeshRuntime, values_per_rank: int) -> MeshCollectives:

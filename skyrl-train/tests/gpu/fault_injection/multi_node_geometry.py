@@ -1,0 +1,7 @@
+"""Dependency-light constants for the four-node EP4/FSDP4 test geometry."""
+
+EXPECTED_NODES = 4
+GPUS_PER_NODE = 4
+WORLD_SIZE = EXPECTED_NODES * GPUS_PER_NODE
+EP_SIZE = GPUS_PER_NODE
+FSDP_SIZE = EXPECTED_NODES

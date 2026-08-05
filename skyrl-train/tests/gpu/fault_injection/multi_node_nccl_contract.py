@@ -25,9 +25,9 @@ from pathlib import Path
 
 import pytest
 
-from skyrl_train.utils.nccl_environment import nccl_diagnostics_environment
-from tests.gpu.fault_injection.multi_node_mesh import EXPECTED_NODES, GPUS_PER_NODE, WORLD_SIZE
-from tests.gpu.fault_injection.multi_node_phase_divergence_worker import (
+from skyrl_train.nccl_diagnostics import nccl_diagnostics_environment
+from tests.gpu.fault_injection.multi_node_geometry import EXPECTED_NODES, GPUS_PER_NODE, WORLD_SIZE
+from tests.gpu.fault_injection.multi_node_phase_divergence_contract import (
     ACTIVE_MARKER,
     BLOCKING_WAIT_DISABLED_MARKER,
     PROCESS_GROUP_TIMEOUT_SECONDS,

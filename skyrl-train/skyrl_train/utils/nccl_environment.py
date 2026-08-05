@@ -2,26 +2,11 @@ import os
 
 from loguru import logger
 
+from skyrl_train.nccl_diagnostics import nccl_diagnostics_environment
 from skyrl_train.utils.constants import (
-    DEFAULT_NCCL_TRACE_BUFFER_SIZE,
     get_nccl_monitor_heartbeat_timeout,
     get_worker_nccl_timeout_s,
 )
-
-
-def nccl_diagnostics_environment(*, heartbeat_timeout_seconds: int) -> dict[str, str]:
-    """Return PyTorch NCCL watchdog and flight-recorder variables for workers."""
-
-    return {
-        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
-        "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
-        "TORCH_NCCL_ENABLE_MONITORING": "1",
-        "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": f"{heartbeat_timeout_seconds:d}",
-        # Torch 2.9 renamed this setting while retaining the old name as an alias.
-        # Keep both until every supported policy image uses the new spelling.
-        "TORCH_NCCL_TRACE_BUFFER_SIZE": str(DEFAULT_NCCL_TRACE_BUFFER_SIZE),
-        "TORCH_FR_BUFFER_SIZE": str(DEFAULT_NCCL_TRACE_BUFFER_SIZE),
-    }
 
 
 def worker_nccl_environment() -> dict[str, str]:
