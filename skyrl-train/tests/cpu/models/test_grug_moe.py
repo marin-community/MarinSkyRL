@@ -55,6 +55,13 @@ def tiny_config(**overrides) -> GrugMoeConfig:
     return GrugMoeConfig(**values)
 
 
+@pytest.fixture
+def grouped_kernel(monkeypatch):
+    grouped_kernel_module = ModuleType("skyrl_train.models.layers.moe")
+    grouped_kernel_module.__dict__["_run_experts_grouped_mm"] = run_experts_for_loop
+    monkeypatch.setitem(sys.modules, grouped_kernel_module.__name__, grouped_kernel_module)
+
+
 def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
     torch.manual_seed(7)
     model = GrugMoeForCausalLM(tiny_config())
@@ -95,7 +102,7 @@ def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(monkeypatch):
+def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(grouped_kernel):
     torch.manual_seed(9)
     model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1))
     block = model.model.layers[0].mlp
@@ -103,9 +110,6 @@ def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(monkeypat
     keys_before = tuple(model.state_dict())
     expected = block(hidden)
 
-    grouped_kernel_module = ModuleType("skyrl_train.models.layers.moe")
-    grouped_kernel_module.__dict__["_run_experts_grouped_mm"] = run_experts_for_loop
-    monkeypatch.setitem(sys.modules, grouped_kernel_module.__name__, grouped_kernel_module)
     assert enable_grug_grouped_mm(model) == 1
 
     output = block(hidden)
@@ -118,12 +122,8 @@ def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(monkeypat
     assert "model.layers.0.mlp.experts.down_proj.weight" in keys_before
 
 
-def test_bfloat16_expert_combine_uses_float32_accumulation(monkeypatch):
+def test_bfloat16_expert_combine_uses_float32_accumulation(grouped_kernel):
     config = tiny_config(num_local_experts=5, num_experts_per_tok=4, num_hidden_layers=1)
-
-    grouped_kernel_module = ModuleType("skyrl_train.models.layers.moe")
-    grouped_kernel_module.__dict__["_run_experts_grouped_mm"] = run_experts_for_loop
-    monkeypatch.setitem(sys.modules, grouped_kernel_module.__name__, grouped_kernel_module)
 
     def new_block():
         block = GrugMoeSparseMoeBlock(config).to(dtype=torch.bfloat16)
