@@ -1,0 +1,1656 @@
+diff --git a/skyrl-train/scripts/grug_fixed_replay_benchmark.py b/skyrl-train/scripts/grug_fixed_replay_benchmark.py
+index 6e6d6df..1e20cfd 100755
+--- a/skyrl-train/scripts/grug_fixed_replay_benchmark.py
++++ b/skyrl-train/scripts/grug_fixed_replay_benchmark.py
+@@ -95,10 +95,58 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--sample", type=int, required=True)
+     parser.add_argument("--profile-s3-uri")
+     parser.add_argument("--expert-attribution", action="store_true")
++    parser.add_argument("--route-discriminator", action="store_true")
++    parser.add_argument(
++        "--route-discriminator-target",
++        action="append",
++        default=[],
++        metavar="RANK:MICROBATCH:FIRST|MIDDLE|LAST",
++    )
++    parser.add_argument("--localization-microbatch", type=int)
++    parser.add_argument("--localization-rank", type=int)
++    parser.add_argument("--localization-token-index", type=int)
++    parser.add_argument("--localization-causal-layer", type=int)
+     parser.add_argument("--pg-timeout-seconds", type=int, default=900)
+     return parser.parse_args()
+ 
+ 
++def parse_route_discriminator_targets(values: list[str]) -> list[dict[str, int | str]]:
++    targets = []
++    seen = set()
++    for value in values:
++        fields = value.split(":")
++        if len(fields) != 3:
++            raise ValueError(f"invalid route-discriminator target {value!r}")
++        rank_text, microbatch_text, position = fields
++        position = position.lower()
++        if position not in {"first", "middle", "last"}:
++            raise ValueError(f"invalid route-discriminator position {position!r}")
++        rank = int(rank_text)
++        microbatch = int(microbatch_text)
++        if rank < 0 or microbatch < 0:
++            raise ValueError(f"route-discriminator coordinates must be nonnegative: {value!r}")
++        key = (rank, microbatch, position)
++        if key in seen:
++            raise ValueError(f"duplicate route-discriminator target {value!r}")
++        seen.add(key)
++        targets.append({"rank": rank, "microbatch": microbatch, "representative_position": position})
++    return targets
++
++
++def order_route_discriminator_targets(targets: list[dict[str, int | str]]) -> list[dict[str, int | str]]:
++    """Order coordinates by rank, microbatch, then frozen action-sample order."""
++
++    position_order = {"first": 0, "middle": 1, "last": 2}
++    return sorted(
++        targets,
++        key=lambda item: (
++            int(item["rank"]),
++            int(item["microbatch"]),
++            position_order[str(item["representative_position"])],
++        ),
++    )
++
++
+ def s3_client():
+     endpoint = os.environ.get("CW_S3_ENDPOINT") or os.environ.get("AWS_ENDPOINT_URL")
+     access_key = os.environ.get("CW_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID")
+@@ -386,6 +434,7 @@ def run_paired_matched_arm(
+     implementation: str,
+     expert_attribution: bool,
+     paired_route_mode: str | None,
++    route_discriminator_mode: str | None,
+     mode: str,
+     sequence_length: int,
+     world_size: int,
+@@ -449,6 +498,7 @@ def run_paired_matched_arm(
+             False,
+             expert_attribution,
+             paired_route_mode,
++            route_discriminator_mode,
+         )
+     )
+     require_rank_order(timed, world_size, f"paired arm {arm_name} timed result")
+@@ -491,6 +541,19 @@ def run_paired_matched_arm(
+             raise RuntimeError(f"paired arm {arm_name} compared routes while capturing its reference")
+         if expected_route_mode == "compare" and len(evidence["paired_route_comparison"] or []) != expected_blocks:
+             raise RuntimeError(f"paired arm {arm_name} missed rank {rank} route comparisons")
++        discriminator = item["route_discriminator"]
++        if route_discriminator_mode is None:
++            if discriminator is not None:
++                raise RuntimeError(f"paired arm {arm_name} unexpectedly returned a route discriminator")
++        elif (
++            discriminator is None
++            or discriminator["mode"] != route_discriminator_mode
++            or discriminator["layers"] != expected_blocks
++            or discriminator["microbatches"] != expected_microbatches
++            or discriminator["samples"] != expected_microbatches * 3
++            or discriminator["full_router_logits_retained"]
++        ):
++            raise RuntimeError(f"paired arm {arm_name} returned an incomplete route discriminator: {discriminator}")
+         expected_layer_load = expected_microbatches * sequence_length * identity["num_experts_per_tok"]
+         if any(
+             len(layer_loads) != identity["num_local_experts"] or sum(layer_loads) != expected_layer_load
+@@ -604,6 +667,7 @@ def compare_paired_numeric(candidate: dict[str, Any], reference: dict[str, Any])
+     """Compare one same-actor arm without deciding how gradients gate semantics."""
+ 
+     output = _empty_comparison()
++    output_violation_records = []
+     gradient = _empty_comparison()
+     if len(candidate["timed_workers"]) != len(reference["timed_workers"]):
+         raise RuntimeError("paired numeric worker counts differ")
+@@ -612,10 +676,29 @@ def compare_paired_numeric(candidate: dict[str, Any], reference: dict[str, Any])
+             raise RuntimeError("paired numeric worker ranks differ")
+         candidate_output = candidate_worker["representative_action_log_probs"]
+         reference_output = reference_worker["representative_action_log_probs"]
++        candidate_coordinates = candidate_worker["representative_action_log_prob_coordinates"]
++        reference_coordinates = reference_worker["representative_action_log_prob_coordinates"]
+         if len(candidate_output) != len(reference_output):
+             raise RuntimeError("paired representative output counts differ")
+-        for actual, expected in zip(candidate_output, reference_output):
++        if candidate_coordinates != reference_coordinates or len(candidate_coordinates) != len(candidate_output):
++            raise RuntimeError("paired representative output coordinates differ")
++        for actual, expected, coordinate in zip(candidate_output, reference_output, reference_coordinates):
+             _record_close(output, actual, expected, rtol=OUTPUT_RTOL, atol=OUTPUT_ATOL)
++            finite = math.isfinite(actual) and math.isfinite(expected)
++            difference = abs(actual - expected) if finite else math.inf
++            allowance = OUTPUT_ATOL + OUTPUT_RTOL * abs(expected)
++            if not finite or difference > allowance:
++                output_violation_records.append(
++                    {
++                        "rank": reference_worker["rank"],
++                        **coordinate,
++                        "eager": expected,
++                        "grouped": actual,
++                        "difference": difference,
++                        "allowance": allowance,
++                        "allowance_ratio": difference / allowance if finite else math.inf,
++                    }
++                )
+ 
+         candidate_gradients = candidate_worker["representative_gradients"]
+         reference_gradients = reference_worker["representative_gradients"]
+@@ -648,6 +731,7 @@ def compare_paired_numeric(candidate: dict[str, Any], reference: dict[str, Any])
+     )
+     for summary in (output, loss, gradient):
+         summary["passed"] = summary["violations"] == 0 and summary["nonfinite"] == 0
++    output["violation_records"] = output_violation_records
+     return {
+         "representative_action_log_probs": output,
+         "matched_global_ce": loss,
+@@ -655,6 +739,41 @@ def compare_paired_numeric(candidate: dict[str, Any], reference: dict[str, Any])
+     }
+ 
+ 
++def compare_paired_output_fingerprints(candidate: dict[str, Any], reference: dict[str, Any]) -> dict[str, Any]:
++    """Check that diagnostic hooks leave the frozen output samples bitwise unchanged."""
++
++    if len(candidate["timed_workers"]) != len(reference["timed_workers"]):
++        raise RuntimeError("paired output-fingerprint worker counts differ")
++    mismatches = []
++    checked = 0
++    for candidate_worker, reference_worker in zip(candidate["timed_workers"], reference["timed_workers"]):
++        if candidate_worker["rank"] != reference_worker["rank"]:
++            raise RuntimeError("paired output-fingerprint worker ranks differ")
++        if (
++            candidate_worker["representative_action_log_prob_coordinates"]
++            != reference_worker["representative_action_log_prob_coordinates"]
++        ):
++            raise RuntimeError("paired output-fingerprint coordinates differ")
++        checked += len(reference_worker["representative_action_log_probs"])
++        if (
++            candidate_worker["representative_action_log_probs_sha256"]
++            != reference_worker["representative_action_log_probs_sha256"]
++        ):
++            mismatches.append(
++                {
++                    "rank": reference_worker["rank"],
++                    "reference_sha256": reference_worker["representative_action_log_probs_sha256"],
++                    "candidate_sha256": candidate_worker["representative_action_log_probs_sha256"],
++                }
++            )
++    return {
++        "checked": checked,
++        "mismatched_workers": len(mismatches),
++        "mismatches": mismatches,
++        "passed": not mismatches,
++    }
++
++
+ def summarize_route_contract(grouped_arm: dict[str, Any]) -> dict[str, Any]:
+     summary = {
+         "rank_layers": 0,
+@@ -710,14 +829,24 @@ def validate_paired_arms(arms: list[dict[str, Any]], mode: str) -> dict[str, Any
+     }
+     if mode == "preflight":
+         oracle = compare_paired_numeric(by_name["eager_instrumented"], by_name["eager_oracle"])
++        eager_capture_neutrality = compare_paired_output_fingerprints(
++            by_name["eager_instrumented"], by_name["eager_oracle"]
++        )
+         grouped = compare_paired_numeric(by_name["grouped_instrumented"], by_name["eager_instrumented"])
++        grouped_capture_neutrality = (
++            compare_paired_output_fingerprints(by_name["grouped_instrumented"], by_name["grouped_oracle"])
++            if "grouped_oracle" in by_name
++            else None
++        )
+         routes = summarize_route_contract(by_name["grouped_instrumented"])
+         passed = (
+             oracle["representative_action_log_probs"]["passed"]
+             and oracle["matched_global_ce"]["passed"]
+             and oracle["representative_gradients"]["passed"]
++            and eager_capture_neutrality["passed"]
+             and grouped["representative_action_log_probs"]["passed"]
+             and grouped["matched_global_ce"]["passed"]
++            and (grouped_capture_neutrality is None or grouped_capture_neutrality["passed"])
+             and routes["passed"]
+         )
+         return {
+@@ -726,6 +855,8 @@ def validate_paired_arms(arms: list[dict[str, Any]], mode: str) -> dict[str, Any
+             "tolerances": tolerances,
+             "causal_localization_prerequisite": CAUSAL_LOCALIZATION,
+             "eager_instrumentation_oracle": oracle,
++            "eager_capture_bitwise_neutrality": eager_capture_neutrality,
++            "grouped_capture_bitwise_neutrality": grouped_capture_neutrality,
+             "grouped_versus_eager": grouped,
+             "route_contract": routes,
+             "grouped_representative_gradients_are_observational": True,
+@@ -750,19 +881,47 @@ def validate_paired_arms(arms: list[dict[str, Any]], mode: str) -> dict[str, Any
+ 
+ def main() -> None:
+     args = parse_args()
++    route_discriminator_targets = parse_route_discriminator_targets(args.route_discriminator_target)
++    localization_coordinates = (
++        args.localization_microbatch,
++        args.localization_rank,
++        args.localization_token_index,
++        args.localization_causal_layer,
++    )
++    focused_localization = any(value is not None for value in localization_coordinates)
+     if args.profile_s3_uri is not None and args.mode != "preflight":
+         raise ValueError("profiling is restricted to bounded preflight runs")
+-    if args.objective == "localize" and (
+-        args.mode != "preflight" or args.expert_implementation != "eager" or args.profile_s3_uri is not None
+-    ):
+-        raise ValueError("localization requires unprofiled preflight mode starting from eager experts")
++    if args.objective == "localize":
++        if args.expert_implementation != "eager" or args.profile_s3_uri is not None:
++            raise ValueError("localization requires unprofiled eager initialization")
++        if focused_localization and any(value is None for value in localization_coordinates):
++            raise ValueError("focused localization requires microbatch, rank, token index, and causal layer")
++        if args.mode == "headline" and not focused_localization:
++            raise ValueError("headline localization requires an exact failure-correlated coordinate")
++    elif focused_localization:
++        raise ValueError("localization coordinates require --objective localize")
+     if args.objective == "paired_matched_ce" and (
+         args.expert_implementation != "eager" or args.profile_s3_uri is not None or args.expert_attribution
+     ):
+         raise ValueError("paired matched CE requires eager initialization and owns its unprofiled arm attribution")
+     if args.expert_attribution and args.objective != "matched_ce":
+         raise ValueError("expert attribution is defined only for the matched_ce boundary")
++    if args.route_discriminator and args.objective != "paired_matched_ce":
++        raise ValueError("route discrimination is defined only for paired matched CE")
++    if route_discriminator_targets and not args.route_discriminator:
++        raise ValueError("route-discriminator targets require --route-discriminator")
+     world_size = WORLD_SIZES[args.mode]
++    expected_microbatches = MICROBATCHES_PER_RANK[args.mode]
++    if focused_localization:
++        if not 0 <= args.localization_microbatch < expected_microbatches:
++            raise ValueError(f"localization microbatch is outside the {args.mode} topology")
++        if not 0 <= args.localization_rank < world_size:
++            raise ValueError(f"localization rank is outside the {args.mode} topology")
++        if args.localization_token_index < 0 or args.localization_causal_layer < 1:
++            raise ValueError("localization token index must be nonnegative and causal layer must be positive")
++    for target in route_discriminator_targets:
++        if target["rank"] >= world_size or target["microbatch"] >= expected_microbatches:
++            raise ValueError(f"route-discriminator target is outside the {args.mode} topology: {target}")
+     client = s3_client()
+     with tempfile.TemporaryDirectory(prefix="grug-fixed-replay-") as work:
+         manifest, shards = load_verified_replay(
+@@ -781,6 +940,8 @@ def main() -> None:
+             batch.metadata["grug_benchmark_global_loss_tokens"] = global_loss_tokens
+ 
+         sequence_length = int(manifest["batch"]["fields"]["sequences"]["shape"][1])
++        if focused_localization and args.localization_token_index >= sequence_length:
++            raise ValueError(f"localization token is outside sequence length {sequence_length}")
+         cfg = make_config(args, sequence_length)
+         initialize_ray(cfg)
+         cluster_gpus = int(ray.cluster_resources().get("GPU", 0))
+@@ -812,6 +973,10 @@ def main() -> None:
+             assert_topology(topology, args.mode)
+             identities = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_identity"))
+             require_rank_order(identities, world_size, "initial worker identity")
++            if focused_localization and args.localization_causal_layer >= identities[0]["num_hidden_layers"]:
++                raise ValueError(
++                    f"localization causal layer is outside {identities[0]['num_hidden_layers']} model layers"
++                )
+             expected_backend = args.attention_backend
+             for identity in identities:
+                 if identity["model_revision"] != args.model_revision:
+@@ -844,31 +1009,102 @@ def main() -> None:
+             del batches
+ 
+             if args.objective == "localize":
+-                localization = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_localize_staged"))
+-                for rank, (item, identity) in enumerate(zip(localization, identities)):
+-                    if item["rank"] != rank:
+-                        raise RuntimeError(f"localization actor/rank order mismatch: {item}")
+-                    if item["state_hash_before"] != item["state_hash_after"]:
+-                        raise RuntimeError(f"localization changed rank {rank} model state")
+-                    if not item["cpu_rng_restored"] or not item["cuda_rng_restored"]:
+-                        raise RuntimeError(f"localization did not restore rank {rank} RNG state")
+-                    if item["gradients_after"] != 0:
+-                        raise RuntimeError(f"localization left rank {rank} model gradients")
+-                    if len(item["blocks"]) != identity["num_hidden_layers"]:
+-                        raise RuntimeError(f"localization missed rank {rank} sparse blocks")
+-                    for block in item["blocks"]:
+-                        router = block["router_shadow_vs_eager"]
+-                        if (
+-                            not router["logits"]["exact"]
+-                            or not router["selected_experts_exact"]
+-                            or not router["combine_weights"]["exact"]
+-                        ):
+-                            raise RuntimeError(f"rank {rank} shadow changed layer {block['layer']} routing")
++
++                def run_localization(*method_args):
++                    items = ray.get(
++                        policy.async_run_ray_method(
++                            "pass_through",
++                            "grug_benchmark_localize_staged",
++                            *method_args,
++                        )
++                    )
++                    for rank, (item, identity) in enumerate(zip(items, identities)):
++                        if item["rank"] != rank:
++                            raise RuntimeError(f"localization actor/rank order mismatch: {item}")
++                        if item["state_hash_before"] != item["state_hash_after"]:
++                            raise RuntimeError(f"localization changed rank {rank} model state")
++                        if not item["cpu_rng_restored"] or not item["cuda_rng_restored"]:
++                            raise RuntimeError(f"localization did not restore rank {rank} RNG state")
++                        if item["gradients_after"] != 0:
++                            raise RuntimeError(f"localization left rank {rank} model gradients")
++                        if len(item["blocks"]) != identity["num_hidden_layers"]:
++                            raise RuntimeError(f"localization missed rank {rank} sparse blocks")
++                        for block in item["blocks"]:
++                            router = block["router_shadow_vs_eager"]
++                            if (
++                                not router["logits"]["exact"]
++                                or not router["selected_experts_exact"]
++                                or not router["combine_weights"]["exact"]
++                            ):
++                                raise RuntimeError(f"rank {rank} shadow changed layer {block['layer']} routing")
++                    return items
++
++                if focused_localization:
++                    focused_args = (
++                        args.localization_microbatch,
++                        args.localization_rank,
++                        args.localization_token_index,
++                        args.localization_causal_layer,
++                    )
++                    localization_scan = run_localization(*focused_args, None)
++                    selected_detailed_layer = localization_scan[args.localization_rank][
++                        "first_causal_nonexact_block_output_layer"
++                    ]
++                    localization_detail = None
++                    if selected_detailed_layer is not None:
++                        localization_detail = run_localization(*focused_args, selected_detailed_layer)
++
++                        def stable_signature(item):
++                            return {
++                                key: value for key, value in item.items() if key not in {"blocks", "detailed_layer"}
++                            } | {
++                                "blocks": [
++                                    {key: value for key, value in block.items() if key != "detailed"}
++                                    for block in item["blocks"]
++                                ]
++                            }
++
++                        for rank, (scan_item, detail_item) in enumerate(zip(localization_scan, localization_detail)):
++                            if stable_signature(scan_item) != stable_signature(detail_item):
++                                raise RuntimeError(f"focused detail pass changed rank {rank} localization evidence")
++                        materialized = [
++                            (rank, block["layer"])
++                            for rank, item in enumerate(localization_detail)
++                            for block in item["blocks"]
++                            if "detailed" in block
++                        ]
++                        expected_materialized = [(args.localization_rank, selected_detailed_layer)]
++                        if materialized != expected_materialized:
++                            raise RuntimeError(
++                                f"focused detail materialized {materialized}, expected {expected_materialized}"
++                            )
++                        selected_detail = localization_detail[args.localization_rank]["blocks"][
++                            selected_detailed_layer
++                        ]["detailed"]
++                        if selected_detail["selected_changed_row"] is None:
++                            raise RuntimeError("focused detail pass did not reproduce its selected causal row")
++                    verdict = (
++                        "localized_causal_internal_divergence"
++                        if selected_detailed_layer is not None
++                        else "no_causal_internal_divergence"
++                    )
++                    localization = None
++                else:
++                    localization = run_localization()
++                    localization_scan = None
++                    localization_detail = None
++                    selected_detailed_layer = None
++                    verdict = "legacy_preflight_localization"
+                 result = {
+-                    "schema_version": 1,
++                    "schema_version": 2 if focused_localization else 1,
+                     "created_utc": dt.datetime.now(dt.UTC).isoformat(),
+-                    "benchmark": "marinskyrl_grug_fixed_replay_localization",
++                    "benchmark": (
++                        "marinskyrl_grug_failure_correlated_causal_localization"
++                        if focused_localization
++                        else "marinskyrl_grug_fixed_replay_localization"
++                    ),
+                     "objective": args.objective,
++                    "verdict": verdict,
+                     "mode": args.mode,
+                     "sample": args.sample,
+                     "source_revision": args.source_revision,
+@@ -888,25 +1124,44 @@ def main() -> None:
+                     "worker_identities": identities,
+                     "staging": staged,
+                     "localization": localization,
++                    "focused_coordinate": (
++                        {
++                            "rank": args.localization_rank,
++                            "microbatch": args.localization_microbatch,
++                            "model_token_index": args.localization_token_index,
++                            "first_differing_sampled_boundary_layer": args.localization_causal_layer,
++                        }
++                        if focused_localization
++                        else None
++                    ),
++                    "localization_scan": localization_scan,
++                    "selected_detailed_layer": selected_detailed_layer,
++                    "localization_detail": localization_detail,
+                     "runtime_benchmark_path": str(Path(__file__).resolve()),
+                     "runtime_benchmark_sha256": sha256_file(Path(__file__).resolve()),
+                     "boundary": (
+-                        "one no-grad eager fixed-replay forward per rank; every native-grouped sparse block is "
+-                        "shadowed on the identical live block input, with detailed FP32 and gradient probes only "
+-                        "at layer zero; no optimizer step and no model gradients"
++                        "one no-grad eager fixed-replay forward per pass and rank; every native-grouped sparse "
++                        "block is shadowed on the identical live input. Focused mode scans only the named "
++                        "sampled-token attention cone, then materializes routed stages and an independent FP32 "
++                        "slot-wise reference on the target rank at only the first changed causal block. No full "
++                        "router logits leave device, no optimizer step runs, and no model gradients are created"
+                     ),
+                 }
+                 payload_sha256 = upload_result(client, args.result_s3_uri, result)
+                 print(
+-                    "GRUG_LOCALIZATION_RESULT="
++                    ("GRUG_CAUSAL_PROBE_RESULT=" if focused_localization else "GRUG_LOCALIZATION_RESULT=")
+                     + json.dumps(
+                         {
+                             "result_s3_uri": args.result_s3_uri,
+                             "payload_sha256": payload_sha256,
+                             "result_sha256": result["result_sha256"],
+-                            "first_nonexact_block_output_layer_by_rank": [
+-                                item["first_nonexact_block_output_layer"] for item in localization
+-                            ],
++                            "verdict": verdict,
++                            "selected_detailed_layer": selected_detailed_layer,
++                            "first_nonexact_block_output_layer_by_rank": (
++                                [item["first_nonexact_block_output_layer"] for item in localization]
++                                if localization is not None
++                                else None
++                            ),
+                         },
+                         sort_keys=True,
+                     ),
+@@ -928,18 +1183,33 @@ def main() -> None:
+                     ):
+                         raise RuntimeError(f"paired baseline is invalid on rank {rank}: {item}")
+                     baseline_hashes.append(item["state_hash"])
+-                arm_specs = (
+-                    (
+-                        ("eager_oracle", "eager", False, None),
+-                        ("eager_instrumented", "eager", True, "capture"),
+-                        ("grouped_instrumented", "grouped", True, "compare"),
++                if args.mode == "preflight":
++                    arm_specs = [
++                        ("eager_oracle", "eager", False, None, None),
++                        (
++                            "eager_instrumented",
++                            "eager",
++                            True,
++                            "capture",
++                            "capture" if args.route_discriminator else None,
++                        ),
++                    ]
++                    if args.route_discriminator:
++                        arm_specs.append(("grouped_oracle", "grouped", False, None, None))
++                    arm_specs.append(
++                        (
++                            "grouped_instrumented",
++                            "grouped",
++                            True,
++                            "compare",
++                            "compare" if args.route_discriminator else None,
++                        )
+                     )
+-                    if args.mode == "preflight"
+-                    else (
+-                        ("eager", "eager", True, None),
+-                        ("grouped", "grouped", True, None),
+-                    )
+-                )
++                else:
++                    arm_specs = [
++                        ("eager", "eager", True, None, "capture" if args.route_discriminator else None),
++                        ("grouped", "grouped", True, None, "compare" if args.route_discriminator else None),
++                    ]
+                 arms = [
+                     run_paired_matched_arm(
+                         policy=policy,
+@@ -947,6 +1217,7 @@ def main() -> None:
+                         implementation=implementation,
+                         expert_attribution=expert_attribution,
+                         paired_route_mode=paired_route_mode if args.mode == "preflight" else None,
++                        route_discriminator_mode=route_discriminator_mode,
+                         mode=args.mode,
+                         sequence_length=sequence_length,
+                         world_size=world_size,
+@@ -957,7 +1228,13 @@ def main() -> None:
+                         baseline_identities=identities,
+                         baseline_state_hashes=baseline_hashes,
+                     )
+-                    for arm_name, implementation, expert_attribution, paired_route_mode in arm_specs
++                    for (
++                        arm_name,
++                        implementation,
++                        expert_attribution,
++                        paired_route_mode,
++                        route_discriminator_mode,
++                    ) in arm_specs
+                 ]
+                 finish = ray.get(policy.async_run_ray_method("pass_through", "grug_benchmark_finish_paired_baseline"))
+                 require_rank_order(finish, world_size, "paired finish")
+@@ -976,8 +1253,80 @@ def main() -> None:
+                 if final_topology != topology or final_identities != identities:
+                     raise RuntimeError("paired benchmark did not restore its initial actor/GPU identity")
+                 semantic_check = validate_paired_arms(arms, args.mode)
++                route_discriminator = None
++                if args.route_discriminator:
++                    violation_records = semantic_check["grouped_versus_eager"]["representative_action_log_probs"][
++                        "violation_records"
++                    ]
++                    requested_by_key = {}
++                    for target in [*route_discriminator_targets, *violation_records]:
++                        key = (
++                            int(target["rank"]),
++                            int(target["microbatch"]),
++                            str(target["representative_position"]),
++                        )
++                        requested_by_key[key] = {
++                            "rank": key[0],
++                            "microbatch": key[1],
++                            "representative_position": key[2],
++                        }
++                    requested_targets = order_route_discriminator_targets(list(requested_by_key.values()))
++                    ordered_target_keys = [
++                        (
++                            item["rank"],
++                            item["microbatch"],
++                            item["representative_position"],
++                        )
++                        for item in requested_targets
++                    ]
++                    discriminator_workers = ray.get(
++                        policy.async_run_ray_method(
++                            "pass_through",
++                            "grug_benchmark_take_route_discriminator",
++                            requested_targets,
++                        )
++                    )
++                    require_rank_order(discriminator_workers, world_size, "route discriminator")
++                    expected_available = expected_microbatches * 3
++                    if any(item["available_samples"] != expected_available for item in discriminator_workers):
++                        raise RuntimeError("route discriminator did not retain every sampled action coordinate")
++                    target_details = [target for worker in discriminator_workers for target in worker["targets"]]
++                    detail_by_key = {
++                        (
++                            target["coordinate"]["rank"],
++                            target["coordinate"]["microbatch"],
++                            target["coordinate"]["representative_position"],
++                        ): target
++                        for target in target_details
++                    }
++                    if detail_by_key.keys() != requested_by_key.keys():
++                        raise RuntimeError("route discriminator returned the wrong requested targets")
++                    violation_by_key = {
++                        (
++                            item["rank"],
++                            item["microbatch"],
++                            item["representative_position"],
++                        ): item
++                        for item in violation_records
++                    }
++                    for key, detail in detail_by_key.items():
++                        detail["semantic_violation"] = violation_by_key.get(key)
++                    route_discriminator = {
++                        "enabled": True,
++                        "requested_targets": requested_targets,
++                        "semantic_violation_count": len(violation_records),
++                        "semantic_violation_targets": violation_records,
++                        "workers": discriminator_workers,
++                        "targets": [detail_by_key[key] for key in ordered_target_keys],
++                        "capture_contract": (
++                            "all three frozen action samples per rank/microbatch are ordered on host; sampled "
++                            "decoder/MoE rows are represented by SHA-256, exact selected IDs and adjusted "
++                            "top-k+1 boundary values are retained, and full router logits are never retained"
++                        ),
++                        "performance_claim": False,
++                    }
+                 result = {
+-                    "schema_version": 1,
++                    "schema_version": 2 if args.route_discriminator else 1,
+                     "created_utc": dt.datetime.now(dt.UTC).isoformat(),
+                     "benchmark": "marinskyrl_grug_fixed_replay_paired_matched_ce",
+                     "objective": args.objective,
+@@ -1001,6 +1350,7 @@ def main() -> None:
+                     "paired_baseline": baseline,
+                     "arms": arms,
+                     "semantic_check": semantic_check,
++                    "route_discriminator": route_discriminator,
+                     "paired_finish": finish,
+                     "final_topology": final_topology,
+                     "final_worker_identities": final_identities,
+@@ -1012,6 +1362,7 @@ def main() -> None:
+                         "its selected expert path, then times synchronized next-token forward, global "
+                         "token-weighted CE, backward, and FSDP collectives; excludes Adam"
+                     ),
++                    "performance_claim": not args.route_discriminator,
+                 }
+                 payload_sha256 = upload_result(client, args.result_s3_uri, result)
+                 print(
+diff --git a/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py b/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py
+index 880aa28..7c8d976 100644
+--- a/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py
++++ b/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py
+@@ -33,6 +33,7 @@ from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_con
+ from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
+ from skyrl_train.models.grug_moe import (
+     GRUG_MOE_MODEL_TYPE,
++    GrugMoeDecoderLayer,
+     GrugMoeRouter,
+     GrugMoeSparseMoeBlock,
+     validate_grug_expert_parallel_options,
+@@ -63,6 +64,71 @@ class GrugValidationSnapshot:
+     weights: dict[str, torch.Tensor]
+ 
+ 
++_GRUG_ROUTE_DISCRIMINATOR_BOUNDARIES = (
++    "decoder_input",
++    "post_attention_hidden",
++    "pre_router_hidden",
++    "sparse_moe_output",
++    "shared_expert_output",
++    "decoder_output",
++)
++_GRUG_ROUTE_DISCRIMINATOR_POSITIONS = ("first", "middle", "last")
++
++
++def _grug_representative_action_coordinates(
++    *, sequence_length: int, num_actions: int, microbatch: int
++) -> list[dict[str, int | str]]:
++    """Name the three frozen action samples and their causal-model positions."""
++
++    if sequence_length <= 1 or num_actions <= 0 or num_actions >= sequence_length:
++        raise ValueError(f"invalid sequence/action lengths: sequence={sequence_length}, actions={num_actions}")
++    action_indices = (0, num_actions // 2, num_actions - 1)
++    model_start = sequence_length - num_actions - 1
++    return [
++        {
++            "microbatch": microbatch,
++            "representative_position": position,
++            "worker_sample_index": microbatch * len(action_indices) + ordinal,
++            "action_index": action_index,
++            "model_token_index": model_start + action_index,
++        }
++        for ordinal, (position, action_index) in enumerate(zip(_GRUG_ROUTE_DISCRIMINATOR_POSITIONS, action_indices))
++    ]
++
++
++def _grug_cpu_tensor_sha256(tensor: torch.Tensor) -> str:
++    if tensor.device.type != "cpu" or not tensor.is_contiguous():
++        raise ValueError("Grug benchmark hashes require a contiguous CPU tensor")
++    return hashlib.sha256(tensor.view(torch.uint8).numpy().tobytes()).hexdigest()
++
++
++def _grug_sparse_block_causal_windows(
++    *,
++    target_token_index: int,
++    causal_layer: int,
++    num_layers: int,
++    sliding_window: int,
++    valid_start: int,
++) -> dict[int, tuple[int, int]]:
++    """Return the token rows from earlier sparse blocks that can reach one attention output."""
++
++    if not 0 <= causal_layer < num_layers:
++        raise ValueError(f"causal layer {causal_layer} is outside {num_layers} layers")
++    if not 0 <= valid_start <= target_token_index:
++        raise ValueError(f"invalid causal token interval [{valid_start}, {target_token_index}]")
++    if sliding_window <= 0:
++        raise ValueError(f"sliding window must be positive, got {sliding_window}")
++
++    windows = {}
++    for block_layer in range(causal_layer):
++        start = target_token_index
++        for attention_layer in range(causal_layer, block_layer, -1):
++            is_long = attention_layer % 4 == 3 or attention_layer == num_layers - 1
++            start = valid_start if is_long else max(valid_start, start - (sliding_window - 1))
++        windows[block_layer] = (start, target_token_index)
++    return windows
++
++
+ class FSDPWeightExtractor(WeightExtractor):
+     """Extracts weights from FSDP-sharded models.
+ 
+@@ -447,7 +513,371 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         self._grug_benchmark_open_phase = None
+         self._grug_benchmark_parent_phase = None
+ 
+-    def _grug_benchmark_install_expert_hooks(self, paired_route_mode: str | None = None):
++    def _grug_benchmark_install_route_discriminator_hooks(self, mode: str):
++        """Capture sampled-token route and decoder fingerprints without full logits."""
++
++        if mode not in {"capture", "compare"}:
++            raise ValueError(f"unknown route-discriminator mode: {mode}")
++        layers = [module for module in self.model.modules() if isinstance(module, GrugMoeDecoderLayer)]
++        if not layers:
++            raise RuntimeError("route discriminator found no Grug decoder layers")
++        if hasattr(self, "_grug_benchmark_route_discriminator_records"):
++            raise RuntimeError("route discriminator is already active")
++        if mode == "capture":
++            if hasattr(self, "_grug_benchmark_route_discriminator_reference"):
++                raise RuntimeError("route-discriminator reference already exists")
++        else:
++            reference = getattr(self, "_grug_benchmark_route_discriminator_reference", None)
++            if reference is None:
++                raise RuntimeError("route-discriminator comparison has no eager reference")
++        self._grug_benchmark_route_discriminator_mode = mode
++        self._grug_benchmark_route_discriminator_records = []
++        self._grug_benchmark_route_discriminator_current = None
++        self._grug_benchmark_route_discriminator_layers = len(layers)
++
++        def sampled_rows(tensor: torch.Tensor) -> torch.Tensor:
++            current = self._grug_benchmark_route_discriminator_current
++            if current is None:
++                raise RuntimeError("route discriminator observed a forward outside a microbatch")
++            if tensor.ndim != 3 or tensor.shape[0] != 1:
++                raise RuntimeError(f"route discriminator expected [1, sequence, hidden], got {tuple(tensor.shape)}")
++            return tensor.detach()[0].index_select(0, current["token_indices"]).clone()
++
++        def layer_record(layer_index: int) -> dict[str, object] | None:
++            if getattr(self, "_grug_benchmark_parent_phase", None) != "matched_model_forward":
++                return None
++            current = self._grug_benchmark_route_discriminator_current
++            if current is None:
++                raise RuntimeError("route discriminator has no active microbatch")
++            return current["layers"][layer_index]
++
++        def before_decoder(layer_index: int, _module, args):
++            record = layer_record(layer_index)
++            if record is None:
++                return
++            if record["boundaries"]:
++                raise RuntimeError(f"route discriminator repeated decoder layer {layer_index}")
++            record["boundaries"]["decoder_input"] = sampled_rows(args[0])
++
++        def after_attention(layer_index: int, _module, _args, output):
++            record = layer_record(layer_index)
++            if record is None:
++                return
++            decoder_input = record["boundaries"].get("decoder_input")
++            if decoder_input is None:
++                raise RuntimeError(f"route discriminator missed layer {layer_index} decoder input")
++            record["boundaries"]["post_attention_hidden"] = decoder_input + sampled_rows(output)
++
++        def capture_boundary(layer_index: int, name: str, output):
++            record = layer_record(layer_index)
++            if record is None:
++                return
++            if name in record["boundaries"]:
++                raise RuntimeError(f"route discriminator repeated layer {layer_index} boundary {name}")
++            record["boundaries"][name] = sampled_rows(output)
++
++        def after_final_hidden(_module, _args, output):
++            if getattr(self, "_grug_benchmark_parent_phase", None) != "matched_model_forward":
++                return
++            current = self._grug_benchmark_route_discriminator_current
++            if current is None or current["final_hidden"] is not None:
++                raise RuntimeError("route discriminator final-hidden boundary is missing or repeated")
++            current["final_hidden"] = sampled_rows(output)
++
++        handles = []
++        for layer_index, layer in enumerate(layers):
++            handles.extend(
++                (
++                    layer.register_forward_pre_hook(
++                        lambda module, args, index=layer_index: before_decoder(index, module, args)
++                    ),
++                    layer.self_attn.register_forward_hook(
++                        lambda module, args, output, index=layer_index: after_attention(index, module, args, output)
++                    ),
++                    layer.mlp_gated_norm.register_forward_hook(
++                        lambda _module, _args, output, index=layer_index: capture_boundary(
++                            index, "pre_router_hidden", output
++                        )
++                    ),
++                    layer.mlp.register_forward_hook(
++                        lambda _module, _args, output, index=layer_index: capture_boundary(
++                            index, "sparse_moe_output", output
++                        )
++                    ),
++                    layer.shared_expert.register_forward_hook(
++                        lambda _module, _args, output, index=layer_index: capture_boundary(
++                            index, "shared_expert_output", output
++                        )
++                    ),
++                    layer.register_forward_hook(
++                        lambda _module, _args, output, index=layer_index: capture_boundary(
++                            index, "decoder_output", output
++                        )
++                    ),
++                )
++            )
++        final_norms = [
++            module.final_gated_norm
++            for module in self.model.modules()
++            if hasattr(module, "final_gated_norm") and hasattr(module, "layers")
++        ]
++        if len(final_norms) != 1:
++            raise RuntimeError(f"route discriminator expected one final gated norm, found {len(final_norms)}")
++        handles.append(final_norms[0].register_forward_hook(after_final_hidden))
++        return handles, len(layers)
++
++    def _grug_benchmark_begin_route_discriminator_microbatch(self, experience, microbatch: int):
++        if self._grug_benchmark_route_discriminator_current is not None:
++            raise RuntimeError("route discriminator did not close its preceding microbatch")
++        num_actions = experience.num_actions
++        if isinstance(num_actions, (list, tuple)):
++            if len(num_actions) != 1:
++                raise RuntimeError(f"route discriminator requires one num_actions value, got {num_actions}")
++            num_actions = num_actions[0]
++        num_actions = int(num_actions)
++        sequence_length = int(experience.sequences.shape[-1])
++        coordinates = _grug_representative_action_coordinates(
++            sequence_length=sequence_length,
++            num_actions=num_actions,
++            microbatch=microbatch,
++        )
++        token_indices = torch.tensor(
++            [item["model_token_index"] for item in coordinates],
++            dtype=torch.int64,
++            device=experience.sequences.device,
++        )
++        self._grug_benchmark_route_discriminator_current = {
++            "microbatch": microbatch,
++            "coordinates": coordinates,
++            "token_indices": token_indices,
++            "layers": [
++                {"boundaries": {}, "route": None} for _ in range(self._grug_benchmark_route_discriminator_layers)
++            ],
++            "final_hidden": None,
++        }
++
++    def _grug_benchmark_capture_route_discriminator_routes(
++        self, layer_index: int, router: GrugMoeRouter, output
++    ) -> None:
++        if getattr(self, "_grug_benchmark_parent_phase", None) != "matched_model_forward":
++            return
++        current = self._grug_benchmark_route_discriminator_current
++        if current is None:
++            raise RuntimeError("route discriminator observed routing outside a microbatch")
++        record = current["layers"][layer_index]
++        if record["route"] is not None:
++            raise RuntimeError(f"route discriminator repeated layer {layer_index} routing")
++        indices = current["token_indices"]
++        with torch.no_grad():
++            selected_experts = output.selected_experts.detach().index_select(0, indices).clone()
++            adjusted_logits = (output.router_logits.detach().index_select(0, indices) + router.bias).float()
++            sorted_values, sorted_expert_ids = torch.sort(
++                adjusted_logits,
++                dim=-1,
++                descending=True,
++                stable=True,
++            )
++            record["route"] = {
++                "selected_experts": selected_experts,
++                "boundary_expert_ids": sorted_expert_ids[:, : router.top_k + 1],
++                "adjusted_topk_plus_one": sorted_values[:, : router.top_k + 1],
++            }
++
++    def _grug_benchmark_finish_route_discriminator_microbatch(self) -> None:
++        current = self._grug_benchmark_route_discriminator_current
++        if current is None:
++            raise RuntimeError("route discriminator has no microbatch to finish")
++        self._grug_benchmark_route_discriminator_current = None
++        layers = current["layers"]
++        for layer_index, record in enumerate(layers):
++            if tuple(record["boundaries"]) != _GRUG_ROUTE_DISCRIMINATOR_BOUNDARIES:
++                raise RuntimeError(
++                    f"route discriminator layer {layer_index} boundary order is {tuple(record['boundaries'])}"
++                )
++            if record["route"] is None:
++                raise RuntimeError(f"route discriminator missed layer {layer_index} routing")
++        if current["final_hidden"] is None:
++            raise RuntimeError("route discriminator missed final hidden state")
++
++        boundary_gpu = torch.stack(
++            [
++                torch.stack([record["boundaries"][name] for name in _GRUG_ROUTE_DISCRIMINATOR_BOUNDARIES])
++                for record in layers
++            ]
++        )
++        final_hidden_cpu = current["final_hidden"].to("cpu").contiguous()
++        boundary_cpu = boundary_gpu.to("cpu").contiguous()
++        selected_cpu = torch.stack([record["route"]["selected_experts"] for record in layers]).to("cpu")
++        boundary_ids_cpu = torch.stack([record["route"]["boundary_expert_ids"] for record in layers]).to("cpu")
++        boundary_values_cpu = (
++            torch.stack([record["route"]["adjusted_topk_plus_one"] for record in layers]).to("cpu").float()
++        )
++        samples = []
++        for sample_index, coordinate in enumerate(current["coordinates"]):
++            boundary_sha256 = {}
++            for layer_index in range(len(layers)):
++                for boundary_index, name in enumerate(_GRUG_ROUTE_DISCRIMINATOR_BOUNDARIES):
++                    row = boundary_cpu[layer_index, boundary_index, sample_index].contiguous()
++                    boundary_sha256[f"layer_{layer_index:02d}.{name}"] = _grug_cpu_tensor_sha256(row)
++            boundary_sha256["model.final_hidden"] = _grug_cpu_tensor_sha256(final_hidden_cpu[sample_index].contiguous())
++            routes = []
++            for layer_index in range(len(layers)):
++                routes.append(
++                    {
++                        "layer": layer_index,
++                        "selected_experts": selected_cpu[layer_index, sample_index].tolist(),
++                        "boundary_expert_ids": boundary_ids_cpu[layer_index, sample_index].tolist(),
++                        "adjusted_topk_plus_one": boundary_values_cpu[layer_index, sample_index].tolist(),
++                    }
++                )
++            samples.append(
++                {
++                    "coordinate": coordinate,
++                    "boundary_sha256": boundary_sha256,
++                    "routes": routes,
++                }
++            )
++        self._grug_benchmark_route_discriminator_records.append(
++            {"microbatch": current["microbatch"], "samples": samples}
++        )
++
++    def _grug_benchmark_finish_route_discriminator_hooks(self, handles, layer_count: int):
++        for handle in handles:
++            handle.remove()
++        if self._grug_benchmark_route_discriminator_current is not None:
++            raise RuntimeError("route discriminator left an open microbatch")
++        records = self._grug_benchmark_route_discriminator_records
++        del self._grug_benchmark_route_discriminator_records
++        del self._grug_benchmark_route_discriminator_current
++        actual_layers = self._grug_benchmark_route_discriminator_layers
++        del self._grug_benchmark_route_discriminator_layers
++        if actual_layers != layer_count:
++            raise RuntimeError(f"route discriminator layer count changed: {actual_layers} != {layer_count}")
++        if [record["microbatch"] for record in records] != list(range(len(records))):
++            raise RuntimeError("route discriminator microbatches are incomplete or out of order")
++        mode = self._grug_benchmark_route_discriminator_mode
++        del self._grug_benchmark_route_discriminator_mode
++        if mode == "capture":
++            self._grug_benchmark_route_discriminator_reference = records
++        else:
++            reference = self._grug_benchmark_route_discriminator_reference
++            if len(reference) != len(records):
++                raise RuntimeError(
++                    f"route discriminator eager/grouped microbatches differ: {len(reference)} != {len(records)}"
++                )
++            self._grug_benchmark_route_discriminator_candidate = records
++        return {
++            "mode": mode,
++            "layers": layer_count,
++            "microbatches": len(records),
++            "samples": sum(len(record["samples"]) for record in records),
++            "boundaries_per_sample": layer_count * len(_GRUG_ROUTE_DISCRIMINATOR_BOUNDARIES) + 1,
++            "selected_expert_ids_per_layer_sample": len(records[0]["samples"][0]["routes"][0]["selected_experts"]),
++            "adjusted_boundary_values_per_layer_sample": len(
++                records[0]["samples"][0]["routes"][0]["adjusted_topk_plus_one"]
++            ),
++            "storage": "sampled rows hashed on CPU; exact selected IDs and top-k+1 adjusted values retained on host",
++            "full_router_logits_retained": False,
++        }
++
++    def grug_benchmark_take_route_discriminator(self, targets):
++        """Return only requested failure-correlated records, then release host capture."""
++
++        rank = int(torch.distributed.get_rank())
++        reference = getattr(self, "_grug_benchmark_route_discriminator_reference", None)
++        candidate = getattr(self, "_grug_benchmark_route_discriminator_candidate", None)
++        if reference is None or candidate is None:
++            raise RuntimeError("route discriminator needs completed eager and grouped arms")
++
++        def sample_map(records):
++            mapped = {}
++            for record in records:
++                for sample in record["samples"]:
++                    coordinate = sample["coordinate"]
++                    key = (coordinate["microbatch"], coordinate["representative_position"])
++                    if key in mapped:
++                        raise RuntimeError(f"duplicate route-discriminator coordinate {key}")
++                    mapped[key] = sample
++            return mapped
++
++        reference_by_key = sample_map(reference)
++        candidate_by_key = sample_map(candidate)
++        if reference_by_key.keys() != candidate_by_key.keys():
++            raise RuntimeError("route discriminator eager/grouped coordinates differ")
++        requested = [target for target in targets if int(target["rank"]) == rank]
++        details = []
++        for target in requested:
++            key = (int(target["microbatch"]), str(target["representative_position"]))
++            if key not in reference_by_key:
++                raise RuntimeError(f"rank {rank} has no route-discriminator sample {key}")
++            eager = reference_by_key[key]
++            grouped = candidate_by_key[key]
++            if eager["coordinate"] != grouped["coordinate"]:
++                raise RuntimeError(f"route-discriminator coordinate changed at rank {rank} {key}")
++            boundary_path = []
++            first_differing_boundary = None
++            last_matching_before_first_difference = None
++            for name, eager_sha256 in eager["boundary_sha256"].items():
++                grouped_sha256 = grouped["boundary_sha256"][name]
++                exact = eager_sha256 == grouped_sha256
++                boundary_path.append(
++                    {
++                        "boundary": name,
++                        "exact": exact,
++                        "eager_sha256": eager_sha256,
++                        "grouped_sha256": grouped_sha256,
++                    }
++                )
++                if first_differing_boundary is None:
++                    if exact:
++                        last_matching_before_first_difference = name
++                    else:
++                        first_differing_boundary = name
++            route_path = []
++            first_route_mismatch_layer = None
++            for eager_route, grouped_route in zip(eager["routes"], grouped["routes"]):
++                if eager_route["layer"] != grouped_route["layer"]:
++                    raise RuntimeError(f"route-discriminator layer order changed at rank {rank} {key}")
++                selected_experts_exact = eager_route["selected_experts"] == grouped_route["selected_experts"]
++                if not selected_experts_exact and first_route_mismatch_layer is None:
++                    first_route_mismatch_layer = eager_route["layer"]
++                route_path.append(
++                    {
++                        "layer": eager_route["layer"],
++                        "selected_experts_exact": selected_experts_exact,
++                        "eager_selected_experts": eager_route["selected_experts"],
++                        "grouped_selected_experts": grouped_route["selected_experts"],
++                        "eager_boundary_expert_ids": eager_route["boundary_expert_ids"],
++                        "grouped_boundary_expert_ids": grouped_route["boundary_expert_ids"],
++                        "eager_adjusted_topk_plus_one": eager_route["adjusted_topk_plus_one"],
++                        "grouped_adjusted_topk_plus_one": grouped_route["adjusted_topk_plus_one"],
++                    }
++                )
++            coordinate = {"rank": rank, **eager["coordinate"]}
++            details.append(
++                {
++                    "coordinate": coordinate,
++                    "last_matching_before_first_difference": last_matching_before_first_difference,
++                    "first_differing_boundary": first_differing_boundary,
++                    "first_route_mismatch_layer": first_route_mismatch_layer,
++                    "boundary_path": boundary_path,
++                    "route_path": route_path,
++                }
++            )
++        del self._grug_benchmark_route_discriminator_reference
++        del self._grug_benchmark_route_discriminator_candidate
++        return {
++            "rank": rank,
++            "available_samples": len(reference_by_key),
++            "requested_targets": len(requested),
++            "targets": details,
++        }
++
++    def _grug_benchmark_install_expert_hooks(
++        self,
++        paired_route_mode: str | None = None,
++        route_discriminator_mode: str | None = None,
++    ):
+         """Time routed blocks and retain exact per-layer route loads.
+ 
+         The sparse block is a common module boundary for both the eager and
+@@ -464,6 +894,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             raise RuntimeError("routed-block attribution found no GrugMoeSparseMoeBlock modules")
+         if paired_route_mode not in {None, "capture", "compare"}:
+             raise ValueError(f"unknown paired route mode: {paired_route_mode}")
++        if (
++            route_discriminator_mode is not None
++            and getattr(self, "_grug_benchmark_route_discriminator_mode", None) != route_discriminator_mode
++        ):
++            raise RuntimeError("route discriminator must be installed before routed-block attribution")
+         self._grug_benchmark_expert_events = {"forward": [], "backward": []}
+         self._grug_benchmark_open_expert_span = None
+         self._grug_benchmark_route_loads = [None] * len(modules)
+@@ -600,6 +1035,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                             comparison["max_changed_current_margin"],
+                             float(current_margin[changed].max().item()),
+                         )
++            if route_discriminator_mode is not None:
++                self._grug_benchmark_capture_route_discriminator_routes(layer_index, router, output)
+             self._grug_benchmark_route_calls[layer_index] += 1
+ 
+         handles = []
+@@ -1002,10 +1439,25 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         local_loss_sum = torch.zeros((), dtype=torch.float64, device=torch.cuda.current_device())
+         local_loss_tokens = torch.zeros((), dtype=torch.int64, device=torch.cuda.current_device())
+         representative_action_log_probs = []
++        representative_action_log_prob_coordinates = []
+         microbatches = 0
+         self.model.train()
+         for experience in BatchIterator(batch, sample_batch_size=1, drop_last=False):
+             experience.to_device(torch.cuda.current_device())
++            num_actions = experience.num_actions
++            if isinstance(num_actions, (list, tuple)):
++                if len(num_actions) != 1:
++                    raise RuntimeError(f"matched CE requires one num_actions value, got {num_actions}")
++                num_actions = num_actions[0]
++            coordinates = _grug_representative_action_coordinates(
++                sequence_length=int(experience.sequences.shape[-1]),
++                num_actions=int(num_actions),
++                microbatch=microbatches,
++            )
++            representative_action_log_prob_coordinates.extend(coordinates)
++            route_discriminator_enabled = getattr(self, "_grug_benchmark_route_discriminator_mode", None) is not None
++            if route_discriminator_enabled:
++                self._grug_benchmark_begin_route_discriminator_microbatch(experience, microbatches)
+             phase = getattr(self, "_grug_benchmark_phase", None)
+             if phase is not None:
+                 phase("begin", "matched_model_forward")
+@@ -1020,12 +1472,21 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                     rollout_routed_experts=None,
+                 )
+                 flat_action_log_probs = action_log_probs.detach().reshape(-1)
++                representative_index_values = (
++                    0,
++                    flat_action_log_probs.numel() // 2,
++                    flat_action_log_probs.numel() - 1,
++                )
+                 representative_indices = torch.tensor(
+-                    (0, flat_action_log_probs.numel() // 2, flat_action_log_probs.numel() - 1),
++                    representative_index_values,
+                     dtype=torch.int64,
+                     device=flat_action_log_probs.device,
+                 )
+                 representative_action_log_probs.append(flat_action_log_probs.index_select(0, representative_indices))
++                if [item["action_index"] for item in coordinates] != list(representative_index_values):
++                    raise RuntimeError("route-discriminator coordinates disagree with frozen action samples")
++                if route_discriminator_enabled:
++                    self._grug_benchmark_finish_route_discriminator_microbatch()
+                 if phase is not None:
+                     phase("end", "matched_model_forward")
+                     phase("begin", "matched_ce_loss")
+@@ -1050,6 +1511,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             int(local_loss_tokens.item()),
+             microbatches,
+             torch.cat(representative_action_log_probs),
++            representative_action_log_prob_coordinates,
+         )
+ 
+     def grug_benchmark_warmup_matched_ce(self):
+@@ -1068,7 +1530,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         cuda_rng_state = torch.cuda.get_rng_state()
+         self.optimizer.zero_grad(set_to_none=True)
+         warm_batch = self._grug_benchmark_batch[:1]
+-        _, warm_loss_tokens, microbatches, _ = self._grug_benchmark_matched_ce(warm_batch)
++        _, warm_loss_tokens, microbatches, _, _ = self._grug_benchmark_matched_ce(warm_batch)
+         if warm_loss_tokens <= 0 or microbatches != 1:
+             raise RuntimeError("matched CE warmup did not exercise one nonempty microbatch")
+         gradient_tensors = sum(parameter.grad is not None for parameter in self.model.parameters())
+@@ -1135,15 +1597,22 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             "mini_batch_size_per_gpu": int(self.policy_mini_batch_size_per_gpu),
+         }
+ 
+-    def grug_benchmark_localize_staged(self):
++    def grug_benchmark_localize_staged(
++        self,
++        microbatch: int = 0,
++        target_rank: int | None = None,
++        target_token_index: int | None = None,
++        causal_layer: int | None = None,
++        detailed_layer: int | None = 0,
++    ):
+         """Compare eager and grouped Grug blocks on identical live FSDP inputs.
+ 
+         This is disposable measurement instrumentation.  One no-grad eager
+         model forward supplies the input to every sparse block.  A pre-hook
+         runs the grouped branch on that same tensor before the eager branch,
+         so later layers cannot hide where the first block-local difference
+-        begins.  Layer zero additionally records projection-level FP32
+-        references and a route-conditioned input/weight-gradient probe.
++        begins.  A focused run may name one sampled-token causal cone and defer
++        detailed expert/reference materialization to one selected layer.
+         """
+ 
+         if not hasattr(self, "_grug_benchmark_batch"):
+@@ -1157,6 +1626,37 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         if any(module.experts.use_grouped_mm for module in modules):
+             raise RuntimeError("Grug localization must start from the eager expert path")
+ 
++        rank = int(torch.distributed.get_rank())
++        if not 0 <= microbatch < self._grug_benchmark_batch.batch_size:
++            raise ValueError(f"localization microbatch {microbatch} is outside the staged batch")
++        diagnostic_batch = self._grug_benchmark_batch[microbatch : microbatch + 1]
++        sequence_length = int(diagnostic_batch["sequences"].shape[-1])
++        focused = any(value is not None for value in (target_rank, target_token_index, causal_layer))
++        if focused and any(value is None for value in (target_rank, target_token_index, causal_layer)):
++            raise ValueError("focused localization requires target rank, token index, and causal layer")
++        if target_rank is not None and not 0 <= target_rank < torch.distributed.get_world_size():
++            raise ValueError(f"localization target rank {target_rank} is outside the process group")
++        if target_token_index is not None and not 0 <= target_token_index < sequence_length:
++            raise ValueError(f"localization token {target_token_index} is outside sequence length {sequence_length}")
++        if causal_layer is not None and not 0 <= causal_layer < len(modules):
++            raise ValueError(f"localization causal layer {causal_layer} is outside {len(modules)} layers")
++        if detailed_layer is not None and not 0 <= detailed_layer < len(modules):
++            raise ValueError(f"localization detailed layer {detailed_layer} is outside {len(modules)} layers")
++
++        causal_windows: dict[int, tuple[int, int]] = {}
++        if focused and rank == target_rank:
++            valid_indices = torch.where(diagnostic_batch["attention_mask"][0].to(torch.bool))[0]
++            if valid_indices.numel() == 0 or not bool((valid_indices == target_token_index).any().item()):
++                raise ValueError(f"localization token {target_token_index} is masked on rank {rank}")
++            valid_start = int(valid_indices[0].item())
++            causal_windows = _grug_sparse_block_causal_windows(
++                target_token_index=int(target_token_index),
++                causal_layer=int(causal_layer),
++                num_layers=len(modules),
++                sliding_window=int(self.model.model.config.sliding_window),
++                valid_start=valid_start,
++            )
++
+         def tensor_sha256(tensor: torch.Tensor) -> str:
+             cpu = tensor.detach().to("cpu").contiguous()
+             return hashlib.sha256(cpu.view(torch.uint8).numpy().tobytes()).hexdigest()
+@@ -1199,6 +1699,54 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                 "nonfinite": int((~torch.isfinite(actual_float)).sum().item()),
+             }
+ 
++        def row_difference(
++            actual: torch.Tensor,
++            reference: torch.Tensor,
++            *,
++            layer_index: int,
++        ) -> dict[str, object]:
++            if actual.shape != reference.shape or actual.ndim not in {2, 3}:
++                raise RuntimeError(
++                    f"cannot compare localization rows {tuple(actual.shape)} and {tuple(reference.shape)}"
++                )
++            actual_rows = actual.detach().reshape(-1, actual.shape[-1])
++            reference_rows = reference.detach().reshape(-1, reference.shape[-1])
++            changed = (actual_rows != reference_rows).any(dim=-1)
++            changed_indices = torch.where(changed)[0]
++            changed_cpu = changed_indices.to("cpu", dtype=torch.int64).contiguous()
++            window = causal_windows.get(layer_index)
++            if window is None:
++                causal_indices = changed_indices.new_empty((0,))
++            else:
++                causal_indices = changed_indices[(changed_indices >= window[0]) & (changed_indices <= window[1])]
++            causal_cpu = causal_indices.to("cpu", dtype=torch.int64).contiguous()
++            return {
++                "rows": int(actual_rows.shape[0]),
++                "changed_rows": int(changed_indices.numel()),
++                "first_changed_row": int(changed_indices[0].item()) if changed_indices.numel() else None,
++                "changed_row_indices_sha256": _grug_cpu_tensor_sha256(changed_cpu),
++                "causal_window": list(window) if window is not None else None,
++                "causal_changed_rows": int(causal_indices.numel()),
++                "first_causal_changed_row": int(causal_indices[0].item()) if causal_indices.numel() else None,
++                "causal_changed_row_indices_sha256": _grug_cpu_tensor_sha256(causal_cpu),
++            }
++
++        def selected_row_detail(actual: torch.Tensor, reference: torch.Tensor, row: int) -> dict[str, object]:
++            actual_row = actual.detach().reshape(-1, actual.shape[-1])[row]
++            reference_row = reference.detach().reshape(-1, reference.shape[-1])[row]
++            changed = torch.where(actual_row != reference_row)[0]
++            changed_cpu = changed.to("cpu", dtype=torch.int64).contiguous()
++            return {
++                "token_index": row,
++                "grouped": tensor_summary(actual_row),
++                "eager": tensor_summary(reference_row),
++                "grouped_vs_eager": difference(actual_row, reference_row, rtol=4e-2, atol=4e-3),
++                "changed_component_indices": changed_cpu.tolist(),
++                "changed_component_indices_sha256": _grug_cpu_tensor_sha256(changed_cpu),
++                "grouped_changed_values": actual_row.index_select(0, changed).float().cpu().tolist(),
++                "eager_changed_values": reference_row.index_select(0, changed).float().cpu().tolist(),
++            }
++
+         def local_weight(weight: torch.Tensor) -> torch.Tensor:
+             return self._grug_benchmark_local_tensor(weight).detach()
+ 
+@@ -1281,9 +1829,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             num_tokens: int,
+         ) -> torch.Tensor:
+             sorted_weights = combine_weights.reshape(-1).index_select(0, order).to(routed_output.dtype)
+-            output = routed_output.new_zeros((num_tokens, routed_output.shape[-1]))
+-            output.index_add_(0, sorted_token_indices, routed_output * sorted_weights.unsqueeze(-1))
+-            return output
++            weighted = (routed_output * sorted_weights.unsqueeze(-1)).float()
++            output = torch.zeros(
++                (num_tokens, routed_output.shape[-1]),
++                dtype=torch.float32,
++                device=routed_output.device,
++            )
++            output.index_add_(0, sorted_token_indices, weighted)
++            return output.to(routed_output.dtype)
+ 
+         def fp32_routed_reference(
+             hidden_states: torch.Tensor,
+@@ -1441,7 +1994,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                     },
+                 }
+ 
+-                if layer_index == 0:
++                detail_state = None
++                materialize_detail = detailed_layer is not None and layer_index == detailed_layer
++                if focused:
++                    materialize_detail = materialize_detail and rank == target_rank
++                if materialize_detail:
+                     gate_weight = local_weight(module.experts.gate_proj.weight)
+                     down_weight = local_weight(module.experts.down_proj.weight)
+                     up_weight = local_weight(module.experts.up_proj.weight)
+@@ -1486,6 +2043,20 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                         sorted_token_indices,
+                         flat.shape[0],
+                     )
++                    manual_eager_output = combine_routed(
++                        eager_stages[-1],
++                        combine_weights,
++                        order,
++                        sorted_token_indices,
++                        flat.shape[0],
++                    )
++                    independent_fp32_output = combine_routed(
++                        fp32_stages[-1],
++                        combine_weights,
++                        order,
++                        sorted_token_indices,
++                        flat.shape[0],
++                    )
+                     product_routed_output = product_routed["output"]
+                     detailed["product_routed_input_exact"] = bool(torch.equal(product_routed["input"], routed_input))
+                     detailed["product_routed_counts_exact"] = bool(torch.equal(product_routed["counts"], counts))
+@@ -1503,18 +2074,31 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                     detailed["repeated_combine_vs_product_grouped"] = difference(
+                         repeated_product_combine, grouped_output.reshape_as(repeated_product_combine)
+                     )
+-                    probe_expert = int(torch.argmax(counts).item())
+-                    probe_start = int(counts[:probe_expert].sum().item())
+-                    probe_end = probe_start + int(counts[probe_expert].item())
+-                    detailed["gradient_probe_expert"] = probe_expert
+-                    detailed["gradient_probe"] = single_expert_probe(
+-                        routed_input[probe_start:probe_end],
+-                        gate_weight[probe_expert],
+-                        down_weight[probe_expert],
+-                        up_weight[probe_expert],
+-                    )
++                    if not focused:
++                        probe_expert = int(torch.argmax(counts).item())
++                        probe_start = int(counts[:probe_expert].sum().item())
++                        probe_end = probe_start + int(counts[probe_expert].item())
++                        detailed["gradient_probe_expert"] = probe_expert
++                        detailed["gradient_probe"] = single_expert_probe(
++                            routed_input[probe_start:probe_end],
++                            gate_weight[probe_expert],
++                            down_weight[probe_expert],
++                            up_weight[probe_expert],
++                        )
+                     evidence["detailed"] = detailed
+-                    del eager_stages, grouped_stages, fp32_stages
++                    detail_state = {
++                        "stage_names": stage_names,
++                        "eager_stages": eager_stages,
++                        "grouped_stages": grouped_stages,
++                        "fp32_stages": fp32_stages,
++                        "manual_eager_output": manual_eager_output,
++                        "manual_grouped_output": manual_grouped_output,
++                        "independent_fp32_output": independent_fp32_output,
++                        "product_routed_output": product_routed_output,
++                        "sorted_token_indices": sorted_token_indices,
++                        "sorted_experts": flat_experts.index_select(0, order),
++                        "sorted_weights": combine_weights.reshape(-1).index_select(0, order),
++                    }
+ 
+             actual_router: dict[str, object] = {}
+ 
+@@ -1531,9 +2115,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                 "actual_router": actual_router,
+                 "router_handle": router_handle,
+                 "evidence": evidence,
++                "detail_state": detail_state,
+             }
+ 
+-        def after_block(layer_index: int, _module: GrugMoeSparseMoeBlock, _args, eager_output):
++        def after_block(layer_index: int, module: GrugMoeSparseMoeBlock, _args, eager_output):
+             shadow = shadow_by_layer.pop(layer_index)
+             shadow["router_handle"].remove()
+             actual_router = shadow["actual_router"]
+@@ -1541,9 +2126,121 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                 raise RuntimeError(f"layer {layer_index} did not capture the eager router output")
+             evidence = shadow["evidence"]
+             evidence["router_shadow_vs_eager"] = actual_router
+-            evidence["block_output_grouped_vs_eager"] = difference(
+-                shadow["grouped_output"], eager_output, rtol=4e-2, atol=4e-3
++            block_comparison = difference(shadow["grouped_output"], eager_output, rtol=4e-2, atol=4e-3)
++            block_comparison["rows"] = row_difference(
++                shadow["grouped_output"],
++                eager_output,
++                layer_index=layer_index,
+             )
++            evidence["block_output_grouped_vs_eager"] = block_comparison
++
++            detail_state = shadow["detail_state"]
++            if detail_state is not None:
++                detailed = evidence["detailed"]
++                detailed["actual_eager_vs_manual_eager"] = difference(
++                    eager_output.reshape_as(detail_state["manual_eager_output"]),
++                    detail_state["manual_eager_output"],
++                )
++                selected_row = (
++                    block_comparison["rows"]["first_causal_changed_row"]
++                    if focused
++                    else block_comparison["rows"]["first_changed_row"]
++                )
++                detailed["selected_changed_row"] = selected_row
++                if selected_row is not None:
++                    routed_rows = torch.where(detail_state["sorted_token_indices"] == selected_row)[0]
++                    if routed_rows.numel() != module.router.top_k:
++                        raise RuntimeError(
++                            f"layer {layer_index} selected token {selected_row} has "
++                            f"{routed_rows.numel()} routed rows, expected {module.router.top_k}"
++                        )
++                    selected_stages = {}
++                    first_nonexact_stage = None
++                    for name, grouped, eager, fp32 in zip(
++                        detail_state["stage_names"],
++                        detail_state["grouped_stages"],
++                        detail_state["eager_stages"],
++                        detail_state["fp32_stages"],
++                    ):
++                        grouped_selected = grouped.index_select(0, routed_rows)
++                        eager_selected = eager.index_select(0, routed_rows)
++                        fp32_selected = fp32.index_select(0, routed_rows)
++                        grouped_vs_eager = difference(grouped_selected, eager_selected)
++                        if first_nonexact_stage is None and not grouped_vs_eager["exact"]:
++                            first_nonexact_stage = name
++                        selected_stages[name] = {
++                            "grouped": tensor_summary(grouped_selected),
++                            "eager": tensor_summary(eager_selected),
++                            "independent_fp32": tensor_summary(fp32_selected),
++                            "grouped_vs_eager": grouped_vs_eager,
++                            "grouped_vs_independent_fp32": difference(grouped_selected, fp32_selected),
++                            "eager_vs_independent_fp32": difference(eager_selected, fp32_selected),
++                        }
++
++                    grouped_flat = shadow["grouped_output"].reshape(-1, shadow["grouped_output"].shape[-1])
++                    eager_flat = eager_output.reshape(-1, eager_output.shape[-1])
++                    manual_grouped = detail_state["manual_grouped_output"]
++                    manual_eager = detail_state["manual_eager_output"]
++                    independent_fp32 = detail_state["independent_fp32_output"]
++                    product_routed_selected = detail_state["product_routed_output"].index_select(0, routed_rows)
++                    grouped_down_selected = detail_state["grouped_stages"][-1].index_select(0, routed_rows)
++                    selected_output_comparisons = {
++                        "product_grouped_vs_manual_grouped": difference(
++                            grouped_flat[selected_row], manual_grouped[selected_row]
++                        ),
++                        "actual_eager_vs_manual_eager": difference(
++                            eager_flat[selected_row], manual_eager[selected_row]
++                        ),
++                        "manual_grouped_vs_manual_eager": difference(
++                            manual_grouped[selected_row], manual_eager[selected_row]
++                        ),
++                        "manual_grouped_vs_independent_fp32": difference(
++                            manual_grouped[selected_row], independent_fp32[selected_row]
++                        ),
++                        "manual_eager_vs_independent_fp32": difference(
++                            manual_eager[selected_row], independent_fp32[selected_row]
++                        ),
++                        "product_routed_vs_reconstructed_grouped_down": difference(
++                            product_routed_selected, grouped_down_selected
++                        ),
++                    }
++                    if first_nonexact_stage is not None:
++                        ownership = "expert_projection"
++                    elif not selected_output_comparisons["product_routed_vs_reconstructed_grouped_down"]["exact"]:
++                        ownership = "product_grouped_expert"
++                    elif not selected_output_comparisons["product_grouped_vs_manual_grouped"]["exact"]:
++                        ownership = "grouped_combine"
++                    elif not selected_output_comparisons["actual_eager_vs_manual_eager"]["exact"]:
++                        ownership = "eager_combine"
++                    elif not block_comparison["exact"]:
++                        ownership = "unattributed"
++                    else:
++                        ownership = "none"
++                    detailed["selected_token"] = {
++                        "token_index": selected_row,
++                        "routed_rows": routed_rows.to("cpu", dtype=torch.int64).tolist(),
++                        "expert_ids": detail_state["sorted_experts"]
++                        .index_select(0, routed_rows)
++                        .to("cpu", dtype=torch.int64)
++                        .tolist(),
++                        "combine_weights": detail_state["sorted_weights"]
++                        .index_select(0, routed_rows)
++                        .float()
++                        .cpu()
++                        .tolist(),
++                        "first_nonexact_routed_stage": first_nonexact_stage,
++                        "ownership": ownership,
++                        "routed_stages": selected_stages,
++                        "output_grouped_vs_eager": selected_row_detail(
++                            shadow["grouped_output"], eager_output, selected_row
++                        ),
++                        "output_comparisons": selected_output_comparisons,
++                        "independent_fp32_output": tensor_summary(independent_fp32[selected_row]),
++                        "independent_reference": (
++                            "FP32 slot-wise eager projections on the identical routed inputs and local weights, "
++                            "weighted and index-added in expert-stable route order"
++                        ),
++                    }
+             block_evidence[layer_index] = evidence
+ 
+         for layer_index, module in enumerate(modules):
+@@ -1566,7 +2263,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         cuda_rng_state = torch.cuda.get_rng_state()
+         gradients_before = sum(parameter.grad is not None for parameter in self.model.parameters())
+         self.optimizer.zero_grad(set_to_none=True)
+-        diagnostic_batch = self._grug_benchmark_batch[:1]
+         experience = BatchIterator.batch_to_experience(diagnostic_batch)
+         experience.to_device(torch.cuda.current_device())
+         try:
+@@ -1610,8 +2306,22 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             (item["layer"] for item in block_evidence if not item["block_output_grouped_vs_eager"]["exact"]),
+             None,
+         )
++        first_causal_nonexact_layer = next(
++            (
++                item["layer"]
++                for item in block_evidence
++                if item["block_output_grouped_vs_eager"]["rows"]["causal_changed_rows"] > 0
++            ),
++            None,
++        )
+         return {
+             "rank": int(torch.distributed.get_rank()),
++            "microbatch": microbatch,
++            "target_rank": target_rank,
++            "target_token_index": target_token_index,
++            "causal_layer": causal_layer,
++            "causal_windows": {str(layer): list(window) for layer, window in causal_windows.items()},
++            "detailed_layer": detailed_layer if rank == target_rank or not focused else None,
+             "state_hash_before": state_hash_before,
+             "state_hash_after": state_hash_after,
+             "gradients_cleared_before": gradients_before,
+@@ -1620,6 +2330,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             "cuda_rng_restored": bool(torch.equal(torch.cuda.get_rng_state(), cuda_rng_state)),
+             "action_log_probs": tensor_summary(action_log_probs),
+             "first_nonexact_block_output_layer": first_nonexact_layer,
++            "first_causal_nonexact_block_output_layer": first_causal_nonexact_layer,
+             "blocks": block_evidence,
+         }
+ 
+@@ -1667,6 +2378,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         profile: bool = False,
+         expert_attribution: bool = False,
+         paired_route_mode: str | None = None,
++        route_discriminator_mode: str | None = None,
+     ):
+         """Time the common fixed-replay CE forward and backward, without Adam."""
+ 
+@@ -1676,21 +2388,34 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         self._grug_benchmark_open_phase = None
+         self._grug_benchmark_parent_phase = None
+         profiler = self._grug_benchmark_start_profile(profile)
++        route_discriminator_handles = []
++        route_discriminator_layer_count = 0
++        if route_discriminator_mode is not None:
++            route_discriminator_handles, route_discriminator_layer_count = (
++                self._grug_benchmark_install_route_discriminator_hooks(route_discriminator_mode)
++            )
+         expert_handles = []
+         expert_module_count = 0
+         if expert_attribution:
+-            expert_handles, expert_module_count = self._grug_benchmark_install_expert_hooks(paired_route_mode)
+-        elif paired_route_mode is not None:
+-            raise ValueError("paired route comparison requires expert attribution")
++            expert_handles, expert_module_count = self._grug_benchmark_install_expert_hooks(
++                paired_route_mode,
++                route_discriminator_mode,
++            )
++        elif paired_route_mode is not None or route_discriminator_mode is not None:
++            raise ValueError("paired route comparison and discrimination require expert attribution")
+         self.optimizer.zero_grad(set_to_none=True)
+         torch.cuda.synchronize()
+         if torch.distributed.is_initialized():
+             torch.distributed.barrier()
+         torch.cuda.synchronize()
+         started = time.perf_counter()
+-        local_loss_sum, local_loss_tokens, microbatches, representative_action_log_probs = (
+-            self._grug_benchmark_matched_ce(self._grug_benchmark_batch)
+-        )
++        (
++            local_loss_sum,
++            local_loss_tokens,
++            microbatches,
++            representative_action_log_probs,
++            representative_action_log_prob_coordinates,
++        ) = self._grug_benchmark_matched_ce(self._grug_benchmark_batch)
+         torch.cuda.synchronize()
+         if torch.distributed.is_initialized():
+             torch.distributed.barrier()
+@@ -1708,6 +2433,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             if expert_attribution
+             else None
+         )
++        route_discriminator_evidence = (
++            self._grug_benchmark_finish_route_discriminator_hooks(
++                route_discriminator_handles,
++                route_discriminator_layer_count,
++            )
++            if route_discriminator_mode is not None
++            else None
++        )
+         profile_artifact_gzip = self._grug_benchmark_finish_profile(profiler)
+         peak_allocated_bytes = int(torch.cuda.max_memory_allocated())
+         peak_reserved_bytes = int(torch.cuda.max_memory_reserved())
+@@ -1763,6 +2496,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                 f"matched CE missed representative gradients: {sorted(missing_representative_gradients)}"
+             )
+         self.optimizer.zero_grad(set_to_none=True)
++        representative_action_log_probs_cpu = representative_action_log_probs.detach().to("cpu").contiguous()
+         return {
+             "rank": int(torch.distributed.get_rank()),
+             "elapsed_seconds": elapsed,
+@@ -1773,9 +2507,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             "gradient_tensors": gradient_tensors,
+             "gradient_numel": gradient_numel,
+             "nonfinite_gradient_tensors": nonfinite_gradient_tensors,
+-            "representative_action_log_probs": representative_action_log_probs.float().cpu().tolist(),
++            "representative_action_log_probs": representative_action_log_probs_cpu.float().tolist(),
++            "representative_action_log_probs_sha256": _grug_cpu_tensor_sha256(representative_action_log_probs_cpu),
++            "representative_action_log_prob_coordinates": representative_action_log_prob_coordinates,
+             "representative_gradients": representative_gradients,
+             "expert_attribution": expert_evidence,
++            "route_discriminator": route_discriminator_evidence,
+             "peak_allocated_bytes": peak_allocated_bytes,
+             "peak_reserved_bytes": peak_reserved_bytes,
+             "allocated_bytes": int(torch.cuda.memory_allocated()),
