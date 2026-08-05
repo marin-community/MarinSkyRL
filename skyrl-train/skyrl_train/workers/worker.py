@@ -126,6 +126,12 @@ class _GrugQueryBiasCapturePlan:
         )
 
 
+@dataclass(frozen=True)
+class _GrugQueryBiasMicrobatchCapture:
+    causal_lm: GrugMoeForCausalLM
+    accumulator: GrugQueryBiasAccumulator
+
+
 def _build_grug_query_bias_capture_plan(
     attention_mask: torch.Tensor,
     *,
@@ -1049,6 +1055,37 @@ class PolicyWorkerBase(Worker):
         )
         self._grug_query_bias_candidate_count = candidate_count
 
+    def _begin_grug_query_bias_microbatch(
+        self,
+        causal_lm: GrugMoeForCausalLM | None,
+        attention_mask: torch.Tensor,
+        local_step: int,
+        capture_plan: _GrugQueryBiasCapturePlan | None,
+    ) -> _GrugQueryBiasMicrobatchCapture | None:
+        accumulator = getattr(self, "_grug_query_bias_accumulator", None)
+        if causal_lm is None or accumulator is None:
+            return None
+
+        capture_mask = attention_mask
+        if capture_plan is not None:
+            if capture_plan.valid_token_counts[local_step] == 0:
+                return None
+            capture_mask = capture_plan.mask_for(attention_mask, local_step)
+        causal_lm.begin_query_bias_capture(self._grug_query_bias_candidate_count, capture_mask)
+        return _GrugQueryBiasMicrobatchCapture(causal_lm, accumulator)
+
+    def _observe_grug_query_bias_microbatch(
+        self,
+        capture: _GrugQueryBiasMicrobatchCapture | None,
+    ) -> None:
+        if capture is None:
+            return
+        capture.accumulator.observe(
+            capture.causal_lm.take_query_bias_observation(
+                candidate_count=self._grug_query_bias_candidate_count,
+            )
+        )
+
     def _finish_grug_query_bias_window(self, *, optimizer_step_succeeded: bool) -> None:
         """Apply one completed Grug bias window, or discard it after a skipped step."""
 
@@ -1332,19 +1369,12 @@ class PolicyWorkerBase(Worker):
         response_span_tags = experience.response_span_tags
 
         grug_causal_lm = self._grug_causal_lm()
-        grug_query_bias_accumulator = getattr(self, "_grug_query_bias_accumulator", None)
-        grug_capture_mask = attention_mask
-        grug_capture_active = grug_causal_lm is not None and grug_query_bias_accumulator is not None
-        if grug_capture_active and grug_capture_plan is not None:
-            grug_capture_active = grug_capture_plan.valid_token_counts[local_step] > 0
-            if grug_capture_active:
-                grug_capture_mask = grug_capture_plan.mask_for(attention_mask, local_step)
-        if grug_capture_active:
-            assert grug_causal_lm is not None
-            grug_causal_lm.begin_query_bias_capture(
-                self._grug_query_bias_candidate_count,
-                grug_capture_mask,
-            )
+        grug_capture = self._begin_grug_query_bias_microbatch(
+            grug_causal_lm,
+            attention_mask,
+            local_step,
+            grug_capture_plan,
+        )
 
         # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
         # per-token weighted loss mask (THINK positions scaled by think_token_weight,
@@ -1371,14 +1401,7 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
                 rollout_routed_experts=rollout_routed_experts,
             )
-            if grug_capture_active:
-                assert grug_causal_lm is not None
-                assert grug_query_bias_accumulator is not None
-                grug_query_bias_accumulator.observe(
-                    grug_causal_lm.take_query_bias_observation(
-                        candidate_count=self._grug_query_bias_candidate_count,
-                    )
-                )
+            self._observe_grug_query_bias_microbatch(grug_capture)
             # loss function
             # TODO: recompute advantages
             policy_loss, clip_ratio = self.policy_loss_fn(

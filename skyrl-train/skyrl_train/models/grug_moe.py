@@ -392,12 +392,7 @@ class GrugMoeExperts(nn.Module):
         routed_input: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        """Run already-grouped routed rows.
-
-        This is the exact module boundary Torchtitan's expert-parallel hooks
-        wrap. Eager execution uses :meth:`forward_eager` explicitly, so a
-        requested grouped path can never fall back to the Python expert loop.
-        """
+        """Run routed rows grouped by expert and return them in the same order."""
 
         if not self.use_grouped_mm:
             raise RuntimeError("Grug grouped expert forward called without use_grouped_mm=true")

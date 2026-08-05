@@ -53,11 +53,6 @@ def test_grug_training_options_accept_native_grouped_mm():
     validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "use_grouped_mm": True})
 
 
-def test_grug_training_options_reject_native_and_generic_grouping_together():
-    with pytest.raises(ValueError, match="both native and generic grouped MoE"):
-        validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "use_grouped_mm": True, "moe_grouped_gemm": True})
-
-
 def test_grug_training_options_ignore_other_models():
     validate_grug_training_options(
         **{

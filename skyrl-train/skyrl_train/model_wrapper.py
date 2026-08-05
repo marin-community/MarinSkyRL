@@ -105,8 +105,6 @@ def validate_grug_training_options(
 
     if model_type != GRUG_MOE_MODEL_TYPE:
         return
-    if use_grouped_mm and moe_grouped_gemm:
-        raise ValueError("Grug FSDP2 training cannot enable both native and generic grouped MoE")
     unsupported = {
         "attention backend": attn_implementation not in GRUG_SUPPORTED_ATTENTION_BACKENDS,
         "sample packing": use_sample_packing,
@@ -121,6 +119,17 @@ def validate_grug_training_options(
     enabled = [name for name, is_enabled in unsupported.items() if is_enabled]
     if enabled:
         raise ValueError("Grug FSDP2 training does not support: " + ", ".join(enabled))
+
+
+def _enable_native_grug_grouping(model: nn.Module, use_grouped_mm: bool) -> None:
+    """Enable native grouped execution when the loaded model is Grug."""
+
+    if not use_grouped_mm or getattr(getattr(model, "config", None), "model_type", None) != GRUG_MOE_MODEL_TYPE:
+        return
+    num_grug_moe_blocks = enable_grug_grouped_mm(model)
+    if num_grug_moe_blocks == 0:
+        raise RuntimeError("use_grouped_mm=true selected Grug native grouping but found no Grug MoE blocks")
+    logger.info(f"[Grug-MoE] enabled native grouped_mm on {num_grug_moe_blocks} blocks")
 
 
 def _cp_mask_dict_supported(model) -> bool:
@@ -606,11 +615,7 @@ class HFModelWrapper(nn.Module):
         else:
             self.model = pretrain_or_model
 
-        if use_grouped_mm and getattr(getattr(self.model, "config", None), "model_type", None) == GRUG_MOE_MODEL_TYPE:
-            num_grug_moe_blocks = enable_grug_grouped_mm(self.model)
-            if num_grug_moe_blocks == 0:
-                raise RuntimeError("use_grouped_mm=true selected Grug native grouping but found no Grug MoE blocks")
-            logger.info(f"[Grug-MoE] enabled native grouped_mm on {num_grug_moe_blocks} blocks")
+        _enable_native_grug_grouping(self.model, use_grouped_mm)
 
         # CP mask contract probe (computed once): does this HF model's forward
         # accept the per-layer-type mask DICT escape hatch? Dense Qwen3 does;

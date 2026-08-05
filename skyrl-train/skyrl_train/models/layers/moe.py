@@ -49,7 +49,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
-from skyrl_train.models.layers.moe_routing import TokenReorderer, route_grouped_experts
+from skyrl_train.models.layers.moe_routing import TokenReorderer, grouped_expert_contributions
 
 # torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
 # does the DTensor->local convert + generate_permute_indices (cross-rank
@@ -538,7 +538,7 @@ class MoE(nn.Module):
             routed_output = self._run_deepep_routed_experts(x, selected_experts_indices, top_scores)
             return routed_output.reshape(bs, slen, dim)
 
-        routed_indices, routed_output = route_grouped_experts(
+        routed_indices, routed_output = grouped_expert_contributions(
             self.experts,
             x,
             top_scores,

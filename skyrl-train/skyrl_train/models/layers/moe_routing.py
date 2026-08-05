@@ -45,14 +45,14 @@ class TokenReorderer(nn.Module):
         return sorted_scores, sorted_token_indices, num_tokens_per_expert
 
 
-def route_grouped_experts(
+def grouped_expert_contributions(
     experts: GroupedExpertCallable,
     hidden_states: torch.Tensor,
     top_scores: torch.Tensor,
     selected_experts_indices: torch.Tensor,
     reorderer: TokenReorderer,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Route, run, and weight one grouped-expert token batch."""
+    """Return scatter indices and weighted outputs for grouped expert routes."""
 
     sorted_scores, sorted_token_indices, num_tokens_per_expert = reorderer(
         top_scores,
@@ -75,7 +75,7 @@ def run_grouped_experts(
 ) -> torch.Tensor:
     """Route, run, weight, and combine one grouped-expert token batch."""
 
-    routed_indices, routed_output = route_grouped_experts(
+    routed_indices, routed_output = grouped_expert_contributions(
         experts,
         hidden_states,
         top_scores,
