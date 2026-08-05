@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 NovaSkyAI
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
-import skyrl_train.models.grug_moe as grug_moe
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.models.grug_moe import (
     GrugMoeAttention,
@@ -101,7 +101,9 @@ def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(monkeypat
     keys_before = tuple(model.state_dict())
     expected = block(hidden)
 
-    monkeypatch.setattr(grug_moe, "_run_grug_grouped_mm", run_experts_for_loop)
+    grouped_kernel_module = ModuleType("skyrl_train.models.layers.moe")
+    grouped_kernel_module.__dict__["_run_experts_grouped_mm"] = run_experts_for_loop
+    monkeypatch.setitem(sys.modules, grouped_kernel_module.__name__, grouped_kernel_module)
     assert enable_grug_grouped_mm(model) == 1
 
     output = block(hidden)

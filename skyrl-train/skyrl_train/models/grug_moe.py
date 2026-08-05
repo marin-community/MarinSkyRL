@@ -24,7 +24,7 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
 )
-from skyrl_train.models.layers.moe_routing import TokenReorderer, run_grouped_experts
+from skyrl_train.models.layers.moe_routing import TokenReorderer, grouped_expert_contributions
 from skyrl_train.utils.flash_attention import (
     FLASH_ATTN_IMPORT_ERROR,
     flash_attn_func,
@@ -337,23 +337,6 @@ class _GrugZeroInitLinear(nn.Linear):
     pass
 
 
-def _run_grug_grouped_mm(
-    gate: torch.Tensor,
-    down: torch.Tensor,
-    up: torch.Tensor,
-    routed_input: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
-) -> torch.Tensor:
-    """Run the native Grug projections through the existing grouped kernel."""
-
-    # Torchtitan is an EP-extra dependency. Import it only when this explicitly
-    # requested path runs so eager Grug model loading keeps its base dependency
-    # surface.
-    from skyrl_train.models.layers.moe import _run_experts_grouped_mm  # noqa: PLC0415
-
-    return _run_experts_grouped_mm(gate, down, up, routed_input, num_tokens_per_expert)
-
-
 class GrugMoeExperts(nn.Module):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__()
@@ -408,7 +391,12 @@ class GrugMoeExperts(nn.Module):
                 f"(gate={type(self.gate_proj.weight).__name__}, routed_rows={routed_input.shape[0]})"
             )
             self._grouped_mm_logged = True
-        return _run_grug_grouped_mm(
+
+        # Torchtitan is an EP-extra dependency. Import the kernel only when this
+        # explicitly requested path runs so eager model loading stays lightweight.
+        from skyrl_train.models.layers.moe import _run_experts_grouped_mm  # noqa: PLC0415
+
+        return _run_experts_grouped_mm(
             self.gate_proj.weight,
             self.down_proj.weight,
             self.up_proj.weight,
@@ -518,12 +506,17 @@ class _GrugGroupedExpertExecution:
         selected_experts: torch.Tensor,
         combine_weights: torch.Tensor,
     ) -> torch.Tensor:
-        return run_grouped_experts(
+        routed_indices, routed_output = grouped_expert_contributions(
             experts,
             hidden_states,
             combine_weights,
             selected_experts,
             reorderer,
+        )
+        return torch.zeros_like(hidden_states).scatter_add(
+            dim=0,
+            index=routed_indices,
+            src=routed_output,
         )
 
 

@@ -34,13 +34,13 @@ Source of truth: ``skyrl_train/models/layers/moe.py`` and
         w1: (num_experts, hidden_dim, dim)  -- gate_proj
         w3: (num_experts, hidden_dim, dim)  -- up_proj
         w2: (num_experts, dim, hidden_dim)  -- down_proj
-  * ``run_experts_for_loop`` in ``moe_routing.py`` (the EP=1 PARITY oracle,
-    whose docstring says it
-    "numerically matches HF eager down(silu(gate(x)) * up(x))"):
-        h = silu(x @ w1[j].T);  h = h * (x @ w3[j].T);  out = h @ w2[j].T
-    i.e. ``x @ w1[j].T`` IS ``nn.Linear(gate_proj)(x)``, so w1[j] already has the
-    HF ``[out_features, in_features]`` orientation of ``gate_proj.weight`` -- a
-    plain per-expert SLICE, NO transpose. Same for w3->up_proj, w2->down_proj.
+  * ``run_experts_for_loop`` in ``moe_routing.py`` is the EP=1 parity oracle:
+        h = silu(routed_input @ gate_weights[j].T)
+        h = h * (routed_input @ up_weights[j].T)
+        out = h @ down_weights[j].T
+    The corresponding w1/w3/w2 slices therefore already have the HF
+    ``[out_features, in_features]`` orientation. The conversion does not
+    transpose them.
   * ``moe_weight_remap.convert_tt_layer_to_hf`` already encodes exactly this
     (w1[j]->gate_proj, w3[j]->up_proj, w2[j]->down_proj, router->mlp.gate). We
     REUSE that function so this script stays in lockstep with the trainer.

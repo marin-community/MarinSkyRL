@@ -96,26 +96,3 @@ def grouped_expert_contributions(
     routed_output = experts(routed_input, routing.tokens_per_expert)
     routed_output = (routed_output.float() * routing.scores.reshape(-1, 1)).to(hidden_states.dtype)
     return routed_indices, routed_output
-
-
-def run_grouped_experts(
-    experts: GroupedExpertCallable,
-    hidden_states: torch.Tensor,
-    top_scores: torch.Tensor,
-    selected_experts_indices: torch.Tensor,
-    reorderer: TokenReorderer,
-) -> torch.Tensor:
-    """Route, run, weight, and combine one grouped-expert token batch."""
-
-    routed_indices, routed_output = grouped_expert_contributions(
-        experts,
-        hidden_states,
-        top_scores,
-        selected_experts_indices,
-        reorderer,
-    )
-    return torch.zeros_like(hidden_states).scatter_add(
-        dim=0,
-        index=routed_indices,
-        src=routed_output,
-    )
