@@ -50,6 +50,7 @@ SRUN_KILL_WAIT_SECONDS = 20
 WATCHDOG_HEARTBEAT_TIMEOUT_SECONDS = PROCESS_GROUP_TIMEOUT_SECONDS // 2
 MASTER_PORT_BASE = 20_000
 MASTER_PORT_SPAN = 20_000
+LEGACY_BLOCKING_WAIT_TIMEOUT_MS = "1800000"
 
 
 def _allocated_hostnames() -> tuple[str, ...]:
@@ -136,14 +137,14 @@ def _launch_slurm_step(
     node_agent_command_prefix: tuple[str, ...],
 ) -> Iterator[ProcessGang]:
     environment = os.environ.copy()
-    # Keep the modern alias absent so the red case isolates the legacy setting
+    # Keep the modern alias absent so this contract isolates the legacy setting
     # captured in the TaskTrove worker environment, independent of the shell
-    # used to submit this opt-in test.
+    # used to submit the test.
     environment.pop("TORCH_NCCL_BLOCKING_WAIT", None)
     # The production Ray worker bootstrap must remove this alias before
     # importing torch; otherwise it disables the watchdog path exercised here.
     environment["NCCL_BLOCKING_WAIT"] = "1"
-    environment["TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS"] = "1800000"
+    environment["TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS"] = LEGACY_BLOCKING_WAIT_TIMEOUT_MS
     environment.update(
         nccl_diagnostics_environment(
             heartbeat_timeout_seconds=WATCHDOG_HEARTBEAT_TIMEOUT_SECONDS,

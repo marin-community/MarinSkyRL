@@ -41,11 +41,7 @@ def _run_worker_setup_probe() -> None:
     "blocking_wait_environment",
     (
         {},
-        {
-            "NCCL_BLOCKING_WAIT": "1",
-            "TORCH_NCCL_BLOCKING_WAIT": "1",
-            "TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS": "1800000",
-        },
+        dict.fromkeys(INCOMPATIBLE_NCCL_ENVIRONMENT, "1"),
     ),
     ids=("default", "inherited-blocking-wait"),
 )
@@ -66,6 +62,8 @@ def test_ray_worker_setup_prepares_process_before_torch_import(blocking_wait_env
     )
 
     assert result.stdout.strip() == "ok"
+    for variable in blocking_wait_environment:
+        assert variable in result.stderr
 
 
 if __name__ == "__main__":

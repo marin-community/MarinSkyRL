@@ -6,9 +6,13 @@ so CUDA cannot be initialized against the driver's device view first.
 """
 
 import asyncio
+import logging
 import os
 
 from skyrl_train.numa_policy import install_host_memory_policy, is_numa_affinity_enabled
+
+
+logger = logging.getLogger(__name__)
 
 
 INCOMPATIBLE_NCCL_ENVIRONMENT = (
@@ -24,8 +28,14 @@ def configure_worker_process() -> None:
     # MarinSkyRL uses ProcessGroupNCCL's asynchronous watchdog. Blocking wait
     # selects an incompatible wait path, and the timeout-like variable is not a
     # PyTorch setting. Clear inherited launcher state before torch reads it.
-    for variable in INCOMPATIBLE_NCCL_ENVIRONMENT:
-        os.environ.pop(variable, None)
+    removed_nccl_settings = [
+        variable for variable in INCOMPATIBLE_NCCL_ENVIRONMENT if os.environ.pop(variable, None) is not None
+    ]
+    if removed_nccl_settings:
+        logger.warning(
+            "Ignoring incompatible NCCL worker settings before PyTorch initialization: %s",
+            ", ".join(removed_nccl_settings),
+        )
     if is_numa_affinity_enabled():
         install_host_memory_policy()
     os.environ["UV_USE_IO_URING"] = "0"
