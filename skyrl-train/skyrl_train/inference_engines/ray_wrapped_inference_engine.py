@@ -16,6 +16,7 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
+from skyrl_train.env_vars import EnvVarScope, managed_environment_names
 
 
 # ---------------------------------------------------------------------------
@@ -42,19 +43,10 @@ from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TY
 # of these vars are set in the launching env (every non-#232 run), the dict is
 # empty and runtime_env is None -> byte-identical actor creation as before.
 _NCCL_FR_ENV_PASSTHROUGH = (
-    "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
-    "TORCH_NCCL_ENABLE_MONITORING",
-    "TORCH_NCCL_DUMP_ON_TIMEOUT",
-    "TORCH_NCCL_TRACE_CPP_STACK",
-    "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
-    # torch 2.9+ canonical FR dump-path cvar (deprecation-renamed from
-    # TORCH_NCCL_DEBUG_INFO_TEMP_FILE); forward it too so the engine TP workers
-    # write their flight-recorder pickle to the same in-pod /tmp dir as the policy.
-    "TORCH_FR_DUMP_TEMP_FILE",
+    # Manual dump triggers are an advanced external input rather than part of
+    # the debug preset. All managed watchdog/recorder variables come from the
+    # EnvVarManager scope below.
     "TORCH_NCCL_DEBUG_INFO_PIPE_FILE",
-    "TORCH_FR_BUFFER_SIZE",
-    "TORCH_NCCL_TRACE_BUFFER_SIZE",
-    "TORCH_NCCL_ASYNC_ERROR_HANDLING",
 )
 
 
@@ -122,7 +114,8 @@ def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
     (byte-identical actor creation for every run that does not set them)."""
     import os
 
-    env_vars = {k: os.environ[k] for k in _NCCL_FR_ENV_PASSTHROUGH if k in os.environ}
+    passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
+    env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
     if not env_vars:
         return None
     logger.info(f"#232 FIX B: forwarding NCCL FR env to vLLM engine actors via runtime_env: {sorted(env_vars)}")

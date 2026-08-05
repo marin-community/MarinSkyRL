@@ -93,6 +93,7 @@ from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TA
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source, runtime_bundle_inputs
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
+from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope
 
 # Default cluster and GPU shape. Memory and disk requests are resolved from the
 # selected cluster's live nodes after CLI parsing.
@@ -1633,6 +1634,15 @@ def create_parser() -> argparse.ArgumentParser:
         "(SKYRL_EP_LOADER_CHUNK_ROWS). Default: unset = 8.",
     )
     g.add_argument(
+        "--debug-mode",
+        dest="debug_mode",
+        choices=[mode.value for mode in DistributedDebugMode],
+        default=None,
+        help="Apply one centrally managed diagnostic preset. 'distributed' enables bounded "
+        "NCCL setup logs, flight-recorder timing/stacks, per-rank phase records, and durable "
+        "job-scoped artifacts. Default: unset = trainer.debug_mode from the RL config.",
+    )
+    g.add_argument(
         "--collective-phase-diagnostics",
         dest="collective_phase_diagnostics",
         choices=["on", "off"],
@@ -1699,6 +1709,22 @@ def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
         env["SKYRL_EP_LOADER_CHUNK_ROWS"] = str(args.ep_loader_chunk_rows)
     _onoff("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", args.collective_phase_diagnostics)
     return env
+
+
+def build_debug_launch_env(args: argparse.Namespace) -> dict[str, str]:
+    """Resolve the effective debug preset after the job name and RL config exist."""
+    mode = args.debug_mode
+    if mode is None:
+        raw = _load_rl_config_yaml(args.rl_config)
+        mode = str((raw.get("trainer") or {}).get("debug_mode", DistributedDebugMode.OFF.value))
+    try:
+        resolved = DistributedDebugMode(mode)
+    except ValueError as error:
+        choices = ", ".join(item.value for item in DistributedDebugMode)
+        raise ValueError(f"trainer.debug_mode must be one of: {choices}; got {mode!r}") from error
+    if resolved is DistributedDebugMode.OFF:
+        return {}
+    return EnvVarManager.for_distributed_launch(job_name=args.job_name).environment_for(EnvVarScope.TASK_RUNTIME)
 
 
 def _load_rl_config_yaml(rl_config_path: str) -> dict:
@@ -2324,6 +2350,13 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     if config_extra_env:
         env_vars.update(config_extra_env)
         print(f"[rl-iris] Config extra_env: {', '.join(sorted(config_extra_env))}", flush=True)
+    debug_env = build_debug_launch_env(args)
+    if debug_env:
+        env_vars.update(debug_env)
+        print(
+            f"[rl-iris] Distributed debug mode: artifacts -> {debug_env['SKYRL_DEBUG_ARTIFACT_DIR']}",
+            flush=True,
+        )
     env_vars.update(args.rl_config_launch.task_environment())
     # ── Per-cluster infra-env DEFAULTS (fill-gap belt for cluster-specific footguns) ──────────
     # Some clusters need a specific network/NCCL interface that a cluster-AGNOSTIC RL config

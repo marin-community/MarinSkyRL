@@ -146,3 +146,11 @@ Omitting the prefix fails before launch. The host Python needs this checkout and
 is not the runtime under test. See
 `.agents/ops/jupiter/` for the current Jupiter policy-runtime command and GPFS-safe launch procedure.
 The `--confcutdir` boundary also prevents unrelated GPU fixtures from becoming host-controller dependencies.
+
+## Distributed debug artifact contract
+
+`distributed_debug_artifact_contract.py` is the smaller two-node acceptance gate for the managed debug preset.
+It runs one successful cross-node NCCL collective and one deterministic rank-nonarrival failure after a
+successful communicator warmup, serially, and checks terminal state plus the complete durable artifact inventory. See
+[`docs/distributed-debug-mode.md`](../../../../docs/distributed-debug-mode.md#jupiter-acceptance-test) for the
+launch command and expected artifact layout.

@@ -11,3 +11,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--node-agent-command-prefix",
         help="Command prepended to every remote Slurm node agent, such as the production container launcher.",
     )
+    group.addoption(
+        "--debug-artifact-root",
+        help="Explicit durable directory for the distributed-debug artifact acceptance test.",
+    )

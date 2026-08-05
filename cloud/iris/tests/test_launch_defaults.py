@@ -23,6 +23,7 @@ if str(_REPO_ROOT) not in sys.path:
 from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
+    build_debug_launch_env,
     build_skyrl_flag_env,
     build_task_command,
     create_parser,
@@ -277,6 +278,36 @@ def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):
     args = _args(tmp_path, "opencode", ["--collective-phase-diagnostics", "on"])
 
     assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
+
+
+def test_distributed_debug_cli_sets_one_job_scoped_contract(tmp_path):
+    args = _args(tmp_path, "opencode", ["--debug-mode", "distributed", "--job-name", "debug-canary"])
+
+    environment = build_debug_launch_env(args)
+
+    assert environment["SKYRL_DEBUG_MODE"] == "distributed"
+    assert environment["SKYRL_DEBUG_ARTIFACT_DIR"] == "/tmp/skyrl-debug/debug-canary"
+
+
+def test_distributed_debug_config_sets_same_job_scoped_contract(tmp_path):
+    args = _args(tmp_path, "opencode", ["--job-name", "config-debug-canary"])
+    config = tmp_path / "debug.yaml"
+    config.write_text("trainer:\n  debug_mode: distributed\n")
+    args.rl_config = str(config)
+
+    environment = build_debug_launch_env(args)
+
+    assert environment["SKYRL_DEBUG_MODE"] == "distributed"
+    assert environment["SKYRL_DEBUG_ARTIFACT_DIR"] == "/tmp/skyrl-debug/config-debug-canary"
+
+
+def test_distributed_debug_cli_off_overrides_config(tmp_path):
+    args = _args(tmp_path, "opencode", ["--debug-mode", "off", "--job-name", "normal-canary"])
+    config = tmp_path / "debug.yaml"
+    config.write_text("trainer:\n  debug_mode: distributed\n")
+    args.rl_config = str(config)
+
+    assert build_debug_launch_env(args) == {}
 
 
 def test_rl_config_is_materialized_for_the_task(tmp_path):
