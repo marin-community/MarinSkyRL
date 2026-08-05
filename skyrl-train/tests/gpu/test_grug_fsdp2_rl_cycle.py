@@ -40,7 +40,7 @@ EP1_DISAGGREGATED_NUM_GPUS = EP1_POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE
 MIXED_EP_DISAGGREGATED_NUM_GPUS = MIXED_EP_POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
-SERVING_EXPERT_NAMES = {
+SERVING_EXPERT_INDEX_BY_NAME = {
     "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
     "model.layers.0.mlp.experts.4.gate_proj.weight": 4,
 }
@@ -244,7 +244,7 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
         parameter_names=parameter_names,
         sync_parameter_names=[
             parameter_names[0],
-            *SERVING_EXPERT_NAMES,
+            *SERVING_EXPERT_INDEX_BY_NAME,
             parameter_names[2],
             parameter_names[3],
         ],
@@ -310,7 +310,7 @@ def _assert_checkpoint_resume_next_step(
 def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot) -> dict[str, int]:
     """Check serving weights and return each named expert's serving EP rank."""
     found = {name: False for name in names}
-    expert_owners = {name: set() for name in SERVING_EXPERT_NAMES}
+    expert_owners = {name: set() for name in SERVING_EXPERT_INDEX_BY_NAME}
     for engine in client.engines:
         per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(names, False))
         if isinstance(per_rank, dict):
@@ -324,7 +324,7 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
                 found[name] = True
                 expected_dtype = "float32" if name in training.bias_names or name == ROUTER_NAME else "bfloat16"
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
-                expert_index = SERVING_EXPERT_NAMES.get(name)
+                expert_index = SERVING_EXPERT_INDEX_BY_NAME.get(name)
                 if expert_index is not None:
                     expert_owners[name].add(int(entry["ep_rank"]))
                 expected = (
@@ -435,7 +435,8 @@ def _run_full_cycle(
                 // expert_model_parallel_size
             )
             trainer_owners = {
-                name: expert_index // experts_per_trainer_owner for name, expert_index in SERVING_EXPERT_NAMES.items()
+                name: expert_index // experts_per_trainer_owner
+                for name, expert_index in SERVING_EXPERT_INDEX_BY_NAME.items()
             }
             assert len(set(trainer_owners.values())) > 1, trainer_owners
             assert len(set(serving_owners.values())) > 1, serving_owners

@@ -1105,7 +1105,11 @@ class PolicyWorkerBase(Worker):
                     assert grug_capture_plan is not None
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_capture_plan.valid_token_counts[local_step:window_end])
-                    self._grug_query_bias_window = GrugQueryBiasWindow(grug_causal_lm, valid_tokens)
+                    self._grug_query_bias_window = GrugQueryBiasWindow(
+                        grug_causal_lm,
+                        valid_tokens,
+                        grug_capture_plan,
+                    )
                 diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
                 with _phase_diagnostics.region(
                     diagnostic_mesh,
@@ -1121,7 +1125,6 @@ class PolicyWorkerBase(Worker):
                         global_step,
                         local_step,
                         accumulation_steps,
-                        grug_capture_plan=grug_capture_plan,
                     )
                 policy_update_steps += 1
 
@@ -1182,7 +1185,6 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
-        grug_capture_plan: GrugQueryBiasCapturePlan | None = None,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
@@ -1211,7 +1213,6 @@ class PolicyWorkerBase(Worker):
             and grug_query_bias_window.begin_microbatch(
                 attention_mask,
                 local_step,
-                grug_capture_plan,
             )
         )
 

@@ -30,6 +30,7 @@ from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     GRUG_SUPPORTED_ATTENTION_BACKENDS,
+    GrugMoeForCausalLM,
     enable_grug_grouped_mm,
     validate_grug_training_strategy,
 )
@@ -124,7 +125,7 @@ def validate_grug_training_options(
 def _enable_native_grug_grouping(model: nn.Module, use_grouped_mm: bool) -> None:
     """Enable native grouped execution when the loaded model is Grug."""
 
-    if not use_grouped_mm or getattr(getattr(model, "config", None), "model_type", None) != GRUG_MOE_MODEL_TYPE:
+    if not use_grouped_mm or not isinstance(model, GrugMoeForCausalLM):
         return
     num_grug_moe_blocks = enable_grug_grouped_mm(model)
     if num_grug_moe_blocks == 0:

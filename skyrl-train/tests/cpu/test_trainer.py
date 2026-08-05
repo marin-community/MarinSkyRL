@@ -148,9 +148,7 @@ def test_grug_query_bias_virtual_shards_partition_optimizer_window():
             ep_rank=ep_rank,
         )
         capture_plan = GrugQueryBiasCapturePlan.build(attention_mask, shard_layout)
-        assert capture_plan.valid_token_counts == tuple(
-            int(capture_plan.mask_for(mask, local_step).sum()) for local_step, mask in enumerate(microbatches)
-        )
+        assert capture_plan.valid_token_counts == ((3, 0), (0, 5))[ep_rank]
         rank_masks.append(
             torch.cat([capture_plan.mask_for(mask, local_step) for local_step, mask in enumerate(microbatches)])
         )
@@ -715,8 +713,7 @@ def test_ppo_train_batch_calculations():
     # Mock training_step to track calls and verify accumulation behavior
     policy_training_calls = []
 
-    def mock_policy_training_step(experience, global_step, local_step, accumulation_steps, *, grug_capture_plan=None):
-        assert grug_capture_plan is None
+    def mock_policy_training_step(experience, global_step, local_step, accumulation_steps):
         policy_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
         return {"policy_loss": 0.5, "policy_lr": 1e-4, "entropy": 2.0}
 
@@ -859,9 +856,9 @@ def test_grug_ppo_train_releases_consumed_microbatches():
     previous_experience = None
     prior_microbatch_was_released = []
 
-    def training_step(experience, _global_step, _local_step, _accumulation_steps, *, grug_capture_plan):
+    def training_step(experience, _global_step, _local_step, _accumulation_steps):
         nonlocal previous_experience
-        assert grug_capture_plan is not None
+        assert worker._grug_query_bias_window.capture_plan is not None
         if previous_experience is not None:
             gc.collect()
             prior_microbatch_was_released.append(previous_experience() is None)

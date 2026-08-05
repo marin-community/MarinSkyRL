@@ -195,9 +195,15 @@ def next_query_bias(betas: torch.Tensor) -> torch.Tensor:
 class GrugQueryBiasWindow:
     """Collect and apply query-bias observations for one optimizer window."""
 
-    def __init__(self, model: GrugQueryBiasCaptureModel, valid_tokens: int) -> None:
+    def __init__(
+        self,
+        model: GrugQueryBiasCaptureModel,
+        valid_tokens: int,
+        capture_plan: GrugQueryBiasCapturePlan | None = None,
+    ) -> None:
         config = model.config
         self.model = model
+        self.capture_plan = capture_plan
         self.candidate_count = query_bias_candidate_count(
             valid_tokens,
             config.num_experts_per_tok,
@@ -214,13 +220,14 @@ class GrugQueryBiasWindow:
         self,
         attention_mask: torch.Tensor,
         local_step: int,
-        capture_plan: GrugQueryBiasCapturePlan | None,
     ) -> bool:
+        """Start capture and return false when this EP shard owns no valid tokens."""
+
         capture_mask = attention_mask
-        if capture_plan is not None:
-            if capture_plan.valid_token_counts[local_step] == 0:
+        if self.capture_plan is not None:
+            if self.capture_plan.valid_token_counts[local_step] == 0:
                 return False
-            capture_mask = capture_plan.mask_for(attention_mask, local_step)
+            capture_mask = self.capture_plan.mask_for(attention_mask, local_step)
         self.model.begin_query_bias_capture(self.candidate_count, capture_mask)
         return True
 
