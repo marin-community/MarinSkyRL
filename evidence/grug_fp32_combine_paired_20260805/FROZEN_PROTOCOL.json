@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "status": "frozen_before_live_results",
+  "frozen_at": "2026-08-05T00:46:06Z",
+  "objective": "Estimate the local fixed-route correctness and cost of FP32 Grug expert-output accumulation without changing the failed distributed gate or MarinSkyRL PR 276.",
+  "pins": {
+    "parent_revision": "0c213586b5491b8046ca7780e965c4b26dc6a2a2",
+    "candidate_revision": "fbb1fc8378601e0346d00d186809f10d1ad0360d",
+    "parent_module_sha256": "b1e63368996530dd8fa678ec3b482a1bd63007c0d69901cd13c6a4e42c294d50",
+    "candidate_module_sha256": "2dd51d842afe6f57fe00337c21945923da68664d9c23678633c578c27504ba93",
+    "driver_sha256": "c862518172dd623f3bd5f7d138aaa128361e492958f431639e73d1099e5a2ac8"
+  },
+  "reader_at_freeze": {
+    "path": "verify_packet.py",
+    "sha256": "5f83e9030295d4219c9180a52147082bbbd14247c562217f84105456cc48cc4e"
+  },
+  "runtime": {
+    "cluster": "cw-rno2a",
+    "iris_job_id": "/romain/dev-gpu-romain-grug-fp32-20260805",
+    "pod_name": "iris-romain-dev-gpu-romain-grug-fp3-9d5a2e90-0-dd2cb5728ff2f33a",
+    "container_image": "ghcr.io/marin-community/iris-task:1c7e3818c-recovery1",
+    "container_image_id": "ghcr.io/marin-community/iris-task@sha256:9af9a3d38f57c2ed8dfe1d6f6657a9f4a00c582ec06a5ac2af8fcddbe51da03c",
+    "workspace_base_head": "7c3bac451a69d34fa8b8f027ceb91998a6e0ff2c",
+    "python": "3.12.13",
+    "torch": "2.11.0+cu129",
+    "torch_cuda": "12.9",
+    "transformers": "5.8.1",
+    "loguru": "0.7.3",
+    "ray": "2.51.1",
+    "omegaconf": "2.3.0",
+    "torchtitan": "git+https://github.com/pytorch/torchtitan@a1fdd7e43694bbfeff5d6ad8ac738c067bb90d41",
+    "python_package_inventory_sha256": "8df26c4fa6f5bd79d25f22a9fd31bda8d4627af8083a975d1124f1b6dda84a77",
+    "nvidia_driver": "595.71.05",
+    "resource_request": {
+      "nodes": 1,
+      "gpu_variant": "H100",
+      "gpus": 8,
+      "cpu": 32,
+      "memory": "128Gi",
+      "ephemeral_storage": "200Gi",
+      "priority": "interactive"
+    }
+  },
+  "correctness": {
+    "execution": "GPU 0 only; parent then candidate in fresh processes; performance starts only if every gate passes",
+    "fixture": {
+      "tokens": 4096,
+      "hidden_size": 128,
+      "intermediate_size": 64,
+      "num_experts": 5,
+      "top_k": 4,
+      "expert_ids_per_token": [0, 1, 2, 3],
+      "combine_weights_per_token": [1.0, 0.5, 0.5, 0.5]
+    },
+    "multiplication": "BF16 expert output times combine weight cast to BF16, before either accumulator",
+    "oracles": {
+      "fp32": "independent slot-wise FP32 reduction from the path-specific BF16 weighted summands",
+      "fp64": "independent fixed slot-order FP64 reduction from the same path-specific BF16 weighted summands"
+    },
+    "output_tolerance": {
+      "rtol": 0.0,
+      "atol": 0.0
+    },
+    "combine_relevant_gradient_tolerance": {
+      "rtol": 0.08,
+      "atol": 0.0001,
+      "targets": [
+        "hidden",
+        "combine_weights",
+        "expert_gate_weight",
+        "expert_up_weight",
+        "expert_down_weight"
+      ]
+    },
+    "required_gates": [
+      "parent eager and grouped outputs differ from the FP32 slot-wise contract",
+      "candidate eager and grouped outputs exactly match the FP32 slot-wise contract",
+      "candidate combine-relevant gradients match the FP32 and FP64 references within the frozen tolerance",
+      "candidate eager and grouped outputs match exactly and gradients match within the frozen tolerance",
+      "candidate maximum pre-cast error versus FP64 is lower than the parent's on eager and grouped paths"
+    ]
+  },
+  "performance": {
+    "shape": {
+      "tokens": 8192,
+      "hidden_size": 2560,
+      "intermediate_size": 1280,
+      "num_experts": 256,
+      "top_k": 4
+    },
+    "seed": 20260805,
+    "state_initialization": "deterministic BF16 normal(mean=0,std=0.02) in sorted parameter-name order",
+    "input_initialization": "deterministic BF16 normal with CUDA generator seed 20260806",
+    "fixed_route": "expert_id[token,slot] = (token * 73 + [0,1,7,31][slot]) mod 256; exactly 128 routed rows per expert",
+    "combine_weights": "deterministic FP32 sigmoid phases normalized to sum 2.5 per token",
+    "cotangent": "deterministic BF16 linspace(-1,1)",
+    "source_isolation": "fresh child process per arm/GPU/repetition; a copied common package differs only at the hash-checked accumulation blocks",
+    "boundaries": {
+      "full_block": "GrugMoeSparseMoeBlock._forward_grouped with routes fixed outside the router: route sorting, routed-input construction, grouped expert projections, BF16 weighting, combine accumulation, and backward",
+      "combine": "complete affected combine section: weight flatten/index-select/cast, BF16 expert-output multiplication, output allocation, index_add accumulation, candidate casts, and backward"
+    },
+    "timing": "CUDA events around forward and backward with backward-event synchronization; setup and gradient clearing are outside timed regions",
+    "hbm": "after warmup and gradient clearing, empty allocator cache, synchronize, record allocated baseline, reset peak stats, run measured iterations, report peak allocated and peak-minus-baseline",
+    "warmup_iterations_per_process": 5,
+    "measured_iterations_per_process": 20,
+    "processes_per_arm_per_gpu": 2,
+    "waves": [
+      {
+        "wave": 0,
+        "even_gpus": "parent repetition 0",
+        "odd_gpus": "candidate repetition 0"
+      },
+      {
+        "wave": 1,
+        "even_gpus": "candidate repetition 0",
+        "odd_gpus": "parent repetition 0"
+      },
+      {
+        "wave": 2,
+        "even_gpus": "parent repetition 1",
+        "odd_gpus": "candidate repetition 1"
+      },
+      {
+        "wave": 3,
+        "even_gpus": "candidate repetition 1",
+        "odd_gpus": "parent repetition 1"
+      }
+    ],
+    "maximum_concurrent_processes": 8,
+    "pairing": "both arms run twice on every physical GPU in alternating order; summarize 40 timing samples per arm/GPU, then report candidate-parent per-GPU deltas and cross-GPU median/range"
+  },
+  "safety": {
+    "forbidden": [
+      "local EP=8 x FSDP=4 or any 32-worker smoke test",
+      "live replay",
+      "distributed job",
+      "R3 or Levanter work",
+      "attention investigation",
+      "production benchmark switch"
+    ],
+    "remote_cgroup_stop_bytes": 107374182400,
+    "remote_host_mem_available_stop_bytes": 274877906944,
+    "remote_minimum_swap_free_fraction_if_swap_exists": 0.5,
+    "observed_remote_host_swap_total_bytes_before_run": 0,
+    "local_host_must_remain_free_of_measurement_workers": true,
+    "do_not_extend_after_results": true
+  },
+  "verdict": {
+    "kind": "estimate_only_no_materiality_threshold",
+    "primary_metric": "warmed full fixed-route sparse-block forward-plus-backward milliseconds",
+    "direction_rule": "all eight per-GPU median deltas must have one sign to label that direction; otherwise report inconclusive direction",
+    "interpretation_limits": [
+      "does not change the failed 32-H100 distributed action-output gate",
+      "does not prove distributed semantic equivalence or end-to-end MFU",
+      "does not identify attention as causal or resolve Marin issue 7903",
+      "does not put fbb1fc8 on MarinSkyRL PR 276"
+    ]
+  }
+}
