@@ -21,7 +21,11 @@ except ImportError:
     from torch.distributed._tensor import DTensor
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_expert_parallel_options
+from skyrl_train.models.grug_moe import (
+    GRUG_EP_COMM_BACKEND,
+    GRUG_MOE_MODEL_TYPE,
+    validate_grug_expert_parallel_options,
+)
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
@@ -777,7 +781,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=getattr(strategy, "ep_size", 1),
             use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
-            ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", "torch")),
+            ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", GRUG_EP_COMM_BACKEND)),
         )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh

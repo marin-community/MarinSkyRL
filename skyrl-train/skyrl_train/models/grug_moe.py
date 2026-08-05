@@ -11,7 +11,7 @@ without materializing dense sequence-by-sequence scores or masks.
 from __future__ import annotations
 
 import math
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -36,6 +36,7 @@ from skyrl_train.utils.flash_attention import (
 
 
 GRUG_MOE_MODEL_TYPE = "grug_moe"
+GRUG_EP_COMM_BACKEND = "torch"
 GRUG_ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
 GRUG_MOE_ARCHITECTURE = "GrugMoeForCausalLM"
 GRUG_MOE_ATTENTION_MODE = "production"
@@ -85,10 +86,19 @@ def validate_grug_expert_parallel_options(
 
     if model_type != GRUG_MOE_MODEL_TYPE or expert_model_parallel_size <= 1:
         return
+    validate_grug_expert_parallel_runtime(
+        use_grouped_mm=use_grouped_mm,
+        ep_comm_backend=ep_comm_backend,
+    )
+
+
+def validate_grug_expert_parallel_runtime(*, use_grouped_mm: bool, ep_comm_backend: str) -> None:
+    """Validate the execution choices required by native Grug expert sharding."""
+
     if not use_grouped_mm:
         raise ValueError("Grug expert_model_parallel_size>1 requires use_grouped_mm=true")
-    if ep_comm_backend != "torch":
-        raise ValueError("Grug expert parallelism supports only ep_comm_backend=torch")
+    if ep_comm_backend != GRUG_EP_COMM_BACKEND:
+        raise ValueError(f"Grug expert parallelism supports only ep_comm_backend={GRUG_EP_COMM_BACKEND}")
 
 
 def _jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -472,43 +482,82 @@ class GrugMoeRouter(nn.Module):
         return GrugMoeRouterOutput(router_logits, selected_experts, combine_weights)
 
 
+class _GrugExpertExecution(Protocol):
+    """Stable sparse-block interface for eager and grouped expert execution."""
+
+    def run(
+        self,
+        experts: GrugMoeExperts,
+        reorderer: TokenReorderer,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        combine_weights: torch.Tensor,
+    ) -> torch.Tensor: ...
+
+
+class _GrugEagerExpertExecution:
+    def run(
+        self,
+        experts: GrugMoeExperts,
+        reorderer: TokenReorderer,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        combine_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        del reorderer
+        return experts.forward_eager(hidden_states, selected_experts, combine_weights.to(hidden_states.dtype))
+
+
+class _GrugGroupedExpertExecution:
+    def run(
+        self,
+        experts: GrugMoeExperts,
+        reorderer: TokenReorderer,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        combine_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return run_grouped_experts(
+            experts,
+            hidden_states,
+            combine_weights,
+            selected_experts,
+            reorderer,
+        )
+
+
+_GRUG_EAGER_EXPERT_EXECUTION = _GrugEagerExpertExecution()
+_GRUG_GROUPED_EXPERT_EXECUTION = _GrugGroupedExpertExecution()
+
+
 class GrugMoeSparseMoeBlock(nn.Module):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__()
         self.router = GrugMoeRouter(config)
         self.experts = GrugMoeExperts(config)
         self.reorderer = TokenReorderer(config.num_local_experts, config.num_experts_per_tok)
+        self._expert_execution: _GrugExpertExecution = _GRUG_EAGER_EXPERT_EXECUTION
 
     def enable_grouped_mm(self) -> None:
         self.experts.use_grouped_mm = True
-
-    def _forward_grouped(
-        self,
-        hidden_states: torch.Tensor,
-        selected_experts: torch.Tensor,
-        combine_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        return run_grouped_experts(
-            self.experts,
-            hidden_states,
-            combine_weights,
-            selected_experts,
-            self.reorderer,
-        )
+        self._expert_execution = _GRUG_GROUPED_EXPERT_EXECUTION
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shape = hidden_states.shape
         flat = hidden_states.reshape(-1, shape[-1])
         _, selected_experts, combine_weights = self.router(flat)
-        if self.experts.use_grouped_mm:
-            output = self._forward_grouped(flat, selected_experts, combine_weights)
-        else:
-            output = self.experts.forward_eager(flat, selected_experts, combine_weights.to(flat.dtype))
+        output = self._expert_execution.run(
+            self.experts,
+            self.reorderer,
+            flat,
+            selected_experts,
+            combine_weights,
+        )
         return output.reshape(shape)
 
 
 def enable_grug_grouped_mm(model: nn.Module) -> int:
-    """Enable native grouped execution on every Grug sparse-MoE block."""
+    """Enable native grouped execution and return the number of changed blocks."""
 
     blocks = [module for module in model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
     for block in blocks:

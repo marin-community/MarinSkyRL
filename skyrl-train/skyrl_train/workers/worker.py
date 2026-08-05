@@ -1243,16 +1243,13 @@ class PolicyWorkerBase(Worker):
                         local_step=local_step,
                     ),
                 ):
-                    if grug_capture_plan is None:
-                        status = self.training_step(experience, global_step, local_step, accumulation_steps)
-                    else:
-                        status = self.training_step(
-                            experience,
-                            global_step,
-                            local_step,
-                            accumulation_steps,
-                            grug_capture_plan=grug_capture_plan,
-                        )
+                    status = self.training_step(
+                        experience,
+                        global_step,
+                        local_step,
+                        accumulation_steps,
+                        grug_capture_plan=grug_capture_plan,
+                    )
                 policy_update_steps += 1
 
                 # for DP

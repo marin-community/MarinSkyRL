@@ -718,7 +718,8 @@ def test_ppo_train_batch_calculations():
     # Mock training_step to track calls and verify accumulation behavior
     policy_training_calls = []
 
-    def mock_policy_training_step(experience, global_step, local_step, accumulation_steps):
+    def mock_policy_training_step(experience, global_step, local_step, accumulation_steps, *, grug_capture_plan=None):
+        assert grug_capture_plan is None
         policy_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
         return {"policy_loss": 0.5, "policy_lr": 1e-4, "entropy": 2.0}
 

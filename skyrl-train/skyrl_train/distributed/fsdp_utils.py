@@ -18,8 +18,9 @@
 import functools
 from collections import OrderedDict
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union
+from typing import Protocol, Union
 
 import torch
 import torch.distributed as dist
@@ -34,10 +35,11 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 from torch.distributed.tensor import DTensor, distribute_module, distribute_tensor
+from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
 
-from skyrl_train.models.grug_moe import GrugMoeExperts
+from skyrl_train.models.grug_moe import GrugMoeExperts, validate_grug_expert_parallel_runtime
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -643,10 +645,10 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 def _distribute_grug_experts(experts, ep_plan, ep_mesh, ep_comm_backend):
     """Shard native Grug projections while keeping checkpoint keys unchanged."""
 
-    if ep_comm_backend != "torch":
-        raise ValueError("Grug expert parallelism supports only ep_comm_backend=torch")
-    if not experts.use_grouped_mm:
-        raise ValueError("Grug expert parallelism requires use_grouped_mm=true")
+    validate_grug_expert_parallel_runtime(
+        use_grouped_mm=experts.use_grouped_mm,
+        ep_comm_backend=ep_comm_backend,
+    )
 
     projections = {experts.gate_proj, experts.up_proj, experts.down_proj}
 
@@ -666,12 +668,73 @@ def _distribute_grug_experts(experts, ep_plan, ep_mesh, ep_comm_backend):
     )
 
 
-def _compose_expert_fsdp_shards(experts, *, is_grug, ep_mesh, fsdp_mesh, fsdp_kwargs):
+class _ExpertParallelTarget(Protocol):
+    experts: nn.Module
+
+    def distribute(self, ep_plan, ep_mesh, ep_comm_backend: str) -> None: ...
+
+    def finish(self, ep_mesh, ep_comm_backend: str) -> None: ...
+
+    def named_parameters(self): ...
+
+
+@dataclass(frozen=True)
+class _GrugExpertParallelTarget:
+    experts: GrugMoeExperts
+
+    def distribute(self, ep_plan, ep_mesh, ep_comm_backend: str) -> None:
+        _distribute_grug_experts(self.experts, ep_plan, ep_mesh, ep_comm_backend)
+
+    def finish(self, ep_mesh, ep_comm_backend: str) -> None:
+        del ep_comm_backend
+        # MeshDispatch replicates each logical batch across EP ranks. Average
+        # only expert gradients; router and dense gradients remain local replicas.
+        self.experts.ep_size = ep_mesh.size()
+
+    def named_parameters(self):
+        return self.experts.named_parameters(recurse=True)
+
+
+@dataclass(frozen=True)
+class _GroupedExpertParallelTarget:
+    moe: nn.Module
+    experts: nn.Module
+
+    def distribute(self, ep_plan, ep_mesh, ep_comm_backend: str) -> None:
+        del ep_comm_backend
+        parallelize_module(self.experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
+
+    def finish(self, ep_mesh, ep_comm_backend: str) -> None:
+        del ep_mesh
+        self.moe.set_ep_comm_backend(ep_comm_backend)
+        self.moe._ep_enabled = True
+
+    def named_parameters(self):
+        return self.experts.named_parameters(recurse=False)
+
+
+def _expert_parallel_target(module, grouped_experts_type) -> _ExpertParallelTarget | None:
+    if isinstance(module, GrugMoeExperts):
+        return _GrugExpertParallelTarget(module)
+
+    moe = getattr(module, "moe", None)
+    if moe is None:
+        return None
+    experts = getattr(moe, "experts", None)
+    if experts is None or not (
+        isinstance(experts, grouped_experts_type) or experts.__class__.__name__ == "GroupedExperts"
+    ):
+        return None
+    return _GroupedExpertParallelTarget(moe, experts)
+
+
+def _compose_expert_fsdp_shards(target, *, ep_mesh, fsdp_mesh, fsdp_kwargs):
     """Compose FSDP onto EP expert shards and validate the resulting geometry."""
 
     if fsdp_kwargs is None:
         return
 
+    experts = target.experts
     num_experts = getattr(experts, "num_experts", None)
     ep_size = ep_mesh.size()
     fsdp_size = fsdp_mesh.size()
@@ -691,7 +754,7 @@ def _compose_expert_fsdp_shards(experts, *, is_grug, ep_mesh, fsdp_mesh, fsdp_kw
         return
 
     expected_local_rows = num_experts // ep_size // fsdp_size if num_experts is not None else None
-    for parameter_name, parameter in experts.named_parameters(recurse=is_grug):
+    for parameter_name, parameter in target.named_parameters():
         placements = getattr(parameter, "placements", ())
         assert len(placements) == 2 and all(
             isinstance(placement, (Shard, _StridedShard)) for placement in placements
@@ -749,8 +812,6 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     )
     assert sequence_parallel_size == 1, "SP+EP is deferred (scope §5): apply_ep requires sequence_parallel_size==1"
 
-    from torch.distributed.tensor.parallel import parallelize_module
-
     # torch (Stage 4) → torchtitan ExpertParallel (installs all_to_all hooks +
     # @expert_parallel grouped-mm). deepep (Stage 5) → DeepEPExpertParallel (Shard(0)
     # only; dispatch/combine is driven from MoE.forward). Imported lazily so the base
@@ -786,49 +847,18 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     fsdp_mesh = device_mesh["fsdp"]
     sharded = 0
     for module in model.modules():
-        is_grug = isinstance(module, GrugMoeExperts)
-        if is_grug:
-            experts = module
-            moe = None
-        else:
-            # The lifted grouped block exposes `moe.experts` (a GroupedExperts
-            # holding w1/w2/w3). Match the shim's `moe` attribute to find it.
-            moe = getattr(module, "moe", None)
-            if moe is None:
-                continue
-            experts = getattr(moe, "experts", None)
-            if experts is None or not (
-                isinstance(experts, GroupedExperts) or experts.__class__.__name__ == "GroupedExperts"
-            ):
-                continue
+        target = _expert_parallel_target(module, GroupedExperts)
+        if target is None:
+            continue
 
-        if is_grug:
-            _distribute_grug_experts(experts, ep_plan, ep_mesh, ep_comm_backend)
-        else:
-            parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
-
+        target.distribute(ep_plan, ep_mesh, ep_comm_backend)
         _compose_expert_fsdp_shards(
-            experts,
-            is_grug=is_grug,
+            target,
             ep_mesh=ep_mesh,
             fsdp_mesh=fsdp_mesh,
             fsdp_kwargs=fsdp_kwargs,
         )
-
-        if is_grug:
-            # MeshDispatch deliberately replicates each logical input across EP
-            # ranks. The all-to-all therefore gives an expert one identical
-            # contribution from every EP rank. Average only expert parameter
-            # gradients; router and dense gradients are already local replicas
-            # and must retain their EP=1 scale.
-            experts.ep_size = ep_mesh.size()
-        else:
-            # Tell the grouped block which comm backend to run. For deepep this
-            # also switches GroupedExperts.forward to the local-experts path.
-            assert moe is not None
-            moe.set_ep_comm_backend(ep_comm_backend)
-            # Flag the grouped block so its forward selects EP-decorated compute.
-            moe._ep_enabled = True
+        target.finish(ep_mesh, ep_comm_backend)
         sharded += 1
     grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
     if grug_parameters:

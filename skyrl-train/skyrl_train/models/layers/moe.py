@@ -23,7 +23,7 @@ What was lifted / changed vs prime-rl:
     hook: it re-gathers weights from the LIVE ``self.gate(x)`` softmax, exactly
     the Stage-2 monkeypatch semantics. ``expert_bias`` / ``force_balanced`` kept
     for API compatibility but unused on the swap path.
-  * ``TokenReorderer`` — kept verbatim.
+  * token reorder/combine — shared with native Grug through ``moe_routing``.
   * ``MoE`` — adapted: ``MoEArgs`` / ``ep_comm_backend`` / DeepEP /
     aux-loss-free ``expert_bias`` / ``tokens_per_expert`` / ``routing_confidence``
     bookkeeping all dropped. The shared expert is OPTIONAL (vanilla Qwen3-MoE
