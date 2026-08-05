@@ -103,6 +103,7 @@ def _wait_for_fsdp_all_gather(
         stall_current_stream=stall_current_stream,
     )
     work.wait()
+    torch.cuda.synchronize(collectives.fsdp.device)
     del input_values, output_values
 
 
@@ -212,6 +213,7 @@ def _run_model_schedule_divergence(
             phase="ep-all-to-all",
         )
         work.wait()
+        torch.cuda.synchronize(runtime.device)
         return gradient
 
     value.register_hook(model_backward_hook)

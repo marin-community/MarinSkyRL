@@ -28,7 +28,15 @@ checkpoint, or optimizer state.
 
 ## Results
 
-Pending the on-demand four-node Jupiter run.
+Jupiter job 1246330 ran all three cases on four GH200 nodes against the production Torch 2.11/CUDA 13 SIF and
+Titan overlay. Every case warmed its communicators, emitted the expected before-enqueue and after-enqueue
+counts, and terminated nonzero. The controller still marked every case failed because the worker emitted an
+unexpected-completion record immediately after `WorkNCCL.wait()`.
+
+This refuted the harness's first completion oracle. With asynchronous error handling, `wait()` establishes a
+CUDA stream dependency but does not by itself prove CPU-visible GPU completion. The worker must synchronize the
+device before it can report that a collective completed. The next run adds that synchronization without
+changing the fault inputs or deadlines.
 
 ## Future work
 
