@@ -100,7 +100,7 @@ process-group timeout is three minutes, so the enclosing cluster job needs a lon
 ## Four-node collective-stall discriminators
 
 `multi_node_nccl_contract.py` starts `multi_node_worker_bootstrap.py`, which applies the production Ray worker
-setup before loading `multi_node_phase_divergence_worker.py`. Together they are the destructive counterpart to
+setup before loading `multi_node_collective_stall_worker.py`. Together they are the destructive counterpart to
 the healthy traffic test. They use the same 16-rank EP4/FSDP4 placement and asynchronous watchdog mode. Each
 fresh gang completes three EP all-to-all and inter-node FSDP all-gather warmup rounds before injecting one
 mechanism:
@@ -131,7 +131,7 @@ for rendezvous, mesh construction, and healthy warmup. It starts a separate
 two-minute fault deadline only after all 16 ranks report ready. Either deadline kills and reaps the disposable
 Slurm step under a separate bounded reap deadline and includes its captured output in the failure. A passing run emits
 16 warmup records, 16 readiness records with effective timeout and group membership, 16 fault-entry records,
-and 12 unaffected-EP completion records; no blocked collective may return normally.
+and 12 unaffected-FSDP completion records; no blocked collective may return normally.
 
 The controller injects the legacy `NCCL_BLOCKING_WAIT=1` setting seen in the TaskTrove launch environment before
 starting each node agent. The production worker bootstrap must remove it before importing torch; every readiness
