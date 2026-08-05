@@ -199,7 +199,7 @@ class GrugQueryBiasWindow:
         self,
         model: GrugQueryBiasCaptureModel,
         valid_tokens: int,
-        capture_plan: GrugQueryBiasCapturePlan | None = None,
+        capture_plan: GrugQueryBiasCapturePlan,
     ) -> None:
         config = model.config
         self.model = model
@@ -224,10 +224,9 @@ class GrugQueryBiasWindow:
         """Start capture and return false when this EP shard owns no valid tokens."""
 
         capture_mask = attention_mask
-        if self.capture_plan is not None:
-            if self.capture_plan.valid_token_counts[local_step] == 0:
-                return False
-            capture_mask = self.capture_plan.mask_for(attention_mask, local_step)
+        if self.capture_plan.valid_token_counts[local_step] == 0:
+            return False
+        capture_mask = self.capture_plan.mask_for(attention_mask, local_step)
         self.model.begin_query_bias_capture(self.candidate_count, capture_mask)
         return True
 

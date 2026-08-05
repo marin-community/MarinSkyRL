@@ -61,7 +61,7 @@ def run_experts_for_loop(
     routed_input: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
-    """Run grouped gated MLPs with a dependency-light PyTorch loop."""
+    """Match eager gated-MLP numerics and zero any padded routed rows."""
 
     counts = num_tokens_per_expert.to(torch.int64).tolist()
     routed_rows = sum(counts)

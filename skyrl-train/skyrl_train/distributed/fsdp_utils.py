@@ -17,6 +17,7 @@
 
 import functools
 from collections import OrderedDict
+from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -38,8 +39,6 @@ from torch.distributed.tensor import DTensor, distribute_module, distribute_tens
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
-
-from skyrl_train.models.grug_moe import GrugMoeExperts, validate_grug_expert_parallel_runtime
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -242,6 +241,8 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 
 def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
     """Attach expert-gradient averaging and return module and parameter counts."""
+
+    from skyrl_train.models.grug_moe import GrugMoeExperts
 
     module_count = 0
     parameter_count = 0
@@ -655,8 +656,20 @@ class _ExpertParallelPlan(Protocol):
     _token_combine: Callable[..., object]
 
 
-def _distribute_grug_experts(experts, context: _ExpertParallelContext):
+class _GrugExpertHolder(Protocol):
+    gate_proj: nn.Module
+    up_proj: nn.Module
+    down_proj: nn.Module
+    use_grouped_mm: bool
+    ep_size: int
+
+    def named_parameters(self, recurse: bool = True) -> Iterator[tuple[str, nn.Parameter]]: ...
+
+
+def _distribute_grug_experts(experts: _GrugExpertHolder, context: _ExpertParallelContext):
     """Shard native Grug projections while keeping checkpoint keys unchanged."""
+
+    from skyrl_train.models.grug_moe import validate_grug_expert_parallel_runtime
 
     validate_grug_expert_parallel_runtime(
         use_grouped_mm=experts.use_grouped_mm,
@@ -688,12 +701,12 @@ class _ExpertParallelTarget(Protocol):
 
     def finish(self, context: _ExpertParallelContext) -> None: ...
 
-    def named_parameters(self): ...
+    def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]: ...
 
 
 @dataclass(frozen=True)
 class _GrugExpertParallelTarget:
-    experts: GrugMoeExperts
+    experts: _GrugExpertHolder
 
     def distribute(self, context: _ExpertParallelContext) -> None:
         _distribute_grug_experts(self.experts, context)
@@ -703,7 +716,7 @@ class _GrugExpertParallelTarget:
         # only expert gradients; router and dense gradients remain local replicas.
         self.experts.ep_size = context.mesh.size()
 
-    def named_parameters(self):
+    def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]:
         return self.experts.named_parameters(recurse=True)
 
 
@@ -719,11 +732,13 @@ class _GroupedExpertParallelTarget:
         self.moe.set_ep_comm_backend(context.comm_backend)
         self.moe._ep_enabled = True
 
-    def named_parameters(self):
+    def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]:
         return self.experts.named_parameters(recurse=False)
 
 
 def _expert_parallel_target(module, grouped_experts_type) -> _ExpertParallelTarget | None:
+    from skyrl_train.models.grug_moe import GrugMoeExperts
+
     if isinstance(module, GrugMoeExperts):
         return _GrugExpertParallelTarget(module)
 
@@ -731,9 +746,7 @@ def _expert_parallel_target(module, grouped_experts_type) -> _ExpertParallelTarg
     if moe is None:
         return None
     experts = getattr(moe, "experts", None)
-    if experts is None or not (
-        isinstance(experts, grouped_experts_type) or experts.__class__.__name__ == "GroupedExperts"
-    ):
+    if experts is None or not isinstance(experts, grouped_experts_type):
         return None
     return _GroupedExpertParallelTarget(moe, experts)
 
@@ -835,22 +848,8 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
 
         ep_plan = ExpertParallel()
 
-    # Matcher relaxation (EP=2xFSDP=2 OLMoE grouped-expert load bug): match the
-    # expert holder by `isinstance(experts, GroupedExperts)` AS WELL AS the legacy
-    # `__class__.__name__ == "GroupedExperts"` string check. ALL supported archs
-    # (Qwen3-MoE, Qwen3-Next, OLMoE, Mixtral) build their expert holder as the SAME
-    # `skyrl_train.models.layers.moe.GroupedExperts` (MoE.__init__ -> self.experts =
-    # GroupedExperts(...)); there is NO sibling/subclass holder today. We use the
-    # `isinstance OR name` UNION (not isinstance alone) deliberately so the match is
-    # a STRICT SUPERSET of the prior name-check and cannot regress on either axis:
-    #   * isinstance also catches any FUTURE GroupedExperts subclass (a name-only
-    #     check would silently miss a subclass -> ep-only 1-D leak -> the
-    #     `length(N) exceeds N/fsdp` load crash this fix targets);
-    #   * the name fallback survives module-import duplication (two import paths for
-    #     GroupedExperts would defeat a bare isinstance but keep the name equal).
-    # It never broadens to non-expert modules (only `.moe.experts` that are
-    # GroupedExperts / subclasses match), so it is byte-identical on EP=1 (apply_ep
-    # not called) and on the working Qwen EP x FSDP paths (match already fired).
+    # All supported lifted architectures use this holder type. isinstance also
+    # catches subclasses while keeping the target narrowed for the sharding code.
     from skyrl_train.models.layers.moe import GroupedExperts
 
     ep_mesh = device_mesh["ep"]

@@ -99,7 +99,9 @@ class _FixedQueryBiasAccumulator:
 
 def _window_with_grug_query_bias_accumulator(accumulator):
     causal_lm = _ObservableGrugCausalLM()
-    window = GrugQueryBiasWindow(causal_lm, valid_tokens=1)
+    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
+    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
+    window = GrugQueryBiasWindow(causal_lm, valid_tokens=1, capture_plan=capture_plan)
     window.accumulator = accumulator
     return window, causal_lm
 

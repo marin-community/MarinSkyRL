@@ -82,7 +82,7 @@ def validate_grug_expert_parallel_options(
     use_grouped_mm: bool,
     ep_comm_backend: str,
 ) -> None:
-    """Validate the narrow native Grug trainer-EP surface before model load."""
+    """Reject unsupported execution choices when native Grug EP is enabled."""
 
     if model_type != GRUG_MOE_MODEL_TYPE or expert_model_parallel_size <= 1:
         return
