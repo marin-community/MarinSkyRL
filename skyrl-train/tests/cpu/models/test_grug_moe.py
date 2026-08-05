@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn.functional as F
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -18,6 +17,7 @@ from skyrl_train.models.grug_moe import (
     GrugMoeRouter,
     enable_grug_grouped_mm,
 )
+from skyrl_train.models.layers.moe_routing import run_experts_for_loop
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
     GrugQueryBiasLayerObservation,
@@ -101,14 +101,7 @@ def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(monkeypat
     keys_before = tuple(model.state_dict())
     expected = block(hidden)
 
-    def grouped_contract(gate, down, up, routed_input, counts):
-        outputs = []
-        for expert_idx, expert_input in enumerate(torch.split(routed_input, counts.tolist())):
-            activated = F.silu(F.linear(expert_input, gate[expert_idx])) * F.linear(expert_input, up[expert_idx])
-            outputs.append(F.linear(activated, down[expert_idx]))
-        return torch.cat(outputs)
-
-    monkeypatch.setattr(grug_moe, "_run_grug_grouped_mm", grouped_contract)
+    monkeypatch.setattr(grug_moe, "_run_grug_grouped_mm", run_experts_for_loop)
     assert enable_grug_grouped_mm(model) == 1
 
     output = block(hidden)

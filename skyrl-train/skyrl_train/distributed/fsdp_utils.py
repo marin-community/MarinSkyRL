@@ -20,7 +20,7 @@ from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Protocol, Union
+from typing import Callable, Protocol, Union
 
 import torch
 import torch.distributed as dist
@@ -644,9 +644,15 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
 @dataclass(frozen=True)
 class _ExpertParallelContext:
-    plan: object
+    plan: "_ExpertParallelPlan"
     mesh: DeviceMesh
     comm_backend: str
+
+
+class _ExpertParallelPlan(Protocol):
+    _partition_fn: Callable[..., None]
+    _token_dispatch: Callable[..., object]
+    _token_combine: Callable[..., object]
 
 
 def _distribute_grug_experts(experts, context: _ExpertParallelContext):

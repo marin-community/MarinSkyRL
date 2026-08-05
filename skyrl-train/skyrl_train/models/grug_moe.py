@@ -478,7 +478,7 @@ class GrugMoeRouter(nn.Module):
 
 
 class _GrugExpertExecution(Protocol):
-    """Stable sparse-block interface for eager and grouped expert execution."""
+    """Run sparse experts through either eager or grouped execution."""
 
     def run(
         self,

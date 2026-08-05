@@ -8,7 +8,7 @@ on. Stage 4 re-adds the ``@expert_parallel`` decorator and DeepEP dispatch.
 
 What was lifted / changed vs prime-rl:
   * ``GroupedExperts`` — kept; the ``_forward_deepep`` / ``ep_comm_backend``
-    surface is restored. The for-loop impl ``_run_experts_for_loop`` is the EP=1
+    surface is restored. The for-loop helper ``run_experts_for_loop`` is the EP=1
     PARITY DEFAULT (fp32-capable, matches HF eager exactly). ``torch._grouped_mm``
     is a bf16/SM90-only perf path kept behind ``use_grouped_mm`` (validated
     separately, not the parity oracle). On the torch-EP path the grouped-mm runs
@@ -49,7 +49,11 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
-from skyrl_train.models.layers.moe_routing import TokenReorderer, grouped_expert_contributions
+from skyrl_train.models.layers.moe_routing import (
+    TokenReorderer,
+    grouped_expert_contributions,
+    run_experts_for_loop,
+)
 
 # torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
 # does the DTensor->local convert + generate_permute_indices (cross-rank
@@ -96,34 +100,6 @@ def _log_experts_path(experts, path: str) -> None:
         )
     except Exception:
         pass
-
-
-def _run_experts_for_loop(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w3: torch.Tensor,
-    x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
-) -> torch.Tensor:
-    """EP=1 parity default: per-expert gated-MLP via a Python for-loop.
-
-    fp32-capable; numerically matches HF eager ``down(silu(gate(x)) * up(x))``.
-    """
-    # NOTE: incurs a device/host sync (tolist) — acceptable on the parity path.
-    # histc returns float counts; split/sum need ints.
-    counts = num_tokens_per_expert.to(torch.int64).tolist()
-    num_padding = x.shape[0] - sum(counts)
-
-    x_splits = torch.split(x[: sum(counts)], split_size_or_sections=counts, dim=0)
-    out_experts_splits = []
-    for expert_idx, x_expert in enumerate(x_splits):
-        h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
-        h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
-        h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
-        out_experts_splits.append(h)
-    out = torch.cat(out_experts_splits, dim=0)
-    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-    return out
 
 
 def _run_experts_grouped_mm_impl(
@@ -231,7 +207,7 @@ class GroupedExperts(nn.Module):
             _log_experts_path(self, "grouped_mm_deepep")
             return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
         _log_experts_path(self, "for_loop_deepep")
-        return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+        return run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         # DeepEP backend: dispatch/permute happened upstream in MoE; run local experts.
@@ -254,7 +230,7 @@ class GroupedExperts(nn.Module):
             _log_experts_path(self, "grouped_mm")
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         _log_experts_path(self, "for_loop")
-        return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+        return run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float = 0.02):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)

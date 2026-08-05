@@ -3,7 +3,6 @@ import contextlib
 import logging
 import os
 import socket
-from dataclasses import dataclass
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import tqdm
 from collections import defaultdict
@@ -46,9 +45,9 @@ from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
-    GrugQueryBiasAccumulator,
-    next_query_bias,
-    query_bias_candidate_count,
+    GrugQueryBiasCapturePlan,
+    GrugQueryBiasShardLayout,
+    GrugQueryBiasWindow,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.utils.utils import (
@@ -59,115 +58,6 @@ from skyrl_train.utils.utils import (
 )
 from omegaconf import DictConfig
 from pathlib import Path
-
-
-def _grug_query_bias_virtual_shard_mask(
-    attention_mask: torch.Tensor,
-    *,
-    local_step: int,
-    micro_batch_size: int,
-    accumulation_steps: int,
-    ep_size: int,
-    ep_rank: int,
-) -> torch.Tensor:
-    """Select this EP coordinate's deterministic share of an optimizer window.
-
-    The optimizer-window row count must be divisible by ``ep_size``.
-    """
-
-    if attention_mask.ndim != 2:
-        raise ValueError(f"attention_mask must be 2-D, got shape={tuple(attention_mask.shape)}")
-    if micro_batch_size < 1 or accumulation_steps < 1:
-        raise ValueError(
-            f"micro_batch_size and accumulation_steps must be positive, got {micro_batch_size}, {accumulation_steps}"
-        )
-    if attention_mask.shape[0] != micro_batch_size:
-        raise RuntimeError(
-            "the final policy optimizer window is incomplete: "
-            f"expected microbatch rows={micro_batch_size}, got {attention_mask.shape[0]}"
-        )
-    if ep_size < 1 or not 0 <= ep_rank < ep_size:
-        raise ValueError(f"invalid EP coordinate ep_rank={ep_rank}, ep_size={ep_size}")
-
-    rows_per_window = micro_batch_size * accumulation_steps
-    if rows_per_window % ep_size:
-        raise ValueError(
-            "Grug query-bias virtual shards require "
-            f"micro_batch_size*accumulation_steps={rows_per_window} divisible by ep_size={ep_size}"
-        )
-
-    rows_per_shard = rows_per_window // ep_size
-    shard_start = ep_rank * rows_per_shard
-    shard_end = shard_start + rows_per_shard
-    microbatch_start = (local_step % accumulation_steps) * micro_batch_size
-    row_offsets = torch.arange(micro_batch_size, device=attention_mask.device) + microbatch_start
-    owned_rows = (row_offsets >= shard_start) & (row_offsets < shard_end)
-    return attention_mask.bool() & owned_rows.unsqueeze(1)
-
-
-@dataclass(frozen=True)
-class _GrugQueryBiasCapturePlan:
-    """Virtual EP ownership for every microbatch in one policy batch."""
-
-    valid_token_counts: tuple[int, ...]
-    micro_batch_size: int
-    accumulation_steps: int
-    ep_size: int
-    ep_rank: int
-
-    def mask_for(self, attention_mask: torch.Tensor, local_step: int) -> torch.Tensor:
-        return _grug_query_bias_virtual_shard_mask(
-            attention_mask,
-            local_step=local_step,
-            micro_batch_size=self.micro_batch_size,
-            accumulation_steps=self.accumulation_steps,
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-        )
-
-
-@dataclass(frozen=True)
-class _GrugQueryBiasMicrobatchCapture:
-    causal_lm: GrugMoeForCausalLM
-    accumulator: GrugQueryBiasAccumulator
-
-
-def _build_grug_query_bias_capture_plan(
-    attention_mask: torch.Tensor,
-    *,
-    micro_batch_size: int,
-    accumulation_steps: int,
-    ep_size: int,
-    ep_rank: int,
-) -> _GrugQueryBiasCapturePlan:
-    valid_token_counts = tuple(
-        int(
-            _grug_query_bias_virtual_shard_mask(
-                mask,
-                local_step=local_step,
-                micro_batch_size=micro_batch_size,
-                accumulation_steps=accumulation_steps,
-                ep_size=ep_size,
-                ep_rank=ep_rank,
-            )
-            .sum()
-            .item()
-        )
-        for local_step, mask in enumerate(attention_mask.split(micro_batch_size))
-    )
-    remainder = len(valid_token_counts) % accumulation_steps
-    if remainder:
-        raise RuntimeError(
-            "the final policy optimizer window is incomplete: "
-            f"expected {accumulation_steps} microbatches, got {remainder}"
-        )
-    return _GrugQueryBiasCapturePlan(
-        valid_token_counts=valid_token_counts,
-        micro_batch_size=micro_batch_size,
-        accumulation_steps=accumulation_steps,
-        ep_size=ep_size,
-        ep_rank=ep_rank,
-    )
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -1022,6 +912,7 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
+        self._grug_query_bias_window: GrugQueryBiasWindow | None = None
 
     def _normalize_mini_batch_size(self):
         """
@@ -1040,64 +931,6 @@ class PolicyWorkerBase(Worker):
 
         causal_lm = getattr(self.model, "model", self.model)
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
-
-    def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
-        config = causal_lm.config
-        candidate_count = query_bias_candidate_count(
-            valid_tokens,
-            config.num_experts_per_tok,
-            config.num_local_experts,
-        )
-        self._grug_query_bias_accumulator = GrugQueryBiasAccumulator(
-            candidate_count=candidate_count,
-            num_layers=config.num_hidden_layers,
-            num_experts=config.num_local_experts,
-        )
-        self._grug_query_bias_candidate_count = candidate_count
-
-    def _begin_grug_query_bias_microbatch(
-        self,
-        causal_lm: GrugMoeForCausalLM | None,
-        attention_mask: torch.Tensor,
-        local_step: int,
-        capture_plan: _GrugQueryBiasCapturePlan | None,
-    ) -> _GrugQueryBiasMicrobatchCapture | None:
-        accumulator = getattr(self, "_grug_query_bias_accumulator", None)
-        if causal_lm is None or accumulator is None:
-            return None
-
-        capture_mask = attention_mask
-        if capture_plan is not None:
-            if capture_plan.valid_token_counts[local_step] == 0:
-                return None
-            capture_mask = capture_plan.mask_for(attention_mask, local_step)
-        causal_lm.begin_query_bias_capture(self._grug_query_bias_candidate_count, capture_mask)
-        return _GrugQueryBiasMicrobatchCapture(causal_lm, accumulator)
-
-    def _observe_grug_query_bias_microbatch(
-        self,
-        capture: _GrugQueryBiasMicrobatchCapture | None,
-    ) -> None:
-        if capture is None:
-            return
-        capture.accumulator.observe(
-            capture.causal_lm.take_query_bias_observation(
-                candidate_count=self._grug_query_bias_candidate_count,
-            )
-        )
-
-    def _finish_grug_query_bias_window(self, *, optimizer_step_succeeded: bool) -> None:
-        """Apply one completed Grug bias window, or discard it after a skipped step."""
-
-        accumulator = getattr(self, "_grug_query_bias_accumulator", None)
-        if accumulator is None:
-            return
-        if optimizer_step_succeeded:
-            causal_lm = self._grug_causal_lm()
-            if causal_lm is None:
-                raise RuntimeError("Grug query-bias accumulator exists without a Grug policy model")
-            causal_lm.set_query_bias(next_query_bias(accumulator.finalize_betas()))
-        self._grug_query_bias_accumulator = None
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
@@ -1250,12 +1083,15 @@ class PolicyWorkerBase(Worker):
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
             ep_size = int(getattr(self.strategy, "ep_size", 1))
             ep_rank = int(self.strategy.device_mesh.get_local_rank(mesh_dim="ep")) if ep_size > 1 else 0
-            grug_capture_plan = _build_grug_query_bias_capture_plan(
-                train_data["attention_mask"],
+            shard_layout = GrugQueryBiasShardLayout(
                 micro_batch_size=micro_batch_size,
                 accumulation_steps=accumulation_steps,
                 ep_size=ep_size,
                 ep_rank=ep_rank,
+            )
+            grug_capture_plan = GrugQueryBiasCapturePlan.build(
+                train_data["attention_mask"],
+                shard_layout,
             )
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
@@ -1269,7 +1105,7 @@ class PolicyWorkerBase(Worker):
                     assert grug_capture_plan is not None
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_capture_plan.valid_token_counts[local_step:window_end])
-                    self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
+                    self._grug_query_bias_window = GrugQueryBiasWindow(grug_causal_lm, valid_tokens)
                 diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
                 with _phase_diagnostics.region(
                     diagnostic_mesh,
@@ -1346,7 +1182,7 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
-        grug_capture_plan: _GrugQueryBiasCapturePlan | None = None,
+        grug_capture_plan: GrugQueryBiasCapturePlan | None = None,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
@@ -1369,11 +1205,14 @@ class PolicyWorkerBase(Worker):
         response_span_tags = experience.response_span_tags
 
         grug_causal_lm = self._grug_causal_lm()
-        grug_capture = self._begin_grug_query_bias_microbatch(
-            grug_causal_lm,
-            attention_mask,
-            local_step,
-            grug_capture_plan,
+        grug_query_bias_window = getattr(self, "_grug_query_bias_window", None)
+        grug_capture_started = bool(
+            grug_query_bias_window
+            and grug_query_bias_window.begin_microbatch(
+                attention_mask,
+                local_step,
+                grug_capture_plan,
+            )
         )
 
         # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
@@ -1401,7 +1240,9 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
                 rollout_routed_experts=rollout_routed_experts,
             )
-            self._observe_grug_query_bias_microbatch(grug_capture)
+            if grug_capture_started:
+                assert grug_query_bias_window is not None
+                grug_query_bias_window.observe_microbatch()
             # loss function
             # TODO: recompute advantages
             policy_loss, clip_ratio = self.policy_loss_fn(
@@ -1542,7 +1383,9 @@ class PolicyWorkerBase(Worker):
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
 
-            self._finish_grug_query_bias_window(optimizer_step_succeeded=optimizer_step_succeeded)
+            if grug_query_bias_window is not None:
+                grug_query_bias_window.finish(optimizer_step_succeeded=optimizer_step_succeeded)
+                self._grug_query_bias_window = None
 
             # Now push this step's entropy to the rolling window for next step.
             if stale_clip is not None:
