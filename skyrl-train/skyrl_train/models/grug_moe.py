@@ -349,7 +349,7 @@ def _run_grug_grouped_mm(
     # Torchtitan is an EP-extra dependency. Import it only when this explicitly
     # requested path runs so eager Grug model loading keeps its base dependency
     # surface.
-    from skyrl_train.models.layers.moe import _run_experts_grouped_mm
+    from skyrl_train.models.layers.moe import _run_experts_grouped_mm  # noqa: PLC0415
 
     return _run_experts_grouped_mm(gate, down, up, routed_input, num_tokens_per_expert)
 

@@ -27,13 +27,15 @@ the per-expert HF layout vLLM can load:
 
 VERIFIED MAPPING (w1=gate, w3=up, w2=down; NO per-expert transpose)
 -------------------------------------------------------------------
-Source of truth: ``skyrl_train/models/layers/moe.py``.
+Source of truth: ``skyrl_train/models/layers/moe.py`` and
+``skyrl_train/models/layers/moe_routing.py``.
 
   * ``GroupedExperts`` docstring (the parameter contract):
         w1: (num_experts, hidden_dim, dim)  -- gate_proj
         w3: (num_experts, hidden_dim, dim)  -- up_proj
         w2: (num_experts, dim, hidden_dim)  -- down_proj
-  * ``_run_experts_for_loop`` (the EP=1 PARITY oracle, docstring says it
+  * ``run_experts_for_loop`` in ``moe_routing.py`` (the EP=1 PARITY oracle,
+    whose docstring says it
     "numerically matches HF eager down(silu(gate(x)) * up(x))"):
         h = silu(x @ w1[j].T);  h = h * (x @ w3[j].T);  out = h @ w2[j].T
     i.e. ``x @ w1[j].T`` IS ``nn.Linear(gate_proj)(x)``, so w1[j] already has the

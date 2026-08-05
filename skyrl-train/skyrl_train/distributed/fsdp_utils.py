@@ -680,9 +680,9 @@ def _distribute_grug_experts(experts: _GrugExpertHolder, context: _ExpertParalle
 
     projections = {experts.gate_proj, experts.up_proj, experts.down_proj}
 
-    def partition_grug_projection(_name, submodule, mesh):
+    def partition_grug_projection(name, submodule, mesh):
         if submodule in projections:
-            context.plan._partition_fn(_name, submodule, mesh)
+            context.plan._partition_fn(name, submodule, mesh)
 
     # The hooks must wrap the checkpoint-compatible holder whose grouped forward
     # accepts routed rows and per-expert counts. Moving them to a wrapper would
@@ -751,7 +751,13 @@ def _expert_parallel_target(module, grouped_experts_type) -> _ExpertParallelTarg
     return _GroupedExpertParallelTarget(moe, experts)
 
 
-def _compose_expert_fsdp_shards(target, *, ep_mesh, fsdp_mesh, fsdp_kwargs):
+def _compose_expert_fsdp_shards(
+    target: _ExpertParallelTarget,
+    *,
+    ep_mesh: DeviceMesh,
+    fsdp_mesh: DeviceMesh,
+    fsdp_kwargs: dict[str, object] | None,
+) -> None:
     """Compose FSDP onto EP expert shards and validate the resulting geometry."""
 
     if fsdp_kwargs is None:

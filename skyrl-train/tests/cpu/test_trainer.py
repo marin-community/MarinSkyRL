@@ -152,7 +152,7 @@ def test_grug_query_bias_virtual_shards_partition_optimizer_window():
         capture_plan = GrugQueryBiasCapturePlan.build(attention_mask, shard_layout)
         assert capture_plan.valid_token_counts == ((3, 0), (0, 5))[ep_rank]
         rank_masks.append(
-            torch.cat([capture_plan.mask_for(mask, local_step) for local_step, mask in enumerate(microbatches)])
+            torch.cat([shard_layout.mask_for(mask, local_step) for local_step, mask in enumerate(microbatches)])
         )
 
     torch.testing.assert_close(rank_masks[0].logical_xor(rank_masks[1]), attention_mask.bool())

@@ -124,9 +124,6 @@ class GrugQueryBiasCapturePlan:
             )
         return cls(valid_token_counts, shard_layout)
 
-    def mask_for(self, attention_mask: torch.Tensor, local_step: int) -> torch.Tensor:
-        return self.shard_layout.mask_for(attention_mask, local_step)
-
 
 class GrugQueryBiasAccumulator:
     """Retain exact per-expert top-q candidates across one optimizer window."""
@@ -225,7 +222,7 @@ class GrugQueryBiasWindow:
 
         if self.capture_plan.valid_token_counts[local_step] == 0:
             return False
-        capture_mask = self.capture_plan.mask_for(attention_mask, local_step)
+        capture_mask = self.capture_plan.shard_layout.mask_for(attention_mask, local_step)
         self.model.begin_query_bias_capture(self.candidate_count, capture_mask)
         return True
 
