@@ -99,9 +99,10 @@ process-group timeout is three minutes, so the enclosing cluster job needs a lon
 
 ## Four-node permanent phase divergence
 
-`multi_node_nccl_contract.py` controls the dedicated `multi_node_phase_divergence_worker.py`; together they are
-the destructive counterpart to the healthy traffic test. They use the same 16-rank EP4/FSDP4 placement and
-blocking communicator mode. After every rank completes three EP all-to-all and
+`multi_node_nccl_contract.py` starts `multi_node_worker_bootstrap.py`, which applies the production Ray worker
+setup before loading `multi_node_phase_divergence_worker.py`. Together they are the destructive counterpart to
+the healthy traffic test. They use the same 16-rank EP4/FSDP4 placement and asynchronous watchdog mode. After
+every rank completes three EP all-to-all and
 inter-node FSDP all-gather warmup rounds, rank 0 enters an FSDP all-gather while the other 15 ranks enter EP
 all-to-all. Twelve ranks complete unaffected EP groups and remain alive; rank 0 and its three EP peers wait for
 participants that never arrive. The test passes only if the configured ProcessGroupNCCL deadline converts that

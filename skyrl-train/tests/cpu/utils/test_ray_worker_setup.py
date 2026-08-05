@@ -62,8 +62,6 @@ def test_ray_worker_setup_prepares_process_before_torch_import(blocking_wait_env
     )
 
     assert result.stdout.strip() == "ok"
-    for variable in blocking_wait_environment:
-        assert variable in result.stderr
 
 
 if __name__ == "__main__":
