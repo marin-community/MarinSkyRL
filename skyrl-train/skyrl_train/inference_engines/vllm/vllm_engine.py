@@ -702,9 +702,9 @@ class WorkerWrap:
           * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
           * ``model.layers.{i}.mlp.gate.weight`` (router)       -> ReplicatedLinear (full copy every rank)
           * ``model.layers.{i}.self_attn.o_proj.weight``        -> RowParallelLinear (TP input-sharded)
-          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> FusedMoE w13_weight[local_e, :I]  (EP expert-sharded)
-          * ``...experts.{j}.up_proj.weight``                   -> FusedMoE w13_weight[local_e, I:]
-          * ``...experts.{j}.down_proj.weight``                 -> FusedMoE w2_weight[local_e]
+          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> RoutedExperts w13_weight[local_e, :I]
+          * ``...experts.{j}.up_proj.weight``                   -> RoutedExperts w13_weight[local_e, I:]
+          * ``...experts.{j}.down_proj.weight``                 -> RoutedExperts w2_weight[local_e]
 
         Args:
             hf_names: list of HF parameter names to read back.
@@ -761,11 +761,11 @@ class WorkerWrap:
                 m = expert_re.match(name)
                 if m is not None:
                     prefix, gj, proj = m.group(1), int(m.group(2)), m.group(3)
-                    # vLLM FusedMoE stores w13_weight [n_local_experts, 2*I, H] and
+                    # vLLM RoutedExperts stores w13_weight [n_local_experts, 2*I, H] and
                     # w2_weight [n_local_experts, H, I]. Local experts are a contiguous
                     # EP slice: global expert gj lives on ep_rank == gj // n_local.
-                    w13 = all_params.get(f"{prefix}.experts.w13_weight")
-                    w2 = all_params.get(f"{prefix}.experts.w2_weight")
+                    w13 = all_params.get(f"{prefix}.experts.routed_experts.w13_weight")
+                    w2 = all_params.get(f"{prefix}.experts.routed_experts.w2_weight")
                     if w13 is None or w2 is None:
                         # Fallback: scan for any experts.*weight tensor under this prefix.
                         cand = {
@@ -849,8 +849,8 @@ class WorkerWrap:
 
         out = {"__ranks__": {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}}
         prefix = f"model.layers.{layer_idx}.mlp"
-        w13 = all_params.get(f"{prefix}.experts.w13_weight")
-        w2 = all_params.get(f"{prefix}.experts.w2_weight")
+        w13 = all_params.get(f"{prefix}.experts.routed_experts.w13_weight")
+        w2 = all_params.get(f"{prefix}.experts.routed_experts.w2_weight")
         if w13 is None or w2 is None:
             cand = [k for k in all_params if k.startswith(f"{prefix}.experts.") and k.endswith("weight")]
             out["error"] = f"no w13/w2 under {prefix}; candidates={cand}"
@@ -862,7 +862,8 @@ class WorkerWrap:
         global_num = None
         placement = None
         for mod_name, mod in model.named_modules():
-            if mod_name == f"{prefix}.experts" or mod_name.endswith(f"layers.{layer_idx}.mlp.experts"):
+            routed_experts_name = f"{prefix}.experts.routed_experts"
+            if mod_name == routed_experts_name or mod_name.endswith(routed_experts_name):
                 emap = getattr(mod, "_expert_map", None)
                 if emap is None:
                     emap = getattr(mod, "expert_map", None)
