@@ -24,6 +24,7 @@ import numpy as np
 from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 
@@ -100,8 +101,10 @@ def _worker_with_grug_query_bias_accumulator(accumulator):
     return worker, causal_lm
 
 
-def test_default_config_freezes_grug_query_bias_updates():
-    assert get_default_config().trainer.policy.grug_query_bias_update_mode == "frozen"
+def test_default_config_matches_missing_query_bias_mode():
+    configured_mode = get_default_config().trainer.policy.grug_query_bias_update_mode
+
+    assert resolve_grug_query_bias_update_mode({}).value == configured_mode
 
 
 def test_failed_optimizer_step_discards_grug_query_bias_window():
@@ -115,7 +118,7 @@ def test_failed_optimizer_step_discards_grug_query_bias_window():
     torch.testing.assert_close(causal_lm.query_bias, previous_bias)
 
 
-def test_replace_mode_applies_grug_query_bias_once():
+def test_successful_step_applies_grug_query_bias_once():
     betas = torch.tensor([[1.0, -2.0]])
     accumulator = _FixedQueryBiasAccumulator(betas)
     worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
