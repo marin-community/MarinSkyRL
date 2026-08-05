@@ -73,19 +73,23 @@ def _git_commit(root: Path) -> str:
     ).stdout.strip()
 
 
-def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
-    checkout = tmp_path / "checkout"
-    runtime_package = checkout / "cloud" / "iris"
+def _write_runtime_files(root: Path, marker: str) -> None:
+    runtime_package = root / "cloud" / "iris"
     runtime_package.mkdir(parents=True)
-    (checkout / "pyproject.toml").write_text('[project]\nname = "marinskyrl"\nversion = "0.1.0"\n')
     (runtime_package / "runtime_bundle_files.txt").write_text(
         "cloud/iris/__init__.py\ncloud/iris/task_runtime.py\nchat_templates/delphi_v0.jinja2\n"
     )
     (runtime_package / "__init__.py").write_text("")
-    (runtime_package / "task_runtime.py").write_text('RUNTIME_MARKER = "selected-checkout"\n')
-    chat_templates = checkout / "chat_templates"
+    (runtime_package / "task_runtime.py").write_text(f'RUNTIME_MARKER = "{marker}"\n')
+    chat_templates = root / "chat_templates"
     chat_templates.mkdir()
-    (chat_templates / "delphi_v0.jinja2").write_text("selected checkout template\n")
+    (chat_templates / "delphi_v0.jinja2").write_text(f"{marker.replace('-', ' ')} template\n")
+
+
+def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
+    checkout = tmp_path / "checkout"
+    _write_runtime_files(checkout, "selected-checkout")
+    (checkout / "pyproject.toml").write_text('[project]\nname = "marinskyrl"\nversion = "0.1.0"\n')
     subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.email", "tests@marin.community"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.name", "MarinSkyRL tests"], cwd=checkout, check=True)
@@ -374,6 +378,35 @@ def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(
         "cloud/iris/__init__.py",
         "cloud/iris/task_runtime.py",
     }
+    assert runtime_bundle.validate_bundled_runtime(workspace) == commit
+
+
+def test_runtime_bundle_uses_files_from_installed_vcs_distribution(tmp_path: Path, monkeypatch) -> None:
+    site_packages = tmp_path / "site-packages"
+    _write_runtime_files(site_packages, "installed-vcs-distribution")
+    commit = "1" * 40
+
+    class Distribution:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return json.dumps(
+                {
+                    "url": "https://github.com/marin-community/MarinSkyRL.git",
+                    "vcs_info": {"vcs": "git", "commit_id": commit, "requested_revision": commit},
+                }
+            )
+
+        def locate_file(self, path: str) -> Path:
+            return site_packages / path
+
+    monkeypatch.setattr(runtime_bundle.importlib.metadata, "distribution", lambda name: Distribution())
+    monkeypatch.chdir(tmp_path)
+
+    workspace = runtime_bundle.build_runtime_bundle(commit)
+
+    assert (workspace / "cloud" / "iris" / "task_runtime.py").read_text() == (
+        'RUNTIME_MARKER = "installed-vcs-distribution"\n'
+    )
     assert runtime_bundle.validate_bundled_runtime(workspace) == commit
 
 

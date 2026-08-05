@@ -41,6 +41,7 @@ def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel)
     assert Parser().parsestr(built_wheel.metadata)["Name"] == "marinskyrl"
     assert "marinskyrl = cloud.iris.job:main" in built_wheel.entry_points
     assert "cloud/iris/job.py" in built_wheel.names
+    assert "cloud/iris/runtime_bundle_files.txt" in built_wheel.names
     assert "chat_templates/delphi_v0.jinja2" in built_wheel.names
     assert "skyrl_gym/__init__.py" in built_wheel.names
     assert "skyrl_train/__init__.py" in built_wheel.names
