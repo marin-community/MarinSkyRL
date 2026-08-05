@@ -29,6 +29,7 @@ PAYLOAD_MIB = 1
 WARMUP_MARKER = "MULTI_NODE_COMMUNICATOR_WARMUP_COMPLETED"
 READY_MARKER = "MULTI_NODE_FAULT_READY"
 ACTIVE_MARKER = "MULTI_NODE_FAULT_ACTIVE"
+BLOCKING_WAIT_DISABLED_MARKER = "blocking_wait=None"
 UNAFFECTED_EP_COMPLETION_MARKER = "MULTI_NODE_UNAFFECTED_EP_COMPLETED"
 UNEXPECTED_COMPLETION_MARKER = "MULTI_NODE_FAULT_UNEXPECTED_COMPLETION"
 
@@ -50,11 +51,13 @@ def _run(runtime: MeshRuntime, control_directory: Path) -> None:
     values_per_rank = numel_for_mib(PAYLOAD_MIB, VERIFICATION_DTYPE)
     collectives = _build_and_warm_communicators(runtime, values_per_rank)
     rank = runtime.placement.rank
+    blocking_wait = os.environ.get("NCCL_BLOCKING_WAIT")
+    blocking_wait_record = BLOCKING_WAIT_DISABLED_MARKER if blocking_wait is None else f"blocking_wait={blocking_wait}"
     print(
         f"{READY_MARKER} rank={rank} backend={dist.get_backend()} timeout={PROCESS_GROUP_TIMEOUT_SECONDS} "
         f"ep_ranks={collectives.ep.ranks} fsdp_ranks={collectives.fsdp.ranks} "
         f"async_error_handling={os.environ.get('TORCH_NCCL_ASYNC_ERROR_HANDLING')} "
-        f"blocking_wait={os.environ.get('NCCL_BLOCKING_WAIT')}",
+        f"{blocking_wait_record}",
         flush=True,
     )
     signal_rank_ready_and_wait_for_start(control_directory, rank)
@@ -84,7 +87,3 @@ def main() -> None:
     disable_nccl_communicator_nonblocking(os.environ)
     with multi_node_mesh_runtime(PROCESS_GROUP_TIMEOUT_SECONDS, os.environ) as mesh_runtime:
         _run(mesh_runtime, arguments.control_directory)
-
-
-if __name__ == "__main__":
-    main()

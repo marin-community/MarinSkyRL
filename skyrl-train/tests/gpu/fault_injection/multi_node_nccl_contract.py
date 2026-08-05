@@ -29,6 +29,7 @@ from skyrl_train.utils.nccl_environment import nccl_diagnostics_environment
 from tests.gpu.fault_injection.multi_node_mesh import EXPECTED_NODES, GPUS_PER_NODE, WORLD_SIZE
 from tests.gpu.fault_injection.multi_node_phase_divergence_worker import (
     ACTIVE_MARKER,
+    BLOCKING_WAIT_DISABLED_MARKER,
     PROCESS_GROUP_TIMEOUT_SECONDS,
     UNAFFECTED_EP_COMPLETION_MARKER,
     UNEXPECTED_COMPLETION_MARKER,
@@ -195,7 +196,7 @@ def test_warmed_multinode_phase_divergence_terminates_gang(pytestconfig: pytest.
             run_timeout_seconds=FAULT_TIMEOUT_SECONDS,
         )
 
-        assert result.output.count("blocking_wait=None") == WORLD_SIZE, result.output
+        assert result.output.count(BLOCKING_WAIT_DISABLED_MARKER) == WORLD_SIZE, result.output
         assert result.output.count(ACTIVE_MARKER) == WORLD_SIZE, result.output
         assert result.output.count(UNAFFECTED_EP_COMPLETION_MARKER) == WORLD_SIZE - GPUS_PER_NODE, result.output
         assert UNEXPECTED_COMPLETION_MARKER not in result.output
