@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Callable, Protocol, TypeGuard, Union
+from typing import Callable, Protocol, TypeGuard, Union, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -654,6 +654,7 @@ class _ExpertParallelPlan(Protocol):
     _token_combine: Callable[..., object]
 
 
+@runtime_checkable
 class _GrugExpertHolder(Protocol):
     gate_proj: nn.Module
     up_proj: nn.Module
@@ -669,15 +670,7 @@ class _GrugExpertHolder(Protocol):
 
 
 def _is_grug_expert_holder(module: nn.Module) -> TypeGuard[_GrugExpertHolder]:
-    projections = ("gate_proj", "up_proj", "down_proj")
-    return (
-        all(isinstance(getattr(module, name, None), nn.Module) for name in projections)
-        and isinstance(getattr(module, "use_grouped_mm", None), bool)
-        and isinstance(getattr(module, "ep_size", None), int)
-        and callable(getattr(module, "parameters", None))
-        and callable(getattr(module, "named_parameters", None))
-        and callable(getattr(module, "validate_expert_parallel_runtime", None))
-    )
+    return isinstance(module, _GrugExpertHolder)
 
 
 def _distribute_grug_experts(experts: _GrugExpertHolder, context: _ExpertParallelContext):
