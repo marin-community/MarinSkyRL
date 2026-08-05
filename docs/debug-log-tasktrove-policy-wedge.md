@@ -22,6 +22,56 @@ historical and does not describe an established cause.
 
 ## Investigation entries
 
+### 2026-08-05: inherited blocking wait defeats the ProcessGroupNCCL deadline
+
+Jupiter job 1242876 ran the four-node EP4/FSDP4 permanent-divergence contract against the production GH200
+runtime. The controller injected the TaskTrove worker environment's `NCCL_BLOCKING_WAIT=1` together with
+`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`. All 16 ranks completed three healthy EP/FSDP warmup rounds and reported
+a 60-second process-group timeout. All ranks then entered the deliberate fault: rank 0 entered its inter-node
+FSDP all-gather, the other ranks entered EP all-to-all, and the 12 ranks in unaffected EP groups completed.
+
+The four blocked ranks remained alive until the controller's independent 120-second fault deadline. PyTorch
+emitted neither a collective-timeout detection nor a watchdog abort. The controller killed and reaped the
+Slurm step, and pytest failed after 379.38 seconds including environment startup. This is a deterministic
+reproduction of the liveness-contract failure: an inherited blocking-wait setting turns a permanent subgroup
+non-arrival into a live gang past the configured ProcessGroupNCCL bound.
+
+This experiment does not identify what initiates the first subgroup stall in a natural training run. It
+isolates the separate MarinSkyRL defect that allows such a stall to remain wedged indefinitely. The matching
+green experiment must use the production worker bootstrap, prove that it removes all blocking-wait aliases
+before importing torch, and show the same fault terminating under ProcessGroupNCCL's asynchronous watchdog.
+
+Jupiter job 1243041 ran that matching experiment after the worker-bootstrap fix. All 16 ranks again completed
+the warmup and entered the same fault, but every readiness record reported `blocking_wait=None`. The four
+blocked collectives timed out after 60.07 to 60.10 seconds, all ranks received the diagnostic dump signal, and
+torchrun exited nonzero before the controller deadline. The enclosing pytest passed in 341.41 seconds and the
+batch job completed normally. The red/green pair establishes that clearing inherited blocking-wait state at
+the production worker boundary restores the configured liveness bound for this failure shape.
+
+### 2026-08-05: NUMA is refuted and phase records isolate one FSDP subgroup
+
+The seven jobs in the August 4 fleet all logged strict GPU-local CPU binding before process-group
+initialization and later reproduced the wedge. This refutes NUMA placement as a sufficient fix for this
+failure. It does not invalidate the separate host-memory placement contract added in PR #287.
+
+The diagnostic baseline job 1211183 recorded a coherent final region at global step 7, microbatch 838.
+All 16 ranks entered backward with identical EP, FSDP, and WORLD sequence numbers. Twelve ranks completed
+backward; ranks 1, 5, 9, and 13 did not. Those four ranks share EP coordinate 1 and form one complete
+inter-node FSDP subgroup. The other three FSDP subgroups advanced by 240 EP and 196 FSDP operations and
+exited the step. This observation refutes whole-world schedule divergence for that instance and localizes
+loss of progress to one complete FSDP subgroup. It does not distinguish a subgroup transport stall from a
+later subgroup-local operation.
+
+The no-packing and no-reshard bisect arms also reached a final `backward_enter` on every rank and timed out
+at the eight-hour allocation boundary. They completed one more global step than the paired baseline, which
+is not enough evidence that either option changes the hazard. Neither option prevented the wedge.
+
+Every August 4 worker also inherited `NCCL_BLOCKING_WAIT=1` alongside
+`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`. The next controlled experiment runs the existing four-node permanent
+phase-divergence contract with that exact conflict. The test must first fail by exceeding its independent
+deadline, then pass only after the production worker bootstrap removes the incompatible blocking-wait
+settings before torch is imported.
+
 ### 2026-08-02: replace Python-frame inference with native evidence
 
 The paired `py-spy --native` capture refuted the mask-construction hotspot explanation. Two threads with

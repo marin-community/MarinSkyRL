@@ -15,6 +15,7 @@ import argparse
 import os
 import signal
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,7 @@ from tests.process_gang import (
 )
 
 
-WORKER_MODULE = "tests.gpu.fault_injection.multi_node_phase_divergence_worker"
+WORKER_MODULE = "tests.gpu.fault_injection.multi_node_worker_bootstrap"
 SETUP_TIMEOUT_SECONDS = 300
 FAULT_TIMEOUT_SECONDS = 120
 REAP_TIMEOUT_SECONDS = 30
@@ -71,10 +72,17 @@ def _master_port() -> int:
     return MASTER_PORT_BASE + job_id % MASTER_PORT_SPAN
 
 
+def _master_address(hostname: str) -> str:
+    """Resolve the batch host before entering Jupiter's IPv4-only runtime."""
+
+    return socket.gethostbyname(hostname)
+
+
 def _slurm_step_command(
     control_directory: Path,
     hostnames: tuple[str, ...],
     node_agent_command_prefix: tuple[str, ...],
+    master_address: str,
     master_port: int,
 ) -> tuple[str, ...]:
     """Build the host-side Slurm step that enters the policy runtime on each node."""
@@ -94,7 +102,7 @@ def _slurm_step_command(
         "--control-directory",
         str(control_directory),
         "--master-address",
-        hostnames[0],
+        master_address,
         "--master-port",
         str(master_port),
     )
@@ -127,14 +135,24 @@ def _launch_slurm_step(
     node_agent_command_prefix: tuple[str, ...],
 ) -> Iterator[ProcessGang]:
     environment = os.environ.copy()
-    environment.pop("NCCL_BLOCKING_WAIT", None)
     environment.pop("TORCH_NCCL_BLOCKING_WAIT", None)
+    # Reproduce the legacy Jupiter launch environment. The production Ray
+    # worker bootstrap must remove this alias before importing torch; otherwise
+    # it disables the watchdog path exercised by this fault.
+    environment["NCCL_BLOCKING_WAIT"] = "1"
+    environment["TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS"] = "1800000"
     environment.update(
         nccl_diagnostics_environment(
             heartbeat_timeout_seconds=WATCHDOG_HEARTBEAT_TIMEOUT_SECONDS,
         )
     )
-    command = _slurm_step_command(control_directory, hostnames, node_agent_command_prefix, _master_port())
+    command = _slurm_step_command(
+        control_directory,
+        hostnames,
+        node_agent_command_prefix,
+        _master_address(hostnames[0]),
+        _master_port(),
+    )
     with launch_process_gang(
         command=command,
         working_directory=SKYRL_TRAIN_ROOT,
@@ -175,6 +193,7 @@ def test_warmed_multinode_phase_divergence_terminates_gang(pytestconfig: pytest.
             run_timeout_seconds=FAULT_TIMEOUT_SECONDS,
         )
 
+        assert result.output.count("blocking_wait=None") == WORLD_SIZE, result.output
         assert result.output.count(ACTIVE_MARKER) == WORLD_SIZE, result.output
         assert result.output.count(UNAFFECTED_EP_COMPLETION_MARKER) == WORLD_SIZE - GPUS_PER_NODE, result.output
         assert UNEXPECTED_COMPLETION_MARKER not in result.output

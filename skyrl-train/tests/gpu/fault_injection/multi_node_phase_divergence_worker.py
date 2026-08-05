@@ -53,7 +53,8 @@ def _run(runtime: MeshRuntime, control_directory: Path) -> None:
     print(
         f"{READY_MARKER} rank={rank} backend={dist.get_backend()} timeout={PROCESS_GROUP_TIMEOUT_SECONDS} "
         f"ep_ranks={collectives.ep.ranks} fsdp_ranks={collectives.fsdp.ranks} "
-        f"async_error_handling={os.environ.get('TORCH_NCCL_ASYNC_ERROR_HANDLING')}",
+        f"async_error_handling={os.environ.get('TORCH_NCCL_ASYNC_ERROR_HANDLING')} "
+        f"blocking_wait={os.environ.get('NCCL_BLOCKING_WAIT')}",
         flush=True,
     )
     signal_rank_ready_and_wait_for_start(control_directory, rank)
@@ -76,10 +77,14 @@ def _run(runtime: MeshRuntime, control_directory: Path) -> None:
     signal.pause()
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--control-directory", type=Path, required=True)
     arguments = parser.parse_args()
     disable_nccl_communicator_nonblocking(os.environ)
     with multi_node_mesh_runtime(PROCESS_GROUP_TIMEOUT_SECONDS, os.environ) as mesh_runtime:
         _run(mesh_runtime, arguments.control_directory)
+
+
+if __name__ == "__main__":
+    main()

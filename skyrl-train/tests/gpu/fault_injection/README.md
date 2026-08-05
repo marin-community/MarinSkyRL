@@ -126,6 +126,13 @@ Slurm step under a separate bounded reap deadline and includes its captured outp
 16 warmup records, 16 readiness records with effective timeout and group membership, 16 fault-entry records,
 and 12 unaffected-EP completion records; no blocked collective may return normally.
 
+The controller injects the legacy `NCCL_BLOCKING_WAIT=1` setting seen in the TaskTrove launch environment before
+starting the node agents. The production worker bootstrap must remove it before importing torch; every readiness
+record therefore reports `blocking_wait=None`. This keeps the regression at the actual worker boundary and proves
+that inherited launcher settings cannot switch ProcessGroupNCCL away from MarinSkyRL's asynchronous watchdog.
+The controller also resolves the Slurm batch hostname to IPv4 before torchrun because Jupiter compute nodes do not
+support the IPv6 addresses returned first by the cluster aliases.
+
 Pass the policy-image command through `--node-agent-command-prefix`. The controller prepends it to every remote
 node-agent command and invokes the image's `python`, so all four nodes use the same explicit policy runtime.
 Omitting the prefix fails before launch. The host Python needs this checkout and its test dependencies, but it

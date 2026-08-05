@@ -31,11 +31,13 @@ def test_monitor_heartbeat_is_capped_by_collective_timeout(monkeypatch):
     assert env["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] == "30"
 
 
-def test_inference_engine_does_not_forward_communicator_nonblocking(monkeypatch):
+def test_inference_engine_forwards_only_supported_nccl_diagnostics(monkeypatch):
     for variable in _NCCL_FR_ENV_PASSTHROUGH:
         monkeypatch.delenv(variable, raising=False)
     monkeypatch.setenv("TORCH_NCCL_USE_COMM_NONBLOCKING", "1")
     monkeypatch.setenv("TORCH_NCCL_NONBLOCKING_TIMEOUT", "47")
+    monkeypatch.setenv("NCCL_BLOCKING_WAIT", "1")
+    monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS", "1800000")
     monkeypatch.setenv("TORCH_NCCL_ENABLE_MONITORING", "1")
 
     runtime_env = _build_inference_engine_runtime_env()
