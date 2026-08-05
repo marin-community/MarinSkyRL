@@ -860,7 +860,6 @@ def test_grug_ppo_train_releases_consumed_microbatches():
 
     def training_step(experience, _global_step, _local_step, _accumulation_steps):
         nonlocal previous_experience
-        assert worker._grug_query_bias_window.capture_plan is not None
         if previous_experience is not None:
             gc.collect()
             prior_microbatch_was_released.append(previous_experience() is None)

@@ -368,6 +368,12 @@ class GrugMoeExperts(nn.Module):
         self.ep_size = 1
         self._grouped_mm_logged = False
 
+    def validate_expert_parallel_runtime(self, ep_comm_backend: str) -> None:
+        validate_grug_expert_parallel_runtime(
+            use_grouped_mm=self.use_grouped_mm,
+            ep_comm_backend=ep_comm_backend,
+        )
+
     def forward_eager(
         self,
         hidden_states: torch.Tensor,

@@ -223,7 +223,6 @@ class GrugQueryBiasWindow:
     ) -> bool:
         """Start capture and return false when this EP shard owns no valid tokens."""
 
-        capture_mask = attention_mask
         if self.capture_plan.valid_token_counts[local_step] == 0:
             return False
         capture_mask = self.capture_plan.mask_for(attention_mask, local_step)

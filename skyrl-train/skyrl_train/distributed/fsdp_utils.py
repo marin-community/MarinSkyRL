@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Callable, Protocol, Union
+from typing import Callable, Protocol, TypeGuard, Union
 
 import torch
 import torch.distributed as dist
@@ -242,12 +242,10 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
     """Attach expert-gradient averaging and return module and parameter counts."""
 
-    from skyrl_train.models.grug_moe import GrugMoeExperts
-
     module_count = 0
     parameter_count = 0
     for experts in model.modules():
-        if not isinstance(experts, GrugMoeExperts):
+        if not _is_grug_expert_holder(experts):
             continue
 
         for handle in getattr(experts, "_ep_gradient_scale_handles", ()):
@@ -663,18 +661,21 @@ class _GrugExpertHolder(Protocol):
     use_grouped_mm: bool
     ep_size: int
 
+    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]: ...
+
     def named_parameters(self, recurse: bool = True) -> Iterator[tuple[str, nn.Parameter]]: ...
+
+    def validate_expert_parallel_runtime(self, ep_comm_backend: str) -> None: ...
+
+
+def _is_grug_expert_holder(module: nn.Module) -> TypeGuard[_GrugExpertHolder]:
+    return callable(getattr(module, "validate_expert_parallel_runtime", None))
 
 
 def _distribute_grug_experts(experts: _GrugExpertHolder, context: _ExpertParallelContext):
     """Shard native Grug projections while keeping checkpoint keys unchanged."""
 
-    from skyrl_train.models.grug_moe import validate_grug_expert_parallel_runtime
-
-    validate_grug_expert_parallel_runtime(
-        use_grouped_mm=experts.use_grouped_mm,
-        ep_comm_backend=context.comm_backend,
-    )
+    experts.validate_expert_parallel_runtime(context.comm_backend)
 
     projections = {experts.gate_proj, experts.up_proj, experts.down_proj}
 
@@ -737,9 +738,7 @@ class _GroupedExpertParallelTarget:
 
 
 def _expert_parallel_target(module, grouped_experts_type) -> _ExpertParallelTarget | None:
-    from skyrl_train.models.grug_moe import GrugMoeExperts
-
-    if isinstance(module, GrugMoeExperts):
+    if _is_grug_expert_holder(module):
         return _GrugExpertParallelTarget(module)
 
     moe = getattr(module, "moe", None)
