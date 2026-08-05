@@ -101,10 +101,10 @@ def _worker_with_grug_query_bias_accumulator(accumulator):
     return worker, causal_lm
 
 
-def test_default_config_matches_missing_query_bias_mode():
-    configured_mode = get_default_config().trainer.policy.grug_query_bias_update_mode
+def test_default_config_freezes_grug_query_bias_updates():
+    policy_config = get_default_config().trainer.policy
 
-    assert resolve_grug_query_bias_update_mode({}).value == configured_mode
+    assert resolve_grug_query_bias_update_mode(policy_config).value == "frozen"
 
 
 def test_failed_optimizer_step_discards_grug_query_bias_window():
@@ -609,7 +609,10 @@ def test_ppo_train_batch_calculations():
             "trainer": {
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
-                "policy": {"optimizer_config": {"max_grad_norm": 1.0}},
+                "policy": {
+                    "grug_query_bias_update_mode": "frozen",
+                    "optimizer_config": {"max_grad_norm": 1.0},
+                },
                 "algorithm": {
                     "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
@@ -771,15 +774,15 @@ def test_ppo_train_batch_calculations():
 
 @pytest.mark.parametrize(
     ("update_mode", "expected_query_bias_windows"),
-    [(None, 0), ("replace", 2)],
-    ids=["default-frozen", "replace"],
+    [("frozen", 0), ("replace", 2)],
 )
 def test_grug_ppo_train_query_bias_policy_releases_consumed_microbatches(update_mode, expected_query_bias_windows):
     """The policy gates query-bias windows without retaining consumed Experience objects."""
 
-    policy_config = {"optimizer_config": {"max_grad_norm": 1.0}}
-    if update_mode is not None:
-        policy_config["grug_query_bias_update_mode"] = update_mode
+    policy_config = {
+        "grug_query_bias_update_mode": update_mode,
+        "optimizer_config": {"max_grad_norm": 1.0},
+    }
     cfg = OmegaConf.create(
         {
             "trainer": {

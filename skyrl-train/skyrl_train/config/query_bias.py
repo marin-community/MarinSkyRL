@@ -15,10 +15,10 @@ class GrugQueryBiasUpdateMode(StrEnum):
 
 
 def resolve_grug_query_bias_update_mode(policy_config: Mapping[str, object]) -> GrugQueryBiasUpdateMode:
-    """Resolve the policy mode; a missing field selects frozen behavior."""
+    """Resolve the configured policy mode."""
 
     config_key = "grug_query_bias_update_mode"
-    raw_mode = policy_config.get(config_key, GrugQueryBiasUpdateMode.FROZEN)
+    raw_mode = policy_config[config_key]
     try:
         return GrugQueryBiasUpdateMode(raw_mode)
     except ValueError as error:
