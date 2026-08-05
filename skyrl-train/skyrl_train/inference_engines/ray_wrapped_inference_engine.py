@@ -246,6 +246,7 @@ def create_ray_wrapped_inference_engines(
     max_num_seqs=1024,
     tokenizer=None,
     backend="vllm",
+    vllm_attention_backend: str | None = None,
     sleep_level=2,  # we only set to 1 for unit tests that do not explicitly sync weights or for LoRA
     enable_lora=False,
     max_lora_rank=64,
@@ -562,6 +563,9 @@ def create_ray_wrapped_inference_engines(
                     if decode_context_parallel_size > 1
                     else {}
                 )
+                attention_backend_kwargs = (
+                    {"attention_backend": vllm_attention_backend} if vllm_attention_backend is not None else {}
+                )
 
                 # #232 FIX B: attach runtime_env only when FR vars are present, so
                 # actor creation is byte-identical for every non-#232 run.
@@ -597,6 +601,7 @@ def create_ray_wrapped_inference_engines(
                     **dp_kwargs,
                     **mp_extra_kwargs,
                     **dcp_kwargs,
+                    **attention_backend_kwargs,
                     **vlm_engine_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,

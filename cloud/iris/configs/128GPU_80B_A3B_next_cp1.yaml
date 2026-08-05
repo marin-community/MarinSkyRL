@@ -190,6 +190,7 @@ trainer:
     num_parallel_generation_workers: 128
 
 generator:
+  vllm_attention_backend: FLASH_ATTN
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
@@ -259,7 +260,6 @@ extra_env:
   SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   SKYRL_TIS_SERVED_ID_SPLICE: "1"
-  VLLM_ATTENTION_BACKEND: FLASH_ATTN
   NCCL_DEBUG: WARN
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET
