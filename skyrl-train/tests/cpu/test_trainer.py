@@ -24,7 +24,6 @@ import numpy as np
 from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
-from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 
@@ -99,12 +98,6 @@ def _worker_with_grug_query_bias_accumulator(accumulator):
     worker.model = SimpleNamespace(model=causal_lm)
     worker._grug_query_bias_accumulator = accumulator
     return worker, causal_lm
-
-
-def test_default_config_freezes_grug_query_bias_updates():
-    policy_config = get_default_config().trainer.policy
-
-    assert resolve_grug_query_bias_update_mode(policy_config).value == "frozen"
 
 
 def test_failed_optimizer_step_discards_grug_query_bias_window():
@@ -774,11 +767,16 @@ def test_ppo_train_batch_calculations():
 
 @pytest.mark.parametrize(
     ("update_mode", "expected_query_bias_windows"),
-    [("frozen", 0), ("replace", 2)],
+    [(None, 0), ("replace", 2)],
+    ids=["default", "replace"],
 )
-def test_grug_ppo_train_query_bias_policy_releases_consumed_microbatches(update_mode, expected_query_bias_windows):
+def test_grug_ppo_train_starts_query_bias_windows_without_retaining_microbatches(
+    update_mode, expected_query_bias_windows
+):
     """The policy gates query-bias windows without retaining consumed Experience objects."""
 
+    if update_mode is None:
+        update_mode = get_default_config().trainer.policy.grug_query_bias_update_mode
     policy_config = {
         "grug_query_bias_update_mode": update_mode,
         "optimizer_config": {"max_grad_norm": 1.0},
