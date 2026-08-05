@@ -109,14 +109,14 @@ def _enqueue_fsdp_all_gather(
     return PendingAllGather(work, input_values, output_values)
 
 
-def _wait_for_fsdp_all_gather(context: FaultContext, *, stall_current_stream: bool = False) -> None:
+def _run_fsdp_all_gather_to_completion(context: FaultContext, *, stall_current_stream: bool = False) -> None:
     pending = _enqueue_fsdp_all_gather(context, stall_current_stream=stall_current_stream)
     pending.work.wait()
     torch.cuda.synchronize(context.collectives.fsdp.device)
 
 
 def _hold_after_healthy_fsdp(context: FaultContext) -> None:
-    _wait_for_fsdp_all_gather(context)
+    _run_fsdp_all_gather_to_completion(context)
     _marker(context, UNAFFECTED_FSDP_COMPLETION_MARKER, "fsdp-all-gather")
     signal.pause()
 
@@ -162,7 +162,7 @@ def _run_fault(context: FaultContext) -> None:
         _marker(context, BEFORE_ENQUEUE_MARKER, "fsdp-all-gather")
         signal.pause()
 
-    _wait_for_fsdp_all_gather(
+    _run_fsdp_all_gather_to_completion(
         context,
         stall_current_stream=context.mode is FaultMode.ENQUEUED_CUDA_STALL and context.rank == TARGET_RANK,
     )
