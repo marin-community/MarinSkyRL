@@ -91,7 +91,7 @@ from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TA
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
-from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope
+from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
 from cloud.iris.runtime_environment import (
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
@@ -1865,7 +1865,6 @@ def _build_task_shell(
     args: argparse.Namespace,
     controller_cmd: list[str],
     pythonpath: str,
-    iris_verification: str,
 ) -> list[str]:
     """Wrap the node controller with per-pod storage and cache setup."""
     ctrl = shlex.join(controller_cmd)
@@ -1919,7 +1918,6 @@ def _build_task_shell(
     )
     bash = (
         f"set -e; {spill_preflight}cd {APP_DIR}; "
-        f"{iris_verification}"
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
@@ -2124,7 +2122,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     controller_cmd.extend(train_cmd)
 
     pythonpath = f"{APP_DIR}:{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train"
-    return _build_task_shell(args, controller_cmd, pythonpath, "")
+    return _build_task_shell(args, controller_cmd, pythonpath)
 
 
 def resolved_launch_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2358,19 +2356,12 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     # reverify rollout). Mirror the base IrisLauncher passthrough set
     # so the same creds reach the RL worker.
     #
-    # WANDB routing default: the iris RL configs log to wandb (trainer.logger: wandb;
-    # CoreWeave has egress). SkyRL's wandb.init passes project= but NOT entity=
-    # (MarinSkyRL tracking.py), so without WANDB_ENTITY the run silently lands in the
-    # API key's DEFAULT entity (e.g. nyu-dice-lab), not the team org. Default both to
-    # the OT-Agent team here so every run lands in
-    # dogml/OpenThoughts-Agent; an explicitly-set launch-host WANDB_ENTITY/PROJECT wins.
-    os.environ.setdefault("WANDB_ENTITY", "dogml")
-    os.environ.setdefault("WANDB_PROJECT", "OpenThoughts-Agent")
+    # SkyRL passes trainer.project_name directly to wandb.init but does not pass an
+    # entity. Resolve that missing dimension here: the explicit launch argument wins,
+    # followed by the launch-host value and the Marin team default.
     for k in (
         "HF_TOKEN",
         "WANDB_API_KEY",
-        "WANDB_ENTITY",
-        "WANDB_PROJECT",
         "DAYTONA_API_KEY",
         "DAYTONA_JWT_TOKEN",
         "DAYTONA_ORGANIZATION_ID",
@@ -2384,8 +2375,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
         v = os.environ.get(k)
         if v:
             env_vars[k] = v
-    if args.wandb_entity:
-        env_vars["WANDB_ENTITY"] = args.wandb_entity
+    env_vars.update(wandb_launch_environment(entity=args.wandb_entity))
 
     # Federated controller-ingress pod plumbing (opencode-RL literal capture): the in-pod
     # worker mints the capability token at the PARENT (marin/iris.oa.dev) for the mirrored

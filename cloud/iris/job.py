@@ -25,7 +25,6 @@ from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
     AttemptState,
-    RuntimeIdentity,
     SkyRLJobSpec,
     SkyRLLaunchRequest,
     SkyRLModel,
@@ -41,10 +40,6 @@ class JobBackend(Protocol):
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
 
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome: ...
-
-
-def _validate_runtime(runtime: RuntimeIdentity) -> None:
-    runtime_bundle_inputs(runtime.commit)
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
@@ -127,7 +122,7 @@ def execute_job(
 ) -> SkyRLTerminalResponse:
     """Validate, submit, monitor, and commit one MarinSkyRL artifact attempt."""
     request = spec.request
-    _validate_runtime(request.runtime)
+    runtime_bundle_inputs(request.runtime.commit)
     if _path_exists(request.output.terminal_manifest_uri):
         raise ValueError(f"Terminal manifest is immutable and already exists: {request.output.terminal_manifest_uri}")
 

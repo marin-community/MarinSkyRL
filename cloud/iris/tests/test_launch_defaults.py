@@ -21,6 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris import iris_backend  # noqa: E402
+from cloud.iris.env_vars import grug_gpu_gate_environment, wandb_launch_environment  # noqa: E402
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
     build_debug_launch_env,
@@ -66,6 +67,22 @@ scale_groups:
 """
     )
     return path
+
+
+def test_grug_gpu_gate_environment_preserves_the_ambient_pythonpath():
+    environment = grug_gpu_gate_environment("/workspace/marinskyrl", environ={"PYTHONPATH": "/ambient/python"})
+
+    assert environment == {
+        "PYTHONPATH": "/workspace/marinskyrl/skyrl-gym:/workspace/marinskyrl/skyrl-train:/ambient/python",
+        "VLLM_USE_DEEP_GEMM": "0",
+        "VLLM_USE_V1": "1",
+    }
+
+
+def test_wandb_launch_environment_prefers_explicit_entity():
+    environment = wandb_launch_environment(entity="marin-community", environ={"WANDB_ENTITY": "ambient-entity"})
+
+    assert environment == {"WANDB_ENTITY": "marin-community"}
 
 
 def _node_snapshot(

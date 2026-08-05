@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import sys
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -46,6 +47,10 @@ DEBUG_MODE_ENV = "SKYRL_DEBUG_MODE"
 DEBUG_ARTIFACT_DIR_ENV = "SKYRL_DEBUG_ARTIFACT_DIR"
 FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
+PYTHONPATH_ENV = "PYTHONPATH"
+VLLM_USE_V1_ENV = "VLLM_USE_V1"
+VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
+WANDB_ENTITY_ENV = "WANDB_ENTITY"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -72,6 +77,15 @@ ENV_VAR_SPECS = (
     EnvVarSpec("TORCH_NCCL_TRACE_CPP_STACK", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("TORCH_SHOW_CPP_STACKTRACES", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("TORCH_SYMBOLIZE_MODE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
+    EnvVarSpec(PYTHONPATH_ENV, "ci.marin_nightly.grug", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.DRIVER})),
+    EnvVarSpec(VLLM_USE_V1_ENV, "ci.marin_nightly.grug", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.DRIVER})),
+    EnvVarSpec(
+        VLLM_USE_DEEP_GEMM_ENV,
+        "ci.marin_nightly.grug",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.DRIVER}),
+    ),
+    EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
 )
 
 _SPECS_BY_NAME = {spec.name: spec for spec in ENV_VAR_SPECS}
@@ -228,3 +242,34 @@ def managed_environment_names(scope: EnvVarScope | None = None) -> frozenset[str
     if scope is None:
         return frozenset(_SPECS_BY_NAME)
     return frozenset(spec.name for spec in ENV_VAR_SPECS if scope in spec.scopes)
+
+
+def grug_gpu_gate_environment(repository_root: str, *, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build the environment for the Grug rollout/train/broadcast GPU gate."""
+    ambient = os.environ if environ is None else environ
+    source_paths = f"{repository_root}/skyrl-gym:{repository_root}/skyrl-train"
+    if pythonpath := ambient.get(PYTHONPATH_ENV):
+        source_paths = f"{source_paths}:{pythonpath}"
+    return {
+        PYTHONPATH_ENV: source_paths,
+        VLLM_USE_V1_ENV: "1",
+        VLLM_USE_DEEP_GEMM_ENV: "0",
+    }
+
+
+def wandb_launch_environment(*, entity: str | None, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Resolve the W&B entity with explicit launch configuration taking precedence."""
+    ambient = os.environ if environ is None else environ
+    return {WANDB_ENTITY_ENV: entity or ambient.get(WANDB_ENTITY_ENV, "dogml")}
+
+
+def _main(argv: list[str]) -> None:
+    if len(argv) < 5 or argv[1] != "run-grug-gpu-gate" or argv[3] != "--":
+        raise SystemExit(f"usage: {argv[0]} run-grug-gpu-gate REPOSITORY_ROOT -- COMMAND [ARG ...]")
+    environment = dict(os.environ)
+    environment.update(grug_gpu_gate_environment(argv[2]))
+    os.execvpe(argv[4], argv[4:], environment)
+
+
+if __name__ == "__main__":
+    _main(sys.argv)
