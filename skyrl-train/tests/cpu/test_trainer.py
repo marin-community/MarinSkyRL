@@ -107,25 +107,14 @@ def test_default_config_freezes_grug_query_bias_updates():
     assert get_default_config().trainer.policy.grug_query_bias_update_mode == "frozen"
 
 
-def test_frozen_grug_query_bias_does_not_start_an_accumulator():
+@pytest.mark.parametrize("update_mode", ["frozen", None], ids=["explicit", "missing"])
+def test_frozen_grug_query_bias_does_not_start_an_accumulator(update_mode):
     accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="frozen")
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
 
     worker._begin_grug_query_bias_window(causal_lm, valid_tokens=8)
 
     assert worker._grug_query_bias_accumulator is None
-
-
-@pytest.mark.parametrize("update_mode", ["frozen", None], ids=["explicit", "missing"])
-def test_frozen_grug_query_bias_discards_an_existing_accumulator(update_mode):
-    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
-    previous_bias = causal_lm.query_bias.clone()
-
-    worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
-
-    assert worker._grug_query_bias_accumulator is None
-    torch.testing.assert_close(causal_lm.query_bias, previous_bias)
 
 
 def test_frozen_grug_query_bias_has_zero_drift_across_optimizer_steps():

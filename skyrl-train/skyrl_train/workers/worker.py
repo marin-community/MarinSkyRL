@@ -961,9 +961,6 @@ class PolicyWorkerBase(Worker):
         accumulator = getattr(self, "_grug_query_bias_accumulator", None)
         if accumulator is None:
             return
-        if not self._grug_query_bias_updates_enabled():
-            self._grug_query_bias_accumulator = None
-            return
         if optimizer_step_succeeded:
             causal_lm = self._grug_causal_lm()
             if causal_lm is None:

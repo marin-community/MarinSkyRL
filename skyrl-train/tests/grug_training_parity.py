@@ -24,7 +24,6 @@ ORACLE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "grug_training_oracle"
 
 @dataclass(frozen=True)
 class GrugTrainingOracle:
-    root: Path
     manifest: dict[str, Any]
     observations: dict[str, np.ndarray]
 
@@ -50,7 +49,7 @@ def load_grug_training_oracle() -> GrugTrainingOracle:
     manifest = json.loads((ORACLE_FIXTURE_DIR / "manifest.json").read_text())
     with np.load(ORACLE_FIXTURE_DIR / "observations.npz") as archive:
         observations = {name: archive[name] for name in archive.files}
-    return GrugTrainingOracle(root=ORACLE_FIXTURE_DIR, manifest=manifest, observations=observations)
+    return GrugTrainingOracle(manifest=manifest, observations=observations)
 
 
 def assert_close(label: str, actual: torch.Tensor, expected: np.ndarray, *, gradient: bool = False) -> None:
