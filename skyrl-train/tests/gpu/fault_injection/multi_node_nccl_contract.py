@@ -26,7 +26,7 @@ import pytest
 
 from skyrl_train.nccl_diagnostics import nccl_diagnostics_environment
 from tests.gpu.fault_injection.multi_node_geometry import EXPECTED_NODES, GPUS_PER_NODE, WORLD_SIZE
-from tests.gpu.fault_injection.multi_node_phase_divergence_protocol import (
+from tests.gpu.fault_injection.multi_node_collective_stall_protocol import (
     ACTIVE_MARKER,
     AFTER_ENQUEUE_MARKER,
     BEFORE_ENQUEUE_MARKER,
