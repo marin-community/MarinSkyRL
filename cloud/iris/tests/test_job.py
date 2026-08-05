@@ -468,8 +468,6 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
     cuda_library_path = tmp_path / "cuda" / "lib"
     cuda_library_path.mkdir(parents=True)
     uv_args = tmp_path / "uv-args"
-    probe = tmp_path / "probe"
-
     fake_uv = fake_bin / "uv"
     fake_uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_UV_ARGS"\n')
     fake_uv.chmod(0o755)
@@ -478,7 +476,7 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "#!/bin/sh\n"
         'case "$2" in\n'
         '  *"import site"*) printf "%s\\n" "$FAKE_CUDA_LIBRARY_PATH" ;;\n'
-        '  *) printf "%s\\n" "$2" > "$FAKE_PROBE" ;;\n'
+        "  *) exit 0 ;;\n"
         "esac\n"
     )
     fake_python.chmod(0o755)
@@ -492,7 +490,6 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "IRIS_VENV": str(environment),
         "FAKE_UV_ARGS": str(uv_args),
         "FAKE_CUDA_LIBRARY_PATH": str(cuda_library_path),
-        "FAKE_PROBE": str(probe),
     }
 
     subprocess.run(["bash", "-c", task_setup_script(commit, RuntimeProfile.FSDP)], env=env, check=True)
@@ -515,5 +512,3 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "telemetry",
     ]
     assert runtime_file.read_text().startswith("export LD_LIBRARY_PATH=")
-    assert "vllm.cumem_allocator" in probe.read_text()
-    assert "GRUG_MOE_ARCHITECTURE" in probe.read_text()

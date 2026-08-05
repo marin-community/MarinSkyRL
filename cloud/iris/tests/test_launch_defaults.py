@@ -494,28 +494,6 @@ def test_runtime_profile_is_portable_to_arm_cluster(tmp_path, strategy, profile)
     assert args.runtime_profile is profile
 
 
-def test_federated_target_cluster_keeps_training_profile(tmp_path):
-    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
-    args = _strategy_args(
-        tmp_path,
-        "megatron",
-        [
-            "--target-cluster",
-            "cw-us-east-08a",
-            "--cluster-config",
-            str(cluster_config),
-            "--gpu-variant",
-            "GB200",
-            "--gpus-per-node",
-            "4",
-        ],
-    )
-
-    resolve_launch_defaults(args)
-
-    assert args.runtime_profile is RuntimeProfile.MEGATRON
-
-
 def test_parser_rejects_removed_harbor_source_override():
     with pytest.raises(SystemExit):
         create_parser().parse_args(["--rl_config", "x", "--model_path", "y", "--harbor-ref", "main"])

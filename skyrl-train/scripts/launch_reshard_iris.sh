@@ -13,10 +13,10 @@ readonly RESHARD_SCRIPT="$SCRIPT_DIR/reshard_fsdp2_to_hf.py"
 : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID for the checkpoint object store.}"
 : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY for the checkpoint object store.}"
 
-# No default on purpose. Deployed digests live in cloud/iris/gpu_rl_images.py, and a
-# second copy here could drift from that registry.
-: "${TASK_IMAGE:?Set TASK_IMAGE to an immutable gpu-rl image reference from cloud/iris/gpu_rl_images.py.}"
-: "${RL_PYTHON:?Set RL_PYTHON to GPU_RL_PYTHON from cloud/iris/gpu_rl_images.py.}"
+# This standalone entry point still uses the legacy GPU-RL image. Its migration to
+# the frozen root environment is tracked in marin-community/marin#7920.
+: "${TASK_IMAGE:?Set TASK_IMAGE to an immutable legacy gpu-rl image reference.}"
+: "${RL_PYTHON:=/opt/marin/envs/rl/bin/python}"
 readonly TASK_IMAGE
 readonly RL_PYTHON
 readonly S3_PREFIX="${S3_PREFIX:-s3://marin-us-east-02a/iris/delphi-1e23-wc50m-rl-d1-rlvrmath-32gpu/checkpoints/global_step_101/policy}"

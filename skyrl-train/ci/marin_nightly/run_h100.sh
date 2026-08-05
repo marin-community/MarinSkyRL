@@ -9,7 +9,7 @@
 # model quality, and is not meant to.
 #
 # The scheduled workflow runs in the cluster's standard Iris task image. This script creates the
-# same frozen root environment used by normal image-free launches before exercising the trainer.
+# same frozen root environment used by Iris launches before exercising the trainer.
 # The flags below spell out what examples/gsm8k/run_gsm8k.sh would have passed, sized for one GPU.
 set -euo pipefail
 
@@ -19,9 +19,7 @@ MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
 LOG="${LOG:-$PWD/nightly-run.log}"
 SPEC="${SPEC:-ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json}"
-NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env}"
-RUNTIME_ENV_FILE="$NIGHTLY_RL_ENV/marinskyrl-runtime.sh"
-PYTHON="$NIGHTLY_RL_ENV/bin/python"
+source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" production
 
 # The defaults below are the behavioural shape the shipped gate spec is calibrated against: 30
 # GRPO steps at batch 32 with 8 samples/prompt is enough for reward to visibly climb on a 0.6B
@@ -41,15 +39,6 @@ LR="${LR:-2.0e-6}"
 # data.val_data still has to resolve, so a handful of rows is enough.
 TRAIN_ROWS="${TRAIN_ROWS:-2000}"
 VAL_ROWS="${VAL_ROWS:-16}"
-
-echo "::: resolving the frozen MarinSkyRL runtime"
-bash "$REPOSITORY_ROOT/cloud/iris/bootstrap_runtime.sh" \
-  "$REPOSITORY_ROOT" \
-  "$NIGHTLY_RL_ENV" \
-  "$RUNTIME_ENV_FILE" \
-  fsdp \
-  production
-source "$RUNTIME_ENV_FILE"
 
 cd "$REPOSITORY_ROOT/skyrl-train"
 
