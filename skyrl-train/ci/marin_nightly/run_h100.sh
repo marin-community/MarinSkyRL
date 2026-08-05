@@ -42,11 +42,13 @@ VAL_ROWS="${VAL_ROWS:-16}"
 
 cd "$REPOSITORY_ROOT/skyrl-train"
 
-# Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling
-# environment package before setting the source paths.
+# The nightly exercises checked-out trainer and environment source ahead of the image's baked
+# fallback. Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling
+# environment package before setting the source paths. The trainer also imports shared launcher
+# modules from cloud/, which remains at the checkout root.
 rm -rf skyrl-gym
 cp -R ../skyrl-gym skyrl-gym
-export PYTHONPATH="$PWD/skyrl-gym:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PWD/skyrl-gym:$PWD:$REPOSITORY_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "::: GPU and driver"
 nvidia-smi --query-gpu=name,driver_version --format=csv

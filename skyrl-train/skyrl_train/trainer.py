@@ -1225,7 +1225,7 @@ class RayPPOTrainer:
 
         # only use `generator_output_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
-        mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
+        mean_reward, pass_at_n = get_metrics_from_generator_output(
             generator_output_for_metrics,
             uids_for_metrics,
         )
@@ -1267,13 +1267,13 @@ class RayPPOTrainer:
 
         reward_metrics = {
             f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
-            "reward/avg_raw_reward": mean_raw_reward,
+            "reward/avg_raw_reward": mean_reward,
         }
         self.all_metrics.update(reward_metrics)
         effective_samples = self.all_metrics.get("async/effective_batch_samples", "N/A")
         logger.info(
             f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, "
-            f"reward/avg_raw_reward: {mean_raw_reward} "
+            f"reward/avg_raw_reward: {mean_reward} "
             f"(effective_batch={effective_samples} samples)"
         )
 

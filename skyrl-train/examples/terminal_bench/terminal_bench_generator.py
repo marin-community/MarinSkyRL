@@ -205,6 +205,9 @@ class TerminalBenchAgentOutput:
     loss_mask: List[int]
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
+    # Verifier outcome before optimization-specific reward shaping. This is the
+    # stable success signal for pass@k; failed/invalidated trajectories keep zero.
+    unshaped_reward: float = 0.0
     summarization_count: Optional[int] = None
     rollout_logprobs: Optional[List[float]] = None
     # MoE router-replay (Stage 1 capture rail): per-token [L, K] expert-selection
@@ -229,6 +232,23 @@ class TerminalBenchAgentOutput:
     # True when the truncation penalty was applied (stop_reason=="length" +
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
+
+
+def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
+    """Replace an invalidated trajectory with an aligned zero-reward stub."""
+    output.response_ids = [0]
+    output.stop_reason = "error"
+    output.loss_mask = [0]
+    output.prompt_ids = [0]
+    output.reward = 0
+    output.unshaped_reward = 0
+    output.rollout_logprobs = None
+    output.rollout_routed_experts = None
+    output.token_level_shaping = None
+    output.response_span_tags = None
+    output.reward_components = None
+    output.alignment_stats = None
+    output.truncation_penalized = False
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -1038,25 +1058,14 @@ class TerminalBenchGenerator(GeneratorInterface):
             for output in all_outputs:
                 if output.stop_reason == "error":
                     # Error outputs already have correct exclude_from_baseline set
-                    output.response_ids = [0]
-                    output.loss_mask = [0]
-                    output.prompt_ids = [0]
-                    output.reward = 0
-                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
-                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
+                    _clear_failed_trajectory(output)
                 else:
                     successful_outputs.append(output)
         else:
             # Legacy mode: if any trajectory fails, zero entire group
             for output in all_outputs:
                 if output.trajectory_id.instance_id in failed_instance_ids:
-                    output.response_ids = [0]
-                    output.stop_reason = "error"
-                    output.loss_mask = [0]
-                    output.prompt_ids = [0]
-                    output.reward = 0
-                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
-                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
+                    _clear_failed_trajectory(output)
                     output.exclude_from_baseline = False  # Legacy: include in baseline
                 else:
                     successful_outputs.append(output)
@@ -1308,6 +1317,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
             "response_ids": [output.response_ids for output in all_outputs],
             "rewards": [output.reward for output in all_outputs],
+            "unshaped_rewards": [output.unshaped_reward for output in all_outputs],
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
@@ -2029,6 +2039,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
+            unshaped_reward=original_reward,
             rollout_logprobs=rollout_logprobs,
             rollout_routed_experts=rollout_routed_experts,
             summarization_count=summarization_count,

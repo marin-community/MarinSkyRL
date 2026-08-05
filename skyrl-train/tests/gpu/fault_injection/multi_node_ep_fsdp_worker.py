@@ -25,15 +25,14 @@ from tests.gpu.fault_injection.collective_payloads import (
     run_verified_all_gather,
     run_verified_all_to_all,
 )
-from tests.gpu.fault_injection.multi_node_mesh import (
+from tests.gpu.fault_injection.multi_node_geometry import (
     EP_SIZE,
     EXPECTED_NODES,
     FSDP_SIZE,
     GPUS_PER_NODE,
     WORLD_SIZE,
-    MeshRuntime,
-    multi_node_mesh_runtime,
 )
+from tests.gpu.fault_injection.multi_node_mesh import MeshRuntime, multi_node_mesh_runtime
 from tests.nccl_environment import disable_nccl_communicator_nonblocking
 
 

@@ -33,6 +33,9 @@ Do not treat a compact collective smoke test as evidence for a production topolo
 the GPU type, world size, EP/FSDP dimensions, dependency image or lock revision, command, branch commit, and
 complete pass/fail result for on-demand distributed runs.
 
+The two-run debug artifact acceptance contract and its Jupiter command are documented in
+[`docs/distributed-debug-mode.md`](docs/distributed-debug-mode.md#jupiter-acceptance-test).
+
 ## Before a PR
 
 Run `uv run infra/pre-commit.py --changed-files --fix`, commit the clean diff, then run

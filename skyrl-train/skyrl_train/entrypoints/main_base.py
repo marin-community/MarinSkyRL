@@ -32,6 +32,8 @@ from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
+from skyrl_train.distributed_debug import apply_distributed_debug_mode
+from skyrl_train.env_vars import write_process_manifest
 import asyncio
 import multiprocessing as mp
 
@@ -531,6 +533,11 @@ def skyrl_entrypoint(cfg: DictConfig):
 def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
+
+    debug_environment = apply_distributed_debug_mode(cfg)
+    if debug_environment:
+        manifest = write_process_manifest("driver", environment=debug_environment)
+        logger.info(f"Distributed debug mode active; driver manifest: {manifest}")
 
     # Set FP8 fuse_weights env vars from config (must happen before Ray init
     # so all workers inherit them).

@@ -97,15 +97,22 @@ Run from `skyrl-train/` in the same image and environment used by policy workers
 rank prints `MULTI_NODE_EP_FSDP_TRAFFIC_OK` and every torchrun agent exits zero. A hang is a failure; the
 process-group timeout is three minutes, so the enclosing cluster job needs a longer independent deadline.
 
-## Four-node permanent phase divergence
+## Four-node collective-stall discriminators
 
-`multi_node_nccl_contract.py` controls the dedicated `multi_node_phase_divergence_worker.py`; together they are
-the destructive counterpart to the healthy traffic test. They use the same 16-rank EP4/FSDP4 placement and
-blocking communicator mode. After every rank completes three EP all-to-all and
-inter-node FSDP all-gather warmup rounds, rank 0 enters an FSDP all-gather while the other 15 ranks enter EP
-all-to-all. Twelve ranks complete unaffected EP groups and remain alive; rank 0 and its three EP peers wait for
-participants that never arrive. The test passes only if the configured ProcessGroupNCCL deadline converts that
-permanent phase divergence into a nonzero gang exit.
+`multi_node_nccl_contract.py` starts `multi_node_worker_bootstrap.py`, which applies the production Ray worker
+setup before loading `multi_node_collective_stall_worker.py`. Together they are the destructive counterpart to
+the healthy traffic test. They use the same 16-rank EP4/FSDP4 placement and asynchronous watchdog mode. Each
+fresh gang completes three EP all-to-all and inter-node FSDP all-gather warmup rounds before injecting one
+mechanism:
+
+- every rank in one FSDP subgroup receives a `WorkNCCL`, but rank 1's NCCL stream remains behind long-running
+  CUDA work;
+- rank 1 stops before it enqueues its subgroup's next FSDP all-gather;
+- rank 1's autograd hook enqueues an EP all-to-all while its FSDP peers enqueue FSDP all-gather.
+
+Machine-readable records on both sides of each asynchronous call distinguish work scheduled on the CPU from a
+rank that never made the call. In every case the other three FSDP subgroups complete and remain alive, so a
+blocked collective—not an early peer exit—must cause the nonzero gang exit.
 
 Run the pytest controller on the Slurm host directly from the batch process of an otherwise idle allocation
 containing exactly four four-GPU nodes. Do not put the controller inside Apptainer and do not wrap pytest in
@@ -124,7 +131,14 @@ for rendezvous, mesh construction, and healthy warmup. It starts a separate
 two-minute fault deadline only after all 16 ranks report ready. Either deadline kills and reaps the disposable
 Slurm step under a separate bounded reap deadline and includes its captured output in the failure. A passing run emits
 16 warmup records, 16 readiness records with effective timeout and group membership, 16 fault-entry records,
-and 12 unaffected-EP completion records; no blocked collective may return normally.
+and 12 unaffected-FSDP completion records; no blocked collective may return normally.
+
+The controller injects the legacy `NCCL_BLOCKING_WAIT=1` setting seen in the TaskTrove launch environment before
+starting each node agent. The production worker bootstrap must remove it before importing torch; every readiness
+record therefore reports `blocking_wait=None`. This keeps the regression at the actual worker boundary and proves
+that inherited launcher settings cannot switch ProcessGroupNCCL away from MarinSkyRL's asynchronous watchdog.
+The controller also resolves the Slurm batch hostname to IPv4 before torchrun because Jupiter compute nodes do not
+support the IPv6 addresses returned first by the cluster aliases.
 
 Pass the policy-image command through `--node-agent-command-prefix`. The controller prepends it to every remote
 node-agent command and invokes the image's `python`, so all four nodes use the same explicit policy runtime.
@@ -132,3 +146,11 @@ Omitting the prefix fails before launch. The host Python needs this checkout and
 is not the runtime under test. See
 `.agents/ops/jupiter/` for the current Jupiter policy-runtime command and GPFS-safe launch procedure.
 The `--confcutdir` boundary also prevents unrelated GPU fixtures from becoming host-controller dependencies.
+
+## Distributed debug artifact contract
+
+`distributed_debug_artifact_contract.py` is the smaller two-node acceptance gate for the managed debug preset.
+It runs one successful cross-node NCCL collective and one deterministic rank-nonarrival failure after a
+successful communicator warmup, serially, and checks terminal state plus the complete durable artifact inventory. See
+[`docs/distributed-debug-mode.md`](../../../../docs/distributed-debug-mode.md#jupiter-acceptance-test) for the
+launch command and expected artifact layout.

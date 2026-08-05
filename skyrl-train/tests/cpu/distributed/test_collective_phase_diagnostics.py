@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -133,3 +134,23 @@ def test_enabled_capture_failure_propagates(monkeypatch):
     ):
         with pytest.raises(RuntimeError, match="coordinate lost"):
             collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
+
+
+def test_debug_mode_persists_each_phase_record(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", "1")
+    monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
+    mesh = FakeDeviceMesh(FakeProcessGroup(2), FakeProcessGroup(3))
+    monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: FakeProcessGroup(1))
+
+    with collective_phase_diagnostics.region(
+        mesh,
+        kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+        rank=3,
+    ):
+        collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
+
+    files = list((tmp_path / "collective_phases").glob("*.jsonl"))
+    assert len(files) == 1
+    record = json.loads(files[0].read_text())
+    assert record["rank"] == 3
+    assert record["phase"] == "backward_enter"

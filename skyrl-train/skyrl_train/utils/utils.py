@@ -18,6 +18,7 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.env_vars import EnvVarManager, EnvVarScope
 
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
@@ -1030,7 +1031,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     Returns:
         Dict[str, str]: Environment variables to be used in Ray runtime environment
     """
-    # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
     # Force CPython stock asyncio (epoll SelectorEventLoop), NOT uvloop, in EVERY
@@ -1087,6 +1087,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # boot in case import ordering races the runtime-env injection.
     env_vars["UV_USE_IO_URING"] = "0"
 
+    env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
+    # Resolve the actual collective deadline last so the debug preset's heartbeat
+    # cannot exceed a shorter explicitly configured process-group timeout.
     env_vars.update(worker_nccl_environment())
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445

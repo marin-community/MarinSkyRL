@@ -1,6 +1,7 @@
 # Paths are relative to the MarinSkyRL checkout and are copied into each Iris task workspace.
 cloud/iris/__init__.py
 cloud/iris/artifacts.py
+cloud/iris/env_vars.py
 cloud/iris/hf_datasets.py
 cloud/iris/ingress_utils.py
 cloud/iris/literal_proxy_utils.py

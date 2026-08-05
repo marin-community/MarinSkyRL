@@ -1,5 +1,6 @@
 import os
 
+
 #
 SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180))
 """
@@ -15,7 +16,6 @@ Timeout for allocating the placement group for different actors in SkyRL
 # override (env > default); set it lower for a quick test.
 DEFAULT_WORKER_NCCL_TIMEOUT_IN_S = 1800
 DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT = 300
-DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20000
 
 
 def get_worker_nccl_timeout_s() -> int:

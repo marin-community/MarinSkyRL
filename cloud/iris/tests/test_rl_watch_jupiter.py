@@ -11,6 +11,7 @@ from scripts.iris.jupiter_rl_artifacts import (
     JupiterArtifactSyncResult,
     JupiterJobStatus,
     JupiterRunSpec,
+    _remote_exists,
     parse_jupiter_run_spec,
     query_jupiter_job_status,
     sync_jupiter_artifacts,
@@ -57,6 +58,20 @@ def test_status_row_surfaces_tis_alignment_and_token_probability_shift(tmp_path:
 def test_jupiter_run_spec_rejects_ambiguous_or_unsafe_paths(value: str) -> None:
     with pytest.raises(ValueError):
         parse_jupiter_run_spec(value)
+
+
+def test_jupiter_remote_path_check_uses_bash_compatible_test_syntax(tmp_path: Path) -> None:
+    remote_directory = tmp_path / "artifact directory"
+    remote_directory.mkdir()
+    remote_file = remote_directory / "finelog.out"
+    remote_file.touch()
+
+    def run_remote_command(arguments: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", "-c", arguments[-1]], **options)
+
+    assert _remote_exists(run_remote_command, "Jupiter", str(remote_directory), directory=True)
+    assert _remote_exists(run_remote_command, "Jupiter", str(remote_file), directory=False)
+    assert not _remote_exists(run_remote_command, "Jupiter", str(remote_directory / "missing"), directory=True)
 
 
 def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) -> None:

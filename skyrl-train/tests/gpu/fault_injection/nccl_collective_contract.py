@@ -26,7 +26,7 @@ import torch.distributed as dist
 
 from skyrl_train.distributed.fsdp_utils import create_device_mesh
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
-from skyrl_train.utils.nccl_environment import nccl_diagnostics_environment
+from skyrl_train.nccl_diagnostics import nccl_diagnostics_environment
 from tests.gpu.fault_injection.collective_payloads import (
     MeshCollectives,
     run_verified_all_gather,

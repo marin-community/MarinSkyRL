@@ -34,6 +34,10 @@ class GeneratorOutput(TypedDict):
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
     rewards: Union[List[float], List[List[float]]]
+    # Outcome rewards before optimization-specific shaping. Metrics such as
+    # pass@k use this channel so changing a shaper cannot change task success.
+    # Generators without a distinct shaping stage may omit it.
+    unshaped_rewards: Optional[List[float]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
