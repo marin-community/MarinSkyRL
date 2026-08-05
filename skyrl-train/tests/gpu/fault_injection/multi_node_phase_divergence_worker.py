@@ -19,9 +19,10 @@ from tests.gpu.fault_injection.collective_payloads import (
     warm_ep_and_fsdp_communicators,
 )
 from tests.gpu.fault_injection.multi_node_mesh import MeshRuntime, multi_node_mesh_runtime
-from tests.gpu.fault_injection.multi_node_phase_divergence_contract import (
+from tests.gpu.fault_injection.multi_node_phase_divergence_markers import (
     ACTIVE_MARKER,
     BLOCKING_WAIT_DISABLED_MARKER,
+    BLOCKING_WAIT_FIELD,
     PROCESS_GROUP_TIMEOUT_SECONDS,
     READY_MARKER,
     UNAFFECTED_EP_COMPLETION_MARKER,
@@ -54,7 +55,9 @@ def _run(runtime: MeshRuntime, control_directory: Path) -> None:
     collectives = _build_and_warm_communicators(runtime, values_per_rank)
     rank = runtime.placement.rank
     blocking_wait = os.environ.get("NCCL_BLOCKING_WAIT")
-    blocking_wait_record = BLOCKING_WAIT_DISABLED_MARKER if blocking_wait is None else f"blocking_wait={blocking_wait}"
+    blocking_wait_record = (
+        BLOCKING_WAIT_DISABLED_MARKER if blocking_wait is None else f"{BLOCKING_WAIT_FIELD}={blocking_wait}"
+    )
     print(
         f"{READY_MARKER} rank={rank} backend={dist.get_backend()} timeout={PROCESS_GROUP_TIMEOUT_SECONDS} "
         f"ep_ranks={collectives.ep.ranks} fsdp_ranks={collectives.fsdp.ranks} "

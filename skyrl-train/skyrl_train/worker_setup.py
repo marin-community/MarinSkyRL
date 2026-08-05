@@ -26,8 +26,9 @@ def configure_worker_process() -> None:
     """Install process-wide prerequisites before Ray creates actor threads."""
 
     # MarinSkyRL uses ProcessGroupNCCL's asynchronous watchdog. Blocking wait
-    # selects an incompatible wait path, and the timeout-like variable is not a
-    # PyTorch setting. Clear inherited launcher state before torch reads it.
+    # selects an incompatible wait path. The timeout-like variable is not a
+    # PyTorch setting, but removing it makes the warning below expose that
+    # invalid configuration instead of leaving a false deadline in the worker.
     removed_nccl_settings = [
         variable for variable in INCOMPATIBLE_NCCL_ENVIRONMENT if os.environ.pop(variable, None) is not None
     ]
