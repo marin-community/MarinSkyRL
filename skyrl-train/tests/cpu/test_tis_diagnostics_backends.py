@@ -108,6 +108,7 @@ def _fsdp_training_step_status(use_tis: bool, monkeypatch) -> dict:
     worker.optimizer = None
     worker.scheduler = _FakeScheduler()
     worker.record_memory = False
+    worker._grug_query_bias_window = None
 
     experience = Experience(
         sequences=torch.randint(0, 100, (BATCH_SIZE, SEQ_LEN)),
