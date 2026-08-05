@@ -669,7 +669,15 @@ class _GrugExpertHolder(Protocol):
 
 
 def _is_grug_expert_holder(module: nn.Module) -> TypeGuard[_GrugExpertHolder]:
-    return callable(getattr(module, "validate_expert_parallel_runtime", None))
+    projections = ("gate_proj", "up_proj", "down_proj")
+    return (
+        all(isinstance(getattr(module, name, None), nn.Module) for name in projections)
+        and isinstance(getattr(module, "use_grouped_mm", None), bool)
+        and isinstance(getattr(module, "ep_size", None), int)
+        and callable(getattr(module, "parameters", None))
+        and callable(getattr(module, "named_parameters", None))
+        and callable(getattr(module, "validate_expert_parallel_runtime", None))
+    )
 
 
 def _distribute_grug_experts(experts: _GrugExpertHolder, context: _ExpertParallelContext):

@@ -18,7 +18,6 @@ _SUPPORTED_OPTIONS = {
     "context_parallel_size": 1,
     "moe_router_replay": False,
     "moe_grouped_gemm": False,
-    "use_grouped_mm": False,
     "use_liger_kernel": False,
 }
 
@@ -47,10 +46,6 @@ def test_grug_training_options_reject_each_unsupported_feature(option, value, la
 @pytest.mark.parametrize("attn_implementation", ["eager", "flash_attention_2"])
 def test_grug_training_options_accept_supported_attention(attn_implementation):
     validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "attn_implementation": attn_implementation})
-
-
-def test_grug_training_options_accept_native_grouped_mm():
-    validate_grug_training_options(**{**_SUPPORTED_OPTIONS, "use_grouped_mm": True})
 
 
 def test_grug_training_options_ignore_other_models():

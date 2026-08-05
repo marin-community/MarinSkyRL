@@ -99,7 +99,6 @@ def validate_grug_training_options(
     context_parallel_size: int,
     moe_router_replay: bool,
     moe_grouped_gemm: bool,
-    use_grouped_mm: bool,
     use_liger_kernel: bool,
 ) -> None:
     """Validate the deliberately narrow supported Grug training surface."""
@@ -437,7 +436,6 @@ class HFModelWrapper(nn.Module):
                 context_parallel_size=context_parallel_size,
                 moe_router_replay=moe_router_replay,
                 moe_grouped_gemm=moe_grouped_gemm,
-                use_grouped_mm=use_grouped_mm,
                 use_liger_kernel=use_liger_kernel,
             )
 

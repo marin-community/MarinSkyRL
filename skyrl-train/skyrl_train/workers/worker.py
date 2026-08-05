@@ -1207,7 +1207,7 @@ class PolicyWorkerBase(Worker):
         response_span_tags = experience.response_span_tags
 
         grug_causal_lm = self._grug_causal_lm()
-        grug_query_bias_window = getattr(self, "_grug_query_bias_window", None)
+        grug_query_bias_window = self._grug_query_bias_window
         grug_capture_started = bool(
             grug_query_bias_window
             and grug_query_bias_window.begin_microbatch(
