@@ -1,0 +1,7 @@
+🤖 `fbb1fc8` remains off this PR. #276 is still exactly at `0c213586b5491b8046ca7780e965c4b26dc6a2a2`; no product change from this evidence pass was pushed to its branch.
+
+The bounded local result is mixed: the candidate passed its fixed-route FP32-combine output and gradient contract, but the real-shape paired measurement found it slower on every one of eight H100s. Full fixed-route block forward + backward increased by a paired median `0.537424` ms (`1.038439x`; per-GPU delta range `+0.498303` to `+0.545664` ms). The complete affected combine boundary increased by `0.531640` ms (`1.340920x`) and `251,592,704` incremental peak allocated bytes (`1.461307x`). The full-block peak was unchanged because another part of that boundary set the peak.
+
+This does not change the failed 32-H100 action-output gate. Its latest instrumented run still failed `1 / 12,288` sampled action log probabilities, and the bounded causal probe did not localize a correction. Detailed numerics, protocol, limits, and the packet are in [Marin #7903](https://github.com/marin-community/marin/issues/7903) and the [immutable evidence report](https://github.com/marin-community/MarinSkyRL/blob/40d365d661f3acc411a78b8801000a4eae964512/evidence/grug_fp32_combine_paired_20260805/REPORT.md).
+
+Separately, GitHub currently reports this PR `CONFLICTING` / `DIRTY` against `main`; its exact-head checks remain green. This evidence-only pass did not touch that conflict.
