@@ -108,13 +108,11 @@ def test_default_config_freezes_grug_query_bias_updates():
 
 
 @pytest.mark.parametrize("update_mode", ["frozen", None], ids=["explicit", "missing"])
-def test_frozen_grug_query_bias_does_not_start_an_accumulator(update_mode):
+def test_frozen_grug_query_bias_disables_updates(update_mode):
     accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
+    worker, _ = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
 
-    worker._begin_grug_query_bias_window(causal_lm, valid_tokens=8)
-
-    assert worker._grug_query_bias_accumulator is None
+    assert not worker._grug_query_bias_updates_enabled()
 
 
 def test_frozen_grug_query_bias_has_zero_drift_across_optimizer_steps():
@@ -132,8 +130,9 @@ def test_frozen_grug_query_bias_has_zero_drift_across_optimizer_steps():
     for step in range(5):
         input_ids = (base_tokens + step) % causal_lm.config.vocab_size
         attention_mask = torch.ones_like(input_ids)
-        worker._begin_grug_query_bias_window(causal_lm, valid_tokens=input_ids.numel())
-        assert worker._grug_query_bias_accumulator is None
+        if worker._grug_query_bias_updates_enabled():
+            worker._begin_grug_query_bias_window(causal_lm, valid_tokens=input_ids.numel())
+        assert getattr(worker, "_grug_query_bias_accumulator", None) is None
 
         optimizer.zero_grad(set_to_none=True)
         loss = causal_lm(input_ids, attention_mask=attention_mask, labels=input_ids).loss

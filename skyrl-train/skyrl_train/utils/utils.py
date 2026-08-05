@@ -19,7 +19,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope
-from skyrl_train.models.grug_query_bias import GrugQueryBiasUpdateMode
+from skyrl_train.models.grug_query_bias import resolve_grug_query_bias_update_mode
 
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
@@ -506,12 +506,10 @@ def validate_cfg(cfg: DictConfig):
         f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
     )
 
-    valid_grug_query_bias_update_modes = tuple(mode.value for mode in GrugQueryBiasUpdateMode)
-    grug_query_bias_update_mode = cfg.trainer.policy.get("grug_query_bias_update_mode", GrugQueryBiasUpdateMode.FROZEN)
-    assert grug_query_bias_update_mode in valid_grug_query_bias_update_modes, (
-        f"invalid grug_query_bias_update_mode: {grug_query_bias_update_mode}. "
-        f"Must be one of {valid_grug_query_bias_update_modes}"
-    )
+    try:
+        resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+    except ValueError as error:
+        raise AssertionError(str(error)) from error
 
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":

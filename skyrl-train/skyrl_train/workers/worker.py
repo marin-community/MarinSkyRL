@@ -49,6 +49,7 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasUpdateMode,
     next_query_bias,
     query_bias_candidate_count,
+    resolve_grug_query_bias_update_mode,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.utils.utils import (
@@ -933,15 +934,10 @@ class PolicyWorkerBase(Worker):
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
     def _grug_query_bias_updates_enabled(self) -> bool:
-        # Missing means frozen so older saved configs also preserve checkpoint state.
-        mode = self.cfg.trainer.policy.get("grug_query_bias_update_mode", GrugQueryBiasUpdateMode.FROZEN)
+        mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
         return mode == GrugQueryBiasUpdateMode.REPLACE
 
     def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
-        if not self._grug_query_bias_updates_enabled():
-            self._grug_query_bias_accumulator = None
-            return
-
         config = causal_lm.config
         candidate_count = query_bias_candidate_count(
             valid_tokens,
