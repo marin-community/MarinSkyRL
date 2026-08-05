@@ -21,6 +21,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.config.query_bias import GrugQueryBiasUpdateMode, resolve_grug_query_bias_update_mode
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
@@ -46,10 +47,8 @@ from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
-    GrugQueryBiasUpdateMode,
     next_query_bias,
     query_bias_candidate_count,
-    resolve_grug_query_bias_update_mode,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.utils.utils import (

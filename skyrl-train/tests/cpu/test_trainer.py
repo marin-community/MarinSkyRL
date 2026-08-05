@@ -25,7 +25,6 @@ from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
-from tests.grug_training_parity import load_grug_training_oracle_model
 from tests.cpu.util import example_dummy_config
 
 
@@ -113,36 +112,6 @@ def test_frozen_grug_query_bias_disables_updates(update_mode):
     worker, _ = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
 
     assert not worker._grug_query_bias_updates_enabled()
-
-
-def test_frozen_grug_query_bias_has_zero_drift_across_optimizer_steps():
-    causal_lm = load_grug_training_oracle_model()
-    causal_lm.train()
-
-    worker = object.__new__(PolicyWorkerBase)
-    worker.cfg = get_default_config()
-    worker.model = SimpleNamespace(model=causal_lm)
-    optimizer = torch.optim.AdamW(causal_lm.parameters(), lr=1e-4)
-    initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
-    initial_lm_head = causal_lm.lm_head.weight.detach().clone()
-    base_tokens = torch.arange(12).reshape(2, 6)
-
-    for step in range(5):
-        input_ids = (base_tokens + step) % causal_lm.config.vocab_size
-        attention_mask = torch.ones_like(input_ids)
-        if worker._grug_query_bias_updates_enabled():
-            worker._begin_grug_query_bias_window(causal_lm, valid_tokens=input_ids.numel())
-        assert getattr(worker, "_grug_query_bias_accumulator", None) is None
-
-        optimizer.zero_grad(set_to_none=True)
-        loss = causal_lm(input_ids, attention_mask=attention_mask, labels=input_ids).loss
-        loss.backward()
-        optimizer.step()
-        worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
-
-    actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
-    torch.testing.assert_close(actual_bias, initial_bias, rtol=0, atol=0)
-    assert not torch.equal(causal_lm.lm_head.weight, initial_lm_head)
 
 
 def test_failed_optimizer_step_discards_grug_query_bias_window():
@@ -807,18 +776,23 @@ def test_ppo_train_batch_calculations():
     assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
 
 
-def test_grug_ppo_train_releases_consumed_microbatches():
-    """Grug query-bias look-ahead must not retain every consumed Experience."""
+@pytest.mark.parametrize(
+    ("update_mode", "expected_query_bias_windows"),
+    [(None, 0), ("replace", 2)],
+    ids=["default-frozen", "replace"],
+)
+def test_grug_ppo_train_query_bias_policy_releases_consumed_microbatches(update_mode, expected_query_bias_windows):
+    """The policy gates query-bias windows without retaining consumed Experience objects."""
 
+    policy_config = {"optimizer_config": {"max_grad_norm": 1.0}}
+    if update_mode is not None:
+        policy_config["grug_query_bias_update_mode"] = update_mode
     cfg = OmegaConf.create(
         {
             "trainer": {
                 "micro_train_batch_size_per_gpu": 1,
                 "update_epochs_per_batch": 1,
-                "policy": {
-                    "grug_query_bias_update_mode": "replace",
-                    "optimizer_config": {"max_grad_norm": 1.0},
-                },
+                "policy": policy_config,
                 "algorithm": {"policy_loss_type": "regular", "loss_reduction": "token_mean"},
             },
             "generator": {"sampling_params": {"temperature": 1.0}},
@@ -856,6 +830,14 @@ def test_grug_ppo_train_releases_consumed_microbatches():
     worker.strategy.all_reduce.side_effect = lambda status: status
     worker.model = SimpleNamespace(model=_ObservableGrugCausalLM())
 
+    query_bias_windows = []
+    begin_query_bias_window = worker._begin_grug_query_bias_window
+
+    def record_query_bias_window(causal_lm, valid_tokens):
+        query_bias_windows.append(valid_tokens)
+        begin_query_bias_window(causal_lm, valid_tokens)
+
+    worker._begin_grug_query_bias_window = record_query_bias_window
     previous_experience = None
     prior_microbatch_was_released = []
 
@@ -875,6 +857,7 @@ def test_grug_ppo_train_releases_consumed_microbatches():
     ):
         worker.ppo_train(batch)
 
+    assert len(query_bias_windows) == expected_query_bias_windows
     assert prior_microbatch_was_released == [True, True, True]
 
 

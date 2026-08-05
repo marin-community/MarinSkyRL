@@ -17,9 +17,9 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope
-from skyrl_train.models.grug_query_bias import resolve_grug_query_bias_update_mode
 
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
