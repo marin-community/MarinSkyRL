@@ -6,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -15,6 +16,7 @@ from skyrl_train.models.grug_moe import (
     GrugMoeConfig,
     GrugMoeForCausalLM,
     GrugMoeRouter,
+    GrugMoeSparseMoeBlock,
     enable_grug_grouped_mm,
 )
 from skyrl_train.models.layers.moe_routing import run_experts_for_loop
@@ -114,6 +116,81 @@ def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(monkeypat
     assert "model.layers.0.mlp.experts.gate_proj.weight" in keys_before
     assert "model.layers.0.mlp.experts.up_proj.weight" in keys_before
     assert "model.layers.0.mlp.experts.down_proj.weight" in keys_before
+
+
+def test_bfloat16_expert_combine_uses_float32_accumulation(monkeypatch):
+    config = tiny_config(num_local_experts=5, num_experts_per_tok=4, num_hidden_layers=1)
+
+    grouped_kernel_module = ModuleType("skyrl_train.models.layers.moe")
+    grouped_kernel_module.__dict__["_run_experts_grouped_mm"] = run_experts_for_loop
+    monkeypatch.setitem(sys.modules, grouped_kernel_module.__name__, grouped_kernel_module)
+
+    def new_block():
+        block = GrugMoeSparseMoeBlock(config).to(dtype=torch.bfloat16)
+        with torch.no_grad():
+            block.experts.gate_proj.weight.zero_()
+            block.experts.up_proj.weight.zero_()
+            block.experts.down_proj.weight.zero_()
+            for expert in range(4):
+                block.experts.gate_proj.weight[expert, 0, 0] = 16.0
+                block.experts.up_proj.weight[expert, 0, 0] = 1.0
+            block.experts.down_proj.weight[0, 0, 0] = 1.0 / 16.0
+            block.experts.down_proj.weight[1:, 0, 0] = 1.0 / 2048.0
+        return block
+
+    def run(path):
+        block = new_block()
+        hidden = torch.zeros((16, config.hidden_size), dtype=torch.bfloat16)
+        hidden[:, 0] = 1.0
+        hidden.requires_grad_(True)
+        selected_experts = torch.arange(4).expand(hidden.shape[0], -1).clone()
+        combine_weights = (
+            torch.tensor([1.0, 0.5, 0.5, 0.5], dtype=torch.float32)
+            .expand(hidden.shape[0], -1)
+            .clone()
+            .requires_grad_(True)
+        )
+        if path == "eager":
+            output = block.experts.forward_eager(hidden, selected_experts, combine_weights)
+        elif path == "grouped":
+            block.enable_grouped_mm()
+            output = block._expert_execution.run(
+                block.experts,
+                block.reorderer,
+                hidden,
+                selected_experts,
+                combine_weights,
+            )
+        else:
+            output = torch.zeros_like(hidden, dtype=torch.float32)
+            for slot in range(selected_experts.shape[-1]):
+                expert = int(selected_experts[0, slot])
+                gate = F.linear(hidden, block.experts.gate_proj.weight[expert])
+                up = F.linear(hidden, block.experts.up_proj.weight[expert])
+                expert_output = F.linear(F.silu(gate) * up, block.experts.down_proj.weight[expert])
+                contribution = expert_output * combine_weights[:, slot].to(expert_output.dtype).unsqueeze(-1)
+                output = output + contribution.float()
+            output = output.to(hidden.dtype)
+        loss = output.float().square().mean()
+        gradients = torch.autograd.grad(
+            loss,
+            (
+                hidden,
+                combine_weights,
+                block.experts.gate_proj.weight,
+                block.experts.up_proj.weight,
+                block.experts.down_proj.weight,
+            ),
+        )
+        return output, gradients
+
+    reference_output, reference_gradients = run("reference")
+    assert reference_output[0, 0].item() == 1.015625
+    for path in ("eager", "grouped"):
+        output, gradients = run(path)
+        torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+        for gradient, reference_gradient in zip(gradients, reference_gradients):
+            torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
 
 
 def test_gradient_checkpointing_preserves_logits_and_gradients():

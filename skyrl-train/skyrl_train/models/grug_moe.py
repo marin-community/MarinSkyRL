@@ -363,7 +363,7 @@ class GrugMoeExperts(nn.Module):
         selected_experts: torch.Tensor,
         combine_weights: torch.Tensor,
     ) -> torch.Tensor:
-        output = torch.zeros_like(hidden_states)
+        output = torch.zeros_like(hidden_states, dtype=torch.float32)
         for expert_idx in range(self.num_experts):
             token_idx, slot_idx = torch.where(selected_experts == expert_idx)
             if token_idx.numel() == 0:
@@ -373,8 +373,8 @@ class GrugMoeExperts(nn.Module):
             up = F.linear(expert_input, self.up_proj.weight[expert_idx])
             expert_output = F.linear(F.silu(gate) * up, self.down_proj.weight[expert_idx])
             weight = combine_weights[token_idx, slot_idx].unsqueeze(-1).to(expert_output.dtype)
-            output.index_add_(0, token_idx, expert_output * weight)
-        return output
+            output.index_add_(0, token_idx, (expert_output * weight).float())
+        return output.to(hidden_states.dtype)
 
     def forward(
         self,
@@ -509,14 +509,18 @@ class _GrugGroupedExpertExecution:
         routed_indices, routed_output = grouped_expert_contributions(
             experts,
             hidden_states,
-            combine_weights,
+            combine_weights.to(hidden_states.dtype),
             selected_experts,
             reorderer,
         )
-        return torch.zeros_like(hidden_states).scatter_add(
-            dim=0,
-            index=routed_indices,
-            src=routed_output,
+        return (
+            torch.zeros_like(hidden_states, dtype=torch.float32)
+            .scatter_add(
+                dim=0,
+                index=routed_indices,
+                src=routed_output.float(),
+            )
+            .to(hidden_states.dtype)
         )
 
 
