@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import torch
 import pytest
 from jaxtyping import Float, Integer
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pytest import approx
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +26,7 @@ from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
+from tests.grug_training_parity import ORACLE_FIXTURE_DIR
 
 
 @pytest.fixture
@@ -98,6 +99,53 @@ def _worker_with_grug_query_bias_accumulator(accumulator):
     worker.model = SimpleNamespace(model=causal_lm)
     worker._grug_query_bias_accumulator = accumulator
     return worker, causal_lm
+
+
+def _grug_ppo_worker_and_batch(
+    cfg: DictConfig,
+    causal_lm: GrugMoeForCausalLM,
+    sequences: torch.Tensor,
+) -> tuple[PolicyWorkerBase, TrainingInputBatch]:
+    batch_size = sequences.shape[0]
+    batch = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": torch.ones_like(sequences),
+            "action_log_probs": torch.zeros(batch_size, 2),
+            "base_action_log_probs": torch.zeros(batch_size, 2),
+            "values": torch.zeros(batch_size, 2),
+            "returns": torch.zeros(batch_size, 2),
+            "advantages": torch.ones(batch_size, 2),
+            "loss_mask": torch.ones(batch_size, 2),
+            "response_mask": torch.ones(batch_size, 2),
+            "rollout_logprobs": None,
+        }
+    )
+    batch.metadata = {"global_step": 0, "response_length": 2}
+
+    worker = PolicyWorkerBase(
+        cfg=cfg,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
+    worker.strategy = MagicMock(fsdp_strategy="fsdp2")
+    worker.strategy.is_rank_0.return_value = False
+    worker.strategy.all_reduce.side_effect = lambda status: status
+    worker.model = SimpleNamespace(model=causal_lm)
+    return worker, batch
+
+
+def _run_grug_ppo_train(worker: PolicyWorkerBase, batch: TrainingInputBatch) -> None:
+    with (
+        patch("torch.cuda.empty_cache"),
+        patch("torch.distributed.barrier"),
+        patch("tqdm.tqdm", side_effect=lambda iterator, **kwargs: iterator),
+    ):
+        worker.ppo_train(batch)
 
 
 def test_failed_optimizer_step_discards_grug_query_bias_window():
@@ -767,20 +815,23 @@ def test_ppo_train_batch_calculations():
 
 @pytest.mark.parametrize(
     ("update_mode", "expected_query_bias_windows"),
-    [(None, 0), ("replace", 2)],
-    ids=["default", "replace"],
+    [
+        (get_default_config().trainer.policy.grug_query_bias_update_mode, 0),
+        (None, 0),
+        ("replace", 2),
+    ],
+    ids=["default", "missing", "replace"],
 )
 def test_grug_ppo_train_starts_query_bias_windows_without_retaining_microbatches(
     update_mode, expected_query_bias_windows
 ):
     """The policy gates query-bias windows without retaining consumed Experience objects."""
 
-    if update_mode is None:
-        update_mode = get_default_config().trainer.policy.grug_query_bias_update_mode
     policy_config = {
-        "grug_query_bias_update_mode": update_mode,
         "optimizer_config": {"max_grad_norm": 1.0},
     }
+    if update_mode is not None:
+        policy_config["grug_query_bias_update_mode"] = update_mode
     cfg = OmegaConf.create(
         {
             "trainer": {
@@ -792,37 +843,12 @@ def test_grug_ppo_train_starts_query_bias_windows_without_retaining_microbatches
             "generator": {"sampling_params": {"temperature": 1.0}},
         }
     )
-    batch_size = 4
-    batch = TrainingInputBatch(
-        {
-            "sequences": torch.ones(batch_size, 4, dtype=torch.long),
-            "attention_mask": torch.ones(batch_size, 4, dtype=torch.long),
-            "action_log_probs": torch.zeros(batch_size, 2),
-            "base_action_log_probs": torch.zeros(batch_size, 2),
-            "values": torch.zeros(batch_size, 2),
-            "returns": torch.zeros(batch_size, 2),
-            "advantages": torch.ones(batch_size, 2),
-            "loss_mask": torch.ones(batch_size, 2),
-            "response_mask": torch.ones(batch_size, 2),
-            "rollout_logprobs": None,
-        }
-    )
-    batch.metadata = {"global_step": 0, "response_length": 2}
-
-    worker = PolicyWorkerBase(
-        cfg=cfg,
-        world_size=1,
-        rank=0,
-        local_rank=0,
-        master_addr="localhost",
-        master_port=12345,
-        sequence_parallel_size=1,
+    worker, batch = _grug_ppo_worker_and_batch(
+        cfg,
+        _ObservableGrugCausalLM(),
+        torch.ones(4, 4, dtype=torch.long),
     )
     worker.policy_mini_batch_size_per_gpu = 2
-    worker.strategy = MagicMock(fsdp_strategy="fsdp2")
-    worker.strategy.is_rank_0.return_value = False
-    worker.strategy.all_reduce.side_effect = lambda status: status
-    worker.model = SimpleNamespace(model=_ObservableGrugCausalLM())
 
     query_bias_windows = []
     begin_query_bias_window = worker._begin_grug_query_bias_window
@@ -844,15 +870,72 @@ def test_grug_ppo_train_starts_query_bias_windows_without_retaining_microbatches
         return {"policy_loss": 0.5, "policy_lr": 1e-4, "policy_entropy": 0.1, "response_length": 2}
 
     worker.training_step = training_step
-    with (
-        patch("torch.cuda.empty_cache"),
-        patch("torch.distributed.barrier"),
-        patch("tqdm.tqdm", side_effect=lambda iterator, **kwargs: iterator),
-    ):
-        worker.ppo_train(batch)
+    _run_grug_ppo_train(worker, batch)
 
     assert len(query_bias_windows) == expected_query_bias_windows
     assert prior_microbatch_was_released == [True, True, True]
+
+
+def test_default_grug_ppo_train_keeps_query_bias_exact_across_optimizer_steps():
+    causal_lm = GrugMoeForCausalLM.from_pretrained(
+        ORACLE_FIXTURE_DIR,
+        local_files_only=True,
+        attn_implementation="eager",
+        dtype=torch.float32,
+    )
+    causal_lm.train()
+    frozen_bias = torch.linspace(
+        -0.3,
+        0.3,
+        steps=causal_lm.config.num_hidden_layers * causal_lm.config.num_local_experts,
+    ).reshape(causal_lm.config.num_hidden_layers, causal_lm.config.num_local_experts)
+    frozen_bias -= frozen_bias.mean(dim=-1, keepdim=True)
+    causal_lm.set_query_bias(frozen_bias)
+
+    cfg = get_default_config()
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.update_epochs_per_batch = 1
+    cfg.trainer.algorithm.loss_reduction = "token_mean"
+    batch_size = 5
+    sequences = torch.arange(batch_size * 6).reshape(batch_size, 6) % causal_lm.config.vocab_size
+    worker, batch = _grug_ppo_worker_and_batch(
+        cfg,
+        causal_lm,
+        sequences,
+    )
+    worker.policy_mini_batch_size_per_gpu = 1
+
+    optimizer = torch.optim.AdamW(causal_lm.parameters(), lr=1e-4)
+    initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
+    initial_lm_head = causal_lm.lm_head.weight.detach().clone()
+    optimizer_steps = 0
+
+    def training_step(experience, _global_step, _local_step, _accumulation_steps):
+        nonlocal optimizer_steps
+        optimizer.zero_grad(set_to_none=True)
+        loss = causal_lm(
+            experience.sequences,
+            attention_mask=experience.attention_mask,
+            labels=experience.sequences,
+        ).loss
+        loss.backward()
+        optimizer.step()
+        optimizer_steps += 1
+        worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
+        return {
+            "policy_loss": loss.detach().item(),
+            "policy_lr": 1e-4,
+            "policy_entropy": 0.0,
+            "response_length": 2,
+        }
+
+    worker.training_step = training_step
+    _run_grug_ppo_train(worker, batch)
+
+    actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
+    assert optimizer_steps == batch_size
+    torch.testing.assert_close(actual_bias, initial_bias, rtol=0, atol=0)
+    assert not torch.equal(causal_lm.lm_head.weight, initial_lm_head)
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

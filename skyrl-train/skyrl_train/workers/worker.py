@@ -1105,9 +1105,9 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
-        grug_query_bias_update_mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
         grug_query_bias_updates_enabled = (
-            grug_causal_lm is not None and grug_query_bias_update_mode == GrugQueryBiasUpdateMode.REPLACE
+            grug_causal_lm is not None
+            and resolve_grug_query_bias_update_mode(self.cfg.trainer.policy) == GrugQueryBiasUpdateMode.REPLACE
         )
         grug_microbatch_valid_tokens = None
         if grug_query_bias_updates_enabled:
