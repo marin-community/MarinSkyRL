@@ -240,9 +240,6 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
         return nullcontext()
 
 
-# Fsdp2 load full state dict from `accelerate`
-# Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
-# NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
 def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
     """Attach expert-gradient averaging and return module and parameter counts."""
 
@@ -267,6 +264,9 @@ def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]
     return module_count, parameter_count
 
 
+# Fsdp2 load full state dict from `accelerate`
+# Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
+# NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
 def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None, ep_enabled=False):
     """
     Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
@@ -642,38 +642,45 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
 
 
-def _distribute_grug_experts(experts, ep_plan, ep_mesh, ep_comm_backend):
+@dataclass(frozen=True)
+class _ExpertParallelContext:
+    plan: object
+    mesh: DeviceMesh
+    comm_backend: str
+
+
+def _distribute_grug_experts(experts, context: _ExpertParallelContext):
     """Shard native Grug projections while keeping checkpoint keys unchanged."""
 
     validate_grug_expert_parallel_runtime(
         use_grouped_mm=experts.use_grouped_mm,
-        ep_comm_backend=ep_comm_backend,
+        ep_comm_backend=context.comm_backend,
     )
 
     projections = {experts.gate_proj, experts.up_proj, experts.down_proj}
 
     def partition_grug_projection(_name, submodule, mesh):
         if submodule in projections:
-            ep_plan._partition_fn(_name, submodule, mesh)
+            context.plan._partition_fn(_name, submodule, mesh)
 
     # The hooks must wrap the checkpoint-compatible holder whose grouped forward
     # accepts routed rows and per-expert counts. Moving them to a wrapper would
     # change the native projection keys.
     distribute_module(
         experts,
-        device_mesh=ep_mesh,
+        device_mesh=context.mesh,
         partition_fn=partition_grug_projection,
-        input_fn=ep_plan._token_dispatch,
-        output_fn=ep_plan._token_combine,
+        input_fn=context.plan._token_dispatch,
+        output_fn=context.plan._token_combine,
     )
 
 
 class _ExpertParallelTarget(Protocol):
     experts: nn.Module
 
-    def distribute(self, ep_plan, ep_mesh, ep_comm_backend: str) -> None: ...
+    def distribute(self, context: _ExpertParallelContext) -> None: ...
 
-    def finish(self, ep_mesh, ep_comm_backend: str) -> None: ...
+    def finish(self, context: _ExpertParallelContext) -> None: ...
 
     def named_parameters(self): ...
 
@@ -682,14 +689,13 @@ class _ExpertParallelTarget(Protocol):
 class _GrugExpertParallelTarget:
     experts: GrugMoeExperts
 
-    def distribute(self, ep_plan, ep_mesh, ep_comm_backend: str) -> None:
-        _distribute_grug_experts(self.experts, ep_plan, ep_mesh, ep_comm_backend)
+    def distribute(self, context: _ExpertParallelContext) -> None:
+        _distribute_grug_experts(self.experts, context)
 
-    def finish(self, ep_mesh, ep_comm_backend: str) -> None:
-        del ep_comm_backend
+    def finish(self, context: _ExpertParallelContext) -> None:
         # MeshDispatch replicates each logical batch across EP ranks. Average
         # only expert gradients; router and dense gradients remain local replicas.
-        self.experts.ep_size = ep_mesh.size()
+        self.experts.ep_size = context.mesh.size()
 
     def named_parameters(self):
         return self.experts.named_parameters(recurse=True)
@@ -700,13 +706,11 @@ class _GroupedExpertParallelTarget:
     moe: nn.Module
     experts: nn.Module
 
-    def distribute(self, ep_plan, ep_mesh, ep_comm_backend: str) -> None:
-        del ep_comm_backend
-        parallelize_module(self.experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
+    def distribute(self, context: _ExpertParallelContext) -> None:
+        parallelize_module(self.experts, device_mesh=context.mesh, parallelize_plan=context.plan)
 
-    def finish(self, ep_mesh, ep_comm_backend: str) -> None:
-        del ep_mesh
-        self.moe.set_ep_comm_backend(ep_comm_backend)
+    def finish(self, context: _ExpertParallelContext) -> None:
+        self.moe.set_ep_comm_backend(context.comm_backend)
         self.moe._ep_enabled = True
 
     def named_parameters(self):
@@ -845,20 +849,21 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
 
     ep_mesh = device_mesh["ep"]
     fsdp_mesh = device_mesh["fsdp"]
+    ep_context = _ExpertParallelContext(ep_plan, ep_mesh, ep_comm_backend)
     sharded = 0
     for module in model.modules():
         target = _expert_parallel_target(module, GroupedExperts)
         if target is None:
             continue
 
-        target.distribute(ep_plan, ep_mesh, ep_comm_backend)
+        target.distribute(ep_context)
         _compose_expert_fsdp_shards(
             target,
             ep_mesh=ep_mesh,
             fsdp_mesh=fsdp_mesh,
             fsdp_kwargs=fsdp_kwargs,
         )
-        target.finish(ep_mesh, ep_comm_backend)
+        target.finish(ep_context)
         sharded += 1
     grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
     if grug_parameters:

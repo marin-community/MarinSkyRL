@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 import torch
 from torch import nn
@@ -18,6 +18,14 @@ class GroupedExpertCallable(Protocol):
     ) -> torch.Tensor: ...
 
 
+class GroupedRouting(NamedTuple):
+    """Named outputs from grouping token routes by expert."""
+
+    scores: torch.Tensor
+    token_indices: torch.Tensor
+    tokens_per_expert: torch.Tensor
+
+
 class TokenReorderer(nn.Module):
     """Reorder token indices to match expert ordering for grouped compute."""
 
@@ -30,7 +38,7 @@ class TokenReorderer(nn.Module):
         self,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> GroupedRouting:
         selected_experts_indices = selected_experts_indices.reshape(-1)
         # Integer counts are required by both torch.split and EP all-to-all.
         num_tokens_per_expert = torch.histc(
@@ -42,7 +50,7 @@ class TokenReorderer(nn.Module):
         sorted_route_indices = torch.argsort(selected_experts_indices, stable=True)
         sorted_scores = top_scores.reshape(-1)[sorted_route_indices]
         sorted_token_indices = sorted_route_indices // self.top_k
-        return sorted_scores, sorted_token_indices, num_tokens_per_expert
+        return GroupedRouting(sorted_scores, sorted_token_indices, num_tokens_per_expert)
 
 
 def grouped_expert_contributions(
@@ -54,15 +62,15 @@ def grouped_expert_contributions(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return scatter indices and weighted outputs for grouped expert routes."""
 
-    sorted_scores, sorted_token_indices, num_tokens_per_expert = reorderer(
+    routing = reorderer(
         top_scores,
         selected_experts_indices,
     )
     hidden_size = hidden_states.shape[-1]
-    routed_indices = sorted_token_indices.reshape(-1, 1).expand(-1, hidden_size)
+    routed_indices = routing.token_indices.reshape(-1, 1).expand(-1, hidden_size)
     routed_input = torch.gather(hidden_states, dim=0, index=routed_indices)
-    routed_output = experts(routed_input, num_tokens_per_expert)
-    routed_output = (routed_output.float() * sorted_scores.reshape(-1, 1)).to(hidden_states.dtype)
+    routed_output = experts(routed_input, routing.tokens_per_expert)
+    routed_output = (routed_output.float() * routing.scores.reshape(-1, 1)).to(hidden_states.dtype)
     return routed_indices, routed_output
 
 
