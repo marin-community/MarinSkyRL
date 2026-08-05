@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 1020, in <module>
+    main()
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 1016, in main
+    args.function(args)
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 968, in _worker
+    result = _run_correctness(args.arm)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 374, in _run_correctness
+    torch, _, _, GrugMoeSparseMoeBlock = _import_torch_and_grug()
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 150, in _import_torch_and_grug
+    from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeSparseMoeBlock
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/models/__init__.py", line 5, in <module>
+    from skyrl_train.models.grug_moe import (
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/models/grug_moe.py", line 27, in <module>
+    from skyrl_train.utils.flash_attention import (
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/utils/__init__.py", line 1, in <module>
+    from .utils import *  # noqa: F401, F403
+    ^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/utils/utils.py", line 9, in <module>
+    import ray
+ModuleNotFoundError: No module named 'ray'

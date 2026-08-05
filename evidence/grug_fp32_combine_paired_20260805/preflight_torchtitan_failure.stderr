@@ -1,0 +1,32 @@
+2026-08-05 00:44:50.348 | INFO     | skyrl_train.models.grug_moe:forward:394 - [Grug-MoE-PATH] native grouped_mm (gate=Parameter, routed_rows=16384)
+Traceback (most recent call last):
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 1020, in <module>
+    main()
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 1016, in main
+    args.function(args)
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 968, in _worker
+    result = _run_correctness(args.arm)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 386, in _run_correctness
+    actual_output, actual_gradients, hashes, _ = _correctness_run("actual", path)
+                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/evidence/grug_fp32_combine_paired_20260805/run_pair.py", line 338, in _correctness_run
+    output = block._forward_grouped(hidden, selected_experts, combine_weights)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/models/grug_moe.py", line 497, in _forward_grouped
+    routed_output = self.experts(routed_input, num_tokens_per_expert)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/models/grug_moe.py", line 399, in forward
+    return _run_grug_grouped_mm(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/models/grug_moe.py", line 341, in _run_grug_grouped_mm
+    from skyrl_train.models.layers.moe import _run_experts_grouped_mm
+  File "/workspace/grug-fp32-runtime/sources/parent/skyrl_train/models/layers/moe.py", line 59, in <module>
+    from torchtitan.distributed.expert_parallel import expert_parallel
+ModuleNotFoundError: No module named 'torchtitan'

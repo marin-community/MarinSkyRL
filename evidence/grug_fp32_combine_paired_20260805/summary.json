@@ -1,0 +1,1827 @@
+{
+  "cross_gpu": {
+    "combine_backward_ms": {
+      "candidate_minus_parent_median": 0.3136879950761795,
+      "candidate_minus_parent_range": [
+        0.3123359978199005,
+        0.31459200382232666
+      ],
+      "candidate_over_parent_median": 1.5531851160144252,
+      "candidate_over_parent_range": [
+        1.5497169839971763,
+        1.554640340301325
+      ]
+    },
+    "combine_boundary_incremental_peak_allocated_bytes": {
+      "candidate_minus_parent_median": 251592704.0,
+      "candidate_minus_parent_range": [
+        251592704.0,
+        251592704.0
+      ],
+      "candidate_over_parent_median": 1.4613073780341264,
+      "candidate_over_parent_range": [
+        1.4613073780341264,
+        1.4613073780341264
+      ]
+    },
+    "combine_forward_backward_ms": {
+      "candidate_minus_parent_median": 0.5316400229930878,
+      "candidate_minus_parent_range": [
+        0.5234880745410919,
+        0.5432479977607727
+      ],
+      "candidate_over_parent_median": 1.3409196713138063,
+      "candidate_over_parent_range": [
+        1.3353525942283144,
+        1.3489552865227603
+      ]
+    },
+    "combine_forward_ms": {
+      "candidate_minus_parent_median": 0.21780002117156982,
+      "candidate_minus_parent_range": [
+        0.2104320228099823,
+        0.22969597578048706
+      ],
+      "candidate_over_parent_median": 1.219420031385736,
+      "candidate_over_parent_range": [
+        1.2117499558937166,
+        1.232263886694857
+      ]
+    },
+    "full_backward_ms": {
+      "candidate_minus_parent_median": 0.31096792221069336,
+      "candidate_minus_parent_range": [
+        0.300447940826416,
+        0.321199893951416
+      ],
+      "candidate_over_parent_median": 1.0331770843001797,
+      "candidate_over_parent_range": [
+        1.0320058569928419,
+        1.0341515412695195
+      ]
+    },
+    "full_block_incremental_peak_allocated_bytes": {
+      "candidate_minus_parent_median": 0.0,
+      "candidate_minus_parent_range": [
+        0.0,
+        0.0
+      ],
+      "candidate_over_parent_median": 1.0,
+      "candidate_over_parent_range": [
+        1.0,
+        1.0
+      ]
+    },
+    "full_forward_backward_ms": {
+      "candidate_minus_parent_median": 0.5374240875244141,
+      "candidate_minus_parent_range": [
+        0.4983034133911133,
+        0.5456643104553223
+      ],
+      "candidate_over_parent_median": 1.0384389544257833,
+      "candidate_over_parent_range": [
+        1.0356033944884067,
+        1.0390137887135888
+      ]
+    },
+    "full_forward_ms": {
+      "candidate_minus_parent_median": 0.2125999927520752,
+      "candidate_minus_parent_range": [
+        0.19228792190551758,
+        0.24255990982055664
+      ],
+      "candidate_over_parent_median": 1.0462301972936219,
+      "candidate_over_parent_range": [
+        1.0416893416909752,
+        1.0528003869582208
+      ]
+    }
+  },
+  "per_gpu": [
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.88019198179245,
+            "range": [
+              0.878495991230011,
+              1.3327360153198242
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.0912000238895416,
+            "range": [
+              2.076799988746643,
+              4.33027195930481
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.2120960354804993,
+            "range": [
+              1.196671962738037,
+              2.9975359439849854
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.686079978942871,
+            "range": [
+              9.641375541687012,
+              9.930272102355957
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.481008291244507,
+            "range": [
+              14.415104389190674,
+              21.240447998046875
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.790751934051514,
+            "range": [
+              4.76310396194458,
+              11.477055549621582
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5672160089015961,
+            "range": [
+              0.5655679702758789,
+              0.5689280033111572
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5599520206451416,
+            "range": [
+              1.5512639880180359,
+              2.519007980823517
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9938720166683197,
+            "range": [
+              0.9838719964027405,
+              1.9519360065460205
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.385200023651123,
+            "range": [
+              9.34278392791748,
+              9.678496360778809
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.978896141052246,
+            "range": [
+              13.922719955444336,
+              19.856511116027832
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.590543985366821,
+            "range": [
+              4.555488109588623,
+              10.297727584838867
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.3129759728908539,
+          "candidate_over_parent": 1.5517756339369306
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5312480032444,
+          "candidate_over_parent": 1.340554065903062
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.21822401881217957,
+          "candidate_over_parent": 1.2195695372767563
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.30087995529174805,
+          "candidate_over_parent": 1.0320589816448789
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.5021121501922607,
+          "candidate_over_parent": 1.0359192990008483
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.20020794868469238,
+          "candidate_over_parent": 1.043613120650383
+        }
+      },
+      "gpu": 0
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.8817920088768005,
+            "range": [
+              0.879967987537384,
+              0.8831040263175964
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.090704023838043,
+            "range": [
+              2.078432023525238,
+              4.010527968406677
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.208736002445221,
+            "range": [
+              1.1958400011062622,
+              3.1299519538879395
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.700559616088867,
+            "range": [
+              9.619135856628418,
+              9.96566390991211
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.496912240982056,
+            "range": [
+              14.429919719696045,
+              21.331327438354492
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.796720027923584,
+            "range": [
+              4.774623870849609,
+              11.365663528442383
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5672000050544739,
+            "range": [
+              0.5649279952049255,
+              0.8102080225944519
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5586719810962677,
+            "range": [
+              1.5489599704742432,
+              2.6303040385246277
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9913599789142609,
+            "range": [
+              0.9833279848098755,
+              1.8200960159301758
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.384912014007568,
+            "range": [
+              9.33625602722168,
+              9.721311569213867
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.955856084823608,
+            "range": [
+              13.907360076904297,
+              20.440192222595215
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.571887969970703,
+            "range": [
+              4.541056156158447,
+              11.019519805908203
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.31459200382232666,
+          "candidate_over_parent": 1.554640340301325
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5320320427417755,
+          "candidate_over_parent": 1.3413367592375525
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.21737602353096008,
+          "candidate_over_parent": 1.2192705254947156
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.31564760208129883,
+          "candidate_over_parent": 1.0336335174597455
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.5410561561584473,
+          "candidate_over_parent": 1.0387691126126488
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.22483205795288086,
+          "candidate_over_parent": 1.0491770707046266
+        }
+      },
+      "gpu": 1
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.8804639875888824,
+            "range": [
+              0.8786560297012329,
+              0.8824319839477539
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.0844960510730743,
+            "range": [
+              2.0778239965438843,
+              3.9615999460220337
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.2042080163955688,
+            "range": [
+              1.1980799436569214,
+              3.0815999507904053
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.687727928161621,
+            "range": [
+              9.634495735168457,
+              9.828960418701172
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.494255781173706,
+            "range": [
+              14.444128513336182,
+              25.725504875183105
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.804687976837158,
+            "range": [
+              4.768352031707764,
+              16.00150489807129
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5669920146465302,
+            "range": [
+              0.564191997051239,
+              0.5687999725341797
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5610079765319824,
+            "range": [
+              1.5529919862747192,
+              2.6480000019073486
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9937759935855865,
+            "range": [
+              0.9871039986610413,
+              2.079967975616455
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.387279987335205,
+            "range": [
+              9.339360237121582,
+              9.672703742980957
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.995952367782593,
+            "range": [
+              13.944448471069336,
+              19.046719551086426
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.612400054931641,
+            "range": [
+              4.572351932525635,
+              9.374015808105469
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.3134719729423523,
+          "candidate_over_parent": 1.5528684088042661
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5234880745410919,
+          "candidate_over_parent": 1.3353525942283144
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.2104320228099823,
+          "candidate_over_parent": 1.2117499558937166
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.300447940826416,
+          "candidate_over_parent": 1.0320058569928419
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.4983034133911133,
+          "candidate_over_parent": 1.0356033944884067
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.19228792190551758,
+          "candidate_over_parent": 1.0416893416909752
+        }
+      },
+      "gpu": 2
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.8815520107746124,
+            "range": [
+              0.8799039721488953,
+              0.8829439878463745
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.0843200087547302,
+            "range": [
+              2.078208029270172,
+              3.804896056652069
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.202992022037506,
+            "range": [
+              1.1968640089035034,
+              2.9241280555725098
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.69049596786499,
+            "range": [
+              9.633855819702148,
+              9.961183547973633
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.502991676330566,
+            "range": [
+              14.427775859832764,
+              22.20620822906494
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.807375907897949,
+            "range": [
+              4.7697601318359375,
+              12.572352409362793
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5673279762268066,
+            "range": [
+              0.5655360221862793,
+              0.5693759918212891
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5589919984340668,
+            "range": [
+              1.5529599785804749,
+              2.359295964241028
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9914080202579498,
+            "range": [
+              0.9855679869651794,
+              1.7903679609298706
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.372975826263428,
+            "range": [
+              9.322303771972656,
+              9.689472198486328
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.961343765258789,
+            "range": [
+              13.910911560058594,
+              20.09545612335205
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.591856002807617,
+            "range": [
+              4.557600021362305,
+              10.707679748535156
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.3142240345478058,
+          "candidate_over_parent": 1.5538666304412692
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5253280103206635,
+          "candidate_over_parent": 1.3369664570750397
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.21158400177955627,
+          "candidate_over_parent": 1.2134176821814546
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.3175201416015625,
+          "candidate_over_parent": 1.0338761293624443
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.5416479110717773,
+          "candidate_over_parent": 1.0387962591695226
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.21551990509033203,
+          "candidate_over_parent": 1.0469352490493073
+        }
+      },
+      "gpu": 3
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.8808479905128479,
+            "range": [
+              0.8788160085678101,
+              1.092576026916504
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.092447966337204,
+            "range": [
+              2.076192021369934,
+              4.423424005508423
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.211471974849701,
+            "range": [
+              1.1967040300369263,
+              3.330847978591919
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.680816173553467,
+            "range": [
+              9.637791633605957,
+              12.68892765045166
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.51308822631836,
+            "range": [
+              14.445535659790039,
+              25.654560089111328
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.824991941452026,
+            "range": [
+              4.778304100036621,
+              12.965632438659668
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5670080184936523,
+            "range": [
+              0.5655360221862793,
+              0.5688319802284241
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5600320100784302,
+            "range": [
+              1.5488959550857544,
+              2.3977919816970825
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9931359887123108,
+            "range": [
+              0.9824960231781006,
+              1.8307839632034302
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.367008209228516,
+            "range": [
+              9.318400382995605,
+              9.533344268798828
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.992480039596558,
+            "range": [
+              13.90390396118164,
+              21.861408233642578
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.6206560134887695,
+            "range": [
+              4.556159973144531,
+              12.522944450378418
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.31383997201919556,
+          "candidate_over_parent": 1.5535018232245845
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5324159562587738,
+          "candidate_over_parent": 1.3412852767245504
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.21833598613739014,
+          "candidate_over_parent": 1.2198450047314087
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.31380796432495117,
+          "candidate_over_parent": 1.0335014080606637
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.5206081867218018,
+          "candidate_over_parent": 1.0372062840360365
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.20433592796325684,
+          "candidate_over_parent": 1.0442222765266993
+        }
+      },
+      "gpu": 4
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.8809279799461365,
+            "range": [
+              0.877888023853302,
+              0.883296012878418
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.0839360058307648,
+            "range": [
+              2.078943967819214,
+              3.679744064807892
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.2025920152664185,
+            "range": [
+              1.1984959840774536,
+              2.80185604095459
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.682064056396484,
+            "range": [
+              9.64083194732666,
+              9.821184158325195
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.501279830932617,
+            "range": [
+              14.43561601638794,
+              21.069024085998535
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.817455768585205,
+            "range": [
+              4.778719902038574,
+              11.24783992767334
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5673439800739288,
+            "range": [
+              0.5649600028991699,
+              0.5701119899749756
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5553920269012451,
+            "range": [
+              1.5506240129470825,
+              2.3657599687576294
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9875040054321289,
+            "range": [
+              0.9836159944534302,
+              1.7965439558029175
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.380303859710693,
+            "range": [
+              9.3189115524292,
+              9.915807723999023
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.967487812042236,
+            "range": [
+              13.907103538513184,
+              20.569759368896484
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.5787200927734375,
+            "range": [
+              4.54310417175293,
+              10.653951644897461
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.31358399987220764,
+          "candidate_over_parent": 1.5527228822122083
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5285439789295197,
+          "candidate_over_parent": 1.3398139953067136
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.21508800983428955,
+          "candidate_over_parent": 1.2178097594046393
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.301760196685791,
+          "candidate_over_parent": 1.0321695545473617
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.5337920188903809,
+          "candidate_over_parent": 1.0382167520797954
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.23873567581176758,
+          "candidate_over_parent": 1.0521402643041147
+        }
+      },
+      "gpu": 5
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.8799999952316284,
+            "range": [
+              0.8785600066184998,
+              0.8814079761505127
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.099071979522705,
+            "range": [
+              2.0832319855690002,
+              4.021791934967041
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.219760000705719,
+            "range": [
+              1.2034560441970825,
+              3.1420159339904785
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.726336002349854,
+            "range": [
+              9.682720184326172,
+              9.991904258728027
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.543184041976929,
+            "range": [
+              14.491392135620117,
+              21.162272453308105
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.81548810005188,
+            "range": [
+              4.786464214324951,
+              11.408576011657715
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.566208004951477,
+            "range": [
+              0.5644479990005493,
+              0.5676800012588501
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.563215970993042,
+            "range": [
+              1.553056001663208,
+              2.4164799451828003
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9971839785575867,
+            "range": [
+              0.9876480102539062,
+              1.8515199422836304
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.405136108398438,
+            "range": [
+              9.3253755569458,
+              9.62281608581543
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.001856088638306,
+            "range": [
+              13.927456378936768,
+              19.86137580871582
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.6058080196380615,
+            "range": [
+              4.533952236175537,
+              10.466015815734863
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.31379199028015137,
+          "candidate_over_parent": 1.5541991415452396
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5358560085296631,
+          "candidate_over_parent": 1.3427907713796305
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.22257602214813232,
+          "candidate_over_parent": 1.2232045710061303
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.321199893951416,
+          "candidate_over_parent": 1.0341515412695195
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.541327953338623,
+          "candidate_over_parent": 1.0386611567717712
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.20968008041381836,
+          "candidate_over_parent": 1.0455251455379366
+        }
+      },
+      "gpu": 6
+    },
+    {
+      "arms": {
+        "candidate": {
+          "combine_backward_ms": {
+            "median": 0.880511999130249,
+            "range": [
+              0.8780159950256348,
+              0.883296012878418
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 796983296.0,
+            "range": [
+              796983296.0,
+              796983296.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 2.1000319719314575,
+            "range": [
+              2.085503935813904,
+              3.9694080352783203
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 1.2186399698257446,
+            "range": [
+              1.207487940788269,
+              3.0888960361480713
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.687183856964111,
+            "range": [
+              9.645248413085938,
+              9.748255729675293
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 14.532111883163452,
+            "range": [
+              14.424160480499268,
+              21.521536827087402
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.836463928222656,
+            "range": [
+              4.7740478515625,
+              11.831904411315918
+            ],
+            "sample_count": 40
+          }
+        },
+        "parent": {
+          "combine_backward_ms": {
+            "median": 0.5681760013103485,
+            "range": [
+              0.5667200088500977,
+              0.5698559880256653
+            ],
+            "sample_count": 40
+          },
+          "combine_boundary_incremental_peak_allocated_bytes": {
+            "median": 545390592.0,
+            "range": [
+              545390592.0,
+              545390592.0
+            ],
+            "sample_count": 2
+          },
+          "combine_forward_backward_ms": {
+            "median": 1.5567839741706848,
+            "range": [
+              1.5525439977645874,
+              2.4179199934005737
+            ],
+            "sample_count": 40
+          },
+          "combine_forward_ms": {
+            "median": 0.9889439940452576,
+            "range": [
+              0.9843199849128723,
+              1.8503040075302124
+            ],
+            "sample_count": 40
+          },
+          "full_backward_ms": {
+            "median": 9.379055976867676,
+            "range": [
+              9.328927993774414,
+              9.565535545349121
+            ],
+            "sample_count": 40
+          },
+          "full_block_incremental_peak_allocated_bytes": {
+            "median": 5700675584.0,
+            "range": [
+              5700675584.0,
+              5700675584.0
+            ],
+            "sample_count": 2
+          },
+          "full_forward_backward_ms": {
+            "median": 13.98644757270813,
+            "range": [
+              13.889440059661865,
+              22.64505672454834
+            ],
+            "sample_count": 40
+          },
+          "full_forward_ms": {
+            "median": 4.5939040184021,
+            "range": [
+              4.556960105895996,
+              13.275168418884277
+            ],
+            "sample_count": 40
+          }
+        }
+      },
+      "deltas": {
+        "combine_backward_ms": {
+          "candidate_minus_parent": 0.3123359978199005,
+          "candidate_over_parent": 1.5497169839971763
+        },
+        "combine_boundary_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 251592704.0,
+          "candidate_over_parent": 1.4613073780341264
+        },
+        "combine_forward_backward_ms": {
+          "candidate_minus_parent": 0.5432479977607727,
+          "candidate_over_parent": 1.3489552865227603
+        },
+        "combine_forward_ms": {
+          "candidate_minus_parent": 0.22969597578048706,
+          "candidate_over_parent": 1.232263886694857
+        },
+        "full_backward_ms": {
+          "candidate_minus_parent": 0.30812788009643555,
+          "candidate_over_parent": 1.0328527605396958
+        },
+        "full_block_incremental_peak_allocated_bytes": {
+          "candidate_minus_parent": 0.0,
+          "candidate_over_parent": 1.0
+        },
+        "full_forward_backward_ms": {
+          "candidate_minus_parent": 0.5456643104553223,
+          "candidate_over_parent": 1.0390137887135888
+        },
+        "full_forward_ms": {
+          "candidate_minus_parent": 0.24255990982055664,
+          "candidate_over_parent": 1.0528003869582208
+        }
+      },
+      "gpu": 7
+    }
+  ],
+  "readback": {
+    "checks": [
+      "complete schema-v1 packet",
+      "parent revision pin",
+      "candidate revision pin",
+      "parent module pin",
+      "candidate module pin",
+      "frozen protocol digest",
+      "executed driver digest",
+      "protocol driver pin",
+      "frozen runtime cluster",
+      "frozen runtime iris_job_id",
+      "frozen runtime pod_name",
+      "frozen runtime container_image_id",
+      "frozen runtime python_package_inventory_sha256",
+      "frozen runtime resource_request",
+      "Python package inventory digest",
+      "NVIDIA driver recorded",
+      "estimate-only freeze",
+      "real Grug expert shape",
+      "eight-GPU inventory",
+      "frozen correctness gate",
+      "paired correctness fixture identity",
+      "parent eager fixture discrimination",
+      "candidate eager FP32 output contract",
+      "candidate eager FP32 gradient contract",
+      "parent grouped fixture discrimination",
+      "candidate grouped FP32 output contract",
+      "candidate grouped FP32 gradient contract",
+      "32 finite scheduled arm processes",
+      "GPU 0 alternating order",
+      "GPU 0 parent repetition count",
+      "GPU 0 parent repetition IDs",
+      "GPU 0 parent source pin",
+      "GPU 0 parent route minimum",
+      "GPU 0 parent route maximum",
+      "GPU 0 parent full_block sample count",
+      "GPU 0 parent full_block HBM accounting",
+      "GPU 0 parent combine_boundary sample count",
+      "GPU 0 parent combine_boundary HBM accounting",
+      "GPU 0 parent source pin",
+      "GPU 0 parent route minimum",
+      "GPU 0 parent route maximum",
+      "GPU 0 parent full_block sample count",
+      "GPU 0 parent full_block HBM accounting",
+      "GPU 0 parent combine_boundary sample count",
+      "GPU 0 parent combine_boundary HBM accounting",
+      "GPU 0 candidate repetition count",
+      "GPU 0 candidate repetition IDs",
+      "GPU 0 candidate source pin",
+      "GPU 0 candidate route minimum",
+      "GPU 0 candidate route maximum",
+      "GPU 0 candidate full_block sample count",
+      "GPU 0 candidate full_block HBM accounting",
+      "GPU 0 candidate combine_boundary sample count",
+      "GPU 0 candidate combine_boundary HBM accounting",
+      "GPU 0 candidate source pin",
+      "GPU 0 candidate route minimum",
+      "GPU 0 candidate route maximum",
+      "GPU 0 candidate full_block sample count",
+      "GPU 0 candidate full_block HBM accounting",
+      "GPU 0 candidate combine_boundary sample count",
+      "GPU 0 candidate combine_boundary HBM accounting",
+      "GPU 0 paired state identity",
+      "GPU 0 paired hidden identity",
+      "GPU 0 paired selected_experts identity",
+      "GPU 0 paired combine_weights identity",
+      "GPU 0 paired cotangent identity",
+      "GPU 0 paired weighted_bf16_summands identity",
+      "GPU 1 alternating order",
+      "GPU 1 parent repetition count",
+      "GPU 1 parent repetition IDs",
+      "GPU 1 parent source pin",
+      "GPU 1 parent route minimum",
+      "GPU 1 parent route maximum",
+      "GPU 1 parent full_block sample count",
+      "GPU 1 parent full_block HBM accounting",
+      "GPU 1 parent combine_boundary sample count",
+      "GPU 1 parent combine_boundary HBM accounting",
+      "GPU 1 parent source pin",
+      "GPU 1 parent route minimum",
+      "GPU 1 parent route maximum",
+      "GPU 1 parent full_block sample count",
+      "GPU 1 parent full_block HBM accounting",
+      "GPU 1 parent combine_boundary sample count",
+      "GPU 1 parent combine_boundary HBM accounting",
+      "GPU 1 candidate repetition count",
+      "GPU 1 candidate repetition IDs",
+      "GPU 1 candidate source pin",
+      "GPU 1 candidate route minimum",
+      "GPU 1 candidate route maximum",
+      "GPU 1 candidate full_block sample count",
+      "GPU 1 candidate full_block HBM accounting",
+      "GPU 1 candidate combine_boundary sample count",
+      "GPU 1 candidate combine_boundary HBM accounting",
+      "GPU 1 candidate source pin",
+      "GPU 1 candidate route minimum",
+      "GPU 1 candidate route maximum",
+      "GPU 1 candidate full_block sample count",
+      "GPU 1 candidate full_block HBM accounting",
+      "GPU 1 candidate combine_boundary sample count",
+      "GPU 1 candidate combine_boundary HBM accounting",
+      "GPU 1 paired state identity",
+      "GPU 1 paired hidden identity",
+      "GPU 1 paired selected_experts identity",
+      "GPU 1 paired combine_weights identity",
+      "GPU 1 paired cotangent identity",
+      "GPU 1 paired weighted_bf16_summands identity",
+      "GPU 2 alternating order",
+      "GPU 2 parent repetition count",
+      "GPU 2 parent repetition IDs",
+      "GPU 2 parent source pin",
+      "GPU 2 parent route minimum",
+      "GPU 2 parent route maximum",
+      "GPU 2 parent full_block sample count",
+      "GPU 2 parent full_block HBM accounting",
+      "GPU 2 parent combine_boundary sample count",
+      "GPU 2 parent combine_boundary HBM accounting",
+      "GPU 2 parent source pin",
+      "GPU 2 parent route minimum",
+      "GPU 2 parent route maximum",
+      "GPU 2 parent full_block sample count",
+      "GPU 2 parent full_block HBM accounting",
+      "GPU 2 parent combine_boundary sample count",
+      "GPU 2 parent combine_boundary HBM accounting",
+      "GPU 2 candidate repetition count",
+      "GPU 2 candidate repetition IDs",
+      "GPU 2 candidate source pin",
+      "GPU 2 candidate route minimum",
+      "GPU 2 candidate route maximum",
+      "GPU 2 candidate full_block sample count",
+      "GPU 2 candidate full_block HBM accounting",
+      "GPU 2 candidate combine_boundary sample count",
+      "GPU 2 candidate combine_boundary HBM accounting",
+      "GPU 2 candidate source pin",
+      "GPU 2 candidate route minimum",
+      "GPU 2 candidate route maximum",
+      "GPU 2 candidate full_block sample count",
+      "GPU 2 candidate full_block HBM accounting",
+      "GPU 2 candidate combine_boundary sample count",
+      "GPU 2 candidate combine_boundary HBM accounting",
+      "GPU 2 paired state identity",
+      "GPU 2 paired hidden identity",
+      "GPU 2 paired selected_experts identity",
+      "GPU 2 paired combine_weights identity",
+      "GPU 2 paired cotangent identity",
+      "GPU 2 paired weighted_bf16_summands identity",
+      "GPU 3 alternating order",
+      "GPU 3 parent repetition count",
+      "GPU 3 parent repetition IDs",
+      "GPU 3 parent source pin",
+      "GPU 3 parent route minimum",
+      "GPU 3 parent route maximum",
+      "GPU 3 parent full_block sample count",
+      "GPU 3 parent full_block HBM accounting",
+      "GPU 3 parent combine_boundary sample count",
+      "GPU 3 parent combine_boundary HBM accounting",
+      "GPU 3 parent source pin",
+      "GPU 3 parent route minimum",
+      "GPU 3 parent route maximum",
+      "GPU 3 parent full_block sample count",
+      "GPU 3 parent full_block HBM accounting",
+      "GPU 3 parent combine_boundary sample count",
+      "GPU 3 parent combine_boundary HBM accounting",
+      "GPU 3 candidate repetition count",
+      "GPU 3 candidate repetition IDs",
+      "GPU 3 candidate source pin",
+      "GPU 3 candidate route minimum",
+      "GPU 3 candidate route maximum",
+      "GPU 3 candidate full_block sample count",
+      "GPU 3 candidate full_block HBM accounting",
+      "GPU 3 candidate combine_boundary sample count",
+      "GPU 3 candidate combine_boundary HBM accounting",
+      "GPU 3 candidate source pin",
+      "GPU 3 candidate route minimum",
+      "GPU 3 candidate route maximum",
+      "GPU 3 candidate full_block sample count",
+      "GPU 3 candidate full_block HBM accounting",
+      "GPU 3 candidate combine_boundary sample count",
+      "GPU 3 candidate combine_boundary HBM accounting",
+      "GPU 3 paired state identity",
+      "GPU 3 paired hidden identity",
+      "GPU 3 paired selected_experts identity",
+      "GPU 3 paired combine_weights identity",
+      "GPU 3 paired cotangent identity",
+      "GPU 3 paired weighted_bf16_summands identity",
+      "GPU 4 alternating order",
+      "GPU 4 parent repetition count",
+      "GPU 4 parent repetition IDs",
+      "GPU 4 parent source pin",
+      "GPU 4 parent route minimum",
+      "GPU 4 parent route maximum",
+      "GPU 4 parent full_block sample count",
+      "GPU 4 parent full_block HBM accounting",
+      "GPU 4 parent combine_boundary sample count",
+      "GPU 4 parent combine_boundary HBM accounting",
+      "GPU 4 parent source pin",
+      "GPU 4 parent route minimum",
+      "GPU 4 parent route maximum",
+      "GPU 4 parent full_block sample count",
+      "GPU 4 parent full_block HBM accounting",
+      "GPU 4 parent combine_boundary sample count",
+      "GPU 4 parent combine_boundary HBM accounting",
+      "GPU 4 candidate repetition count",
+      "GPU 4 candidate repetition IDs",
+      "GPU 4 candidate source pin",
+      "GPU 4 candidate route minimum",
+      "GPU 4 candidate route maximum",
+      "GPU 4 candidate full_block sample count",
+      "GPU 4 candidate full_block HBM accounting",
+      "GPU 4 candidate combine_boundary sample count",
+      "GPU 4 candidate combine_boundary HBM accounting",
+      "GPU 4 candidate source pin",
+      "GPU 4 candidate route minimum",
+      "GPU 4 candidate route maximum",
+      "GPU 4 candidate full_block sample count",
+      "GPU 4 candidate full_block HBM accounting",
+      "GPU 4 candidate combine_boundary sample count",
+      "GPU 4 candidate combine_boundary HBM accounting",
+      "GPU 4 paired state identity",
+      "GPU 4 paired hidden identity",
+      "GPU 4 paired selected_experts identity",
+      "GPU 4 paired combine_weights identity",
+      "GPU 4 paired cotangent identity",
+      "GPU 4 paired weighted_bf16_summands identity",
+      "GPU 5 alternating order",
+      "GPU 5 parent repetition count",
+      "GPU 5 parent repetition IDs",
+      "GPU 5 parent source pin",
+      "GPU 5 parent route minimum",
+      "GPU 5 parent route maximum",
+      "GPU 5 parent full_block sample count",
+      "GPU 5 parent full_block HBM accounting",
+      "GPU 5 parent combine_boundary sample count",
+      "GPU 5 parent combine_boundary HBM accounting",
+      "GPU 5 parent source pin",
+      "GPU 5 parent route minimum",
+      "GPU 5 parent route maximum",
+      "GPU 5 parent full_block sample count",
+      "GPU 5 parent full_block HBM accounting",
+      "GPU 5 parent combine_boundary sample count",
+      "GPU 5 parent combine_boundary HBM accounting",
+      "GPU 5 candidate repetition count",
+      "GPU 5 candidate repetition IDs",
+      "GPU 5 candidate source pin",
+      "GPU 5 candidate route minimum",
+      "GPU 5 candidate route maximum",
+      "GPU 5 candidate full_block sample count",
+      "GPU 5 candidate full_block HBM accounting",
+      "GPU 5 candidate combine_boundary sample count",
+      "GPU 5 candidate combine_boundary HBM accounting",
+      "GPU 5 candidate source pin",
+      "GPU 5 candidate route minimum",
+      "GPU 5 candidate route maximum",
+      "GPU 5 candidate full_block sample count",
+      "GPU 5 candidate full_block HBM accounting",
+      "GPU 5 candidate combine_boundary sample count",
+      "GPU 5 candidate combine_boundary HBM accounting",
+      "GPU 5 paired state identity",
+      "GPU 5 paired hidden identity",
+      "GPU 5 paired selected_experts identity",
+      "GPU 5 paired combine_weights identity",
+      "GPU 5 paired cotangent identity",
+      "GPU 5 paired weighted_bf16_summands identity",
+      "GPU 6 alternating order",
+      "GPU 6 parent repetition count",
+      "GPU 6 parent repetition IDs",
+      "GPU 6 parent source pin",
+      "GPU 6 parent route minimum",
+      "GPU 6 parent route maximum",
+      "GPU 6 parent full_block sample count",
+      "GPU 6 parent full_block HBM accounting",
+      "GPU 6 parent combine_boundary sample count",
+      "GPU 6 parent combine_boundary HBM accounting",
+      "GPU 6 parent source pin",
+      "GPU 6 parent route minimum",
+      "GPU 6 parent route maximum",
+      "GPU 6 parent full_block sample count",
+      "GPU 6 parent full_block HBM accounting",
+      "GPU 6 parent combine_boundary sample count",
+      "GPU 6 parent combine_boundary HBM accounting",
+      "GPU 6 candidate repetition count",
+      "GPU 6 candidate repetition IDs",
+      "GPU 6 candidate source pin",
+      "GPU 6 candidate route minimum",
+      "GPU 6 candidate route maximum",
+      "GPU 6 candidate full_block sample count",
+      "GPU 6 candidate full_block HBM accounting",
+      "GPU 6 candidate combine_boundary sample count",
+      "GPU 6 candidate combine_boundary HBM accounting",
+      "GPU 6 candidate source pin",
+      "GPU 6 candidate route minimum",
+      "GPU 6 candidate route maximum",
+      "GPU 6 candidate full_block sample count",
+      "GPU 6 candidate full_block HBM accounting",
+      "GPU 6 candidate combine_boundary sample count",
+      "GPU 6 candidate combine_boundary HBM accounting",
+      "GPU 6 paired state identity",
+      "GPU 6 paired hidden identity",
+      "GPU 6 paired selected_experts identity",
+      "GPU 6 paired combine_weights identity",
+      "GPU 6 paired cotangent identity",
+      "GPU 6 paired weighted_bf16_summands identity",
+      "GPU 7 alternating order",
+      "GPU 7 parent repetition count",
+      "GPU 7 parent repetition IDs",
+      "GPU 7 parent source pin",
+      "GPU 7 parent route minimum",
+      "GPU 7 parent route maximum",
+      "GPU 7 parent full_block sample count",
+      "GPU 7 parent full_block HBM accounting",
+      "GPU 7 parent combine_boundary sample count",
+      "GPU 7 parent combine_boundary HBM accounting",
+      "GPU 7 parent source pin",
+      "GPU 7 parent route minimum",
+      "GPU 7 parent route maximum",
+      "GPU 7 parent full_block sample count",
+      "GPU 7 parent full_block HBM accounting",
+      "GPU 7 parent combine_boundary sample count",
+      "GPU 7 parent combine_boundary HBM accounting",
+      "GPU 7 candidate repetition count",
+      "GPU 7 candidate repetition IDs",
+      "GPU 7 candidate source pin",
+      "GPU 7 candidate route minimum",
+      "GPU 7 candidate route maximum",
+      "GPU 7 candidate full_block sample count",
+      "GPU 7 candidate full_block HBM accounting",
+      "GPU 7 candidate combine_boundary sample count",
+      "GPU 7 candidate combine_boundary HBM accounting",
+      "GPU 7 candidate source pin",
+      "GPU 7 candidate route minimum",
+      "GPU 7 candidate route maximum",
+      "GPU 7 candidate full_block sample count",
+      "GPU 7 candidate full_block HBM accounting",
+      "GPU 7 candidate combine_boundary sample count",
+      "GPU 7 candidate combine_boundary HBM accounting",
+      "GPU 7 paired state identity",
+      "GPU 7 paired hidden identity",
+      "GPU 7 paired selected_experts identity",
+      "GPU 7 paired combine_weights identity",
+      "GPU 7 paired cotangent identity",
+      "GPU 7 paired weighted_bf16_summands identity",
+      "host/cgroup memory samples present",
+      "cgroup memory stayed below stop rule",
+      "host memory stayed above stop rule",
+      "raw packet SHA-256 computed"
+    ],
+    "checks_passed": 344,
+    "raw_sha256": "60e882a908643ae487b6f2f2a1c0c979a6a3d10bb9dccd97c40601c98e02526e",
+    "reader_sha256": "5f83e9030295d4219c9180a52147082bbbd14247c562217f84105456cc48cc4e"
+  },
+  "schema_version": 1,
+  "verdict": {
+    "kind": "estimate_only_no_materiality_threshold",
+    "observed_direction": "candidate_slower_on_all_eight_gpus",
+    "primary_metric": "full_forward_backward_ms"
+  }
+}
