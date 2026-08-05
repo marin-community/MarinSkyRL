@@ -932,10 +932,6 @@ class PolicyWorkerBase(Worker):
         causal_lm = getattr(self.model, "model", self.model)
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
-    def _grug_query_bias_updates_enabled(self) -> bool:
-        mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
-        return mode == GrugQueryBiasUpdateMode.REPLACE
-
     def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
         config = causal_lm.config
         candidate_count = query_bias_candidate_count(
@@ -951,7 +947,7 @@ class PolicyWorkerBase(Worker):
         self._grug_query_bias_candidate_count = candidate_count
 
     def _finish_grug_query_bias_window(self, *, optimizer_step_succeeded: bool) -> None:
-        """Apply an enabled Grug bias window after a successful step, then clear it."""
+        """Apply an accumulated bias after a successful step; always clear it."""
 
         accumulator = getattr(self, "_grug_query_bias_accumulator", None)
         if accumulator is None:
@@ -1109,7 +1105,10 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
-        grug_query_bias_updates_enabled = grug_causal_lm is not None and self._grug_query_bias_updates_enabled()
+        grug_query_bias_update_mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
+        grug_query_bias_updates_enabled = (
+            grug_causal_lm is not None and grug_query_bias_update_mode == GrugQueryBiasUpdateMode.REPLACE
+        )
         grug_microbatch_valid_tokens = None
         if grug_query_bias_updates_enabled:
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
