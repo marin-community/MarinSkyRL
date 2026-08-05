@@ -53,15 +53,19 @@ exit 0
     command_bin.mkdir()
     _write_executable(command_bin / "nvidia-smi", "#!/usr/bin/env bash\nexit 0\n")
 
-    result = subprocess.run(
-        ("bash", str(nightly_directory / NIGHTLY_SCRIPT.name)),
-        cwd=checkout,
-        env=os.environ
-        | {
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.update(
+        {
             "HOME": str(tmp_path),
             "NIGHTLY_RL_ENV": str(runtime),
             "PATH": os.pathsep.join((str(command_bin), os.environ["PATH"])),
-        },
+        }
+    )
+    result = subprocess.run(
+        ("bash", str(nightly_directory / NIGHTLY_SCRIPT.name)),
+        cwd=checkout,
+        env=environment,
         capture_output=True,
         text=True,
     )
