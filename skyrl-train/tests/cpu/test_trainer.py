@@ -4,6 +4,7 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 
 import gc
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -11,6 +12,7 @@ import pytest
 from jaxtyping import Float, Integer
 from omegaconf import OmegaConf
 from pytest import approx
+from transformers import AutoModelForCausalLM
 from unittest.mock import MagicMock, patch
 
 
@@ -92,17 +94,81 @@ class _FixedQueryBiasAccumulator:
         return self.betas
 
 
-def _worker_with_grug_query_bias_accumulator(accumulator):
+def _worker_with_grug_query_bias_accumulator(accumulator, *, update_mode):
     worker = object.__new__(PolicyWorkerBase)
+    policy_config = {} if update_mode is None else {"grug_query_bias_update_mode": update_mode}
+    worker.cfg = OmegaConf.create({"trainer": {"policy": policy_config}})
     causal_lm = _ObservableGrugCausalLM()
     worker.model = SimpleNamespace(model=causal_lm)
     worker._grug_query_bias_accumulator = accumulator
     return worker, causal_lm
 
 
+def test_default_config_freezes_grug_query_bias_updates():
+    assert get_default_config().trainer.policy.grug_query_bias_update_mode == "frozen"
+
+
+def test_frozen_grug_query_bias_does_not_start_an_accumulator():
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="frozen")
+
+    worker._begin_grug_query_bias_window(causal_lm, valid_tokens=8)
+
+    assert worker._grug_query_bias_accumulator is None
+
+
+@pytest.mark.parametrize("update_mode", ["frozen", None], ids=["explicit", "missing"])
+def test_frozen_grug_query_bias_discards_an_existing_accumulator(update_mode):
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
+    previous_bias = causal_lm.query_bias.clone()
+
+    worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
+
+    assert worker._grug_query_bias_accumulator is None
+    torch.testing.assert_close(causal_lm.query_bias, previous_bias)
+
+
+def test_frozen_grug_query_bias_has_zero_drift_across_optimizer_steps():
+    fixture = Path(__file__).parents[1] / "fixtures" / "grug_training_oracle"
+    causal_lm = AutoModelForCausalLM.from_pretrained(
+        fixture,
+        trust_remote_code=False,
+        local_files_only=True,
+        attn_implementation="eager",
+        dtype=torch.float32,
+    )
+    assert isinstance(causal_lm, GrugMoeForCausalLM)
+    causal_lm.train()
+
+    worker = object.__new__(PolicyWorkerBase)
+    worker.cfg = get_default_config()
+    worker.model = SimpleNamespace(model=causal_lm)
+    optimizer = torch.optim.AdamW(causal_lm.parameters(), lr=1e-4)
+    initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
+    initial_lm_head = causal_lm.lm_head.weight.detach().clone()
+    base_tokens = torch.arange(12).reshape(2, 6)
+
+    for step in range(5):
+        input_ids = (base_tokens + step) % causal_lm.config.vocab_size
+        attention_mask = torch.ones_like(input_ids)
+        worker._begin_grug_query_bias_window(causal_lm, valid_tokens=input_ids.numel())
+        assert worker._grug_query_bias_accumulator is None
+
+        optimizer.zero_grad(set_to_none=True)
+        loss = causal_lm(input_ids, attention_mask=attention_mask, labels=input_ids).loss
+        loss.backward()
+        optimizer.step()
+        worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
+
+    actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
+    torch.testing.assert_close(actual_bias, initial_bias, rtol=0, atol=0)
+    assert not torch.equal(causal_lm.lm_head.weight, initial_lm_head)
+
+
 def test_failed_optimizer_step_discards_grug_query_bias_window():
     accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="replace")
     previous_bias = causal_lm.query_bias.clone()
 
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=False)
@@ -111,10 +177,10 @@ def test_failed_optimizer_step_discards_grug_query_bias_window():
     torch.testing.assert_close(causal_lm.query_bias, previous_bias)
 
 
-def test_successful_optimizer_step_applies_grug_query_bias_once():
+def test_replace_mode_applies_grug_query_bias_once():
     betas = torch.tensor([[1.0, -2.0]])
     accumulator = _FixedQueryBiasAccumulator(betas)
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="replace")
 
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
 
@@ -770,7 +836,10 @@ def test_grug_ppo_train_releases_consumed_microbatches():
             "trainer": {
                 "micro_train_batch_size_per_gpu": 1,
                 "update_epochs_per_batch": 1,
-                "policy": {"optimizer_config": {"max_grad_norm": 1.0}},
+                "policy": {
+                    "grug_query_bias_update_mode": "replace",
+                    "optimizer_config": {"max_grad_norm": 1.0},
+                },
                 "algorithm": {"policy_loss_type": "regular", "loss_reduction": "token_mean"},
             },
             "generator": {"sampling_params": {"temperature": 1.0}},

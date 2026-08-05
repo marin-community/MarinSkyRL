@@ -27,6 +27,9 @@ trainer:
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
+    # Preserve the router state learned by the checkpoint during RL. "replace"
+    # retains the JAX pretraining/SFT query-bias update for explicit experiments.
+    grug_query_bias_update_mode: "frozen"
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       lora:

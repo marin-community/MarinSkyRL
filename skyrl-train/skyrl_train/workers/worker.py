@@ -931,7 +931,16 @@ class PolicyWorkerBase(Worker):
         causal_lm = getattr(self.model, "model", self.model)
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
+    def _grug_query_bias_updates_enabled(self) -> bool:
+        # Missing means frozen so older saved configs also preserve checkpoint state.
+        mode = self.cfg.trainer.policy.get("grug_query_bias_update_mode", "frozen")
+        return mode == "replace"
+
     def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
+        if not self._grug_query_bias_updates_enabled():
+            self._grug_query_bias_accumulator = None
+            return
+
         config = causal_lm.config
         candidate_count = query_bias_candidate_count(
             valid_tokens,
@@ -950,6 +959,9 @@ class PolicyWorkerBase(Worker):
 
         accumulator = getattr(self, "_grug_query_bias_accumulator", None)
         if accumulator is None:
+            return
+        if not self._grug_query_bias_updates_enabled():
+            self._grug_query_bias_accumulator = None
             return
         if optimizer_step_succeeded:
             causal_lm = self._grug_causal_lm()
@@ -1104,8 +1116,9 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
+        grug_query_bias_updates_enabled = grug_causal_lm is not None and self._grug_query_bias_updates_enabled()
         grug_microbatch_valid_tokens = None
-        if grug_causal_lm is not None:
+        if grug_query_bias_updates_enabled:
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
             grug_microbatch_valid_tokens = [
                 int(mask.sum().item()) for mask in train_data["attention_mask"].split(micro_batch_size)
@@ -1124,7 +1137,7 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
-                if grug_causal_lm is not None and local_step % accumulation_steps == 0:
+                if grug_query_bias_updates_enabled and local_step % accumulation_steps == 0:
                     assert grug_microbatch_valid_tokens is not None
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])

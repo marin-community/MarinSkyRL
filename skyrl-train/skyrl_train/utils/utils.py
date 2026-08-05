@@ -505,6 +505,11 @@ def validate_cfg(cfg: DictConfig):
         f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
     )
 
+    grug_query_bias_update_mode = cfg.trainer.policy.get("grug_query_bias_update_mode", "frozen")
+    assert grug_query_bias_update_mode in ("frozen", "replace"), (
+        f"invalid grug_query_bias_update_mode: {grug_query_bias_update_mode}. Must be one of ('frozen', 'replace')"
+    )
+
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":
         assert cfg.trainer.critic.model.path, (
