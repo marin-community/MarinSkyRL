@@ -221,16 +221,23 @@ def test_warmed_multinode_stall_has_expected_signature_and_terminates_gang(
 
         mode_before = f"{BEFORE_ENQUEUE_MARKER} mode={mode.value}"
         mode_after = f"{AFTER_ENQUEUE_MARKER} mode={mode.value}"
+        before_count = result.output.count(mode_before)
+        after_count = result.output.count(mode_after)
         if mode is FaultMode.ENQUEUED_CUDA_STALL:
-            assert result.output.count(mode_before) == WORLD_SIZE, result.output
-            assert result.output.count(mode_after) == WORLD_SIZE, result.output
+            assert before_count == WORLD_SIZE, result.output
+            assert after_count == WORLD_SIZE, result.output
         elif mode is FaultMode.PRE_ENQUEUE_NONARRIVAL:
-            assert result.output.count(mode_before) == WORLD_SIZE, result.output
-            assert result.output.count(mode_after) == WORLD_SIZE - 1, result.output
+            assert before_count == WORLD_SIZE, result.output
+            assert after_count == WORLD_SIZE - 1, result.output
         else:
             assert result.output.count(MODEL_OPERATION_MARKER) == WORLD_SIZE, result.output
-            assert result.output.count(mode_before) == WORLD_SIZE, result.output
-            assert result.output.count(mode_after) == WORLD_SIZE, result.output
+            assert before_count == WORLD_SIZE, result.output
+            assert after_count == WORLD_SIZE, result.output
+        print(
+            f"MULTI_NODE_COLLECTIVE_STALL_OK mode={mode.value} before={before_count} after={after_count} "
+            f"unaffected_fsdp={WORLD_SIZE - GPUS_PER_NODE}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

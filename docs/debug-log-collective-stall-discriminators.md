@@ -45,6 +45,16 @@ all emitted an explicit precondition record, then the three peers emitted the sh
 well. Restricting the explicit record to the withheld rank removes those three duplicates without changing the
 fault.
 
+Jupiter job 1246556 reran only the corrected pre-enqueue case at commit `0d90dfee`. It passed in 205.62
+seconds with 16 before-enqueue records, 15 after-enqueue records, 12 healthy FSDP-subgroup completions, no
+unexpected completion, and a nonzero gang exit. The final evidence is split across two runs: job 1246400
+validated the enqueued CUDA stall and model schedule divergence, and job 1246556 validated pre-enqueue
+non-arrival. The last code change only removes the pre-enqueue case's three duplicate records.
+
+These tests establish distinct controlled signatures; they do not assign one to the natural TaskTrove wedge.
+The next natural timeout needs flight-recorder state or equivalent before/after-enqueue evidence from ranks 1,
+5, 9, and 13 before any of the three mechanisms can be selected.
+
 ## Future work
 
 - [ ] Compare these controlled signatures with the next natural timeout's flight-recorder artifacts.
