@@ -37,17 +37,18 @@ experts, and top-4 routing.
 
 The independent references reduce the path's BF16 weighted summands in fixed
 slot order. One uses FP32 to express the candidate contract; the other uses
-FP64 to measure local accumulation error. They do not call either product
-combine implementation.
+FP64 to benchmark returned-output accuracy against a higher-precision
+fixed-order accumulator. They do not call either product combine implementation.
 
 - Parent eager and grouped outputs each differed from the FP32 reference in
   `4,096 / 524,288` elements, with maximum absolute error `0.015625`.
 - Candidate eager and grouped outputs were bitwise equal to the independent
   FP32 reference: zero failures and zero maximum error. They were also bitwise
   equal after casting the independent FP64 result to BF16.
-- Against the pre-cast FP64 reduction, the parent's maximum error was
-  `0.01171875` and mean error was `0.000091552734375`. The candidate's were
-  `0.00390625` and `0.000030517578125`, respectively.
+- Against the independent uncast FP64 accumulator, the returned BF16 output's
+  maximum error was `0.01171875` for the parent and `0.00390625` for the
+  candidate; mean error was `0.000091552734375` and `0.000030517578125`,
+  respectively.
 - Candidate eager and grouped outputs were bitwise equal. Combine-weight,
   expert gate, up, and down gradients were bitwise equal between those paths;
   the hidden-gradient maximum difference was `2.384185791015625e-7`.
@@ -55,8 +56,18 @@ combine implementation.
   the frozen `rtol=0.08, atol=0.0001` FP32 and FP64-reference checks with zero
   tolerance failures. The output rule was exact: `rtol=0, atol=0`.
 
-All five frozen correctness gates passed before performance began, including
-fixture discrimination of the known parent error.
+Post-run review found one protocol-label deviation. The fifth required gate says
+"candidate maximum pre-cast error," but the product path retained only its
+returned BF16 output. The recorded `fp64_pre_cast_accuracy.actual` values compare
+that returned output with the independent uncast FP64 accumulator; the product's
+internal pre-final-cast FP32 accumulator was not captured. Thus the recorded
+`candidate_reduces_fp64_error=true` supports the narrower returned-output result
+above, not a direct product pre-cast measurement. The first four required gates
+passed at their stated scope, and the fixture discriminated the known parent
+error. The generated `SUMMARY.md` phrase "reduced local accumulation error"
+must likewise be read at returned-output scope. The frozen protocol, raw packet,
+reader, and generated summaries remain unchanged so their executed identities
+and byte-for-byte readback are preserved.
 
 ## Paired timing result
 
@@ -68,12 +79,23 @@ giving 40 timing samples per arm per GPU. CUDA events enclosed forward and
 backward, and the final backward event was synchronized. Setup and gradient
 clearing stayed outside the timed regions.
 
+The frozen HBM procedure emptied the allocator cache after those five warmups.
+The first retained iteration in each process therefore included post-empty-cache
+allocations and was visibly slower than its other 19 iterations. All samples
+were retained. Each arm had two such high samples in its 40-sample per-GPU pool,
+so neither determined the reported median; the median came from the stable
+post-allocation iterations.
+
 The full-block boundary is `GrugMoeSparseMoeBlock._forward_grouped` with the
 router held outside the measurement. It includes route sorting, routed-input
 construction, grouped expert projections, BF16 weighting, combine accumulation,
 and backward. The combine boundary is the complete affected section: weight
 flatten/index selection/cast, BF16 expert-output multiplication, output
 allocation, `index_add` accumulation, the candidate casts, and backward.
+The primary full-block boundary calls the hash-pinned product module directly.
+Because the product does not expose combine as a standalone callable, the
+driver implements the isolated combine boundary with those same affected
+operations.
 
 The parent and candidate columns below are medians across the eight per-GPU arm
 medians. Delta and ratio are the median of the eight paired per-GPU comparisons;
