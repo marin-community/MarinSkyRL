@@ -1,4 +1,15 @@
-"""Dependency-light protocol shared by the phase-divergence controller and worker."""
+"""Dependency-light protocol shared by the collective-stall controller and worker."""
+
+from enum import StrEnum
+
+
+class FaultMode(StrEnum):
+    """Mutually exclusive failure mechanisms exercised by the worker gang."""
+
+    ENQUEUED_CUDA_STALL = "enqueued-cuda-stall"
+    PRE_ENQUEUE_NONARRIVAL = "pre-enqueue-nonarrival"
+    MODEL_SCHEDULE_DIVERGENCE = "model-schedule-divergence"
+
 
 PROCESS_GROUP_TIMEOUT_SECONDS = 60
 WARMUP_MARKER = "MULTI_NODE_COMMUNICATOR_WARMUP_COMPLETED"
@@ -6,5 +17,8 @@ READY_MARKER = "MULTI_NODE_FAULT_READY"
 ACTIVE_MARKER = "MULTI_NODE_FAULT_ACTIVE"
 BLOCKING_WAIT_FIELD = "blocking_wait"
 BLOCKING_WAIT_DISABLED_MARKER = f"{BLOCKING_WAIT_FIELD}=None"
-UNAFFECTED_EP_COMPLETION_MARKER = "MULTI_NODE_UNAFFECTED_EP_COMPLETED"
+BEFORE_ENQUEUE_MARKER = "MULTI_NODE_BEFORE_ENQUEUE"
+AFTER_ENQUEUE_MARKER = "MULTI_NODE_AFTER_ENQUEUE"
+MODEL_OPERATION_MARKER = "MULTI_NODE_MODEL_OPERATION"
+UNAFFECTED_FSDP_COMPLETION_MARKER = "MULTI_NODE_UNAFFECTED_FSDP_COMPLETED"
 UNEXPECTED_COMPLETION_MARKER = "MULTI_NODE_FAULT_UNEXPECTED_COMPLETION"
