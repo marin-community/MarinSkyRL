@@ -170,7 +170,7 @@ def _ssh(
 
 def _remote_exists(runner: CommandRunner, host: str, remote_path: str, *, directory: bool) -> bool:
     predicate = "-d" if directory else "-f"
-    result = _ssh(runner, host, f"test {predicate} -- {shlex.quote(remote_path)}")
+    result = _ssh(runner, host, f"test {predicate} {shlex.quote(remote_path)}")
     if result.returncode not in {0, 1}:
         raise RuntimeError(f"Jupiter path check failed: {_error_detail(result)}")
     return result.returncode == 0
