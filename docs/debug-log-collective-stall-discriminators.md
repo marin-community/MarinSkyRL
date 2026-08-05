@@ -38,6 +38,13 @@ CUDA stream dependency but does not by itself prove CPU-visible GPU completion. 
 device before it can report that a collective completed. The next run adds that synchronization without
 changing the fault inputs or deadlines.
 
+Jupiter job 1246400 reran all three cases with the corrected completion boundary. The enqueued CUDA stall and
+model schedule divergence passed. The pre-enqueue case terminated with the intended 16 before-enqueue, 15
+after-enqueue mechanism, but its controller saw 19 before-enqueue strings: the withheld rank and its three peers
+all emitted an explicit precondition record, then the three peers emitted the shared enqueue helper's record as
+well. Restricting the explicit record to the withheld rank removes those three duplicates without changing the
+fault.
+
 ## Future work
 
 - [ ] Compare these controlled signatures with the next natural timeout's flight-recorder artifacts.

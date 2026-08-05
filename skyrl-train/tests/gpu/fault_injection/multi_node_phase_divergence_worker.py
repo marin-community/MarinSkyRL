@@ -162,13 +162,13 @@ def _run_pre_enqueue_nonarrival(
             rank=rank,
         )
 
-    _marker(
-        BEFORE_ENQUEUE_MARKER,
-        mode=FaultMode.PRE_ENQUEUE_NONARRIVAL,
-        rank=rank,
-        phase="fsdp-all-gather",
-    )
     if rank == TARGET_RANK:
+        _marker(
+            BEFORE_ENQUEUE_MARKER,
+            mode=FaultMode.PRE_ENQUEUE_NONARRIVAL,
+            rank=rank,
+            phase="fsdp-all-gather",
+        )
         signal.pause()
     _wait_for_fsdp_all_gather(
         collectives,
