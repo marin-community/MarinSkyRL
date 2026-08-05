@@ -6,8 +6,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 import torch
+
+
+class GrugQueryBiasUpdateMode(StrEnum):
+    """Policy for updating Grug router query-bias buffers during RL."""
+
+    FROZEN = "frozen"
+    REPLACE = "replace"
 
 
 def query_bias_candidate_count(valid_tokens: int, experts_per_token: int, num_experts: int) -> int:

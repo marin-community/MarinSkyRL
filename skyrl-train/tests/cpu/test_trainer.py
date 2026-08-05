@@ -4,7 +4,6 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 
 import gc
 import weakref
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -12,7 +11,6 @@ import pytest
 from jaxtyping import Float, Integer
 from omegaconf import OmegaConf
 from pytest import approx
-from transformers import AutoModelForCausalLM
 from unittest.mock import MagicMock, patch
 
 
@@ -27,6 +25,7 @@ from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
+from tests.grug_training_parity import load_grug_training_oracle_model
 from tests.cpu.util import example_dummy_config
 
 
@@ -130,15 +129,7 @@ def test_frozen_grug_query_bias_discards_an_existing_accumulator(update_mode):
 
 
 def test_frozen_grug_query_bias_has_zero_drift_across_optimizer_steps():
-    fixture = Path(__file__).parents[1] / "fixtures" / "grug_training_oracle"
-    causal_lm = AutoModelForCausalLM.from_pretrained(
-        fixture,
-        trust_remote_code=False,
-        local_files_only=True,
-        attn_implementation="eager",
-        dtype=torch.float32,
-    )
-    assert isinstance(causal_lm, GrugMoeForCausalLM)
+    causal_lm = load_grug_training_oracle_model()
     causal_lm.train()
 
     worker = object.__new__(PolicyWorkerBase)

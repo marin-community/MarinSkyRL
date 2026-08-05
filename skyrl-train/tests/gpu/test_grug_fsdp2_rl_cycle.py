@@ -101,6 +101,7 @@ def _config(
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.fsdp_config.moe_grouped_gemm = False
     cfg.trainer.policy.fsdp_config.use_grouped_mm = False
+    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
     cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
     cfg.trainer.policy.optimizer_config.lr = 3.0e-2
     cfg.trainer.policy.optimizer_config.weight_decay = 0.0

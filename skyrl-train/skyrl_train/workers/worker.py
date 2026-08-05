@@ -46,6 +46,7 @@ from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
+    GrugQueryBiasUpdateMode,
     next_query_bias,
     query_bias_candidate_count,
 )
@@ -933,8 +934,8 @@ class PolicyWorkerBase(Worker):
 
     def _grug_query_bias_updates_enabled(self) -> bool:
         # Missing means frozen so older saved configs also preserve checkpoint state.
-        mode = self.cfg.trainer.policy.get("grug_query_bias_update_mode", "frozen")
-        return mode == "replace"
+        mode = self.cfg.trainer.policy.get("grug_query_bias_update_mode", GrugQueryBiasUpdateMode.FROZEN)
+        return mode == GrugQueryBiasUpdateMode.REPLACE
 
     def _begin_grug_query_bias_window(self, causal_lm: GrugMoeForCausalLM, valid_tokens: int) -> None:
         if not self._grug_query_bias_updates_enabled():
@@ -955,7 +956,7 @@ class PolicyWorkerBase(Worker):
         self._grug_query_bias_candidate_count = candidate_count
 
     def _finish_grug_query_bias_window(self, *, optimizer_step_succeeded: bool) -> None:
-        """Apply one completed Grug bias window, or discard it after a skipped step."""
+        """Apply an enabled Grug bias window after a successful step, then clear it."""
 
         accumulator = getattr(self, "_grug_query_bias_accumulator", None)
         if accumulator is None:
