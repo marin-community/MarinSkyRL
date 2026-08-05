@@ -135,10 +135,12 @@ def _launch_slurm_step(
     node_agent_command_prefix: tuple[str, ...],
 ) -> Iterator[ProcessGang]:
     environment = os.environ.copy()
+    # Keep the modern alias absent so the red case isolates the legacy setting
+    # captured in the TaskTrove worker environment, independent of the shell
+    # used to submit this opt-in test.
     environment.pop("TORCH_NCCL_BLOCKING_WAIT", None)
-    # Reproduce the legacy Jupiter launch environment. The production Ray
-    # worker bootstrap must remove this alias before importing torch; otherwise
-    # it disables the watchdog path exercised by this fault.
+    # The production Ray worker bootstrap must remove this alias before
+    # importing torch; otherwise it disables the watchdog path exercised here.
     environment["NCCL_BLOCKING_WAIT"] = "1"
     environment["TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS"] = "1800000"
     environment.update(
