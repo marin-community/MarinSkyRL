@@ -19,7 +19,7 @@ from tests.gpu.fault_injection.collective_payloads import (
     warm_ep_and_fsdp_communicators,
 )
 from tests.gpu.fault_injection.multi_node_mesh import MeshRuntime, multi_node_mesh_runtime
-from tests.gpu.fault_injection.multi_node_phase_divergence_markers import (
+from tests.gpu.fault_injection.multi_node_phase_divergence_protocol import (
     ACTIVE_MARKER,
     BLOCKING_WAIT_DISABLED_MARKER,
     BLOCKING_WAIT_FIELD,

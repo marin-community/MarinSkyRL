@@ -1,4 +1,4 @@
-"""Dependency-light markers shared by the phase-divergence controller and worker."""
+"""Dependency-light protocol shared by the phase-divergence controller and worker."""
 
 PROCESS_GROUP_TIMEOUT_SECONDS = 60
 WARMUP_MARKER = "MULTI_NODE_COMMUNICATOR_WARMUP_COMPLETED"
