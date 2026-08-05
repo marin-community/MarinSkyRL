@@ -395,7 +395,7 @@ def _run_full_cycle(
         )
         _assert_policy_attention_backend(policy, "flash_attention_2")
         if expert_model_parallel_size > 1:
-            geometry = ray.get(policy.async_run_ray_method("pass_through", "diag_ep8_geometry"))
+            geometry = ray.get(policy.async_run_ray_method("pass_through", "diag_ep_geometry"))
             assert all(item["mesh_dim_names"] == ["ddp", "fsdp", "ep"] for item in geometry)
             assert all(tuple(item["mesh_shape"]) == (1, 2, 2) for item in geometry)
             assert {item["ep_coord"] for item in geometry} == {0, 1}

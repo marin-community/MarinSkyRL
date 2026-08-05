@@ -861,8 +861,9 @@ def test_grug_ppo_train_releases_consumed_microbatches():
     previous_experience = None
     prior_microbatch_was_released = []
 
-    def training_step(experience, _global_step, _local_step, _accumulation_steps):
+    def training_step(experience, _global_step, _local_step, _accumulation_steps, *, grug_capture_plan):
         nonlocal previous_experience
+        assert grug_capture_plan is not None
         if previous_experience is not None:
             gc.collect()
             prior_microbatch_was_released.append(previous_experience() is None)

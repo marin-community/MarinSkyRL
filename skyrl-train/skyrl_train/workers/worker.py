@@ -3,6 +3,7 @@ import contextlib
 import logging
 import os
 import socket
+from dataclasses import dataclass
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import tqdm
 from collections import defaultdict
@@ -102,6 +103,65 @@ def _grug_query_bias_virtual_shard_mask(
     row_offsets = torch.arange(micro_batch_size, device=attention_mask.device) + microbatch_start
     owned_rows = (row_offsets >= shard_start) & (row_offsets < shard_end)
     return attention_mask.bool() & owned_rows.unsqueeze(1)
+
+
+@dataclass(frozen=True)
+class _GrugQueryBiasCapturePlan:
+    """Virtual EP ownership for every microbatch in one policy batch."""
+
+    valid_token_counts: tuple[int, ...]
+    micro_batch_size: int
+    accumulation_steps: int
+    ep_size: int
+    ep_rank: int
+
+    def mask_for(self, attention_mask: torch.Tensor, local_step: int) -> torch.Tensor:
+        return _grug_query_bias_virtual_shard_mask(
+            attention_mask,
+            local_step=local_step,
+            micro_batch_size=self.micro_batch_size,
+            accumulation_steps=self.accumulation_steps,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+        )
+
+
+def _build_grug_query_bias_capture_plan(
+    attention_mask: torch.Tensor,
+    *,
+    micro_batch_size: int,
+    accumulation_steps: int,
+    ep_size: int,
+    ep_rank: int,
+) -> _GrugQueryBiasCapturePlan:
+    valid_token_counts = tuple(
+        int(
+            _grug_query_bias_virtual_shard_mask(
+                mask,
+                local_step=local_step,
+                micro_batch_size=micro_batch_size,
+                accumulation_steps=accumulation_steps,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+            )
+            .sum()
+            .item()
+        )
+        for local_step, mask in enumerate(attention_mask.split(micro_batch_size))
+    )
+    remainder = len(valid_token_counts) % accumulation_steps
+    if remainder:
+        raise RuntimeError(
+            "the final policy optimizer window is incomplete: "
+            f"expected {accumulation_steps} microbatches, got {remainder}"
+        )
+    return _GrugQueryBiasCapturePlan(
+        valid_token_counts=valid_token_counts,
+        micro_batch_size=micro_batch_size,
+        accumulation_steps=accumulation_steps,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -1148,32 +1208,18 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
-        grug_microbatch_valid_tokens = None
+        grug_capture_plan = None
         if grug_causal_lm is not None:
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
             ep_size = int(getattr(self.strategy, "ep_size", 1))
             ep_rank = int(self.strategy.device_mesh.get_local_rank(mesh_dim="ep")) if ep_size > 1 else 0
-            attention_masks = list(train_data["attention_mask"].split(micro_batch_size))
-            grug_microbatch_valid_tokens = []
-            for microbatch_step, mask in enumerate(attention_masks):
-                virtual_mask = _grug_query_bias_virtual_shard_mask(
-                    mask,
-                    local_step=microbatch_step,
-                    micro_batch_size=micro_batch_size,
-                    accumulation_steps=accumulation_steps,
-                    ep_size=ep_size,
-                    ep_rank=ep_rank,
-                )
-                grug_microbatch_valid_tokens.append(int(virtual_mask.sum().item()))
-            remainder = len(grug_microbatch_valid_tokens) % accumulation_steps
-            if remainder:
-                raise RuntimeError(
-                    "the final policy optimizer window is incomplete: "
-                    f"expected {accumulation_steps} microbatches, got {remainder}"
-                )
-            self._grug_query_bias_valid_token_counts = grug_microbatch_valid_tokens
-            self._grug_query_bias_ep_size = ep_size
-            self._grug_query_bias_ep_rank = ep_rank
+            grug_capture_plan = _build_grug_query_bias_capture_plan(
+                train_data["attention_mask"],
+                micro_batch_size=micro_batch_size,
+                accumulation_steps=accumulation_steps,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+            )
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
@@ -1183,9 +1229,9 @@ class PolicyWorkerBase(Worker):
             )
             for local_step, experience in enumerate(pbar):
                 if grug_causal_lm is not None and local_step % accumulation_steps == 0:
-                    assert grug_microbatch_valid_tokens is not None
+                    assert grug_capture_plan is not None
                     window_end = local_step + accumulation_steps
-                    valid_tokens = sum(grug_microbatch_valid_tokens[local_step:window_end])
+                    valid_tokens = sum(grug_capture_plan.valid_token_counts[local_step:window_end])
                     self._begin_grug_query_bias_window(grug_causal_lm, valid_tokens)
                 diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
                 with _phase_diagnostics.region(
@@ -1197,12 +1243,16 @@ class PolicyWorkerBase(Worker):
                         local_step=local_step,
                     ),
                 ):
-                    status = self.training_step(
-                        experience,
-                        global_step,
-                        local_step,
-                        accumulation_steps,
-                    )
+                    if grug_capture_plan is None:
+                        status = self.training_step(experience, global_step, local_step, accumulation_steps)
+                    else:
+                        status = self.training_step(
+                            experience,
+                            global_step,
+                            local_step,
+                            accumulation_steps,
+                            grug_capture_plan=grug_capture_plan,
+                        )
                 policy_update_steps += 1
 
                 # for DP
@@ -1244,11 +1294,6 @@ class PolicyWorkerBase(Worker):
                     all_metrics[k].append(v)
                 pbar.set_postfix(short_status)
 
-        if grug_causal_lm is not None:
-            del self._grug_query_bias_valid_token_counts
-            del self._grug_query_bias_ep_size
-            del self._grug_query_bias_ep_rank
-
         torch.distributed.barrier()
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
@@ -1267,6 +1312,7 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
+        grug_capture_plan: _GrugQueryBiasCapturePlan | None = None,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
@@ -1292,18 +1338,10 @@ class PolicyWorkerBase(Worker):
         grug_query_bias_accumulator = getattr(self, "_grug_query_bias_accumulator", None)
         grug_capture_mask = attention_mask
         grug_capture_active = grug_causal_lm is not None and grug_query_bias_accumulator is not None
-        valid_token_counts = getattr(self, "_grug_query_bias_valid_token_counts", None)
-        if grug_capture_active and valid_token_counts is not None:
-            grug_capture_active = valid_token_counts[local_step] > 0
+        if grug_capture_active and grug_capture_plan is not None:
+            grug_capture_active = grug_capture_plan.valid_token_counts[local_step] > 0
             if grug_capture_active:
-                grug_capture_mask = _grug_query_bias_virtual_shard_mask(
-                    attention_mask,
-                    local_step=local_step,
-                    micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
-                    accumulation_steps=accumulation_steps,
-                    ep_size=self._grug_query_bias_ep_size,
-                    ep_rank=self._grug_query_bias_ep_rank,
-                )
+                grug_capture_mask = grug_capture_plan.mask_for(attention_mask, local_step)
         if grug_capture_active:
             assert grug_causal_lm is not None
             grug_causal_lm.begin_query_bias_capture(

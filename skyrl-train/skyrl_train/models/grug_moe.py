@@ -24,6 +24,7 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
 )
+from skyrl_train.models.layers.moe_routing import TokenReorderer, run_grouped_experts
 from skyrl_train.utils.flash_attention import (
     FLASH_ATTN_IMPORT_ERROR,
     flash_attn_func,
@@ -476,6 +477,7 @@ class GrugMoeSparseMoeBlock(nn.Module):
         super().__init__()
         self.router = GrugMoeRouter(config)
         self.experts = GrugMoeExperts(config)
+        self.reorderer = TokenReorderer(config.num_local_experts, config.num_experts_per_tok)
 
     def enable_grouped_mm(self) -> None:
         self.experts.use_grouped_mm = True
@@ -486,20 +488,13 @@ class GrugMoeSparseMoeBlock(nn.Module):
         selected_experts: torch.Tensor,
         combine_weights: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens, hidden_size = hidden_states.shape
-        top_k = selected_experts.shape[-1]
-        flat_experts = selected_experts.reshape(-1)
-        order = torch.argsort(flat_experts, stable=True)
-        token_indices = torch.arange(num_tokens, device=hidden_states.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
-        sorted_token_indices = token_indices.index_select(0, order)
-        routed_input = hidden_states.index_select(0, sorted_token_indices)
-        num_tokens_per_expert = torch.bincount(flat_experts, minlength=self.experts.num_experts)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
-        sorted_weights = combine_weights.reshape(-1).index_select(0, order).to(hidden_states.dtype)
-        routed_output = routed_output * sorted_weights.unsqueeze(-1)
-        output = torch.zeros((num_tokens, hidden_size), dtype=hidden_states.dtype, device=hidden_states.device)
-        output.index_add_(0, sorted_token_indices, routed_output)
-        return output
+        return run_grouped_experts(
+            self.experts,
+            hidden_states,
+            combine_weights,
+            selected_experts,
+            self.reorderer,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shape = hidden_states.shape

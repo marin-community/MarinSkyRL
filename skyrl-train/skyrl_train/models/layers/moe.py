@@ -49,6 +49,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+from skyrl_train.models.layers.moe_routing import TokenReorderer, route_grouped_experts
 
 # torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
 # does the DTensor->local convert + generate_permute_indices (cross-rank
@@ -353,35 +354,6 @@ class TokenChoiceTopKRouter(nn.Module):
         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
 
-class TokenReorderer(nn.Module):
-    """Reorder token indices to match expert ordering for grouped expert compute."""
-
-    def __init__(self, num_experts: int, top_k: int):
-        super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
-
-    def forward(
-        self,
-        top_scores: torch.Tensor,
-        selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        selected_experts_indices = selected_experts_indices.reshape(-1)
-        # int64 counts: the for-loop path needs ints (tolist→split), and the EP
-        # all_to_all dispatch (torchtitan _token_dispatch) requires INTEGER split
-        # sizes — a float histc here makes NCCL alltoall_base reject the splits.
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.float(),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        ).to(torch.int64)
-        token_indices_experts_sorted = torch.argsort(selected_experts_indices, stable=True)
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
-        return top_scores_experts_sorted, token_indices_experts_sorted, num_tokens_per_expert
-
-
 # --------------------------------------------------------------------------- #
 # MoE orchestrator (EP=1; optional shared expert with Qwen3-Next sigmoid gate) #
 # --------------------------------------------------------------------------- #
@@ -533,21 +505,6 @@ class MoE(nn.Module):
         routed_output = routed_outputs[0] if len(routed_outputs) == 1 else torch.cat(routed_outputs, dim=0)
         return routed_output if shared_output is None else shared_output + routed_output
 
-    def _run_routed_experts(
-        self,
-        x: torch.Tensor,
-        token_indices_experts_sorted: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-        top_scores_experts_sorted: torch.Tensor,
-    ) -> torch.Tensor:
-        dim = x.shape[-1]
-        routed_indices = token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim)
-        routed_input = torch.gather(x, dim=0, index=routed_indices)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
-        # Scale AFTER experts (HF eager multiplies the expert output by routing_weights).
-        routed_output = (routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)).to(x.dtype)
-        return routed_output
-
     def forward(
         self,
         x: torch.Tensor,
@@ -581,17 +538,12 @@ class MoE(nn.Module):
             routed_output = self._run_deepep_routed_experts(x, selected_experts_indices, top_scores)
             return routed_output.reshape(bs, slen, dim)
 
-        (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-        ) = self.reorderer(top_scores, selected_experts_indices)
-
-        routed_output = self._run_routed_experts(
+        routed_indices, routed_output = route_grouped_experts(
+            self.experts,
             x,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-            top_scores_experts_sorted,
+            top_scores,
+            selected_experts_indices,
+            self.reorderer,
         )
 
         if self.shared_expert is not None:
@@ -601,7 +553,6 @@ class MoE(nn.Module):
         else:
             out = torch.zeros_like(x)
 
-        routed_indices = token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim)
         out = out.scatter_add(dim=0, index=routed_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
         return out

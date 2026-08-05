@@ -98,7 +98,7 @@ def main():
         )
 
         # ---- 1. GEOMETRY PROOF: do EP groups straddle >=2 nodes? ----
-        geos = ray.get(policy.async_run_ray_method("pass_through", "diag_ep8_geometry"))
+        geos = ray.get(policy.async_run_ray_method("pass_through", "diag_ep_geometry"))
         geos = sorted([g for g in geos if isinstance(g, dict)], key=lambda d: d["rank"])
         print("\n[ep8diag] ===== MESH GEOMETRY (rank | host | coord | ep_coord | ep_group_key) =====", flush=True)
         from collections import defaultdict

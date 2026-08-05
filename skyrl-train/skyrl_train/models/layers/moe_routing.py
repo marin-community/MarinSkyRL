@@ -1,0 +1,89 @@
+"""Shared token routing for grouped mixture-of-experts implementations."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+import torch
+from torch import nn
+
+
+class GroupedExpertCallable(Protocol):
+    """Expert holder accepted by the grouped routing pipeline."""
+
+    def __call__(
+        self,
+        routed_input: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor: ...
+
+
+class TokenReorderer(nn.Module):
+    """Reorder token indices to match expert ordering for grouped compute."""
+
+    def __init__(self, num_experts: int, top_k: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+    def forward(
+        self,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        selected_experts_indices = selected_experts_indices.reshape(-1)
+        # Integer counts are required by both torch.split and EP all-to-all.
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.float(),
+            bins=self.num_experts,
+            min=0,
+            max=self.num_experts,
+        ).to(torch.int64)
+        sorted_route_indices = torch.argsort(selected_experts_indices, stable=True)
+        sorted_scores = top_scores.reshape(-1)[sorted_route_indices]
+        sorted_token_indices = sorted_route_indices // self.top_k
+        return sorted_scores, sorted_token_indices, num_tokens_per_expert
+
+
+def route_grouped_experts(
+    experts: GroupedExpertCallable,
+    hidden_states: torch.Tensor,
+    top_scores: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+    reorderer: TokenReorderer,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Route, run, and weight one grouped-expert token batch."""
+
+    sorted_scores, sorted_token_indices, num_tokens_per_expert = reorderer(
+        top_scores,
+        selected_experts_indices,
+    )
+    hidden_size = hidden_states.shape[-1]
+    routed_indices = sorted_token_indices.reshape(-1, 1).expand(-1, hidden_size)
+    routed_input = torch.gather(hidden_states, dim=0, index=routed_indices)
+    routed_output = experts(routed_input, num_tokens_per_expert)
+    routed_output = (routed_output.float() * sorted_scores.reshape(-1, 1)).to(hidden_states.dtype)
+    return routed_indices, routed_output
+
+
+def run_grouped_experts(
+    experts: GroupedExpertCallable,
+    hidden_states: torch.Tensor,
+    top_scores: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+    reorderer: TokenReorderer,
+) -> torch.Tensor:
+    """Route, run, weight, and combine one grouped-expert token batch."""
+
+    routed_indices, routed_output = route_grouped_experts(
+        experts,
+        hidden_states,
+        top_scores,
+        selected_experts_indices,
+        reorderer,
+    )
+    return torch.zeros_like(hidden_states).scatter_add(
+        dim=0,
+        index=routed_indices,
+        src=routed_output,
+    )

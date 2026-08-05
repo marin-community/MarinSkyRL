@@ -640,6 +640,75 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
 
 
+def _distribute_grug_experts(experts, ep_plan, ep_mesh, ep_comm_backend):
+    """Shard native Grug projections while keeping checkpoint keys unchanged."""
+
+    if ep_comm_backend != "torch":
+        raise ValueError("Grug expert parallelism supports only ep_comm_backend=torch")
+    if not experts.use_grouped_mm:
+        raise ValueError("Grug expert parallelism requires use_grouped_mm=true")
+
+    projections = {experts.gate_proj, experts.up_proj, experts.down_proj}
+
+    def partition_grug_projection(_name, submodule, mesh):
+        if submodule in projections:
+            ep_plan._partition_fn(_name, submodule, mesh)
+
+    # The hooks must wrap the checkpoint-compatible holder whose grouped forward
+    # accepts routed rows and per-expert counts. Moving them to a wrapper would
+    # change the native projection keys.
+    distribute_module(
+        experts,
+        device_mesh=ep_mesh,
+        partition_fn=partition_grug_projection,
+        input_fn=ep_plan._token_dispatch,
+        output_fn=ep_plan._token_combine,
+    )
+
+
+def _compose_expert_fsdp_shards(experts, *, is_grug, ep_mesh, fsdp_mesh, fsdp_kwargs):
+    """Compose FSDP onto EP expert shards and validate the resulting geometry."""
+
+    if fsdp_kwargs is None:
+        return
+
+    num_experts = getattr(experts, "num_experts", None)
+    ep_size = ep_mesh.size()
+    fsdp_size = fsdp_mesh.size()
+    if num_experts is not None and ep_size > 1 and fsdp_size > 1:
+        experts_per_ep_rank = num_experts // ep_size
+        assert num_experts % ep_size == 0, f"num_experts={num_experts} must be divisible by ep_size={ep_size}"
+        assert experts_per_ep_rank % fsdp_size == 0, (
+            f"fsdp_size={fsdp_size} must divide num_experts//ep_size="
+            f"{experts_per_ep_rank} (num_experts={num_experts}, ep_size={ep_size}); "
+            "uneven expert shard makes the padded FSDP optimizer shard disagree "
+            f"with the EP gradient. Choose an fsdp_size that divides {experts_per_ep_rank}."
+        )
+
+    ep_fsdp_kwargs = {key: value for key, value in fsdp_kwargs.items() if key != "mesh"}
+    fully_shard(experts, mesh=fsdp_mesh, **ep_fsdp_kwargs)
+    if ep_size <= 1 or fsdp_size <= 1:
+        return
+
+    expected_local_rows = num_experts // ep_size // fsdp_size if num_experts is not None else None
+    for parameter_name, parameter in experts.named_parameters(recurse=is_grug):
+        placements = getattr(parameter, "placements", ())
+        assert len(placements) == 2 and all(
+            isinstance(placement, (Shard, _StridedShard)) for placement in placements
+        ), (
+            f"EP+FSDP expert param {parameter_name} did not compose to a 2-D (fsdp,ep) "
+            f"sharded DTensor (got placements={placements}); this is the EP-only 1-D leak "
+            "that breaks streamed state loading."
+        )
+        if expected_local_rows is not None:
+            local_rows = parameter.to_local().shape[0]
+            assert local_rows == expected_local_rows, (
+                f"EP+FSDP expert param {parameter_name} local rows {local_rows} != "
+                f"num_experts//ep//fsdp = {expected_local_rows} "
+                f"(num_experts={num_experts}, ep_size={ep_size}, fsdp_size={fsdp_size})."
+            )
+
+
 def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size=1, fsdp_kwargs=None):
     """Shard MoE experts across the ``ep`` submesh via torchtitan ``ExpertParallel``.
 
@@ -734,91 +803,17 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
                 continue
 
         if is_grug:
-            if ep_comm_backend != "torch":
-                raise ValueError("Grug expert parallelism supports only ep_comm_backend=torch")
-            if not experts.use_grouped_mm:
-                raise ValueError("Grug expert parallelism requires use_grouped_mm=true")
-
-            # The checkpoint-compatible Grug holder keeps each weight under its
-            # native projection child. Shard those three direct child parameters,
-            # while installing Torchtitan's token dispatch/combine hooks on the
-            # parent boundary whose forward accepts (routed_input, counts).
-            projections = {experts.gate_proj, experts.up_proj, experts.down_proj}
-
-            def partition_grug_projection(_name, submodule, mesh):
-                if submodule in projections:
-                    ep_plan._partition_fn(_name, submodule, mesh)
-
-            distribute_module(
-                experts,
-                device_mesh=ep_mesh,
-                partition_fn=partition_grug_projection,
-                input_fn=ep_plan._token_dispatch,
-                output_fn=ep_plan._token_combine,
-            )
+            _distribute_grug_experts(experts, ep_plan, ep_mesh, ep_comm_backend)
         else:
             parallelize_module(experts, device_mesh=ep_mesh, parallelize_plan=ep_plan)
 
-        # Compose the FSDP Shard dim on the fsdp submesh → 2-D expert DTensors.
-        if fsdp_kwargs is not None:
-            # FAIL-FAST: when EP AND FSDP both shard the expert dim, each EP-rank
-            # holds (num_experts // ep_size) experts, which FSDP then shards over
-            # fsdp_size. If that is uneven, FSDP2 even-pads the param/optimizer
-            # local shard while the EP-backward grad stays unpadded → the Adam
-            # `lerp_` raises `size of tensor a (N) must match b (N-1) at dim 0` at
-            # the step-1 optimizer step (job 674574: fsdp_size=6, 64/6 uneven).
-            # Catch the invalid geometry at init with a clear message instead.
-            num_experts = getattr(experts, "num_experts", None)
-            ep_size = ep_mesh.size()
-            fsdp_size = fsdp_mesh.size()
-            if num_experts is not None and ep_size > 1 and fsdp_size > 1:
-                experts_per_ep_rank = num_experts // ep_size
-                assert num_experts % ep_size == 0, f"num_experts={num_experts} must be divisible by ep_size={ep_size}"
-                assert experts_per_ep_rank % fsdp_size == 0, (
-                    f"fsdp_size={fsdp_size} must divide num_experts//ep_size="
-                    f"{experts_per_ep_rank} (num_experts={num_experts}, ep_size={ep_size}); "
-                    f"uneven expert shard → FSDP2 pads the local optimizer shard but the "
-                    f"EP-backward grad is unpadded → Adam dim-0 mismatch at the step-1 "
-                    f"optimizer step. Choose an fsdp_size that divides {experts_per_ep_rank}."
-                )
-            ep_fsdp_kwargs = {k: v for k, v in fsdp_kwargs.items() if k != "mesh"}
-            fully_shard(experts, mesh=fsdp_mesh, **ep_fsdp_kwargs)
-            # Composition assert (A): when EP AND FSDP both shard the expert dim,
-            # `fully_shard(experts)` MUST have composed a 2-D (fsdp, ep) DTensor on
-            # top of the ep `parallelize_module` Shard(0). If a future arch's holder
-            # leaves the param EP-sharded-only (1-D `(Shard(0),)`, num_experts//ep
-            # rows), the streamed loader `fsdp2_load_full_state_dict` would faithfully
-            # assemble that 1-D shard and crash opaquely at `load_state_dict(assign=True)`
-            # with `start(0)+length(num_experts//ep) exceeds dimension size(num_experts//ep//fsdp)`.
-            # Fail LOUD here at wrap time instead. No-op on the working Qwen / 80B
-            # paths (always 2-D) and skipped entirely unless ep>1 AND fsdp>1.
-            if ep_size > 1 and fsdp_size > 1:
-                e_per = None
-                if num_experts is not None:
-                    e_per = num_experts // ep_size // fsdp_size
-                # `_StridedShard` (the placement FSDP2 emits for the dim sharded by
-                # BOTH the ep and fsdp mesh dims) returns `is_shard() == False` on
-                # torch 2.11 — a quirk, NOT an EP-only 1-D leak. Accept it explicitly
-                # so the (_StridedShard(fsdp), Shard(ep)) 2-D composition validates.
-                from torch.distributed.tensor.placement_types import Shard
-                from torch.distributed.tensor._dtensor_spec import _StridedShard
-
-                for _pn, _p in experts.named_parameters(recurse=is_grug):
-                    _pls = getattr(_p, "placements", ())
-                    assert len(_pls) == 2 and all(isinstance(pl, (Shard, _StridedShard)) for pl in _pls), (
-                        f"EP+FSDP expert param {_pn} did not compose to a 2-D (fsdp,ep) "
-                        f"sharded DTensor (got placements={_pls}); apply_ep's "
-                        f"fully_shard(experts) did not reach this holder for this arch. "
-                        f"This is the EP-only 1-D leak that triggers the loader "
-                        f"`length(...) exceeds ...` crash."
-                    )
-                    if e_per is not None:
-                        _local_rows = _p.to_local().shape[0]
-                        assert _local_rows == e_per, (
-                            f"EP+FSDP expert param {_pn} local rows {_local_rows} != "
-                            f"num_experts//ep//fsdp = {e_per} "
-                            f"(num_experts={num_experts}, ep_size={ep_size}, fsdp_size={fsdp_size})."
-                        )
+        _compose_expert_fsdp_shards(
+            experts,
+            is_grug=is_grug,
+            ep_mesh=ep_mesh,
+            fsdp_mesh=fsdp_mesh,
+            fsdp_kwargs=fsdp_kwargs,
+        )
 
         if is_grug:
             # MeshDispatch deliberately replicates each logical input across EP

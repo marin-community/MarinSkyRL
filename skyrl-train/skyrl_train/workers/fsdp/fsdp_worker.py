@@ -515,14 +515,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             weights=weights,
         )
 
-    def diag_ep8_geometry(self):
-        """TEST-ONLY (EP=8 cross-node diag): return this rank's mesh geometry +
-        physical-node identity so the driver can PROVE an EP group straddles >=2
-        nodes. No collectives, no gather — pure introspection.
+    def diag_ep_geometry(self):
+        """TEST-ONLY: return this rank's EP mesh geometry and node identity.
+
+        The driver can use this to prove that an EP group spans multiple nodes.
+        No collectives or gathers are issued.
 
         Returns a dict with global rank, hostname, mesh shape/dim-names, this rank's
         per-mesh-dim coordinate, and the EP submesh coordinate (the index of this rank
-        within its 8-rank EP group).
+        within its EP group).
         """
         import socket
 
@@ -532,7 +533,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         coord = list(mesh.get_coordinate())
         ep_dim = dim_names.index("ep") if "ep" in dim_names else None
         # The EP-group identity = the coord with the ep dim removed (all ranks sharing
-        # this tuple form one 8-way EP group). The ep coord = position within the group.
+        # this tuple form one EP group). The ep coord = position within the group.
         group_key = tuple(c for i, c in enumerate(coord) if i != ep_dim)
         return {
             "rank": int(torch.distributed.get_rank()),
