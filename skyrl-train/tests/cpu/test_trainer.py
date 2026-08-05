@@ -92,10 +92,8 @@ class _FixedQueryBiasAccumulator:
         return self.betas
 
 
-def _worker_with_grug_query_bias_accumulator(accumulator, *, update_mode):
+def _worker_with_grug_query_bias_accumulator(accumulator):
     worker = object.__new__(PolicyWorkerBase)
-    policy_config = {} if update_mode is None else {"grug_query_bias_update_mode": update_mode}
-    worker.cfg = OmegaConf.create({"trainer": {"policy": policy_config}})
     causal_lm = _ObservableGrugCausalLM()
     worker.model = SimpleNamespace(model=causal_lm)
     worker._grug_query_bias_accumulator = accumulator
@@ -108,7 +106,7 @@ def test_default_config_freezes_grug_query_bias_updates():
 
 def test_failed_optimizer_step_discards_grug_query_bias_window():
     accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="replace")
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
     previous_bias = causal_lm.query_bias.clone()
 
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=False)
@@ -120,7 +118,7 @@ def test_failed_optimizer_step_discards_grug_query_bias_window():
 def test_replace_mode_applies_grug_query_bias_once():
     betas = torch.tensor([[1.0, -2.0]])
     accumulator = _FixedQueryBiasAccumulator(betas)
-    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="replace")
+    worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator)
 
     worker._finish_grug_query_bias_window(optimizer_step_succeeded=True)
 
