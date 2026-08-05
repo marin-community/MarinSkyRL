@@ -55,6 +55,17 @@ These tests establish distinct controlled signatures; they do not assign one to 
 The next natural timeout needs flight-recorder state or equivalent before/after-enqueue evidence from ranks 1,
 5, 9, and 13 before any of the three mechanisms can be selected.
 
+Jupiter job 1246598 validated the complete post-review branch at commit `4d828288` against the same production
+runtime. All three cases passed in 603.42 seconds. Their compact records were:
+
+- enqueued CUDA stall: 16 before, 16 after, 12 unaffected FSDP completions;
+- pre-enqueue non-arrival: 16 before, 15 after, 12 unaffected FSDP completions;
+- model schedule divergence: 16 before, 16 after across different EP/FSDP operations, 12 unaffected FSDP
+  completions.
+
+Every blocked gang exited nonzero inside the independent controller deadline. The Slurm batch completed and
+released all four nodes.
+
 ## Future work
 
 - [ ] Compare these controlled signatures with the next natural timeout's flight-recorder artifacts.
