@@ -3,8 +3,9 @@
 
 """Configuration semantics for Grug router query-bias updates."""
 
-from collections.abc import Mapping
 from enum import StrEnum
+
+from omegaconf import DictConfig
 
 
 class GrugQueryBiasUpdateMode(StrEnum):
@@ -14,8 +15,8 @@ class GrugQueryBiasUpdateMode(StrEnum):
     REPLACE = "replace"
 
 
-def resolve_grug_query_bias_update_mode(policy_config: Mapping[str, object]) -> GrugQueryBiasUpdateMode:
-    """Resolve the configured policy mode."""
+def resolve_grug_query_bias_update_mode(policy_config: DictConfig) -> GrugQueryBiasUpdateMode:
+    """Read the policy update-mode field and reject unknown choices."""
 
     config_key = "grug_query_bias_update_mode"
     raw_mode = policy_config[config_key]
