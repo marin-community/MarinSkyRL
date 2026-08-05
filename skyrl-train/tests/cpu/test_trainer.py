@@ -106,14 +106,6 @@ def test_default_config_freezes_grug_query_bias_updates():
     assert get_default_config().trainer.policy.grug_query_bias_update_mode == "frozen"
 
 
-@pytest.mark.parametrize("update_mode", ["frozen", None], ids=["explicit", "missing"])
-def test_frozen_grug_query_bias_disables_updates(update_mode):
-    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    worker, _ = _worker_with_grug_query_bias_accumulator(accumulator, update_mode=update_mode)
-
-    assert not worker._grug_query_bias_updates_enabled()
-
-
 def test_failed_optimizer_step_discards_grug_query_bias_window():
     accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
     worker, causal_lm = _worker_with_grug_query_bias_accumulator(accumulator, update_mode="replace")

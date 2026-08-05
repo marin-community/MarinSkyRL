@@ -28,21 +28,6 @@ class GrugTrainingOracle:
     observations: dict[str, np.ndarray]
 
 
-def load_grug_training_oracle_model() -> GrugMoeForCausalLM:
-    """Load the model from the committed Grug training oracle."""
-
-    model = AutoModelForCausalLM.from_pretrained(
-        ORACLE_FIXTURE_DIR,
-        trust_remote_code=False,
-        local_files_only=True,
-        attn_implementation="eager",
-        dtype=torch.float32,
-    )
-    if not isinstance(model, GrugMoeForCausalLM):
-        raise TypeError(f"expected GrugMoeForCausalLM, got {type(model).__name__}")
-    return model
-
-
 def load_grug_training_oracle() -> GrugTrainingOracle:
     """Load the small committed oracle into memory."""
 
@@ -96,7 +81,16 @@ def run_grug_training_parity() -> None:
     observations = oracle.observations
     device = torch.device("cuda")
     torch.set_float32_matmul_precision("highest")
-    model = load_grug_training_oracle_model().to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        ORACLE_FIXTURE_DIR,
+        trust_remote_code=False,
+        local_files_only=True,
+        attn_implementation="eager",
+        dtype=torch.float32,
+    )
+    if not isinstance(model, GrugMoeForCausalLM):
+        raise TypeError(f"expected GrugMoeForCausalLM, got {type(model).__name__}")
+    model.to(device)
     model.train()
     input_ids = torch.from_numpy(observations["input_ids"]).long().to(device)
     attention_mask = torch.ones_like(input_ids)
