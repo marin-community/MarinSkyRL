@@ -74,12 +74,6 @@ def _master_port() -> int:
     return MASTER_PORT_BASE + job_id % MASTER_PORT_SPAN
 
 
-def _master_address(hostname: str) -> str:
-    """Resolve the batch host before entering Jupiter's IPv4-only runtime."""
-
-    return socket.gethostbyname(hostname)
-
-
 def _slurm_step_command(
     control_directory: Path,
     hostnames: tuple[str, ...],
@@ -150,11 +144,13 @@ def _launch_slurm_step(
             heartbeat_timeout_seconds=WATCHDOG_HEARTBEAT_TIMEOUT_SECONDS,
         )
     )
+    # Resolve the batch host before entering Jupiter's IPv4-only runtime.
+    master_address = socket.gethostbyname(hostnames[0])
     command = _slurm_step_command(
         control_directory,
         hostnames,
         node_agent_command_prefix,
-        _master_address(hostnames[0]),
+        master_address,
         _master_port(),
     )
     with launch_process_gang(
