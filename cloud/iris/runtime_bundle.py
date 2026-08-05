@@ -192,7 +192,7 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
 
 
 def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:
-    """Validate and return the checkout files identified by a launch request."""
+    """Validate and return the runtime files identified by a launch request."""
     source = resolve_launcher_source()
     if source.commit != expected_launcher_commit:
         raise ValueError(
@@ -204,7 +204,7 @@ def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource
 
 
 def build_runtime_bundle(expected_launcher_commit: str) -> Path:
-    """Copy committed runtime files from the selected checkout into an Iris workspace."""
+    """Copy the selected runtime files into an Iris workspace."""
     source, paths = runtime_bundle_inputs(expected_launcher_commit)
 
     workspace = Path(tempfile.mkdtemp(prefix="marinskyrl-runtime-bundle-"))

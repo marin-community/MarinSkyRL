@@ -107,7 +107,7 @@ def runtime_checkout(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
             assert name == "direct_url.json"
             return json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
 
-    monkeypatch.setattr(runtime_bundle.importlib.metadata, "distribution", lambda name: Distribution())
+    monkeypatch.setattr(runtime_bundle.importlib.metadata, "distribution", lambda _name: Distribution())
     monkeypatch.chdir(tmp_path)
     return checkout, commit
 
