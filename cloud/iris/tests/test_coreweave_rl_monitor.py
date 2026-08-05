@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 
-from cloud.iris.gpu_rl_images import GPU_RL_PYTHON
+from cloud.iris.legacy_gpu_rl_environment import GPU_RL_PYTHON
 from scripts.iris import coreweave_ops, watch_coreweave_rl
 from scripts.iris.iris_ops import (
     MonitorError,

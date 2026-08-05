@@ -1,4 +1,4 @@
-"""Legacy GPU-RL paths for the monitor and checkpoint-reshard entry points.
+"""Legacy GPU-RL environment paths used by monitor and reshard entry points.
 
 Delete this module when those entry points install the frozen root environment. The
 remaining migration is tracked in marin-community/marin#7920.

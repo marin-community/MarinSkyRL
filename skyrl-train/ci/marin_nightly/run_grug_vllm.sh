@@ -3,7 +3,9 @@
 set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" development
+NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env}"
+source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
+  "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" development
 export PYTHONPATH="$REPOSITORY_ROOT/skyrl-gym:$REPOSITORY_ROOT/skyrl-train${PYTHONPATH:+:$PYTHONPATH}"
 export VLLM_USE_V1=1
 export VLLM_USE_DEEP_GEMM=0

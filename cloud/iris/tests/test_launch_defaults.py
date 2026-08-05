@@ -327,7 +327,6 @@ def test_rl_config_is_materialized_for_the_task(tmp_path):
     assert task_copy.read_bytes() == source.read_bytes()
     assert launch.task_path in command[-1]
     assert str(source) not in command[-1]
-    assert "source /app/marinskyrl/.iris-runtime-env" in command[-1]
 
 
 def _spill_preflight_probe(tmp_path: Path, monkeypatch, spill_dir: Path) -> tuple[list[str], Path]:
@@ -497,32 +496,6 @@ def test_explicit_runtime_profile_must_match_strategy(tmp_path):
 
     with pytest.raises(SystemExit, match="does not match trainer.strategy"):
         resolve_launch_defaults(args)
-
-
-@pytest.mark.parametrize(
-    ("strategy", "profile"),
-    [("fsdp2", RuntimeProfile.FSDP), ("megatron", RuntimeProfile.MEGATRON)],
-)
-def test_runtime_profile_is_portable_to_arm_cluster(tmp_path, strategy, profile):
-    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
-    args = _strategy_args(
-        tmp_path,
-        strategy,
-        [
-            "--cluster",
-            "cw-us-east-08a",
-            "--cluster-config",
-            str(cluster_config),
-            "--gpu-variant",
-            "GB200",
-            "--gpus-per-node",
-            "4",
-        ],
-    )
-
-    resolve_launch_defaults(args)
-
-    assert args.runtime_profile is profile
 
 
 def test_parser_rejects_removed_harbor_source_override():

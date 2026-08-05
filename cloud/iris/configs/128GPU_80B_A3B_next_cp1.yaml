@@ -86,6 +86,7 @@ terminal_bench:
 
 trainer:
   strategy: megatron
+  flash_attn: false
   use_sample_packing: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: true

@@ -25,7 +25,7 @@ from cloud.iris.protocol import (
     SkyRLTopology,
 )
 from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
-from cloud.iris.runtime_environment import RuntimeProfile
+from cloud.iris.runtime_environment import RuntimeProfile, runtime_profile_for_strategy
 
 # Dotted YAML path -> SkyRLRolePlan field name.  These become ``++`` Hydra overrides
 # inside ``job_launch_argv``, so a transcription error would silently change the
@@ -91,9 +91,7 @@ def derive_strategy(config: dict[str, Any]) -> str | None:
 
 def derive_runtime_profile(config: dict[str, Any]) -> RuntimeProfile:
     """Return the dependency profile required by the configured trainer strategy."""
-    if derive_strategy(config) == "megatron":
-        return RuntimeProfile.MEGATRON
-    return RuntimeProfile.FSDP
+    return runtime_profile_for_strategy(derive_strategy(config))
 
 
 def derive_output_paths(run_prefix: str) -> SkyRLOutputPaths:

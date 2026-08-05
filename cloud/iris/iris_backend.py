@@ -89,13 +89,14 @@ from cloud.iris.ray_storage import (
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
-from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source, runtime_bundle_inputs
+from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope
 from cloud.iris.runtime_environment import (
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
     RuntimeProfile,
+    runtime_profile_for_strategy,
     task_setup_script,
 )
 
@@ -319,7 +320,6 @@ class IrisBackend:
     """Submit typed MarinSkyRL jobs through the existing Iris launcher."""
 
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
-        runtime_bundle_inputs(spec.request.runtime.commit)
         resolved_launch_args(job_launch_argv(spec, config_path))
 
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
@@ -881,7 +881,7 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
         args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
 
     strategy = _rl_training_strategy(args)
-    expected_profile = RuntimeProfile.MEGATRON if strategy == "megatron" else RuntimeProfile.FSDP
+    expected_profile = runtime_profile_for_strategy(strategy)
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile
     elif args.runtime_profile != expected_profile:
@@ -2124,16 +2124,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     controller_cmd.extend(train_cmd)
 
     pythonpath = f"{APP_DIR}:{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train"
-    iris_verification = ""
-    if getattr(args, "ingress_mode", "direct") == "controller":
-        iris_verification = (
-            f'{RL_PYTHON} -c "import importlib.metadata as m; '
-            f"import iris.cluster.client.endpoint_client, iris.cluster.client.job_info, "
-            f"iris.rpc.controller_connect, iris.cluster.types; "
-            f"print('[rl-iris] locked marin-iris', m.version('marin-iris'), "
-            f"'(controller-ingress import OK)')\"; "
-        )
-    return _build_task_shell(args, controller_cmd, pythonpath, iris_verification)
+    return _build_task_shell(args, controller_cmd, pythonpath, "")
 
 
 def resolved_launch_args(argv: list[str] | None = None) -> argparse.Namespace:

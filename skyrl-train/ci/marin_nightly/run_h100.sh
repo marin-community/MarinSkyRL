@@ -14,12 +14,14 @@
 set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
 LOG="${LOG:-$PWD/nightly-run.log}"
 SPEC="${SPEC:-ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json}"
-source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" production
+source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
+  "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" production
 
 # The defaults below are the behavioural shape the shipped gate spec is calibrated against: 30
 # GRPO steps at batch 32 with 8 samples/prompt is enough for reward to visibly climb on a 0.6B
@@ -42,10 +44,9 @@ VAL_ROWS="${VAL_ROWS:-16}"
 
 cd "$REPOSITORY_ROOT/skyrl-train"
 
-# The nightly exercises checked-out trainer and environment source ahead of the image's baked
-# fallback. Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling
-# environment package before setting the source paths. The trainer also imports shared launcher
-# modules from cloud/, which remains at the checkout root.
+# Ray's zip runtime cannot preserve the repository symlink, so materialize the sibling environment
+# package before setting the source paths. The trainer also imports shared launcher modules from
+# cloud/, which remains at the checkout root.
 rm -rf skyrl-gym
 cp -R ../skyrl-gym skyrl-gym
 export PYTHONPATH="$PWD/skyrl-gym:$PWD:$REPOSITORY_ROOT${PYTHONPATH:+:$PYTHONPATH}"

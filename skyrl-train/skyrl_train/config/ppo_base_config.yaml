@@ -235,7 +235,9 @@ trainer:
     num_trials: 256
     on_failure: "abort"
   max_prompt_length: 512
-  flash_attn: true
+  # The frozen base profile is portable across H100/x86_64 and GB200/aarch64.
+  # FlashAttention policy kernels remain an explicit optional extension.
+  flash_attn: false
   attn_backend: "auto"
   disable_fast_tokenizer: false
   target_modules: null

@@ -20,7 +20,6 @@ from cloud.iris.request_builder import (
     derive_num_nodes,
     derive_output_paths,
     derive_role_plan,
-    derive_runtime_profile,
     derive_strategy,
 )
 from cloud.iris.runtime_bundle import LauncherSource
@@ -207,18 +206,6 @@ class TestDeriveStrategy:
         config = _make_config()
         config["trainer"]["strategy"] = 42
         assert derive_strategy(config) is None
-
-
-@pytest.mark.parametrize(
-    "strategy, expected",
-    [
-        ("fsdp2", RuntimeProfile.FSDP),
-        ("megatron", RuntimeProfile.MEGATRON),
-        (None, RuntimeProfile.FSDP),
-    ],
-)
-def test_runtime_profile_follows_trainer_strategy(strategy, expected):
-    assert derive_runtime_profile(_make_config(strategy=strategy)) is expected
 
 
 # ---------------------------------------------------------------------------

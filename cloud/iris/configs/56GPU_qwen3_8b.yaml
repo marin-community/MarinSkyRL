@@ -86,6 +86,7 @@ terminal_bench:
 
 trainer:
   strategy: megatron
+  flash_attn: false
   algorithm:
     advantage_estimator: rloo_n
     use_kl_loss: false

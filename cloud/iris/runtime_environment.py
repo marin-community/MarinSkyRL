@@ -19,6 +19,13 @@ class RuntimeProfile(StrEnum):
     MEGATRON = "megatron"
 
 
+def runtime_profile_for_strategy(strategy: str | None) -> RuntimeProfile:
+    """Return the locked dependency profile for a trainer strategy."""
+    if strategy == "megatron":
+        return RuntimeProfile.MEGATRON
+    return RuntimeProfile.FSDP
+
+
 def task_setup_script(commit: str, profile: RuntimeProfile) -> str:
     """Build the Iris setup script for a frozen SkyRL checkout and dependency profile."""
     checkout = MARINSKYRL_TASK_ROOT
