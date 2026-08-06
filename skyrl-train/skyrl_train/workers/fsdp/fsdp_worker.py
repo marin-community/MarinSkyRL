@@ -779,7 +779,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         validate_grug_expert_parallel_options(
             getattr(model_config, "model_type", None),
-            expert_model_parallel_size=getattr(strategy, "ep_size", 1),
+            expert_model_parallel_size=strategy.ep_size,
             use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
             ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", GRUG_EP_COMM_BACKEND)),
         )

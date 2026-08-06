@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Callable, Protocol, TypeGuard, Union, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Protocol, Union
 
 import torch
 import torch.distributed as dist
@@ -39,6 +39,9 @@ from torch.distributed.tensor import DTensor, distribute_module, distribute_tens
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
+
+if TYPE_CHECKING:
+    from skyrl_train.models.grug_moe import GrugMoeExperts
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -242,10 +245,12 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
     """Attach expert-gradient averaging and return module and parameter counts."""
 
+    from skyrl_train.models.grug_moe import GrugMoeExperts  # noqa: PLC0415
+
     module_count = 0
     parameter_count = 0
     for experts in model.modules():
-        if not _is_grug_expert_holder(experts):
+        if not isinstance(experts, GrugMoeExperts):
             continue
 
         for handle in getattr(experts, "_ep_gradient_scale_handles", ()):
@@ -654,26 +659,7 @@ class _ExpertParallelPlan(Protocol):
     _token_combine: Callable[..., object]
 
 
-@runtime_checkable
-class _GrugExpertHolder(Protocol):
-    gate_proj: nn.Module
-    up_proj: nn.Module
-    down_proj: nn.Module
-    use_grouped_mm: bool
-    ep_size: int
-
-    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]: ...
-
-    def named_parameters(self, recurse: bool = True) -> Iterator[tuple[str, nn.Parameter]]: ...
-
-    def validate_expert_parallel_runtime(self, ep_comm_backend: str) -> None: ...
-
-
-def _is_grug_expert_holder(module: nn.Module) -> TypeGuard[_GrugExpertHolder]:
-    return isinstance(module, _GrugExpertHolder)
-
-
-def _distribute_grug_experts(experts: _GrugExpertHolder, context: _ExpertParallelContext):
+def _distribute_grug_experts(experts: "GrugMoeExperts", context: _ExpertParallelContext):
     """Shard native Grug projections while keeping checkpoint keys unchanged."""
 
     experts.validate_expert_parallel_runtime(context.comm_backend)
@@ -708,7 +694,7 @@ class _ExpertParallelTarget(Protocol):
 
 @dataclass(frozen=True)
 class _GrugExpertParallelTarget:
-    experts: _GrugExpertHolder
+    experts: "GrugMoeExperts"
 
     def distribute(self, context: _ExpertParallelContext) -> None:
         _distribute_grug_experts(self.experts, context)
@@ -738,8 +724,8 @@ class _GroupedExpertParallelTarget:
         return self.experts.named_parameters(recurse=False)
 
 
-def _expert_parallel_target(module, grouped_experts_type) -> _ExpertParallelTarget | None:
-    if _is_grug_expert_holder(module):
+def _expert_parallel_target(module, grouped_experts_type, grug_experts_type) -> _ExpertParallelTarget | None:
+    if isinstance(module, grug_experts_type):
         return _GrugExpertParallelTarget(module)
 
     moe = getattr(module, "moe", None)
@@ -856,6 +842,7 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
 
     # All supported lifted architectures use this holder type. isinstance also
     # catches subclasses while keeping the target narrowed for the sharding code.
+    from skyrl_train.models.grug_moe import GrugMoeExperts
     from skyrl_train.models.layers.moe import GroupedExperts
 
     ep_mesh = device_mesh["ep"]
@@ -863,7 +850,7 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     ep_context = _ExpertParallelContext(ep_plan, ep_mesh, ep_comm_backend)
     sharded = 0
     for module in model.modules():
-        target = _expert_parallel_target(module, GroupedExperts)
+        target = _expert_parallel_target(module, GroupedExperts, GrugMoeExperts)
         if target is None:
             continue
 
