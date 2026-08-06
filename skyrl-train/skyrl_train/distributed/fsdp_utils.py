@@ -849,9 +849,9 @@ def apply_ep(
 
         ep_plan = ExpertParallel()
 
-    # All supported lifted architectures use this holder type. isinstance also
-    # catches subclasses while keeping the target narrowed for the sharding code.
-    from skyrl_train.models.layers.moe import GroupedExperts
+    # All supported lifted architectures use this holder type. Keep the import
+    # lazy so non-EP model loading does not require TorchTitan.
+    from skyrl_train.models.layers.moe import GroupedExperts  # noqa: PLC0415
 
     ep_mesh = device_mesh["ep"]
     fsdp_mesh = device_mesh["fsdp"]
