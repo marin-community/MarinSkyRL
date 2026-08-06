@@ -51,7 +51,8 @@ The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kep
 Install SkyRL
 
 ```bash
-uv sync --frozen --group dev --extra cpu  # use --extra cuda for GPU training
+conda create -n otagent python=3.12
+conda activate otagent
 pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1 torchvision
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
 
@@ -75,15 +76,12 @@ Remainings
 pip install fastapi uvicorn
 ```
 
-The operator scripts (`scripts/iris/`) call the `iris` CLI from the marin repo.
-Set it up once:
-```bash
-cd ~/Documents/marin && uv sync --package marin-iris --extra controller
-```
+We will soon make things uv-syncable.
 
 ### Data preparation
 
 ```bash
+conda activate otagent
 # Download the eval dataset (OTTB-dev)
 hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
 # Download the train dataset

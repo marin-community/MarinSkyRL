@@ -59,12 +59,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Mapping, Sequence, TypeVar
 
+
 # --- iris invocation ------------------------------------------------------
-# The iris CLI lives in the marin repo's uv-managed .venv (editable install).
-# Sync with the controller extra for CoreWeave (k8s) support:
-#   cd ~/Documents/marin && uv sync --package marin-iris --extra controller
-# Override with $IRIS_BIN if the marin checkout lives elsewhere.
-IRIS_BIN = os.environ.get("IRIS_BIN", os.path.expanduser("~/Documents/marin/.venv/bin/iris"))
+def resolve_iris_binary() -> str:
+    """Resolve Iris from PATH unless the operator provides an explicit binary."""
+    return os.environ.get("IRIS_BIN", "iris")
+
+
+IRIS_BIN = resolve_iris_binary()
 DEFAULT_CLUSTER = "cw-us-east-02a"  # the GPU RL cluster; use "marin" for TPU jobs
 DEFAULT_BUNDLE_ROOT = Path.home() / "Documents" / "iris-job-bundles"
 
@@ -427,11 +429,12 @@ def run_iris_command(
     arguments: list[str],
     *,
     cluster: str,
-    iris_bin: str = IRIS_BIN,
+    iris_bin: str | None = None,
     environment: dict[str, str] | None = None,
     timeout: int = 180,
 ) -> subprocess.CompletedProcess[str]:
     """Run an Iris CLI command with bounded retries for transient connection failures."""
+    iris_bin = iris_bin or resolve_iris_binary()
     for attempt in range(DNS_ATTEMPTS):
         result = subprocess.run(
             [iris_bin, f"--cluster={cluster}", *arguments],
@@ -496,7 +499,7 @@ class JobStateSnapshot:
 
 
 def _run_iris(args: list[str], cluster: str, timeout: int = 180) -> subprocess.CompletedProcess:
-    cmd = [IRIS_BIN, f"--cluster={cluster}", *args]
+    cmd = [resolve_iris_binary(), f"--cluster={cluster}", *args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 

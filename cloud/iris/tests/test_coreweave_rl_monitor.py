@@ -12,7 +12,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from cloud.iris.legacy_gpu_rl_environment import GPU_RL_PYTHON
-from scripts.iris import coreweave_ops, watch_coreweave_rl
+from scripts.iris import coreweave_ops, iris_ops, watch_coreweave_rl
 from scripts.iris.iris_ops import (
     MonitorError,
     StyledCell,
@@ -43,6 +43,29 @@ def test_monitor_defaults_to_the_shared_document_bundle_root(monkeypatch):
         "training",
     )
     assert "experiments" not in bundle.directory.parts
+
+
+def test_iris_binary_defaults_to_path_and_honors_explicit_override(monkeypatch):
+    monkeypatch.delenv("IRIS_BIN", raising=False)
+    assert iris_ops.resolve_iris_binary() == "iris"
+
+    monkeypatch.setenv("IRIS_BIN", "/opt/operator/bin/iris")
+    assert iris_ops.resolve_iris_binary() == "/opt/operator/bin/iris"
+
+
+def test_iris_command_resolves_binary_when_invoked(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("IRIS_BIN", "/opt/operator/bin/iris")
+    monkeypatch.setattr(iris_ops.subprocess, "run", fake_run)
+
+    iris_ops.run_iris_command(["job", "list"], cluster="cw-rno2a")
+
+    assert calls[0][0] == ["/opt/operator/bin/iris", "--cluster=cw-rno2a", "job", "list"]
 
 
 def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path):

@@ -57,6 +57,7 @@ from scripts.iris.coreweave_clusters import (  # noqa: E402
     COREWEAVE_KUBECONFIG,
     COREWEAVE_OBJECT_ENDPOINT,
 )
+from scripts.iris.iris_ops import resolve_iris_binary  # noqa: E402
 from infra.artifact_files import LOG_SUFFIXES  # noqa: E402
 
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
@@ -64,10 +65,6 @@ ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
 RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
 DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
-IRIS_CANDIDATES = [
-    os.path.expanduser("~/Documents/marin/.venv/bin/iris"),
-    "iris",
-]
 
 
 def _secret(key, kubeconfig):
@@ -352,12 +349,12 @@ def sync_trace_jobs(
 def sync_finelog(job, cluster, dest, lines):
     kubeconfig = COREWEAVE_CLUSTERS[cluster].kubeconfig
     env = {**os.environ, "KUBECONFIG": str(kubeconfig)}
-    iris = next((c for c in IRIS_CANDIDATES if c == "iris" or os.path.exists(c)), "iris")
+    iris_bin = resolve_iris_binary()
     out_path = os.path.join(dest, "finelog.log")
-    print(f"[finelog] {job} via {os.path.basename(iris)} --cluster={cluster} --no-tail --max-lines {lines} ...")
+    print(f"[finelog] {job} via {os.path.basename(iris_bin)} --cluster={cluster} --no-tail --max-lines {lines} ...")
     with open(out_path, "w") as f:
         p = subprocess.run(
-            [iris, f"--cluster={cluster}", "job", "logs", job, "--no-tail", "--max-lines", str(lines)],
+            [iris_bin, f"--cluster={cluster}", "job", "logs", job, "--no-tail", "--max-lines", str(lines)],
             stdout=f,
             stderr=subprocess.PIPE,
             text=True,

@@ -11,7 +11,7 @@
 
 set -x
 SIF=/e/scratch/jureap59/feuer1/containers/skyrl_megatron_vllm0202rc0_r3.sif
-SKYRL=/e/scratch/jureap59/feuer1/MarinSkyRL/SkyRL/skyrl-train
+SKYRL=/e/scratch/jureap59/feuer1/OpenThoughts-Agent/SkyRL/skyrl-train
 HFCACHE=/e/data1/datasets/playground/ot-baf/hf_hub
 
 export NCCL_SOCKET_FAMILY=AF_INET
