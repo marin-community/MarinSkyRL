@@ -65,3 +65,38 @@ def test_headline_topology_requires_four_complete_nodes(benchmark_module):
     topology[-1]["host"] = "node-extra"
     with pytest.raises(RuntimeError, match="four complete 8-GPU hosts|expected 4 complete 8-GPU hosts"):
         benchmark_module.assert_topology(topology, "headline")
+
+
+def test_representative_gradient_aggregation_removes_only_ep_replication(benchmark_module):
+    timed = []
+    for rank in range(8):
+        timed.append(
+            {
+                "representative_gradients": {
+                    "model.layers.0.input_layernorm.weight": {
+                        "local_numel": 10,
+                        "l2_norm": 2.0,
+                        "max_abs": 0.5,
+                    },
+                    "model.layers.0.mlp.experts.down_proj.weight": {
+                        "local_numel": 10 + rank,
+                        "l2_norm": float(rank + 1),
+                        "max_abs": float(rank + 1) / 10,
+                    },
+                }
+            }
+        )
+
+    aggregated = benchmark_module.aggregate_representative_gradients(timed, expert_parallel_size=8)
+
+    assert aggregated["model.layers.0.input_layernorm.weight"] == {
+        "numel": 10,
+        "l2_norm": 2.0,
+        "max_abs": 0.5,
+        "ep_replication_divisor": 8,
+    }
+    expert = aggregated["model.layers.0.mlp.experts.down_proj.weight"]
+    assert expert["numel"] == sum(range(10, 18))
+    assert expert["l2_norm"] == pytest.approx(sum(value**2 for value in range(1, 9)) ** 0.5)
+    assert expert["max_abs"] == 0.8
+    assert expert["ep_replication_divisor"] == 1

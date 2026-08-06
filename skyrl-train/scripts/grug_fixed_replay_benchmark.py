@@ -56,6 +56,11 @@ TENSOR_FIELDS = (
     "sequences",
 )
 NONE_FIELDS = ("base_action_log_probs", "is_last_step", "rollout_logprobs", "values")
+PRACTICAL_GATE = {
+    "action_log_probs": {"rtol": 4.0e-2, "atol": 4.0e-3},
+    "matched_global_ce": {"rtol": 2.0e-3, "atol": 2.0e-3},
+    "representative_gradients": {"rtol": 8.0e-2, "atol": 1.0e-4},
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,6 +119,29 @@ def sha256_file(path: Path) -> str:
 def tensor_bytes(tensor: torch.Tensor) -> memoryview:
     cpu = tensor.detach().cpu().contiguous()
     return memoryview(cpu.view(torch.uint8).numpy()).cast("B")
+
+
+def aggregate_representative_gradients(
+    timed: list[dict[str, Any]], expert_parallel_size: int
+) -> dict[str, dict[str, float | int]]:
+    representative_names = set(timed[0]["representative_gradients"])
+    if any(set(item["representative_gradients"]) != representative_names for item in timed):
+        raise RuntimeError("ranks returned different representative gradient keys")
+
+    representative_global = {}
+    for name in sorted(representative_names):
+        replication = 1 if ".mlp.experts." in name else expert_parallel_size
+        samples = [item["representative_gradients"][name] for item in timed]
+        total_numel = sum(item["local_numel"] for item in samples)
+        if total_numel % replication:
+            raise RuntimeError(f"gradient shard count for {name} does not divide EP replication")
+        representative_global[name] = {
+            "numel": total_numel // replication,
+            "l2_norm": math.sqrt(sum(item["l2_norm"] ** 2 for item in samples) / replication),
+            "max_abs": max(item["max_abs"] for item in samples),
+            "ep_replication_divisor": replication,
+        }
+    return representative_global
 
 
 def download_object(client, uri: str, destination: Path, expected_bytes: int, expected_sha256: str) -> None:
@@ -579,6 +607,7 @@ def main() -> None:
                 raise RuntimeError("profile request and returned artifact disagree")
 
             if args.objective == "operational":
+                raw_grad_norms = []
                 for item in timed:
                     status = item["train_status"]
                     if not all(finite_number(value) for value in status.values()):
@@ -589,6 +618,14 @@ def main() -> None:
                         raise RuntimeError(f"rank {item['rank']} completed the wrong number of updates: {status}")
                     if status.get("raw_grad_norm", 0.0) <= 0.0:
                         raise RuntimeError(f"rank {item['rank']} did not report a positive gradient norm: {status}")
+                    raw_grad_norms.append(float(status["raw_grad_norm"]))
+                if not math.isclose(
+                    min(raw_grad_norms),
+                    max(raw_grad_norms),
+                    rel_tol=1.0e-6,
+                    abs_tol=1.0e-6,
+                ):
+                    raise RuntimeError(f"ranks disagree on the all-reduced raw gradient norm: {raw_grad_norms}")
                 post_step_state = ray.get(
                     policy.async_run_ray_method("pass_through", "grug_benchmark_validate_finite_state")
                 )
@@ -637,6 +674,39 @@ def main() -> None:
                             for layer_loads in evidence["route_loads_per_layer"]
                         ):
                             raise RuntimeError(f"rank returned wrong per-layer logical route work: {item}")
+                action_gate = PRACTICAL_GATE["action_log_probs"]
+                ce_gate = PRACTICAL_GATE["matched_global_ce"]
+                for data_rank in range(data_parallel_size):
+                    replicas = timed[
+                        data_rank * args.expert_parallel_size : (data_rank + 1) * args.expert_parallel_size
+                    ]
+                    reference = replicas[0]
+                    reference_ce = reference["local_loss_sum"] / reference["local_loss_tokens"]
+                    for replica in replicas[1:]:
+                        replica_ce = replica["local_loss_sum"] / replica["local_loss_tokens"]
+                        if replica["local_loss_tokens"] != reference["local_loss_tokens"] or not math.isclose(
+                            replica_ce,
+                            reference_ce,
+                            rel_tol=ce_gate["rtol"],
+                            abs_tol=ce_gate["atol"],
+                        ):
+                            raise RuntimeError(
+                                f"EP replicas for data rank {data_rank} disagree on matched CE: {replicas}"
+                            )
+                        values = replica["representative_action_log_probs"]
+                        reference_values = reference["representative_action_log_probs"]
+                        if len(values) != len(reference_values) or any(
+                            not math.isclose(
+                                value,
+                                reference_value,
+                                rel_tol=action_gate["rtol"],
+                                abs_tol=action_gate["atol"],
+                            )
+                            for value, reference_value in zip(values, reference_values, strict=True)
+                        ):
+                            raise RuntimeError(
+                                f"EP replicas for data rank {data_rank} disagree on representative action logprobs"
+                            )
 
             elapsed_values = [item["elapsed_seconds"] for item in timed]
             if not elapsed_values or not finite_tree(elapsed_values) or min(elapsed_values) <= 0:
@@ -685,6 +755,8 @@ def main() -> None:
                 "peak_allocated_bytes_max": max(item["peak_allocated_bytes"] for item in timed),
                 "peak_reserved_bytes_max": max(item["peak_reserved_bytes"] for item in timed),
             }
+            if args.objective == "operational":
+                metrics["raw_grad_norm"] = raw_grad_norms[0]
             if args.expert_attribution:
                 expert_phase_seconds = critical["expert_attribution"]["phase_seconds"]
                 expert_seconds = sum(expert_phase_seconds.values())
@@ -718,6 +790,9 @@ def main() -> None:
                 )
                 metrics["matched_gradient_tensors_min"] = min(item["gradient_tensors"] for item in timed)
                 metrics["matched_gradient_numel_min"] = min(item["gradient_numel"] for item in timed)
+                metrics["matched_representative_gradients"] = aggregate_representative_gradients(
+                    timed, args.expert_parallel_size
+                )
             result = {
                 "schema_version": 1,
                 "created_utc": dt.datetime.now(dt.UTC).isoformat(),
@@ -742,6 +817,7 @@ def main() -> None:
                 "logical_batch_sha256": args.logical_batch_sha256,
                 "manifest_batch": manifest["batch"],
                 "manifest_batch_metadata": manifest["batch_metadata"],
+                "practical_correctness_gate": PRACTICAL_GATE,
                 "config": OmegaConf.to_container(cfg, resolve=True),
                 "topology": topology,
                 "worker_identities": identities,
