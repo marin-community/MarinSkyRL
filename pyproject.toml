@@ -41,7 +41,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agentic = ["daytona>=0.92.0"]
 cpu = [
     "accelerate>=1.14,<2",
     "harbor-config",
@@ -78,6 +77,7 @@ vllm = [
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.5.0 ; sys_platform == 'linux'",
@@ -107,6 +107,7 @@ megatron = [
 ]
 telemetry = [
     "marin-rigging[prometheus]==0.2.70.dev30755316227",
+    "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
 
@@ -190,6 +191,7 @@ flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
+harbor = { git = "https://github.com/marin-community/harbor.git" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu129", extra = "cuda" },

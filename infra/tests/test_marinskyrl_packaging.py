@@ -60,12 +60,18 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     extras = set(metadata.get_all("Provides-Extra", []))
     requirements = metadata.get_all("Requires-Dist", [])
 
-    assert {"cpu", "cuda", "fsdp", "vllm", "megatron"}.issubset(extras)
+    assert {"cpu", "cuda", "fsdp", "vllm", "megatron", "telemetry"}.issubset(extras)
+    assert "agentic" not in extras
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torchtitan") and "extra == 'fsdp'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
+    assert any(
+        requirement.startswith("harbor[analysis,datasets,daytona]") and "extra == 'vllm'" in requirement
+        for requirement in requirements
+    )
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
+    assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(
         requirement.startswith("torchvision==") and "extra == 'megatron'" in requirement
         for requirement in requirements
@@ -106,3 +112,13 @@ def test_fsdp_extra_provides_flash_attention_for_both_linux_architectures() -> N
     urls = sources["flash-attn"]
     assert any("linux_x86_64.whl" in source["url"] for source in urls)
     assert any("linux_aarch64.whl" in source["url"] for source in urls)
+
+
+def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
+    sources = PYPROJECT["tool"]["uv"]["sources"]
+    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
+
+    assert sources["harbor"] == {"git": "https://github.com/marin-community/harbor.git"}
+    harbor = next(package for package in lock["package"] if package["name"] == "harbor")
+    assert harbor["source"]["git"].startswith("https://github.com/marin-community/harbor.git#")
+    assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
