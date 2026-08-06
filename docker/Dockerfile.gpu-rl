@@ -258,8 +258,8 @@ RUN cd ${SKYRL_HOME} && \
 # the same root project.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
-# RL venv path MUST match the Iris launcher's registered
-# GPU_RL_ENV_DIR=/opt/marin/envs/rl (cloud/iris/gpu_rl_images.py).
+# RL venv path remains fixed for the legacy monitor and reshard entry points
+# (cloud/iris/legacy_gpu_rl_environment.py).
 ENV RL_ENV_DIR=/opt/marin/envs/rl
 ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # =============================================================================

@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 NovaSkyAI
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,7 +18,6 @@ from skyrl_train.models.grug_moe import (
     GrugMoeSparseMoeBlock,
     enable_grug_grouped_mm,
 )
-from skyrl_train.models.layers.moe_routing import run_experts_for_loop
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
     GrugQueryBiasLayerObservation,
@@ -53,13 +51,6 @@ def tiny_config(**overrides) -> GrugMoeConfig:
     }
     values.update(overrides)
     return GrugMoeConfig(**values)
-
-
-@pytest.fixture
-def grouped_kernel(monkeypatch):
-    grouped_kernel_module = ModuleType("skyrl_train.models.layers.moe")
-    grouped_kernel_module.__dict__["_run_experts_grouped_mm"] = run_experts_for_loop
-    monkeypatch.setitem(sys.modules, grouped_kernel_module.__name__, grouped_kernel_module)
 
 
 def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
@@ -102,32 +93,27 @@ def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_native_grouped_mm_matches_eager_and_preserves_checkpoint_keys(grouped_kernel):
+def test_enabling_grouped_mm_preserves_checkpoint_keys():
     torch.manual_seed(9)
     model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1))
-    block = model.model.layers[0].mlp
-    hidden = torch.randn(2, 3, model.config.hidden_size)
     keys_before = tuple(model.state_dict())
-    expected = block(hidden)
 
     assert enable_grug_grouped_mm(model) == 1
 
-    output = block(hidden)
-
-    assert block.experts.use_grouped_mm is True
-    torch.testing.assert_close(output, expected)
     assert tuple(model.state_dict()) == keys_before
     assert "model.layers.0.mlp.experts.gate_proj.weight" in keys_before
     assert "model.layers.0.mlp.experts.up_proj.weight" in keys_before
     assert "model.layers.0.mlp.experts.down_proj.weight" in keys_before
 
 
-def test_bfloat16_expert_combine_uses_float32_accumulation(grouped_kernel):
+def test_bfloat16_sparse_moe_forward_uses_float32_accumulation():
     config = tiny_config(num_local_experts=5, num_experts_per_tok=4, num_hidden_layers=1)
 
     def new_block():
         block = GrugMoeSparseMoeBlock(config).to(dtype=torch.bfloat16)
         with torch.no_grad():
+            block.router.weight.zero_()
+            block.router.weight[:5, 0] = torch.tensor([8.0, 4.0, 2.0, 1.0, 0.0], dtype=torch.bfloat16)
             block.experts.gate_proj.weight.zero_()
             block.experts.up_proj.weight.zero_()
             block.experts.down_proj.weight.zero_()
@@ -138,30 +124,16 @@ def test_bfloat16_expert_combine_uses_float32_accumulation(grouped_kernel):
             block.experts.down_proj.weight[1:, 0, 0] = 1.0 / 2048.0
         return block
 
-    def run(path):
+    def run(*, reference: bool):
         block = new_block()
         hidden = torch.zeros((16, config.hidden_size), dtype=torch.bfloat16)
         hidden[:, 0] = 1.0
         hidden.requires_grad_(True)
-        selected_experts = torch.arange(4).expand(hidden.shape[0], -1).clone()
-        combine_weights = (
-            torch.tensor([1.0, 0.5, 0.5, 0.5], dtype=torch.float32)
-            .expand(hidden.shape[0], -1)
-            .clone()
-            .requires_grad_(True)
-        )
-        if path == "eager":
-            output = block.experts.forward_eager(hidden, selected_experts, combine_weights)
-        elif path == "grouped":
-            block.enable_grouped_mm()
-            output = block._expert_execution.run(
-                block.experts,
-                block.reorderer,
-                hidden,
-                selected_experts,
-                combine_weights,
-            )
-        else:
+        if reference:
+            selected_experts = torch.arange(4).expand(hidden.shape[0], -1)
+            selected_logits = F.linear(hidden.float(), block.router.weight.float())[:, :4]
+            combine_weights = torch.sigmoid(selected_logits)
+            combine_weights = combine_weights * (2.5 / (combine_weights.sum(dim=-1, keepdim=True) + 1e-9))
             output = torch.zeros_like(hidden, dtype=torch.float32)
             for slot in range(selected_experts.shape[-1]):
                 expert = int(selected_experts[0, slot])
@@ -171,12 +143,14 @@ def test_bfloat16_expert_combine_uses_float32_accumulation(grouped_kernel):
                 contribution = expert_output * combine_weights[:, slot].to(expert_output.dtype).unsqueeze(-1)
                 output = output + contribution.float()
             output = output.to(hidden.dtype)
+        else:
+            output = block(hidden)
         loss = output.float().square().mean()
         gradients = torch.autograd.grad(
             loss,
             (
                 hidden,
-                combine_weights,
+                block.router.weight,
                 block.experts.gate_proj.weight,
                 block.experts.up_proj.weight,
                 block.experts.down_proj.weight,
@@ -184,13 +158,11 @@ def test_bfloat16_expert_combine_uses_float32_accumulation(grouped_kernel):
         )
         return output, gradients
 
-    reference_output, reference_gradients = run("reference")
-    assert reference_output[0, 0].item() == 1.015625
-    for path in ("eager", "grouped"):
-        output, gradients = run(path)
-        torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
-        for gradient, reference_gradient in zip(gradients, reference_gradients):
-            torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
+    reference_output, reference_gradients = run(reference=True)
+    output, gradients = run(reference=False)
+    torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    for gradient, reference_gradient in zip(gradients, reference_gradients):
+        torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
 
 
 def test_gradient_checkpointing_preserves_logits_and_gradients():

@@ -47,9 +47,8 @@ class LocalRaySpillTarget:
             raise RuntimeError(f"Could not create Ray spill directory {self.location!r}: {error}") from error
 
     def shell_preflight(self) -> str:
-        # Keep this independent of Python startup: it must fail before the controller
-        # interpreter imports MarinSkyRL. prepare_node repeats the same contract at Ray's
-        # immediate subprocess boundary.
+        # This must fail before the controller imports MarinSkyRL. prepare_node repeats
+        # the contract at Ray's immediate subprocess boundary.
         quoted_path = shlex.quote(self.location)
         error_message = shlex.quote(
             f"[rl-iris] Could not prepare local Ray spill directory {self.location!r} before controller startup"
@@ -80,7 +79,7 @@ class R2RaySpillTarget:
             import boto3  # noqa: F401
         except ImportError as error:
             raise RuntimeError(
-                "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
+                "--ray-spill-backend=r2 requires boto3 in the locked runtime; use local spilling or fix the profile"
             ) from error
 
     def shell_preflight(self) -> str:

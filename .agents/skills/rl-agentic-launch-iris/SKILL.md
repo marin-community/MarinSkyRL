@@ -6,7 +6,7 @@ description: Validate, submit, and observe agentic MarinSkyRL training on Iris w
 # Launch agentic RL on Iris
 
 Read `.agents/ops/coreweave.md`, the selected configuration, and the current
-`cloud.iris.iris_backend` interface before constructing a command. Resolve cluster, image,
+`cloud.iris.iris_backend` interface before constructing a command. Resolve cluster, runtime profile,
 credentials, capacity, retry policy, and artifact destinations at execution time.
 
 ## Workflow
@@ -14,10 +14,10 @@ credentials, capacity, retry policy, and artifact destinations at execution time
 1. Start from a clean committed revision and classify the harness from the resolved configuration.
 2. Validate model, topology, rollout concurrency, sandbox provider, verifier, checkpoint policy,
    artifact paths, and campaign registration/publication policy.
-3. Run the complete launch with `--dry-run`. Inspect the generated job identity, image digest,
+3. Run the complete launch with `--dry-run`. Inspect the generated job identity, runtime commit and profile,
    resource roles, command, secret references, retries, and durable destinations.
 4. Confirm external prerequisites using non-secret evidence: provider access, snapshot headroom,
-   task data, model access, and target-cluster image pullability.
+   task data, model access, and target-cluster capacity.
 5. Submit the reviewed command and preserve its resolved configuration with the experiment record.
 6. Observe through initialization into completed trials, verifier rewards, advancing training steps,
    and a checkpoint when due. Use `rl-job-health-deep-dive` when state alone cannot prove progress.

@@ -10,6 +10,7 @@ import logging
 import os
 
 from skyrl_train.numa_policy import install_host_memory_policy, is_numa_affinity_enabled
+from skyrl_train.env_vars import DEBUG_MODE_ENV, write_process_manifest
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ def configure_worker_process() -> None:
     if is_numa_affinity_enabled():
         install_host_memory_policy()
     os.environ["UV_USE_IO_URING"] = "0"
+    if os.environ.get(DEBUG_MODE_ENV) == "distributed":
+        write_process_manifest("ray-worker-bootstrap")
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
     try:

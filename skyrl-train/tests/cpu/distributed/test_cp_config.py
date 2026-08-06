@@ -28,7 +28,7 @@ from skyrl_train.config.utils import get_default_config
 from tests.cpu.fsdp_config_assertions import TRAINER_MODEL_ROLES, assert_role_fsdp_defaults
 
 # The baseline snapshots `get_default_config()` without the intentionally additive
-# CP, grouped-mm, attention-backend, and DCP fields. Keeping the remaining defaults
+# CP, grouped-mm, debug-mode, attention-backend, and DCP fields. Keeping the remaining defaults
 # current makes this a CP no-op regression test rather than a stale whole-config lock.
 # `resolve=False` preserves interpolations, so the comparison is HOME-/env-independent.
 GOLDEN = Path(__file__).parent.parent / "data" / "ppo_base_pre_cp.yaml"
@@ -54,12 +54,14 @@ STAGE2_TRAINER_FIELDS = {
         "on_failure": "abort",
     },
 }
-# Additive generator key from the vLLM DCP port Stage 0 (flag-off no-op, default == 1).
-# Like the CP fields, it is purely additive and must be stripped before the structural
-# -identity comparison against the pre-CP golden (it is unrelated to CP — DCP is the
-# rollout-side decode KV-cache shard).
-STAGE0_DCP_GENERATOR_FIELDS = {
+DEBUG_MODE_TRAINER_FIELDS = {
+    "debug_mode": "off",
+}
+# Additive generator keys with behavior-preserving disabled defaults. Like the CP
+# fields, they are stripped before comparison with the pre-CP golden.
+ADDITIVE_GENERATOR_FIELDS = {
     "inference_engine_decode_context_parallel_size": 1,
+    "vllm_attention_backend": None,
 }
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was
@@ -101,9 +103,9 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         fsdp = container["trainer"][role]["fsdp_config"]
         for k in (*CP_FIELDS, *MOE_FSDP_FIELDS):  # strip the additive keys -> should reproduce pre-CP shape
             fsdp.pop(k, None)
-    for k in STAGE2_TRAINER_FIELDS:  # strip Stage-2 additive top-level trainer keys
+    for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS):
         container["trainer"].pop(k, None)
-    for k in STAGE0_DCP_GENERATOR_FIELDS:  # strip DCP Stage-0 additive generator key
+    for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the no-CP baseline"
@@ -124,12 +126,13 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
         # And the added keys carry the disabled defaults.
         for k, v in {**CP_FIELDS, **MOE_FSDP_FIELDS}.items():
             assert cur_fsdp[k] == v
-    # The only new top-level trainer keys are the Stage-2 additive ones (attn_backend).
+    # Only explicitly additive top-level trainer keys may differ from the golden.
     added_trainer = set(current["trainer"]) - set(golden["trainer"])
-    assert added_trainer == set(STAGE2_TRAINER_FIELDS), (
-        f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(STAGE2_TRAINER_FIELDS)}"
+    expected_trainer_fields = STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS
+    assert added_trainer == set(expected_trainer_fields), (
+        f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(expected_trainer_fields)}"
     )
-    for k, v in STAGE2_TRAINER_FIELDS.items():
+    for k, v in expected_trainer_fields.items():
         assert current["trainer"][k] == v
 
 

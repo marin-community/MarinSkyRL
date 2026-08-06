@@ -18,14 +18,16 @@ paths, LoRA/4-bit loading, and PKO remain unsupported. Trainer EP requires the
 torch backend, native `use_grouped_mm=true`, AdamW, and ETP/CP/SP all equal to
 one.
 
-## Runtime image
+## Runtime support
 
-Grug serving requires the Marin vLLM fork at commit
-`8672c71e311cb76a81154589cb60498b41dd59f7`. Resolve the cluster's standard
-image from `cloud/iris/gpu_rl_images.py` and verify that it contains this fork.
-If it does not, pass an explicit verified image by immutable digest. The
-`4b55591306c934cdc21461f091c9ea22ad008007` pin in the image build is the
-native-wheel donor, not the serving source revision.
+Grug serving uses the Marin vLLM wheels selected by the root `uv.lock`. The lock
+chooses immutable x86_64 and aarch64 assets for the H100 and GB200 execution
+platforms, respectively. The standard Iris environment verifies `vllm._C`, the
+cuMem allocator, and `GrugMoeForCausalLM` before training starts.
+
+The eager policy path does not require FlashAttention. Selecting the fused policy
+path still requires a compiled FlashAttention build compatible with the locked
+Torch and CUDA ABI.
 
 ## Query bias
 
