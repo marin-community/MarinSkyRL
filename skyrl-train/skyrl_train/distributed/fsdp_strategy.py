@@ -24,6 +24,7 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.constants import get_worker_nccl_timeout_s
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
+    DEFAULT_EP_COMM_BACKEND,
     MixedPrecisionPolicy,
     init_fn,
     get_fsdp_wrap_policy,
@@ -417,7 +418,7 @@ class FSDPStrategy(DistributedStrategy):
                     _meta = torch.empty(_shape, device="meta", dtype=_dtype)
                     setattr(_submod, _attr, torch.nn.Parameter(_meta, requires_grad=_rg))
 
-                ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
+                ep_backend = self.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)
                 num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs)
                 assert num_sharded > 0, (
                     "expert_model_parallel_size>1 but no supported grouped experts were found; "

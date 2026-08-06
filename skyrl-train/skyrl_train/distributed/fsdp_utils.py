@@ -50,6 +50,9 @@ else:
     fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy = None, None, None, None
 
 
+DEFAULT_EP_COMM_BACKEND = "torch"
+
+
 def init_fn(x: torch.nn.Module):
     if torch.distributed.get_rank() != 0:
         x = x.to_empty(device=torch.cuda.current_device(), recurse=False)
@@ -721,8 +724,11 @@ class _GroupedExpertParallelTarget:
         return self.experts.named_parameters(recurse=False)
 
 
-def _expert_parallel_target(module, grouped_experts_type, grug_experts_type) -> _ExpertParallelTarget | None:
-    if isinstance(module, grug_experts_type):
+def _expert_parallel_target(
+    module: nn.Module,
+    grouped_experts_type: type[nn.Module],
+) -> _ExpertParallelTarget | None:
+    if isinstance(module, GrugMoeExperts):
         return _GrugExpertParallelTarget(module)
 
     moe = getattr(module, "moe", None)
@@ -784,7 +790,13 @@ def _compose_expert_fsdp_shards(
             )
 
 
-def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size=1, fsdp_kwargs=None):
+def apply_ep(
+    model,
+    device_mesh,
+    ep_comm_backend=DEFAULT_EP_COMM_BACKEND,
+    sequence_parallel_size=1,
+    fsdp_kwargs=None,
+):
     """Shard MoE experts across the ``ep`` submesh via torchtitan ``ExpertParallel``.
 
     Stage 4a — torch ``all_to_all`` backend only (NO DeepEP; that is Stage 5) and
@@ -846,7 +858,7 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
     ep_context = _ExpertParallelContext(ep_plan, ep_mesh, ep_comm_backend)
     sharded = 0
     for module in model.modules():
-        target = _expert_parallel_target(module, GroupedExperts, GrugMoeExperts)
+        target = _expert_parallel_target(module, GroupedExperts)
         if target is None:
             continue
 

@@ -22,7 +22,6 @@ except ImportError:
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
 from skyrl_train.models.grug_moe import (
-    GRUG_EP_COMM_BACKEND,
     GRUG_MOE_MODEL_TYPE,
     validate_grug_expert_parallel_options,
 )
@@ -31,7 +30,7 @@ from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dty
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
 from skyrl_train.utils.numa import memory_nodes_for_range
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
+from skyrl_train.distributed.fsdp_utils import DEFAULT_EP_COMM_BACKEND, fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -781,7 +780,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=strategy.ep_size,
             use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
-            ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", GRUG_EP_COMM_BACKEND)),
+            ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)),
         )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
