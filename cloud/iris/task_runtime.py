@@ -272,7 +272,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     return True
 
 
-def stage_model(model_path: str, warm_source: str | None = None) -> None:
+def stage_model(model_path: str, warm_source: str | None = None, revision: str | None = None) -> None:
     """Pre-download the policy model into this NODE's local HF cache on EVERY node.
 
     The controller runs on every node before Ray bootstrap, so pre-download the
@@ -300,7 +300,12 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     # after the HF prestage. On a missing/empty/incomplete source or ANY error we fall
     # through to the HF snapshot_download prestage below (byte-identical). warm_source
     # is None unless the launcher forwarded --model-warm-source.
-    if warm_source:
+    if warm_source and revision:
+        _log(
+            f"stage_model: ignoring unversioned warm source {warm_source} because immutable revision "
+            f"{revision} was requested"
+        )
+    elif warm_source:
         try:
             if _warm_sync_model_from_s3(model_path, warm_source):
                 return
@@ -329,10 +334,11 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     code = (
         "import sys\n"
         "from huggingface_hub import snapshot_download\n"
-        "p = snapshot_download(sys.argv[1], allow_patterns=sys.argv[2].split(','))\n"
+        "p = snapshot_download(sys.argv[1], allow_patterns=sys.argv[2].split(','), revision=sys.argv[3] or None)\n"
         "print('PRESTAGE_LOCAL_DIR=' + p)\n"
     )
-    _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
+    revision_label = f"@{revision}" if revision else ""
+    _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}{revision_label}")
     last_err = ""
     # A stalled snapshot_download (mid-download socket hang) blocks subprocess.run
     # forever without a per-attempt timeout. HF resumes the partial `.incomplete`
@@ -343,7 +349,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     for attempt in range(1, 7):
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
+                [sys.executable, "-c", code, model_path, ",".join(allow_patterns), revision or ""],
                 env=child_env,
                 capture_output=True,
                 text=True,
@@ -1486,6 +1492,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "launcher (auto-derived from the repo id).",
     )
     parser.add_argument(
+        "--prestage-model-revision",
+        default="",
+        help="Optional immutable Hugging Face revision for --prestage-model. A pinned revision bypasses the "
+        "unversioned S3 warm mirror and downloads that exact snapshot once per node.",
+    )
+    parser.add_argument(
         "--model-source-uri",
         default="",
         help="Object-store HF export to materialize on every node before Ray starts.",
@@ -1568,7 +1580,11 @@ def main() -> None:
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
-        stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
+        stage_model(
+            args.prestage_model,
+            warm_source=(args.model_warm_source or None),
+            revision=(args.prestage_model_revision or None),
+        )
     # Force the policy chat template onto the (now warm) node-local tokenizer cache on
     # EVERY node, before Ray — the training driver's tokenizer may load on any node.
     if args.policy_chat_template:

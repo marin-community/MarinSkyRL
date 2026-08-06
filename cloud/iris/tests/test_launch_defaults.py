@@ -432,6 +432,27 @@ def test_controller_rejects_object_store_model_path_before_staging():
         stage_model("s3://models/policy")
 
 
+def test_model_prestage_forwards_immutable_revision_and_skips_unversioned_warm_source(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout="PRESTAGE_LOCAL_DIR=/cache/exact\n", stderr="")
+
+    monkeypatch.setattr("cloud.iris.task_runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud.iris.task_runtime._rank", lambda: 0)
+    monkeypatch.setattr("cloud.iris.task_runtime._num_tasks", lambda: 1)
+    monkeypatch.setattr(
+        "cloud.iris.task_runtime._warm_sync_model_from_s3",
+        lambda *_args, **_kwargs: pytest.fail("a pinned revision must not use an unversioned mirror"),
+    )
+
+    stage_model("org/model", warm_source="s3://bucket/unversioned", revision="a" * 40)
+
+    assert len(calls) == 1
+    assert calls[0][0][-1] == "a" * 40
+
+
 def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
     args = _args(tmp_path, "opencode", ["--num-nodes", "1"])
 
