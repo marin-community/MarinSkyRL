@@ -57,8 +57,11 @@ from infra.rl_metrics import (  # noqa: E402
     POLICY_LOSS_KEYS,
     REWARD_KEYS,
     TIS_EXACT_MATCH_KEYS,
+    TIS_IMPORTANCE_RATIO_MEAN_KEYS,
+    TIS_LOG_RATIO_ABS_MEAN_KEYS,
     metric_value,
     parse_training_metrics_result,
+    parse_tis_enabled,
     training_metrics_parse_error,
 )
 from scripts.iris.jupiter_rl_artifacts import (  # noqa: E402
@@ -992,19 +995,21 @@ class ParsedMetrics:
     step: int | None
     total: int | None
     metrics: dict[str, Any]
+    tis_enabled: bool | None
     error: str | None
 
 
 def parse_metrics(finelog: Path) -> ParsedMetrics:
     if not finelog.exists():
-        return ParsedMetrics(None, None, {}, None)
+        return ParsedMetrics(None, None, {}, None, None)
     try:
         text = finelog.read_text(errors="replace")
     except OSError as error:
-        return ParsedMetrics(None, None, {}, f"could not read finelog: {error}")
+        return ParsedMetrics(None, None, {}, None, f"could not read finelog: {error}")
     progress = PROGRESS_PATTERN.findall(text)
     step = int(progress[-1][0]) if progress else None
     total = int(progress[-1][1]) if progress else None
+    tis_enabled = parse_tis_enabled(text)
     result = parse_training_metrics_result(text)
     if result.records:
         latest = result.records[-1]
@@ -1012,11 +1017,12 @@ def parse_metrics(finelog: Path) -> ParsedMetrics:
             latest.step,
             total,
             latest.metrics,
+            tis_enabled,
             training_metrics_parse_error(result.malformed_lines),
         )
     if result.malformed_lines:
-        return ParsedMetrics(step, total, {}, training_metrics_parse_error(result.malformed_lines))
-    return ParsedMetrics(step, total, {}, None)
+        return ParsedMetrics(step, total, {}, tis_enabled, training_metrics_parse_error(result.malformed_lines))
+    return ParsedMetrics(step, total, {}, tis_enabled, None)
 
 
 def display_metric(value: Any | None, precision: int = 4) -> str:
@@ -1036,26 +1042,39 @@ def tis_ratio_summary(metrics: dict[str, Any]) -> str:
     That legacy value is useful, but it is not mean absolute log-ratio, so keep
     the label distinct.
     """
-    log_ratio = metric_value(
-        metrics,
-        "policy/tis/log_ratio_abs_mean",
-        "tis/log_ratio_abs_mean",
-    )
+    log_ratio = metric_value(metrics, *TIS_LOG_RATIO_ABS_MEAN_KEYS)
     if log_ratio is not None:
         return f"TIS |log r|={display_metric(log_ratio)}"
 
-    importance_ratio = metric_value(
-        metrics,
-        "policy/tis/imp_ratio_mean",
-        "tis/imp_ratio_mean",
-        "policy/rollout_train_prob_diff_mean",
-    )
+    importance_ratio = metric_value(metrics, *TIS_IMPORTANCE_RATIO_MEAN_KEYS)
     return f"TIS r={display_metric(importance_ratio)}"
 
 
 def tis_alignment_summary(metrics: dict[str, Any]) -> str:
     """Render served-token versus trainer-token exact alignment for TIS."""
     return f"TIS exact={display_metric(metric_value(metrics, *TIS_EXACT_MATCH_KEYS))}"
+
+
+def tis_diagnostic_summaries(metrics: dict[str, Any], enabled: bool | None) -> tuple[str, ...]:
+    """Render available TIS diagnostics or explain why they are absent."""
+    summaries: list[str] = []
+    if metric_value(metrics, *TIS_EXACT_MATCH_KEYS) is not None:
+        summaries.append(tis_alignment_summary(metrics))
+    if (
+        metric_value(metrics, *TIS_LOG_RATIO_ABS_MEAN_KEYS) is not None
+        or metric_value(metrics, *TIS_IMPORTANCE_RATIO_MEAN_KEYS) is not None
+    ):
+        summaries.append(tis_ratio_summary(metrics))
+
+    if summaries:
+        if enabled is False:
+            summaries.append("TIS correction disabled")
+        return tuple(summaries)
+    if enabled is False:
+        return ("TIS disabled",)
+    if enabled is True:
+        return ("TIS enabled; metrics missing",)
+    return ("TIS unavailable",)
 
 
 def token_probability_shift_summary(metrics: dict[str, Any]) -> str:
@@ -1152,8 +1171,7 @@ def report_row(job: MonitoredJob, artifacts: ArtifactResult, directory: Path) ->
     trend = "; ".join(
         (
             f"entropy={display_metric(entropy)}",
-            tis_alignment_summary(metrics),
-            tis_ratio_summary(metrics),
+            *tis_diagnostic_summaries(metrics, parsed.tis_enabled),
             token_probability_shift_summary(metrics),
         )
     )

@@ -541,6 +541,35 @@ def test_rl_report_row_reads_policy_namespaced_tis_log_ratio(tmp_path):
     assert "TIS |log r|=0.125" in row[-1].value
 
 
+def test_rl_report_row_explains_tis_disabled_by_resolved_config(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "trainer:\n"
+        "  algorithm:\n"
+        "    use_tis: false\n"
+        "Training Step Progress: 2 / 80\n"
+        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143, '
+        '"policy/log_ratio_abs_mean": 0.0}\n',
+    )
+
+    assert "TIS disabled" in row[-1].value
+    assert "TIS exact=—" not in row[-1].value
+    assert "TIS r=—" not in row[-1].value
+
+
+def test_rl_report_row_flags_enabled_tis_without_diagnostics(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "trainer:\n"
+        "  algorithm:\n"
+        "    use_tis: true\n"
+        "Training Step Progress: 2 / 80\n"
+        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143}\n',
+    )
+
+    assert "TIS enabled; metrics missing" in row[-1].value
+
+
 def test_tis_ratio_summary_uses_distinct_legacy_importance_ratio_label():
     summary = watch_coreweave_rl.tis_ratio_summary({"policy/rollout_train_prob_diff_mean": 50_087_992.0})
 
