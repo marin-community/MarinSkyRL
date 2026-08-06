@@ -130,10 +130,7 @@ def test_bfloat16_sparse_moe_forward_uses_float32_accumulation():
         hidden[:, 0] = 1.0
         hidden.requires_grad_(True)
         if reference:
-            selected_experts = torch.arange(4).expand(hidden.shape[0], -1)
-            selected_logits = F.linear(hidden.float(), block.router.weight.float())[:, :4]
-            combine_weights = torch.sigmoid(selected_logits)
-            combine_weights = combine_weights * (2.5 / (combine_weights.sum(dim=-1, keepdim=True) + 1e-9))
+            _, selected_experts, combine_weights = block.router(hidden)
             output = torch.zeros_like(hidden, dtype=torch.float32)
             for slot in range(selected_experts.shape[-1]):
                 expert = int(selected_experts[0, slot])

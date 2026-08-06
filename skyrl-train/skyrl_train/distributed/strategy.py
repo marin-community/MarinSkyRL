@@ -18,6 +18,7 @@ DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 
 class DistributedStrategy(ABC):
     device_mesh: DeviceMesh | None = None
+    ep_size: int = 1
 
     @abstractmethod
     def setup_distributed(self):

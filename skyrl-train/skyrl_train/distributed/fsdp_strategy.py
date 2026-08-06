@@ -320,7 +320,7 @@ class FSDPStrategy(DistributedStrategy):
         # submesh only (the experts get a separate ExpertParallel Shard(0) over the
         # "ep" submesh in apply_ep, after fully_shard). ep_size==1 keeps fsdp_mesh
         # as today's full mesh (byte-identical).
-        ep_on = getattr(self, "ep_size", 1) > 1
+        ep_on = self.ep_size > 1
         if ep_on:
             fsdp_mesh = self.device_mesh["fsdp"]
 

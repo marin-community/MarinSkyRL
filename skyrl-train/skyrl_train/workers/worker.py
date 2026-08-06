@@ -1081,7 +1081,7 @@ class PolicyWorkerBase(Worker):
         grug_capture_plan = None
         if grug_causal_lm is not None:
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
-            ep_size = int(getattr(self.strategy, "ep_size", 1))
+            ep_size = self.strategy.ep_size
             ep_rank = int(self.strategy.device_mesh.get_local_rank(mesh_dim="ep")) if ep_size > 1 else 0
             shard_layout = GrugQueryBiasShardLayout(
                 micro_batch_size=micro_batch_size,
