@@ -851,6 +851,7 @@ def test_grug_ppo_train_releases_consumed_microbatches():
     )
     worker.policy_mini_batch_size_per_gpu = 2
     worker.strategy = MagicMock(fsdp_strategy="fsdp2")
+    worker.strategy.ep_size = 1
     worker.strategy.is_rank_0.return_value = False
     worker.strategy.all_reduce.side_effect = lambda status: status
     worker.model = SimpleNamespace(model=_ObservableGrugCausalLM())
