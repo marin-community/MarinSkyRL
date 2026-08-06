@@ -15,6 +15,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -69,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--flash-attn-wheel-sha256", required=True)
     parser.add_argument("--manifest-s3-uri", required=True)
     parser.add_argument("--manifest-sha256", required=True)
     parser.add_argument("--logical-batch-sha256", required=True)
@@ -439,6 +441,21 @@ def main() -> None:
         )
     if "@sha256:" not in args.image:
         raise ValueError("--image must pin an immutable sha256 digest")
+    if len(args.flash_attn_wheel_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in args.flash_attn_wheel_sha256
+    ):
+        raise ValueError("--flash-attn-wheel-sha256 must be a lowercase SHA-256 digest")
+    if args.attention_backend == "flash_attention_2":
+        import flash_attn_2_cuda
+
+        flash_attn_runtime = {
+            "version": importlib.metadata.version("flash-attn"),
+            "wheel_sha256": args.flash_attn_wheel_sha256,
+            "extension_path": flash_attn_2_cuda.__file__,
+            "extension_sha256": sha256_file(Path(flash_attn_2_cuda.__file__)),
+        }
+    else:
+        flash_attn_runtime = None
     if args.profile_s3_uri is not None and args.mode != "preflight":
         raise ValueError("profiling is restricted to bounded preflight runs")
     if args.expert_attribution and args.objective != "matched_ce":
@@ -806,6 +823,7 @@ def main() -> None:
                 "model": args.model,
                 "model_revision": args.model_revision,
                 "attention_backend": args.attention_backend,
+                "flash_attn_runtime": flash_attn_runtime,
                 "expert_implementation": args.expert_implementation,
                 "expert_parallel_size": args.expert_parallel_size,
                 "fsdp_size": world_size // args.expert_parallel_size,

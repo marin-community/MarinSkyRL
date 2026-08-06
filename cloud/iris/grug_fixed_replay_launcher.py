@@ -36,6 +36,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--priority", choices=("production", "interactive", "batch"), required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-revision", required=True)
+    parser.add_argument("--flash-attn-wheel-sha256", required=True)
     parser.add_argument("--cpu", type=float, default=48.0)
     parser.add_argument("--memory", default="1500GB")
     parser.add_argument("--disk", default="1000GB")
@@ -70,6 +71,7 @@ def validate_request(args: argparse.Namespace, benchmark_argv: list[str]) -> Non
         "--image": args.task_image,
         "--model": args.model,
         "--model-revision": args.model_revision,
+        "--flash-attn-wheel-sha256": args.flash_attn_wheel_sha256,
         "--sample": "1",
     }
     for name, value in expected.items():
@@ -112,6 +114,13 @@ def task_command(args: argparse.Namespace, benchmark_argv: list[str]) -> list[st
         f"mkdir -p {shlex.quote(RAY_SPILL_DIR)}; "
         f"cd {APP_DIR}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
+        "wheel_count=$(find /wheels -maxdepth 1 -type f -name 'flash_attn-*.whl' | wc -l); "
+        'test "$wheel_count" = 1; '
+        "flash_wheel=$(find /wheels -maxdepth 1 -type f -name 'flash_attn-*.whl'); "
+        f"printf '%s  %s\\n' {shlex.quote(args.flash_attn_wheel_sha256)} \"$flash_wheel\" | sha256sum -c -; "
+        'uv pip install --python "$(command -v python)" --no-deps "$flash_wheel"; '
+        "python -c 'import flash_attn, flash_attn_2_cuda; print(\"[grug-fixed-replay] "
+        "flash-attn runtime ready:\", flash_attn.__version__, flash_attn_2_cuda.__file__)'; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"exec {shlex.join(controller)}"
     )

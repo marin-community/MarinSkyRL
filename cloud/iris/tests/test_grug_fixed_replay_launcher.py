@@ -4,7 +4,7 @@ from argparse import Namespace
 
 import pytest
 
-from cloud.iris.grug_fixed_replay_launcher import controller_command, main, validate_request
+from cloud.iris.grug_fixed_replay_launcher import controller_command, main, task_command, validate_request
 
 
 def request(**overrides):
@@ -13,6 +13,7 @@ def request(**overrides):
         "task_image": "registry/image@sha256:" + "b" * 64,
         "model": "org/model",
         "model_revision": "c" * 40,
+        "flash_attn_wheel_sha256": "d" * 64,
         "nodes": 4,
         "rendezvous_dir": "s3://bucket/run",
     }
@@ -26,6 +27,7 @@ def benchmark_argv(**overrides):
         "--image": "registry/image@sha256:" + "b" * 64,
         "--model": "org/model",
         "--model-revision": "c" * 40,
+        "--flash-attn-wheel-sha256": "d" * 64,
         "--sample": "1",
         "--mode": "headline",
     }
@@ -66,6 +68,20 @@ def test_request_rejects_wrong_node_shape(monkeypatch, nodes, mode):
 
     with pytest.raises(ValueError, match="requires"):
         validate_request(args, benchmark_argv(**{"--mode": mode}))
+
+
+def test_task_command_installs_and_verifies_the_pinned_flash_attn_wheel():
+    args = request()
+
+    command = task_command(args, benchmark_argv())
+
+    assert command[:2] == ["bash", "-c"]
+    shell = command[2]
+    assert 'test "$wheel_count" = 1' in shell
+    assert args.flash_attn_wheel_sha256 in shell
+    assert "sha256sum -c -" in shell
+    assert 'uv pip install --python "$(command -v python)" --no-deps "$flash_wheel"' in shell
+    assert "import flash_attn, flash_attn_2_cuda" in shell
 
 
 def test_dry_run_does_not_contact_iris(monkeypatch, tmp_path):
