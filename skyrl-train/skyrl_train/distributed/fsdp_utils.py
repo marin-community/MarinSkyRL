@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Callable, Protocol, Union
+from typing import Callable, Protocol, Union
 
 import torch
 import torch.distributed as dist
@@ -40,8 +40,7 @@ from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
 
-if TYPE_CHECKING:
-    from skyrl_train.models.grug_moe import GrugMoeExperts
+from skyrl_train.models.grug_moe import GrugMoeExperts
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -244,8 +243,6 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 
 def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
     """Attach expert-gradient averaging and return module and parameter counts."""
-
-    from skyrl_train.models.grug_moe import GrugMoeExperts  # noqa: PLC0415
 
     module_count = 0
     parameter_count = 0
@@ -842,7 +839,6 @@ def apply_ep(model, device_mesh, ep_comm_backend="torch", sequence_parallel_size
 
     # All supported lifted architectures use this holder type. isinstance also
     # catches subclasses while keeping the target narrowed for the sharding code.
-    from skyrl_train.models.grug_moe import GrugMoeExperts
     from skyrl_train.models.layers.moe import GroupedExperts
 
     ep_mesh = device_mesh["ep"]

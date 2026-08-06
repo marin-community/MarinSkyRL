@@ -362,7 +362,7 @@ class Worker(DistributedTorchRayActor):
                 diag["mesh_shape"] = tuple(mesh.mesh.shape)
                 diag["mesh_dim_names"] = tuple(mesh.mesh_dim_names)
                 diag["mesh_coord"] = tuple(int(c) for c in mesh.get_coordinate())
-                diag["ep_size"] = int(getattr(strat, "ep_size", 1))
+                diag["ep_size"] = strat.ep_size
                 diag["cp_size"] = int(getattr(strat, "cp_size", 1))
             except Exception as e:
                 diag["mesh_error"] = repr(e)
