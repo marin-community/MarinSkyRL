@@ -61,7 +61,9 @@ def _fake_frozen_runtime(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return environment, os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
 
 
-def _run_bootstrap(environment: Path, process_environment: dict[str, str], profile: str) -> subprocess.CompletedProcess[str]:
+def _run_bootstrap(
+    environment: Path, process_environment: dict[str, str], profile: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "bash",
