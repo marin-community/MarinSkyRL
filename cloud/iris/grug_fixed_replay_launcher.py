@@ -114,13 +114,6 @@ def task_command(args: argparse.Namespace, benchmark_argv: list[str]) -> list[st
         f"mkdir -p {shlex.quote(RAY_SPILL_DIR)}; "
         f"cd {APP_DIR}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
-        "wheel_count=$(find /wheels -maxdepth 1 -type f -name 'flash_attn-*.whl' | wc -l); "
-        'test "$wheel_count" = 1; '
-        "flash_wheel=$(find /wheels -maxdepth 1 -type f -name 'flash_attn-*.whl'); "
-        f"printf '%s  %s\\n' {shlex.quote(args.flash_attn_wheel_sha256)} \"$flash_wheel\" | sha256sum -c -; "
-        'uv pip install --python "$(command -v python)" --no-deps "$flash_wheel"; '
-        "python -c 'import flash_attn, flash_attn_2_cuda; print(\"[grug-fixed-replay] "
-        "flash-attn runtime ready:\", flash_attn.__version__, flash_attn_2_cuda.__file__)'; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"exec {shlex.join(controller)}"
     )

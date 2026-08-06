@@ -1,4 +1,5 @@
 #!/bin/bash
+# Jupiter-only SIF test: this manual Slurm job runs against Jupiter's Apptainer runtime.
 #SBATCH --account=reformo
 #SBATCH --partition=booster
 #SBATCH --reservation=reformo

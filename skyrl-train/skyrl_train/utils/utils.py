@@ -18,8 +18,9 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
+from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.env_vars import EnvVarManager, EnvVarScope
+from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
@@ -1096,7 +1097,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
     # Resolve the actual collective deadline last so the debug preset's heartbeat
     # cannot exceed a shorter explicitly configured process-group timeout.
-    env_vars.update(worker_nccl_environment())
+    env_vars.update(worker_nccl_environment(base_environment=env_vars))
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
@@ -1309,6 +1310,11 @@ def initialize_ray(cfg: DictConfig):
     from .ppo_utils import (
         sync_registries,
     )
+
+    debug_environment = apply_distributed_debug_mode(cfg)
+    if debug_environment:
+        manifest = write_process_manifest("driver", environment=debug_environment)
+        logger.info(f"Distributed debug mode active; driver manifest: {manifest}")
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,

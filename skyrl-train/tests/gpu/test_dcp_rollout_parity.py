@@ -1,5 +1,7 @@
 """Stage 3 (vLLM DCP) — rollout correctness parity (DCP=N vs DCP=1), the G2 gate.
 
+Jupiter-only SIF test: the documented Apptainer command targets Jupiter's Slurm runtime.
+
 RE-GATED 2026-06-13 to a bf16-sharded-reduction-appropriate TOLERANCE criterion.
 =================================================================================
 The original gate ("greedy token-ids BIT-IDENTICAL + logprobs allclose 1e-2") was

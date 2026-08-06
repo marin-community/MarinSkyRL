@@ -324,6 +324,7 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
         if isinstance(per_rank, dict):
             per_rank = [per_rank]
         for rank_values in per_rank:
+            serving_ep_rank = int(rank_values["__ranks__"]["ep_rank"])
             for name in names:
                 entry = rank_values[name]
                 if entry.get("skip"):
@@ -334,7 +335,7 @@ def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
                 expert_index = SERVING_EXPERT_INDEX_BY_NAME.get(name)
                 if expert_index is not None:
-                    expert_owners[name].add(int(entry["ep_rank"]))
+                    expert_owners[name].add(serving_ep_rank)
                 expected = (
                     training.weights[STACKED_EXPERT_NAME][expert_index]
                     if expert_index is not None

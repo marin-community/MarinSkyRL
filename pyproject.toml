@@ -41,7 +41,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agentic = ["daytona>=0.92.0"]
 cpu = [
     "accelerate>=1.14,<2",
     "harbor-config",
@@ -69,12 +68,16 @@ deepspeed = [
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
-fsdp = ["torchtitan ; sys_platform == 'linux'"]
+fsdp = [
+    "flash-attn==2.8.3 ; sys_platform == 'linux'",
+    "torchtitan ; sys_platform == 'linux'",
+]
 vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
+    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.5.0 ; sys_platform == 'linux'",
@@ -104,6 +107,7 @@ megatron = [
 ]
 telemetry = [
     "marin-rigging[prometheus]==0.2.70.dev30755316227",
+    "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
 
@@ -125,6 +129,7 @@ docs = [
     "sphinx-rtd-theme>=2.0.0",
 ]
 dev = [
+    { include-group = "analysis" },
     "litellm",
     "marin-rigging[prometheus]==0.2.70.dev30755316227",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
@@ -182,6 +187,11 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
+flash-attn = [
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+harbor = { git = "https://github.com/marin-community/harbor.git" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu129", extra = "cuda" },

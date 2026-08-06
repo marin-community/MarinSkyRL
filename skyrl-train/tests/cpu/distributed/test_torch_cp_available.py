@@ -1,5 +1,7 @@
 """Stage-1 environment gate for the FSDP2 torch-native Context-Parallel (CP) port.
 
+Jupiter-only SIF test: the documented Apptainer command targets Jupiter's Slurm runtime.
+
 Stage 1 pins ``torch>=2.10`` for the trainer + actively-used vLLM path so the
 torch-native CP API (``torch.distributed.tensor.experimental.context_parallel``,
 the ring-SDPA load balancer, and the private offset/unshard helpers that

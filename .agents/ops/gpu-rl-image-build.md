@@ -1,8 +1,9 @@
 # GPU-RL image build operations
 
-This runbook owns mutable facts for building and deploying
-`ghcr.io/marin-community/marinskyrl`. The build script and Dockerfiles remain the executable source
-of truth; inspect them before each build.
+This runbook owns mutable facts for explicitly requested compatibility builds of
+`ghcr.io/marin-community/marinskyrl`. Maintained Iris training, checkpoint resharding, and log collection use
+frozen environments in the standard task image. The build script and Dockerfiles remain the executable source
+of truth; inspect them before each compatibility build.
 
 ## Operator environment
 

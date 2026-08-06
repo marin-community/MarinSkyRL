@@ -70,18 +70,16 @@ def test_request_rejects_wrong_node_shape(monkeypatch, nodes, mode):
         validate_request(args, benchmark_argv(**{"--mode": mode}))
 
 
-def test_task_command_installs_and_verifies_the_pinned_flash_attn_wheel():
+def test_task_command_uses_the_frozen_runtime_without_overwriting_dependencies():
     args = request()
 
     command = task_command(args, benchmark_argv())
 
     assert command[:2] == ["bash", "-c"]
     shell = command[2]
-    assert 'test "$wheel_count" = 1' in shell
-    assert args.flash_attn_wheel_sha256 in shell
-    assert "sha256sum -c -" in shell
-    assert 'uv pip install --python "$(command -v python)" --no-deps "$flash_wheel"' in shell
-    assert "import flash_attn, flash_attn_2_cuda" in shell
+    assert "source /app/marinskyrl/.iris-runtime-env" in shell
+    assert "/wheels" not in shell
+    assert "uv pip install" not in shell
 
 
 def test_dry_run_does_not_contact_iris(monkeypatch, tmp_path):

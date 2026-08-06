@@ -8,10 +8,9 @@ import subprocess
 
 import pytest
 
-from cloud.iris.legacy_gpu_rl_environment import GPU_RL_ENV_DIR
-
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
+GPU_RL_ENV_DIR = "/opt/marin/envs/rl"
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
 GPU_RL_BUILD_SCRIPT = REPOSITORY_ROOT / "docker" / "build_gpu_rl_kaniko.sh"
 GPU_RL_ARM64_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl-arm64"

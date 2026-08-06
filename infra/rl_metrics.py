@@ -10,6 +10,10 @@ from typing import Any
 
 _ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 _MIRROR_PREFIX = re.compile(r"WANDB_MIRROR\s+kind=(?P<kind>\S+)\s+step=(?P<step>\d+)\s+metrics=")
+_USE_TIS_PATTERN = re.compile(
+    r"(?:\btrainer\.algorithm\.use_tis\s*=|\buse_tis[\"']?\s*[:=])\s*(?P<enabled>true|false)\b",
+    re.IGNORECASE,
+)
 
 REWARD_KEYS = ("reward/avg_raw_reward", "loss/avg_final_rewards")
 POLICY_LOSS_KEYS = ("policy/policy_loss", "policy_loss")
@@ -19,6 +23,12 @@ TIS_EXACT_MATCH_KEYS = (
     "generate/tis/exact_match_fraction",
     "tis/exact_match_fraction",
     "policy/tis/exact_match_fraction",
+)
+TIS_LOG_RATIO_ABS_MEAN_KEYS = ("policy/tis/log_ratio_abs_mean", "tis/log_ratio_abs_mean")
+TIS_IMPORTANCE_RATIO_MEAN_KEYS = (
+    "policy/tis/imp_ratio_mean",
+    "tis/imp_ratio_mean",
+    "policy/rollout_train_prob_diff_mean",
 )
 POLICY_LOG_RATIO_ABS_MEAN_KEYS = ("policy/log_ratio_abs_mean", "log_ratio_abs_mean")
 POLICY_LOG_RATIO_ABS_P99_KEYS = ("policy/log_ratio_abs_p99", "log_ratio_abs_p99")
@@ -55,6 +65,14 @@ def training_metrics_parse_error(malformed_lines: int) -> str | None:
 
 def strip_ansi(text: str) -> str:
     return _ANSI_PATTERN.sub("", text)
+
+
+def parse_tis_enabled(log_content: str) -> bool | None:
+    """Return the last resolved TIS setting printed in a training log."""
+    matches = tuple(_USE_TIS_PATTERN.finditer(strip_ansi(log_content)))
+    if not matches:
+        return None
+    return matches[-1].group("enabled").lower() == "true"
 
 
 def parse_training_metrics_result(log_content: str) -> TrainingMetricsParseResult:

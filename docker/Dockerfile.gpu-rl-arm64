@@ -286,8 +286,7 @@ RUN cd ${SKYRL_HOME} && \
 # frozen resolution.
 # No UV_CONSTRAINT / rl_env_constraints: the lock IS the constraint.
 # =============================================================================
-# RL venv path remains fixed for the legacy monitor and reshard entry points
-# (cloud/iris/legacy_gpu_rl_environment.py).
+# Retain the fixed venv path as part of the compatibility-image contract.
 ENV RL_ENV_DIR=/opt/marin/envs/rl
 ENV UV_PROJECT_ENVIRONMENT=${RL_ENV_DIR}
 # =============================================================================

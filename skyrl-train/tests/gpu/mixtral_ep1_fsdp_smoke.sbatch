@@ -1,4 +1,5 @@
 #!/bin/bash
+# Jupiter-only SIF test: this manual Slurm job runs against Jupiter's Apptainer runtime.
 #SBATCH --job-name=mixtral-smoke
 #SBATCH --account=reformo
 #SBATCH --partition=booster
