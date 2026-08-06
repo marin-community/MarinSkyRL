@@ -4,7 +4,7 @@ from argparse import Namespace
 
 import pytest
 
-from cloud.iris.grug_fixed_replay_launcher import main, task_command, validate_request
+from cloud.iris.grug_fixed_replay_launcher import controller_command, main, validate_request
 
 
 def request(**overrides):
@@ -42,10 +42,15 @@ def test_request_binds_runtime_image_model_sample_and_shape(monkeypatch):
 
     validate_request(args, benchmark_argv())
 
-    command = task_command(args, benchmark_argv())
-    shell = command[-1]
-    assert "--prestage-model-revision " + args.model_revision in shell
-    assert "/skyrl-train/scripts/grug_fixed_replay_benchmark.py" in shell
+    command = controller_command(args, benchmark_argv())
+    revision_flag = command.index("--prestage-model-revision")
+    benchmark = command.index("--") + 1
+    assert command[revision_flag + 1] == args.model_revision
+    assert command[benchmark:] == [
+        "python",
+        "/app/marinskyrl/skyrl-train/scripts/grug_fixed_replay_benchmark.py",
+        *benchmark_argv(),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -80,7 +85,7 @@ def test_dry_run_does_not_contact_iris(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("cloud.iris.grug_fixed_replay_launcher.build_runtime_bundle", lambda _commit: tmp_path)
     monkeypatch.setattr(
-        "cloud.iris.grug_fixed_replay_launcher.iris_client",
+        "cloud.iris.grug_fixed_replay_launcher.open_iris_client",
         lambda *_args, **_kwargs: pytest.fail("dry-run must not contact Iris"),
     )
 

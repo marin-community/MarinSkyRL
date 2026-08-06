@@ -4,24 +4,25 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import os
 import shlex
 from pathlib import Path
 
-from iris.client import IrisClient
-from iris.cluster.composer import provider_bundle
-from iris.cluster.config import load_config
-from iris.cluster.local_cluster import LocalCluster
+from iris.cli.connect import open_iris_client
 from iris.cluster.types import Entrypoint, EnvironmentSpec
 from iris.rpc import job_pb2
 
 from cloud.iris.iris_backend import _gpu_constraints, _gpu_multinode, _gpu_resources
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.runtime_environment import MARINSKYRL_ACTIVATION_FILE, RuntimeProfile, task_setup_script
+from cloud.iris.runtime_environment import (
+    MARINSKYRL_ACTIVATION_FILE,
+    MARINSKYRL_TASK_ROOT,
+    RuntimeProfile,
+    task_setup_script,
+)
 
-APP_DIR = "/app"
-SKYRL_HOME = "/app/marinskyrl"
+APP_DIR = str(Path(MARINSKYRL_TASK_ROOT).parent)
+RAY_SPILL_DIR = "/tmp/ray_spill"
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -81,17 +82,17 @@ def validate_request(args: argparse.Namespace, benchmark_argv: list[str]) -> Non
         raise ValueError(f"benchmark mode {mode!r} requires {expected_nodes} nodes, got {args.nodes}")
 
 
-def task_command(args: argparse.Namespace, benchmark_argv: list[str]) -> list[str]:
+def controller_command(args: argparse.Namespace, benchmark_argv: list[str]) -> list[str]:
     benchmark = [
         "python",
-        f"{SKYRL_HOME}/skyrl-train/scripts/grug_fixed_replay_benchmark.py",
+        f"{MARINSKYRL_TASK_ROOT}/skyrl-train/scripts/grug_fixed_replay_benchmark.py",
         *benchmark_argv,
     ]
-    controller = [
+    return [
         "python",
         "cloud/iris/task_runtime.py",
         "--ray-spill-dir",
-        "/tmp/ray_spill",
+        RAY_SPILL_DIR,
         "--rendezvous-dir",
         args.rendezvous_dir,
         "--prestage-model",
@@ -101,28 +102,20 @@ def task_command(args: argparse.Namespace, benchmark_argv: list[str]) -> list[st
         "--",
         *benchmark,
     ]
-    pythonpath = f"{APP_DIR}:{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train"
+
+
+def task_command(args: argparse.Namespace, benchmark_argv: list[str]) -> list[str]:
+    controller = controller_command(args, benchmark_argv)
+    pythonpath = f"{APP_DIR}:{MARINSKYRL_TASK_ROOT}:{MARINSKYRL_TASK_ROOT}/skyrl-train"
     shell = (
         "set -euo pipefail; "
-        "mkdir -p /tmp/ray_spill; "
+        f"mkdir -p {shlex.quote(RAY_SPILL_DIR)}; "
         f"cd {APP_DIR}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
         f"exec {shlex.join(controller)}"
     )
     return ["bash", "-c", shell]
-
-
-@contextlib.contextmanager
-def iris_client(cluster_config: Path, workspace: Path):
-    config = load_config(str(cluster_config))
-    bundle = provider_bundle(config)
-    if config.controller.controller_kind() == "local":
-        controller_address = LocalCluster(config).start()
-    else:
-        controller_address = config.controller_address() or bundle.controller.discover_controller(config.controller)
-    with bundle.controller.tunnel(address=controller_address) as controller_url:
-        yield IrisClient.remote(controller_url, workspace=workspace)
 
 
 def main() -> None:
@@ -154,7 +147,7 @@ def main() -> None:
         print("[grug-fixed-replay] dry-run: validated; no job submitted", flush=True)
         return
 
-    with iris_client(args.cluster_config, workspace) as client:
+    with open_iris_client(config_file=args.cluster_config, workspace=workspace) as client:
         job = client.submit(
             entrypoint=Entrypoint.from_command(*command),
             name=args.job_name,
