@@ -77,6 +77,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "max_num_seqs": cfg.generator.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
+        "vllm_attention_backend": cfg.generator.get("vllm_attention_backend", None),
         "engine_init_kwargs": {
             **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
             "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),

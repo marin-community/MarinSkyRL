@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import tomllib
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -20,12 +21,18 @@ BUNDLE_IDENTITY_FILE = ".marinskyrl-runtime.json"
 DISTRIBUTION_NAME = "marinskyrl"
 
 
+class LauncherSourceKind(StrEnum):
+    CHECKOUT = "checkout"
+    INSTALLED = "installed"
+
+
 @dataclass(frozen=True)
 class LauncherSource:
-    """Committed checkout selected as the source of launcher runtime files."""
+    """Immutable source selected for launcher runtime files."""
 
     root: Path
     commit: str
+    kind: LauncherSourceKind = LauncherSourceKind.CHECKOUT
 
 
 @dataclass(frozen=True)
@@ -69,31 +76,44 @@ def _checkout_root(path: Path) -> Path | None:
     return root if project.get("name") == DISTRIBUTION_NAME else None
 
 
-def _installed_checkout() -> Path:
+def _installed_source() -> LauncherSource:
     try:
-        direct_url = importlib.metadata.distribution(DISTRIBUTION_NAME).read_text("direct_url.json")
+        distribution = importlib.metadata.distribution(DISTRIBUTION_NAME)
     except importlib.metadata.PackageNotFoundError as error:
         raise RuntimeError("Cannot locate an installed marinskyrl distribution outside a checkout") from error
+    direct_url = distribution.read_text("direct_url.json")
     if not direct_url:
-        raise RuntimeError("Installed marinskyrl distribution has no direct_url.json checkout identity")
-    parsed_url = urlparse(json.loads(direct_url).get("url", ""))
-    if parsed_url.scheme != "file":
-        raise RuntimeError("Installed marinskyrl distribution does not identify a local checkout")
-    checkout = Path(unquote(parsed_url.path)).resolve()
-    if not checkout.is_dir():
-        raise RuntimeError(f"Installed marinskyrl checkout is missing: {checkout}")
-    root = _checkout_root(checkout)
-    if root is None:
-        raise RuntimeError(f"Installed marinskyrl checkout is missing or invalid: {checkout}")
-    return root
+        raise RuntimeError("Installed marinskyrl distribution has no direct_url.json source identity")
+
+    source_identity = json.loads(direct_url)
+    parsed_url = urlparse(source_identity.get("url", ""))
+    if parsed_url.scheme == "file":
+        checkout = Path(unquote(parsed_url.path)).resolve()
+        if not checkout.is_dir():
+            raise RuntimeError(f"Installed marinskyrl checkout is missing: {checkout}")
+        root = _checkout_root(checkout)
+        if root is None:
+            raise RuntimeError(f"Installed marinskyrl checkout is missing or invalid: {checkout}")
+        return LauncherSource(root=root, commit=_git_output(root, "rev-parse", "HEAD"))
+
+    vcs_info = source_identity.get("vcs_info")
+    if not isinstance(vcs_info, dict) or vcs_info.get("vcs") != "git":
+        raise RuntimeError("Installed marinskyrl distribution does not identify a Git commit")
+    commit = vcs_info.get("commit_id")
+    if not isinstance(commit, str) or not commit:
+        raise RuntimeError("Installed marinskyrl distribution does not identify a Git commit")
+    root = Path(distribution.locate_file("")).resolve()
+    if not (root / BUNDLE_FILE_MANIFEST).is_file():
+        raise RuntimeError(f"Installed marinskyrl distribution is missing {BUNDLE_FILE_MANIFEST}")
+    return LauncherSource(root=root, commit=commit, kind=LauncherSourceKind.INSTALLED)
 
 
 def resolve_launcher_source() -> LauncherSource:
-    """Resolve the checkout whose committed runtime bytes a launch will ship."""
+    """Resolve the immutable runtime bytes a launch will ship."""
     checkout = _checkout_root(Path.cwd())
-    if checkout is None:
-        checkout = _installed_checkout()
-    return LauncherSource(root=checkout, commit=_git_output(checkout, "rev-parse", "HEAD"))
+    if checkout is not None:
+        return LauncherSource(root=checkout, commit=_git_output(checkout, "rev-parse", "HEAD"))
+    return _installed_source()
 
 
 def _bundle_relative_path(value: str) -> Path:
@@ -122,6 +142,8 @@ def _bundle_paths(source: LauncherSource) -> tuple[Path, ...]:
 
 
 def _reject_uncommitted_runtime(source: LauncherSource, paths: tuple[Path, ...]) -> None:
+    if source.kind is LauncherSourceKind.INSTALLED:
+        return
     relative_paths = [BUNDLE_FILE_MANIFEST.as_posix(), *(path.as_posix() for path in paths)]
     status = _git_output(source.root, "status", "--porcelain", "--untracked-files=all", "--", *relative_paths)
     if status:
@@ -170,7 +192,7 @@ def validate_bundled_runtime(workspace: Path | None = None) -> str:
 
 
 def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource, tuple[Path, ...]]:
-    """Validate and return the checkout files identified by a launch request."""
+    """Validate and return the runtime files identified by a launch request."""
     source = resolve_launcher_source()
     if source.commit != expected_launcher_commit:
         raise ValueError(
@@ -182,7 +204,7 @@ def runtime_bundle_inputs(expected_launcher_commit: str) -> tuple[LauncherSource
 
 
 def build_runtime_bundle(expected_launcher_commit: str) -> Path:
-    """Copy committed runtime files from the selected checkout into an Iris workspace."""
+    """Copy the selected runtime files into an Iris workspace."""
     source, paths = runtime_bundle_inputs(expected_launcher_commit)
 
     workspace = Path(tempfile.mkdtemp(prefix="marinskyrl-runtime-bundle-"))

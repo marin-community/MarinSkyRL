@@ -1,8 +1,8 @@
 """Tests for the config-to-SkyRLJobSpec request builder.
 
-Every geometry value must come from the YAML (no silent defaults), image
-architecture must be resolved through ``image_for_cluster``, and the result
-must round-trip through ``protocol.job_spec``.
+Every geometry value must come from the YAML (no silent defaults), the runtime
+profile must follow the trainer strategy, and the result must round-trip through
+``protocol.job_spec``.
 """
 
 from __future__ import annotations
@@ -13,13 +13,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cloud.iris.gpu_rl_images import (
-    GPU_RL_IMAGES,
-    CLUSTER_ARCHITECTURES,
-    ImageArchitecture,
-    ImageVariant,
-    image_for_cluster,
-)
 from cloud.iris.protocol import job_spec
 from cloud.iris.request_builder import (
     _ROLE_PLAN_PATHS,
@@ -30,9 +23,7 @@ from cloud.iris.request_builder import (
     derive_strategy,
 )
 from cloud.iris.runtime_bundle import LauncherSource
-
-_AMD64_CLUSTERS = [c for c, a in CLUSTER_ARCHITECTURES.items() if a is ImageArchitecture.AMD64]
-_ARM64_CLUSTERS = [c for c, a in CLUSTER_ARCHITECTURES.items() if a is ImageArchitecture.ARM64]
+from cloud.iris.runtime_environment import RuntimeProfile
 
 
 # ---------------------------------------------------------------------------
@@ -327,63 +318,40 @@ class TestBuildJobSpec:
 
 
 # ---------------------------------------------------------------------------
-# Image selection through image_for_cluster (not hardcoded keys)
+# Runtime selection
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "cluster, strategy",
+    "strategy, expected_profile",
     [
-        # FSDP2 (standard variant)
-        (next(c for c in _AMD64_CLUSTERS), "fsdp2"),
-        (next(c for c in _ARM64_CLUSTERS), "fsdp2"),
-        # Megatron variant
-        (next(c for c in _AMD64_CLUSTERS), "megatron"),
-        (next(c for c in _ARM64_CLUSTERS), "megatron"),
-        # No strategy → standard
-        (next(c for c in _AMD64_CLUSTERS), None),
-        (next(c for c in _ARM64_CLUSTERS), None),
+        ("fsdp2", RuntimeProfile.FSDP),
+        ("megatron", RuntimeProfile.MEGATRON),
+        (None, RuntimeProfile.FSDP),
     ],
 )
-def test_image_resolved_via_image_for_cluster(tmp_path, cluster, strategy):
+def test_runtime_identity_uses_source_commit_and_strategy_profile(tmp_path, strategy, expected_profile):
     spec = _build_basic_spec(
         tmp_path,
         config_overrides=dict(strategy=strategy),
-        cluster=cluster,
-        target_cluster=None,
     )
-    expected = image_for_cluster(cluster, strategy)
-    assert spec.request.runtime.task_image == expected.reference
-    assert spec.request.runtime.trainer_commit == expected.source_commit
+    assert spec.request.runtime.commit == "abc123def456"
+    assert spec.request.runtime.profile is expected_profile
 
 
-def test_target_cluster_controls_image_architecture(tmp_path):
-    """When target_cluster is set, its architecture determines the image."""
-    amd64_cluster = next(c for c in _AMD64_CLUSTERS)
-    arm64_cluster = next(c for c in _ARM64_CLUSTERS)
-    spec = _build_basic_spec(
+def test_runtime_identity_is_portable_across_target_clusters(tmp_path):
+    local_spec = _build_basic_spec(tmp_path, cluster="cw-rno2a", target_cluster=None)
+    federated_spec = _build_basic_spec(
         tmp_path,
-        cluster=amd64_cluster,
-        target_cluster=arm64_cluster,
+        cluster="cw-rno2a",
+        target_cluster="cw-us-east-08a",
     )
-    expected = image_for_cluster(arm64_cluster, "fsdp2")
-    assert spec.request.runtime.task_image == expected.reference
-    assert expected.architecture is ImageArchitecture.ARM64
+    assert federated_spec.request.runtime == local_spec.request.runtime
 
 
-def test_megatron_strategy_selects_megatron_variant(tmp_path):
-    spec = _build_basic_spec(tmp_path, config_overrides=dict(strategy="megatron"))
-    expected = image_for_cluster("cw-rno2a", "megatron")
-    assert expected.variant is ImageVariant.MEGATRON
-    assert spec.request.runtime.task_image == expected.reference
-
-
-def test_image_matches_registered_registry_entry(tmp_path):
-    """The resolved image is one of the four registered entries, not a hand-built string."""
-    spec = _build_basic_spec(tmp_path)
-    image_ref = spec.request.runtime.task_image
-    registered_refs = {img.reference for img in GPU_RL_IMAGES.values()}
-    assert image_ref in registered_refs
+def test_wandb_entity_is_forwarded_to_execution_options(tmp_path):
+    spec = _build_basic_spec(tmp_path, wandb_entity="marin-community")
+    assert spec.execution.wandb_entity == "marin-community"
 
 
 # ---------------------------------------------------------------------------

@@ -69,12 +69,14 @@ docker buildx build -f docker/Dockerfile.gpu-rl \
 in-build `wheel-builder` stage (compiled fresh; buildx layer-caches it for the
 next rebuild on the same builder). Equivalent result, but pays the nvcc cost.
 
-## After a rebuild — register the digest
+## After a rebuild
 
-The image is pinned by **immutable `@sha256:` digest** in
-`cloud/iris/gpu_rl_images.py`. After pushing, register the digest from the
-`:gpu-rl-<full-sha>` tag, never the floating `:gpu-rl` tag, together with its
-source and Harbor revisions.
+Record the immutable digest from the `:gpu-rl-<full-sha>` tag, never the floating
+`:gpu-rl` tag, together with its source and Harbor revisions in the associated issue
+or PR. Iris training no longer consumes these images;
+[marin-community/marin#7920](https://github.com/marin-community/marin/issues/7920)
+tracks the standalone checkpoint-reshard and monitor paths that still assume their
+environment layout.
 
 ## What proves the build is good
 

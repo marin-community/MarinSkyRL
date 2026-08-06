@@ -236,7 +236,7 @@ trainer:
     num_trials: 256
     on_failure: "abort"
   max_prompt_length: 512
-  flash_attn: true
+  flash_attn: false
   attn_backend: "auto"
   disable_fast_tokenizer: false
   target_modules: null
@@ -261,6 +261,7 @@ generator:
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
+  vllm_attention_backend: null
   weight_sync_backend: "nccl"
   fuse_weights: false
   weight_transfer_threshold_cuda_ipc_GB: 1.0

@@ -14,7 +14,6 @@ from typing import Any, Protocol
 
 from iris.client import JobFailedError
 
-from cloud.iris.gpu_rl_images import CLUSTER_ARCHITECTURES, GPU_RL_IMAGES, GpuRlImage
 from cloud.iris.artifacts import (
     CHECKPOINT_MARKER_FILENAME,
     fs_and_path,
@@ -22,10 +21,10 @@ from cloud.iris.artifacts import (
     relative_object_key,
     validate_hf_export,
 )
+from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
     AttemptState,
-    RuntimeIdentity,
     SkyRLJobSpec,
     SkyRLLaunchRequest,
     SkyRLModel,
@@ -41,25 +40,6 @@ class JobBackend(Protocol):
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
 
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome: ...
-
-
-def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
-    matches = [image for image in GPU_RL_IMAGES.values() if image.reference == runtime.task_image]
-    if len(matches) != 1:
-        raise ValueError(f"Task image is not registered by this launcher: {runtime.task_image}")
-    image = matches[0]
-    if image.source_commit != runtime.trainer_commit:
-        raise ValueError(
-            f"Task image embeds trainer commit {image.source_commit}, not requested {runtime.trainer_commit}"
-        )
-    architecture = CLUSTER_ARCHITECTURES.get(cluster)
-    if architecture is None:
-        raise ValueError(f"No GPU architecture is registered for cluster {cluster!r}")
-    if image.architecture != architecture:
-        raise ValueError(
-            f"Task image architecture {image.architecture} is incompatible with cluster {cluster} ({architecture})"
-        )
-    return image
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
@@ -142,7 +122,7 @@ def execute_job(
 ) -> SkyRLTerminalResponse:
     """Validate, submit, monitor, and commit one MarinSkyRL artifact attempt."""
     request = spec.request
-    _registered_image(request.runtime, spec.execution.target_cluster or spec.execution.cluster)
+    runtime_bundle_inputs(request.runtime.commit)
     if _path_exists(request.output.terminal_manifest_uri):
         raise ValueError(f"Terminal manifest is immutable and already exists: {request.output.terminal_manifest_uri}")
 
@@ -229,6 +209,7 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--gpu-variant", default=None)
     build_parser.add_argument("--target-cluster", default=None)
     build_parser.add_argument("--parent-cluster-config", default=None)
+    build_parser.add_argument("--wandb-entity", default=None)
     build_parser.add_argument("--priority", default=None)
     build_parser.add_argument("--max-retries", type=int, default=None)
     build_parser.add_argument("--seed", type=int, default=None)
@@ -248,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             "gpu_variant",
             "target_cluster",
             "parent_cluster_config",
+            "wandb_entity",
             "priority",
             "max_retries",
             "seed",

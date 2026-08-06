@@ -28,6 +28,14 @@ def test_run_h100_exposes_checkout_packages_to_trainer(tmp_path: Path) -> None:
     (checkout / "skyrl-gym").mkdir()
 
     shutil.copy2(NIGHTLY_SCRIPT, nightly_directory / NIGHTLY_SCRIPT.name)
+    (nightly_directory / "resolve_runtime.sh").write_text(
+        """#!/usr/bin/env bash
+[[ $# -eq 3 ]] || return 2
+[[ "$1" == "${REPOSITORY_ROOT}" ]] || return 3
+[[ "$2" == "${NIGHTLY_RL_ENV}" ]] || return 4
+PYTHON="$2/bin/python"
+"""
+    )
     shutil.copy2(TRAINER_ENV_VARS, trainer_package / "env_vars.py")
     shutil.copy2(IRIS_ENV_VARS, iris_package / "env_vars.py")
     (trainer_package / "__init__.py").touch()

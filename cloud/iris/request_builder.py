@@ -1,9 +1,9 @@
 """Build a SkyRLJobSpec from an RL YAML config plus experiment inputs.
 
 Every geometry value (``role_plan``, ``topology``) is derived from the config — no
-silent defaults.  Image architecture is resolved through :func:`image_for_cluster`.
-Output paths derive from one run prefix.  The result round-trips through
-:func:`cloud.iris.protocol.job_spec`.
+silent defaults. The runtime profile is derived from the trainer strategy and paired
+with the exact submitting commit. Output paths derive from one run prefix. The result
+round-trips through :func:`cloud.iris.protocol.job_spec`.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from typing import Any
 
 import yaml
 
-from cloud.iris.gpu_rl_images import GpuRlImage, image_for_cluster
 from cloud.iris.protocol import (
     DataLocator,
     IrisLaunchOptions,
@@ -26,6 +25,7 @@ from cloud.iris.protocol import (
     SkyRLTopology,
 )
 from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
+from cloud.iris.runtime_environment import RuntimeProfile, runtime_profile_for_strategy
 
 # Dotted YAML path -> SkyRLRolePlan field name.  These become ``++`` Hydra overrides
 # inside ``job_launch_argv``, so a transcription error would silently change the
@@ -89,6 +89,11 @@ def derive_strategy(config: dict[str, Any]) -> str | None:
     return strategy if isinstance(strategy, str) else None
 
 
+def derive_runtime_profile(config: dict[str, Any]) -> RuntimeProfile:
+    """Return the dependency profile required by the configured trainer strategy."""
+    return runtime_profile_for_strategy(derive_strategy(config))
+
+
 def derive_output_paths(run_prefix: str) -> SkyRLOutputPaths:
     """Derive all five output URIs from a single run prefix.
 
@@ -124,6 +129,7 @@ def build_job_spec(
     gpu_variant: str = "H100",
     target_cluster: str | None = None,
     parent_cluster_config: str | None = None,
+    wandb_entity: str | None = None,
     priority: str = "interactive",
     max_retries: int = 3,
     seed: int = 42,
@@ -138,9 +144,8 @@ def build_job_spec(
 
     - ``role_plan`` — every field read from the YAML via :func:`derive_role_plan`.
     - ``topology.num_nodes`` — from :func:`derive_num_nodes`.
-    - ``runtime.task_image`` / ``trainer_commit`` — through :func:`image_for_cluster`,
-      keyed on the execution cluster and the config's ``trainer.strategy``.
-    - ``runtime.launcher_commit`` — from the submitting checkout.
+    - ``runtime.profile`` — from the config's ``trainer.strategy``.
+    - ``runtime.commit`` — from the submitting checkout.
     - ``output`` — all five paths from ``run_prefix``.
 
     **Caller-supplied** (experiment-specific, cannot be derived safely):
@@ -156,8 +161,7 @@ def build_job_spec(
     config: dict[str, Any] = yaml.safe_load(config_yaml)
     plan = derive_role_plan(config)
     num_nodes = derive_num_nodes(plan)
-    strategy = derive_strategy(config)
-    image: GpuRlImage = image_for_cluster(target_cluster or cluster, strategy)
+    profile = derive_runtime_profile(config)
     source = launcher_source or resolve_launcher_source()
 
     return SkyRLJobSpec(
@@ -166,9 +170,8 @@ def build_job_spec(
             attempt_id=attempt_id,
             config_yaml=config_yaml,
             runtime=RuntimeIdentity(
-                launcher_commit=source.commit,
-                task_image=image.reference,
-                trainer_commit=image.source_commit,
+                commit=source.commit,
+                profile=profile,
             ),
             model=ModelLocator(
                 uri=model_uri,
@@ -200,5 +203,6 @@ def build_job_spec(
             priority=priority,
             max_retries=max_retries,
             job_name=run_id,
+            wandb_entity=wandb_entity,
         ),
     )

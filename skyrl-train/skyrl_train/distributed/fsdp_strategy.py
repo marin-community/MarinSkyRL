@@ -24,6 +24,7 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.constants import get_worker_nccl_timeout_s
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
+    DEFAULT_EP_COMM_BACKEND,
     MixedPrecisionPolicy,
     init_fn,
     get_fsdp_wrap_policy,
@@ -320,7 +321,7 @@ class FSDPStrategy(DistributedStrategy):
         # submesh only (the experts get a separate ExpertParallel Shard(0) over the
         # "ep" submesh in apply_ep, after fully_shard). ep_size==1 keeps fsdp_mesh
         # as today's full mesh (byte-identical).
-        ep_on = getattr(self, "ep_size", 1) > 1
+        ep_on = self.ep_size > 1
         if ep_on:
             fsdp_mesh = self.device_mesh["fsdp"]
 
@@ -417,11 +418,11 @@ class FSDPStrategy(DistributedStrategy):
                     _meta = torch.empty(_shape, device="meta", dtype=_dtype)
                     setattr(_submod, _attr, torch.nn.Parameter(_meta, requires_grad=_rg))
 
-                ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
+                ep_backend = self.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)
                 num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs)
                 assert num_sharded > 0, (
-                    "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
-                    "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
+                    "expert_model_parallel_size>1 but no supported grouped experts were found; "
+                    "Grug requires use_grouped_mm=true, while generic HF MoE requires moe_grouped_gemm=true."
                 )
                 # DeepEP backend (Stage 5): set the SM count once (must precede the first
                 # dispatch; also sets the intranode kernel + RDMA channel count) and thread

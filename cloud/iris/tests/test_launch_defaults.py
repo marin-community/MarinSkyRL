@@ -20,7 +20,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris.gpu_rl_images import ImageArchitecture, image_for_cluster  # noqa: E402
+from cloud.iris import iris_backend  # noqa: E402
+from cloud.iris.env_vars import grug_gpu_gate_environment, wandb_launch_environment  # noqa: E402
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
     build_debug_launch_env,
@@ -32,6 +33,7 @@ from cloud.iris.iris_backend import (  # noqa: E402
     resolve_node_resource_requests,
     resolve_launch_defaults,
 )
+from cloud.iris.runtime_environment import RuntimeProfile  # noqa: E402
 from cloud.iris.rl_config_translation import (  # noqa: E402
     RL_CONFIG_TASK_DIR,
     materialize_rl_config,
@@ -65,6 +67,22 @@ scale_groups:
 """
     )
     return path
+
+
+def test_grug_gpu_gate_environment_preserves_the_ambient_pythonpath():
+    environment = grug_gpu_gate_environment("/workspace/marinskyrl", environ={"PYTHONPATH": "/ambient/python"})
+
+    assert environment == {
+        "PYTHONPATH": "/workspace/marinskyrl/skyrl-gym:/workspace/marinskyrl/skyrl-train:/ambient/python",
+        "VLLM_USE_DEEP_GEMM": "0",
+        "VLLM_USE_V1": "1",
+    }
+
+
+def test_wandb_launch_environment_prefers_explicit_entity():
+    environment = wandb_launch_environment(entity="marin-community", environ={"WANDB_ENTITY": "ambient-entity"})
+
+    assert environment == {"WANDB_ENTITY": "marin-community"}
 
 
 def _node_snapshot(
@@ -335,8 +353,11 @@ def _spill_preflight_probe(tmp_path: Path, monkeypatch, spill_dir: Path) -> tupl
     controller = tmp_path / "controller-probe"
     controller.write_text('#!/bin/sh\ntest -d "$EXPECTED_SPILL_DIR" || exit 31\ntouch "$CONTROLLER_OBSERVATION"\n')
     controller.chmod(0o755)
+    runtime_environment = app_dir / ".iris-runtime-env"
+    runtime_environment.write_text("true\n")
     monkeypatch.setattr("cloud.iris.iris_backend.APP_DIR", str(app_dir))
-    monkeypatch.setattr("cloud.iris.iris_backend.GPU_RL_PYTHON", str(controller))
+    monkeypatch.setattr("cloud.iris.iris_backend.MARINSKYRL_ACTIVATION_FILE", str(runtime_environment))
+    monkeypatch.setattr("cloud.iris.iris_backend.RL_PYTHON", str(controller))
 
     args = _args(tmp_path, "opencode", ["--ray-spill-dir", str(spill_dir)])
     normalize(args)
@@ -422,10 +443,11 @@ def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
     assert re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", first)
 
 
-def test_parser_defers_image_choice_to_resolution_and_keeps_recovery_retries():
+def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries():
     args = create_parser().parse_args(["--rl_config", "x", "--model_path", "y"])
 
-    assert args.task_image is None
+    assert args.runtime_commit is None
+    assert args.runtime_profile is None
     assert args.max_retries == 6
     assert args.memory == "auto"
     assert args.disk == "auto"
@@ -451,28 +473,31 @@ def _strategy_args(tmp_path: Path, strategy: str, extra: list[str] | None = None
     return create_parser().parse_args(args + (extra or []))
 
 
-def test_megatron_config_selects_the_megatron_image(tmp_path):
+def test_megatron_config_selects_the_megatron_profile(tmp_path, monkeypatch):
+    expected_commit = "b" * 40
+    monkeypatch.setattr(iris_backend, "resolve_launcher_source", lambda: SimpleNamespace(commit=expected_commit))
     args = _strategy_args(tmp_path, "megatron")
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
+    assert args.runtime_profile is RuntimeProfile.MEGATRON
+    assert args.runtime_commit == expected_commit
 
 
-def test_non_megatron_config_selects_the_plain_image(tmp_path):
+def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     args = _strategy_args(tmp_path, "fsdp2")
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", "fsdp2").reference
+    assert args.runtime_profile is RuntimeProfile.FSDP
 
 
-def test_config_without_a_declared_strategy_selects_the_plain_image(tmp_path):
+def test_config_without_a_declared_strategy_selects_the_fsdp_profile(tmp_path):
     args = _args(tmp_path, "opencode")
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", None).reference
+    assert args.runtime_profile is RuntimeProfile.FSDP
 
 
 def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
@@ -480,62 +505,14 @@ def test_skyrl_override_strategy_wins_over_the_config_file(tmp_path):
 
     resolve_launch_defaults(args)
 
-    assert args.task_image == image_for_cluster("cw-us-east-02a", "megatron").reference
+    assert args.runtime_profile is RuntimeProfile.MEGATRON
 
 
-def test_explicit_task_image_overrides_strategy_selection(tmp_path):
-    args = _strategy_args(tmp_path, "megatron", ["--task-image", "ghcr.io/example/custom@sha256:abc"])
+def test_explicit_runtime_profile_must_match_strategy(tmp_path):
+    args = _strategy_args(tmp_path, "megatron", ["--runtime-profile", "fsdp"])
 
-    resolve_launch_defaults(args)
-
-    assert args.task_image == "ghcr.io/example/custom@sha256:abc"
-
-
-@pytest.mark.parametrize("strategy", ["fsdp2", "megatron"])
-def test_east08_selects_an_arm64_image(tmp_path, strategy):
-    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
-    args = _strategy_args(
-        tmp_path,
-        strategy,
-        [
-            "--cluster",
-            "cw-us-east-08a",
-            "--cluster-config",
-            str(cluster_config),
-            "--gpu-variant",
-            "GB200",
-            "--gpus-per-node",
-            "4",
-        ],
-    )
-
-    resolve_launch_defaults(args)
-
-    expected_image = image_for_cluster("cw-us-east-08a", strategy)
-    assert expected_image.architecture is ImageArchitecture.ARM64
-    assert args.task_image == expected_image.reference
-
-
-def test_federated_target_cluster_controls_image_architecture(tmp_path):
-    cluster_config = _cluster_config(tmp_path, gpu_variant="GB200", gpus_per_node=4)
-    args = _strategy_args(
-        tmp_path,
-        "megatron",
-        [
-            "--target-cluster",
-            "cw-us-east-08a",
-            "--cluster-config",
-            str(cluster_config),
-            "--gpu-variant",
-            "GB200",
-            "--gpus-per-node",
-            "4",
-        ],
-    )
-
-    resolve_launch_defaults(args)
-
-    assert args.task_image == image_for_cluster("cw-us-east-08a", "megatron").reference
+    with pytest.raises(SystemExit, match="does not match trainer.strategy"):
+        resolve_launch_defaults(args)
 
 
 def test_parser_rejects_removed_harbor_source_override():

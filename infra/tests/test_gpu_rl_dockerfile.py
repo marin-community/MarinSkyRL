@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from cloud.iris.gpu_rl_images import GPU_RL_ENV_DIR
+from cloud.iris.legacy_gpu_rl_environment import GPU_RL_ENV_DIR
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]

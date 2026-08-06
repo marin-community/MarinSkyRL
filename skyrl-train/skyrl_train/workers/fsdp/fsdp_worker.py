@@ -21,13 +21,16 @@ except ImportError:
     from torch.distributed._tensor import DTensor
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE
+from skyrl_train.models.grug_moe import (
+    GRUG_MOE_MODEL_TYPE,
+    validate_grug_expert_parallel_options,
+)
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
 from skyrl_train.utils.numa import memory_nodes_for_range
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
+from skyrl_train.distributed.fsdp_utils import DEFAULT_EP_COMM_BACKEND, fsdp_version, get_init_weight_context_manager
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -515,24 +518,23 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             weights=weights,
         )
 
-    def diag_ep8_geometry(self):
-        """TEST-ONLY (EP=8 cross-node diag): return this rank's mesh geometry +
-        physical-node identity so the driver can PROVE an EP group straddles >=2
-        nodes. No collectives, no gather — pure introspection.
+    def diag_ep_geometry(self):
+        """TEST-ONLY: return this rank's EP mesh geometry and node identity.
+
+        The driver can use this to prove that an EP group spans multiple nodes.
+        No collectives or gathers are issued.
 
         Returns a dict with global rank, hostname, mesh shape/dim-names, this rank's
         per-mesh-dim coordinate, and the EP submesh coordinate (the index of this rank
-        within its 8-rank EP group).
+        within its EP group).
         """
-        import socket
-
         mesh = self.strategy.device_mesh
         dim_names = list(mesh.mesh_dim_names)
         shape = tuple(mesh.shape)
         coord = list(mesh.get_coordinate())
         ep_dim = dim_names.index("ep") if "ep" in dim_names else None
         # The EP-group identity = the coord with the ep dim removed (all ranks sharing
-        # this tuple form one 8-way EP group). The ep coord = position within the group.
+        # this tuple form one EP group). The ep coord = position within the group.
         group_key = tuple(c for i, c in enumerate(coord) if i != ep_dim)
         return {
             "rank": int(torch.distributed.get_rank()),
@@ -570,8 +572,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """
         import hashlib
         import json
-        import os
-        import socket
 
         rank = int(torch.distributed.get_rank())
         host = socket.gethostname()
@@ -772,9 +772,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self._normalize_mini_batch_size()
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        if getattr(model_config, "model_type", None) == GRUG_MOE_MODEL_TYPE:
-            if getattr(strategy, "ep_size", 1) != 1:
-                raise ValueError("Grug FSDP2 policy training requires expert_model_parallel_size=1")
+        validate_grug_expert_parallel_options(
+            getattr(model_config, "model_type", None),
+            expert_model_parallel_size=strategy.ep_size,
+            use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
+            ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)),
+        )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -863,8 +866,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if getattr(self, "_local_rank", None) != 0:
                 return
             interval = int(os.environ.get("SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL", "60"))
-            import socket
-
             from examples.terminal_bench.fd_monitor import start_fd_monitor
 
             logger.info(

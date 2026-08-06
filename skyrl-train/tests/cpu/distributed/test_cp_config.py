@@ -57,12 +57,11 @@ STAGE2_TRAINER_FIELDS = {
 DEBUG_MODE_TRAINER_FIELDS = {
     "debug_mode": "off",
 }
-# Additive generator key from the vLLM DCP port Stage 0 (flag-off no-op, default == 1).
-# Like the CP fields, it is purely additive and must be stripped before the structural
-# -identity comparison against the pre-CP golden (it is unrelated to CP — DCP is the
-# rollout-side decode KV-cache shard).
-STAGE0_DCP_GENERATOR_FIELDS = {
+# Additive generator keys with behavior-preserving disabled defaults. Like the CP
+# fields, they are stripped before comparison with the pre-CP golden.
+ADDITIVE_GENERATOR_FIELDS = {
     "inference_engine_decode_context_parallel_size": 1,
+    "vllm_attention_backend": None,
 }
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was
@@ -106,7 +105,7 @@ def test_all_defaults_is_structurally_identical_to_baseline():
             fsdp.pop(k, None)
     for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS):
         container["trainer"].pop(k, None)
-    for k in STAGE0_DCP_GENERATOR_FIELDS:  # strip DCP Stage-0 additive generator key
+    for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the no-CP baseline"

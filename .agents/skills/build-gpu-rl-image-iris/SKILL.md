@@ -1,6 +1,6 @@
 ---
 name: build-gpu-rl-image-iris
-description: Build, push, validate, and deploy-pin MarinSkyRL GPU-RL container variants as Iris jobs using the repository's kaniko driver. Use when rebuilding an RL runtime after MarinSkyRL source, Harbor, the frozen dependency lock, CUDA extensions, system packages, or backend extras change.
+description: Build and validate legacy MarinSkyRL GPU-RL containers for standalone tools that still require their environment layout. Do not use these images for Iris training.
 ---
 
 # Build GPU-RL images on Iris
@@ -18,14 +18,13 @@ Before changing or submitting anything, read these files completely:
    constraints, and launch template.
 3. `docker/build_gpu_rl_kaniko.sh` for the required-variable contract and architecture selection.
 4. The selected `docker/Dockerfile.gpu-rl*` for baked dependency pins and build assertions.
-5. `cloud/iris/gpu_rl_images.py` for deployed digests, platforms, and baked provenance.
 
 The script and Dockerfiles outrank prose when they disagree. Correct stale ops documentation in the same change.
 
 ## Establish the build set
 
-- Inventory the GPU-RL variants consumed by the launcher. Build the standard and Megatron variants together so a
-  strategy switch cannot cross a MarinSkyRL or Harbor boundary.
+- Confirm that the requested standalone tool still requires the legacy image. Iris training installs a frozen
+  MarinSkyRL environment in the standard task image and must not use this build path.
 - Resolve every requested host architecture from current cluster state. Let the build script derive its Dockerfile,
   kaniko platform, cache namespace, and tag suffix from the build host.
 - Build each requested architecture on a native host. Do not cross-build CUDA images from a laptop.
@@ -89,13 +88,13 @@ For every built tag:
 Do not deploy-pin a tag that passes build assertions but fails platform, layer, visibility, or anonymous-access
 validation.
 
-## Update deployment pins
+## Record the artifact
 
-1. Update the standard and Megatron records in `cloud/iris/gpu_rl_images.py` together for every rebuilt
-   architecture.
-2. Keep provenance comments concise: source revision, Harbor revision, build jobs, variant relationship, and validation
-   evidence. Move extended build history to the ops file.
-3. Run the launcher tests, repository lint, and required review pass.
+1. Record the source revision, Harbor revision, build jobs, immutable digest, platform, and validation evidence in
+   the associated issue or PR.
+2. Do not add the digest to the Iris training launcher. marin-community/marin#7920 tracks removal of the remaining
+   legacy image consumers.
+3. Run the repository lint and required review pass for any source changes.
 4. Commit, push, and open or update the PR using the `commit` and `writing-style` skills.
 5. Watch CI and review activity through merge. Merge only with user authorization and green required checks.
 

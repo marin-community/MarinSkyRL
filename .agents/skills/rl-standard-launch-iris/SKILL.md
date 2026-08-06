@@ -5,7 +5,7 @@ description: Validate, submit, and observe standard MarinSkyRL training on Iris 
 
 # Launch standard RL on Iris
 
-Read the selected configuration and current `cloud.iris.iris_backend` interface. Resolve images,
+Read the selected configuration and current `cloud.iris.iris_backend` interface. Resolve the runtime profile,
 resources, retries, names, capacity, and artifact destinations at execution time.
 
 ## Workflow
@@ -14,7 +14,7 @@ resources, retries, names, capacity, and artifact destinations at execution time
    dataset and reward path and contains no agent harness or sandbox environment.
 2. Validate model, data, topology, batch geometry, reward function, checkpoint policy, artifact
    destinations, and registration policy.
-3. Run the complete launch with `--dry-run`. Inspect job identity, image digest, resources, trainer
+3. Run the complete launch with `--dry-run`. Inspect job identity, runtime commit and profile, resources, trainer
    command, input overrides, retry policy, and durable destinations.
 4. Submit the reviewed command and preserve its resolved configuration with the experiment record.
 5. Verify worker admission, distributed initialization, data and reward processing, advancing

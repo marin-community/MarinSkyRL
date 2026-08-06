@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive SkyRL training from rank zero of an Iris-managed Ray cluster.
 
-Runs on rank 0 inside the gpu-rl container after the controller
+Runs on rank 0 inside the frozen Iris task environment after the controller
 (``task_runtime.py``) has bootstrapped one cross-node Ray cluster and
 exported ``RAY_ADDRESS``. This runner parses the RL config, resolves HF task data,
 builds the SkyRL Hydra args, and execs the MarinSkyRL entrypoint attached to that
@@ -112,7 +112,7 @@ class LocalRLRunner:
             print(f"RL environment found: {rl_env}")
             self.rl_env_path = rl_env
         else:
-            # On Iris, sys.executable is already the gpu-rl image's RL venv python.
+            # On Iris, sys.executable is already the frozen task venv's Python.
             self.rl_env_path = None
 
         skyrl_home = os.environ.get("SKYRL_HOME")

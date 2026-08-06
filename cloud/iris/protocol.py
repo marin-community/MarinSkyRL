@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from cloud.iris.runtime_environment import RuntimeProfile
+
 
 class AttemptState(StrEnum):
     PREPARED = "prepared"
@@ -15,9 +17,8 @@ class AttemptState(StrEnum):
 
 @dataclass(frozen=True)
 class RuntimeIdentity:
-    launcher_commit: str
-    task_image: str
-    trainer_commit: str
+    commit: str
+    profile: RuntimeProfile
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ class IrisLaunchOptions:
     priority: str
     max_retries: int
     job_name: str
+    wandb_entity: str | None
 
 
 @dataclass(frozen=True)
@@ -132,7 +134,10 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
             run_id=request["run_id"],
             attempt_id=request["attempt_id"],
             config_yaml=request["config_yaml"],
-            runtime=RuntimeIdentity(**request["runtime"]),
+            runtime=RuntimeIdentity(
+                commit=request["runtime"]["commit"],
+                profile=RuntimeProfile(request["runtime"]["profile"]),
+            ),
             model=ModelLocator(**request["model"]),
             train_data=tuple(DataLocator(**locator) for locator in request["train_data"]),
             validation_data=tuple(DataLocator(**locator) for locator in request["validation_data"]),

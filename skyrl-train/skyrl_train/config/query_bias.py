@@ -15,12 +15,12 @@ class GrugQueryBiasUpdateMode(StrEnum):
     REPLACE = "replace"
 
 
-def resolve_grug_query_bias_update_mode(policy_config: DictConfig) -> GrugQueryBiasUpdateMode | None:
-    """Resolve the configured mode, or no update for a legacy config without the field."""
+def resolve_grug_query_bias_update_mode(policy_config: DictConfig) -> GrugQueryBiasUpdateMode:
+    """Resolve the required query-bias update mode."""
 
     config_key = "grug_query_bias_update_mode"
     if config_key not in policy_config:
-        return None
+        raise ValueError(f"missing required policy configuration: {config_key}")
     raw_mode = policy_config[config_key]
     try:
         return GrugQueryBiasUpdateMode(raw_mode)

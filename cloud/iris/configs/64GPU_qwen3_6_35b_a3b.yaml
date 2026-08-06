@@ -86,6 +86,7 @@ terminal_bench:
 
 trainer:
   strategy: megatron
+  flash_attn: false
   use_sample_packing: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: true
@@ -188,6 +189,7 @@ trainer:
     num_parallel_generation_workers: 128
 
 generator:
+  vllm_attention_backend: FLASH_ATTN
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
@@ -248,7 +250,6 @@ extra_env:
   SKYRL_GDN_MASK_FLA: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   SKYRL_TIS_SERVED_ID_SPLICE: "1"
-  VLLM_ATTENTION_BACKEND: FLASH_ATTN
   NCCL_DEBUG: WARN
   SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "1800"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"

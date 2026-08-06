@@ -102,8 +102,9 @@ places the build context at `/app`.
 
 - Target clusters may lack GHCR pull secrets, so the package must support anonymous pulls.
 - Keep every compressed image layer below the current operational ceiling of approximately 8 GB.
-- Register deployed digests, platforms, tags, and baked revisions in `cloud/iris/gpu_rl_images.py`.
+- Record legacy image digests, platforms, tags, and baked revisions in the associated issue or PR. Iris training
+  installs the frozen root environment in the standard task image and does not consume an image registry.
 - Inspect the OCI configuration and require `org.opencontainers.image.revision` and
-  `org.marin.harbor-commit` to match the committed build inputs before registering a digest.
+  `org.marin.harbor-commit` to match the committed build inputs before using a digest.
 
 The `build-gpu-rl-image-iris` skill owns monitoring, image validation, and deployment procedure.

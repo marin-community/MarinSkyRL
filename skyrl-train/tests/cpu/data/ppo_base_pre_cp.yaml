@@ -243,7 +243,7 @@ trainer:
   eval_before_train: true
   eval_interval: 5
   max_prompt_length: 512
-  flash_attn: true
+  flash_attn: false
   disable_fast_tokenizer: false
   target_modules: null
   exclude_modules: null

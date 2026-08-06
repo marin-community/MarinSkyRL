@@ -72,7 +72,6 @@ deepspeed = [
 fsdp = ["torchtitan ; sys_platform == 'linux'"]
 vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "flash-attn==2.8.3 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
@@ -82,7 +81,7 @@ vllm = [
     "torch==2.11.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.26.0 ; sys_platform == 'linux'",
-    "vllm==0.23.0 ; sys_platform == 'linux'",
+    "vllm==0.0.0.dev20260805+marin.fa50698a9a30.cu129 ; sys_platform == 'linux'",
 ]
 megatron = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
@@ -178,16 +177,8 @@ constraint-dependencies = [
 ]
 
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }]
 transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
-
-[tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
-
-[[tool.uv.dependency-metadata]]
-name = "flash-attn"
-requires-dist = ["torch", "einops"]
 
 [tool.uv.sources]
 torch = [
@@ -204,6 +195,10 @@ torchvision = [
     { index = "pytorch-cu129", extra = "vllm" },
 ]
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
+vllm = [
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
     { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },

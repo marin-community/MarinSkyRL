@@ -417,6 +417,17 @@ def test_validate_cfg_rejects_unknown_config_choice(config_path, invalid_value, 
         validate_cfg(cfg)
 
 
+def test_validate_cfg_requires_grug_query_bias_update_mode():
+    pytest.importorskip("hydra")
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = _validatable_dummy_config()
+    del cfg.trainer.policy.grug_query_bias_update_mode
+
+    with pytest.raises(AssertionError, match="missing required policy configuration: grug_query_bias_update_mode"):
+        validate_cfg(cfg)
+
+
 def test_adaptive_kl_controller_update():
     controller = AdaptiveKLController(init_kl_coef=0.2, target=0.1, horizon=100)
     controller.update(current=0.2, n_steps=10)
