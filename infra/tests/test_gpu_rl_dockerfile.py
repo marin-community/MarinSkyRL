@@ -181,7 +181,6 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
     report = tmp_path / "pip-check"
     common = [
         "The package `gcsfs` requires `fsspec>=2026.6.0`, but `2026.4.0` is installed",
-        "The package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed",
     ]
     reports = {
         "linux_x86_64": common,
@@ -204,6 +203,11 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
     for platform, expected in reports.items():
         standard_diagnostics = "\n".join(expected)
         assert check(platform, standard_diagnostics, False) == 0
+        obsolete_quack_conflict = (
+            standard_diagnostics
+            + "\nThe package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed"
+        )
+        assert check(platform, obsolete_quack_conflict, False) != 0
         assert check(platform, standard_diagnostics + "\nThe package `unexpected` is incompatible", False) != 0
         megatron_expected = [*expected, *megatron]
         if platform == "linux_aarch64":

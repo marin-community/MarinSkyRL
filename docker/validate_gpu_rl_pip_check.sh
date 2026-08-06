@@ -7,14 +7,13 @@ platform=${2:?wheel platform is required}
 install_megatron=${3:?Megatron selector is required}
 
 grep -E '^The package `gcsfs` requires `fsspec[^`]*`, but `[^`]+` is installed$' "$report"
-grep -E '^The package `quack-kernels` requires `nvidia-cutlass-dsl[^`]*`, but `[^`]+` is installed$' "$report"
 
-expected=2
+expected=1
 case "$platform" in
   linux_x86_64) ;;
   linux_aarch64)
     grep -E '^The package `nvidia-cusparselt-cu12` was built for a different platform$' "$report"
-    expected=3
+    expected=2
     ;;
   *)
     echo "unsupported GPU-RL wheel platform: $platform" >&2
