@@ -1,5 +1,7 @@
 """Stage 4 (FSDP2 CP) — CP forward wrap gate: ring SDPA via torch context_parallel.
 
+Jupiter-only SIF test: the documented Apptainer commands target Jupiter's Slurm runtime.
+
 This stage proves the CP forward wrap RUNS and is a literal no-op at cp=1. Per-token
 unshard *correctness* (G3 parity) is Stage 5; here the forward immediately unshards
 the logits to get a runnable forward.

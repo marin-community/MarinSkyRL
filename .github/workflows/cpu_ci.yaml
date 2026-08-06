@@ -37,8 +37,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           activate-environment: true
+      - name: Install the development environment
+        run: uv sync --frozen --group dev
       - name: Run infra tests
-        run: uv run --no-project --with pytest --with pandas --with matplotlib --with pyyaml --with tabulate pytest infra/tests/ -q
+        run: uv run --frozen pytest infra/tests/ -q
 
   iris_launcher_tests:
     runs-on: ubuntu-latest

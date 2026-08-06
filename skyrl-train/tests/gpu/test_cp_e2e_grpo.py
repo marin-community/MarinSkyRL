@@ -1,5 +1,7 @@
 """Stage 6 (FSDP2 CP) — E2E GRPO parity + long-context OOM->OK (the ship gate).
 
+Jupiter-only SIF test: the documented Apptainer commands target Jupiter's Slurm runtime.
+
 This is the make-or-break integration test for torch-native Context Parallel on
 the FSDP2 backend. It proves CP works end-to-end in a REAL GRPO step and that the
 feature delivers its reason for existing (a sequence that OOMs at cp=1 trains at

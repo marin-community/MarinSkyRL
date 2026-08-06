@@ -1,5 +1,7 @@
 """Stage 3 — context-parallel device-mesh construction (CPU gate).
 
+Jupiter-only SIF test: the documented Apptainer command targets Jupiter's Slurm runtime.
+
 Mirrors ``test_ep_mesh.py``. Validates that ``create_device_mesh`` gains a ``cp``
 dim with the load-bearing dim-order contract ``ddp < fsdp < cp < ep``, while the
 flag-off path (``cp_size==1``) emits the byte-identical mesh of today (G1).

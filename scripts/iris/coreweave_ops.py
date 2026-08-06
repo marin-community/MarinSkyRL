@@ -32,7 +32,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cloud.iris.legacy_gpu_rl_environment import GPU_RL_PYTHON  # noqa: E402
 from scripts.iris.coreweave_clusters import CLUSTERS as COREWEAVE_CLUSTERS, ClusterConfig  # noqa: E402
 from scripts.iris.iris_ops import DNS_ATTEMPTS, DNS_INITIAL_BACKOFF, job_id_parts  # noqa: E402
 
@@ -186,38 +185,8 @@ def pod_command_line(base: list[str], pod: str, container: str) -> list[str]:
     return [part for part in raw.splitlines() if part]
 
 
-def resolve_runtime_python(base: list[str], pod: str, container: str) -> str:
-    """Return the canonical GPU-RL Python after verifying it exists in ``pod``.
-
-    The gpu-rl image deliberately does not put a bare ``python`` on ``PATH``.
-    Keeping this resolution here makes every CoreWeave reader use the same
-    pinned runtime and fail explicitly if an image violates that contract.
-    """
-    try:
-        command(
-            [
-                *base,
-                "-n",
-                NAMESPACE,
-                "exec",
-                pod,
-                "-c",
-                container,
-                "--",
-                "sh",
-                "-c",
-                'test -x "$1"',
-                "sh",
-                GPU_RL_PYTHON,
-            ]
-        )
-    except RuntimeError as error:
-        raise RuntimeError(f"Canonical GPU-RL Python {GPU_RL_PYTHON} is unavailable in {pod}: {error}") from error
-    return GPU_RL_PYTHON
-
-
 def resolve_container_python(base: list[str], pod: str, container: str) -> str:
-    """Return a Python interpreter available in an arbitrary task container."""
+    """Return the frozen task Python, or a base interpreter when no task environment exists."""
     path = command(
         [
             *base,
@@ -230,7 +199,9 @@ def resolve_container_python(base: list[str], pod: str, container: str) -> str:
             "--",
             "sh",
             "-c",
-            "command -v python3 || command -v python",
+            'if [ -n "${IRIS_VENV:-}" ] && [ -x "$IRIS_VENV/bin/python" ]; '
+            'then printf "%s\\n" "$IRIS_VENV/bin/python"; '
+            "else command -v python3 || command -v python; fi",
         ]
     ).strip()
     if not path:

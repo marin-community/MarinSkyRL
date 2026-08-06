@@ -1,5 +1,7 @@
 """Stage 2 (FSDP2 CP) 1-GPU forward parity: SDPA vs flash_attention_2.
 
+Jupiter-only SIF test: the documented Apptainer command targets Jupiter's Slurm runtime.
+
 The load-bearing Stage-2 gate: pivoting the FSDP2 model's attention backend to
 SDPA must preserve the training signal. `HFModelWrapper.forward` slices to the
 action (response) positions, so left-padding garbage is excluded by construction

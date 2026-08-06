@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 
-from cloud.iris.legacy_gpu_rl_environment import GPU_RL_PYTHON
 from scripts.iris import coreweave_ops, iris_ops, watch_coreweave_rl
 from scripts.iris.iris_ops import (
     MonitorError,
@@ -427,7 +426,7 @@ def test_coreweave_command_retries_transient_transport_failures(monkeypatch, std
     assert delays == [coreweave_ops.DNS_INITIAL_BACKOFF]
 
 
-def test_ray_log_inventory_uses_explicit_python_for_rl_images(monkeypatch):
+def test_ray_log_inventory_honors_explicit_container_python(monkeypatch):
     monkeypatch.setattr(
         coreweave_ops,
         "resolve_container_python",
@@ -440,10 +439,27 @@ def test_ray_log_inventory_uses_explicit_python_for_rl_images(monkeypatch):
             ["kubectl"],
             "pod",
             "task",
-            python_executable=GPU_RL_PYTHON,
+            python_executable="/runtime/bin/python",
         )
         == []
     )
+
+
+def test_complete_ray_log_sync_discovers_frozen_task_python(monkeypatch, tmp_path):
+    commands: list[list[str]] = []
+    frozen_python = "/app/.venv/bin/python"
+
+    def fake_command(arguments, **_kwargs):
+        commands.append(arguments)
+        if "IRIS_VENV" in arguments[-1]:
+            return frozen_python
+        return "[]"
+
+    monkeypatch.setattr(coreweave_ops, "command", fake_command)
+
+    assert watch_coreweave_rl.fetch_complete_ray_logs(["kubectl"], "pod", tmp_path) == 0
+    assert any("IRIS_VENV" in command[-1] for command in commands)
+    assert any(frozen_python in command for command in commands)
 
 
 def test_rl_sync_warning_never_renders_proxy_html():

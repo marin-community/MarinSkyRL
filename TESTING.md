@@ -24,6 +24,9 @@ Regular GPU CI tests live in `skyrl-train/tests/gpu/gpu_ci/`. Expensive, destruc
 fault-injection tests live outside that directory and require an explicit file path. A Python file deliberately
 named without the `test_` prefix is opt-in and must remain outside default discovery.
 
+An invocation that names an Apptainer SIF is specific to Jupiter's Slurm runtime. Mark its test or batch file
+with `Jupiter-only SIF test` so it cannot be mistaken for an Iris custom-image requirement.
+
 The shared policy prohibits sleeps as readiness checks. An opt-in distributed test may deliberately delay or
 withhold a rank when that condition is the test input. A test that expects a collective to hang or a worker to
 remain withheld must use isolated worker processes, separate setup and execution deadlines, captured output,

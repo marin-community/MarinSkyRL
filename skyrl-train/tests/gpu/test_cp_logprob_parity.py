@@ -1,5 +1,7 @@
 """Stage 5 (FSDP2 CP) — THE correctness gate: per-CP-rank token-offset / unshard.
 
+Jupiter-only SIF test: the documented Apptainer commands target Jupiter's Slurm runtime.
+
 This stage replaces Stage-4's temporary immediate logit-unshard with the
 loss-aligned per-token unshard: the per-token logprobs / entropy are computed on
 the sequence-sharded `[B, S/cp, V]` logits (against the co-sharded

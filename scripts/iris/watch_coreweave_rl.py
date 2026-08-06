@@ -77,7 +77,7 @@ from scripts.iris.coreweave_ops import (  # noqa: E402
     object_store_client,
     pod_matches_job,
     ray_log_inventory,
-    resolve_runtime_python,
+    resolve_container_python,
     safe_relative_path,
     save_ray_logs,
     split_s3_uri,
@@ -704,7 +704,7 @@ def fetch_complete_pod_log(base: list[str], pod: str, destination: Path) -> None
 
 
 def fetch_complete_ray_logs(base: list[str], pod: str, destination: Path) -> int:
-    runtime_python = resolve_runtime_python(base, pod, "task")
+    runtime_python = resolve_container_python(base, pod, "task")
     inventory = ray_log_inventory(base, pod, "task", patterns=None, python_executable=runtime_python)
     if not inventory:
         return 0

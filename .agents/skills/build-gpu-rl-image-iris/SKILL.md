@@ -1,6 +1,6 @@
 ---
 name: build-gpu-rl-image-iris
-description: Build and validate legacy MarinSkyRL GPU-RL containers for standalone tools that still require their environment layout. Do not use these images for Iris training.
+description: Build and validate compatibility MarinSkyRL GPU-RL containers when the user explicitly requests one. Maintained Iris training and utilities use frozen environments instead.
 ---
 
 # Build GPU-RL images on Iris
@@ -23,8 +23,8 @@ The script and Dockerfiles outrank prose when they disagree. Correct stale ops d
 
 ## Establish the build set
 
-- Confirm that the requested standalone tool still requires the legacy image. Iris training installs a frozen
-  MarinSkyRL environment in the standard task image and must not use this build path.
+- Confirm that the user explicitly requested a compatibility image. Maintained Iris training and utilities install
+  a frozen MarinSkyRL environment in the standard task image and must not use this build path.
 - Resolve every requested host architecture from current cluster state. Let the build script derive its Dockerfile,
   kaniko platform, cache namespace, and tag suffix from the build host.
 - Build each requested architecture on a native host. Do not cross-build CUDA images from a laptop.

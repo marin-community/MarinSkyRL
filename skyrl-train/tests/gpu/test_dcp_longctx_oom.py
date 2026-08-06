@@ -1,5 +1,7 @@
 """Stage 4 (vLLM DCP) — long-context KV OOM->OK demonstration (the SHIP gate).
 
+Jupiter-only SIF test: the documented Apptainer command targets Jupiter's Slurm runtime.
+
 This is the concrete demonstration of WHY rollout DCP exists: a long-context request
 whose **decode KV cache cannot fit at dcp=1 but fits at dcp=2 on the same GPU budget**
 (same tp, same gpu_memory_utilization). DCP shards the KV cache along the token dim

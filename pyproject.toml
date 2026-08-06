@@ -125,6 +125,7 @@ docs = [
     "sphinx-rtd-theme>=2.0.0",
 ]
 dev = [
+    { include-group = "analysis" },
     "litellm",
     "marin-rigging[prometheus]==0.2.70.dev30755316227",
     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
