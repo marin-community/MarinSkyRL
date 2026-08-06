@@ -203,6 +203,7 @@ trainer:
     num_parallel_generation_workers: 128
 
 generator:
+  vllm_attention_backend: FLASH_ATTN
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
@@ -266,8 +267,6 @@ extra_env:
   SKYRL_TIS_SERVED_ID_SPLICE: "1"
   SKYRL_POLICY_HOST_RAM_MONITOR: "1"
   SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
-  VLLM_ATTENTION_BACKEND: FLASH_ATTN
-  LD_LIBRARY_PATH: /opt/openthoughts/envs/rl/lib
   NCCL_DEBUG: WARN
   VLLM_ALLOW_ROUTED_EXPERTS_DCP: "1"
   VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"

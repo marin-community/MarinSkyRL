@@ -43,7 +43,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 # NOTE (MarinSkyRL port): ``upath`` (universal_pathlib) is imported LAZILY inside the two
 # remote-URI helpers below rather than at module scope. Those paths only run on iris where
-# ``experiments_dir`` is a ``gs://…`` URI; there ``upath`` is provided by the gpu-rl image
+# ``experiments_dir`` is a ``gs://…`` URI; there ``upath`` is provided by the locked environment
 # (a harbor/fsspec dependency), exactly as ``harbor`` itself is. Keeping it lazy leaves the
 # module import-clean + unit-testable on a plain checkout (local experiments_dir needs no
 # upload) without adding an unresolvable dep to the MarinSkyRL lock. The registration/mint

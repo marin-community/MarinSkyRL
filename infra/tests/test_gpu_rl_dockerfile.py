@@ -8,6 +8,8 @@ import subprocess
 
 import pytest
 
+from cloud.iris.legacy_gpu_rl_environment import GPU_RL_ENV_DIR
+
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 GPU_RL_DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile.gpu-rl"
@@ -27,6 +29,17 @@ def test_runtime_image_exposes_source_and_harbor_provenance(dockerfile_path: Pat
 
     assert 'org.opencontainers.image.revision="${GITSHA}"' in dockerfile
     assert 'org.marin.harbor-commit="${HARBOR_COMMIT}"' in dockerfile
+
+
+@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
+def test_gpu_rl_images_install_to_registered_environment(dockerfile_path: Path) -> None:
+    environment_declarations = [
+        line.removeprefix("ENV RL_ENV_DIR=")
+        for line in dockerfile_path.read_text().splitlines()
+        if line.startswith("ENV RL_ENV_DIR=")
+    ]
+
+    assert environment_declarations == [GPU_RL_ENV_DIR]
 
 
 def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
@@ -167,9 +180,7 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
     """Exercise the shared dependency gate against representative reports."""
     report = tmp_path / "pip-check"
     common = [
-        "The package `aiobotocore` requires `botocore>=1.42.90,<1.43.1`, but `1.43.48` is installed",
         "The package `gcsfs` requires `fsspec>=2026.6.0`, but `2026.4.0` is installed",
-        "The package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed",
     ]
     reports = {
         "linux_x86_64": common,
@@ -192,6 +203,11 @@ def test_gpu_images_accept_only_their_known_pip_check_findings(tmp_path: Path) -
     for platform, expected in reports.items():
         standard_diagnostics = "\n".join(expected)
         assert check(platform, standard_diagnostics, False) == 0
+        obsolete_quack_conflict = (
+            standard_diagnostics
+            + "\nThe package `quack-kernels` requires `nvidia-cutlass-dsl==4.6.0`, but `4.5.3` is installed"
+        )
+        assert check(platform, obsolete_quack_conflict, False) != 0
         assert check(platform, standard_diagnostics + "\nThe package `unexpected` is incompatible", False) != 0
         megatron_expected = [*expected, *megatron]
         if platform == "linux_aarch64":

@@ -19,6 +19,7 @@ trainer:
   sequence_parallel_backend: ulysses
   strategy: fsdp2
   policy:
+    grug_query_bias_update_mode: frozen
     model:
       path: Qwen/Qwen2.5-1.5B-Instruct
       lora:
@@ -242,7 +243,7 @@ trainer:
   eval_before_train: true
   eval_interval: 5
   max_prompt_length: 512
-  flash_attn: true
+  flash_attn: false
   disable_fast_tokenizer: false
   target_modules: null
   exclude_modules: null

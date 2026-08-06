@@ -1,10 +1,9 @@
-"""Opt-in controller for the four-node production phase-divergence contract.
+"""Opt-in controller for four-node collective-stall discriminator contracts.
 
 Run this file with pytest from the batch process of an otherwise idle Slurm
 allocation containing exactly four four-GPU nodes. The test starts one torchrun
 agent per node, waits for all 16 workers to warm their production EP4/FSDP4
-communicators, and then sends rank 0 into FSDP all-gather while the other ranks
-enter EP all-to-all.
+communicators, and then runs one isolated collective-stall mechanism per gang.
 
 The filename deliberately avoids pytest's default ``test_*.py`` discovery.
 """
@@ -15,6 +14,7 @@ import argparse
 import os
 import signal
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -24,13 +24,18 @@ from pathlib import Path
 
 import pytest
 
-from skyrl_train.utils.nccl_environment import nccl_diagnostics_environment
-from tests.gpu.fault_injection.multi_node_mesh import EXPECTED_NODES, GPUS_PER_NODE, WORLD_SIZE
-from tests.gpu.fault_injection.multi_node_phase_divergence_worker import (
+from skyrl_train.nccl_diagnostics import nccl_diagnostics_environment
+from tests.gpu.fault_injection.multi_node_geometry import EXPECTED_NODES, GPUS_PER_NODE, WORLD_SIZE
+from tests.gpu.fault_injection.multi_node_collective_stall_protocol import (
     ACTIVE_MARKER,
+    AFTER_ENQUEUE_MARKER,
+    BEFORE_ENQUEUE_MARKER,
+    BLOCKING_WAIT_DISABLED_MARKER,
+    MODEL_OPERATION_MARKER,
     PROCESS_GROUP_TIMEOUT_SECONDS,
-    UNAFFECTED_EP_COMPLETION_MARKER,
+    UNAFFECTED_FSDP_COMPLETION_MARKER,
     UNEXPECTED_COMPLETION_MARKER,
+    FaultMode,
 )
 from tests.gpu.fault_injection.fault_injection_paths import SKYRL_TRAIN_ROOT
 from tests.process_gang import (
@@ -40,7 +45,7 @@ from tests.process_gang import (
 )
 
 
-WORKER_MODULE = "tests.gpu.fault_injection.multi_node_phase_divergence_worker"
+WORKER_MODULE = "tests.gpu.fault_injection.multi_node_worker_bootstrap"
 SETUP_TIMEOUT_SECONDS = 300
 FAULT_TIMEOUT_SECONDS = 120
 REAP_TIMEOUT_SECONDS = 30
@@ -48,6 +53,7 @@ SRUN_KILL_WAIT_SECONDS = 20
 WATCHDOG_HEARTBEAT_TIMEOUT_SECONDS = PROCESS_GROUP_TIMEOUT_SECONDS // 2
 MASTER_PORT_BASE = 20_000
 MASTER_PORT_SPAN = 20_000
+LEGACY_BLOCKING_WAIT_TIMEOUT_MS = "1800000"
 
 
 def _allocated_hostnames() -> tuple[str, ...]:
@@ -75,7 +81,9 @@ def _slurm_step_command(
     control_directory: Path,
     hostnames: tuple[str, ...],
     node_agent_command_prefix: tuple[str, ...],
+    master_address: str,
     master_port: int,
+    mode: FaultMode,
 ) -> tuple[str, ...]:
     """Build the host-side Slurm step that enters the policy runtime on each node."""
 
@@ -94,13 +102,20 @@ def _slurm_step_command(
         "--control-directory",
         str(control_directory),
         "--master-address",
-        hostnames[0],
+        master_address,
         "--master-port",
         str(master_port),
+        "--fault-mode",
+        mode.value,
     )
 
 
-def _exec_node_torchrun(control_directory: Path, master_address: str, master_port: int) -> None:
+def _exec_node_torchrun(
+    control_directory: Path,
+    master_address: str,
+    master_port: int,
+    mode: FaultMode,
+) -> None:
     node_rank = int(os.environ["SLURM_NODEID"])
     command = (
         sys.executable,
@@ -115,6 +130,8 @@ def _exec_node_torchrun(control_directory: Path, master_address: str, master_por
         WORKER_MODULE,
         "--control-directory",
         str(control_directory),
+        "--fault-mode",
+        mode.value,
     )
     os.execv(sys.executable, command)
 
@@ -125,16 +142,32 @@ def _launch_slurm_step(
     log_path: Path,
     hostnames: tuple[str, ...],
     node_agent_command_prefix: tuple[str, ...],
+    mode: FaultMode,
 ) -> Iterator[ProcessGang]:
     environment = os.environ.copy()
-    environment.pop("NCCL_BLOCKING_WAIT", None)
+    # Keep the modern alias absent so this contract isolates the legacy setting
+    # captured in the TaskTrove worker environment, independent of the shell
+    # used to submit the test.
     environment.pop("TORCH_NCCL_BLOCKING_WAIT", None)
+    # The production Ray worker bootstrap must remove this alias before
+    # importing torch; otherwise it disables the watchdog path exercised here.
+    environment["NCCL_BLOCKING_WAIT"] = "1"
+    environment["TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS"] = LEGACY_BLOCKING_WAIT_TIMEOUT_MS
     environment.update(
         nccl_diagnostics_environment(
             heartbeat_timeout_seconds=WATCHDOG_HEARTBEAT_TIMEOUT_SECONDS,
         )
     )
-    command = _slurm_step_command(control_directory, hostnames, node_agent_command_prefix, _master_port())
+    # Resolve the batch host before entering Jupiter's IPv4-only runtime.
+    master_address = socket.gethostbyname(hostnames[0])
+    command = _slurm_step_command(
+        control_directory,
+        hostnames,
+        node_agent_command_prefix,
+        master_address,
+        _master_port(),
+        mode,
+    )
     with launch_process_gang(
         command=command,
         working_directory=SKYRL_TRAIN_ROOT,
@@ -148,7 +181,11 @@ def _launch_slurm_step(
         yield gang
 
 
-def test_warmed_multinode_phase_divergence_terminates_gang(pytestconfig: pytest.Config) -> None:
+@pytest.mark.parametrize("mode", tuple(FaultMode), ids=lambda mode: mode.value)
+def test_warmed_multinode_stall_has_expected_signature_and_terminates_gang(
+    pytestconfig: pytest.Config,
+    mode: FaultMode,
+) -> None:
     hostnames = _allocated_hostnames()
     serialized_prefix = pytestconfig.getoption("--node-agent-command-prefix")
     if serialized_prefix is None:
@@ -166,6 +203,7 @@ def test_warmed_multinode_phase_divergence_terminates_gang(pytestconfig: pytest.
             Path(temporary_dir) / "torchrun.log",
             hostnames,
             node_agent_command_prefix,
+            mode,
         ) as gang,
     ):
         result = run_after_rank_readiness(
@@ -175,10 +213,31 @@ def test_warmed_multinode_phase_divergence_terminates_gang(pytestconfig: pytest.
             run_timeout_seconds=FAULT_TIMEOUT_SECONDS,
         )
 
+        assert result.output.count(BLOCKING_WAIT_DISABLED_MARKER) == WORLD_SIZE, result.output
         assert result.output.count(ACTIVE_MARKER) == WORLD_SIZE, result.output
-        assert result.output.count(UNAFFECTED_EP_COMPLETION_MARKER) == WORLD_SIZE - GPUS_PER_NODE, result.output
+        assert result.output.count(UNAFFECTED_FSDP_COMPLETION_MARKER) == WORLD_SIZE - GPUS_PER_NODE, result.output
         assert UNEXPECTED_COMPLETION_MARKER not in result.output
         assert result.returncode != 0, result.output
+
+        mode_before = f"{BEFORE_ENQUEUE_MARKER} mode={mode.value}"
+        mode_after = f"{AFTER_ENQUEUE_MARKER} mode={mode.value}"
+        before_count = result.output.count(mode_before)
+        after_count = result.output.count(mode_after)
+        if mode is FaultMode.ENQUEUED_CUDA_STALL:
+            assert before_count == WORLD_SIZE, result.output
+            assert after_count == WORLD_SIZE, result.output
+        elif mode is FaultMode.PRE_ENQUEUE_NONARRIVAL:
+            assert before_count == WORLD_SIZE, result.output
+            assert after_count == WORLD_SIZE - 1, result.output
+        else:
+            assert result.output.count(MODEL_OPERATION_MARKER) == WORLD_SIZE, result.output
+            assert before_count == WORLD_SIZE, result.output
+            assert after_count == WORLD_SIZE, result.output
+        print(
+            f"MULTI_NODE_COLLECTIVE_STALL_OK mode={mode.value} before={before_count} after={after_count} "
+            f"unaffected_fsdp={WORLD_SIZE - GPUS_PER_NODE}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":
@@ -187,6 +246,7 @@ if __name__ == "__main__":
     parser.add_argument("--control-directory", type=Path)
     parser.add_argument("--master-address")
     parser.add_argument("--master-port", type=int)
+    parser.add_argument("--fault-mode", type=FaultMode, choices=tuple(FaultMode))
     arguments = parser.parse_args()
     if not arguments.node_agent:
         parser.error("run with pytest, or pass --node-agent from the Slurm controller")
@@ -194,4 +254,8 @@ if __name__ == "__main__":
         parser.error("--node-agent requires --control-directory")
     if arguments.master_address is None or arguments.master_port is None:
         parser.error("--node-agent requires --master-address and --master-port")
-    _exec_node_torchrun(arguments.control_directory, arguments.master_address, arguments.master_port)
+    if arguments.fault_mode is None:
+        parser.error("--node-agent requires --fault-mode")
+    _exec_node_torchrun(
+        arguments.control_directory, arguments.master_address, arguments.master_port, arguments.fault_mode
+    )

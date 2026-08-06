@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM
 
+from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.models.grug_query_bias import next_query_bias, query_bias_candidate_count
 
 FP32_OUTPUT_ATOL = 2e-5
@@ -23,7 +24,6 @@ ORACLE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "grug_training_oracle"
 
 @dataclass(frozen=True)
 class GrugTrainingOracle:
-    root: Path
     manifest: dict[str, Any]
     observations: dict[str, np.ndarray]
 
@@ -34,7 +34,7 @@ def load_grug_training_oracle() -> GrugTrainingOracle:
     manifest = json.loads((ORACLE_FIXTURE_DIR / "manifest.json").read_text())
     with np.load(ORACLE_FIXTURE_DIR / "observations.npz") as archive:
         observations = {name: archive[name] for name in archive.files}
-    return GrugTrainingOracle(root=ORACLE_FIXTURE_DIR, manifest=manifest, observations=observations)
+    return GrugTrainingOracle(manifest=manifest, observations=observations)
 
 
 def assert_close(label: str, actual: torch.Tensor, expected: np.ndarray, *, gradient: bool = False) -> None:
@@ -82,12 +82,15 @@ def run_grug_training_parity() -> None:
     device = torch.device("cuda")
     torch.set_float32_matmul_precision("highest")
     model = AutoModelForCausalLM.from_pretrained(
-        oracle.root,
+        ORACLE_FIXTURE_DIR,
         trust_remote_code=False,
         local_files_only=True,
         attn_implementation="eager",
         dtype=torch.float32,
-    ).to(device)
+    )
+    if not isinstance(model, GrugMoeForCausalLM):
+        raise TypeError(f"expected GrugMoeForCausalLM, got {type(model).__name__}")
+    model.to(device)
     model.train()
     input_ids = torch.from_numpy(observations["input_ids"]).long().to(device)
     attention_mask = torch.ones_like(input_ids)

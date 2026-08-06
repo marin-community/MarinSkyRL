@@ -15,64 +15,93 @@ on:
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
+      grug_target_cluster:
+        description: "ARM64 Iris cluster for the Marin vLLM Grug gate"
+        default: cw-us-east-08a
 
 concurrency:
   group: marin-nightly
   cancel-in-progress: false
 
+env:
+  GCP_PROJECT: hai-gcp-models
+  IRIS_CLIENT_REQUIREMENT: marin-core>=0.2.46.dev202607131620
+  WIF_PROVIDER: projects/748532799086/locations/global/workloadIdentityPools/github-pool/providers/github-oidc
+
 jobs:
-  gsm8k-h100:
+  gpu-gate:
+    name: ${{ matrix.lane }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: gsm8k-h100
+            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+            gpu: H100x1
+            cpu: 8
+            memory: 64GB
+            iris_timeout: 5400
+            task_script: skyrl-train/ci/marin_nightly/run_h100.sh
+            log: nightly.log
+          - lane: grug-vllm-gb200
+            target_cluster: ${{ github.event.inputs.grug_target_cluster || 'cw-us-east-08a' }}
+            gpu: GB200x4
+            cpu: 64
+            memory: 512GB
+            iris_timeout: 3600
+            task_script: skyrl-train/ci/marin_nightly/run_grug_vllm.sh
+            log: grug-vllm.log
     runs-on: ubuntu-latest
     timeout-minutes: 100
     permissions:
       contents: read
       id-token: write
     env:
-      JOB_NAME: marinskyrl-nightly-gsm8k-${{ github.run_id }}-${{ github.run_attempt }}
-      TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+      JOB_NAME: marinskyrl-nightly-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+      MAX_STEPS: ${{ github.event.inputs.max_steps || '30' }}
+      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}
+      TARGET_CLUSTER: ${{ matrix.target_cluster }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Trim the Iris bundle
-        run: git rm -r --cached --quiet skyrl-train/docs skyrl-agent
+        run: git rm -r --quiet skyrl-train/docs skyrl-agent
 
       - uses: astral-sh/setup-uv@v7
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
-          project_id: hai-gcp-models
-          workload_identity_provider: projects/748532799086/locations/global/workloadIdentityPools/github-pool/providers/github-oidc
+          project_id: ${{ env.GCP_PROJECT }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: github-iris@hai-gcp-models.iam.gserviceaccount.com
 
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v3
         with:
-          project_id: hai-gcp-models
+          project_id: ${{ env.GCP_PROJECT }}
 
       - name: Install the iris client
         run: |
-          uv tool install --prerelease allow "marin-core>=0.2.46.dev202607131620"
+          uv tool install --prerelease allow "$IRIS_CLIENT_REQUIREMENT"
           echo "$(uv tool dir)/marin-core/bin" >> "$GITHUB_PATH"
 
-      - name: Train, gate, and check Grug parity on one H100
+      - name: Run ${{ matrix.lane }}
         run: |
           set -o pipefail
-          IRIS_PYTHON="$(uv tool dir)/marin-core/bin/python"
-          RL_IMAGE="$("$IRIS_PYTHON" -c \
-            'import os; from cloud.iris.gpu_rl_images import image_for_cluster; print(image_for_cluster(os.environ["TARGET_CLUSTER"], None).reference)')"
+          TASK_ENV=()
+          if [[ "${{ matrix.lane }}" == "gsm8k-h100" ]]; then
+            TASK_ENV=(-e MODEL "$MODEL" -e MAX_STEPS "$MAX_STEPS")
+          fi
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
             --job-name "$JOB_NAME" \
-            --task-image "$RL_IMAGE" \
-            --gpu H100x1 --enable-extra-resources \
-            --cpu 8 --memory 64GB --disk 200GB \
+            --gpu "${{ matrix.gpu }}" --enable-extra-resources \
+            --cpu "${{ matrix.cpu }}" --memory "${{ matrix.memory }}" --disk 200GB \
             --no-sync \
-            --timeout 5400 \
-            -e MODEL "${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}" \
-            -e MAX_STEPS "${{ github.event.inputs.max_steps || '30' }}" \
-            -e NIGHTLY_RL_ENV /opt/openthoughts/envs/rl \
-            -- bash skyrl-train/ci/marin_nightly/run_h100.sh 2>&1 | tee nightly.log
+            --timeout "${{ matrix.iris_timeout }}" \
+            "${TASK_ENV[@]}" \
+            -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Stop any Iris job the run left behind
         if: always()
@@ -81,12 +110,12 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: nightly-run-log
-          path: nightly.log
+          name: ${{ matrix.lane }}-run-log
+          path: ${{ matrix.log }}
           if-no-files-found: ignore
 
   report-failure:
-    needs: [gsm8k-h100]
+    needs: [gpu-gate]
     if: >-
       always() && github.event_name == 'schedule' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
@@ -98,9 +127,10 @@ jobs:
     steps:
       - uses: marin-community/marin-style/actions/report-failure@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4
         with:
-          lane: gsm8k-h100
+          lane: gsm8k-h100-and-grug-vllm-gb200
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           triage-notes: >-
-            The nightly runs single-H100 GRPO via a WIF-authenticated Iris job on the
-            CoreWeave cluster. Separate Iris/cluster failures from training regressions.
+            The nightly runs dense H100 GRPO and a Grug GB200 rollout/train/broadcast
+            cycle through WIF-authenticated Iris jobs. Separate Iris or cluster failures
+            from lock, native-extension, and training regressions.

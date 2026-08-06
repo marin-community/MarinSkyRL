@@ -15,5 +15,6 @@ Export and shutdown failures do not change training results or W&B ownership.
 The Ray allowlist discards worker, address and task-name labels and never forwards
 Ray's physical node or GPU families; Iris remains authoritative for host and GPU
 telemetry, while centralized vLLM metrics stay with the serving job. Hardware
-probes are not started. The GPU images select the telemetry extra, and process
-shutdown gives Rigging at most two seconds to drain queued records.
+probes are not started. The frozen GPU runtime profile selects the telemetry
+extra, and process shutdown gives Rigging at most two seconds to drain queued
+records.

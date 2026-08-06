@@ -30,6 +30,8 @@ from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     GRUG_SUPPORTED_ATTENTION_BACKENDS,
+    GrugMoeForCausalLM,
+    enable_grug_grouped_mm,
     validate_grug_training_strategy,
 )
 from skyrl_train.utils.flash_attention import (
@@ -97,7 +99,6 @@ def validate_grug_training_options(
     context_parallel_size: int,
     moe_router_replay: bool,
     moe_grouped_gemm: bool,
-    use_grouped_mm: bool,
     use_liger_kernel: bool,
 ) -> None:
     """Validate the deliberately narrow supported Grug training surface."""
@@ -112,12 +113,23 @@ def validate_grug_training_options(
         "sequence parallelism": sequence_parallel_size > 1,
         "context parallelism": context_parallel_size > 1,
         "router replay/R3": moe_router_replay,
-        "grouped MoE": moe_grouped_gemm or use_grouped_mm,
+        "generic grouped MoE swap": moe_grouped_gemm,
         "Liger kernels": use_liger_kernel,
     }
     enabled = [name for name, is_enabled in unsupported.items() if is_enabled]
     if enabled:
         raise ValueError("Grug FSDP2 training does not support: " + ", ".join(enabled))
+
+
+def _enable_native_grug_grouping(model: nn.Module, use_grouped_mm: bool) -> None:
+    """Enable native grouped execution when the loaded model is Grug."""
+
+    if not use_grouped_mm or not isinstance(model, GrugMoeForCausalLM):
+        return
+    num_grug_moe_blocks = enable_grug_grouped_mm(model)
+    if num_grug_moe_blocks == 0:
+        raise RuntimeError("use_grouped_mm=true selected Grug native grouping but found no Grug MoE blocks")
+    logger.info(f"[Grug-MoE] enabled native grouped_mm on {num_grug_moe_blocks} blocks")
 
 
 def _cp_mask_dict_supported(model) -> bool:
@@ -424,7 +436,6 @@ class HFModelWrapper(nn.Module):
                 context_parallel_size=context_parallel_size,
                 moe_router_replay=moe_router_replay,
                 moe_grouped_gemm=moe_grouped_gemm,
-                use_grouped_mm=use_grouped_mm,
                 use_liger_kernel=use_liger_kernel,
             )
 
@@ -602,6 +613,8 @@ class HFModelWrapper(nn.Module):
                 engage_flashqla(self.model)
         else:
             self.model = pretrain_or_model
+
+        _enable_native_grug_grouping(self.model, use_grouped_mm)
 
         # CP mask contract probe (computed once): does this HF model's forward
         # accept the per-layer-type mask DICT escape hatch? Dense Qwen3 does;

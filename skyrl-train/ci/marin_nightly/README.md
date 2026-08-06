@@ -1,17 +1,18 @@
-# Nightly end-to-end gate
+# Nightly end-to-end gates
 
-A real GRPO training run on one H100, every night, scored against a checked-in spec. It
-exists to answer one question: **does the user-facing training path still work?** Rollouts
-generate, rewards score, the policy takes a step, weights sync back into the inference
-engine. It says nothing about model quality and is not meant to — two steps of a 0.6B
-policy over 16 prompts carries no signal about how good the model is.
+The nightly runs dense Qwen GRPO on one H100 and a tiny Grug RL cycle on four GB200s
+from the frozen root environment. The H100 run is scored against a checked-in spec;
+the GB200 run proves the locked Marin vLLM wheel can load Grug, generate rollouts,
+train the eager FSDP2 policy, synchronize mixed-dtype weights, and generate again.
+These are integration gates, not model-quality experiments.
 
 | file | role |
 | --- | --- |
-| `run_h100.sh` | what runs on the GPU: validate the image, slice GSM8K, train, gate |
+| `run_h100.sh` | sync the frozen root environment, slice GSM8K, train, and gate on H100 |
+| `run_grug_vllm.sh` | run a tiny Grug rollout/train/broadcast/rollout cycle on four GB200s |
 | `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
 | `specs/gsm8k-qwen3-0.6b.json` | the thresholds, with provenance for why each one is what it is |
-| `../../../.github/workflows/marin-nightly.yaml` | provisions the H100 through Iris and tears it down |
+| `../../../.github/workflows/marin-nightly.yaml` | provisions both GPU gates through Iris and tears them down |
 
 ## How the gate sees the run
 
@@ -39,17 +40,26 @@ uv run --frozen python -m ci.marin_nightly.gate \
     --wall-clock-seconds 900
 ```
 
-The training run needs the digest-pinned GPU-RL task image and takes its knobs from the
-environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside that image:
+The training run starts from the cluster-configured Iris task image and resolves the
+architecture-specific `vllm` wheel from the root `uv.lock`. It takes its knobs from the
+environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
 
 ```bash
-NIGHTLY_RL_ENV=/opt/openthoughts/envs/rl MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
+MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
+
+The GB200 lane additionally imports `vllm._C` and the cuMem allocator, verifies the
+Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
+mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
+gate independent of the optional compiled FlashAttention package.
 
 To exercise the whole path — provision, train, gate, tear down — trigger the workflow:
 
 ```bash
-gh workflow run marin-nightly.yaml -f max_steps=2
+gh workflow run marin-nightly.yaml \
+  -f max_steps=2 \
+  -f target_cluster=cw-rno2a \
+  -f grug_target_cluster=cw-us-east-08a
 ```
 
 ## Tightening the spec

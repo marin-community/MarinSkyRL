@@ -19,6 +19,7 @@ dependencies = [
     "hydra-core==1.3.2",
     "jaxtyping",
     "loguru",
+    "marin-finelog==0.2.19.dev30724030287",
     "marin-finelog-server==0.2.17.dev30664483151",
     "marin-iris==0.2.70.dev30755316227",
     "marin-iris-native==0.1.5.dev30223685542",
@@ -71,17 +72,17 @@ deepspeed = [
 fsdp = ["torchtitan ; sys_platform == 'linux'"]
 vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "flash-attn==2.8.3 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
+    "quack-kernels==0.5.0 ; sys_platform == 'linux'",
     "tensordict ; sys_platform == 'linux'",
     "torch==2.11.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.26.0 ; sys_platform == 'linux'",
-    "vllm==0.23.0 ; sys_platform == 'linux'",
+    "vllm==0.0.0.dev20260805+marin.fa50698a9a30.cu129 ; sys_platform == 'linux'",
 ]
 megatron = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
@@ -159,11 +160,6 @@ no-build-isolation-package = [
 override-dependencies = [
     "transformer-engine-cu13 ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
-    "botocore==1.43.48 ; sys_platform == 'linux'",
-    "boto3==1.43.48 ; sys_platform == 'linux'",
-    "s3transfer==0.19.1 ; sys_platform == 'linux'",
-    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
-    "s3fs==2026.4.0 ; sys_platform == 'linux'",
     "fsspec==2026.4.0",
     "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
     "humming-kernels[cu12]==0.1.4 ; sys_platform == 'linux'",
@@ -171,19 +167,19 @@ override-dependencies = [
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
+    "opentelemetry-api ; sys_platform != 'linux'",
+]
+constraint-dependencies = [
+    "botocore==1.42.97 ; sys_platform == 'linux'",
+    "boto3==1.42.97 ; sys_platform == 'linux'",
+    "s3transfer==0.16.1 ; sys_platform == 'linux'",
+    "aiobotocore==3.7.0 ; sys_platform == 'linux'",
+    "s3fs==2026.4.0 ; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }]
 transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
-
-[tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
-
-[[tool.uv.dependency-metadata]]
-name = "flash-attn"
-requires-dist = ["torch", "einops"]
 
 [tool.uv.sources]
 torch = [
@@ -200,6 +196,10 @@ torchvision = [
     { index = "pytorch-cu129", extra = "vllm" },
 ]
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
+vllm = [
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
     { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },

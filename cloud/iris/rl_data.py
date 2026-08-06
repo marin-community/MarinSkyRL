@@ -221,7 +221,7 @@ def check_rl_environment() -> Optional[Path]:
 
     Checks ``$DCFT_RL_ENV``, ``$DCFT/envs/rl``, then ``<repo>/envs/rl``. Returns
     None when no such venv exists (the caller then uses ``sys.executable``, which
-    on Iris is already the gpu-rl image's RL venv python).
+    on Iris is already the frozen task venv's Python).
     """
     candidates = []
     if os.environ.get("DCFT_RL_ENV"):

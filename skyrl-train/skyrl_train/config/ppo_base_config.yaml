@@ -11,6 +11,7 @@ data:
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
 trainer:
+  debug_mode: "off"
   placement:
     colocate_all: true
     colocate_policy_ref: true
@@ -26,6 +27,7 @@ trainer:
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
+    grug_query_bias_update_mode: "frozen"
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       lora:
@@ -234,7 +236,7 @@ trainer:
     num_trials: 256
     on_failure: "abort"
   max_prompt_length: 512
-  flash_attn: true
+  flash_attn: false
   attn_backend: "auto"
   disable_fast_tokenizer: false
   target_modules: null
@@ -259,6 +261,7 @@ generator:
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
+  vllm_attention_backend: null
   weight_sync_backend: "nccl"
   fuse_weights: false
   weight_transfer_threshold_cuda_ipc_GB: 1.0

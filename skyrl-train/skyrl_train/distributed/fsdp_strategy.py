@@ -17,12 +17,14 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl_train.distributed.grug_muonh import build_grug_muonh
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
 from skyrl_train.utils.constants import get_worker_nccl_timeout_s
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
+    DEFAULT_EP_COMM_BACKEND,
     MixedPrecisionPolicy,
     init_fn,
     get_fsdp_wrap_policy,
@@ -78,6 +80,8 @@ class FSDPStrategy(DistributedStrategy):
         self.seed = seed
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
+        self.optimizer_name = optimizer_config.get("optimizer", "AdamW") if optimizer_config is not None else None
+        self.is_muonh_optimizer = self.optimizer_name == "MuonH"
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
@@ -317,7 +321,7 @@ class FSDPStrategy(DistributedStrategy):
         # submesh only (the experts get a separate ExpertParallel Shard(0) over the
         # "ep" submesh in apply_ep, after fully_shard). ep_size==1 keeps fsdp_mesh
         # as today's full mesh (byte-identical).
-        ep_on = getattr(self, "ep_size", 1) > 1
+        ep_on = self.ep_size > 1
         if ep_on:
             fsdp_mesh = self.device_mesh["fsdp"]
 
@@ -414,11 +418,11 @@ class FSDPStrategy(DistributedStrategy):
                     _meta = torch.empty(_shape, device="meta", dtype=_dtype)
                     setattr(_submod, _attr, torch.nn.Parameter(_meta, requires_grad=_rg))
 
-                ep_backend = self.fsdp_config.get("ep_comm_backend", "torch")
+                ep_backend = self.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)
                 num_sharded = apply_ep(module, self.device_mesh, ep_comm_backend=ep_backend, fsdp_kwargs=fsdp_kwargs)
                 assert num_sharded > 0, (
-                    "expert_model_parallel_size>1 but no grouped MoE experts found to shard; "
-                    "EP requires moe_grouped_gemm=True so the lifted GroupedExperts modules exist."
+                    "expert_model_parallel_size>1 but no supported grouped experts were found; "
+                    "Grug requires use_grouped_mm=true, while generic HF MoE requires moe_grouped_gemm=true."
                 )
                 # DeepEP backend (Stage 5): set the SM count once (must precede the first
                 # dispatch; also sets the intranode kernel + RDMA channel count) and thread
@@ -469,7 +473,8 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            optimizer_name = optim_config.get("optimizer", "AdamW")
+            optimizer_name = self.optimizer_name
+            assert optimizer_name is not None
             if optimizer_name == "Muon":
                 # Hybrid Muon recipe: Muon on the 2-D hidden matmul weights,
                 # AdamW on embeddings / final head / norms / biases / 1-D params.
@@ -490,6 +495,21 @@ class FSDPStrategy(DistributedStrategy):
                     f"(lr={optim_config.lr}). Muon params (first 6): "
                     f"{new_optimizer._muon_param_names[:6]}"
                 )
+            elif optimizer_name == "MuonH":
+                # Exact Grug production recipe. This is deliberately separate
+                # from the generic "Muon" ablation above.
+                ep_size = int(self.fsdp_config.get("expert_model_parallel_size", 1))
+                if ep_size != 1:
+                    raise ValueError(f"MuonH currently requires expert_model_parallel_size=1, got {ep_size}")
+                new_optimizer = build_grug_muonh(fsdp_module.named_parameters(), optim_config)
+                logger.info(
+                    f"[MuonH] Grug optimizer: {len(new_optimizer._muonh_param_names)} params -> MuonH, "
+                    f"{len(new_optimizer._adamh_param_names)} params -> AdamH, "
+                    f"{len(new_optimizer._adam_param_names)} params -> Adam; "
+                    f"shared lr={new_optimizer.muonh.param_groups[0]['lr']}, "
+                    f"Adam lr={new_optimizer.adam.param_groups[0]['lr'] if new_optimizer.adam else 'n/a'}, "
+                    "weight decay=0 for every group"
+                )
             else:
                 # Resolve optimizer class dynamically from torch.optim
                 optimizer_cls = getattr(optim, optimizer_name, None)
@@ -498,7 +518,8 @@ class FSDPStrategy(DistributedStrategy):
                 ):
                     raise ValueError(
                         f"Unknown optimizer '{optimizer_name}'. "
-                        f"Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop) or 'Muon'."
+                        "Must be a torch.optim.Optimizer subclass (e.g. AdamW, SGD, RMSprop), "
+                        "'Muon', or 'MuonH'."
                     )
 
                 optimizer_kwargs = {"lr": optim_config.lr, "weight_decay": optim_config.weight_decay}
@@ -714,7 +735,8 @@ class FSDPStrategy(DistributedStrategy):
 
         # Final barrier to ensure all operations complete
         dist.barrier()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_checkpoint(

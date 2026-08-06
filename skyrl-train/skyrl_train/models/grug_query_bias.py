@@ -6,8 +6,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
+
+
+class GrugQueryBiasConfig(Protocol):
+    num_experts_per_tok: int
+    num_local_experts: int
+    num_hidden_layers: int
+
+
+class GrugQueryBiasCaptureModel(Protocol):
+    config: GrugQueryBiasConfig
+
+    def begin_query_bias_capture(self, candidate_count: int, token_mask: torch.Tensor) -> None: ...
+
+    def take_query_bias_observation(self, *, candidate_count: int) -> "GrugQueryBiasObservation": ...
+
+    def set_query_bias(self, bias: torch.Tensor) -> None: ...
 
 
 def query_bias_candidate_count(valid_tokens: int, experts_per_token: int, num_experts: int) -> int:
@@ -36,6 +53,76 @@ class GrugQueryBiasLayerObservation:
 class GrugQueryBiasObservation:
     layers: tuple[GrugQueryBiasLayerObservation, ...]
     candidate_count: int
+
+
+@dataclass(frozen=True)
+class GrugQueryBiasShardLayout:
+    """Virtual EP ownership within one optimizer window."""
+
+    micro_batch_size: int
+    accumulation_steps: int
+    ep_size: int
+    ep_rank: int
+
+    def __post_init__(self) -> None:
+        if self.micro_batch_size < 1 or self.accumulation_steps < 1:
+            raise ValueError(
+                "micro_batch_size and accumulation_steps must be positive, "
+                f"got {self.micro_batch_size}, {self.accumulation_steps}"
+            )
+        if self.ep_size < 1 or not 0 <= self.ep_rank < self.ep_size:
+            raise ValueError(f"invalid EP coordinate ep_rank={self.ep_rank}, ep_size={self.ep_size}")
+        rows_per_window = self.micro_batch_size * self.accumulation_steps
+        if rows_per_window % self.ep_size:
+            raise ValueError(
+                "Grug query-bias virtual shards require "
+                f"micro_batch_size*accumulation_steps={rows_per_window} divisible by ep_size={self.ep_size}"
+            )
+
+    def mask_for(self, attention_mask: torch.Tensor, local_step: int) -> torch.Tensor:
+        """Select this EP coordinate's rows from one microbatch."""
+
+        if attention_mask.ndim != 2:
+            raise ValueError(f"attention_mask must be 2-D, got shape={tuple(attention_mask.shape)}")
+        if attention_mask.shape[0] != self.micro_batch_size:
+            raise RuntimeError(
+                "the final policy optimizer window is incomplete: "
+                f"expected microbatch rows={self.micro_batch_size}, got {attention_mask.shape[0]}"
+            )
+
+        rows_per_shard = self.micro_batch_size * self.accumulation_steps // self.ep_size
+        shard_start = self.ep_rank * rows_per_shard
+        shard_end = shard_start + rows_per_shard
+        microbatch_start = (local_step % self.accumulation_steps) * self.micro_batch_size
+        row_offsets = torch.arange(self.micro_batch_size, device=attention_mask.device) + microbatch_start
+        owned_rows = (row_offsets >= shard_start) & (row_offsets < shard_end)
+        return attention_mask.bool() & owned_rows.unsqueeze(1)
+
+
+@dataclass(frozen=True)
+class GrugQueryBiasCapturePlan:
+    """Valid-token counts and virtual ownership for one policy batch."""
+
+    valid_token_counts: tuple[int, ...]
+    shard_layout: GrugQueryBiasShardLayout
+
+    @classmethod
+    def build(
+        cls,
+        attention_mask: torch.Tensor,
+        shard_layout: GrugQueryBiasShardLayout,
+    ) -> GrugQueryBiasCapturePlan:
+        valid_token_counts = tuple(
+            int(shard_layout.mask_for(mask, local_step).sum().item())
+            for local_step, mask in enumerate(attention_mask.split(shard_layout.micro_batch_size))
+        )
+        remainder = len(valid_token_counts) % shard_layout.accumulation_steps
+        if remainder:
+            raise RuntimeError(
+                "the final policy optimizer window is incomplete: "
+                f"expected {shard_layout.accumulation_steps} microbatches, got {remainder}"
+            )
+        return cls(valid_token_counts, shard_layout)
 
 
 class GrugQueryBiasAccumulator:
@@ -100,3 +187,57 @@ def next_query_bias(betas: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"betas must have shape [layers, experts], got {tuple(betas.shape)}")
     bias = -betas.float()
     return bias - bias.mean(dim=-1, keepdim=True)
+
+
+class GrugQueryBiasWindow:
+    """Collect and apply query-bias observations for one optimizer window."""
+
+    def __init__(
+        self,
+        model: GrugQueryBiasCaptureModel,
+        valid_tokens: int,
+        capture_plan: GrugQueryBiasCapturePlan,
+    ) -> None:
+        config = model.config
+        self.model = model
+        self.capture_plan = capture_plan
+        self.candidate_count = query_bias_candidate_count(
+            valid_tokens,
+            config.num_experts_per_tok,
+            config.num_local_experts,
+        )
+        self.accumulator = GrugQueryBiasAccumulator(
+            candidate_count=self.candidate_count,
+            num_layers=config.num_hidden_layers,
+            num_experts=config.num_local_experts,
+        )
+        self._closed = False
+
+    def begin_microbatch(
+        self,
+        attention_mask: torch.Tensor,
+        local_step: int,
+    ) -> bool:
+        """Start capture and return false when this EP shard owns no valid tokens."""
+
+        if self.capture_plan.valid_token_counts[local_step] == 0:
+            return False
+        capture_mask = self.capture_plan.shard_layout.mask_for(attention_mask, local_step)
+        self.model.begin_query_bias_capture(self.candidate_count, capture_mask)
+        return True
+
+    def observe_microbatch(self) -> None:
+        self.accumulator.observe(
+            self.model.take_query_bias_observation(
+                candidate_count=self.candidate_count,
+            )
+        )
+
+    def finish(self, *, optimizer_step_succeeded: bool) -> None:
+        """Apply a completed window once, or discard it after a skipped step."""
+
+        if self._closed:
+            return
+        if optimizer_step_succeeded:
+            self.model.set_query_bias(next_query_bias(self.accumulator.finalize_betas()))
+        self._closed = True

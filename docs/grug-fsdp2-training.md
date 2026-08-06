@@ -1,9 +1,10 @@
 # Grug FSDP2 training
 
-This is a policy-only, EP1 FSDP2 implementation. The trainer uses the
-canonical PyTorch model in `skyrl_train.models.grug_moe`; vLLM serves the same
-HF checkpoint. Eager attention remains the correctness reference. Policy
-training also supports `flash_attention_2`, selected with
+This is a policy-only FSDP2 implementation with EP1 and native grouped expert
+parallelism. The trainer uses the canonical PyTorch model in
+`skyrl_train.models.grug_moe`; vLLM serves the same HF checkpoint. Eager
+attention remains the correctness reference. Policy training also supports
+`flash_attention_2`, selected with
 `trainer.flash_attn=true` or `trainer.attn_backend=flash_attention_2`.
 Unsupported fused requests fail instead of falling back to eager attention.
 
@@ -12,25 +13,35 @@ Grug's 20-query/5-KV-head GQA, half-RoPE on local layers, full causal long
 layers, 2,048-token local window, QK scaling, XSA, and per-head gating. Dense
 unpacked batches may contain left or right padding; FlashAttention unpads valid
 tokens, and model outputs are defined at valid query positions. Sample packing,
-trainer EP/CP, R3/router replay, grouped MoE, LoRA/4-bit loading, and PKO remain
-unsupported.
+trainer CP, R3/router replay, the generic `moe_grouped_gemm` and expert-swap
+paths, LoRA/4-bit loading, and PKO remain unsupported. Trainer EP requires the
+torch backend, native `use_grouped_mm=true`, AdamW, and ETP/CP/SP all equal to
+one.
 
-## Runtime image
+## Runtime support
 
-Grug serving requires the Marin vLLM fork at commit `4b55591306c9`. Resolve the
-cluster's standard image from `cloud/iris/gpu_rl_images.py` and verify that it
-contains this fork. If it does not, pass an explicit verified image by immutable
-digest.
+Grug serving uses the Marin vLLM wheels selected by the root `uv.lock`. The lock
+chooses immutable x86_64 and aarch64 assets for the H100 and GB200 execution
+platforms, respectively. The standard Iris environment verifies `vllm._C`, the
+cuMem allocator, and `GrugMoeForCausalLM` before training starts.
+
+The eager policy path does not require FlashAttention. Selecting the fused policy
+path still requires a compiled FlashAttention build compatible with the locked
+Torch and CUDA ABI.
 
 ## Query bias
 
 For every optimizer window, each rank counts non-padding tokens and uses
-`q = max(1, floor(tokens * top_k / num_experts))`. Each router retains only its
-per-expert top-q values of `unbiased_logit - biased_(K+1)th_logit`; concatenating
-and top-k reducing these candidates is exactly equivalent to retaining the full
-token-by-expert matrix. The q-th values are averaged across ranks. After a real
-optimizer step, the next persistent FP32 bias is `center(-beta)`. A skipped
-non-finite step discards the observation and preserves the previous bias.
+`q = max(1, floor(tokens * top_k / num_experts))`. Under EP, the repeated local
+batch is divided into deterministic virtual row shards, one per EP coordinate,
+so the observation has the same logical rank geometry as EP1. Routing and loss
+still use the full local batch. The per-rank optimizer-window row count must be
+divisible by the EP size. Each router retains only its per-expert top-q values
+of `unbiased_logit - biased_(K+1)th_logit`; concatenating and top-k reducing
+these candidates is exactly equivalent to retaining the full token-by-expert
+matrix. The q-th values are averaged across ranks. After a real optimizer step,
+the next persistent FP32 bias is `center(-beta)`. A skipped non-finite step
+discards the observation and preserves the previous bias.
 
 This padding exclusion is the RL adaptation of Levanter's fixed, padding-free
 batch geometry. The strict cross-framework fixture is padding-free.

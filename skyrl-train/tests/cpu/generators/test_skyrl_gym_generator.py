@@ -359,6 +359,7 @@ def test_generator_output_concatenation():
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
         "rewards": [1.0, 2.0],
+        "unshaped_rewards": [0.0, 1.0],
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
@@ -371,6 +372,7 @@ def test_generator_output_concatenation():
         "prompt_token_ids": [[5, 6, 7], [8]],
         "response_ids": [[5, 6, 7], [8]],
         "rewards": [2.0, 3.0],
+        "unshaped_rewards": [1.0, 0.0],
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
@@ -385,6 +387,7 @@ def test_generator_output_concatenation():
     assert concatenated_output["prompt_token_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["response_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["rewards"] == [1.0, 2.0, 2.0, 3.0]
+    assert concatenated_output["unshaped_rewards"] == [0.0, 1.0, 1.0, 0.0]
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
@@ -439,6 +442,27 @@ def test_get_metrics_from_generator_output():
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
     assert avg_score == 0.5
     assert pass_at_n == 0.5
+
+
+def test_pass_at_n_uses_unshaped_outcomes():
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1], [1], [2], [2]],
+        "response_ids": [[3], [4], [5], [6]],
+        "rewards": [0.2, 0.3, 0.4, 0.5],
+        "unshaped_rewards": [0.0, 1.0, 0.0, 0.0],
+        "loss_masks": [[1], [1], [1], [1]],
+        "stop_reasons": ["stop", "stop", "stop", "stop"],
+        "rollout_logprobs": None,
+    }
+
+    first_avg_score, first_pass_at_n = get_metrics_from_generator_output(generator_output, ["a", "a", "b", "b"])
+
+    generator_output["rewards"] = [-1.0, 0.0, 4.0, 5.0]
+    second_avg_score, second_pass_at_n = get_metrics_from_generator_output(generator_output, ["a", "a", "b", "b"])
+
+    assert first_avg_score == pytest.approx(0.35)
+    assert second_avg_score == pytest.approx(2.0)
+    assert first_pass_at_n == second_pass_at_n == 0.5
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 
+from cloud.iris.legacy_gpu_rl_environment import GPU_RL_PYTHON
 from scripts.iris import coreweave_ops, watch_coreweave_rl
 from scripts.iris.iris_ops import (
     MonitorError,
@@ -416,7 +417,7 @@ def test_ray_log_inventory_uses_explicit_python_for_rl_images(monkeypatch):
             ["kubectl"],
             "pod",
             "task",
-            python_executable="/opt/openthoughts/envs/rl/bin/python",
+            python_executable=GPU_RL_PYTHON,
         )
         == []
     )

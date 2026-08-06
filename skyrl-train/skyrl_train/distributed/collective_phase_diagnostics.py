@@ -11,16 +11,20 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, TextIO
+from pathlib import Path
 
 import torch.distributed as dist
 from loguru import logger
+from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, ensure_debug_artifact_directories
 
 _ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
 LOG_PREFIX = "COLLECTIVE_PHASE_DIAGNOSTICS "
 WORLD_GROUP = "world"
 _region_ids = itertools.count(1)
 _region_ids_lock = threading.Lock()
+_artifact_lock = threading.Lock()
+_artifact_files: dict[Path, TextIO] = {}
 
 
 class ProcessGroupLike(Protocol):
@@ -176,6 +180,18 @@ def _log_phase(context: _RegionContext, phase: CollectivePhase) -> None:
     record = _capture_record(context, phase)
     payload = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
     logger.info(LOG_PREFIX + payload)
+    artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
+    if artifact_root:
+        ensure_debug_artifact_directories(artifact_root)
+        path = (
+            Path(artifact_root) / "collective_phases" / f"{os.uname().nodename}.{os.getpid()}.rank{record.rank}.jsonl"
+        )
+        with _artifact_lock:
+            artifact_file = _artifact_files.get(path)
+            if artifact_file is None:
+                artifact_file = path.open("a", buffering=1)
+                _artifact_files[path] = artifact_file
+            artifact_file.write(payload + "\n")
 
 
 def log_phase(phase: CollectivePhase) -> None:

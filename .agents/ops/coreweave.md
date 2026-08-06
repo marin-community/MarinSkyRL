@@ -101,12 +101,12 @@ Aggregate large trial sets inside a task pod and transfer summaries rather than 
 thousands of small objects to a laptop. Compare timezone-aware object timestamps in UTC; CLI display
 may use local time.
 
-## Images
+## Runtime environments
 
-The immutable GPU-RL image registry lives in `cloud/iris/gpu_rl_images.py`. The launcher selects an
-image from the execution cluster and trainer strategy; `--task-image` is an explicit escape hatch,
-not a routine architecture override. Verify the resolved digest in the launch banner and the
-running container image ID. `gpu-rl-image-build.md` owns the rebuild boundary and build procedure.
+The launcher checks out its own immutable MarinSkyRL commit in the standard Iris task image and runs
+`uv sync --frozen` with the dependency profile selected by `trainer.strategy`. Verify the commit and
+profile in the launch banner and the checkout revision in task setup logs. Architecture-specific
+Python wheels are selected by the upstream lock; there is no RL image override.
 
 ## Guardrails
 

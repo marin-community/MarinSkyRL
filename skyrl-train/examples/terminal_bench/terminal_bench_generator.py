@@ -12,6 +12,8 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import (
+    BATCH_ERROR_METRIC_PREFIX,
+    get_batch_failure_metrics,
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
@@ -203,6 +205,9 @@ class TerminalBenchAgentOutput:
     loss_mask: List[int]
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
+    # Verifier outcome before optimization-specific reward shaping. This is the
+    # stable success signal for pass@k; failed/invalidated trajectories keep zero.
+    unshaped_reward: float = 0.0
     summarization_count: Optional[int] = None
     rollout_logprobs: Optional[List[float]] = None
     # MoE router-replay (Stage 1 capture rail): per-token [L, K] expert-selection
@@ -227,6 +232,23 @@ class TerminalBenchAgentOutput:
     # True when the truncation penalty was applied (stop_reason=="length" +
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
+
+
+def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
+    """Replace an invalidated trajectory with an aligned zero-reward stub."""
+    output.response_ids = [0]
+    output.stop_reason = "error"
+    output.loss_mask = [0]
+    output.prompt_ids = [0]
+    output.reward = 0
+    output.unshaped_reward = 0
+    output.rollout_logprobs = None
+    output.rollout_routed_experts = None
+    output.token_level_shaping = None
+    output.response_span_tags = None
+    output.reward_components = None
+    output.alignment_stats = None
+    output.truncation_penalized = False
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -813,10 +835,13 @@ class TerminalBenchGenerator(GeneratorInterface):
             "loss_masks": [[0] for _ in range(num_trials)],
             "stop_reasons": ["error" for _ in range(num_trials)],
             "rollout_metrics": {
-                "generate/num_failed_instances": num_trials,
-                "generate/num_failed_trajectories": num_trials,
-                "generate/num_masked_trajectories": num_trials,
-                f"generate/exception_{exception_type}": num_trials,
+                **get_batch_failure_metrics(
+                    num_trials,
+                    num_failed_trajectories=num_trials,
+                    num_failed_instances=num_trials,
+                    num_masked_trajectories=num_trials,
+                ),
+                f"{BATCH_ERROR_METRIC_PREFIX}{exception_type}": num_trials,
             },
             "rollout_logprobs": None,
             "exclude_from_baseline": [True for _ in range(num_trials)],  # Infrastructure failure
@@ -1033,25 +1058,14 @@ class TerminalBenchGenerator(GeneratorInterface):
             for output in all_outputs:
                 if output.stop_reason == "error":
                     # Error outputs already have correct exclude_from_baseline set
-                    output.response_ids = [0]
-                    output.loss_mask = [0]
-                    output.prompt_ids = [0]
-                    output.reward = 0
-                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
-                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
+                    _clear_failed_trajectory(output)
                 else:
                     successful_outputs.append(output)
         else:
             # Legacy mode: if any trajectory fails, zero entire group
             for output in all_outputs:
                 if output.trajectory_id.instance_id in failed_instance_ids:
-                    output.response_ids = [0]
-                    output.stop_reason = "error"
-                    output.loss_mask = [0]
-                    output.prompt_ids = [0]
-                    output.reward = 0
-                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
-                    output.rollout_routed_experts = None  # Clear routed_experts to match response_ids length
+                    _clear_failed_trajectory(output)
                     output.exclude_from_baseline = False  # Legacy: include in baseline
                 else:
                     successful_outputs.append(output)
@@ -1090,9 +1104,14 @@ class TerminalBenchGenerator(GeneratorInterface):
                 rollout_metrics["generate/out_tok_p90_p25_ratio"] = p90 / p25 if p25 > 0 else 0.0
         else:
             rollout_metrics = {}
-        rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
-        rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
-        rollout_metrics["generate/num_masked_trajectories"] = num_masked_trajectories
+        rollout_metrics.update(
+            get_batch_failure_metrics(
+                num_trials,
+                num_failed_trajectories=num_failed_trajectories,
+                num_failed_instances=len(failed_instance_ids),
+                num_masked_trajectories=num_masked_trajectories,
+            )
+        )
 
         # TIS logprob-alignment metrics (aggregated across all trajectories with
         # logprobs). These make an LCS fallback or alignment failure ALWAYS visible
@@ -1139,7 +1158,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Pre-populate with zeros so every configured exception appears as a
         # consistent time-series on dashboards, then overlay actual counts.
         for exc_type in self._tracked_exceptions:
-            rollout_metrics[f"generate/errors/{exc_type}"] = 0
+            rollout_metrics[f"{BATCH_ERROR_METRIC_PREFIX}{exc_type}"] = 0
 
         exception_counts: Dict[str, int] = {}
         for output in all_outputs:
@@ -1148,9 +1167,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         if exception_counts:
             logger.info(f"Exception breakdown: {exception_counts}")
             for exc_type, count in exception_counts.items():
-                rollout_metrics[f"generate/errors/{exc_type}"] = count
+                rollout_metrics[f"{BATCH_ERROR_METRIC_PREFIX}{exc_type}"] = count
 
-        logger.info(
+        log_fn = logger.warning if num_failed_trajectories else logger.info
+        log_fn(
             f"Batch generation complete: {num_trials - num_failed_trajectories}/{num_trials} successful, "
             f"{len(failed_instance_ids)} failed instances, "
             f"{num_masked_trajectories} masked (excluded from baseline)"
@@ -1297,6 +1317,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
             "response_ids": [output.response_ids for output in all_outputs],
             "rewards": [output.reward for output in all_outputs],
+            "unshaped_rewards": [output.unshaped_reward for output in all_outputs],
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
@@ -2018,6 +2039,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
+            unshaped_reward=original_reward,
             rollout_logprobs=rollout_logprobs,
             rollout_routed_experts=rollout_routed_experts,
             summarization_count=summarization_count,

@@ -32,19 +32,19 @@ lockfiles and virtualenvs.
 
 ## Install and test
 
-Run launcher and trainer commands from the repository root. The base install is CPU-only; select an image-build
-extra only when resolving a GPU training environment.
+Run launcher and trainer commands from the repository root. The base install is CPU-only; select a GPU runtime
+profile only when resolving a training environment.
 
 ```bash
 # Root launcher + skyrl-train CPU tests (what PR CI runs)
 uv sync --frozen --group dev --extra cpu --extra telemetry
 uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
 
-# FSDP2/vLLM image closure (GPU tests need an 8-GPU node; not run in PR CI)
+# FSDP2/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
 uv sync --frozen --extra fsdp --extra vllm --group dev
 uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not (integrations or megatron)"
 
-# Megatron image closure (select it together with the common training closure)
+# Megatron runtime closure (select it together with the common training closure)
 uv sync --frozen --extra vllm --extra megatron --group dev
 
 # skyrl-gym
@@ -68,8 +68,9 @@ NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 `cpu` and `cuda` are mutually exclusive PyTorch wheel profiles because Python extras cannot replace a base
 dependency. GPU-only component extras such as `vllm`, `megatron`, and `deepspeed` imply `cuda`, so callers name
 the component rather than its hardware consequence. `fsdp` adds TorchTitan for the expert-parallel FSDP path.
-Native vLLM, FlashAttention, TransformerEngine, Mamba, and CUDA artifacts remain Docker image construction
-concerns; the extras describe their Python closure.
+The Iris launcher installs the selected GPU profile from `uv.lock` in the standard task image. Native
+artifacts must be available from the configured wheel sources for every supported architecture; do not
+hide missing wheels in a custom runtime image.
 
 ## Lint
 

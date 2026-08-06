@@ -62,7 +62,11 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.models.grug_moe import is_grug_router_bias
-from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs, ensure_token_ids_in_sse_chunk
+from skyrl_train.inference_engines.vllm.utils import (
+    pop_openai_kwargs,
+    ensure_token_ids_in_sse_chunk,
+    PrefixCacheHitRateAccumulator,
+)
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
 from packaging import version
@@ -698,9 +702,9 @@ class WorkerWrap:
           * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
           * ``model.layers.{i}.mlp.gate.weight`` (router)       -> ReplicatedLinear (full copy every rank)
           * ``model.layers.{i}.self_attn.o_proj.weight``        -> RowParallelLinear (TP input-sharded)
-          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> FusedMoE w13_weight[local_e, :I]  (EP expert-sharded)
-          * ``...experts.{j}.up_proj.weight``                   -> FusedMoE w13_weight[local_e, I:]
-          * ``...experts.{j}.down_proj.weight``                 -> FusedMoE w2_weight[local_e]
+          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> RoutedExperts w13_weight[local_e, :I]
+          * ``...experts.{j}.up_proj.weight``                   -> RoutedExperts w13_weight[local_e, I:]
+          * ``...experts.{j}.down_proj.weight``                 -> RoutedExperts w2_weight[local_e]
 
         Args:
             hf_names: list of HF parameter names to read back.
@@ -757,11 +761,11 @@ class WorkerWrap:
                 m = expert_re.match(name)
                 if m is not None:
                     prefix, gj, proj = m.group(1), int(m.group(2)), m.group(3)
-                    # vLLM FusedMoE stores w13_weight [n_local_experts, 2*I, H] and
+                    # vLLM RoutedExperts stores w13_weight [n_local_experts, 2*I, H] and
                     # w2_weight [n_local_experts, H, I]. Local experts are a contiguous
                     # EP slice: global expert gj lives on ep_rank == gj // n_local.
-                    w13 = all_params.get(f"{prefix}.experts.w13_weight")
-                    w2 = all_params.get(f"{prefix}.experts.w2_weight")
+                    w13 = all_params.get(f"{prefix}.experts.routed_experts.w13_weight")
+                    w2 = all_params.get(f"{prefix}.experts.routed_experts.w2_weight")
                     if w13 is None or w2 is None:
                         # Fallback: scan for any experts.*weight tensor under this prefix.
                         cand = {
@@ -845,8 +849,8 @@ class WorkerWrap:
 
         out = {"__ranks__": {"tp_rank": tp_rank, "tp_size": tp_size, "ep_rank": ep_rank, "ep_size": ep_size}}
         prefix = f"model.layers.{layer_idx}.mlp"
-        w13 = all_params.get(f"{prefix}.experts.w13_weight")
-        w2 = all_params.get(f"{prefix}.experts.w2_weight")
+        w13 = all_params.get(f"{prefix}.experts.routed_experts.w13_weight")
+        w2 = all_params.get(f"{prefix}.experts.routed_experts.w2_weight")
         if w13 is None or w2 is None:
             cand = [k for k in all_params if k.startswith(f"{prefix}.experts.") and k.endswith("weight")]
             out["error"] = f"no w13/w2 under {prefix}; candidates={cand}"
@@ -858,7 +862,8 @@ class WorkerWrap:
         global_num = None
         placement = None
         for mod_name, mod in model.named_modules():
-            if mod_name == f"{prefix}.experts" or mod_name.endswith(f"layers.{layer_idx}.mlp.experts"):
+            routed_experts_name = f"{prefix}.experts.routed_experts"
+            if mod_name == routed_experts_name or mod_name.endswith(routed_experts_name):
                 emap = getattr(mod, "_expert_map", None)
                 if emap is None:
                     emap = getattr(mod, "expert_map", None)
@@ -1221,20 +1226,13 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
             current_running = 0
             current_waiting = 0
             current_cache_usage = 0.0
-            current_prefix_hit = 0.0
+            prefix_cache_stats = None
 
             if scheduler_stats is not None:
                 current_running = getattr(scheduler_stats, "num_running_reqs", 0)
                 current_waiting = getattr(scheduler_stats, "num_waiting_reqs", 0)
                 current_cache_usage = getattr(scheduler_stats, "kv_cache_usage", 0.0) * 100.0  # Convert to percentage
-
-                # Extract prefix cache hit rate from prefix_cache_stats
-                prefix_cache_stats = getattr(scheduler_stats, "prefix_cache_stats", None)
-                if prefix_cache_stats is not None:
-                    hits = getattr(prefix_cache_stats, "hits", 0)
-                    misses = getattr(prefix_cache_stats, "misses", 0)
-                    total = hits + misses
-                    current_prefix_hit = (hits / total * 100.0) if total > 0 else 0.0
+                prefix_cache_stats = scheduler_stats.prefix_cache_stats
 
             # Extract iteration_stats (second positional arg) for per-request latency data
             iteration_stats = None
@@ -1284,14 +1282,14 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
 
                 if existing is None:
                     # Initialize with sample lists for median calculation
-                    V1LoggingStatLoggerFixed._stats_registry[self._engine_id] = {
+                    existing = {
                         # Sample lists for computing median (only active samples)
                         "_samples_prompt_tp": [current_prompt_tp] if is_active else [],
                         "_samples_gen_tp": [current_gen_tp] if is_active else [],
                         "_samples_running": [current_running] if is_active else [],
                         "_samples_waiting": [current_waiting] if is_active else [],
                         "_samples_cache": [current_cache_usage] if is_active else [],
-                        "_samples_prefix_hit": [current_prefix_hit] if is_active else [],
+                        "_prefix_hit": PrefixCacheHitRateAccumulator(),
                         # Per-request latency samples (accumulated from finished requests)
                         "_samples_prefill_time": list(finished_prefill_times),
                         "_samples_decode_time": list(finished_decode_times),
@@ -1305,12 +1303,12 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         "_peak_running": current_running,
                         "_peak_waiting": current_waiting,
                         "_peak_cache": current_cache_usage,
-                        "_peak_prefix_hit": current_prefix_hit,
                         # Counters
                         "_num_samples": 1,
                         "_num_active_samples": 1 if is_active else 0,
                         "timestamp": time.time(),
                     }
+                    V1LoggingStatLoggerFixed._stats_registry[self._engine_id] = existing
                 else:
                     # Update peak values
                     existing["_peak_prompt_tp"] = max(existing["_peak_prompt_tp"], current_prompt_tp)
@@ -1318,7 +1316,6 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     existing["_peak_running"] = max(existing["_peak_running"], current_running)
                     existing["_peak_waiting"] = max(existing["_peak_waiting"], current_waiting)
                     existing["_peak_cache"] = max(existing["_peak_cache"], current_cache_usage)
-                    existing["_peak_prefix_hit"] = max(existing["_peak_prefix_hit"], current_prefix_hit)
 
                     # Accumulate per-request latency samples
                     existing["_samples_prefill_time"].extend(finished_prefill_times)
@@ -1335,11 +1332,12 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         existing["_samples_running"].append(current_running)
                         existing["_samples_waiting"].append(current_waiting)
                         existing["_samples_cache"].append(current_cache_usage)
-                        existing["_samples_prefix_hit"].append(current_prefix_hit)
                         existing["_num_active_samples"] += 1
 
                     existing["_num_samples"] += 1
                     existing["timestamp"] = time.time()
+
+                existing["_prefix_hit"].observe(prefix_cache_stats, is_active=is_active)
 
         now = time.monotonic()
         if now - self.last_log_time > self.log_interval:
@@ -1382,7 +1380,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
             median_running = cls._compute_median(stats["_samples_running"])
             median_waiting = cls._compute_median(stats["_samples_waiting"])
             median_cache = cls._compute_median(stats["_samples_cache"])
-            median_prefix_hit = cls._compute_median(stats["_samples_prefix_hit"])
+            median_prefix_hit = cls._compute_median(stats["_prefix_hit"].samples)
 
             # Compute means from sample lists
             num_active = stats["_num_active_samples"]
@@ -1417,7 +1415,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 "peak_running_reqs": stats["_peak_running"],
                 "peak_waiting_reqs": stats["_peak_waiting"],
                 "peak_gpu_cache_usage_perc": stats["_peak_cache"],
-                "peak_prefix_cache_hit_rate": stats["_peak_prefix_hit"],
+                "peak_prefix_cache_hit_rate": stats["_prefix_hit"].peak,
                 # Median values
                 "median_prompt_throughput": median_prompt_tp,
                 "median_generation_throughput": median_gen_tp,
@@ -1452,7 +1450,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 "num_running_reqs": stats["_peak_running"],
                 "num_waiting_reqs": stats["_peak_waiting"],
                 "gpu_cache_usage_perc": stats["_peak_cache"],
-                "prefix_cache_hit_rate": stats["_peak_prefix_hit"],
+                "prefix_cache_hit_rate": stats["_prefix_hit"].peak,
                 # Metadata
                 "timestamp": stats["timestamp"],
                 "num_samples": stats["_num_samples"],

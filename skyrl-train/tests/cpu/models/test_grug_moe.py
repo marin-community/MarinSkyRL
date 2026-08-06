@@ -5,11 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.models.grug_moe import GrugMoeAttention, GrugMoeConfig, GrugMoeForCausalLM, GrugMoeRouter
+from skyrl_train.models.grug_moe import (
+    GrugMoeAttention,
+    GrugMoeConfig,
+    GrugMoeForCausalLM,
+    GrugMoeRouter,
+    GrugMoeSparseMoeBlock,
+    enable_grug_grouped_mm,
+)
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasAccumulator,
     GrugQueryBiasLayerObservation,
@@ -83,6 +91,75 @@ def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
         actual = reloaded(tokens).logits
         expected = model(tokens).logits
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_enabling_grouped_mm_preserves_checkpoint_keys():
+    torch.manual_seed(9)
+    model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1))
+    keys_before = tuple(model.state_dict())
+
+    assert enable_grug_grouped_mm(model) == 1
+
+    assert tuple(model.state_dict()) == keys_before
+    assert "model.layers.0.mlp.experts.gate_proj.weight" in keys_before
+    assert "model.layers.0.mlp.experts.up_proj.weight" in keys_before
+    assert "model.layers.0.mlp.experts.down_proj.weight" in keys_before
+
+
+def test_bfloat16_sparse_moe_forward_uses_float32_accumulation():
+    config = tiny_config(num_local_experts=5, num_experts_per_tok=4, num_hidden_layers=1)
+
+    def new_block():
+        block = GrugMoeSparseMoeBlock(config).to(dtype=torch.bfloat16)
+        with torch.no_grad():
+            block.router.weight.zero_()
+            block.router.weight[:5, 0] = torch.tensor([8.0, 4.0, 2.0, 1.0, 0.0], dtype=torch.bfloat16)
+            block.experts.gate_proj.weight.zero_()
+            block.experts.up_proj.weight.zero_()
+            block.experts.down_proj.weight.zero_()
+            for expert in range(4):
+                block.experts.gate_proj.weight[expert, 0, 0] = 16.0
+                block.experts.up_proj.weight[expert, 0, 0] = 1.0
+            block.experts.down_proj.weight[0, 0, 0] = 1.0 / 16.0
+            block.experts.down_proj.weight[1:, 0, 0] = 1.0 / 2048.0
+        return block
+
+    def run(*, reference: bool):
+        block = new_block()
+        hidden = torch.zeros((16, config.hidden_size), dtype=torch.bfloat16)
+        hidden[:, 0] = 1.0
+        hidden.requires_grad_(True)
+        if reference:
+            _, selected_experts, combine_weights = block.router(hidden)
+            output = torch.zeros_like(hidden, dtype=torch.float32)
+            for slot in range(selected_experts.shape[-1]):
+                expert = int(selected_experts[0, slot])
+                gate = F.linear(hidden, block.experts.gate_proj.weight[expert])
+                up = F.linear(hidden, block.experts.up_proj.weight[expert])
+                expert_output = F.linear(F.silu(gate) * up, block.experts.down_proj.weight[expert])
+                contribution = expert_output * combine_weights[:, slot].to(expert_output.dtype).unsqueeze(-1)
+                output = output + contribution.float()
+            output = output.to(hidden.dtype)
+        else:
+            output = block(hidden)
+        loss = output.float().square().mean()
+        gradients = torch.autograd.grad(
+            loss,
+            (
+                hidden,
+                block.router.weight,
+                block.experts.gate_proj.weight,
+                block.experts.up_proj.weight,
+                block.experts.down_proj.weight,
+            ),
+        )
+        return output, gradients
+
+    reference_output, reference_gradients = run(reference=True)
+    output, gradients = run(reference=False)
+    torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    for gradient, reference_gradient in zip(gradients, reference_gradients):
+        torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
 
 
 def test_gradient_checkpointing_preserves_logits_and_gradients():

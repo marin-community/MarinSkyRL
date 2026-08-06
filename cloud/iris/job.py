@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import importlib.metadata
 import json
 import posixpath
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
 
 from iris.client import JobFailedError
 
-from cloud.iris.gpu_rl_images import CLUSTER_ARCHITECTURES, GPU_RL_IMAGES, GpuRlImage
 from cloud.iris.artifacts import (
     CHECKPOINT_MARKER_FILENAME,
     fs_and_path,
@@ -25,16 +21,17 @@ from cloud.iris.artifacts import (
     relative_object_key,
     validate_hf_export,
 )
+from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
     AttemptState,
-    RuntimeIdentity,
     SkyRLJobSpec,
     SkyRLLaunchRequest,
     SkyRLModel,
     SkyRLTerminalResponse,
     job_spec,
 )
+from cloud.iris.request_builder import build_job_spec
 
 
 class JobBackend(Protocol):
@@ -43,63 +40,6 @@ class JobBackend(Protocol):
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
 
     def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome: ...
-
-
-def _registered_image(runtime: RuntimeIdentity, cluster: str) -> GpuRlImage:
-    launcher_commit = _installed_launcher_commit()
-    if launcher_commit != runtime.launcher_commit:
-        raise ValueError(
-            f"Installed launcher commit {launcher_commit} does not match requested {runtime.launcher_commit}"
-        )
-    matches = [image for image in GPU_RL_IMAGES.values() if image.reference == runtime.task_image]
-    if len(matches) != 1:
-        raise ValueError(f"Task image is not registered by this launcher: {runtime.task_image}")
-    image = matches[0]
-    if image.source_commit != runtime.trainer_commit:
-        raise ValueError(
-            f"Task image embeds trainer commit {image.source_commit}, not requested {runtime.trainer_commit}"
-        )
-    architecture = CLUSTER_ARCHITECTURES.get(cluster)
-    if architecture is None:
-        raise ValueError(f"No GPU architecture is registered for cluster {cluster!r}")
-    if image.architecture != architecture:
-        raise ValueError(
-            f"Task image architecture {image.architecture} is incompatible with cluster {cluster} ({architecture})"
-        )
-    return image
-
-
-def _installed_launcher_commit() -> str:
-    try:
-        direct_url = importlib.metadata.distribution("marinskyrl").read_text("direct_url.json")
-    except importlib.metadata.PackageNotFoundError:
-        direct_url = None
-    if direct_url:
-        direct_url_value = json.loads(direct_url)
-        commit = direct_url_value.get("vcs_info", {}).get("commit_id")
-        if commit:
-            return str(commit)
-        parsed_url = urlparse(direct_url_value.get("url", ""))
-        if parsed_url.scheme == "file":
-            checkout = Path(unquote(parsed_url.path))
-            if (checkout / ".git").exists() and (checkout / "pyproject.toml").exists():
-                return subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=checkout,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
-    repository_root = Path(__file__).resolve().parents[2]
-    if not (repository_root / ".git").exists() or not (repository_root / "pyproject.toml").exists():
-        raise RuntimeError("Installed marinskyrl wheel has no VCS commit identity in direct_url.json")
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
@@ -182,7 +122,7 @@ def execute_job(
 ) -> SkyRLTerminalResponse:
     """Validate, submit, monitor, and commit one MarinSkyRL artifact attempt."""
     request = spec.request
-    _registered_image(request.runtime, spec.execution.target_cluster or spec.execution.cluster)
+    runtime_bundle_inputs(request.runtime.commit)
     if _path_exists(request.output.terminal_manifest_uri):
         raise ValueError(f"Terminal manifest is immutable and already exists: {request.output.terminal_manifest_uri}")
 
@@ -242,14 +182,89 @@ def create_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="component", required=True)
     iris = subcommands.add_parser("iris")
     iris_commands = iris.add_subparsers(dest="action", required=True)
+
     launch_parser = iris_commands.add_parser("launch")
     launch_parser.add_argument("--request", required=True)
     launch_parser.add_argument("--dry-run", action="store_true")
+
+    build_parser = iris_commands.add_parser("build-request", help="Build a SkyRLJobSpec JSON from an RL YAML config.")
+    build_parser.add_argument("--config", required=True, help="Path to the RL YAML config.")
+    build_parser.add_argument("--run-id", required=True, help="Experiment run identifier.")
+    build_parser.add_argument("--model-uri", required=True)
+    build_parser.add_argument("--model-identity", required=True)
+    build_parser.add_argument("--model-local-path", required=True)
+    build_parser.add_argument("--tokenizer-uri", required=True)
+    build_parser.add_argument("--tokenizer-revision", required=True)
+    build_parser.add_argument(
+        "--train-data",
+        required=True,
+        help='JSON list of data locators, e.g. [{"uri":"s3://...","identity":"...","local_path":"...","relative_path":"train.parquet"}]',
+    )
+    build_parser.add_argument("--validation-data", default="[]", help="JSON list of validation data locators.")
+    build_parser.add_argument("--cluster", required=True)
+    build_parser.add_argument("--cluster-config", required=True)
+    build_parser.add_argument("--cpu", type=float, required=True)
+    build_parser.add_argument("--memory", required=True)
+    build_parser.add_argument("--disk", required=True)
+    build_parser.add_argument("--gpu-variant", default=None)
+    build_parser.add_argument("--target-cluster", default=None)
+    build_parser.add_argument("--parent-cluster-config", default=None)
+    build_parser.add_argument("--wandb-entity", default=None)
+    build_parser.add_argument("--priority", default=None)
+    build_parser.add_argument("--max-retries", type=int, default=None)
+    build_parser.add_argument("--seed", type=int, default=None)
+    build_parser.add_argument("--run-prefix", required=True, help="Canonical output root (e.g. s3://bucket/run-id).")
+    build_parser.add_argument("--overrides", default=None, help="JSON list of Hydra ++ override strings.")
+    build_parser.add_argument("--attempt-id", default=None)
+    build_parser.add_argument("--out", default=None, help="Write JSON to this path; stdout if omitted.")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
+
+    if args.action == "build-request":
+        optional_fields = (
+            "gpu_variant",
+            "target_cluster",
+            "parent_cluster_config",
+            "wandb_entity",
+            "priority",
+            "max_retries",
+            "seed",
+            "attempt_id",
+        )
+        build_kwargs = {k: getattr(args, k) for k in optional_fields if getattr(args, k) is not None}
+        if args.overrides is not None:
+            build_kwargs["overrides"] = json.loads(args.overrides)
+
+        spec = build_job_spec(
+            config_path=Path(args.config),
+            run_id=args.run_id,
+            model_uri=args.model_uri,
+            model_identity=args.model_identity,
+            model_local_path=args.model_local_path,
+            tokenizer_uri=args.tokenizer_uri,
+            tokenizer_revision=args.tokenizer_revision,
+            train_data=json.loads(args.train_data),
+            validation_data=json.loads(args.validation_data),
+            cluster=args.cluster,
+            cluster_config=args.cluster_config,
+            cpu=args.cpu,
+            memory=args.memory,
+            disk=args.disk,
+            run_prefix=args.run_prefix,
+            **build_kwargs,
+        )
+        payload = json.dumps(asdict(spec), indent=2, sort_keys=True)
+        if args.out:
+            Path(args.out).write_text(payload + "\n")
+            print(f"[build-request] wrote {args.out} for run_id={args.run_id}", file=sys.stderr)
+        else:
+            sys.stdout.write(payload + "\n")
+        return 0
+
     with open(args.request) as source:
         spec = job_spec(json.load(source))
     with contextlib.redirect_stdout(sys.stderr):

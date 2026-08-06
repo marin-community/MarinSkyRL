@@ -17,7 +17,9 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.env_vars import EnvVarManager, EnvVarScope
 
 from .constants import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
@@ -230,24 +232,26 @@ class Timer:
         self.update_dict = update_dict
 
     def __enter__(self):
-        self.start_time = time.time()
+        self.start_time = time.monotonic()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
+        duration = time.monotonic() - self.start_time
+        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
     async def __aenter__(self):
-        self.start_time = time.time()
+        self.start_time = time.monotonic()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
+        duration = time.monotonic() - self.start_time
+        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
 
 def get_system_memory_metrics() -> dict:
@@ -501,6 +505,11 @@ def validate_cfg(cfg: DictConfig):
     assert cfg.trainer.sequence_parallel_backend == "ulysses", (
         f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
     )
+
+    try:
+        resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+    except ValueError as error:
+        raise AssertionError(str(error)) from error
 
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":
@@ -1028,7 +1037,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     Returns:
         Dict[str, str]: Environment variables to be used in Ray runtime environment
     """
-    # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
     # Force CPython stock asyncio (epoll SelectorEventLoop), NOT uvloop, in EVERY
@@ -1085,6 +1093,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # boot in case import ordering races the runtime-env injection.
     env_vars["UV_USE_IO_URING"] = "0"
 
+    env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
+    # Resolve the actual collective deadline last so the debug preset's heartbeat
+    # cannot exceed a shorter explicitly configured process-group timeout.
     env_vars.update(worker_nccl_environment())
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445

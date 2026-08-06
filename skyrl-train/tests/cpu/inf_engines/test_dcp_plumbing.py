@@ -1,4 +1,4 @@
-"""Stage-1 plumbing/wiring test for vLLM Decode Context Parallel (DCP).
+"""Plumbing tests for vLLM engine configuration.
 
 Asserts the engine-launch wiring, with NO GPU and NO real Ray actor / vLLM init:
 
@@ -33,8 +33,8 @@ DCP_KEY = "inference_engine_decode_context_parallel_size"
 
 
 # ===================================================================== seam / G5
-def test_from_config_forwards_dcp_value(monkeypatch):
-    """The config-assembly seam reads the DCP key and forwards it as a kwarg.
+def test_from_config_forwards_vllm_engine_options(monkeypatch):
+    """The config-assembly seam forwards typed vLLM engine options.
 
     Covers both entrypoints (BasePPOExp + TerminalBenchExp) since they share this seam.
     """
@@ -61,14 +61,17 @@ def test_from_config_forwards_dcp_value(monkeypatch):
     cfg = get_default_config()
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
     assert captured["decode_context_parallel_size"] == 1
+    assert captured["vllm_attention_backend"] is None
 
     # dcp=2 with admissible TP: forwarded as 2.
     captured.clear()
     cfg2 = get_default_config()
     cfg2.generator.inference_engine_tensor_parallel_size = 8
     cfg2.generator[DCP_KEY] = 2
+    cfg2.generator.vllm_attention_backend = "FLASH_ATTN"
     main_base.create_ray_wrapped_inference_engines_from_config(cfg2, colocate_pg=None, tokenizer=None)
     assert captured["decode_context_parallel_size"] == 2
+    assert captured["vllm_attention_backend"] == "FLASH_ATTN"
 
 
 # ===================================================== remote forwarding G1 + G4
@@ -103,7 +106,7 @@ class _RemoteCapture:
         return _Actor
 
 
-def _run_create(monkeypatch, dcp: int):
+def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
     """Drive the real create_ray_wrapped_inference_engines with Ray/PG/actor mocked.
 
     Uses tp=1, pp=1 (uni backend) so no real GPU/PG bundle reservation is needed; the
@@ -172,6 +175,7 @@ def _run_create(monkeypatch, dcp: int):
         inference_engine_enable_sleep=False,
         async_engine=False,
         backend="vllm",
+        vllm_attention_backend=attention_backend,
     )
     return capture
 
@@ -215,3 +219,13 @@ def test_dcp_does_not_change_bundle_geometry(monkeypatch):
         }
 
     assert geometry(cap1) == geometry(cap2), "DCP must not change GPU/placement geometry (G4)"
+
+
+def test_attention_backend_absent_by_default(monkeypatch):
+    capture = _run_create(monkeypatch, dcp=1)
+    assert "attention_backend" not in capture.remote_calls[0]
+
+
+def test_attention_backend_forwarded_to_vllm_actor(monkeypatch):
+    capture = _run_create(monkeypatch, dcp=1, attention_backend="FLASH_ATTN")
+    assert capture.remote_calls[0]["attention_backend"] == "FLASH_ATTN"

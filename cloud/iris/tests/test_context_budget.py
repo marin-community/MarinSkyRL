@@ -44,6 +44,18 @@ _CONFIGS = {
     "tasktrove_dq_sweep_30b_terminus2.yaml": (32768, 4096, 30),
 }
 
+_FLASH_ATTN_CONFIGS = {
+    "128GPU_80B_A3B_next_cp1.yaml",
+    "32GPU_qwen3_coder_30b_a3b_ep4.yaml",
+    "32GPU_qwen3_coder_30b_a3b_ep4_nooffload.yaml",
+    "64GPU_qwen3_6_35b_a3b.yaml",
+    "tasktrove_dq_sweep_30b.yaml",
+    "tasktrove_dq_sweep_30b_cp6.yaml",
+    "tasktrove_dq_sweep_30b_gb200.yaml",
+    "tasktrove_dq_sweep_30b_ncclnet.yaml",
+    "tasktrove_dq_sweep_30b_terminus2.yaml",
+}
+
 
 def test_all_iris_configs_materialize_one_coherent_context_budget():
     configs_dir = _REPO_ROOT / "cloud/iris/configs"
@@ -66,6 +78,15 @@ def test_all_iris_configs_materialize_one_coherent_context_budget():
                 "max_input_tokens": parsed.context_budget.max_input_tokens,
                 "max_output_tokens": output,
             }
+
+
+def test_flash_attention_configs_use_the_current_vllm_config_field():
+    configs_dir = _REPO_ROOT / "cloud/iris/configs"
+
+    for name in _FLASH_ATTN_CONFIGS:
+        parsed = parse_rl_config(str(configs_dir / name))
+        assert parsed.generator["vllm_attention_backend"] == "FLASH_ATTN"
+        assert "VLLM_ATTENTION_BACKEND" not in parsed.raw.get("extra_env", {})
 
 
 def test_context_budget_derives_all_hydra_length_arguments():

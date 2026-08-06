@@ -404,6 +404,8 @@ def handle_replace_sampling(
             generator_output["rewards"][bad_idx] = (
                 replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
             )
+            if generator_output.get("unshaped_rewards") is not None:
+                generator_output["unshaped_rewards"][bad_idx] = generator_output["unshaped_rewards"][replacement_idx]
             generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
             if generator_output["stop_reasons"]:
                 generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
@@ -542,6 +544,11 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
         "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
         "response_ids": [output["response_ids"][i] for i in kept_indices],
         "rewards": [output["rewards"][i] for i in kept_indices],
+        "unshaped_rewards": (
+            [output["unshaped_rewards"][i] for i in kept_indices]
+            if output.get("unshaped_rewards") is not None
+            else None
+        ),
         "loss_masks": [output["loss_masks"][i] for i in kept_indices],
         "stop_reasons": None,
         "rollout_metrics": output.get("rollout_metrics"),

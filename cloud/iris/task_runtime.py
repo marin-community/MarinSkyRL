@@ -36,16 +36,22 @@ import tempfile
 import threading
 import time
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, validate_hf_export
+from cloud.iris.env_vars import (
+    DEBUG_ARTIFACT_DIR_ENV,
+    FR_DUMP_TEMP_FILE_ENV,
+    NCCL_DEBUG_INFO_TEMP_FILE_ENV,
+    ensure_debug_artifact_directories,
+)
 from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
-    LocalRaySpillTarget,
-    R2RaySpillTarget,
     RaySpillBackend,
     RaySpillTarget,
+    resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
+from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
@@ -665,7 +671,7 @@ def ensure_fr_dump_dir() -> None:
     # TORCH_FR_DUMP_TEMP_FILE is the newer alias torch checks first;
     # TORCH_NCCL_DEBUG_INFO_TEMP_FILE is the canonical name. The value is a per-rank
     # FILENAME PREFIX (torch appends the global rank), so the dir to create is its dirname.
-    dump_prefix = os.environ.get("TORCH_FR_DUMP_TEMP_FILE") or os.environ.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE")
+    dump_prefix = os.environ.get(FR_DUMP_TEMP_FILE_ENV) or os.environ.get(NCCL_DEBUG_INFO_TEMP_FILE_ENV)
     if not dump_prefix:
         _log("FR dump dir: no TORCH_(FR_DUMP|NCCL_DEBUG_INFO)_TEMP_FILE set; nothing to create.")
         return
@@ -884,37 +890,6 @@ def _ray_port_flags() -> list[str]:
     ]
 
 
-# --- Ray object-store spilling ---------------------------------------------------
-# Training-step arguments are reconstructible and latency-sensitive. Local scratch
-# avoids durable cross-region traffic; R2 remains an explicit emergency opt-in.
-#
-# R2's object_spilling_config is set on the head and propagates through GCS; Ray
-# rejects that system config on workers. Local spill directories are CLI flags
-# passed independently to every node.
-# Spill prefix is derived per-job from --rendezvous-dir so runs and task-retries
-# within a run share one prefix without colliding across jobs.
-def _ray_spill_target(
-    rendezvous_dir: str | None,
-    backend: RaySpillBackend,
-    local_spill_dir: str,
-) -> RaySpillTarget:
-    """Resolve one valid local or remote Ray spill target."""
-    if backend is RaySpillBackend.LOCAL:
-        return LocalRaySpillTarget(location=validate_ray_spill_dir(local_spill_dir))
-    if local_spill_dir != DEFAULT_RAY_SPILL_DIR:
-        raise ValueError("--ray-spill-dir only applies to --ray-spill-backend=local")
-    if not rendezvous_dir or not rendezvous_dir.startswith("s3://"):
-        raise ValueError("--ray-spill-backend=r2 requires an s3:// rendezvous directory")
-    # Ray's smart_open spill backend imports boto3 directly.
-    try:
-        import boto3  # noqa: F401
-    except ImportError as error:
-        raise RuntimeError(
-            "--ray-spill-backend=r2 requires boto3; rebuild the GPU-RL image with boto3 or use local spilling"
-        ) from error
-    return R2RaySpillTarget(location=f"{rendezvous_dir.rstrip('/')}/ray_spill")
-
-
 # --- Ray cgroup-aware memory ----------------------------------------------------
 # In a memory-cgroup-limited pod, Ray can read the HOST's physical RAM (~2 TB via
 # /proc/meminfo) instead of the --memory cgroup limit, and size its plasma object
@@ -990,6 +965,7 @@ def ray_start_head(
     ray_port: int,
     spill_target: RaySpillTarget,
 ) -> None:
+    spill_target.prepare_node()
     cmd = [
         _ray_bin(),
         "start",
@@ -1014,6 +990,7 @@ def ray_start_worker(
     node_ip: str,
     spill_target: RaySpillTarget,
 ) -> None:
+    spill_target.prepare_node()
     cmd = [
         _ray_bin(),
         "start",
@@ -1140,6 +1117,56 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
+DEBUG_SYNC_MAX_FILE_BYTES = 512 * 1024 * 1024
+DEBUG_SYNC_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def sync_debug_artifacts(rendezvous_dir: str | None, node_id: str, reason: str) -> None:
+    """Boundedly persist this node's managed debug directory beside rendezvous data."""
+    source_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
+    if not rendezvous_dir or not source_root or not os.path.isdir(source_root):
+        return
+    destination = f"{rendezvous_dir.rstrip('/')}/debug_artifacts/{node_id}"
+    try:
+        filesystem, destination_path = fs_and_path(destination)
+    except Exception as exc:  # noqa: BLE001 - teardown evidence is best-effort
+        _log(f"[debug-sync] cannot resolve {destination} ({exc}) [{reason}]")
+        return
+
+    copied: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    total_bytes = 0
+    for root, directories, files in os.walk(source_root):
+        directories.sort()
+        for filename in sorted(files):
+            local_path = os.path.join(root, filename)
+            relative_path = os.path.relpath(local_path, source_root)
+            try:
+                size = os.path.getsize(local_path)
+                if size > DEBUG_SYNC_MAX_FILE_BYTES or total_bytes + size > DEBUG_SYNC_MAX_TOTAL_BYTES:
+                    skipped.append({"path": relative_path, "bytes": size, "reason": "budget"})
+                    continue
+                filesystem.put(local_path, f"{destination_path}/{relative_path}")
+                copied.append({"path": relative_path, "bytes": size})
+                total_bytes += size
+            except Exception as exc:  # noqa: BLE001 - retain a complete sync receipt
+                skipped.append({"path": relative_path, "reason": str(exc)})
+
+    receipt = {
+        "schema_version": 1,
+        "node_id": node_id,
+        "reason": reason,
+        "source_root": source_root,
+        "copied": copied,
+        "skipped": skipped,
+        "copied_bytes": total_bytes,
+    }
+    try:
+        with filesystem.open(f"{destination_path}/sync-manifest.json", "w") as manifest:
+            json.dump(receipt, manifest, sort_keys=True)
+        _log(f"[debug-sync] uploaded {len(copied)} file(s) / {total_bytes} bytes -> {destination} [{reason}]")
+    except Exception as exc:  # noqa: BLE001 - teardown evidence is best-effort
+        _log(f"[debug-sync] manifest upload failed ({exc}) [{reason}]")
 
 
 def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str) -> None:
@@ -1197,8 +1224,10 @@ def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Ev
         if stop.wait(min(60, interval)):
             return
         sync_ray_session_logs(rendezvous_dir, node_id, "periodic")
+        sync_debug_artifacts(rendezvous_dir, node_id, "periodic")
         while not stop.wait(interval):
             sync_ray_session_logs(rendezvous_dir, node_id, "periodic")
+            sync_debug_artifacts(rendezvous_dir, node_id, "periodic")
 
     threading.Thread(target=_loop, daemon=True, name="ray-log-sync").start()
     _log(
@@ -1232,6 +1261,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         # Flush this node's Ray session logs (per-actor worker stdout/tracebacks) before
         # the pod is reaped — Ray's node-local logs are deleted with the pod.
         sync_ray_session_logs(args.rendezvous_dir, node_id, f"signal {signum} (head)")
+        sync_debug_artifacts(args.rendezvous_dir, node_id, f"signal {signum} (head)")
         if process is not None:
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -1257,7 +1287,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     ray_start_head(
         head_ip,
         ray_port,
-        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
+        resolve_ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
@@ -1307,6 +1337,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         if ray_log_sync_stop is not None:
             ray_log_sync_stop.set()
         sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        sync_debug_artifacts(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
         _set_marker(args.rendezvous_dir, DONE_FILENAME)
@@ -1338,7 +1369,7 @@ def run_worker(args: argparse.Namespace) -> int:
         head_ip,
         ray_port,
         node_ip,
-        _ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
+        resolve_ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
     wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
@@ -1356,6 +1387,7 @@ def run_worker(args: argparse.Namespace) -> int:
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (worker rank {rank})")
         # Flush this node's per-actor Ray worker logs before the pod is reaped.
         sync_ray_session_logs(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
+        sync_debug_artifacts(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
         stop.set()
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -1373,6 +1405,7 @@ def run_worker(args: argparse.Namespace) -> int:
         # Final flush of this worker node's Ray session logs before Ray teardown.
         ray_log_sync_stop.set()
         sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
+        sync_debug_artifacts(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
     return 0
 
@@ -1503,6 +1536,7 @@ def _print_env_snapshot() -> None:
 
 
 def main() -> None:
+    validate_bundled_runtime()
     args, train_argv = parse_args()
     _print_env_snapshot()
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
@@ -1517,6 +1551,9 @@ def main() -> None:
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
+    debug_artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
+    if debug_artifact_root:
+        ensure_debug_artifact_directories(debug_artifact_root)
     # Stage the task dataset on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
     # with FileNotFoundError on task.toml. See stage_train_data docstring.

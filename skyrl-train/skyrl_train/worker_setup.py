@@ -6,17 +6,43 @@ so CUDA cannot be initialized against the driver's device view first.
 """
 
 import asyncio
+import logging
 import os
 
 from skyrl_train.numa_policy import install_host_memory_policy, is_numa_affinity_enabled
+from skyrl_train.env_vars import DEBUG_MODE_ENV, write_process_manifest
+
+
+logger = logging.getLogger(__name__)
+
+
+INCOMPATIBLE_NCCL_ENVIRONMENT = (
+    "NCCL_BLOCKING_WAIT",
+    "TORCH_NCCL_BLOCKING_WAIT",
+    "TORCH_NCCL_BLOCKING_WAIT_TIMEOUT_MS",
+)
 
 
 def configure_worker_process() -> None:
     """Install process-wide prerequisites before Ray creates actor threads."""
 
+    # MarinSkyRL uses ProcessGroupNCCL's asynchronous watchdog. Blocking wait
+    # selects an incompatible wait path. The timeout-like variable is not a
+    # PyTorch setting, but removing it makes the warning below expose that
+    # invalid configuration instead of leaving a false deadline in the worker.
+    removed_nccl_settings = [
+        variable for variable in INCOMPATIBLE_NCCL_ENVIRONMENT if os.environ.pop(variable, None) is not None
+    ]
+    if removed_nccl_settings:
+        logger.warning(
+            "Ignoring incompatible NCCL worker settings before PyTorch initialization: %s",
+            ", ".join(removed_nccl_settings),
+        )
     if is_numa_affinity_enabled():
         install_host_memory_policy()
     os.environ["UV_USE_IO_URING"] = "0"
+    if os.environ.get(DEBUG_MODE_ENV) == "distributed":
+        write_process_manifest("ray-worker-bootstrap")
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
     try:

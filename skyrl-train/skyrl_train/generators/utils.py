@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
@@ -17,6 +18,11 @@ from skyrl_gym.metrics import aggregate_for_environment
 # training tensor still consumes a float, so callers replace UNALIGNED_LOGPROB
 # with 0.0 right before emitting; the metrics are computed BEFORE that step.
 UNALIGNED_LOGPROB = float("nan")
+BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
+_NUM_TRIALS_METRIC = "generate/num_trials"
+_NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
+_NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
+_NUM_MASKED_TRAJECTORIES_METRIC = "generate/num_masked_trajectories"
 
 
 def _lcs_alert_threshold() -> float:
@@ -452,44 +458,56 @@ def detect_qwen3_5_empty_think_prefix(tokenizer, generation_prompt_ids: List[int
 @torch.no_grad()
 def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
     """
-    Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+    Get the mean optimization reward and `pass_at_n` from generator output.
 
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
     calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
     unique examples.
 
-    Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
+    Rewards can be either per-trajectory or per-token. The returned mean describes
+    the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
+    so optimization-specific shaping cannot change the task-success metric.
     """
     rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    # TODO: We should make metrics customizable by the environment.
-    # Map from the example's uid to each trajectory's reward on that same example
-    uid_to_trajectory_rewards = defaultdict(list)
+    unshaped_rewards = generator_output.get("unshaped_rewards")
+    if unshaped_rewards is not None and len(unshaped_rewards) != len(rewards):
+        raise ValueError(
+            "`unshaped_rewards` must have one entry per trajectory: "
+            f"got {len(unshaped_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
+        )
+
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
-        # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
-        mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
-        # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
-        for i, cur_trajectory_rewards in enumerate(rewards):
-            # A prompt rejected before inference has no terminal token and contributes zero reward.
-            terminal_reward = cur_trajectory_rewards[-1] if cur_trajectory_rewards else 0.0
+        # For each trajectory, sum token rewards before computing the batch mean.
+        mean_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+    else:
+        mean_reward = float(np.mean(rewards))
+
+    # TODO: We should make metrics customizable by the environment.
+    # Map from the example's uid to each trajectory's unshaped outcome on that example.
+    uid_to_trajectory_rewards = defaultdict(list)
+    if unshaped_rewards is not None:
+        for i, reward in enumerate(unshaped_rewards):
+            uid_to_trajectory_rewards[uids[i]].append(reward)
+    elif isinstance(rewards[0], list):
+        # Without an explicit outcome channel, preserve the existing token-reward behavior.
+        for i, trajectory_rewards in enumerate(rewards):
+            terminal_reward = trajectory_rewards[-1] if trajectory_rewards else 0.0
             uid_to_trajectory_rewards[uids[i]].append(terminal_reward)
     else:
-        mean_raw_reward = float(np.mean(rewards))
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
     # For each example, pass@n = 1 if any trajectory achieves a positive reward.
-    # With binary rewards, this means any success. With shaped rewards (e.g. pass_ratio),
-    # this means any partial progress. Using > 0.0 rather than >= 1.0 because shaped
-    # rewards may never reach 1.0 (e.g. 9/10 tests = 0.9).
+    # The explicit unshaped channel, when present, makes this invariant to reward shaping.
     pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0.0 for r in v)) / len(
         uid_to_trajectory_rewards
     )
 
-    return mean_raw_reward, pass_at_n
+    return mean_reward, pass_at_n
 
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
@@ -652,6 +670,8 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         # stays keyset-stable and consistent with the per-trajectory emission.
         rollout_metrics["generate/tis/lcs_fallback_alert"] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
 
+    rollout_metrics.update(_merge_batch_failure_metrics(generator_outputs))
+
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -739,6 +759,62 @@ def get_rollout_metrics(
                 rollout_metrics[f"environment/{key}"] = value
 
     return rollout_metrics
+
+
+_BATCH_FAILURE_COUNT_KEYS = (
+    _NUM_TRIALS_METRIC,
+    _NUM_FAILED_INSTANCES_METRIC,
+    _NUM_FAILED_TRAJECTORIES_METRIC,
+    _NUM_MASKED_TRAJECTORIES_METRIC,
+)
+
+
+def _merge_batch_failure_metrics(generator_outputs: List[GeneratorOutput]) -> dict[str, float]:
+    """Sum failure counts across rollout groups and recompute their batch fraction."""
+    group_metrics = [
+        metrics
+        for metrics in (output.get("rollout_metrics") or {} for output in generator_outputs)
+        if _NUM_TRIALS_METRIC in metrics
+    ]
+    if not group_metrics:
+        return {}
+    for metrics in group_metrics:
+        missing = [key for key in _BATCH_FAILURE_COUNT_KEYS if key not in metrics]
+        if missing:
+            raise ValueError(f"Incomplete rollout failure metrics: missing {', '.join(missing)}")
+
+    merged = get_batch_failure_metrics(
+        sum(metrics[_NUM_TRIALS_METRIC] for metrics in group_metrics),
+        num_failed_trajectories=sum(metrics[_NUM_FAILED_TRAJECTORIES_METRIC] for metrics in group_metrics),
+        num_failed_instances=sum(metrics[_NUM_FAILED_INSTANCES_METRIC] for metrics in group_metrics),
+        num_masked_trajectories=sum(metrics[_NUM_MASKED_TRAJECTORIES_METRIC] for metrics in group_metrics),
+    )
+    error_keys = {key for metrics in group_metrics for key in metrics if key.startswith(BATCH_ERROR_METRIC_PREFIX)}
+    merged.update({key: sum(metrics.get(key, 0) for metrics in group_metrics) for key in error_keys})
+    return merged
+
+
+def get_batch_failure_metrics(
+    num_trials: int,
+    num_failed_trajectories: int,
+    num_failed_instances: int,
+    num_masked_trajectories: int,
+) -> Dict[str, float]:
+    """Describe failed and masked trajectories within a requested rollout group.
+
+    Args:
+        num_trials: Requested trajectories and denominator of the failure fraction.
+        num_failed_trajectories: Trajectories that did not complete successfully.
+        num_failed_instances: Distinct instances with at least one failed trajectory.
+        num_masked_trajectories: Trajectories excluded from the baseline.
+    """
+    return {
+        _NUM_TRIALS_METRIC: num_trials,
+        _NUM_FAILED_INSTANCES_METRIC: num_failed_instances,
+        _NUM_FAILED_TRAJECTORIES_METRIC: num_failed_trajectories,
+        _NUM_MASKED_TRAJECTORIES_METRIC: num_masked_trajectories,
+        ROLLOUT_FAILURE_FRACTION_METRIC: num_failed_trajectories / num_trials if num_trials else 0.0,
+    }
 
 
 def prepare_generator_input(
