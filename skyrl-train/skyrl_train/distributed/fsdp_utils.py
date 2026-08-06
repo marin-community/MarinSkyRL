@@ -726,18 +726,17 @@ class _GroupedExpertParallelTarget:
 
 def _expert_parallel_target(
     module: nn.Module,
+    grouped_moe_shim_type: type[nn.Module],
     grouped_experts_type: type[nn.Module],
 ) -> _ExpertParallelTarget | None:
     if isinstance(module, GrugMoeExperts):
         return _GrugExpertParallelTarget(module)
 
-    moe = getattr(module, "moe", None)
-    if moe is None:
+    if not isinstance(module, grouped_moe_shim_type):
         return None
-    experts = getattr(moe, "experts", None)
-    if experts is None or not isinstance(experts, grouped_experts_type):
+    if not isinstance(module.moe.experts, grouped_experts_type):
         return None
-    return _GroupedExpertParallelTarget(moe, experts)
+    return _GroupedExpertParallelTarget(module.moe, module.moe.experts)
 
 
 def _compose_expert_fsdp_shards(
@@ -852,13 +851,14 @@ def apply_ep(
     # All supported lifted architectures use this holder type. Keep the import
     # lazy so non-EP model loading does not require TorchTitan.
     from skyrl_train.models.layers.moe import GroupedExperts  # noqa: PLC0415
+    from skyrl_train.models.layers.moe_swap import GroupedMoEShim  # noqa: PLC0415
 
     ep_mesh = device_mesh["ep"]
     fsdp_mesh = device_mesh["fsdp"]
     ep_context = _ExpertParallelContext(ep_plan, ep_mesh, ep_comm_backend)
     sharded = 0
     for module in model.modules():
-        target = _expert_parallel_target(module, GroupedExperts)
+        target = _expert_parallel_target(module, GroupedMoEShim, GroupedExperts)
         if target is None:
             continue
 

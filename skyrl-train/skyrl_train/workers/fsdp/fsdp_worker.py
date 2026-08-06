@@ -528,8 +528,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         per-mesh-dim coordinate, and the EP submesh coordinate (the index of this rank
         within its EP group).
         """
-        import socket
-
         mesh = self.strategy.device_mesh
         dim_names = list(mesh.mesh_dim_names)
         shape = tuple(mesh.shape)
@@ -574,8 +572,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """
         import hashlib
         import json
-        import os
-        import socket
 
         rank = int(torch.distributed.get_rank())
         host = socket.gethostname()
@@ -870,8 +866,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if getattr(self, "_local_rank", None) != 0:
                 return
             interval = int(os.environ.get("SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL", "60"))
-            import socket
-
             from examples.terminal_bench.fd_monitor import start_fd_monitor
 
             logger.info(
