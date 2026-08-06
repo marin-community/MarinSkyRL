@@ -183,7 +183,7 @@ def main():
         client = InferenceEngineClient(engines, tokenizer, cfg)
 
         # ---- GEOMETRY PROOF: engine node disjoint from policy nodes ----
-        pol_geo = ray.get(policy.async_run_ray_method("pass_through", "diag_ep8_geometry"))
+        pol_geo = ray.get(policy.async_run_ray_method("pass_through", "diag_ep_geometry"))
         pol_geo = sorted([g for g in pol_geo if isinstance(g, dict)], key=lambda d: d["rank"])
         pol_hosts = sorted(set(g["host"] for g in pol_geo))
         rank0_host = next(g["host"] for g in pol_geo if g["rank"] == 0)

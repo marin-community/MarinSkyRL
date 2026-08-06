@@ -399,14 +399,32 @@ def test_default_config_declares_global_loss_denom_null():
     assert algo.global_loss_denom == 7.0 * 4096
 
 
-def test_validate_cfg_rejects_unknown_loss_reduction():
+@pytest.mark.parametrize(
+    ("config_path", "invalid_value", "error"),
+    [
+        ("trainer.algorithm.loss_reduction", "definitely_not_a_reduction", "invalid loss_reduction"),
+        ("trainer.policy.grug_query_bias_update_mode", "blend", "invalid grug_query_bias_update_mode"),
+    ],
+)
+def test_validate_cfg_rejects_unknown_config_choice(config_path, invalid_value, error):
     pytest.importorskip("hydra")
     from omegaconf import OmegaConf
     from skyrl_train.utils.utils import validate_cfg
 
     cfg = _validatable_dummy_config()
-    OmegaConf.update(cfg, "trainer.algorithm.loss_reduction", "definitely_not_a_reduction")
-    with pytest.raises(AssertionError, match="invalid loss_reduction"):
+    OmegaConf.update(cfg, config_path, invalid_value)
+    with pytest.raises(AssertionError, match=error):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_requires_grug_query_bias_update_mode():
+    pytest.importorskip("hydra")
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = _validatable_dummy_config()
+    del cfg.trainer.policy.grug_query_bias_update_mode
+
+    with pytest.raises(AssertionError, match="missing required policy configuration: grug_query_bias_update_mode"):
         validate_cfg(cfg)
 
 

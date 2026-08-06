@@ -17,6 +17,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope
 
@@ -504,6 +505,11 @@ def validate_cfg(cfg: DictConfig):
     assert cfg.trainer.sequence_parallel_backend == "ulysses", (
         f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
     )
+
+    try:
+        resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+    except ValueError as error:
+        raise AssertionError(str(error)) from error
 
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":
