@@ -111,10 +111,87 @@ def test_jupiter_artifact_sync_uses_only_explicit_gpfs_subtrees(tmp_path: Path) 
     transferred_sources = [argument for call in calls if call[0] == "rsync" for argument in call]
     assert result.finelog == "synced"
     assert f"Jupiter:{experiment_dir}/logs/tasktrove-x6_1170543.out" in transferred_sources
-    assert f"Jupiter:{experiment_dir}/ray_logs/" in transferred_sources
-    assert f"Jupiter:{experiment_dir}/tasktrove-x6/ray_logs/" in transferred_sources
+    assert f"Jupiter:{experiment_dir}/ray_logs/ray_1170543/" in transferred_sources
+    assert f"Jupiter:{experiment_dir}/ray_logs/ray_1170543_workers/" in transferred_sources
+    assert f"Jupiter:{experiment_dir}/tasktrove-x6/ray_logs/ray_1170543/" in transferred_sources
+    assert f"Jupiter:{experiment_dir}/tasktrove-x6/ray_logs/ray_1170543_workers/" in transferred_sources
+    assert f"Jupiter:{experiment_dir}/ray_logs/" not in transferred_sources
+    assert f"Jupiter:{experiment_dir}/tasktrove-x6/ray_logs/" not in transferred_sources
     assert f"Jupiter:{trace_root}/trial-new/" in transferred_sources
     assert f"Jupiter:{trace_root}/trial-older/" in transferred_sources
+
+
+def test_jupiter_ray_sync_ignores_untransferable_session_sockets(tmp_path: Path) -> None:
+    experiment_dir = "/e/data1/experiments/tasktrove-x6"
+
+    def fake_run(arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if arguments[0] == "ssh" and "ls -1t" in arguments[-1]:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout=f"{experiment_dir}/logs/tasktrove-x6_1170543.out\n",
+                stderr="",
+            )
+        if arguments[0] == "rsync" and "/ray_logs/" in " ".join(arguments):
+            if "--exclude=sockets/" not in arguments:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    23,
+                    stdout="",
+                    stderr='rsync: recv_generator: mknod "session_latest/sockets/raylet" failed: File name too long',
+                )
+        return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+
+    result = sync_jupiter_artifacts(
+        JupiterRunSpec("1170543", experiment_dir),
+        tmp_path,
+        host="Jupiter",
+        trace_sync_limit=20,
+        max_non_log_bytes=100 * 1024 * 1024,
+        scope="full",
+        finelog_tail_lines=600_000,
+        runner=fake_run,
+    )
+
+    assert result.ray_logs == "4 directories synced"
+    assert result.errors == ()
+
+
+def test_jupiter_sync_works_when_openrsync_rejects_protect_args(tmp_path: Path) -> None:
+    experiment_dir = "/e/data1/experiments/tasktrove-x6"
+
+    def fake_run(arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if arguments[0] == "ssh" and "ls -1t" in arguments[-1]:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout=f"{experiment_dir}/logs/tasktrove-x6_1170543.out\n",
+                stderr="",
+            )
+        if arguments[0] == "rsync" and ({"--protect-args", "-s"} & set(arguments)):
+            return subprocess.CompletedProcess(
+                arguments,
+                1,
+                stdout="",
+                stderr="rsync: unrecognized option `--protect-args'",
+            )
+        return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+
+    result = sync_jupiter_artifacts(
+        JupiterRunSpec("1170543", experiment_dir),
+        tmp_path,
+        host="Jupiter",
+        trace_sync_limit=20,
+        max_non_log_bytes=100 * 1024 * 1024,
+        scope="full",
+        finelog_tail_lines=600_000,
+        runner=fake_run,
+    )
+
+    assert result.finelog == "synced"
+    assert result.slurm_logs == "synced"
+    assert result.ray_logs == "4 directories synced"
+    assert result.errors == ()
 
 
 def test_jupiter_run_spec_preserves_the_explicit_absolute_experiment_path() -> None:

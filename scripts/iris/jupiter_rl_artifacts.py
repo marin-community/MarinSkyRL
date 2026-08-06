@@ -242,10 +242,9 @@ def _rsync(
             "rsync",
             "-az",
             "--partial",
-            "--protect-args",
             *extra_arguments,
             "--",
-            f"{host}:{remote_path}",
+            f"{host}:{shlex.quote(remote_path)}",
             str(destination),
         ],
         timeout=timeout,
@@ -365,25 +364,29 @@ def _sync_slurm_logs(
 
 
 def _sync_ray_logs(session: JupiterSyncSession) -> StageSyncResult:
-    remote_directories = (
+    remote_roots = (
         ("launcher", str(PurePosixPath(session.run.experiment_dir) / "ray_logs")),
         ("worker", str(PurePosixPath(session.run.experiment_dir) / session.run.job_name / "ray_logs")),
     )
+    job_directories = (f"ray_{session.run.job_id}", f"ray_{session.run.job_id}_workers")
     synced = 0
     errors: list[str] = []
-    for local_name, remote_directory in remote_directories:
-        if not _remote_exists(session.runner, session.host, remote_directory, directory=True):
-            continue
-        result = _rsync(
-            session.runner,
-            session.host,
-            f"{remote_directory}/",
-            session.destination / "ray_logs" / local_name,
-        )
-        if result.returncode:
-            errors.append(f"Ray logs: {_error_detail(result)}")
-        else:
-            synced += 1
+    for local_root, remote_root in remote_roots:
+        for job_directory in job_directories:
+            remote_directory = str(PurePosixPath(remote_root) / job_directory)
+            if not _remote_exists(session.runner, session.host, remote_directory, directory=True):
+                continue
+            result = _rsync(
+                session.runner,
+                session.host,
+                f"{remote_directory}/",
+                session.destination / "ray_logs" / local_root / job_directory,
+                extra_arguments=("--exclude=sockets/",),
+            )
+            if result.returncode:
+                errors.append(f"Ray logs ({local_root}/{job_directory}): {_error_detail(result)}")
+            else:
+                synced += 1
     noun = "directory" if synced == 1 else "directories"
     return StageSyncResult(f"{synced} {noun} synced", tuple(errors))
 
