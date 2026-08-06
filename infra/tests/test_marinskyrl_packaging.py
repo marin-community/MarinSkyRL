@@ -96,3 +96,13 @@ def test_megatron_extra_has_native_wheels_for_both_linux_architectures() -> None
         urls = sources[package]
         assert any("linux_x86_64.whl" in source["url"] for source in urls)
         assert any("linux_aarch64.whl" in source["url"] for source in urls)
+
+
+def test_fsdp_extra_provides_flash_attention_for_both_linux_architectures() -> None:
+    extras = PYPROJECT["project"]["optional-dependencies"]
+    sources = PYPROJECT["tool"]["uv"]["sources"]
+
+    assert "flash-attn==2.8.3 ; sys_platform == 'linux'" in extras["fsdp"]
+    urls = sources["flash-attn"]
+    assert any("linux_x86_64.whl" in source["url"] for source in urls)
+    assert any("linux_aarch64.whl" in source["url"] for source in urls)
