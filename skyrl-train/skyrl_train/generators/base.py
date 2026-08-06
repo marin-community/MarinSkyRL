@@ -41,6 +41,11 @@ class GeneratorOutput(TypedDict):
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
+    # Sampling-policy logprobs aligned one-for-one with response_ids. Generation
+    # strategies populate this channel whenever sampling requested logprobs,
+    # independent of whether requests were batched. If token identity is lost
+    # (for example through text postprocessing), return None for the batch rather
+    # than attach probabilities to different tokens.
     rollout_logprobs: Optional[List[List[float]]]
     # MoE router-replay (Stage 1 capture rail): per-sample per-token [L, K]
     # expert-selection rows, i.e. List[ [response_len, L, K] ]. Present only when
