@@ -392,6 +392,7 @@ class HFModelWrapper(nn.Module):
         cp_mesh=None,
         cp_rotate_method: str = "allgather",
         training_strategy: str | None = None,
+        revision: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -403,6 +404,7 @@ class HFModelWrapper(nn.Module):
         # → forward takes the literal no-op nullcontext, byte-identical to today).
         self.cp_mesh = cp_mesh
         self.cp_rotate_method = cp_rotate_method
+        revision_kwargs = {} if revision is None else {"revision": revision}
         # FIX-6 (#232): armed by a CP training forward; consumed by
         # cp_backward_dispatcher_span() to re-install the ring-SDPA patch across
         # backward (gradient-checkpoint recompute). Default-off so non-CP is unchanged.
@@ -423,7 +425,11 @@ class HFModelWrapper(nn.Module):
             )
 
         if isinstance(pretrain_or_model, str):
-            local_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            local_config = AutoConfig.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+                **revision_kwargs,
+            )
             model_type = getattr(local_config, "model_type", None)
             validate_grug_training_strategy(model_type, training_strategy)
             validate_grug_training_options(
@@ -503,6 +509,7 @@ class HFModelWrapper(nn.Module):
                     quantization_config=nf4_config,
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                     device_map=device_map,
+                    **revision_kwargs,
                     **rope_scaling_kwargs,
                 ),
                 model_id=pretrain_or_model,

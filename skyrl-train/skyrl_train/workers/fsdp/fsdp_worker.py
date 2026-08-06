@@ -1,6 +1,13 @@
 import asyncio
+import gzip
+import hashlib
+import inspect
+import math
 import os
+import shutil
 import socket
+import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass
 
@@ -23,6 +30,8 @@ except ImportError:
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
+    GrugMoeRouter,
+    GrugMoeSparseMoeBlock,
     validate_grug_expert_parallel_options,
 )
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
@@ -44,6 +53,7 @@ from skyrl_train.weight_sync.weight_extractor import (
     weight_sync_dtype,
 )
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+from skyrl_train.workers.worker_utils import BatchIterator
 
 
 @dataclass(frozen=True)
@@ -454,6 +464,841 @@ class FSDPWeightExtractor(WeightExtractor):
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
+    @staticmethod
+    def _grug_benchmark_file_sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            while chunk := source.read(16 * 1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _grug_benchmark_local_tensor(tensor):
+        """Return the rank-local storage for a plain tensor or DTensor."""
+
+        return tensor.to_local() if isinstance(tensor, DTensor) else tensor
+
+    @classmethod
+    def _grug_benchmark_state_hash(cls, state):
+        """Hash exact local model state without gathering any FSDP shards."""
+
+        digest = hashlib.sha256()
+        for name, tensor in sorted(state.items()):
+            local = cls._grug_benchmark_local_tensor(tensor).detach().to("cpu").contiguous()
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(local.dtype).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(str(tuple(local.shape)).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(local.view(torch.uint8).numpy().tobytes())
+        return digest.hexdigest()
+
+    def _grug_benchmark_phase(self, action: str, name: str):
+        """Record benchmark-only CUDA events without synchronizing the loop."""
+
+        events = getattr(self, "_grug_benchmark_phase_events", None)
+        if events is None:
+            return
+        if action == "begin":
+            if getattr(self, "_grug_benchmark_open_phase", None) is not None:
+                raise RuntimeError("nested Grug benchmark phases are not supported")
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            annotation = None
+            if getattr(self, "_grug_benchmark_profile_enabled", False):
+                annotation = torch.profiler.record_function(f"grug::{name}")
+                annotation.__enter__()
+            self._grug_benchmark_open_phase = (name, event, annotation)
+            self._grug_benchmark_parent_phase = name
+            return
+        if action != "end":
+            raise ValueError(f"unknown Grug benchmark phase action: {action}")
+        opened = getattr(self, "_grug_benchmark_open_phase", None)
+        if opened is None or opened[0] != name:
+            raise RuntimeError(f"Grug benchmark phase mismatch: open={opened}, closing={name}")
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        events.setdefault(name, []).append((opened[1], event))
+        if opened[2] is not None:
+            opened[2].__exit__(None, None, None)
+        self._grug_benchmark_open_phase = None
+        self._grug_benchmark_parent_phase = None
+
+    def _grug_benchmark_install_expert_hooks(self, paired_route_mode: str | None = None):
+        """Time routed blocks and retain exact per-layer route loads.
+
+        The sparse block is a common module boundary for both the eager and
+        native-grouped paths. Forward hooks run only inside the outer
+        model-forward phase. During
+        gradient-checkpoint recompute the outer phase is ``matched_backward``;
+        those forward hooks are deliberately ignored because the enclosing
+        module-backward hook already includes recompute. This makes the two
+        reported categories nonoverlapping.
+        """
+
+        modules = [module for module in self.model.modules() if isinstance(module, GrugMoeSparseMoeBlock)]
+        if not modules:
+            raise RuntimeError("routed-block attribution found no GrugMoeSparseMoeBlock modules")
+        if paired_route_mode not in {None, "capture", "compare"}:
+            raise ValueError(f"unknown paired route mode: {paired_route_mode}")
+        self._grug_benchmark_expert_events = {"forward": [], "backward": []}
+        self._grug_benchmark_open_expert_span = None
+        self._grug_benchmark_route_loads = [None] * len(modules)
+        self._grug_benchmark_route_calls = [0] * len(modules)
+        self._grug_benchmark_route_mode = paired_route_mode
+        if paired_route_mode == "capture":
+            if hasattr(self, "_grug_benchmark_route_reference"):
+                raise RuntimeError("paired route reference already exists")
+            self._grug_benchmark_route_reference = [[] for _ in modules]
+        elif paired_route_mode == "compare":
+            reference = getattr(self, "_grug_benchmark_route_reference", None)
+            if reference is None or len(reference) != len(modules):
+                raise RuntimeError("paired route comparison has no compatible eager reference")
+            self._grug_benchmark_route_comparison = [
+                {
+                    "tokens": 0,
+                    "routed_allocations": 0,
+                    "changed_tokens": 0,
+                    "changed_routed_allocations": 0,
+                    "ordered_slot_mismatches": 0,
+                    "unexplained_changed_tokens": 0,
+                    "logit_numel": 0,
+                    "logit_abs_sum": 0.0,
+                    "max_token_logit_delta": 0.0,
+                    "reference_margin_min": math.inf,
+                    "current_margin_min": math.inf,
+                    "max_changed_reference_margin": 0.0,
+                    "max_changed_current_margin": 0.0,
+                }
+                for _ in modules
+            ]
+
+        def begin(kind: str):
+            parent = getattr(self, "_grug_benchmark_parent_phase", None)
+            expected = "matched_model_forward" if kind == "forward" else "matched_backward"
+            if parent != expected:
+                return
+            if self._grug_benchmark_open_expert_span is not None:
+                raise RuntimeError(
+                    f"nested Grug expert attribution spans: {self._grug_benchmark_open_expert_span}, {kind}"
+                )
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            self._grug_benchmark_open_expert_span = (kind, event)
+
+        def end(kind: str):
+            parent = getattr(self, "_grug_benchmark_parent_phase", None)
+            expected = "matched_model_forward" if kind == "forward" else "matched_backward"
+            if parent != expected:
+                return
+            opened = self._grug_benchmark_open_expert_span
+            if opened is None or opened[0] != kind:
+                raise RuntimeError(f"Grug expert attribution span mismatch: open={opened}, closing={kind}")
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            self._grug_benchmark_expert_events[kind].append((opened[1], event))
+            self._grug_benchmark_open_expert_span = None
+
+        def capture_routes(layer_index: int, router: GrugMoeRouter, output):
+            if getattr(self, "_grug_benchmark_parent_phase", None) != "matched_model_forward":
+                return
+            selected_experts = output.selected_experts
+            loads = torch.bincount(selected_experts.reshape(-1), minlength=router.num_experts)
+            accumulated = self._grug_benchmark_route_loads[layer_index]
+            if accumulated is None:
+                accumulated = torch.zeros_like(loads)
+                self._grug_benchmark_route_loads[layer_index] = accumulated
+            accumulated.add_(loads)
+            route_mode = self._grug_benchmark_route_mode
+            if route_mode == "capture":
+                with torch.no_grad():
+                    self._grug_benchmark_route_reference[layer_index].append(
+                        {
+                            "adjusted_logits": (output.router_logits + router.bias).detach().clone(),
+                            "selected_experts": selected_experts.detach().clone(),
+                        }
+                    )
+            elif route_mode == "compare":
+                call_index = self._grug_benchmark_route_calls[layer_index]
+                references = self._grug_benchmark_route_reference[layer_index]
+                if call_index >= len(references):
+                    raise RuntimeError(f"paired route layer {layer_index} has too many grouped calls")
+                reference = references[call_index]
+                with torch.no_grad():
+                    current_logits = (output.router_logits + router.bias).detach()
+                    reference_logits = reference["adjusted_logits"]
+                    reference_selected = reference["selected_experts"]
+                    if (
+                        current_logits.shape != reference_logits.shape
+                        or selected_experts.shape != reference_selected.shape
+                    ):
+                        raise RuntimeError(f"paired route layer {layer_index} changed tensor shapes")
+                    logit_delta = (current_logits.float() - reference_logits.float()).abs()
+                    token_delta = logit_delta.amax(dim=-1)
+                    reference_top = torch.topk(reference_logits.float(), k=router.top_k + 1, dim=-1, sorted=True).values
+                    current_top = torch.topk(current_logits.float(), k=router.top_k + 1, dim=-1, sorted=True).values
+                    reference_margin = reference_top[:, router.top_k - 1] - reference_top[:, router.top_k]
+                    current_margin = current_top[:, router.top_k - 1] - current_top[:, router.top_k]
+                    reference_membership = torch.zeros(
+                        (selected_experts.shape[0], router.num_experts),
+                        dtype=torch.bool,
+                        device=selected_experts.device,
+                    )
+                    current_membership = torch.zeros_like(reference_membership)
+                    reference_membership.scatter_(1, reference_selected.long(), True)
+                    current_membership.scatter_(1, selected_experts.long(), True)
+                    symmetric_difference = (reference_membership ^ current_membership).sum(dim=-1)
+                    changed = symmetric_difference != 0
+                    unexplained = changed & (reference_margin > 2 * token_delta)
+                    comparison = self._grug_benchmark_route_comparison[layer_index]
+                    comparison["tokens"] += int(selected_experts.shape[0])
+                    comparison["routed_allocations"] += int(selected_experts.numel())
+                    comparison["changed_tokens"] += int(changed.sum().item())
+                    comparison["changed_routed_allocations"] += int(symmetric_difference.sum().item() // 2)
+                    comparison["ordered_slot_mismatches"] += int((selected_experts != reference_selected).sum().item())
+                    comparison["unexplained_changed_tokens"] += int(unexplained.sum().item())
+                    comparison["logit_numel"] += int(logit_delta.numel())
+                    comparison["logit_abs_sum"] += float(logit_delta.sum().item())
+                    comparison["max_token_logit_delta"] = max(
+                        comparison["max_token_logit_delta"], float(token_delta.max().item())
+                    )
+                    comparison["reference_margin_min"] = min(
+                        comparison["reference_margin_min"], float(reference_margin.min().item())
+                    )
+                    comparison["current_margin_min"] = min(
+                        comparison["current_margin_min"], float(current_margin.min().item())
+                    )
+                    if bool(changed.any().item()):
+                        comparison["max_changed_reference_margin"] = max(
+                            comparison["max_changed_reference_margin"],
+                            float(reference_margin[changed].max().item()),
+                        )
+                        comparison["max_changed_current_margin"] = max(
+                            comparison["max_changed_current_margin"],
+                            float(current_margin[changed].max().item()),
+                        )
+            self._grug_benchmark_route_calls[layer_index] += 1
+
+        handles = []
+        for layer_index, module in enumerate(modules):
+            handles.extend(
+                (
+                    module.register_forward_pre_hook(lambda _module, _args: begin("forward")),
+                    module.register_forward_hook(lambda _module, _args, _output: end("forward")),
+                    module.register_full_backward_pre_hook(lambda _module, _grad_output: begin("backward")),
+                    module.register_full_backward_hook(lambda _module, _grad_input, _grad_output: end("backward")),
+                    module.router.register_forward_hook(
+                        lambda router, _args, output, index=layer_index: capture_routes(index, router, output)
+                    ),
+                )
+            )
+        return handles, len(modules)
+
+    def _grug_benchmark_finish_expert_hooks(self, handles, module_count: int):
+        for handle in handles:
+            handle.remove()
+        if self._grug_benchmark_open_expert_span is not None:
+            raise RuntimeError(f"unclosed Grug expert attribution span: {self._grug_benchmark_open_expert_span[0]}")
+        events = self._grug_benchmark_expert_events
+        self._grug_benchmark_expert_events = None
+        phase_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in spans) / 1000.0 for name, spans in events.items()
+        }
+        call_counts = {name: len(spans) for name, spans in events.items()}
+        if any(count == 0 for count in call_counts.values()):
+            raise RuntimeError(f"routed-block attribution missed a required phase: {call_counts}")
+        if any(loads is None for loads in self._grug_benchmark_route_loads):
+            raise RuntimeError("routed-block attribution missed route loads")
+        route_loads = [loads.detach().cpu().tolist() for loads in self._grug_benchmark_route_loads]
+        route_calls = list(self._grug_benchmark_route_calls)
+        self._grug_benchmark_route_loads = None
+        self._grug_benchmark_route_calls = None
+        route_mode = self._grug_benchmark_route_mode
+        self._grug_benchmark_route_mode = None
+        route_reference_calls = None
+        route_comparison = None
+        if route_mode == "capture":
+            route_reference_calls = [len(calls) for calls in self._grug_benchmark_route_reference]
+        elif route_mode == "compare":
+            route_reference_calls = [len(calls) for calls in self._grug_benchmark_route_reference]
+            if route_reference_calls != route_calls:
+                raise RuntimeError(
+                    f"paired eager/grouped route call counts differ: eager={route_reference_calls}, grouped={route_calls}"
+                )
+            route_comparison = []
+            for layer_index, comparison in enumerate(self._grug_benchmark_route_comparison):
+                logit_numel = comparison.pop("logit_numel")
+                logit_abs_sum = comparison.pop("logit_abs_sum")
+                comparison["layer"] = layer_index
+                comparison["changed_token_fraction"] = comparison["changed_tokens"] / comparison["tokens"]
+                comparison["changed_routed_allocation_fraction"] = (
+                    comparison["changed_routed_allocations"] / comparison["routed_allocations"]
+                )
+                comparison["mean_logit_abs_difference"] = logit_abs_sum / logit_numel
+                route_comparison.append(comparison)
+            del self._grug_benchmark_route_reference
+            del self._grug_benchmark_route_comparison
+        return {
+            "module_count": module_count,
+            "phase_seconds": phase_seconds,
+            "call_counts": call_counts,
+            "route_calls_per_layer": route_calls,
+            "route_loads_per_layer": route_loads,
+            "paired_route_mode": route_mode,
+            "paired_route_reference_calls": route_reference_calls,
+            "paired_route_comparison": route_comparison,
+            "boundary": (
+                "CUDA-stream time inside GrugMoeSparseMoeBlock initial forwards plus full module backward "
+                "spans; includes routing, route materialization, dispatch/sort, routed expert kernels, and "
+                "combine; backward includes checkpoint recompute; layer-level FSDP communication and the "
+                "separate shared expert are excluded"
+            ),
+        }
+
+    def _grug_benchmark_start_profile(self, enabled: bool):
+        """Start one rank-zero profiler for a bounded, non-headline run."""
+
+        self._grug_benchmark_profile_enabled = bool(enabled and torch.distributed.get_rank() == 0)
+        if not self._grug_benchmark_profile_enabled:
+            return None
+        profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=False,
+            profile_memory=True,
+            with_stack=False,
+        )
+        profiler.__enter__()
+        return profiler
+
+    def _grug_benchmark_finish_profile(self, profiler):
+        """Stop and return a compressed Chrome trace from rank zero."""
+
+        self._grug_benchmark_profile_enabled = False
+        if profiler is None:
+            return None
+        profiler.__exit__(None, None, None)
+        with tempfile.TemporaryDirectory(prefix="grug-torch-profile-") as directory:
+            trace_path = os.path.join(directory, "trace.json")
+            compressed_path = trace_path + ".gz"
+            profiler.export_chrome_trace(trace_path)
+            with open(trace_path, "rb") as source, gzip.open(compressed_path, "wb", compresslevel=1) as target:
+                shutil.copyfileobj(source, target, length=16 * 1024 * 1024)
+            with open(compressed_path, "rb") as source:
+                return source.read()
+
+    def grug_benchmark_stage_batch(self, batch: TrainingInputBatch):
+        """Stage one rank-local fixed replay shard outside the timed update.
+
+        The benchmark driver sends one already-sharded batch directly to every
+        policy actor. The stored batch is the exact shard that ``ppo_train``
+        consumes. Per-field hashes prove row identity without moving it again.
+        """
+
+        self._grug_benchmark_batch = batch
+        field_hashes = {}
+        field_shapes = {}
+        for name, tensor in sorted(batch.items()):
+            if tensor is None:
+                field_hashes[name] = None
+                field_shapes[name] = None
+                continue
+            cpu_tensor = tensor.detach().to("cpu").contiguous()
+            field_hashes[name] = hashlib.sha256(cpu_tensor.numpy().tobytes()).hexdigest()
+            field_shapes[name] = list(cpu_tensor.shape)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "batch_size": int(batch.batch_size),
+            "field_hashes": field_hashes,
+            "field_shapes": field_shapes,
+            "allocated_tokens": int(batch["attention_mask"].numel()),
+            "nonpad_tokens": int(batch["attention_mask"].sum().item()),
+            "loss_tokens": int(batch["loss_mask"].sum().item()),
+        }
+
+    def grug_benchmark_reset_peak_memory(self):
+        """Reset CUDA peak accounting after model and replay staging."""
+
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+        }
+
+    @classmethod
+    def _grug_benchmark_element_counts(cls, tensor):
+        """Count local values without gathering an FSDP or optimizer shard."""
+
+        local = cls._grug_benchmark_local_tensor(tensor).detach()
+        if not (torch.is_floating_point(local) or torch.is_complex(local)):
+            return local.numel(), 0
+        nonfinite = int((~torch.isfinite(local)).sum().item())
+        return local.numel(), nonfinite
+
+    def grug_benchmark_validate_finite_state(self):
+        """Prove the timed optimizer boundary left finite local state.
+
+        This runs in a separate actor call after timing and therefore cannot
+        inflate the measured update wall or peak-memory boundary.
+        """
+
+        model_tensors = 0
+        model_numel = 0
+        nonfinite_model_tensors = 0
+        nonfinite_model_elements = 0
+        for tensor in self.model.state_dict().values():
+            numel, nonfinite = self._grug_benchmark_element_counts(tensor)
+            model_tensors += 1
+            model_numel += numel
+            nonfinite_model_tensors += int(nonfinite > 0)
+            nonfinite_model_elements += nonfinite
+
+        optimizer_tensors = 0
+        optimizer_numel = 0
+        nonfinite_optimizer_tensors = 0
+        nonfinite_optimizer_elements = 0
+        nonfinite_optimizer_scalars = 0
+        for parameter_state in self.optimizer.state.values():
+            for value in parameter_state.values():
+                if torch.is_tensor(value) or isinstance(value, DTensor):
+                    numel, nonfinite = self._grug_benchmark_element_counts(value)
+                    optimizer_tensors += 1
+                    optimizer_numel += numel
+                    nonfinite_optimizer_tensors += int(nonfinite > 0)
+                    nonfinite_optimizer_elements += nonfinite
+                elif isinstance(value, (int, float)):
+                    nonfinite_optimizer_scalars += int(not math.isfinite(value))
+                else:
+                    raise TypeError(f"cannot validate optimizer state value of type {type(value)}")
+
+        torch.cuda.synchronize()
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "model_tensors": model_tensors,
+            "model_numel": model_numel,
+            "nonfinite_model_tensors": nonfinite_model_tensors,
+            "nonfinite_model_elements": nonfinite_model_elements,
+            "optimizer_tensors": optimizer_tensors,
+            "optimizer_numel": optimizer_numel,
+            "nonfinite_optimizer_tensors": nonfinite_optimizer_tensors,
+            "nonfinite_optimizer_elements": nonfinite_optimizer_elements,
+            "nonfinite_optimizer_scalars": nonfinite_optimizer_scalars,
+        }
+
+    def grug_benchmark_warmup_and_restore(self):
+        """Warm kernels and optimizer allocation, then restore the exact start state.
+
+        The timed update must not include lazy optimizer-state allocation or first-use
+        kernels.  A one-row production training step warms both.  We snapshot each
+        rank's local FSDP shard, then restore it byte-for-byte, reset every Adam state
+        tensor to zero (the mathematical state before AdamW step 1), restore the LR
+        scheduler and RNG, and verify the model-state hash.
+        """
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before warmup")
+        if self.cfg.trainer.strategy != "fsdp2":
+            raise RuntimeError("the fixed-replay warmup restoration is implemented only for FSDP2")
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        state = self.model.state_dict()
+        state_hash_before = self._grug_benchmark_state_hash(state)
+        state_snapshot = {
+            name: self._grug_benchmark_local_tensor(tensor).detach().to("cpu", copy=True)
+            for name, tensor in state.items()
+        }
+        scheduler_state = self.scheduler.state_dict()
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state()
+
+        warm_batch = self._grug_benchmark_batch[:1]
+        experience = BatchIterator.batch_to_experience(warm_batch)
+        if self._grug_causal_lm() is None:
+            raise RuntimeError("the fixed-replay benchmark requires a Grug policy model")
+        if self.cfg.trainer.policy.grug_query_bias_update_mode != "frozen":
+            raise RuntimeError("the fixed-replay benchmark requires frozen Grug query bias")
+        warm_status = self.training_step(experience, warm_batch.metadata.get("global_step", 0), 0, 1)
+        if not self.strategy.last_optimizer_step_succeeded:
+            raise RuntimeError("the warmup optimizer step was skipped")
+        self.strategy.all_reduce(warm_status)
+        torch.cuda.synchronize()
+
+        with torch.no_grad():
+            restored_state = self.model.state_dict()
+            if set(restored_state) != set(state_snapshot):
+                raise RuntimeError("model state keys changed during benchmark warmup")
+            for name, tensor in restored_state.items():
+                local = self._grug_benchmark_local_tensor(tensor)
+                local.copy_(state_snapshot[name].to(device=local.device, dtype=local.dtype))
+
+        optimizer_state_tensors = 0
+        optimizer_state_numel = 0
+        for parameter_state in self.optimizer.state.values():
+            for key, value in parameter_state.items():
+                if torch.is_tensor(value) or isinstance(value, DTensor):
+                    local_value = self._grug_benchmark_local_tensor(value)
+                    local_value.zero_()
+                    optimizer_state_tensors += 1
+                    optimizer_state_numel += local_value.numel()
+                elif isinstance(value, (int, float)):
+                    parameter_state[key] = type(value)(0)
+                else:
+                    raise TypeError(f"cannot reset optimizer state {key!r} of type {type(value)}")
+        if optimizer_state_tensors == 0:
+            raise RuntimeError("warmup did not materialize optimizer state")
+
+        self.scheduler.load_state_dict(scheduler_state)
+        self.optimizer.zero_grad(set_to_none=True)
+        self.strategy.last_optimizer_step_succeeded = False
+        torch.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state)
+        for name in (
+            "_grug_query_bias_accumulator",
+            "_grug_query_bias_candidate_count",
+            "_ratio_diag_acc",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        state_hash_after = self._grug_benchmark_state_hash(self.model.state_dict())
+        if state_hash_after != state_hash_before:
+            raise RuntimeError(
+                "warmup restoration changed the local model state: "
+                f"before={state_hash_before}, after={state_hash_after}"
+            )
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash_before": state_hash_before,
+            "state_hash_after": state_hash_after,
+            "optimizer_state_tensors": optimizer_state_tensors,
+            "optimizer_state_numel": optimizer_state_numel,
+            "scheduler_last_epoch": int(self.scheduler.last_epoch),
+        }
+
+    def _grug_benchmark_matched_ce(self, batch: TrainingInputBatch):
+        """Run the benchmark's common token-weighted next-token CE backward.
+
+        The replay ``loss_mask`` is aligned to SkyRL's action-log-probability
+        slice.  Multiplying each rank-local loss sum by data_parallel_size/global_tokens
+        compensates for FSDP's data-parallel gradient averaging while EP ranks
+        replicate one logical data chunk. The resulting gradient is the gradient
+        of one global token mean over the fixed logical batch.
+        This intentionally omits PPO diagnostics, entropy, Grug query-bias
+        capture, gradient clipping, and the optimizer boundary.
+        """
+
+        global_loss_tokens = int(batch.metadata["grug_benchmark_global_loss_tokens"])
+        if global_loss_tokens <= 0:
+            raise RuntimeError("matched CE needs a positive global loss-token count")
+
+        data_parallel_size = int(self.mesh_rank.dp_size)
+        local_loss_sum = torch.zeros((), dtype=torch.float64, device=torch.cuda.current_device())
+        local_loss_tokens = torch.zeros((), dtype=torch.int64, device=torch.cuda.current_device())
+        representative_action_log_probs = []
+        microbatches = 0
+        self.model.train()
+        for experience in BatchIterator(batch, sample_batch_size=1, drop_last=False):
+            experience.to_device(torch.cuda.current_device())
+            phase = getattr(self, "_grug_benchmark_phase", None)
+            if phase is not None:
+                phase("begin", "matched_model_forward")
+            with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                action_log_probs = self.model(
+                    experience.sequences,
+                    experience.num_actions,
+                    attention_mask=experience.attention_mask,
+                    temperature=1.0,
+                    return_output=False,
+                    compute_entropy=False,
+                    rollout_routed_experts=None,
+                )
+                flat_action_log_probs = action_log_probs.detach().reshape(-1)
+                representative_indices = torch.tensor(
+                    (0, flat_action_log_probs.numel() // 2, flat_action_log_probs.numel() - 1),
+                    dtype=torch.int64,
+                    device=flat_action_log_probs.device,
+                )
+                representative_action_log_probs.append(flat_action_log_probs.index_select(0, representative_indices))
+                if phase is not None:
+                    phase("end", "matched_model_forward")
+                    phase("begin", "matched_ce_loss")
+                loss_mask = experience.loss_mask.to(torch.float32)
+                microbatch_loss_sum = (-action_log_probs.to(torch.float32) * loss_mask).sum()
+                loss = microbatch_loss_sum * (data_parallel_size / global_loss_tokens)
+            if phase is not None:
+                phase("end", "matched_ce_loss")
+                phase("begin", "matched_backward")
+            self.strategy.backward(loss, self.model, self.optimizer)
+            if phase is not None:
+                phase("end", "matched_backward")
+            teardown_replay = getattr(self.model, "teardown_router_replay", None)
+            if teardown_replay is not None:
+                teardown_replay()
+            local_loss_sum += microbatch_loss_sum.detach().to(torch.float64)
+            local_loss_tokens += loss_mask.sum(dtype=torch.int64)
+            microbatches += 1
+
+        return (
+            local_loss_sum,
+            int(local_loss_tokens.item()),
+            microbatches,
+            torch.cat(representative_action_log_probs),
+        )
+
+    def grug_benchmark_warmup_matched_ce(self):
+        """Warm the common forward/backward path without changing model state."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before warmup")
+        if self.cfg.trainer.strategy != "fsdp2":
+            raise RuntimeError("the fixed-replay warmup is implemented only for FSDP2")
+
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        state_hash_before = self._grug_benchmark_state_hash(self.model.state_dict())
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state()
+        self.optimizer.zero_grad(set_to_none=True)
+        warm_batch = self._grug_benchmark_batch[:1]
+        _, warm_loss_tokens, microbatches, _ = self._grug_benchmark_matched_ce(warm_batch)
+        if warm_loss_tokens <= 0 or microbatches != 1:
+            raise RuntimeError("matched CE warmup did not exercise one nonempty microbatch")
+        gradient_tensors = sum(parameter.grad is not None for parameter in self.model.parameters())
+        if gradient_tensors == 0:
+            raise RuntimeError("matched CE warmup produced no gradients")
+        self.optimizer.zero_grad(set_to_none=True)
+        torch.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        state_hash_after = self._grug_benchmark_state_hash(self.model.state_dict())
+        if state_hash_after != state_hash_before:
+            raise RuntimeError(
+                f"matched CE warmup changed the local model state: before={state_hash_before}, after={state_hash_after}"
+            )
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "state_hash_before": state_hash_before,
+            "state_hash_after": state_hash_after,
+            "gradient_tensors": gradient_tensors,
+            "warmup_loss_tokens": warm_loss_tokens,
+        }
+
+    def grug_benchmark_identity(self):
+        """Return the exact policy path selected by this benchmark rank."""
+
+        config = getattr(self.model.model, "config", None)
+        if getattr(config, "model_type", None) != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("the fixed-replay benchmark requires a Grug policy model")
+        first_layer = self.model.model.model.layers[0]
+        grouped_mm_enabled = bool(first_layer.mlp.experts.use_grouped_mm)
+        grug_module_path = os.path.realpath(inspect.getsourcefile(GrugMoeSparseMoeBlock))
+        worker_path = os.path.realpath(__file__)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "model_type": config.model_type,
+            "model_revision": getattr(config, "_commit_hash", None),
+            "num_hidden_layers": int(config.num_hidden_layers),
+            "num_local_experts": int(config.num_local_experts),
+            "num_experts_per_tok": int(config.num_experts_per_tok),
+            "cuda_device_name": torch.cuda.get_device_name(),
+            "cuda_total_memory_bytes": int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory),
+            "cuda_compute_capability": list(torch.cuda.get_device_capability()),
+            "attention_backend": config._attn_implementation,
+            "attention_module": type(first_layer.self_attn).__qualname__,
+            "moe_module": type(first_layer.mlp).__qualname__,
+            "strategy": type(self.strategy).__qualname__,
+            "optimizer": type(self.optimizer).__qualname__,
+            "scheduler": type(self.scheduler).__qualname__,
+            "gradient_checkpointing": bool(self.cfg.trainer.gradient_checkpointing),
+            "sample_packing": bool(self.cfg.trainer.use_sample_packing),
+            "fsdp_size": int(self.cfg.trainer.policy.fsdp_config.fsdp_size),
+            "expert_parallel_size": int(self.cfg.trainer.policy.fsdp_config.expert_model_parallel_size),
+            "data_parallel_size": int(self.mesh_rank.dp_size),
+            "grug_query_bias_update_mode": str(self.cfg.trainer.policy.grug_query_bias_update_mode),
+            "grouped_moe": bool(self.cfg.trainer.policy.fsdp_config.moe_grouped_gemm),
+            "native_grouped_mm": grouped_mm_enabled,
+            "expert_implementation": "grouped" if grouped_mm_enabled else "eager",
+            "runtime_grug_module_path": grug_module_path,
+            "runtime_grug_module_sha256": self._grug_benchmark_file_sha256(grug_module_path),
+            "runtime_worker_path": worker_path,
+            "runtime_worker_sha256": self._grug_benchmark_file_sha256(worker_path),
+            "micro_batch_size": int(self.cfg.trainer.micro_train_batch_size_per_gpu),
+            "mini_batch_size_per_gpu": int(self.policy_mini_batch_size_per_gpu),
+        }
+
+    def grug_benchmark_run_staged_ppo(self, profile: bool = False):
+        """Time one production PPO update on the previously staged replay shard."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before the timed update")
+        self._grug_benchmark_phase_events = {}
+        self._grug_benchmark_open_phase = None
+        profiler = self._grug_benchmark_start_profile(profile)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        output = self.ppo_train(self._grug_benchmark_batch)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        if self._grug_benchmark_open_phase is not None:
+            raise RuntimeError(f"unclosed Grug benchmark phase: {self._grug_benchmark_open_phase[0]}")
+        phase_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in spans) / 1000.0
+            for name, spans in self._grug_benchmark_phase_events.items()
+        }
+        self._grug_benchmark_phase_events = None
+        profile_artifact_gzip = self._grug_benchmark_finish_profile(profiler)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "elapsed_seconds": elapsed,
+            "phase_seconds": phase_seconds,
+            "train_status": output.metadata["train_status"],
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+            "profile_artifact_gzip": profile_artifact_gzip,
+        }
+
+    def grug_benchmark_run_staged_matched_ce(
+        self,
+        profile: bool = False,
+        expert_attribution: bool = False,
+        paired_route_mode: str | None = None,
+    ):
+        """Time the common fixed-replay CE forward and backward, without Adam."""
+
+        if not hasattr(self, "_grug_benchmark_batch"):
+            raise RuntimeError("call grug_benchmark_stage_batch before the timed update")
+        self._grug_benchmark_phase_events = {}
+        self._grug_benchmark_open_phase = None
+        self._grug_benchmark_parent_phase = None
+        profiler = self._grug_benchmark_start_profile(profile)
+        expert_handles = []
+        expert_module_count = 0
+        if expert_attribution:
+            expert_handles, expert_module_count = self._grug_benchmark_install_expert_hooks(paired_route_mode)
+        elif paired_route_mode is not None:
+            raise ValueError("paired route comparison requires expert attribution")
+        self.optimizer.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        local_loss_sum, local_loss_tokens, microbatches, representative_action_log_probs = (
+            self._grug_benchmark_matched_ce(self._grug_benchmark_batch)
+        )
+        torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        if self._grug_benchmark_open_phase is not None:
+            raise RuntimeError(f"unclosed Grug benchmark phase: {self._grug_benchmark_open_phase[0]}")
+        phase_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in spans) / 1000.0
+            for name, spans in self._grug_benchmark_phase_events.items()
+        }
+        self._grug_benchmark_phase_events = None
+        expert_evidence = (
+            self._grug_benchmark_finish_expert_hooks(expert_handles, expert_module_count)
+            if expert_attribution
+            else None
+        )
+        profile_artifact_gzip = self._grug_benchmark_finish_profile(profiler)
+        peak_allocated_bytes = int(torch.cuda.max_memory_allocated())
+        peak_reserved_bytes = int(torch.cuda.max_memory_reserved())
+
+        gradient_tensors = 0
+        gradient_numel = 0
+        nonfinite_gradient_tensors = 0
+        representative_suffixes = (
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.0.mlp.router.weight",
+            "model.layers.0.mlp.experts.gate_proj.weight",
+            "model.layers.0.mlp.experts.up_proj.weight",
+            "model.layers.0.mlp.experts.down_proj.weight",
+            "model.layers.0.shared_expert.gate_proj.weight",
+            "model.norm.weight",
+            "lm_head.weight",
+        )
+        representative_gradients = {}
+        for name, parameter in self.model.named_parameters():
+            if parameter.grad is None:
+                continue
+            gradient = self._grug_benchmark_local_tensor(parameter.grad)
+            gradient_tensors += 1
+            gradient_numel += gradient.numel()
+            if not bool(torch.isfinite(gradient).all().item()):
+                nonfinite_gradient_tensors += 1
+            matched_suffix = next((suffix for suffix in representative_suffixes if name.endswith(suffix)), None)
+            if matched_suffix is None:
+                continue
+            flat_gradient = gradient.detach().float().reshape(-1)
+            sample_count = min(16, flat_gradient.numel())
+            sample_indices = (
+                torch.linspace(
+                    0,
+                    flat_gradient.numel() - 1,
+                    steps=sample_count,
+                    dtype=torch.float64,
+                    device=flat_gradient.device,
+                )
+                .round()
+                .to(torch.int64)
+            )
+            representative_gradients[matched_suffix] = {
+                "local_numel": flat_gradient.numel(),
+                "l2_norm": float(torch.linalg.vector_norm(flat_gradient).item()),
+                "max_abs": float(flat_gradient.abs().max().item()),
+                "samples": flat_gradient.index_select(0, sample_indices).cpu().tolist(),
+            }
+        missing_representative_gradients = set(representative_suffixes) - set(representative_gradients)
+        if missing_representative_gradients:
+            raise RuntimeError(
+                f"matched CE missed representative gradients: {sorted(missing_representative_gradients)}"
+            )
+        self.optimizer.zero_grad(set_to_none=True)
+        return {
+            "rank": int(torch.distributed.get_rank()),
+            "elapsed_seconds": elapsed,
+            "phase_seconds": phase_seconds,
+            "local_loss_sum": float(local_loss_sum.item()),
+            "local_loss_tokens": local_loss_tokens,
+            "microbatches": microbatches,
+            "gradient_tensors": gradient_tensors,
+            "gradient_numel": gradient_numel,
+            "nonfinite_gradient_tensors": nonfinite_gradient_tensors,
+            "representative_action_log_probs": representative_action_log_probs.float().cpu().tolist(),
+            "representative_gradients": representative_gradients,
+            "expert_attribution": expert_evidence,
+            "peak_allocated_bytes": peak_allocated_bytes,
+            "peak_reserved_bytes": peak_reserved_bytes,
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+            "profile_artifact_gzip": profile_artifact_gzip,
+        }
+
     def get_cpu_offload_numa_diagnostics(self, max_pages: int = 4096) -> FSDPCpuOffloadNumaDiagnostics:
         """Report the physical placement of persistent FSDP2 CPU-offload tensors."""
         parameters = _pinned_cpu_parameters_by_size(self.model.model)
@@ -747,7 +1592,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
         return out
 
-    def init_model(self, model_path, num_training_steps: int = None):
+    def init_model(self, model_path, num_training_steps: int = None, model_revision: str | None = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
@@ -771,7 +1616,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            **({} if model_revision is None else {"revision": model_revision}),
+        )
         validate_grug_expert_parallel_options(
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=strategy.ep_size,
@@ -808,6 +1657,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 cp_mesh=self.cp_mesh,
                 cp_rotate_method=str(self.cfg.trainer.policy.fsdp_config.get("cp_rotate_method", "allgather")),
                 training_strategy=self.cfg.trainer.strategy,
+                revision=model_revision,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
