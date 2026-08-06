@@ -22,6 +22,41 @@ historical and does not describe an established cause.
 
 ## Investigation entries
 
+### 2026-08-06: the first natural bounded failure lost its flight-recorder files
+
+Jupiter job 1253429 resumed from global step 33 with distributed debug mode enabled. It completed global step
+40, then stopped during the step-41 policy inference forward. The 1,800-second ProcessGroupNCCL deadline fired,
+dumped diagnostics, and terminated the gang. This is the first natural TaskTrove failure that satisfied the
+bounded-teardown contract.
+
+The phase records identify global rank 2 as the first observable nonparticipant. Rank 2's last record was the
+first MoE boundary with mesh coordinate `[0,0,2]`. Ranks 0, 1, and 3 later timed out in EP
+`ALLTOALL_BASE` sequence 481295, while ranks 6, 10, and 14 timed out in FSDP `_ALLGATHER_BASE` sequence
+361269. Rank 2 reported no collective timeout of its own. This establishes rank-2 non-arrival as the cause of
+the two blocked subgroups, but the available phase boundary is before routing and expert execution and does not
+identify the operation where rank 2 stopped.
+
+The missing evidence is a debug-contract failure. PyTorch wrote every flight-recorder file to node-local
+`/tmp/nccl_fr_rank*`; the configured durable debug directory's `flight_recorder/` directory is empty. The
+TerminalBench entrypoint did not invoke the shared driver debug initialization, and Ray environment assembly
+allowed the legacy TaskTrove config's `/tmp/nccl_fr_rank` value to overwrite the path derived from
+`trainer.ckpt_path`. The compute nodes were reassigned before the omission was found. The next run requires red
+contracts for both entrypoint initialization and dump-path precedence before another checkpoint resume.
+
+Both contracts failed before the fix: the Ray runtime kept `/tmp/nccl_fr_rank`, and the common Ray
+initialization path wrote no driver manifest. Moving driver debug initialization into `initialize_ray` covers
+every checked-in Hydra training entrypoint, including all four TerminalBench variants. Ray environment assembly
+now resolves the NCCL dump path and heartbeat from the managed environment before consulting ambient legacy
+values. The focused regression suite passes, as do 985 trainer CPU tests and 242 Iris launcher tests.
+
+Jupiter job 1257515 then ran the two-node distributed-debug artifact contract against the production r5 SIF
+and Titan overlay. The healthy gang exited zero with two NCCL logs, two process manifests, and two completion
+receipts. The forced non-arrival gang exited nonzero and preserved both flight-recorder dumps, both NCCL logs,
+both process manifests, and the withheld-rank receipt under the declared GPFS artifact root. The batch job
+completed in 2 minutes 20 seconds, and pytest reported one pass in 124.33 seconds. This validates durable
+artifact capture under a controlled failure; the next natural resume is still required to identify where the
+first nonparticipant stops.
+
 ### 2026-08-05: inherited blocking wait defeats the ProcessGroupNCCL deadline
 
 Jupiter job 1242876 ran the four-node EP4/FSDP4 permanent-divergence contract against the production GH200

@@ -10,8 +10,11 @@ from skyrl_train.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     DEBUG_MODE_ENV,
     DistributedDebugMode,
+    FR_DUMP_TEMP_FILE_ENV,
+    NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     write_process_manifest,
 )
+from skyrl_train.utils.utils import prepare_runtime_environment
 
 
 def _debug_config(*, checkpoint_path: str = "/gpfs/experiments/run/checkpoints"):
@@ -88,3 +91,18 @@ def test_apply_mode_writes_resolved_driver_manifest(tmp_path, monkeypatch):
     assert manifest["environment"]["NCCL_DEBUG_SUBSYS"] == "INIT,BOOTSTRAP,ENV,NET,GRAPH,TUNING"
     assert Path(environment["TORCH_FR_DUMP_TEMP_FILE"]).parent.is_dir()
     assert Path(environment["NCCL_DEBUG_FILE"]).parent.is_dir()
+
+
+def test_distributed_mode_overrides_legacy_dump_destination(monkeypatch):
+    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
+    monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
+    monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV, raising=False)
+    monkeypatch.setenv(FR_DUMP_TEMP_FILE_ENV, "/tmp/nccl_fr_rank")
+    monkeypatch.setenv(NCCL_DEBUG_INFO_TEMP_FILE_ENV, "/tmp/nccl_fr_rank")
+
+    environment = prepare_runtime_environment(_debug_config())
+
+    expected_prefix = "/gpfs/experiments/run/debug/flight_recorder/nccl_fr_rank_"
+    assert environment[FR_DUMP_TEMP_FILE_ENV] == expected_prefix
+    assert environment[NCCL_DEBUG_INFO_TEMP_FILE_ENV] == expected_prefix
+    assert environment["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] == "300"
