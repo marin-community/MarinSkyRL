@@ -52,5 +52,5 @@ trainer-specific code.
   aligned.
 - Text postprocessing invalidates token identity and now drops the whole
   rollout-logprob channel with a warning.
-- The focused generator suite passes: 25 passed.
+- The focused generator suite passes: 26 passed.
 - The repository CPU gate passes: 1,251 collected, 9 skipped.

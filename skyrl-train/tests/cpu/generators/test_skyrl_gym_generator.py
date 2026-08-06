@@ -464,6 +464,42 @@ async def test_non_batched_postprocessed_action_discards_stale_logprobs(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+async def test_non_batched_postprocessed_action_preserves_aligned_logprobs(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.sampling_params.logprobs = 0
+    generator_cfg.use_conversation_multi_turn = False
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = None
+    mock_env.step.return_value = BaseTextEnvStepOutput(
+        observations=[], reward=1.0, done=True, metadata={}, postprocessed_action="mocked output"
+    )
+    mock_tokenizer.encode.side_effect = None
+    mock_tokenizer.encode.return_value = MOCK_LLM_OUTPUT_IDS
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+    output = await generator.generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "env_extras": [{}],
+            "env_classes": [mock_env_cfg.env_class],
+        }
+    )
+
+    assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS]
+    assert output["rollout_logprobs"] == [[0.1] * len(MOCK_LLM_OUTPUT_IDS)]
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
 @pytest.mark.parametrize("retokenize_chat_history", [False, True])
 async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
     mock_make,
