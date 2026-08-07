@@ -24,7 +24,7 @@
     },
     "cycle_2": {
       "created_utc": "2026-08-07T23:09:45Z",
-      "status": "protocol_frozen_pending_exact_environment_preflight",
+      "status": "preflight_passed_ep1_live_gate_pending",
       "corrected_cause": {
         "owner": "MarinSkyRL root dependency record",
         "old_pair": {
@@ -95,7 +95,7 @@
                   "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/exports",
                   "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep1-a01-20260807",
                   "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/resolved_config.yaml",
-                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/trace"
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/trace_jobs"
                 },
                 "job_name": "pr338-67b-c2-ep1-a01-20260807"
               },
@@ -105,7 +105,7 @@
                   "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/exports",
                   "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep1-a02-20260807",
                   "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/resolved_config.yaml",
-                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/trace"
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/trace_jobs"
                 },
                 "job_name": "pr338-67b-c2-ep1-a02-20260807"
               }
@@ -117,7 +117,7 @@
                   "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/exports",
                   "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep8-a01-20260807",
                   "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/resolved_config.yaml",
-                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/trace"
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/trace_jobs"
                 },
                 "job_name": "pr338-67b-c2-ep8-a01-20260807"
               },
@@ -127,7 +127,7 @@
                   "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/exports",
                   "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep8-a02-20260807",
                   "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/resolved_config.yaml",
-                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/trace"
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/trace_jobs"
                 },
                 "job_name": "pr338-67b-c2-ep8-a02-20260807"
               }
@@ -147,11 +147,16 @@
         },
         "schema_version": 1
       },
-      "protocol_sha256": "08e6b6e1a4106e4fde821f9bbca2e5d787e3321690af29eb778012d52fffc7ab",
+      "protocol_sha256": "6594d04b92aa3f366932bce9f7388a7925482656340d562f2b88c8dff0617e84",
+      "protocol_revision_history": [
+        {
+          "canonicalized_payload_sha256": "08e6b6e1a4106e4fde821f9bbca2e5d787e3321690af29eb778012d52fffc7ab",
+          "disposition": "superseded_before_any_full-arm_request",
+          "reason": "The exact preflight resolved the standard training driver's terminal-bench destination with its trace_jobs suffix. The attempt-scoped destinations were corrected to that already-preflighted value before requesting the EP1 gang; no workload, topology, numerical, causal-scope, scheduling, ordering, or retry field changed."
+        }
+      ],
       "preflight": {
-        "job_name": "pr338-67b-c2-preflight-a01-20260807",
         "cluster": "cw-rno2a",
-        "accelerators": 0,
         "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
         "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
         "setup": "cloud.iris.runtime_environment.task_setup_script(tested_commit, RuntimeProfile.FSDP)",
@@ -166,11 +171,56 @@
           "the real training entrypoint exits zero in Hydra config-composition mode and emits the preselected marker",
           "the Iris job is terminal and has no worker or accelerator remaining"
         ],
-        "status": "pending"
+        "attempts": [
+          {
+            "job_name": "pr338-67b-c2-preflight-a01-20260807",
+            "accelerators": 0,
+            "state": "failed",
+            "failure_class": "resource_insufficient_for_standard_fsdp_bootstrap",
+            "failure": "ImportError: libcuda.so.1: cannot open shared object file: No such file or directory",
+            "accepted_as_environment_failure": false,
+            "started_at_ms": 1786144649294,
+            "finished_at_ms": 1786144678133,
+            "task_count": 1,
+            "tasks_with_worker_at_readback": 0,
+            "captured_log_sha256": "6fde188b43a011441c20bdb088640a92a9b7e859fa199917558dce6499e27223",
+            "log_reference": "uv run iris --cluster=marin logs /romain/pr338-67b-c2-preflight-a01-20260807"
+          },
+          {
+            "job_name": "pr338-67b-c2-preflight-a02-20260807",
+            "accelerators": 1,
+            "accelerator_type": "H100",
+            "state": "succeeded",
+            "exit_code": 0,
+            "started_at_ms": 1786144839422,
+            "finished_at_ms": 1786144891148,
+            "task_count": 1,
+            "tasks_with_worker_at_readback": 0,
+            "accelerators_on_current_workers_at_readback": 0,
+            "launcher_sha256": "73aa4d746f394b97df7fdd990c20f0f2900baf13ce5f980300e33280c01c2f7a",
+            "captured_log_sha256": "d538ffc939b2402c8c5608ac694f1be64a5b548dcc59f4ad655823a6c40741f1",
+            "log_reference": "uv run iris --cluster=marin logs /romain/pr338-67b-c2-preflight-a02-20260807",
+            "resolved_record_sha256": "283a4391bbc779fd67c7221535a73c66b6e7c600558c0e8918aa3977ca801050",
+            "installed_identity": {
+              "source_head": "780812704702fda7de59ee2f424e3ef1087c37d5",
+              "pyproject_sha256": "33d48436c9cec6307c9f1aaee08b9c2da2a027a5d8ee7fe916eb3042255d2feb",
+              "uv_lock_sha256": "832928306b3a07da86b580ff252fd1b07ba942d120af8648af580cbc269e160e",
+              "harbor_version": "0.8.1",
+              "harbor_commit": "14777c013bee9d75821bc19dd2f35824bc9f3e96",
+              "harbor_config_version": "0.1.0",
+              "harbor_config_release_tag": "harbor-config-14777c013bee9d75821bc19dd2f35824bc9f3e96",
+              "harbor_origin": "/app/.venv/lib/python3.12/site-packages/harbor/__init__.py",
+              "harbor_config_origin": "/app/.venv/lib/python3.12/site-packages/harbor_config/__init__.py"
+            },
+            "runtime_marker": "[rl-iris] frozen runtime ready: 2.11.0+cu129 0.0.0.dev20260805+marin.fa50698a9a30",
+            "success_marker": "[pr338 cycle2 preflight] real entrypoint config accepted"
+          }
+        ],
+        "status": "passed"
       },
       "attempts": [],
       "results": {
-        "ep1": "pending_preflight",
+        "ep1": "eligible_for_live_gate",
         "ep8": "not_eligible_before_ep1_gate"
       }
     }
