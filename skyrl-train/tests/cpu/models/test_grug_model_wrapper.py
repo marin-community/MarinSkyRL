@@ -4,6 +4,7 @@ from skyrl_train.model_wrapper import validate_grug_training_options
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     validate_grug_expert_parallel_options,
+    validate_grug_selective_checkpoint_options,
     validate_grug_training_strategy,
 )
 
@@ -98,3 +99,26 @@ def test_grug_expert_parallel_requires_native_grouped_torch_path():
         use_grouped_mm=False,
         ep_comm_backend="deepep",
     )
+
+
+def test_grug_selective_checkpoint_requires_supported_execution():
+    options = {
+        "model_type": GRUG_MOE_MODEL_TYPE,
+        "enabled": True,
+        "gradient_checkpointing": True,
+        "use_reentrant": False,
+        "use_grouped_mm": True,
+    }
+    validate_grug_selective_checkpoint_options(**options)
+
+    invalid = (
+        ({"model_type": "qwen3"}, "Grug policy model"),
+        ({"gradient_checkpointing": False}, "gradient_checkpointing=true"),
+        ({"use_reentrant": True}, "gradient_checkpointing_use_reentrant=false"),
+        ({"use_grouped_mm": False}, "use_grouped_mm=true"),
+    )
+    for override, message in invalid:
+        with pytest.raises(ValueError, match=message):
+            validate_grug_selective_checkpoint_options(**{**options, **override})
+
+    validate_grug_selective_checkpoint_options(**{**options, "enabled": False, "model_type": "qwen3"})

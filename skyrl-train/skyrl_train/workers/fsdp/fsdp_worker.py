@@ -23,7 +23,9 @@ except ImportError:
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
+    grug_moe_selective_checkpoint_context,
     validate_grug_expert_parallel_options,
+    validate_grug_selective_checkpoint_options,
 )
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
@@ -778,6 +780,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
             ep_comm_backend=str(self.cfg.trainer.policy.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)),
         )
+        grug_moe_selective_checkpoint = bool(self.cfg.trainer.policy.get("grug_moe_selective_checkpoint", False))
+        validate_grug_selective_checkpoint_options(
+            getattr(model_config, "model_type", None),
+            enabled=grug_moe_selective_checkpoint,
+            gradient_checkpointing=bool(self.cfg.trainer.gradient_checkpointing),
+            use_reentrant=bool(self.cfg.trainer.gradient_checkpointing_use_reentrant),
+            use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
+        )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -813,11 +823,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
             if self.cfg.trainer.gradient_checkpointing:
-                wrapped_model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={
-                        "use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant
-                    }
-                )
+                gradient_checkpointing_kwargs = {"use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant}
+                if grug_moe_selective_checkpoint:
+                    gradient_checkpointing_kwargs["context_fn"] = grug_moe_selective_checkpoint_context
+                wrapped_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),

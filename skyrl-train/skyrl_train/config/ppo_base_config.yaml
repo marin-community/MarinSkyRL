@@ -28,6 +28,8 @@ trainer:
   strategy: fsdp2
   policy:
     grug_query_bias_update_mode: "frozen"
+    # Cache grouped expert matmul outputs while rematerializing the rest of each Grug layer.
+    grug_moe_selective_checkpoint: false
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       lora:

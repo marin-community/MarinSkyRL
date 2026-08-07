@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from torch import nn
+from torch.utils.checkpoint import create_selective_checkpoint_contexts
 from transformers import PretrainedConfig, PreTrainedModel, initialization as init
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
@@ -99,6 +100,36 @@ def validate_grug_expert_parallel_runtime(*, use_grouped_mm: bool, ep_comm_backe
         raise ValueError("Grug expert_model_parallel_size>1 requires use_grouped_mm=true")
     if ep_comm_backend != GRUG_EP_COMM_BACKEND:
         raise ValueError(f"Grug expert parallelism supports only ep_comm_backend={GRUG_EP_COMM_BACKEND}")
+
+
+def validate_grug_selective_checkpoint_options(
+    model_type: str | None,
+    *,
+    enabled: bool,
+    gradient_checkpointing: bool,
+    use_reentrant: bool,
+    use_grouped_mm: bool,
+) -> None:
+    """Reject configurations where Grug's selective checkpoint would be a no-op."""
+
+    if not enabled:
+        return
+    if model_type != GRUG_MOE_MODEL_TYPE:
+        raise ValueError("trainer.policy.grug_moe_selective_checkpoint requires a Grug policy model")
+    if not gradient_checkpointing:
+        raise ValueError("trainer.policy.grug_moe_selective_checkpoint requires gradient_checkpointing=true")
+    if use_reentrant:
+        raise ValueError(
+            "trainer.policy.grug_moe_selective_checkpoint requires gradient_checkpointing_use_reentrant=false"
+        )
+    if not use_grouped_mm:
+        raise ValueError("trainer.policy.grug_moe_selective_checkpoint requires use_grouped_mm=true")
+
+
+def grug_moe_selective_checkpoint_context():
+    """Cache grouped expert matmul outputs during non-reentrant recomputation."""
+
+    return create_selective_checkpoint_contexts([torch.ops.aten._grouped_mm.default])
 
 
 def _jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
