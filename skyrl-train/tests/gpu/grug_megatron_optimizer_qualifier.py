@@ -340,6 +340,37 @@ def _assert_trees_equal(left: Any, right: Any, path: str = "state") -> None:
         assert left == right, (path, left, right)
 
 
+def _assert_resumed_optimizer_states_equal(left: Any, right: Any, path: str = "state") -> None:
+    assert type(left) is type(right), (path, type(left), type(right))
+    if isinstance(left, torch.Tensor):
+        assert left.device == right.device, (path, left.device, right.device)
+        assert torch.equal(left, right), path
+    elif isinstance(left, dict):
+        assert left.keys() == right.keys(), path
+        for key in left:
+            left_value = left[key]
+            right_value = right[key]
+            child_path = f"{path}.{key}"
+            if key == "step":
+                assert type(left_value) is type(right_value), (child_path, type(left_value), type(right_value))
+                assert isinstance(left_value, torch.Tensor), (child_path, type(left_value))
+                assert left_value.shape == right_value.shape == torch.Size(), (
+                    child_path,
+                    left_value.shape,
+                    right_value.shape,
+                )
+                assert left_value.dtype == right_value.dtype, (child_path, left_value.dtype, right_value.dtype)
+                assert torch.equal(left_value.cpu(), right_value.cpu()), child_path
+            else:
+                _assert_resumed_optimizer_states_equal(left_value, right_value, child_path)
+    elif isinstance(left, (list, tuple)):
+        assert len(left) == len(right), path
+        for index, (left_value, right_value) in enumerate(zip(left, right, strict=True)):
+            _assert_resumed_optimizer_states_equal(left_value, right_value, f"{path}.{index}")
+    else:
+        assert left == right, (path, left, right)
+
+
 def _assert_model_matches_main(model_parameters, main_parameters) -> None:
     assert model_parameters.keys() == main_parameters.keys()
     for name, model_parameter in model_parameters.items():
@@ -505,7 +536,9 @@ def _run_qualifier() -> dict[str, Any]:
                 _copy_loaded_model(resumed_model_parameters, loaded["model"])
                 resumed_optimizer.load_state_dict(loaded["optimizer"])
 
-                _assert_trees_equal(resumed_optimizer.state_dict(), checkpoint_optimizer.state_dict())
+                _assert_resumed_optimizer_states_equal(
+                    resumed_optimizer.state_dict(), checkpoint_optimizer.state_dict()
+                )
                 for name in checkpoint_model_parameters:
                     assert torch.equal(checkpoint_model_parameters[name], resumed_model_parameters[name]), name
                     assert torch.equal(checkpoint_main_parameters[name], resumed_main_parameters[name]), name
@@ -518,7 +551,9 @@ def _run_qualifier() -> dict[str, Any]:
                 for name in checkpoint_model_parameters:
                     assert torch.equal(checkpoint_model_parameters[name], resumed_model_parameters[name]), name
                     assert torch.equal(checkpoint_main_parameters[name], resumed_main_parameters[name]), name
-                _assert_trees_equal(resumed_optimizer.state_dict(), checkpoint_optimizer.state_dict())
+                _assert_resumed_optimizer_states_equal(
+                    resumed_optimizer.state_dict(), checkpoint_optimizer.state_dict()
+                )
             except Exception as error:
                 raise QualifierStageError("exact_next_step", error) from error
 
