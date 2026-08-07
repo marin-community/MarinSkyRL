@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "terminal_disposition_published_and_read_back",
+  "record_status": "cycle_2_ep1_running",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-07T21:53:19Z",
+  "revised_utc": "2026-08-07T23:38:32Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -24,7 +24,7 @@
     },
     "cycle_2": {
       "created_utc": "2026-08-07T23:09:45Z",
-      "status": "preflight_passed_ep1_live_gate_pending",
+      "status": "ep1_attempt_1_running",
       "corrected_cause": {
         "owner": "MarinSkyRL root dependency record",
         "old_pair": {
@@ -218,9 +218,72 @@
         ],
         "status": "passed"
       },
-      "attempts": [],
+      "live_gate": {
+        "utc": "2026-08-07T23:35:08Z",
+        "status": "passed",
+        "source": {
+          "branch_local_head": "954a810b409fc602e1f1b6de1f74dbb08a0fa132",
+          "branch_remote_head": "954a810b409fc602e1f1b6de1f74dbb08a0fa132",
+          "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+          "production_and_regression_files_changed": false
+        },
+        "capacity": {
+          "peer_id": "cw-rno2a",
+          "reachable": true,
+          "last_contact_ms": 1786145473934,
+          "active_federated_jobs": 12,
+          "h100_free": 7,
+          "h100_total": 512,
+          "h100_interactive_held": 89,
+          "h100_batch_held": 416,
+          "h100_interactive_available_or_preemptible": 423,
+          "h100_requested": 80,
+          "peer_snapshot_sha256": "916330624aa4e0faad3112e6813e38c5293846ed7efc56334ad80d411e360db8"
+        },
+        "budget": {
+          "user_id": "romain",
+          "limit": 75000,
+          "spent": 4161,
+          "max_band": "PRIORITY_BAND_PRODUCTION",
+          "requested_band": "PRIORITY_BAND_INTERACTIVE",
+          "request_scalar_cost": 89400
+        }
+      },
+      "attempts": [
+        {
+          "arm": "ep1",
+          "attempt": 1,
+          "job_id": "/romain/pr338-67b-c2-ep1-a01-20260807",
+          "submitted_at_utc": "2026-08-07T23:36:56Z",
+          "state_at_2026_08_07T23_38_32Z": "running",
+          "tasks_running": 10,
+          "tasks_total": 10,
+          "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+          "launch_log_sha256": "226a9409d5a0139913a7f790d15690631cc9f77adb29c3a959bdc2add9bfaf34",
+          "independent_request_readback": {
+            "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+            "replicas": 10,
+            "cpu_millicores_per_replica": 48000,
+            "memory_bytes_per_replica": 751619276800,
+            "disk_bytes_per_replica": 11596411699200,
+            "device": {
+              "gpu": {
+                "variant": "H100",
+                "count": 8
+              }
+            },
+            "coscheduling": true,
+            "coscheduling_group_by": "leafgroup",
+            "max_retries_failure": 0,
+            "max_retries_preemption": 1,
+            "priority_band": 2,
+            "timeout_ms": 72000000,
+            "bundle_id": "c2f64c42b53990ac3a7050b1e2e19db0d9a8a212edd93da219d3589e2e8c0fbc"
+          }
+        }
+      ],
       "results": {
-        "ep1": "eligible_for_live_gate",
+        "ep1": "attempt_1_running",
         "ep8": "not_eligible_before_ep1_gate"
       }
     }
