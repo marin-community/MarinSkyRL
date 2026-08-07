@@ -44,7 +44,12 @@ from skyrl_train.utils.ppo_utils import (
     AdaptiveKLController,
     normalize_advantages_dict,
 )
-from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
+from skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    MeshRank,
+    collect_actor_results,
+    concatenate_outputs_after_mesh_dispatch,
+)
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -1709,21 +1714,41 @@ class RayPPOTrainer:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
                     self.critic_model.backload_to_gpu()
-                    critic_statuses = ray.get(self.critic_model.async_run_ray_method("mesh", "ppo_train", data))
+                    critic_refs = self.critic_model.async_run_ray_method("mesh", "ppo_train", data)
+                    critic_statuses = collect_actor_results(
+                        self.critic_model.actor_infos,
+                        critic_refs,
+                        operation="critic ppo_train",
+                    )
                     self.critic_model.offload_to_cpu()
             with Timer("policy_train", self.all_timings):
                 self.policy_model.backload_to_gpu()
-                policy_statuses = ray.get(self.policy_model.async_run_ray_method("mesh", "ppo_train", data))
+                policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
+                policy_statuses = collect_actor_results(
+                    self.policy_model.actor_infos,
+                    policy_refs,
+                    operation="policy ppo_train",
+                )
         else:
             if self.critic_model is not None:
                 with Timer("policy_critic_overlap_train", self.all_timings):
                     policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
                     critic_refs = self.critic_model.async_run_ray_method("mesh", "ppo_train", data)
-                    policy_statuses = ray.get(policy_refs)
-                    critic_statuses = ray.get(critic_refs)
+                    all_statuses = collect_actor_results(
+                        self.policy_model.actor_infos + self.critic_model.actor_infos,
+                        policy_refs + critic_refs,
+                        operation="policy and critic ppo_train",
+                    )
+                    policy_statuses = all_statuses[: len(policy_refs)]
+                    critic_statuses = all_statuses[len(policy_refs) :]
             else:
                 with Timer("policy_train", self.all_timings):
-                    policy_statuses = ray.get(self.policy_model.async_run_ray_method("mesh", "ppo_train", data))
+                    policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
+                    policy_statuses = collect_actor_results(
+                        self.policy_model.actor_infos,
+                        policy_refs,
+                        operation="policy ppo_train",
+                    )
 
         empty_cache_refs = []
         if self.critic_model is not None:
