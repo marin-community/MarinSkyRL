@@ -337,6 +337,19 @@ class _GrugZeroInitLinear(nn.Linear):
     pass
 
 
+class _DivideGradient(torch.autograd.Function):
+    """Leave the forward value unchanged and divide only its backward edge."""
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, divisor: int) -> torch.Tensor:
+        ctx.divisor = divisor
+        return tensor
+
+    @staticmethod
+    def backward(ctx, gradient: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return gradient / ctx.divisor, None
+
+
 class GrugMoeExperts(nn.Module):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__()
@@ -396,10 +409,24 @@ class GrugMoeExperts(nn.Module):
         # explicitly requested path runs so eager model loading stays lightweight.
         from skyrl_train.models.layers.moe import _run_experts_grouped_mm  # noqa: PLC0415
 
+        # MeshDispatch sends the same logical batch from every EP rank, so each
+        # local expert sees ``ep_size`` copies. Scale the three weight edges in
+        # the graph: this averages only expert-weight gradients while leaving the
+        # forward values and hidden-state gradients unchanged. FSDP2 temporarily
+        # replaces registered sharded parameters with their forward-time values,
+        # so hooks attached to the registered objects do not see this backward
+        # edge.
+        gate_weight = self.gate_proj.weight
+        down_weight = self.down_proj.weight
+        up_weight = self.up_proj.weight
+        if self.ep_size > 1:
+            gate_weight = _DivideGradient.apply(gate_weight, self.ep_size)
+            down_weight = _DivideGradient.apply(down_weight, self.ep_size)
+            up_weight = _DivideGradient.apply(up_weight, self.ep_size)
         return _run_experts_grouped_mm(
-            self.gate_proj.weight,
-            self.down_proj.weight,
-            self.up_proj.weight,
+            gate_weight,
+            down_weight,
+            up_weight,
             routed_input,
             num_tokens_per_expert,
         )
