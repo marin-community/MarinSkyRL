@@ -1,0 +1,433 @@
+{
+  "schema_version": 1,
+  "record_status": "frozen_prelaunch",
+  "created_utc": "2026-08-07T21:08:29Z",
+  "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
+  "causal_scope": {
+    "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
+    "does_not_establish": "The causal effect of PR #338 on the full workload because there is no matched parent-EP8 arm. The existing component oracle supplies the narrow causal evidence.",
+    "forbidden_extra_arm": "parent EP8"
+  },
+  "protocol_sha256": "78672fef8476a570c9b0dba757d511223ae61c7ac6d3fb1c194e3dcf8b40f4b8",
+  "commits": {
+    "component_parent": "166a6643b9735f64ab8b4aa85b1035d9577f58ea",
+    "component_qualified_head": "c4513ded30e1d65c3923602ca4ae9f99975bc71b",
+    "origin_main_at_freeze": "a906145aaf2bee56e3d8062830ef463f67722ea2",
+    "production_diff_files": [
+      "skyrl-train/skyrl_train/distributed/fsdp_utils.py",
+      "skyrl-train/skyrl_train/models/grug_moe.py"
+    ],
+    "component_regression_file": "skyrl-train/tests/gpu/grug_ep_gradient_parity.py",
+    "production_diff_changed_after_component_gate": false,
+    "tested_commit": null,
+    "artifact_commit": null
+  },
+  "historical_request": {
+    "campaign_issue": "https://github.com/marin-community/marin/issues/7786",
+    "source_commit": "80d1352c70a29f67981c4381c8088d9ff127e39f",
+    "jobs": {
+      "ep1": "/benjaminfeuer/rl-snowball-e10-rno2a-ctrl-grug-67-20260806-135531",
+      "ep8": "/benjaminfeuer/rl-snowball-e10-rno2a-expertparallel-grug-67-20260806-135531"
+    },
+    "iris_request_per_task": {
+      "tasks": 10,
+      "coscheduled": true,
+      "coscheduling_group_by": "leafgroup",
+      "cpu_millicores": 48000,
+      "memory_bytes": 751619276800,
+      "disk_bytes": 11596411699200,
+      "accelerator": {
+        "variant": "H100",
+        "count": 8
+      },
+      "priority_band_numeric": 2,
+      "max_retries_failure": 3,
+      "max_retries_preemption": 1000,
+      "task_image_request": null,
+      "task_image_note": "The historical task_image field is empty. The then-current controller default digest is not recoverable from the request and is not claimed."
+    },
+    "region_and_cluster": "cw-rno2a",
+    "role_topology": {
+      "policy_and_reference": "8 colocated nodes x 8 H100 = 64 H100",
+      "generation": "2 local vLLM engines, each TP1 x DP8 x EP8 = 8 H100; 16 H100 total",
+      "request_total": "10 nodes and 80 H100"
+    },
+    "immutable_inputs": {
+      "complete_config_gist": {
+        "url": "https://gist.github.com/penfever/c727931f564e60bfd95fe9093126e9c4",
+        "revision": "1e390f2924667c22344d2c4f42ba372477268a7b"
+      },
+      "ep1_config": {
+        "raw_url": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/5648d8193943c120e06786314b662a0bb4f1ae49/snowball_e10_rno2a_ctrl_frozen.yaml",
+        "sha256": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6"
+      },
+      "ep8_config": {
+        "raw_url": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/47ed4f62c99af8ccebf44f1179a02c7ddaa3077d/snowball_e10_rno2a_expertparallel_frozen.yaml",
+        "sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5"
+      },
+      "overlay_gist": {
+        "url": "https://gist.github.com/penfever/a4e0aab5d3c44823e4e4a912c3990121",
+        "revision": "79d2f68a978b21210f66839434608516ee35e537"
+      },
+      "historical_results": {
+        "raw_url": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/46cd8719a5d5b81f9c486b790ebc46b72d940303/e10_results.md",
+        "sha256": "a76bd4f048b278749f24649064f6d14097a6e657198d28a4764c0e37684b0c95"
+      },
+      "historical_metrics": {
+        "url": "https://gist.github.com/penfever/2adb58605603aa087bec9494a3f0d4c0",
+        "revision": "56bc2f112602fe9a3e92972b1ef1ee174bcf0c75",
+        "raw_url": "https://gist.githubusercontent.com/penfever/2adb58605603aa087bec9494a3f0d4c0/raw/0e5598694e019c1aa98492661ec09b26f984fce2/e10c-finelog-metrics.md",
+        "sha256": "b75e2e71f032b7e25e67c8854776ab14831cdd9c25c1eb71dd04711f5a8aa087"
+      },
+      "inherited_defaults": {
+        "path": "skyrl-train/skyrl_train/config/ppo_base_config.yaml",
+        "sha256_at_historical_and_candidate_commits": "7ab42a8362be1cd240c41cc8c8bc6b64b508e2369dc565a6789e36aec5bf43dd"
+      }
+    }
+  },
+  "protocol": {
+    "input_contract": {
+      "kind": "matched_live_online",
+      "fixed_replay_available": false,
+      "common_start": "The same immutable model artifact, seed 42, empty job-scoped checkpoint prefix with resume_mode=latest, and therefore identically initialized fresh AdamW state.",
+      "matched": [
+        "model and tokenizer artifact",
+        "train parquet and deterministic row order",
+        "seed",
+        "generation settings",
+        "reward and objective",
+        "optimizer",
+        "ten-update cap",
+        "region, hardware, image, and source commit"
+      ],
+      "divergence_limit": "Generated responses may diverge after the first accepted optimizer update because this is live online training. No replay infrastructure will be built for this goal."
+    },
+    "source_binding": {
+      "rule": "Commit this frozen record, push it, and use that exact artifact-only Git head as --runtime-commit for both arms. Do not commit between arm launches.",
+      "production_diff_gate": "The production diff must remain byte-for-byte identical to component-qualified head c4513ded30e1d65c3923602ca4ae9f99975bc71b; otherwise rerun the focused component gate before GPU launch.",
+      "tested_commit": null
+    },
+    "task_image": {
+      "reference": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+      "digest": "sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+      "selection": "Current standard Iris task image resolved to an immutable digest before dry-run."
+    },
+    "model_and_tokenizer": {
+      "local_path": "/tmp/snowball-grug-67b-a2b-sft-s2-thinking-step630",
+      "source_uri": "s3://marin-us-east-02a/models/marin-community--grug-67b-a2b-sft-s2-thinking-step630",
+      "identity": "marin-community/grug-67b-a2b-sft-s2-thinking-step630@6808fe5c219471517bd51df35addefd38ebebf89",
+      "model_revision": "6808fe5c219471517bd51df35addefd38ebebf89",
+      "tokenizer_revision": "6808fe5c219471517bd51df35addefd38ebebf89",
+      "tokenizer_source": "the tokenizer files in the same immutable model artifact"
+    },
+    "dataset": {
+      "local_path": "/tmp/snowball-rlvrmath-7498/train.parquet",
+      "source_uri": "s3://marin-us-east-02a/iris/rl-data/snowball-67b-a2b-rlvrmath-7498/train.parquet",
+      "identity": "snowball-67b-a2b-rlvrmath-7498",
+      "size_bytes": 1103466,
+      "etag": "9f089801851727f661edbb882496a2a2",
+      "sha256": "eb3c9cd18466a27a600bfcdddbafc2eb4f318db254815eb44588ab7d74475594",
+      "provenance_uri": "s3://marin-us-east-02a/iris/rl-data/snowball-67b-a2b-rlvrmath-7498/provenance.json",
+      "provenance_sha256": "f47c3c499c8b278a07ebbfc2404b94b65b6134ee67825ed96cad764a1432a917",
+      "upstream": "allenai/RLVR-MATH",
+      "upstream_revision": "bd2a93551b503a395fadd1a740d957559cfe6f3c",
+      "split": "train",
+      "raw_rows": 7500,
+      "emitted_rows": 7498,
+      "filter": "Skip rows whose AIME ground_truth cannot normalize to a non-empty answer.",
+      "skipped_row_indices": [1224, 6673],
+      "validation_data": []
+    },
+    "recipe": {
+      "entrypoint": "skyrl_train.entrypoints.main_base",
+      "environment": {
+        "env_class": "aime",
+        "verifier": "SkyRL Gym AIME exact-answer verifier",
+        "length_penalty_weight": 0.0,
+        "target_length": 768,
+        "truncated_penalty": -2.0,
+        "min_response_length": 16,
+        "end_think_token": "<|end_think|>",
+        "max_gen_length": 0
+      },
+      "objective": {
+        "advantage_estimator": "grpo",
+        "policy_loss_type": "regular",
+        "loss_reduction": "token_mean",
+        "grpo_norm_by_std": true,
+        "advantage_batch_normalize": false,
+        "use_kl_in_reward": false,
+        "use_kl_loss": false,
+        "use_entropy_loss": false,
+        "eps_clip_low": 0.2,
+        "eps_clip_high": 0.2,
+        "update_epochs_per_batch": 1
+      },
+      "optimizer": {
+        "name": "AdamW",
+        "lr": 0.00001,
+        "betas": [0.9, 0.999],
+        "eps": 1e-8,
+        "eps_source": "PyTorch AdamW default; inherited optimizer_kwargs is empty",
+        "weight_decay": 0.01,
+        "max_grad_norm": 0.5,
+        "offload_after_step": true,
+        "num_warmup_steps": 0,
+        "scheduler": "constant_with_warmup",
+        "initial_state": "fresh and identically initialized in each arm"
+      },
+      "training": {
+        "strategy": "fsdp2",
+        "model_dtype": "bfloat16",
+        "epochs": 1,
+        "max_steps": 10,
+        "accepted_update_window": [1, 9],
+        "checkpoint_interval": 2,
+        "hf_save_interval": 5,
+        "train_batch_size": 256,
+        "policy_mini_batch_size": 256,
+        "micro_train_batch_size_per_gpu": 1,
+        "micro_forward_batch_size_per_gpu": 1,
+        "gradient_accumulation_geometry": {
+          "global_samples": 256,
+          "policy_mini_batch_samples": 256,
+          "microbatch_samples_per_data_parallel_rank": 1,
+          "ep1": "64 data-parallel policy ranks, so 4 microbatch waves per update",
+          "ep8": "8 data-parallel groups with each logical batch replicated across the 8-rank expert-parallel dimension, so 32 microbatch waves per update"
+        },
+        "use_sample_packing": false,
+        "flash_attn": true,
+        "gradient_checkpointing": true,
+        "gradient_checkpointing_use_reentrant": false,
+        "query_bias_update_mode": "frozen",
+        "cpu_offload": false,
+        "reshard_after_forward": true
+      },
+      "context": {
+        "request_window_tokens": 32768,
+        "max_new_tokens_per_turn": 31104,
+        "max_turns": 1,
+        "model_num_attention_heads": 20
+      },
+      "generation": {
+        "backend": "vllm",
+        "dtype": "bfloat16",
+        "num_inference_engines": 2,
+        "tensor_parallel_size": 1,
+        "data_parallel_size": 8,
+        "expert_parallel_size": 8,
+        "n_samples_per_prompt": 16,
+        "gpu_memory_utilization": 0.85,
+        "enforce_eager": false,
+        "max_num_batched_tokens": 65536,
+        "run_engines_locally": true,
+        "weight_sync_backend": "nccl",
+        "async_engine": true,
+        "sampling": {
+          "temperature": 1.0,
+          "top_p": 1.0,
+          "min_p": 0.0,
+          "top_k": -1,
+          "repetition_penalty": 1.0
+        }
+      }
+    },
+    "common_role_topology": {
+      "physical_request": "10 nodes x 8 H100 on cw-rno2a",
+      "policy": "8 nodes x 8 H100",
+      "reference": "colocated with policy on the same 8 nodes",
+      "generation": "2 local engines x (TP1, DP8, EP8) on 2 nodes",
+      "peak_nodes": 10,
+      "peak_h100": 80
+    },
+    "arm_difference_allowlist": {
+      "only_allowed_path": "trainer.policy.fsdp_config",
+      "ep1": {
+        "fsdp_size": -1,
+        "expert_model_parallel_size": 1,
+        "expert_tensor_parallel_size": 1,
+        "use_grouped_mm": false,
+        "ep_comm_backend": "torch",
+        "moe_grouped_gemm": false,
+        "moe_token_dispatcher_type": "alltoall"
+      },
+      "ep8": {
+        "fsdp_size": 8,
+        "expert_model_parallel_size": 8,
+        "expert_tensor_parallel_size": 1,
+        "use_grouped_mm": true,
+        "ep_comm_backend": "torch",
+        "moe_grouped_gemm": false,
+        "moe_token_dispatcher_type": "alltoall"
+      },
+      "note": "The generator topology remains TP1/DP8/EP8 in both arms. Only the native training topology differs."
+    },
+    "execution": {
+      "schedule": "sequential: EP1 must reach a terminal state before EP8 is submitted",
+      "cluster": "cw-rno2a",
+      "storage_locality": "Model, data, checkpoints, exports, traces, and rendezvous all use marin-us-east-02a with cw-rno2a; no cross-region egress is required.",
+      "request": {
+        "num_nodes": 10,
+        "gpus_per_node": 8,
+        "gpu_variant": "H100",
+        "cpu_per_node": 48,
+        "memory_per_node": "700GB",
+        "disk_per_node": "10800Gi",
+        "priority": "interactive",
+        "timeout_seconds": 72000,
+        "preemptible": false,
+        "max_retries_failure": 0,
+        "max_retries_preemption": 1
+      },
+      "launch_wrapper": {
+        "path": "/tmp/pr338-67b-qualification/launch_pr338_qualification.py",
+        "sha256": "942f6d37ad78c561a4443a6f9820a9f4bc5ed5d1a09651d7981c4eed90fb8a6f",
+        "purpose": "Launch-host-only monkeypatch of IrisClient.submit that pins task_image and max_retries_preemption. It is excluded from the runtime bundle and does not alter training code.",
+        "frozen_constants": {
+          "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+          "max_retries_preemption": 1
+        }
+      },
+      "shared_command_argv": [
+        "uv", "run", "python", "/tmp/pr338-67b-qualification/launch_pr338_qualification.py",
+        "--model_path", "/tmp/snowball-grug-67b-a2b-sft-s2-thinking-step630",
+        "--model-source-uri", "s3://marin-us-east-02a/models/marin-community--grug-67b-a2b-sft-s2-thinking-step630",
+        "--model-source-identity", "marin-community/grug-67b-a2b-sft-s2-thinking-step630@6808fe5c219471517bd51df35addefd38ebebf89",
+        "--train_data", "[\"/tmp/snowball-rlvrmath-7498/train.parquet\"]",
+        "--val_data", "[]",
+        "--data-sources-json", "[{\"identity\":\"snowball-67b-a2b-rlvrmath-7498\",\"local_path\":\"/tmp/snowball-rlvrmath-7498\",\"relative_path\":\"train.parquet\",\"uri\":\"s3://marin-us-east-02a/iris/rl-data/snowball-67b-a2b-rlvrmath-7498\"}]",
+        "--num-nodes", "10", "--gpus-per-node", "8", "--gpu-variant", "H100",
+        "--cpu", "48", "--memory", "700GB", "--disk", "10800Gi",
+        "--cluster", "cw-rno2a", "--target-cluster", "cw-rno2a",
+        "--runtime-commit", "${TESTED_COMMIT}", "--runtime-profile", "fsdp",
+        "--priority", "interactive", "--max-retries", "0", "--timeout", "72000",
+        "--no-preemptible", "--record-literal",
+        "++trainer.max_steps=10", "++trainer.seed=42",
+        "++trainer.placement.colocate_all=false",
+        "++trainer.placement.policy_num_nodes=8", "++trainer.placement.ref_num_nodes=8",
+        "++trainer.placement.policy_num_gpus_per_node=8", "++trainer.placement.ref_num_gpus_per_node=8",
+        "++generator.num_inference_engines=2", "++generator.inference_engine_tensor_parallel_size=1",
+        "++trainer.train_batch_size=256", "++trainer.policy_mini_batch_size=256",
+        "++trainer.micro_train_batch_size_per_gpu=1", "++generator.n_samples_per_prompt=16"
+      ],
+      "arms": {
+        "ep1": {
+          "job_name": "pr338-67b-ep1-a01-20260807",
+          "rl_config": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/5648d8193943c120e06786314b662a0bb4f1ae49/snowball_e10_rno2a_ctrl_frozen.yaml",
+          "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-ep1-a01-20260807",
+          "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/resolved_config.yaml",
+          "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/checkpoints",
+          "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/exports",
+          "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/trace"
+        },
+        "ep8": {
+          "job_name": "pr338-67b-ep8-a01-20260807",
+          "rl_config": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/47ed4f62c99af8ccebf44f1179a02c7ddaa3077d/snowball_e10_rno2a_expertparallel_frozen.yaml",
+          "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-ep8-a01-20260807",
+          "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/resolved_config.yaml",
+          "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/checkpoints",
+          "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/exports",
+          "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/trace"
+        }
+      }
+    },
+    "retry_policy": {
+      "accepted_metrics_retry": "Never rerun an accepted numerical result.",
+      "allowed": "At most one retry per arm, only for setup failure before accepted metrics or a preemption restartable from the frozen state.",
+      "failure_retries": 0,
+      "preemption_retries": 1
+    },
+    "decision_rule": {
+      "update_cap": 10,
+      "required_through_update": 9,
+      "pass_requires": [
+        "both arms complete accepted optimizer updates through step 9",
+        "every accepted EP8 update through step 9 has optimizer_step_succeeded=1",
+        "every EP8 raw_grad_norm through step 9 is <= 0.5",
+        "no same-step EP8 or EP1 raw_grad_norm is zero or missing",
+        "median same-step EP8/EP1 raw_grad_norm ratio through step 9 is <= 2.0"
+      ],
+      "supporting_metrics": [
+        "policy_entropy",
+        "policy_loss",
+        "final_loss",
+        "avg_raw_advantages",
+        "avg_raw_advantages_abs",
+        "ppo_clip_ratio"
+      ],
+      "ppo_clip_ratio_label": "objective clipping",
+      "derived_gradient_clip_scale": "min(1, 0.5 / raw_grad_norm)",
+      "dispositions": {
+        "both_pass": "mark PR #338 ready for human review; keep issue #335 open",
+        "ep8_diverges_or_numerically_fails": "keep PR #338 draft; keep issue #335 open",
+        "blocked_or_incomplete": "keep PR #338 draft; keep issue #335 open"
+      }
+    }
+  },
+  "preflight": {
+    "input_readback_jobs": [
+      {
+        "job_id": "/romain/pr338-input-readback-20260807",
+        "state": "succeeded",
+        "accelerators": 0
+      },
+      {
+        "job_id": "/romain/pr338-provenance-readback-20260807",
+        "state": "failed",
+        "classification": "preserved pre-metric setup failure: stock image lacked jq",
+        "accelerators": 0
+      },
+      {
+        "job_id": "/romain/pr338-provenance-readback-a02-20260807",
+        "state": "succeeded",
+        "classification": "corrected only the JSON printer; source URI and hash unchanged",
+        "accelerators": 0
+      }
+    ],
+    "locality": "passed",
+    "live_capacity_at_2026-08-07T21:05:16Z": {
+      "cluster": "cw-rno2a",
+      "total_h100": 512,
+      "free_h100": 7,
+      "interactive_held_h100": 89,
+      "batch_held_h100": 416,
+      "reclaimable_for_interactive_including_free": 423,
+      "requested_peak_h100": 80,
+      "fit": true
+    },
+    "scheduling_budget_at_2026-08-07T21:05:45Z": {
+      "user": "romain",
+      "configured_limit": 75000,
+      "active_non_batch_spend": 4161,
+      "request_scalar_size": 89400,
+      "eligibility_rule": "Pending interactive work is downgraded only when current active non-batch spend exceeds the limit; the pending gang total is not a hard request cap.",
+      "eligible_at_readback": true,
+      "priority_or_account_policy_changed": false
+    },
+    "estimate": {
+      "historical_ep8_step_seconds_1_through_9": [4496, 6144, 5265, 3786, 3689, 4991, 4988, 4997, 4992],
+      "wall_clock_hours_per_arm": [13, 15],
+      "gpu_hours_per_arm": [1040, 1200],
+      "sequential_wall_clock_hours": [26, 30],
+      "total_gpu_hours": [2080, 2400],
+      "peak_nodes": 10,
+      "peak_h100": 80
+    },
+    "dry_runs": {
+      "ep1": null,
+      "ep8": null
+    },
+    "admission": "pending dry-runs"
+  },
+  "attempts": [],
+  "results": {
+    "ep1": null,
+    "ep8": null,
+    "same_step_ratios": null,
+    "median_same_step_ratio": null,
+    "decision_rule_passed": null
+  },
+  "disposition": null,
+  "github_readback": null,
+  "resource_release_readback": null
+}
