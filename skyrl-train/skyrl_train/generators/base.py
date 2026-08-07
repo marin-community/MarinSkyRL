@@ -86,9 +86,8 @@ class GeneratorInterface(ABC):
     training job. Use restart logic for recoverable failures.
     """
 
-    @abstractmethod
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        """Generate trajectories for the input batch.
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
+        """Generate trajectories and apply generator-independent output finalization.
 
         Returns outputs in the same order as the input batch.
 
@@ -97,7 +96,55 @@ class GeneratorInterface(ABC):
         Returns:
             GeneratorOutput: Generated trajectories
         """
+        output = await self._generate(input_batch, disable_tqdm=disable_tqdm)
+        self._add_alignment_metrics(output)
+        return output
+
+    @abstractmethod
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
+        """Produce trajectories before shared output finalization."""
         raise NotImplementedError()
+
+    @staticmethod
+    def _add_alignment_metrics(output: GeneratorOutput) -> None:
+        """Expose alignment health implied by the ``GeneratorOutput`` contract.
+
+        A generator that returns rollout logprobs promises they are position-aligned
+        with its response IDs. That direct token-in/token-out path is exact by
+        construction. Generators that reconstruct token streams can publish richer
+        exact/LCS/failure metrics themselves; those observations take precedence.
+        """
+        rollout_logprobs = output.get("rollout_logprobs")
+        if rollout_logprobs is None:
+            return
+
+        rollout_metrics = output.get("rollout_metrics") or {}
+        if "generate/tis/aligned_tokens" in rollout_metrics:
+            return
+
+        response_ids = output["response_ids"]
+        loss_masks = output["loss_masks"]
+        if not (len(response_ids) == len(loss_masks) == len(rollout_logprobs)):
+            raise ValueError("response IDs, loss masks, and rollout logprobs must have the same batch size")
+
+        aligned_tokens = 0
+        for sample_response_ids, sample_loss_mask, sample_logprobs in zip(response_ids, loss_masks, rollout_logprobs):
+            if not (len(sample_response_ids) == len(sample_loss_mask) == len(sample_logprobs)):
+                raise ValueError("rollout logprobs must align one-for-one with response IDs and loss masks")
+            aligned_tokens += sum(bool(value) for value in sample_loss_mask)
+
+        rollout_metrics.update(
+            {
+                "generate/tis/aligned_tokens": float(aligned_tokens),
+                "generate/tis/exact_match_fraction": 1.0 if aligned_tokens else 0.0,
+                "generate/tis/lcs_fallback_fraction": 0.0,
+                "generate/tis/unaligned_fraction": 0.0,
+                "generate/tis/alignment_fail_count": 0.0,
+                "generate/tis/lcs_fallback_messages": 0.0,
+                "generate/tis/lcs_fallback_alert": 0.0,
+            }
+        )
+        output["rollout_metrics"] = rollout_metrics
 
     async def startup(self) -> None:
         """Initialize async resources before training begins.

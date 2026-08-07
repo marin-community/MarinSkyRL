@@ -847,7 +847,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "exclude_from_baseline": [True for _ in range(num_trials)],  # Infrastructure failure
         }
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate rollouts for a batch of prompts using the active QueueOrchestrator.
 

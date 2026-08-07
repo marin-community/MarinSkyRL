@@ -321,6 +321,9 @@ async def test_generate_non_batched_preserves_rollout_logprobs(
     assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS]
     assert output["rollout_logprobs"] == [[0.1] * len(MOCK_LLM_OUTPUT_IDS)]
     assert len(output["rollout_logprobs"][0]) == len(output["loss_masks"][0])
+    assert output["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
+    assert output["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
+    assert output["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -547,6 +550,7 @@ async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg):
+    generator_cfg.sampling_params.logprobs = 0
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
@@ -576,6 +580,9 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert generator_output["rewards"][0] == 1.0
     assert generator_output["stop_reasons"][0] == "stop"
     assert generator_output["loss_masks"][0] == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert generator_output["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
+    assert generator_output["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
+    assert generator_output["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
 
 
 def test_generator_output_concatenation():

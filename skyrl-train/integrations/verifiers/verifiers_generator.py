@@ -61,7 +61,7 @@ class VerifiersGenerator(GeneratorInterface):
             http_client=http_client,
         )
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         assert "env_extras" in input_batch, "Verifiers dataset fields are passed through env_extras"
 
         # Defaults are based on Verifiers' defaults.

@@ -516,7 +516,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
