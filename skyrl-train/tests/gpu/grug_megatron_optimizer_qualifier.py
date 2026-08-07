@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from megatron.core import dist_checkpointing
+from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.optimizer import LayerWiseDistributedOptimizer, OptimizerConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -337,6 +337,13 @@ def _run_qualifier() -> dict[str, Any]:
         os.unlink(rendezvous)
         dist.init_process_group("nccl", init_method=f"file://{rendezvous}", rank=0, world_size=1)
     assert dist.get_world_size() == 1
+    parallel_state.initialize_model_parallel(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        context_parallel_size=1,
+        expert_model_parallel_size=1,
+    )
+    assert parallel_state.model_parallel_is_initialized()
     groups = ProcessGroupCollection(dp_cp=dist.group.WORLD, expt_dp=dist.group.WORLD)
 
     metrics: dict[str, list[torch.Tensor]] = {}
@@ -498,6 +505,8 @@ def main() -> int:
         return 1
     finally:
         if args.mode == "qualify" and dist.is_initialized():
+            parallel_state.destroy_model_parallel()
+            assert not parallel_state.model_parallel_is_initialized()
             dist.destroy_process_group()
 
 
