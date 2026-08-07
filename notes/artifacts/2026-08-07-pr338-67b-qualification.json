@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "terminal_disposition_pending_review_and_publication",
+  "record_status": "terminal_disposition_reviewed_pending_publication",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-07T21:37:00Z",
+  "revised_utc": "2026-08-07T21:45:27Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -650,7 +650,34 @@
     "issue_335": "keep open",
     "training_claim": "No accepted 67B optimizer update was observed, so this qualification supports no full-workload stability or divergence claim.",
     "component_claim": "The earlier component oracle remains valid and unchanged; this infrastructure result neither strengthens nor weakens its narrow expert-gradient scaling conclusion.",
-    "smallest_next_question": "Restore a compatible harbor and harbor_config pair in the pinned standard task environment, then rerun the already frozen two-arm protocol from EP1."
+    "smallest_next_question": "Restore a compatible harbor and harbor_config pair in the pinned standard task environment, prove that the pinned image imports the training entrypoint with a cheap one-task preflight, then rerun the already frozen two-arm protocol from EP1."
+  },
+  "review": {
+    "utc": "2026-08-07T21:45:27Z",
+    "tier": "High",
+    "kind": "GOAL",
+    "reviewers": [
+      {
+        "agent": "Claude",
+        "record_sha256": "5c4aeb524c8fdb5aa236b44b5505dbc07724fab33ff861e5df61757b47e8cecb",
+        "verdict": "Terminal disposition correct; one material process gap that does not change it.",
+        "finding": "The component oracle used a different image and standalone entrypoint, while the local dry-runs never exercised the pinned training container. A cheap one-task import preflight would have exposed the deterministic Harbor package mismatch before either full-gang EP1 submission."
+      },
+      {
+        "agent": "Codex",
+        "record_sha256": "16cbfaff2f49962d37d6a44e2b91c4e242c0eb8e672617ebfa33a2f49923ff04",
+        "verdict": "No material findings."
+      },
+      {
+        "agent": "Gemini",
+        "record_sha256": "bbbe7f5414a74e3cb8d51a1d9bc8af9bf59e7d90a8711f0dcb59f3fe8ccabb66",
+        "verdict": "No material findings."
+      }
+    ],
+    "applied_findings": [
+      "The handoff now requires a cheap one-task import preflight in the exact pinned training image before another full-gang request. No production, test, or frozen-protocol change is warranted."
+    ],
+    "disposition_changed": false
   },
   "github_readback": null,
   "resource_release_readback": {
