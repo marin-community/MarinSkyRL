@@ -10,6 +10,171 @@
     "forbidden_extra_arm": "parent EP8"
   },
   "protocol_sha256": "0049a59a676753af0b5ffc083749896bbb4c2310cd5d3328ae538609159c34e7",
+  "qualification_cycles": {
+    "cycle_1": {
+      "immutable": true,
+      "record_location": "The legacy top-level protocol, attempts, results, disposition, and readbacks are cycle 1 and remain unchanged.",
+      "protocol_sha256": "0049a59a676753af0b5ffc083749896bbb4c2310cd5d3328ae538609159c34e7",
+      "attempt_jobs": [
+        "/romain/pr338-67b-ep1-a01-20260807",
+        "/romain/pr338-67b-ep1-a02-20260807"
+      ],
+      "terminal_outcome": "blocked_or_incomplete",
+      "ep8_submitted": false
+    },
+    "cycle_2": {
+      "created_utc": "2026-08-07T23:09:45Z",
+      "status": "protocol_frozen_pending_exact_environment_preflight",
+      "corrected_cause": {
+        "owner": "MarinSkyRL root dependency record",
+        "old_pair": {
+          "harbor_commit": "14777c013bee9d75821bc19dd2f35824bc9f3e96",
+          "harbor_config_manifest_parent_commit": "01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c",
+          "harbor_config_wheel_sha256": "c3327e1d53bf5c61a8fd7f5e72bf17aa5510e608a20a7d95124445ffeed43d9b"
+        },
+        "corrected_pair": {
+          "harbor_commit": "14777c013bee9d75821bc19dd2f35824bc9f3e96",
+          "harbor_config_manifest_parent_commit": "14777c013bee9d75821bc19dd2f35824bc9f3e96",
+          "harbor_config_wheel_sha256": "27b3718754637809b72ad157d46735230cb3c2a5c2c29c5d096f354f51d251a3"
+        },
+        "correction_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+        "changed_files": [
+          "pyproject.toml",
+          "uv.lock"
+        ],
+        "local_controls": {
+          "old_wheel": "reproduced the exact TelemetryConfig ImportError",
+          "corrected_wheel": "imported harbor.models.job.config and TelemetryConfig",
+          "uv_lock_check": "passed"
+        }
+      },
+      "protocol_payload": {
+        "base_cycle_1_protocol_sha256": "0049a59a676753af0b5ffc083749896bbb4c2310cd5d3328ae538609159c34e7",
+        "cycle_id": 2,
+        "delta_contract": {
+          "effective_protocol": "Apply only the environment/source and attempt-identity deltas below to cycle 1; every workload, topology, numerical decision, causal-scope, scheduling, and ordering field remains inherited byte-for-byte by meaning.",
+          "only_allowed_deltas": [
+            "corrected_environment_and_source_identity",
+            "attempt_scoped_job_names_and_destinations"
+          ]
+        },
+        "environment_and_source_identity": {
+          "component_gate": {
+            "qualified_head": "c4513ded30e1d65c3923602ca4ae9f99975bc71b",
+            "production_and_regression_files_changed": false
+          },
+          "harbor": {
+            "commit": "14777c013bee9d75821bc19dd2f35824bc9f3e96",
+            "version": "0.8.1"
+          },
+          "harbor_config": {
+            "manifest_parent_commit": "14777c013bee9d75821bc19dd2f35824bc9f3e96",
+            "release_tag": "harbor-config-14777c013bee9d75821bc19dd2f35824bc9f3e96",
+            "version": "0.1.0",
+            "wheel_sha256": "27b3718754637809b72ad157d46735230cb3c2a5c2c29c5d096f354f51d251a3"
+          },
+          "pyproject_sha256": "33d48436c9cec6307c9f1aaee08b9c2da2a027a5d8ee7fe916eb3042255d2feb",
+          "runtime_extras": [
+            "fsdp",
+            "vllm",
+            "telemetry"
+          ],
+          "runtime_install_mode": "production",
+          "runtime_profile": "fsdp",
+          "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+          "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+          "uv_lock_sha256": "832928306b3a07da86b580ff252fd1b07ba942d120af8648af580cbc269e160e"
+        },
+        "execution": {
+          "arm_order": "EP1 first; submit EP8 only after EP1 accepts updates through step 9 and releases every worker and accelerator.",
+          "attempts": {
+            "ep1": [
+              {
+                "destinations": {
+                  "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/checkpoints",
+                  "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/exports",
+                  "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep1-a01-20260807",
+                  "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/resolved_config.yaml",
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a01-20260807/trace"
+                },
+                "job_name": "pr338-67b-c2-ep1-a01-20260807"
+              },
+              {
+                "destinations": {
+                  "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/checkpoints",
+                  "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/exports",
+                  "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep1-a02-20260807",
+                  "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/resolved_config.yaml",
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep1-a02-20260807/trace"
+                },
+                "job_name": "pr338-67b-c2-ep1-a02-20260807"
+              }
+            ],
+            "ep8": [
+              {
+                "destinations": {
+                  "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/checkpoints",
+                  "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/exports",
+                  "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep8-a01-20260807",
+                  "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/resolved_config.yaml",
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a01-20260807/trace"
+                },
+                "job_name": "pr338-67b-c2-ep8-a01-20260807"
+              },
+              {
+                "destinations": {
+                  "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/checkpoints",
+                  "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/exports",
+                  "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep8-a02-20260807",
+                  "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/resolved_config.yaml",
+                  "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-c2-ep8-a02-20260807/trace"
+                },
+                "job_name": "pr338-67b-c2-ep8-a02-20260807"
+              }
+            ]
+          },
+          "frozen_arm_config_sha256": {
+            "ep1": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6",
+            "ep8": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5"
+          },
+          "launch_wrapper_sha256": "942f6d37ad78c561a4443a6f9820a9f4bc5ed5d1a09651d7981c4eed90fb8a6f"
+        },
+        "retry_policy": {
+          "accepted_numerical_result_binds_arm": true,
+          "fresh_allowance_per_arm": "At most one retry, only after a pre-metric setup failure or a restartable preemption from frozen state.",
+          "max_retries_failure_per_iris_request": 0,
+          "max_retries_preemption_per_iris_request": 1
+        },
+        "schema_version": 1
+      },
+      "protocol_sha256": "08e6b6e1a4106e4fde821f9bbca2e5d787e3321690af29eb778012d52fffc7ab",
+      "preflight": {
+        "job_name": "pr338-67b-c2-preflight-a01-20260807",
+        "cluster": "cw-rno2a",
+        "accelerators": 0,
+        "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+        "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+        "setup": "cloud.iris.runtime_environment.task_setup_script(tested_commit, RuntimeProfile.FSDP)",
+        "frozen_ep1_config_sha256": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6",
+        "entrypoint": "skyrl_train.entrypoints.main_base",
+        "entrypoint_mode": "Resolve exact Hydra arguments with the in-task training driver, then execute the real entrypoint with --cfg job; model loading and updates are excluded.",
+        "success_marker": "[pr338 cycle2 preflight] real entrypoint config accepted",
+        "acceptance": [
+          "standard setup reaches its frozen-runtime-ready marker",
+          "installed Harbor and harbor-config identities and origins match the frozen root record",
+          "the resolved entrypoint and Hydra configuration bind to the frozen EP1 input and overrides",
+          "the real training entrypoint exits zero in Hydra config-composition mode and emits the preselected marker",
+          "the Iris job is terminal and has no worker or accelerator remaining"
+        ],
+        "status": "pending"
+      },
+      "attempts": [],
+      "results": {
+        "ep1": "pending_preflight",
+        "ep8": "not_eligible_before_ep1_gate"
+      }
+    }
+  },
   "commits": {
     "component_parent": "166a6643b9735f64ab8b4aa85b1035d9577f58ea",
     "component_qualified_head": "c4513ded30e1d65c3923602ca4ae9f99975bc71b",
