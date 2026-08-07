@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "terminal_disposition_reviewed_pending_publication",
+  "record_status": "terminal_disposition_published_and_read_back",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-07T21:45:27Z",
+  "revised_utc": "2026-08-07T21:53:19Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -21,7 +21,8 @@
     "component_regression_file": "skyrl-train/tests/gpu/grug_ep_gradient_parity.py",
     "production_diff_changed_after_component_gate": false,
     "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
-    "artifact_commit": "b3801fb20067278988ad7a1a58a9eedb204c3ff8"
+    "artifact_commit": "b3801fb20067278988ad7a1a58a9eedb204c3ff8",
+    "reviewed_publication_source_commit": "9e79a49833dc2f660e213cf355951a11d899124e"
   },
   "historical_request": {
     "campaign_issue": "https://github.com/marin-community/marin/issues/7786",
@@ -679,9 +680,39 @@
     ],
     "disposition_changed": false
   },
-  "github_readback": null,
+  "github_readback": {
+    "utc": "2026-08-07T21:53:19Z",
+    "pr": {
+      "number": 338,
+      "url": "https://github.com/marin-community/MarinSkyRL/pull/338",
+      "title": "Average Grug expert gradients across EP ranks",
+      "state": "OPEN",
+      "is_draft": true,
+      "head_ref": "issue-335-repro-20260807",
+      "head_sha_at_publication_readback": "9e79a49833dc2f660e213cf355951a11d899124e",
+      "body_sha256": "7ffe5b5b3d1c3078aaa2842533152e0fe9fb71b1b86a93df824762782faa75fe",
+      "body_exact_match": true,
+      "artifact_url": "https://github.com/marin-community/MarinSkyRL/blob/9e79a49833dc2f660e213cf355951a11d899124e/notes/artifacts/2026-08-07-pr338-67b-qualification.json"
+    },
+    "issue": {
+      "number": 335,
+      "url": "https://github.com/marin-community/MarinSkyRL/issues/335",
+      "state": "OPEN",
+      "comment_id": 5222347126,
+      "comment_url": "https://github.com/marin-community/MarinSkyRL/issues/335#issuecomment-5222347126",
+      "comment_author": "yonromai",
+      "comment_created_utc": "2026-08-07T21:51:47Z",
+      "comment_sha256": "9aab2df34bf85b5b742944b6d0f302d4a28ed72eab4135f5799b6549a8e6e2f8",
+      "comment_exact_match": true
+    },
+    "publication_disposition": {
+      "pr_338": "draft and open",
+      "issue_335": "open",
+      "training_claim_published": false
+    }
+  },
   "resource_release_readback": {
-    "utc": "2026-08-07T21:34:38Z",
+    "utc": "2026-08-07T21:53:05Z",
     "jobs": [
       {
         "job_id": "/romain/pr338-67b-ep1-a01-20260807",
