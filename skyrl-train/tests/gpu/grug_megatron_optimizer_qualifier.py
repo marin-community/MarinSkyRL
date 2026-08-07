@@ -85,11 +85,14 @@ def _assert_frozen_inputs() -> None:
 def _build_exact_routes(device: torch.device):
     with np.load(FIXTURE, allow_pickle=False) as fixture:
         identifiers = fixture["metadata_names"].tolist()
-        parameters = {
-            PARAMETER_NAMES[identifier]: nn.Parameter(
-                torch.from_numpy(np.asarray(fixture[f"initial__{identifier}"]).copy()).to(device)
+        initial_values = {
+            PARAMETER_NAMES[identifier]: torch.from_numpy(np.asarray(fixture[f"initial__{identifier}"]).copy()).to(
+                device=device, dtype=torch.float32
             )
             for identifier in identifiers
+        }
+        parameters = {
+            name: nn.Parameter(initial_value.to(dtype=torch.bfloat16)) for name, initial_value in initial_values.items()
         }
         expected_routes = dict(zip(identifiers, fixture["metadata_routes"].tolist()))
         shared_lr = float(fixture["metadata_shared_lr"])
@@ -107,8 +110,10 @@ def _build_exact_routes(device: torch.device):
     assert len({id(parameter) for values in routed.values() for _, parameter in values}) == len(parameters)
 
     def group(values, *, lr: float, is_expert_parallel: bool = False):
+        selected = [(name, parameter) for name, parameter in values if (".experts." in name) == is_expert_parallel]
         return {
-            "params": [parameter for name, parameter in values if (".experts." in name) == is_expert_parallel],
+            "params": [parameter for _, parameter in selected],
+            "param_names": [name for name, _ in selected],
             "lr": lr,
             "lr_mult": lr / shared_lr,
             "wd_mult": 1.0,
@@ -143,7 +148,7 @@ def _build_exact_routes(device: torch.device):
             weight_decay=0.0,
         ),
     ]
-    return parameters, optimizers, actual_routes
+    return parameters, optimizers, actual_routes, initial_values
 
 
 def _init_muon_state(optimizer, _config=None) -> None:
@@ -180,7 +185,7 @@ def _optimizer_config() -> OptimizerConfig:
         weight_decay=0.0,
         bf16=True,
         fp16=False,
-        params_dtype=torch.float32,
+        params_dtype=torch.bfloat16,
         use_distributed_optimizer=False,
         clip_grad=0.0,
         grad_norm_skip_threshold=float("inf"),
@@ -189,8 +194,62 @@ def _optimizer_config() -> OptimizerConfig:
     )
 
 
+def _assert_dtype_contract(model_parameters: dict[str, nn.Parameter], initial_values: dict[str, torch.Tensor]) -> None:
+    config = _optimizer_config()
+    assert config.bf16 is True
+    assert config.fp16 is False
+    assert config.params_dtype == torch.bfloat16
+    assert model_parameters.keys() == initial_values.keys()
+    for name, model_parameter in model_parameters.items():
+        initial_value = initial_values[name]
+        assert model_parameter.dtype == torch.bfloat16, name
+        assert initial_value.dtype == torch.float32, name
+        assert model_parameter.shape == initial_value.shape, name
+        assert torch.equal(model_parameter.float(), initial_value.to(torch.bfloat16).float()), name
+
+
+def _public_main_parameters(
+    model_parameters: dict[str, nn.Parameter],
+    initial_values: dict[str, torch.Tensor],
+    wrapped: LayerWiseDistributedOptimizer,
+    routes: dict[str, str],
+) -> dict[str, nn.Parameter]:
+    main_parameters = {}
+    for route, optimizer_index in ROUTE_INDEX.items():
+        optimizer = wrapped.chained_optimizers[optimizer_index]
+        public_parameters = optimizer.get_parameters()
+        named_parameters = [
+            (name, parameter)
+            for group in optimizer.param_groups
+            for name, parameter in zip(group["param_names"], group["params"], strict=True)
+        ]
+        assert len(public_parameters) == len(named_parameters)
+        assert all(public is named for public, (_, named) in zip(public_parameters, named_parameters, strict=True))
+
+        expected_names = {
+            PARAMETER_NAMES[identifier] for identifier, expected_route in routes.items() if expected_route == route
+        }
+        assert {name for name, _ in named_parameters} == expected_names
+        for name, main_parameter in named_parameters:
+            assert name not in main_parameters
+            model_parameter = model_parameters[name]
+            assert main_parameter is not model_parameter
+            assert main_parameter.shape == model_parameter.shape
+            assert main_parameter.device == model_parameter.device
+            assert main_parameter.dtype == torch.float32
+            main_parameters[name] = main_parameter
+
+    assert main_parameters.keys() == model_parameters.keys()
+    with torch.no_grad():
+        for name, main_parameter in main_parameters.items():
+            main_parameter.copy_(initial_values[name])
+            assert torch.equal(main_parameter, initial_values[name]), name
+    return main_parameters
+
+
 def _build_public_optimizer(device: torch.device, groups: ProcessGroupCollection):
-    parameters, optimizers, routes = _build_exact_routes(device)
+    model_parameters, optimizers, routes, initial_values = _build_exact_routes(device)
+    _assert_dtype_contract(model_parameters, initial_values)
     wrapped = LayerWiseDistributedOptimizer(
         optimizers,
         _optimizer_config(),
@@ -199,7 +258,8 @@ def _build_public_optimizer(device: torch.device, groups: ProcessGroupCollection
     )
     assert type(wrapped) is LayerWiseDistributedOptimizer
     assert len(wrapped.chained_optimizers) == 3
-    return parameters, wrapped, routes
+    main_parameters = _public_main_parameters(model_parameters, initial_values, wrapped, routes)
+    return model_parameters, main_parameters, wrapped, routes
 
 
 def _set_gradients(parameters: dict[str, nn.Parameter], fixture, step: int) -> None:
@@ -219,7 +279,7 @@ def _record_error(metrics: dict[str, list[torch.Tensor]], key: str, actual, expe
 
 
 def _assert_oracle_step(
-    parameters: dict[str, nn.Parameter],
+    main_parameters: dict[str, nn.Parameter],
     wrapped: LayerWiseDistributedOptimizer,
     routes: dict[str, str],
     fixture,
@@ -227,7 +287,7 @@ def _assert_oracle_step(
     metrics: dict[str, list[torch.Tensor]],
 ) -> None:
     for identifier, name in PARAMETER_NAMES.items():
-        parameter = parameters[name]
+        parameter = main_parameters[name]
         route = routes[identifier]
         expected_parameter = _expected(fixture, f"parameter_{step}__{identifier}", parameter.device)
         if route == "muonh":
@@ -241,7 +301,7 @@ def _assert_oracle_step(
             torch.testing.assert_close(parameter, expected_parameter, rtol=TIGHT_RTOL, atol=TIGHT_ATOL)
         _record_error(metrics, f"{route}.parameter", parameter, expected_parameter)
 
-        state = wrapped.chained_optimizers[ROUTE_INDEX[route]].optimizer.state[parameter]
+        state = wrapped.chained_optimizers[ROUTE_INDEX[route]].state[parameter]
         if route == "muonh":
             expected_state = _expected(fixture, f"momentum_{step}__{identifier}", parameter.device)
             torch.testing.assert_close(state["momentum_buffer"], expected_state, rtol=TIGHT_RTOL, atol=TIGHT_ATOL)
@@ -280,22 +340,34 @@ def _assert_trees_equal(left: Any, right: Any, path: str = "state") -> None:
         assert left == right, (path, left, right)
 
 
-def _assert_deterministic_skip(parameters, wrapped, fixture) -> float:
-    parameter_snapshot = {name: parameter.detach().clone() for name, parameter in parameters.items()}
+def _assert_model_matches_main(model_parameters, main_parameters) -> None:
+    assert model_parameters.keys() == main_parameters.keys()
+    for name, model_parameter in model_parameters.items():
+        main_parameter = main_parameters[name]
+        assert model_parameter.dtype == torch.bfloat16, name
+        assert main_parameter.dtype == torch.float32, name
+        assert torch.equal(model_parameter, main_parameter.to(torch.bfloat16)), name
+
+
+def _assert_deterministic_skip(model_parameters, main_parameters, wrapped, fixture) -> float:
+    model_snapshot = {name: parameter.detach().clone() for name, parameter in model_parameters.items()}
+    main_snapshot = {name: parameter.detach().clone() for name, parameter in main_parameters.items()}
     state_snapshot = copy.deepcopy(wrapped.state_dict())
-    _set_gradients(parameters, fixture, 1)
+    _set_gradients(model_parameters, fixture, 1)
     wrapped.config.grad_norm_skip_threshold = 0.0
     success, grad_norm, _ = wrapped.step()
     wrapped.config.grad_norm_skip_threshold = float("inf")
     assert success is False
     assert grad_norm is not None and torch.isfinite(torch.as_tensor(grad_norm)) and grad_norm > 0
-    for name, parameter in parameters.items():
-        assert torch.equal(parameter, parameter_snapshot[name]), name
+    for name, parameter in model_parameters.items():
+        assert torch.equal(parameter, model_snapshot[name]), name
+        assert torch.equal(main_parameters[name], main_snapshot[name]), name
     _assert_trees_equal(wrapped.state_dict(), state_snapshot)
     return float(grad_norm)
 
 
 def _model_sharded_state(parameters: dict[str, nn.Parameter]):
+    assert all(parameter.dtype == torch.bfloat16 for parameter in parameters.values())
     return {
         name: ShardedTensor.from_rank_offsets(name, parameter, replica_id=(0, 0, 0))
         for name, parameter in parameters.items()
@@ -307,11 +379,12 @@ def _copy_loaded_model(parameters, loaded_model) -> None:
         parameter.data.copy_(loaded_model[name])
 
 
-def _run_step(parameters, wrapped, fixture, step: int):
-    _set_gradients(parameters, fixture, step)
+def _run_step(model_parameters, main_parameters, wrapped, fixture, step: int):
+    _set_gradients(model_parameters, fixture, step)
     success, grad_norm, _ = wrapped.step()
     assert success is True
     assert grad_norm is not None and torch.isfinite(torch.as_tensor(grad_norm))
+    _assert_model_matches_main(model_parameters, main_parameters)
     return float(grad_norm)
 
 
@@ -349,17 +422,37 @@ def _run_qualifier() -> dict[str, Any]:
     metrics: dict[str, list[torch.Tensor]] = {}
     with np.load(FIXTURE, allow_pickle=False) as fixture:
         try:
-            oracle_parameters, oracle_optimizer, routes = _build_public_optimizer(device, groups)
+            oracle_model_parameters, oracle_main_parameters, oracle_optimizer, routes = _build_public_optimizer(
+                device, groups
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "public_initial_mapping_complete",
+                        "initial_values_exact": True,
+                        "main_dtype": str(next(iter(oracle_main_parameters.values())).dtype),
+                        "model_dtype": str(next(iter(oracle_model_parameters.values())).dtype),
+                        "parameter_count": len(oracle_model_parameters),
+                        "routes": routes,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             oracle_grad_norms = []
             for step in range(1, int(fixture["metadata_steps"]) + 1):
-                oracle_grad_norms.append(_run_step(oracle_parameters, oracle_optimizer, fixture, step))
-                _assert_oracle_step(oracle_parameters, oracle_optimizer, routes, fixture, step, metrics)
+                oracle_grad_norms.append(
+                    _run_step(oracle_model_parameters, oracle_main_parameters, oracle_optimizer, fixture, step)
+                )
+                _assert_oracle_step(oracle_main_parameters, oracle_optimizer, routes, fixture, step, metrics)
                 oracle_optimizer.zero_grad()
         except Exception as error:
             raise QualifierStageError("construction_or_three_step_oracle", error) from error
 
         try:
-            skipped_grad_norm = _assert_deterministic_skip(oracle_parameters, oracle_optimizer, fixture)
+            skipped_grad_norm = _assert_deterministic_skip(
+                oracle_model_parameters, oracle_main_parameters, oracle_optimizer, fixture
+            )
         except Exception as error:
             raise QualifierStageError("deterministic_skipped_update", error) from error
 
@@ -379,15 +472,17 @@ def _run_qualifier() -> dict[str, Any]:
         )
 
         try:
-            checkpoint_parameters, checkpoint_optimizer, _ = _build_public_optimizer(device, groups)
+            checkpoint_model_parameters, checkpoint_main_parameters, checkpoint_optimizer, _ = _build_public_optimizer(
+                device, groups
+            )
             for step in (1, 2):
-                _run_step(checkpoint_parameters, checkpoint_optimizer, fixture, step)
+                _run_step(checkpoint_model_parameters, checkpoint_main_parameters, checkpoint_optimizer, fixture, step)
                 checkpoint_optimizer.zero_grad()
         except Exception as error:
             raise QualifierStageError("checkpoint_source_steps", error) from error
 
         with tempfile.TemporaryDirectory(prefix="grug-megatron-dcp-") as checkpoint_dir:
-            model_state = _model_sharded_state(checkpoint_parameters)
+            model_state = _model_sharded_state(checkpoint_model_parameters)
             try:
                 optimizer_state = checkpoint_optimizer.sharded_state_dict(model_state)
             except Exception as error:
@@ -398,27 +493,31 @@ def _run_qualifier() -> dict[str, Any]:
                 raise QualifierStageError("public_dcp_save", error) from error
 
             try:
-                resumed_parameters, resumed_optimizer, _ = _build_public_optimizer(device, groups)
-                resumed_model_state = _model_sharded_state(resumed_parameters)
+                resumed_model_parameters, resumed_main_parameters, resumed_optimizer, _ = _build_public_optimizer(
+                    device, groups
+                )
+                resumed_model_state = _model_sharded_state(resumed_model_parameters)
                 load_template = {
                     "model": resumed_model_state,
                     "optimizer": resumed_optimizer.sharded_state_dict(resumed_model_state, is_loading=True),
                 }
                 loaded = dist_checkpointing.load(load_template, checkpoint_dir)
-                _copy_loaded_model(resumed_parameters, loaded["model"])
+                _copy_loaded_model(resumed_model_parameters, loaded["model"])
                 resumed_optimizer.load_state_dict(loaded["optimizer"])
 
                 _assert_trees_equal(resumed_optimizer.state_dict(), checkpoint_optimizer.state_dict())
-                for name in checkpoint_parameters:
-                    assert torch.equal(checkpoint_parameters[name], resumed_parameters[name]), name
+                for name in checkpoint_model_parameters:
+                    assert torch.equal(checkpoint_model_parameters[name], resumed_model_parameters[name]), name
+                    assert torch.equal(checkpoint_main_parameters[name], resumed_main_parameters[name]), name
             except Exception as error:
                 raise QualifierStageError("public_dcp_rebuild_load", error) from error
 
             try:
-                _run_step(checkpoint_parameters, checkpoint_optimizer, fixture, 3)
-                _run_step(resumed_parameters, resumed_optimizer, fixture, 3)
-                for name in checkpoint_parameters:
-                    assert torch.equal(checkpoint_parameters[name], resumed_parameters[name]), name
+                _run_step(checkpoint_model_parameters, checkpoint_main_parameters, checkpoint_optimizer, fixture, 3)
+                _run_step(resumed_model_parameters, resumed_main_parameters, resumed_optimizer, fixture, 3)
+                for name in checkpoint_model_parameters:
+                    assert torch.equal(checkpoint_model_parameters[name], resumed_model_parameters[name]), name
+                    assert torch.equal(checkpoint_main_parameters[name], resumed_main_parameters[name]), name
                 _assert_trees_equal(resumed_optimizer.state_dict(), checkpoint_optimizer.state_dict())
             except Exception as error:
                 raise QualifierStageError("exact_next_step", error) from error
@@ -427,6 +526,8 @@ def _run_qualifier() -> dict[str, Any]:
         "dcp_rebuild_load": "PASS",
         "errors": error_summary,
         "exact_next_step": "PASS",
+        "main_dtype": str(next(iter(oracle_main_parameters.values())).dtype),
+        "model_dtype": str(next(iter(oracle_model_parameters.values())).dtype),
         "oracle_grad_norms": oracle_grad_norms,
         "routes": routes,
         "skipped_grad_norm": skipped_grad_norm,
@@ -468,9 +569,21 @@ def main() -> int:
     try:
         _assert_frozen_inputs()
         if args.mode == "check":
-            stage = "device_independent_routes"
-            _, _, routes = _build_exact_routes(torch.device("cpu"))
-            print(json.dumps({"metadata": _metadata(), "result": "PASS", "routes": routes}, sort_keys=True))
+            stage = "device_independent_dtype_config_and_routes"
+            model_parameters, _, routes, initial_values = _build_exact_routes(torch.device("cpu"))
+            _assert_dtype_contract(model_parameters, initial_values)
+            print(
+                json.dumps(
+                    {
+                        "main_dtype": str(next(iter(initial_values.values())).dtype),
+                        "metadata": _metadata(),
+                        "model_dtype": str(next(iter(model_parameters.values())).dtype),
+                        "result": "PASS",
+                        "routes": routes,
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         signal.signal(signal.SIGALRM, _raise_timeout)
         signal.alarm(18 * 60)
