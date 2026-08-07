@@ -2,7 +2,7 @@
   "schema_version": 1,
   "record_status": "terminal_disposition_pending_review_and_publication",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-07T21:35:04Z",
+  "revised_utc": "2026-08-07T21:37:00Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -21,7 +21,7 @@
     "component_regression_file": "skyrl-train/tests/gpu/grug_ep_gradient_parity.py",
     "production_diff_changed_after_component_gate": false,
     "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
-    "artifact_commit": null
+    "artifact_commit": "b3801fb20067278988ad7a1a58a9eedb204c3ff8"
   },
   "historical_request": {
     "campaign_issue": "https://github.com/marin-community/marin/issues/7786",
@@ -515,7 +515,7 @@
       "arm": "ep1",
       "attempt": 1,
       "classification": "retryable pre-metric setup failure",
-      "submitted_utc": "2026-08-07T21:20:25Z",
+      "submitted_utc": "2026-08-07T21:20:26.735Z",
       "job_id": "/romain/pr338-67b-ep1-a01-20260807",
       "cluster": "cw-rno2a",
       "bundle_id": "aa43812a180e2c98554b106e952ae66efdc87ea457bc27789207de8c3f67140f",
@@ -567,7 +567,7 @@
       "arm": "ep1",
       "attempt": 2,
       "classification": "accepted arm attempt; sole retry after attempt 1 pre-metric setup failure",
-      "submitted_utc": "2026-08-07T21:30:42Z",
+      "submitted_utc": "2026-08-07T21:30:33.626Z",
       "job_id": "/romain/pr338-67b-ep1-a02-20260807",
       "cluster": "cw-rno2a",
       "bundle_id": "de70fa8f0854c0c3134b3de67e2264ad2664a615e0347848e4058946668660f8",
