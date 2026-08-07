@@ -41,14 +41,9 @@ iris --cluster=<cluster> job summary <job-id>
 
 ## Logs and evidence
 
-Capture once, then analyze local files:
-
-```bash
-python infra/sync_rl_logs.py <job-id> --cluster <cluster> --dest <directory> [--trace-jobs]
-```
-
-Read the aggregate `finelog.log` and per-actor files under `ray_session_logs/`. Bound live log
-queries by time or line count. Use `.agents/ops/rl-diagnostics.md` for interpretation.
+Use `watch-coreweave-rl.md` to refresh and inspect the canonical local evidence bundle before making
+live log queries. It owns the watcher invocation, transfer bounds, local layout, report fields, and
+freshness checks. Use `.agents/ops/rl-diagnostics.md` for interpretation.
 
 For process stacks on a live suspect, locate `py-spy` inside the task container and attach to the
 specific trainer, policy worker, or inference process. A single collective stack or watchdog line

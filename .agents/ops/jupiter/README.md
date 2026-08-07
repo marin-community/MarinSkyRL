@@ -16,6 +16,29 @@ Use `squeue -u "$USER"` for live state, `sacct -j <job-id>` for terminal state, 
 when cancellation is authorized. Do not treat an empty result from one login host as authoritative when SSH
 itself reports resource or fork errors; retry another login host.
 
+## Secrets
+
+The private Jupiter secrets file is `$HOME/secrets.env` on the login host. The corresponding operator-side
+source is `/Users/benjaminfeuer/Documents/secrets.env`. Never print either file or copy its contents into an
+ops document, launch record, or diagnostic artifact.
+
+Agentic RL must use `DAYTONA_RL_API_KEY`; do not silently substitute the generic `DAYTONA_API_KEY`. The legacy
+OpenThoughts-Agent Jupiter launcher still consumes `DAYTONA_API_KEY`, so source the private file, require the
+RL-specific key, and map it explicitly immediately before invoking that launcher:
+
+```bash
+set -a
+. "$HOME/secrets.env"
+set +a
+: "${DAYTONA_RL_API_KEY:?DAYTONA_RL_API_KEY is required for Jupiter agentic RL}"
+export DAYTONA_API_KEY="$DAYTONA_RL_API_KEY"
+export DC_AGENT_SECRET_ENV="$HOME/secrets.env"
+```
+
+Preflight by reporting only whether `DAYTONA_RL_API_KEY` is present. Never echo its value. After rendering,
+verify that the batch job received the mapped credential before submission; a generic Daytona key can be valid
+for another account while every RL sandbox request fails.
+
 ## GPFS safety
 
 Jupiter experiment and container paths are on GPFS. Avoid recursive metadata scans such as broad `find`, `du`,

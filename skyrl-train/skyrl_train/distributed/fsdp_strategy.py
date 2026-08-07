@@ -768,34 +768,35 @@ class FSDPStrategy(DistributedStrategy):
         rank = self.get_rank()
         world_size = self.world_size
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-            # Check if checkpoint files exist
-            if not io.exists(model_path):
-                raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-            if not io.exists(extra_path):
-                raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        if not io.exists(model_path):
+            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+        if not io.exists(extra_path):
+            raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        optim_exists = load_optimizer_states and io.exists(optim_path)
 
-            # Optimizer path is optional since we may not save optimizer states initially
-            optim_exists = io.exists(optim_path)
+        self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
+        if optim_exists:
+            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
-            self.print(f"[rank-{rank}]: Loading model from {model_path}")
-            self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
-            if optim_exists:
-                self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
-
-            # Load state dictionaries from disk
-            with io.open_file(model_path, "rb") as f:
+        checkpoint_paths = [model_path]
+        if optim_exists:
+            checkpoint_paths.append(optim_path)
+        checkpoint_paths.append(extra_path)
+        with io.local_read_files(checkpoint_paths) as local_paths:
+            staged_paths = dict(zip(checkpoint_paths, local_paths, strict=True))
+            with io.open_file(staged_paths[model_path], "rb") as f:
                 model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
-            with io.open_file(extra_path, "rb") as f:
+            with io.open_file(staged_paths[extra_path], "rb") as f:
                 extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
             optimizer_state_dict = {}
             if optim_exists and load_optimizer_states:
-                with io.open_file(optim_path, "rb") as f:
+                with io.open_file(staged_paths[optim_path], "rb") as f:
                     optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state

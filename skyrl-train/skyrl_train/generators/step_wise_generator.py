@@ -261,7 +261,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
         return per_step_outputs
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 

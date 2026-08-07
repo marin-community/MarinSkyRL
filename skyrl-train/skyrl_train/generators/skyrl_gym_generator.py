@@ -108,9 +108,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.global_step_fn: Optional[Callable[[], int]] = None
 
     def _validate_cfg(self, generator_cfg: DictConfig):
-        if getattr(generator_cfg.sampling_params, "logprobs", None) is not None and not generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
-
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -211,7 +208,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
 
         loss_mask = []  # this excludes the prompt
-        rollout_logprobs = None
+        current_sampling_params = sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+        collect_logprobs = current_sampling_params.get("logprobs", None) is not None
+        rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         # Capture global_step at first inference for accurate staleness tracking
@@ -240,12 +239,18 @@ class SkyRLGymGenerator(GeneratorInterface):
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
+            response_logprobs_batch = engine_output.get("response_logprobs")
+            response_logprobs = response_logprobs_batch[0] if response_logprobs_batch is not None else None
+            if response_logprobs is not None and len(response_logprobs) != len(output_ids):
+                raise ValueError(
+                    "Inference engine returned response logprobs that do not align with response token IDs: "
+                    f"{len(response_logprobs)=}, {len(output_ids)=}"
+                )
+            if collect_logprobs and response_logprobs is None:
+                rollout_logprobs = None
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
-            current_sampling_params = (
-                sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
-            )
             stop_strs = current_sampling_params.get("stop", None)
             added_eos = False
             if (
@@ -255,6 +260,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
+                    if response_logprobs is not None:
+                        response_logprobs.append(0.0)
                     added_eos = True
 
             # 2. Environment step
@@ -280,7 +287,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                     "A better solution coming soon."
                 )
                 output = env_step_output["postprocessed_action"]
-                output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                postprocessed_output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                if collect_logprobs and response_logprobs is not None and postprocessed_output_ids != output_ids:
+                    logger.warning(
+                        "Discarding rollout logprobs because postprocessed_action changed the generated token IDs"
+                    )
+                    response_logprobs = None
+                    rollout_logprobs = None
+                output_ids = postprocessed_output_ids
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # Three ways of managing input
@@ -289,19 +303,37 @@ class SkyRLGymGenerator(GeneratorInterface):
                 chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
                     chat_history, chat_end_index, output, new_obs
                 )
+                # Re-tokenizing text can change token boundaries, so engine logprobs no
+                # longer have an exact position in the returned response.
+                rollout_logprobs = None
                 # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
                 per_step_rewards.append((step_reward, None))
             elif self.use_conversation_multi_turn:
                 # b. Token-in-token-out. Follow multi-turn chat history format.
-                input_ids, loss_mask, response_end_idx = self._get_next_input_ids_with_multiturn_chat_template(
-                    input_ids, loss_mask, output_ids, new_obs, done, added_eos
+                input_ids, loss_mask, rollout_logprobs, response_end_idx = (
+                    self._get_next_input_ids_with_multiturn_chat_template(
+                        input_ids,
+                        loss_mask,
+                        rollout_logprobs,
+                        output_ids,
+                        response_logprobs,
+                        new_obs,
+                        done,
+                        added_eos,
+                    )
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
             else:
                 # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
                 loss_mask, input_ids, rollout_logprobs, response_end_idx = (
                     self._get_next_input_ids_with_single_turn_chat_template(
-                        output_ids, new_obs, loss_mask, input_ids, rollout_logprobs
+                        output_ids,
+                        response_logprobs,
+                        new_obs,
+                        loss_mask,
+                        input_ids,
+                        rollout_logprobs,
+                        done,
                     )
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
@@ -330,6 +362,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             loss_mask = loss_mask[: response_end_idx - initial_prompt_length + 1]
             response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
+            if rollout_logprobs is not None:
+                rollout_logprobs = rollout_logprobs[: len(response_ids)]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
@@ -338,7 +372,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
+                if rollout_logprobs is not None:
+                    rollout_logprobs.append(0.0)
                 appended_eos_token = True
+
+        assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids), (
+            "rollout_logprobs and response_ids should have the same length"
+        )
 
         # Build reward output
         if retokenize_chat_history:
@@ -354,10 +394,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 if idx >= len(response_ids):
                     break
                 if appended_eos_token and i == len(per_step_rewards) - 1:
-                    # NOTE(Charlie): If we appended the eos token, we need to place
-                    # the reward at the last token (the manually appended eos token)
-                    # rather than the last turn's assistant-generated token. This matches
-                    # the logic in trainer.py::postprocess_generator_output when rewards are List[float].
+                    # Preserve the existing reward-placement contract: a final
+                    # synthetic EOS receives the final turn reward.
                     token_level_rewards[-1] = step_reward
                 else:
                     token_level_rewards[idx] += step_reward
@@ -478,7 +516,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
@@ -541,7 +579,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
 
         if get_logprobs:
-            rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
+            candidate_logprobs = [output.rollout_logprobs for output in all_outputs]
+            rollout_logprobs = candidate_logprobs if all(item is not None for item in candidate_logprobs) else None
         else:
             rollout_logprobs = None
 
@@ -642,7 +681,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         self,
         input_ids: List[int],
         loss_mask: List[int],
+        rollout_logprobs: Optional[List[float]],
         output_ids: List[int],
+        output_logprobs: Optional[List[float]],
         new_obs: ConversationType,
         done: bool,
         added_eos: bool,
@@ -697,6 +738,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         # `agent_loop` function. For consistency with other entities like logprobs , we ignore it in the loss
         # mask
         loss_mask += [1] * len(output_ids) if not added_eos else [1] * (len(output_ids) - 1) + [0]
+        if rollout_logprobs is not None:
+            if output_logprobs is None:
+                rollout_logprobs = None
+            else:
+                rollout_logprobs += output_logprobs
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
@@ -712,20 +758,26 @@ class SkyRLGymGenerator(GeneratorInterface):
             )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
+            if rollout_logprobs is not None:
+                rollout_logprobs += [0.0] * len(observation_ids)
         else:
             if not done:
                 input_ids += self.generation_prompt_ids
                 loss_mask += [0] * len(self.generation_prompt_ids)
+                if rollout_logprobs is not None:
+                    rollout_logprobs += [0.0] * len(self.generation_prompt_ids)
 
-        return input_ids, loss_mask, response_end_idx
+        return input_ids, loss_mask, rollout_logprobs, response_end_idx
 
     def _get_next_input_ids_with_single_turn_chat_template(
         self,
         output_ids: List[int],
+        output_logprobs: Optional[List[float]],
         new_obs: ConversationType,
         loss_mask: List[int],
         input_ids: List[int],
         logprobs: Optional[List[float]],
+        done: bool,
     ):
         """
         Update the loss mask and input ids given a new model response and observation, following
@@ -764,20 +816,25 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         # just update raw tokens and loss mask
         new_resp_tokens = output_ids.copy()
-        if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
+        if not done and new_resp_tokens and new_resp_tokens[-1] == self.tokenizer.eos_token_id:
             # remove the eos token since we are continuing the current assistant message
             new_resp_tokens = new_resp_tokens[:-1]
         loss_mask += [1] * len(new_resp_tokens)
         input_ids += new_resp_tokens
         response_end_idx = len(input_ids) - 1
+        if logprobs is not None:
+            if output_logprobs is None:
+                logprobs = None
+            else:
+                logprobs += output_logprobs[: len(new_resp_tokens)]
 
         if len(new_obs) > 0:
             for obs in new_obs:
                 obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
                 loss_mask += [0] * len(obs_tokens)
                 # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-                if logprobs:
-                    logprobs += [1] * len(obs_tokens)
+                if logprobs is not None:
+                    logprobs += [0.0] * len(obs_tokens)
                 input_ids += obs_tokens
 
         return loss_mask, input_ids, logprobs, response_end_idx
