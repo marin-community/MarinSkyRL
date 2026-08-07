@@ -1,6 +1,7 @@
 # Iris RL diagnostic signals
 
-Use these semantics with evidence captured through `coreweave.md`.
+Use these semantics with local evidence captured through `watch-coreweave-rl.md`. Use
+`coreweave.md` only for live Iris and Kubernetes probes that the local bundle cannot provide.
 
 ## Diagnostic mode
 
