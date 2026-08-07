@@ -46,6 +46,19 @@ from skyrl_train.weight_sync.weight_extractor import (
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 
 
+def _fsdp_moe_model_kwargs(fsdp_config) -> dict[str, bool]:
+    """Translate one role's FSDP MoE settings into ``HFModelWrapper`` options.
+
+    Expert parallelism operates on the grouped model structure created by the wrapper, so every FSDP role
+    must derive these options from the same role-specific config that its ``FSDPStrategy`` consumes.
+    """
+    return {
+        "moe_router_replay": bool(fsdp_config.get("moe_router_replay", False)),
+        "moe_grouped_gemm": bool(fsdp_config.get("moe_grouped_gemm", False)),
+        "use_grouped_mm": bool(fsdp_config.get("use_grouped_mm", False)),
+    }
+
+
 @dataclass(frozen=True)
 class GrugValidationSnapshot:
     """Test-only snapshot of one policy rank's loaded Grug state."""
@@ -798,9 +811,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
-                moe_router_replay=bool(self.cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-                moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
-                use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
+                **_fsdp_moe_model_kwargs(self.cfg.trainer.policy.fsdp_config),
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.policy.fsdp_config.get("context_parallel_size", 1)),
                 # Stage 4: surface the CP submesh + rotate method so the forward
@@ -1275,6 +1286,12 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.cp_group = getattr(strategy, "cp_group", None)
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        validate_grug_expert_parallel_options(
+            getattr(model_config, "model_type", None),
+            expert_model_parallel_size=strategy.ep_size,
+            use_grouped_mm=bool(self.cfg.trainer.ref.fsdp_config.get("use_grouped_mm", False)),
+            ep_comm_backend=str(self.cfg.trainer.ref.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)),
+        )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -1288,6 +1305,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
+                **_fsdp_moe_model_kwargs(self.cfg.trainer.ref.fsdp_config),
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.ref.fsdp_config.get("context_parallel_size", 1)),
                 # Stage 4: ref-logprob forward must CP-shard identically to the
