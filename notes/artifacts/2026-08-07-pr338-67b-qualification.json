@@ -2,13 +2,14 @@
   "schema_version": 1,
   "record_status": "frozen_prelaunch",
   "created_utc": "2026-08-07T21:08:29Z",
+  "revised_utc": "2026-08-07T21:18:00Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
     "does_not_establish": "The causal effect of PR #338 on the full workload because there is no matched parent-EP8 arm. The existing component oracle supplies the narrow causal evidence.",
     "forbidden_extra_arm": "parent EP8"
   },
-  "protocol_sha256": "78672fef8476a570c9b0dba757d511223ae61c7ac6d3fb1c194e3dcf8b40f4b8",
+  "protocol_sha256": "0049a59a676753af0b5ffc083749896bbb4c2310cd5d3328ae538609159c34e7",
   "commits": {
     "component_parent": "166a6643b9735f64ab8b4aa85b1035d9577f58ea",
     "component_qualified_head": "c4513ded30e1d65c3923602ca4ae9f99975bc71b",
@@ -286,7 +287,22 @@
         "frozen_constants": {
           "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
           "max_retries_preemption": 1
-        }
+        },
+        "source_lines": [
+          "from iris.client import IrisClient",
+          "TASK_IMAGE = 'ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab'",
+          "MAX_RETRIES_PREEMPTION = 1",
+          "_submit = IrisClient.submit",
+          "def _submit_frozen(self, *args, **kwargs):",
+          "    if 'task_image' in kwargs or 'max_retries_preemption' in kwargs: raise RuntimeError('qualification wrapper refuses an ambiguous submit override')",
+          "    kwargs['task_image'] = TASK_IMAGE",
+          "    kwargs['max_retries_preemption'] = MAX_RETRIES_PREEMPTION",
+          "    print(f'[pr338 qualification] submit policy: task_image={TASK_IMAGE} max_retries_preemption={MAX_RETRIES_PREEMPTION}', flush=True)",
+          "    return _submit(self, *args, **kwargs)",
+          "IrisClient.submit = _submit_frozen",
+          "from cloud.iris.iris_backend import main",
+          "if __name__ == '__main__': raise SystemExit(main())"
+        ]
       },
       "shared_command_argv": [
         "uv", "run", "python", "/tmp/pr338-67b-qualification/launch_pr338_qualification.py",
@@ -298,22 +314,40 @@
         "--data-sources-json", "[{\"identity\":\"snowball-67b-a2b-rlvrmath-7498\",\"local_path\":\"/tmp/snowball-rlvrmath-7498\",\"relative_path\":\"train.parquet\",\"uri\":\"s3://marin-us-east-02a/iris/rl-data/snowball-67b-a2b-rlvrmath-7498\"}]",
         "--num-nodes", "10", "--gpus-per-node", "8", "--gpu-variant", "H100",
         "--cpu", "48", "--memory", "700GB", "--disk", "10800Gi",
-        "--cluster", "cw-rno2a", "--target-cluster", "cw-rno2a",
+        "--cluster", "cw-rno2a",
+        "--cluster-config", "/home/romain/dev/marin-wt/marinskyrl-20260807-issue-335-repro/.venv/lib/python3.12/site-packages/iris/config/cw-rno2a.yaml",
+        "--target-cluster", "cw-rno2a",
+        "--parent-cluster-config", "/home/romain/dev/marin-wt/marinskyrl-20260807-issue-335-repro/.venv/lib/python3.12/site-packages/iris/config/marin.yaml",
         "--runtime-commit", "${TESTED_COMMIT}", "--runtime-profile", "fsdp",
         "--priority", "interactive", "--max-retries", "0", "--timeout", "72000",
         "--no-preemptible", "--record-literal",
-        "++trainer.max_steps=10", "++trainer.seed=42",
-        "++trainer.placement.colocate_all=false",
-        "++trainer.placement.policy_num_nodes=8", "++trainer.placement.ref_num_nodes=8",
-        "++trainer.placement.policy_num_gpus_per_node=8", "++trainer.placement.ref_num_gpus_per_node=8",
-        "++generator.num_inference_engines=2", "++generator.inference_engine_tensor_parallel_size=1",
-        "++trainer.train_batch_size=256", "++trainer.policy_mini_batch_size=256",
-        "++trainer.micro_train_batch_size_per_gpu=1", "++generator.n_samples_per_prompt=16"
+        "--skyrl_override", "++trainer.max_steps=10",
+        "--skyrl_override", "++trainer.seed=42",
+        "--skyrl_override", "++trainer.placement.colocate_all=false",
+        "--skyrl_override", "++trainer.placement.policy_num_nodes=8",
+        "--skyrl_override", "++trainer.placement.ref_num_nodes=8",
+        "--skyrl_override", "++trainer.placement.policy_num_gpus_per_node=8",
+        "--skyrl_override", "++trainer.placement.ref_num_gpus_per_node=8",
+        "--skyrl_override", "++generator.num_inference_engines=2",
+        "--skyrl_override", "++generator.inference_engine_tensor_parallel_size=1",
+        "--skyrl_override", "++trainer.train_batch_size=256",
+        "--skyrl_override", "++trainer.policy_mini_batch_size=256",
+        "--skyrl_override", "++trainer.micro_train_batch_size_per_gpu=1",
+        "--skyrl_override", "++generator.n_samples_per_prompt=16"
       ],
+      "cluster_config_inputs": {
+        "peer_path": "/home/romain/dev/marin-wt/marinskyrl-20260807-issue-335-repro/.venv/lib/python3.12/site-packages/iris/config/cw-rno2a.yaml",
+        "peer_sha256": "12be64e4825af076918e5045fee64434b546fb725b70b6a0c1921747d3343929",
+        "parent_path": "/home/romain/dev/marin-wt/marinskyrl-20260807-issue-335-repro/.venv/lib/python3.12/site-packages/iris/config/marin.yaml",
+        "parent_sha256": "4cd2ad34536958c51f8d64774ec4ec16a1e02f13604291bb3f14f749cef10df8",
+        "reason": "Automatic lookup assumes a Marin monorepo path absent from this MarinSkyRL worktree; pass the installed Iris configs explicitly."
+      },
       "arms": {
         "ep1": {
           "job_name": "pr338-67b-ep1-a01-20260807",
-          "rl_config": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/5648d8193943c120e06786314b662a0bb4f1ae49/snowball_e10_rno2a_ctrl_frozen.yaml",
+          "rl_config_path": "/tmp/pr338-67b-qualification/gists/snowball_e10_rno2a_ctrl_frozen.yaml",
+          "rl_config_source": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/5648d8193943c120e06786314b662a0bb4f1ae49/snowball_e10_rno2a_ctrl_frozen.yaml",
+          "rl_config_sha256": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6",
           "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-ep1-a01-20260807",
           "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/resolved_config.yaml",
           "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/checkpoints",
@@ -322,7 +356,9 @@
         },
         "ep8": {
           "job_name": "pr338-67b-ep8-a01-20260807",
-          "rl_config": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/47ed4f62c99af8ccebf44f1179a02c7ddaa3077d/snowball_e10_rno2a_expertparallel_frozen.yaml",
+          "rl_config_path": "/tmp/pr338-67b-qualification/gists/snowball_e10_rno2a_expertparallel_frozen.yaml",
+          "rl_config_source": "https://gist.githubusercontent.com/penfever/c727931f564e60bfd95fe9093126e9c4/raw/47ed4f62c99af8ccebf44f1179a02c7ddaa3077d/snowball_e10_rno2a_expertparallel_frozen.yaml",
+          "rl_config_sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5",
           "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-ep8-a01-20260807",
           "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/resolved_config.yaml",
           "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/checkpoints",
@@ -417,7 +453,24 @@
       "ep1": null,
       "ep8": null
     },
-    "admission": "pending dry-runs"
+    "local_dry_run_corrections": [
+      {
+        "classification": "local parser failure before submission",
+        "error": "unrecognized bare Hydra overrides",
+        "correction": "pass each value through the repeatable --skyrl_override flag"
+      },
+      {
+        "classification": "local input-resolution failure before submission",
+        "error": "HTTP rl_config is not a supported config path",
+        "correction": "use the already downloaded, SHA-bound absolute host file"
+      },
+      {
+        "classification": "local input-resolution failure before submission",
+        "error": "automatic cluster config path absent in a MarinSkyRL worktree",
+        "correction": "pass the SHA-bound installed Iris peer and parent config paths explicitly"
+      }
+    ],
+    "admission": "pending exact-head dry-runs"
   },
   "attempts": [],
   "results": {
