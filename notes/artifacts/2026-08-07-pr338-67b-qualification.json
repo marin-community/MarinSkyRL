@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "frozen_prelaunch",
+  "record_status": "terminal_disposition_pending_review_and_publication",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-07T21:18:00Z",
+  "revised_utc": "2026-08-07T21:35:04Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -20,7 +20,7 @@
     ],
     "component_regression_file": "skyrl-train/tests/gpu/grug_ep_gradient_parity.py",
     "production_diff_changed_after_component_gate": false,
-    "tested_commit": null,
+    "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
     "artifact_commit": null
   },
   "historical_request": {
@@ -450,8 +450,32 @@
       "peak_h100": 80
     },
     "dry_runs": {
-      "ep1": null,
-      "ep8": null
+      "ep1": {
+        "utc": "2026-08-07T21:18:00Z",
+        "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
+        "request": "10 exclusive coscheduled nodes x 8 H100, 48 CPU, 700GB memory, 10800Gi disk per node, interactive, non-preemptible",
+        "uploaded_config_path": "/tmp/marin-rl-configs/4d2097f00ad385c8.yaml",
+        "config_sha256": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6",
+        "durable_checkpoint_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/checkpoints",
+        "durable_export_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/exports",
+        "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/resolved_config.yaml",
+        "launcher_marker": "[rl-iris] --dry-run: not submitting",
+        "status": "passed_with_known_post_dry_run_harness_error",
+        "post_marker_error": "cloud.iris.iris_backend.main dereferenced exit_code on the integer returned by the dry-run branch; request resolution had completed and submit was not called"
+      },
+      "ep8": {
+        "utc": "2026-08-07T21:18:00Z",
+        "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
+        "request": "10 exclusive coscheduled nodes x 8 H100, 48 CPU, 700GB memory, 10800Gi disk per node, interactive, non-preemptible",
+        "uploaded_config_path": "/tmp/marin-rl-configs/b8159ceff5eb3892.yaml",
+        "config_sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5",
+        "durable_checkpoint_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/checkpoints",
+        "durable_export_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/exports",
+        "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep8-a01-20260807/resolved_config.yaml",
+        "launcher_marker": "[rl-iris] --dry-run: not submitting",
+        "status": "passed_with_known_post_dry_run_harness_error",
+        "post_marker_error": "cloud.iris.iris_backend.main dereferenced exit_code on the integer returned by the dry-run branch; request resolution had completed and submit was not called"
+      }
     },
     "local_dry_run_corrections": [
       {
@@ -470,17 +494,185 @@
         "correction": "pass the SHA-bound installed Iris peer and parent config paths explicitly"
       }
     ],
-    "admission": "pending exact-head dry-runs"
+    "latest_capacity_at_2026-08-07T21:18:33Z": {
+      "cluster_reachable": true,
+      "total_h100": 512,
+      "free_h100": 7,
+      "interactive_held_h100": 89,
+      "batch_held_h100": 416,
+      "reclaimable_for_interactive_including_free": 423,
+      "active_federated_jobs": 14,
+      "pending_tasks": 1,
+      "running_tasks": 78,
+      "budget_limit": 75000,
+      "active_non_batch_spend": 4161,
+      "fits": true
+    },
+    "admission": "passed"
   },
-  "attempts": [],
+  "attempts": [
+    {
+      "arm": "ep1",
+      "attempt": 1,
+      "classification": "retryable pre-metric setup failure",
+      "submitted_utc": "2026-08-07T21:20:25Z",
+      "job_id": "/romain/pr338-67b-ep1-a01-20260807",
+      "cluster": "cw-rno2a",
+      "bundle_id": "aa43812a180e2c98554b106e952ae66efdc87ea457bc27789207de8c3f67140f",
+      "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+      "request_readback": {
+        "tasks": 10,
+        "cpu_millicores_per_task": 48000,
+        "memory_bytes_per_task": 751619276800,
+        "disk_bytes_per_task": 11596411699200,
+        "h100_per_task": 8,
+        "coscheduled": true,
+        "coscheduling_group_by": "leafgroup",
+        "priority_band_numeric": 2,
+        "max_retries_failure": 0,
+        "max_retries_preemption": 1,
+        "timeout_ms": 72000000
+      },
+      "latest_state_at_2026-08-07T21:27:12Z": "failed",
+      "failures": 1,
+      "preemptions": 0,
+      "terminal_observed_utc": "2026-08-07T21:27:12Z",
+      "terminal_manifest": {
+        "controller": "https://iris.oa.dev",
+        "job_id": "/romain/pr338-67b-ep1-a01-20260807",
+        "state": "failed",
+        "exit": 0,
+        "submitted_at_ms": 1786137626735,
+        "started_at_ms": 1786137643620,
+        "finished_at_ms": 1786138026116,
+        "tasks_failed": 1,
+        "tasks_coscheduled_failed": 9,
+        "failed_task": 5,
+        "failed_task_exit": 1,
+        "error_type": "ImportError",
+        "error": "cannot import name 'TelemetryConfig' from 'harbor_config.models.job.config' (/app/.venv/lib/python3.12/site-packages/harbor_config/models/job/config.py)",
+        "failure_boundary": "Iris setup step 2/2 before the Ray gang formed and before any WANDB_MIRROR kind=train record"
+      },
+      "resolved_config_readback": {
+        "uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a01-20260807/resolved_config.yaml",
+        "status": "not produced before setup failure",
+        "content_sha256": null,
+        "frozen_input_config_sha256": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6"
+      },
+      "retry_consumed": true,
+      "accepted_metrics": []
+    },
+    {
+      "arm": "ep1",
+      "attempt": 2,
+      "classification": "accepted arm attempt; sole retry after attempt 1 pre-metric setup failure",
+      "submitted_utc": "2026-08-07T21:30:42Z",
+      "job_id": "/romain/pr338-67b-ep1-a02-20260807",
+      "cluster": "cw-rno2a",
+      "bundle_id": "de70fa8f0854c0c3134b3de67e2264ad2664a615e0347848e4058946668660f8",
+      "tested_commit": "1d7c7d365b062403b05c5c1e03d31a8e80016828",
+      "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+      "request_readback": {
+        "tasks": 10,
+        "cpu_millicores_per_task": 48000,
+        "memory_bytes_per_task": 751619276800,
+        "disk_bytes_per_task": 11596411699200,
+        "h100_per_task": 8,
+        "coscheduled": true,
+        "coscheduling_group_by": "leafgroup",
+        "priority_band_numeric": 2,
+        "max_retries_failure": 0,
+        "max_retries_preemption": 1,
+        "timeout_ms": 72000000
+      },
+      "operational_identity_changes_only": {
+        "job_name": "pr338-67b-ep1-a02-20260807",
+        "rendezvous_dir": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-ep1-a02-20260807",
+        "resolved_config_uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a02-20260807/resolved_config.yaml",
+        "checkpoint_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a02-20260807/checkpoints",
+        "export_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a02-20260807/exports",
+        "trace_dir": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a02-20260807/trace_jobs"
+      },
+      "latest_state_at_2026-08-07T21:34:38Z": "failed",
+      "failures": 1,
+      "preemptions": 0,
+      "terminal_observed_utc": "2026-08-07T21:33:29Z",
+      "terminal_manifest": {
+        "controller": "https://iris.oa.dev",
+        "job_id": "/romain/pr338-67b-ep1-a02-20260807",
+        "state": "failed",
+        "exit": 0,
+        "submitted_at_ms": 1786138233626,
+        "started_at_ms": 1786138244159,
+        "finished_at_ms": 1786138357323,
+        "tasks_failed": 1,
+        "tasks_coscheduled_failed": 9,
+        "failed_task": 9,
+        "failed_task_exit": 1,
+        "error_type": "ImportError",
+        "error": "cannot import name 'TelemetryConfig' from 'harbor_config.models.job.config' (/app/.venv/lib/python3.12/site-packages/harbor_config/models/job/config.py)",
+        "failure_boundary": "Iris setup step 2/2 before the Ray gang formed and before any WANDB_MIRROR kind=train record"
+      },
+      "resolved_config_readback": {
+        "uri": "s3://marin-us-east-02a/iris/pr338-67b-ep1-a02-20260807/resolved_config.yaml",
+        "status": "not produced before setup failure",
+        "content_sha256": null,
+        "frozen_input_config_sha256": "4d2097f00ad385c89c4e64f086160845e865e8e24277f19c5648079ff6361bb6"
+      },
+      "accepted_metrics": []
+    }
+  ],
   "results": {
-    "ep1": null,
-    "ep8": null,
-    "same_step_ratios": null,
+    "ep1": {
+      "status": "incomplete_pre_metric_setup_failure",
+      "accepted_optimizer_updates": 0,
+      "required_through_update": 9,
+      "attempts": [
+        "/romain/pr338-67b-ep1-a01-20260807",
+        "/romain/pr338-67b-ep1-a02-20260807"
+      ],
+      "blocker": "Both the initial request and the sole allowed retry failed during installed Harbor package import before the Ray gang formed. harbor expected TelemetryConfig from harbor_config, but the installed harbor_config did not export it."
+    },
+    "ep8": {
+      "status": "not_submitted",
+      "accepted_optimizer_updates": 0,
+      "reason": "The sequential protocol could no longer yield a passing comparison after EP1 exhausted its retry without an accepted update. Submitting EP8 would spend 80 H100 without changing the frozen blocked/incomplete disposition."
+    },
+    "same_step_ratios": [],
     "median_same_step_ratio": null,
-    "decision_rule_passed": null
+    "decision_rule_passed": false,
+    "decision_rule_evaluation": "Blocked/incomplete: neither arm completed accepted optimizer updates through step 9, so no numerical EP8-versus-EP1 claim is supported."
   },
-  "disposition": null,
+  "disposition": {
+    "outcome": "blocked_or_incomplete",
+    "pr_338": "keep draft",
+    "issue_335": "keep open",
+    "training_claim": "No accepted 67B optimizer update was observed, so this qualification supports no full-workload stability or divergence claim.",
+    "component_claim": "The earlier component oracle remains valid and unchanged; this infrastructure result neither strengthens nor weakens its narrow expert-gradient scaling conclusion.",
+    "smallest_next_question": "Restore a compatible harbor and harbor_config pair in the pinned standard task environment, then rerun the already frozen two-arm protocol from EP1."
+  },
   "github_readback": null,
-  "resource_release_readback": null
+  "resource_release_readback": {
+    "utc": "2026-08-07T21:34:38Z",
+    "jobs": [
+      {
+        "job_id": "/romain/pr338-67b-ep1-a01-20260807",
+        "state": "failed",
+        "task_count": 10,
+        "tasks_with_worker": 0,
+        "remaining_accelerators": 0
+      },
+      {
+        "job_id": "/romain/pr338-67b-ep1-a02-20260807",
+        "state": "failed",
+        "task_count": 10,
+        "tasks_with_worker": 0,
+        "remaining_accelerators": 0
+      }
+    ],
+    "ep8_job_count": 0,
+    "qualification_tasks_with_worker": 0,
+    "qualification_accelerators_remaining": 0
+  }
 }
