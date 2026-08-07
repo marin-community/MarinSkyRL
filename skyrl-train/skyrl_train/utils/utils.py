@@ -603,6 +603,13 @@ def validate_cfg(cfg: DictConfig):
             # just set to 0 for better user exp
             cfg.generator.sampling_params.logprobs = 0
 
+        if not cfg.generator.batched:
+            logger.warning(
+                "`generator.batched` is `False` but `trainer.algorithm.use_tis` is `True`. TIS needs "
+                "rollout logprobs, which only the batched generation path returns. Setting `batched` to `True`."
+            )
+            cfg.generator.batched = True
+
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
         assert cfg.trainer.algorithm.policy_loss_type in [
