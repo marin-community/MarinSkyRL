@@ -70,6 +70,9 @@ ADDITIVE_GENERATOR_FIELDS = {
 MOE_FSDP_FIELDS = {
     "use_grouped_mm": False,
 }
+ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
+    "fsdp_parameter_storage_dtype": None,
+}
 
 
 # ----------------------------------------------------------------------------- G0
@@ -103,6 +106,10 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         fsdp = container["trainer"][role]["fsdp_config"]
         for k in (*CP_FIELDS, *MOE_FSDP_FIELDS):  # strip the additive keys -> should reproduce pre-CP shape
             fsdp.pop(k, None)
+    for role in ("policy", "critic"):
+        optimizer = container["trainer"][role]["optimizer_config"]
+        for k in ADDITIVE_TRAINING_OPTIMIZER_FIELDS:
+            optimizer.pop(k, None)
     for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS):
         container["trainer"].pop(k, None)
     for k in ADDITIVE_GENERATOR_FIELDS:
