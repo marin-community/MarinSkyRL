@@ -1,27 +1,46 @@
 from datetime import datetime, timezone, timedelta
+import random
+import time
+
 import fsspec
+from fsspec.exceptions import FSTimeoutError
+from loguru import logger
 
 # Optional AWS deps (present when s3fs is installed)
 try:
     import botocore.session as _botocore_session
-    from botocore.exceptions import ClientError
+    from botocore.exceptions import ClientError, ConnectionError as BotocoreConnectionError, HTTPClientError
 
     _HAS_BOTOCORE = True
+    _TRANSIENT_S3_ERRORS = (FSTimeoutError, TimeoutError, BotocoreConnectionError, HTTPClientError)
 except Exception:
     _HAS_BOTOCORE = False
+    _TRANSIENT_S3_ERRORS = (FSTimeoutError, TimeoutError)
 
     class ClientError(Exception):  # fallback type
         pass
 
 
 _S3_FS = None  # type: ignore
+_S3_CONNECT_TIMEOUT_SECONDS = 60
+_S3_READ_TIMEOUT_SECONDS = 300
+_S3_SDK_MAX_ATTEMPTS = 10
+_S3_TRANSFER_MAX_ATTEMPTS = 5
+_S3_RETRY_BASE_SECONDS = 1.0
 
 
 def get_s3_fs():
     """Return a cached S3 filesystem instance, creating it once."""
     global _S3_FS
     if _S3_FS is None:
-        _S3_FS = fsspec.filesystem("s3")
+        _S3_FS = fsspec.filesystem(
+            "s3",
+            config_kwargs={
+                "connect_timeout": _S3_CONNECT_TIMEOUT_SECONDS,
+                "read_timeout": _S3_READ_TIMEOUT_SECONDS,
+                "retries": {"max_attempts": _S3_SDK_MAX_ATTEMPTS, "mode": "adaptive"},
+            },
+        )
     return _S3_FS
 
 
@@ -57,17 +76,33 @@ def s3_refresh_if_expiring(fs) -> None:
 
 
 def call_with_s3_retry(fs, fn, *args, **kwargs):
-    """
-    Wrapper for calling an S3 method. If it fails with ExpiredToken, force refresh once and retry.
-    """
-    try:
-        return fn(*args, **kwargs)
-    except ClientError as e:
-        code = getattr(e, "response", {}).get("Error", {}).get("Code")
-        if code in {"ExpiredToken", "ExpiredTokenException", "RequestExpired"} and hasattr(fs, "connect"):
-            try:
-                fs.connect(refresh=True)
-            except Exception:
-                pass
+    """Call an S3 operation with bounded retries for credentials and transient transport failures."""
+    for attempt in range(1, _S3_TRANSFER_MAX_ATTEMPTS + 1):
+        try:
             return fn(*args, **kwargs)
-        raise
+        except ClientError as error:
+            code = getattr(error, "response", {}).get("Error", {}).get("Code")
+            if code not in {"ExpiredToken", "ExpiredTokenException", "RequestExpired"}:
+                raise
+            if hasattr(fs, "connect"):
+                try:
+                    fs.connect(refresh=True)
+                except Exception:
+                    logger.opt(exception=True).warning("Failed to refresh S3 credentials before retry")
+            retry_error = error
+        except _TRANSIENT_S3_ERRORS as error:
+            retry_error = error
+
+        if attempt == _S3_TRANSFER_MAX_ATTEMPTS:
+            raise retry_error
+        delay = _S3_RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * random.uniform(0.8, 1.2)
+        logger.warning(
+            "S3 operation failed with {}; retrying attempt {}/{} in {:.1f}s",
+            type(retry_error).__name__,
+            attempt + 1,
+            _S3_TRANSFER_MAX_ATTEMPTS,
+            delay,
+        )
+        time.sleep(delay)
+
+    raise AssertionError("unreachable")
