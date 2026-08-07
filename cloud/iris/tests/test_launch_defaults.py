@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -451,6 +452,51 @@ def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries
     assert args.max_retries == 6
     assert args.memory == "auto"
     assert args.disk == "auto"
+
+
+def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypatch):
+    args = _args(
+        tmp_path,
+        "opencode",
+        [
+            "--job-name",
+            "retry-budget",
+            "--memory",
+            "64Gi",
+            "--disk",
+            "100Gi",
+            "--cpu",
+            "4",
+            "--max-retries",
+            "3",
+            "--no-wait",
+        ],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+    submitted = {}
+
+    class RecordingClient:
+        def submit(self, **kwargs):
+            submitted.update(kwargs)
+            return SimpleNamespace(job_id="retry-budget-job")
+
+    @contextmanager
+    def client_context():
+        yield RecordingClient()
+
+    monkeypatch.setattr(iris_backend, "build_runtime_bundle", lambda commit: tmp_path)
+    monkeypatch.setattr(iris_backend, "prepare_federated_parent_credentials", lambda args: None)
+    monkeypatch.setattr(iris_backend, "load_secrets_env_into_os_environ", lambda path: {})
+    monkeypatch.setattr(iris_backend, "_rl_config_is_agentic", lambda path: False)
+    monkeypatch.setattr(iris_backend, "build_task_command", lambda args: ["true"])
+    monkeypatch.setattr(iris_backend, "_ambient_in_cluster_client", lambda workspace: client_context())
+
+    outcome = iris_backend.launch(args, expected_launcher_commit=args.runtime_commit)
+
+    assert outcome.job_id == "retry-budget-job"
+    assert submitted["max_retries_failure"] == 3
+    assert submitted["max_task_failures"] == 3
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
