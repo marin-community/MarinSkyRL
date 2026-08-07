@@ -77,13 +77,14 @@ def _write_runtime_files(root: Path, marker: str) -> None:
     runtime_package = root / "cloud" / "iris"
     runtime_package.mkdir(parents=True)
     (runtime_package / "runtime_bundle_files.txt").write_text(
-        "cloud/iris/__init__.py\ncloud/iris/task_runtime.py\nchat_templates/delphi_v0.jinja2\n"
+        "cloud/iris/__init__.py\ncloud/iris/task_runtime.py\nchat_templates/delphi_v0.jinja2\nchat_templates/delphi_v1.jinja2\n"
     )
     (runtime_package / "__init__.py").write_text("")
     (runtime_package / "task_runtime.py").write_text(f'RUNTIME_MARKER = "{marker}"\n')
     chat_templates = root / "chat_templates"
     chat_templates.mkdir()
     (chat_templates / "delphi_v0.jinja2").write_text(f"{marker.replace('-', ' ')} template\n")
+    (chat_templates / "delphi_v1.jinja2").write_text(f"{marker.replace('-', ' ')} v1 template\n")
 
 
 def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
@@ -371,10 +372,12 @@ def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(
 
     assert (workspace / "cloud" / "iris" / "task_runtime.py").read_text() == ('RUNTIME_MARKER = "selected-checkout"\n')
     assert (workspace / "chat_templates" / "delphi_v0.jinja2").read_text() == "selected checkout template\n"
+    assert (workspace / "chat_templates" / "delphi_v1.jinja2").read_text() == "selected checkout v1 template\n"
     identity = json.loads((workspace / ".marinskyrl-runtime.json").read_text())
     assert identity["launcher_commit"] == commit
     assert {entry["path"] for entry in identity["files"]} == {
         "chat_templates/delphi_v0.jinja2",
+        "chat_templates/delphi_v1.jinja2",
         "cloud/iris/__init__.py",
         "cloud/iris/task_runtime.py",
     }

@@ -14,4 +14,5 @@ cloud/iris/runtime_bundle.py
 cloud/iris/task_runtime.py
 cloud/iris/training_driver.py
 chat_templates/delphi_v0.jinja2
+chat_templates/delphi_v1.jinja2
 chat_templates/qwen3_thinking_acc.jinja2
