@@ -1103,7 +1103,7 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     WHY THIS EXISTS (a real torch-2.11 ``_StridedShard`` gather-ordering quirk — but NOT the
     r2–r7 salad; see the correction above).
     ``apply_ep`` composes the grouped-expert dim as
-    ``(_StridedShard(dim=0, sf=fsdp_size) [fsdp], Shard(dim=0) [ep])`` on torch
+    ``(_StridedShard(dim=0, sf=ep_size) [fsdp], Shard(dim=0) [ep])`` on torch
     2.11. The FSDP→vLLM weight sync gathered it via ``DTensor.full_tensor()``,
     which redistributes to ``Replicate`` through torch's transform planner. On
     torch 2.11 ``_StridedShard.is_shard()`` returns ``False`` (it is no longer a
@@ -1155,19 +1155,16 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
     dtype = dt.dtype
 
     # Replay distribute_tensor's split with each placement's OWN _split_tensor to
-    # discover which GLOBAL rows (along sdim) this rank's local shard holds. Tag
-    # rows with their global id, split identically, read back the surviving ids.
-    shp = [1] * dt.dim()
-    shp[sdim] = n
-    rowids = torch.arange(n).view(shp).expand(full_shape).contiguous()
+    # discover which GLOBAL rows (along sdim) this rank's local shard holds. The
+    # placements only inspect sdim, so row ids need no trailing weight dimensions.
+    rowids = torch.arange(n).view([1] * sdim + [n])
     coord = mesh.get_coordinate()
     cur = rowids
     for mesh_dim, p in enumerate(placements):
         if isinstance(p, (Shard, _StridedShard)):
             shards, _ = p._split_tensor(cur, mesh.size(mesh_dim), with_padding=False, contiguous=True)
             cur = shards[coord[mesh_dim]]
-    perm = [sdim] + [d for d in range(cur.dim()) if d != sdim]
-    my_rows = cur.permute(*perm).reshape(cur.shape[sdim], -1)[:, 0].tolist()
+    my_rows = cur.reshape(-1).tolist()
 
     local = dt.to_local().detach().contiguous()
     # FSDP2 may even-pad the local shard along sdim; keep only the rows we own.
