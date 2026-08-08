@@ -92,7 +92,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                     with Timer("save_checkpoints", self.all_timings):
                         self.save_checkpoints()
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                    with Timer(self.hf_model_save_operation(), self.all_timings):
+                    with Timer(self.hf_model_save_timer_label(), self.all_timings):
                         self.handle_hf_model_save()
                 self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
                 self.all_timings = {}
@@ -111,7 +111,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
-            with Timer(self.hf_model_save_operation(), self.all_timings):
+            with Timer(self.hf_model_save_timer_label(), self.all_timings):
                 self.handle_hf_model_save()
         logger.info("Training done!")
 

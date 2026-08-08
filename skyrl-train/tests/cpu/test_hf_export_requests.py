@@ -1,9 +1,9 @@
-from argparse import Namespace
 import pytest
 from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
-from cloud.iris.export_hf_checkpoint import build_command
+from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, request_spec
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.hf_export import (
     HFExportStatus,
     new_hf_export_request,
@@ -22,7 +22,6 @@ def _trainer_config(tmp_path, *, execute: bool = False):
             "trainer": {
                 "ckpt_path": str(tmp_path / "checkpoints"),
                 "export_path": str(tmp_path / "exports"),
-                "strategy": "fsdp2",
                 "hf_export_execution": execute,
                 "placement": {"policy_num_nodes": 2, "policy_num_gpus_per_node": 4},
                 "policy": {"model": {"path": "org/model"}},
@@ -96,6 +95,14 @@ def test_hf_export_interval_must_be_checkpoint_aligned():
         validate_hf_export_config(cfg)
 
 
+def test_default_hf_export_interval_tracks_checkpoint_override():
+    cfg = get_default_config()
+    cfg.trainer.ckpt_interval = 10
+
+    assert cfg.trainer.hf_save_interval == 10
+    validate_hf_export_config(cfg)
+
+
 @pytest.mark.parametrize(
     "trainer_config",
     [
@@ -117,8 +124,8 @@ def test_normal_training_rejects_in_band_hub_upload(trainer_config):
 
 def test_export_job_owns_timeout_and_waits_for_completion():
     command = build_command(
-        Namespace(
-            ckpt_path="s3://bucket/run/checkpoints",
+        ExportJobSpec(
+            checkpoint_base_path="s3://bucket/run/checkpoints",
             step=10,
             export_path="s3://bucket/run/exports",
             rl_config="config.yaml",
@@ -153,6 +160,16 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     assert options["--timeout"] == "7200"
     assert "--no-wait" not in command
     assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
+
+
+def test_request_rejects_operator_override_instead_of_ignoring_it():
+    parser = argument_parser()
+    args = parser.parse_args(
+        ["--request", "/checkpoint/global_step_10", "--rl_config", "config.yaml", "--num-nodes", "8"]
+    )
+
+    with pytest.raises(SystemExit):
+        request_spec(args, parser)
 
 
 @pytest.mark.parametrize(

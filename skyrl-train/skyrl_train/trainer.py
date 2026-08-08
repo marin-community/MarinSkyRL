@@ -88,7 +88,7 @@ from skyrl_train.hf_export import (
     read_hf_export_request,
     write_hf_export_request,
 )
-from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFExportAction
+from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 _TRAINER_STATE_FILENAME = "trainer_state.pt"
@@ -402,9 +402,9 @@ class RayPPOTrainer:
                 logger.info("Saved final checkpoint.")
             await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
-            with Timer(self.hf_model_save_operation(), self.all_timings):
-                action = await asyncio.to_thread(self.handle_hf_model_save)
-                if action is HFExportAction.EXECUTED:
+            with Timer(self.hf_model_save_timer_label(), self.all_timings):
+                await asyncio.to_thread(self.handle_hf_model_save)
+                if self.cfg.trainer.hf_export_execution:
                     logger.info("Saved final model.")
                     await asyncio.to_thread(self._flush_hf_uploads)
 
@@ -621,7 +621,7 @@ class RayPPOTrainer:
 
                 # Handle HF model saving
                 if self._control.should_save_hf_model:
-                    with Timer(self.hf_model_save_operation(), self.all_timings):
+                    with Timer(self.hf_model_save_timer_label(), self.all_timings):
                         self.handle_hf_model_save()
                     self._control.should_save_hf_model = False
 
@@ -2089,15 +2089,15 @@ class RayPPOTrainer:
             )
         logger.info("Successfully saved model weights.")
 
-    def hf_model_save_operation(self) -> str:
+    def hf_model_save_timer_label(self) -> str:
         """Return the timing label for the configured HF export action."""
         return "save_hf_model" if self.cfg.trainer.hf_export_execution else "queue_hf_export"
 
-    def handle_hf_model_save(self) -> HFExportAction:
-        """Execute an export or return the durable request state reached by this call."""
+    def handle_hf_model_save(self) -> None:
+        """Execute an export-only run or persist its out-of-band request state."""
         if self.cfg.trainer.hf_export_execution:
             self.save_models()
-            return HFExportAction.EXECUTED
+            return
 
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         trainer_state_path = os.path.join(checkpoint_path, _TRAINER_STATE_FILENAME)
@@ -2111,12 +2111,11 @@ class RayPPOTrainer:
         if existing is not None:
             if existing.status is HFExportStatus.COMPLETE:
                 logger.info(f"HF export for global_step_{self.global_step} is already complete")
-                return HFExportAction.ALREADY_COMPLETE
             else:
                 logger.info(
                     f"HF export for global_step_{self.global_step} is already recorded with status={existing.status.value}"
                 )
-                return HFExportAction.ALREADY_PENDING
+            return
 
         placement = self.cfg.trainer.placement
         request = new_hf_export_request(
@@ -2134,7 +2133,6 @@ class RayPPOTrainer:
         )
         request_path = write_hf_export_request(request)
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
-        return HFExportAction.REQUESTED
 
     def _flush_hf_uploads(self) -> None:
         """Re-process HF Hub uploads after the final model export is on disk.

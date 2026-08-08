@@ -14,13 +14,6 @@ class HFExportStatus(StrEnum):
     COMPLETE = "complete"
 
 
-class HFExportAction(StrEnum):
-    EXECUTED = "executed"
-    REQUESTED = "requested"
-    ALREADY_PENDING = "already_pending"
-    ALREADY_COMPLETE = "already_complete"
-
-
 @dataclass(frozen=True)
 class HFExportRequest:
     schema_version: int

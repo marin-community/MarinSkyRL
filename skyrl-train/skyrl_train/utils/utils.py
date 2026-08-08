@@ -513,16 +513,16 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
                 "hf_hub_upload cannot run in normal training because HF exports are produced out of band; "
                 "publish only after the export request is complete"
             )
-        checkpoint_intervals = [
-            int(callback.get("save_steps", -1))
-            for callback in callbacks
-            if callback.get("type") == CHECKPOINT_CALLBACK_TYPE and int(callback.get("save_steps", -1)) > 0
-        ]
-        export_intervals = [
-            int(callback.get("save_steps", -1))
-            for callback in callbacks
-            if callback.get("type") == HF_MODEL_SAVE_CALLBACK_TYPE and int(callback.get("save_steps", -1)) > 0
-        ]
+
+        def callback_intervals(callback_type: str) -> list[int]:
+            return [
+                int(callback.get("save_steps", -1))
+                for callback in callbacks
+                if callback.get("type") == callback_type and int(callback.get("save_steps", -1)) > 0
+            ]
+
+        checkpoint_intervals = callback_intervals(CHECKPOINT_CALLBACK_TYPE)
+        export_intervals = callback_intervals(HF_MODEL_SAVE_CALLBACK_TYPE)
     else:
         checkpoint_interval = int(cfg.trainer.get("ckpt_interval", -1))
         export_interval = int(cfg.trainer.get("hf_save_interval", -1))
