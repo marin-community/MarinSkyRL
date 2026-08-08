@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "cycle_2_ep8_running",
+  "record_status": "cycle_2_ep8_retry_running",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-08T13:24:15Z",
+  "revised_utc": "2026-08-08T13:46:30Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -24,7 +24,7 @@
     },
     "cycle_2": {
       "created_utc": "2026-08-07T23:09:45Z",
-      "status": "ep8_attempt_1_running",
+      "status": "ep8_attempt_2_running_after_attempt_1_premetric_setup_failure",
       "corrected_cause": {
         "owner": "MarinSkyRL root dependency record",
         "old_pair": {
@@ -510,17 +510,37 @@
           "job_id": "/romain/pr338-67b-c2-ep8-a01-20260807",
           "submitted_at_ms": 1786195419007,
           "started_at_ms": 1786195433460,
-          "state_at_2026_08_08T13_24_15Z": "running",
+        "state": "failed_premetric_setup",
+        "finished_at_ms": 1786196237816,
+        "failures": 1,
+        "preemptions": 0,
+        "tasks_failed": 1,
+        "tasks_coscheduled_failed": 9,
+        "tasks_with_worker_at_final_readback": 0,
+        "accelerators_on_current_workers_at_final_readback": 0,
           "tasks_total": 10,
           "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
           "frozen_config_sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5",
           "launch_log_sha256": "3851e4931cf0c351d426d9ad30dede6194565344bf7ea5049d6003eaf5b6fb47",
-          "pre_submission_local_rejection": {
+        "pre_submission_local_rejection": {
             "created_iris_job": false,
             "requested_accelerators": false,
             "cause": "The first local invocation omitted the explicit installed Iris config path and exited before submission.",
-            "log_sha256": "e308a1c0d05fd80ed7d8869d7b569a5902df75a3e408e0357bac2b63d680b8eb"
-          },
+          "log_sha256": "e308a1c0d05fd80ed7d8869d7b569a5902df75a3e408e0357bac2b63d680b8eb"
+        },
+        "setup_failure": {
+          "accepted_metric_rows": 0,
+          "failure_stage": "skyrl_train.entrypoints.main_base.validate_cfg",
+          "failure": "AssertionError: `WANDB_API_KEY` is required for `wandb` logger",
+          "retry_eligible": true,
+          "captured_log_sha256": "330679657d91b7793f08c8af2c4abcc87114f4ec0ebaddee9eea3b7bfa937109",
+          "rank_0_termination_artifact": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep8-a01-20260807/term_artifacts/_romain_pr338-67b-c2-ep8-a01-20260807_0:0_1786195697.txt"
+        },
+        "resource_release_readback": {
+          "tasks_with_worker": 0,
+          "accelerators_on_current_workers": 0,
+          "readback_sha256": "36325416d644e179572bbd4d51fe1d7c298109b9c57a3dafa49544fb17a7ff44"
+        },
           "independent_request_readback": {
             "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
             "replicas": 10,
@@ -540,14 +560,63 @@
             "priority_band": 2,
             "timeout_ms": 72000000,
             "preemption_policy": 0,
-            "bundle_id": "aae00813b4eb9adb1efb662253f4b579afc9fc6e7c0766c5c13bbc17655f3ead"
-          }
+          "bundle_id": "aae00813b4eb9adb1efb662253f4b579afc9fc6e7c0766c5c13bbc17655f3ead"
         }
+      },
+      {
+        "arm": "ep8",
+        "attempt": 2,
+        "job_id": "/romain/pr338-67b-c2-ep8-a02-20260807",
+        "submitted_at_ms": 1786196590273,
+        "started_at_ms": 1786196605498,
+        "state_at_2026_08_08T13_46_30Z": "running",
+        "tasks_total": 10,
+        "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+        "frozen_config_sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5",
+        "launch_log_sha256": "631ef7a30ce76d20185cb3b2021ed94d1f1967f303e5e6a3d3584429a9080a42",
+        "retry_basis": "Attempt 1 failed in configuration validation before any WANDB_MIRROR metric row or numerical update; the frozen one-retry allowance therefore applies.",
+        "operational_correction": "Load the protected standard launch-host secrets environment so the unchanged frozen workload can pass W&B configuration validation.",
+        "secret_safe_readback": {
+          "wandb_api_key_present": true,
+          "secret_values_read_or_printed": false,
+          "environment_key_readback_sha256": "3068cd8c387f62323ebac6651629bb1b48f75a19eaf53d853d036781c7ab71bb"
+        },
+        "pre_submission_live_gate": {
+          "attempt_1_terminal_and_released": true,
+          "attempt_2_preexisting_job_rows": 0,
+          "peer_reachable": true,
+          "h100_interactive_available_or_preemptible": 423,
+          "h100_requested": 80,
+          "peer_snapshot_sha256": "3a6b45d67dbb4e4ef60e04dd783cfc899ef6b922da4f255c97fbe95dfb8ae76c"
+        },
+        "independent_request_readback": {
+          "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+          "replicas": 10,
+          "cpu_millicores_per_replica": 48000,
+          "memory_bytes_per_replica": 751619276800,
+          "disk_bytes_per_replica": 11596411699200,
+          "device": {
+            "gpu": {
+              "variant": "H100",
+              "count": 8
+            }
+          },
+          "coscheduling": true,
+          "coscheduling_group_by": "leafgroup",
+          "max_retries_failure": 0,
+          "max_retries_preemption": 1,
+          "priority_band": 2,
+          "timeout_ms": 72000000,
+          "preemption_policy": 0,
+          "bundle_id": "62c1b7071a0fb2325141e63e02eb47b86f3e8ede4c906d0526d43ae09de60cca",
+          "request_readback_sha256": "82f29503d9b0240cf6588df5572dfb502aa953d3d8e61289d42b8692b24f93a5"
+        }
+      }
       ],
       "results": {
         "ep1": "attempt_1_accepted_updates_0_through_9_then_failed_post_metric_finalization",
-        "ep8": "attempt_1_running",
-        "comparison": "pending_ep8_updates_0_through_9"
+      "ep8": "attempt_1_failed_premetric_setup; attempt_2_running_under_frozen_retry_allowance",
+      "comparison": "pending_ep8_attempt_2_updates_0_through_9"
       }
     }
   },
