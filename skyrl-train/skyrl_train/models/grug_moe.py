@@ -58,8 +58,43 @@ def is_grug_router_bias(model_type: str | None, name: str) -> bool:
 def validate_grug_training_strategy(model_type: str | None, training_strategy: str | None) -> None:
     """Reject Grug before an unsupported trainer backend allocates the model."""
 
-    if model_type == GRUG_MOE_MODEL_TYPE and training_strategy != "fsdp2":
-        raise ValueError("Grug policy training requires trainer.strategy=fsdp2")
+    if model_type == GRUG_MOE_MODEL_TYPE and training_strategy not in {"fsdp2", "megatron"}:
+        raise ValueError("Grug policy training requires trainer.strategy=fsdp2 or guarded megatron")
+
+
+def validate_grug_megatron_policy(
+    model_type: str | None,
+    *,
+    is_policy_worker: bool,
+    world_size: int,
+    tensor_model_parallel_size: int,
+    pipeline_model_parallel_size: int,
+    context_parallel_size: int,
+    expert_model_parallel_size: int,
+    expert_tensor_parallel_size: int | None,
+    virtual_pipeline_model_parallel_size: int | None,
+    use_sample_packing: bool,
+) -> None:
+    """Admit only the frozen one-rank Grug Megatron policy boundary."""
+
+    if model_type != GRUG_MOE_MODEL_TYPE:
+        return
+    if not is_policy_worker:
+        raise ValueError("Grug Megatron supports one policy rank only; reference workers are not admitted")
+    topology = {
+        "world": world_size,
+        "TP": tensor_model_parallel_size,
+        "EP": expert_model_parallel_size,
+        "ETP": expert_tensor_parallel_size or 1,
+        "PP": pipeline_model_parallel_size,
+        "CP": context_parallel_size,
+        "VP": virtual_pipeline_model_parallel_size or 1,
+    }
+    if any(size != 1 for size in topology.values()):
+        rendered = " ".join(f"{name}={size}" for name, size in topology.items())
+        raise ValueError(f"Grug Megatron requires world=TP=EP=ETP=PP=CP=VP=1, got {rendered}")
+    if use_sample_packing:
+        raise ValueError("Grug Megatron requires trainer.use_sample_packing=false")
 
 
 def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:

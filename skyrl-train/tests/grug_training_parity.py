@@ -68,50 +68,41 @@ def assert_route_margin(label: str, route_margin: float) -> None:
         raise AssertionError(f"{label}: route margin {route_margin:.8g} must exceed {minimum:.8g}")
 
 
-def run_grug_training_parity() -> None:
-    """Check the PyTorch implementation against the committed Levanter oracle."""
+def assert_grug_training_parity(model, *, semantic_model=None) -> None:
+    """Check one canonical Grug graph against the committed Levanter oracle."""
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("the locked tolerances require an H100")
-
+    semantic_model = model if semantic_model is None else semantic_model
+    canonical_model = getattr(semantic_model, "model", semantic_model)
     oracle = load_grug_training_oracle()
     manifest = oracle.manifest
     assert manifest["schema_version"] == 1
     assert manifest["padding"] == "none"
     observations = oracle.observations
-    device = torch.device("cuda")
+    device = next(semantic_model.parameters()).device
     torch.set_float32_matmul_precision("highest")
-    model = AutoModelForCausalLM.from_pretrained(
-        ORACLE_FIXTURE_DIR,
-        trust_remote_code=False,
-        local_files_only=True,
-        attn_implementation="eager",
-        dtype=torch.float32,
-    )
-    if not isinstance(model, GrugMoeForCausalLM):
-        raise TypeError(f"expected GrugMoeForCausalLM, got {type(model).__name__}")
-    model.to(device)
     model.train()
     input_ids = torch.from_numpy(observations["input_ids"]).long().to(device)
     attention_mask = torch.ones_like(input_ids)
     candidate_count = query_bias_candidate_count(
         input_ids.numel(),
-        model.config.num_experts_per_tok,
-        model.config.num_local_experts,
+        canonical_model.config.num_experts_per_tok,
+        canonical_model.config.num_local_experts,
     )
-    model.begin_query_bias_capture(candidate_count, attention_mask)
+    semantic_model.begin_query_bias_capture(candidate_count, attention_mask)
     output = model(
         input_ids,
+        position_ids=torch.arange(input_ids.shape[1], device=device).unsqueeze(0).expand_as(input_ids),
         attention_mask=attention_mask,
         labels=input_ids,
         output_hidden_states=True,
+        return_dict=True,
     )
-    query_bias_observation = model.take_query_bias_observation(candidate_count=candidate_count)
+    query_bias_observation = semantic_model.take_query_bias_observation(candidate_count=candidate_count)
 
     assert_close("loss", output.loss.reshape(1), observations["loss"].reshape(1))
     assert_close("logits", output.logits, observations["logits"])
     assert_close("hidden.embed", output.hidden_states[0], observations["hidden.embed"])
-    for layer_idx in range(model.config.num_hidden_layers):
+    for layer_idx in range(canonical_model.config.num_hidden_layers):
         assert_route_margin(f"route.{layer_idx}", float(observations[f"route_margin.{layer_idx}"]))
         assert_close(
             f"hidden.layer.{layer_idx}",
@@ -137,12 +128,15 @@ def run_grug_training_parity() -> None:
     assert_close("hidden.final", output.hidden_states[-1], observations["hidden.final"])
 
     output.loss.backward()
-    parameters = dict(model.named_parameters())
+    parameters = dict(semantic_model.named_parameters())
     gradient_names = tuple(manifest["update_parameter_names"])
     for name in gradient_names:
+        parameter = parameters.get(name, parameters.get(f"model.{name}"))
+        if parameter is None:
+            raise AssertionError(f"missing selected gradient parameter {name}")
         assert_close(
             f"gradient.{name}",
-            parameters[name].grad,
+            getattr(parameter, "main_grad", None) if parameter.grad is None else parameter.grad,
             observations[f"gradient.{name}"],
             gradient=True,
         )
@@ -150,19 +144,44 @@ def run_grug_training_parity() -> None:
     learning_rate = float(manifest["sgd_learning_rate"])
     with torch.no_grad():
         for name in gradient_names:
-            parameters[name].add_(parameters[name].grad, alpha=-learning_rate)
+            parameter = parameters.get(name, parameters.get(f"model.{name}"))
+            gradient = getattr(parameter, "main_grad", None) if parameter.grad is None else parameter.grad
+            parameter.add_(gradient, alpha=-learning_rate)
         betas = torch.stack(
             [layer.candidates[:, candidate_count - 1] for layer in query_bias_observation.layers],
             dim=0,
         )
-        model.set_query_bias(next_query_bias(betas))
+        semantic_model.set_query_bias(next_query_bias(betas))
         next_observation_routes = []
-        model.begin_query_bias_capture(candidate_count, attention_mask)
-        model(input_ids, attention_mask=attention_mask)
-        next_observation = model.take_query_bias_observation(candidate_count=candidate_count)
+        semantic_model.begin_query_bias_capture(candidate_count, attention_mask)
+        model(
+            input_ids,
+            position_ids=torch.arange(input_ids.shape[1], device=device).unsqueeze(0).expand_as(input_ids),
+            attention_mask=attention_mask,
+        )
+        next_observation = semantic_model.take_query_bias_observation(candidate_count=candidate_count)
         next_observation_routes.extend(layer.selected_experts for layer in next_observation.layers)
     for layer_idx, routes in enumerate(next_observation_routes):
         assert_exact_routes(f"next_route.{layer_idx}", routes, observations[f"next_route.{layer_idx}"])
+
+
+def run_grug_training_parity() -> None:
+    """Check the canonical PyTorch implementation against the committed Levanter oracle."""
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("the locked tolerances require an H100")
+
+    model = AutoModelForCausalLM.from_pretrained(
+        ORACLE_FIXTURE_DIR,
+        trust_remote_code=False,
+        local_files_only=True,
+        attn_implementation="eager",
+        dtype=torch.float32,
+    )
+    if not isinstance(model, GrugMoeForCausalLM):
+        raise TypeError(f"expected GrugMoeForCausalLM, got {type(model).__name__}")
+    model.to(torch.device("cuda"))
+    assert_grug_training_parity(model)
 
 
 if __name__ == "__main__":

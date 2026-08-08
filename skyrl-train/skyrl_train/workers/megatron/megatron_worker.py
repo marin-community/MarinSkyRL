@@ -28,7 +28,8 @@ from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
-from skyrl_train.models.grug_moe import validate_grug_training_strategy
+from skyrl_train.models.grug_megatron import GrugMoeBridge  # noqa: F401 - registers the local Bridge
+from skyrl_train.models.grug_moe import validate_grug_megatron_policy, validate_grug_training_strategy
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.utils.ppo_utils import TIS_DIAG_KEYS
@@ -187,13 +188,33 @@ class MegatronWeightExtractor(WeightExtractor):
 
 class MegatronWorker:
     def init_configs(
-        self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False
+        self,
+        model_path,
+        megatron_config,
+        model_config_kwargs,
+        transformer_config_kwargs,
+        *,
+        is_policy_worker,
+        bf16=True,
+        flash_attn=False,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
+        validate_grug_megatron_policy(
+            getattr(hf_config, "model_type", None),
+            is_policy_worker=is_policy_worker,
+            world_size=self._world_size,
+            tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+            pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+            context_parallel_size=megatron_config.context_parallel_size,
+            expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+            expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+            virtual_pipeline_model_parallel_size=transformer_config_kwargs.get("virtual_pipeline_model_parallel_size"),
+            use_sample_packing=self.cfg.trainer.use_sample_packing,
+        )
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
@@ -381,6 +402,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.trainer.policy.megatron_config,
             self.cfg.trainer.policy.megatron_config.model_config_kwargs,
             self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+            is_policy_worker=True,
             bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
         )
@@ -762,6 +784,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             self.cfg.trainer.ref.megatron_config,
             self.cfg.trainer.ref.megatron_config.model_config_kwargs,
             self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
+            is_policy_worker=False,
             bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
         )

@@ -4,6 +4,7 @@ from skyrl_train.model_wrapper import validate_grug_training_options
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     validate_grug_expert_parallel_options,
+    validate_grug_megatron_policy,
     validate_grug_training_strategy,
 )
 
@@ -59,15 +60,47 @@ def test_grug_training_options_ignore_other_models():
     )
 
 
-@pytest.mark.parametrize("strategy", [None, "fsdp", "deepspeed", "megatron"])
-def test_grug_training_strategy_rejects_non_fsdp2_backends(strategy):
-    with pytest.raises(ValueError, match="trainer.strategy=fsdp2"):
+@pytest.mark.parametrize("strategy", [None, "fsdp", "deepspeed"])
+def test_grug_training_strategy_rejects_unsupported_backends(strategy):
+    with pytest.raises(ValueError, match="trainer.strategy=fsdp2 or guarded megatron"):
         validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, strategy)
 
 
 def test_grug_training_strategy_accepts_fsdp2_and_ignores_other_models():
     validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, "fsdp2")
+    validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, "megatron")
     validate_grug_training_strategy("qwen3", "deepspeed")
+
+
+def test_grug_megatron_admits_only_one_unpacked_policy_rank():
+    options = {
+        "is_policy_worker": True,
+        "world_size": 1,
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "context_parallel_size": 1,
+        "expert_model_parallel_size": 1,
+        "expert_tensor_parallel_size": None,
+        "virtual_pipeline_model_parallel_size": None,
+        "use_sample_packing": False,
+    }
+    validate_grug_megatron_policy(GRUG_MOE_MODEL_TYPE, **options)
+
+    for option, value, message in (
+        ("is_policy_worker", False, "policy rank only"),
+        ("world_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("tensor_model_parallel_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("expert_model_parallel_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("expert_tensor_parallel_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("pipeline_model_parallel_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("context_parallel_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("virtual_pipeline_model_parallel_size", 2, "world=TP=EP=ETP=PP=CP=VP=1"),
+        ("use_sample_packing", True, "use_sample_packing=false"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_grug_megatron_policy(GRUG_MOE_MODEL_TYPE, **{**options, option: value})
+
+    validate_grug_megatron_policy("qwen3", **{**options, "world_size": 8})
 
 
 def test_grug_expert_parallel_requires_native_grouped_torch_path():

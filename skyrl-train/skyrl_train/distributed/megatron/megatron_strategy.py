@@ -85,6 +85,7 @@ class MegatronStrategy(DistributedStrategy):
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
+        self.last_optimizer_step_succeeded = False
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
@@ -152,8 +153,11 @@ class MegatronStrategy(DistributedStrategy):
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
-        _, grad_norm, _ = optimizer.step()
-        scheduler.step(1)
+        self.last_optimizer_step_succeeded = False
+        update_successful, grad_norm, _ = optimizer.step()
+        self.last_optimizer_step_succeeded = bool(update_successful)
+        if self.last_optimizer_step_succeeded and scheduler is not None:
+            scheduler.step(1)
         optimizer.zero_grad()
         return grad_norm
 
