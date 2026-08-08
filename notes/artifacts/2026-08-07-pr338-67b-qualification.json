@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "cycle_2_ep1_running",
+  "record_status": "cycle_2_ep8_running",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-07T23:38:32Z",
+  "revised_utc": "2026-08-08T13:24:15Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -24,7 +24,7 @@
     },
     "cycle_2": {
       "created_utc": "2026-08-07T23:09:45Z",
-      "status": "ep1_attempt_1_running",
+      "status": "ep8_attempt_1_running",
       "corrected_cause": {
         "owner": "MarinSkyRL root dependency record",
         "old_pair": {
@@ -249,17 +249,240 @@
           "request_scalar_cost": 89400
         }
       },
+      "ep8_live_gate": {
+        "utc": "2026-08-08T13:20:41Z",
+        "status": "passed",
+        "source": {
+          "branch_local_head": "2e0655c22ec4cfd274b352b169b692fc55c6339b",
+          "branch_remote_head": "2e0655c22ec4cfd274b352b169b692fc55c6339b",
+          "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+          "production_and_regression_files_changed": false,
+          "task_image_manifest_present": true
+        },
+        "ep1_release": {
+          "job_id": "/romain/pr338-67b-c2-ep1-a01-20260807",
+          "state": "failed_post_metric_finalization",
+          "finished_at_ms": 1786195153625,
+          "tasks_with_worker": 0,
+          "accelerators_on_current_workers": 0,
+          "peer_pod_matches": 0
+        },
+        "capacity": {
+          "peer_id": "cw-rno2a",
+          "reachable": true,
+          "last_contact_ms": 1786195232243,
+          "active_federated_jobs": 5,
+          "pending_tasks": 1,
+          "running_tasks": 61,
+          "h100_free": 183,
+          "h100_total": 512,
+          "h100_interactive_held": 89,
+          "h100_batch_held": 240,
+          "h100_interactive_available_or_preemptible": 423,
+          "h100_requested": 80,
+          "peer_snapshot_sha256": "f4db0259146088c9f1e91bbfc5699ba578e4495fc3493193705febcd62c21ac7"
+        },
+        "budget": {
+          "user_id": "romain",
+          "limit": 75000,
+          "spent": 4161,
+          "max_band": "PRIORITY_BAND_PRODUCTION",
+          "requested_band": "PRIORITY_BAND_INTERACTIVE",
+          "request_scalar_cost": 89400
+        }
+      },
       "attempts": [
         {
           "arm": "ep1",
           "attempt": 1,
           "job_id": "/romain/pr338-67b-c2-ep1-a01-20260807",
           "submitted_at_utc": "2026-08-07T23:36:56Z",
-          "state_at_2026_08_07T23_38_32Z": "running",
-          "tasks_running": 10,
+          "state": "failed_post_metric_finalization",
+          "finished_at_ms": 1786195153625,
+          "failures": 1,
+          "preemptions": 0,
+          "tasks_failed": 1,
+          "tasks_coscheduled_failed": 9,
+          "tasks_with_worker_at_final_readback": 0,
+          "accelerators_on_current_workers_at_final_readback": 0,
           "tasks_total": 10,
           "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
           "launch_log_sha256": "226a9409d5a0139913a7f790d15690631cc9f77adb29c3a959bdc2add9bfaf34",
+          "numerical_evidence": {
+            "accepted_protocol_updates": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9
+            ],
+            "emitted_steps": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "complete_rank0_log_lines": 130656,
+            "complete_rank0_log_bytes": 28054103,
+            "complete_rank0_log_sha256": "d4360afdc9664099097a3b9db3664d9f6ca09989491383eedfb44b61e27237b8",
+            "parsed_metrics_sha256": "a4d886bf20fcda98b37a2799e338e56525db41b1c0f5ad52e4b6a5d7df221c90",
+            "optimizer_step_succeeded_all": true,
+            "raw_grad_norm_present_and_positive_all": true,
+            "raw_grad_norm_at_or_below_cap_all": true,
+            "raw_grad_norm_cap": 0.5
+          },
+          "accepted_metrics": [
+            {
+              "protocol_update": 0,
+              "emitted_step": 1,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.09521484375,
+              "clip_scale": 1,
+              "policy_entropy": 0.7340967105701566,
+              "policy_loss": 1.0186340659856796e-09,
+              "final_loss": 1.5916157281026244e-11,
+              "avg_raw_advantages": -0.014133939519524574,
+              "avg_raw_advantages_abs": 0.304323673248291,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 1,
+              "emitted_step": 2,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.189453125,
+              "clip_scale": 1,
+              "policy_entropy": 0.6701851300895214,
+              "policy_loss": 2.0372681319713593e-10,
+              "final_loss": 3.183231456205249e-12,
+              "avg_raw_advantages": -0.13491171598434448,
+              "avg_raw_advantages_abs": 0.6155251264572144,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 2,
+              "emitted_step": 3,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.09375,
+              "clip_scale": 1,
+              "policy_entropy": 0.7011907268315554,
+              "policy_loss": -7.421476766467094e-10,
+              "final_loss": -1.1596057447604835e-11,
+              "avg_raw_advantages": -0.06727287918329239,
+              "avg_raw_advantages_abs": 0.5184025168418884,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 3,
+              "emitted_step": 4,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.0849609375,
+              "clip_scale": 1,
+              "policy_entropy": 0.7293173158541322,
+              "policy_loss": -2.9103830456733704e-10,
+              "final_loss": -4.547473508864641e-12,
+              "avg_raw_advantages": -0.08020740747451782,
+              "avg_raw_advantages_abs": 0.5637353658676147,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 4,
+              "emitted_step": 5,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.064453125,
+              "clip_scale": 1,
+              "policy_entropy": 0.7723479103296995,
+              "policy_loss": 1.9936123862862587e-09,
+              "final_loss": 3.115019353572279e-11,
+              "avg_raw_advantages": -0.06696725636720657,
+              "avg_raw_advantages_abs": 0.4814704954624176,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 5,
+              "emitted_step": 6,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.05810546875,
+              "clip_scale": 1,
+              "policy_entropy": 0.7636330993846059,
+              "policy_loss": -1.0186340659856796e-09,
+              "final_loss": -1.5916157281026244e-11,
+              "avg_raw_advantages": -0.06783268600702286,
+              "avg_raw_advantages_abs": 0.5404281616210938,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 6,
+              "emitted_step": 7,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.0546875,
+              "clip_scale": 1,
+              "policy_entropy": 0.7982987379655242,
+              "policy_loss": 1.5861587598919868e-09,
+              "final_loss": 2.4783730623312294e-11,
+              "avg_raw_advantages": -0.08457008004188538,
+              "avg_raw_advantages_abs": 0.4982662796974182,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 7,
+              "emitted_step": 8,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.04345703125,
+              "clip_scale": 1,
+              "policy_entropy": 0.7858153199777007,
+              "policy_loss": 2.3646862246096134e-10,
+              "final_loss": 3.694822225952521e-12,
+              "avg_raw_advantages": -0.0699167400598526,
+              "avg_raw_advantages_abs": 0.470130980014801,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 8,
+              "emitted_step": 9,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.039306640625,
+              "clip_scale": 1,
+              "policy_entropy": 0.82046327739954,
+              "policy_loss": -1.7462298274040222e-09,
+              "final_loss": -2.7284841053187847e-11,
+              "avg_raw_advantages": -0.04625638201832771,
+              "avg_raw_advantages_abs": 0.4454941749572754,
+              "ppo_clip_ratio": 0.0
+            },
+            {
+              "protocol_update": 9,
+              "emitted_step": 10,
+              "optimizer_step_succeeded": 1.0,
+              "raw_grad_norm": 0.035400390625,
+              "clip_scale": 1,
+              "policy_entropy": 0.8233203077688813,
+              "policy_loss": 1.0913936421275139e-09,
+              "final_loss": 1.7053025658242404e-11,
+              "avg_raw_advantages": -0.04472678527235985,
+              "avg_raw_advantages_abs": 0.4359664022922516,
+              "ppo_clip_ratio": 0.0
+            }
+          ],
+          "post_metric_finalization": {
+            "periodic_step_10_checkpoint_succeeded": true,
+            "periodic_step_10_hf_export_succeeded": true,
+            "failure_stage": "duplicate train-end HF export after Training Batches Processed: 10/10",
+            "failure": "NCCL watchdog timeout followed by ActorUnavailableError in _finalize_training -> save_models",
+            "retry_eligible": false,
+            "finalization_log_sha256": "6c09a2837992707069026606db29f21fae95fd02541239b952a2759072e3802e",
+            "rank_0_termination_artifact": "s3://marin-us-east-02a/iris/cw-rno2a/rendezvous/pr338-67b-c2-ep1-a01-20260807/term_artifacts/_romain_pr338-67b-c2-ep1-a01-20260807_0:0_1786194585.txt"
+          },
           "independent_request_readback": {
             "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
             "replicas": 10,
@@ -280,11 +503,51 @@
             "timeout_ms": 72000000,
             "bundle_id": "c2f64c42b53990ac3a7050b1e2e19db0d9a8a212edd93da219d3589e2e8c0fbc"
           }
+        },
+        {
+          "arm": "ep8",
+          "attempt": 1,
+          "job_id": "/romain/pr338-67b-c2-ep8-a01-20260807",
+          "submitted_at_ms": 1786195419007,
+          "started_at_ms": 1786195433460,
+          "state_at_2026_08_08T13_24_15Z": "running",
+          "tasks_total": 10,
+          "tested_commit": "780812704702fda7de59ee2f424e3ef1087c37d5",
+          "frozen_config_sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5",
+          "launch_log_sha256": "3851e4931cf0c351d426d9ad30dede6194565344bf7ea5049d6003eaf5b6fb47",
+          "pre_submission_local_rejection": {
+            "created_iris_job": false,
+            "requested_accelerators": false,
+            "cause": "The first local invocation omitted the explicit installed Iris config path and exited before submission.",
+            "log_sha256": "e308a1c0d05fd80ed7d8869d7b569a5902df75a3e408e0357bac2b63d680b8eb"
+          },
+          "independent_request_readback": {
+            "task_image": "ghcr.io/marin-community/iris-task@sha256:c646ef8b571571edfc96c75fd9c8cc712ad286b61b33781070bdc29ab9f9a6ab",
+            "replicas": 10,
+            "cpu_millicores_per_replica": 48000,
+            "memory_bytes_per_replica": 751619276800,
+            "disk_bytes_per_replica": 11596411699200,
+            "device": {
+              "gpu": {
+                "variant": "H100",
+                "count": 8
+              }
+            },
+            "coscheduling": true,
+            "coscheduling_group_by": "leafgroup",
+            "max_retries_failure": 0,
+            "max_retries_preemption": 1,
+            "priority_band": 2,
+            "timeout_ms": 72000000,
+            "preemption_policy": 0,
+            "bundle_id": "aae00813b4eb9adb1efb662253f4b579afc9fc6e7c0766c5c13bbc17655f3ead"
+          }
         }
       ],
       "results": {
-        "ep1": "attempt_1_running",
-        "ep8": "not_eligible_before_ep1_gate"
+        "ep1": "attempt_1_accepted_updates_0_through_9_then_failed_post_metric_finalization",
+        "ep8": "attempt_1_running",
+        "comparison": "pending_ep8_updates_0_through_9"
       }
     }
   },
