@@ -406,7 +406,7 @@ class RayPPOTrainer:
                 logger.info("Saved final checkpoint.")
             await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
-            await asyncio.to_thread(self.handle_hf_model_save)
+            await asyncio.to_thread(self.handle_hf_export)
             if self.cfg.trainer.hf_export_execution:
                 logger.info("Saved final model.")
                 await asyncio.to_thread(self._flush_hf_uploads)
@@ -624,7 +624,7 @@ class RayPPOTrainer:
 
                 # Handle HF model saving
                 if self._control.should_save_hf_model:
-                    self.handle_hf_model_save()
+                    self.handle_hf_export()
                     self._control.should_save_hf_model = False
 
                 # Handle evaluation
@@ -2091,13 +2091,13 @@ class RayPPOTrainer:
             )
         logger.info("Successfully saved model weights.")
 
-    def handle_hf_model_save(self) -> None:
+    def handle_hf_export(self) -> None:
         """Execute an export-only run or persist its out-of-band request state."""
         timer_label = "save_hf_model" if self.cfg.trainer.hf_export_execution else "queue_hf_export"
         with Timer(timer_label, self.all_timings):
-            self._handle_hf_model_save()
+            self._handle_hf_export()
 
-    def _handle_hf_model_save(self) -> None:
+    def _handle_hf_export(self) -> None:
         if self.cfg.trainer.hf_export_execution:
             self.save_models()
             return

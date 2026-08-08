@@ -38,7 +38,7 @@ def test_normal_hf_save_records_rerunnable_request_without_live_export(tmp_path)
     checkpoint = tmp_path / "checkpoints" / "global_step_10"
     checkpoint.mkdir(parents=True)
     (checkpoint / "trainer_state.pt").write_bytes(b"complete")
-    trainer.handle_hf_model_save()
+    trainer.handle_hf_export()
 
     request = read_hf_export_request(str(checkpoint))
     assert request is not None
@@ -166,11 +166,22 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
 
 
-def test_request_rejects_operator_override_instead_of_ignoring_it():
-    parser = argument_parser()
-    args = parser.parse_args(
-        ["--request", "/checkpoint/global_step_10", "--rl_config", "config.yaml", "--num-nodes", "8"]
+def test_request_rejects_operator_override_instead_of_ignoring_it(tmp_path):
+    checkpoint = tmp_path / "checkpoints" / "global_step_10"
+    checkpoint.mkdir(parents=True)
+    write_hf_export_request(
+        HFExportRequest(
+            step=10,
+            checkpoint_base_path=str(checkpoint.parent),
+            checkpoint_path=str(checkpoint),
+            export_path=str(tmp_path / "exports"),
+            model_path="org/model",
+            num_nodes=2,
+            gpus_per_node=4,
+        )
     )
+    parser = argument_parser()
+    args = parser.parse_args(["--request", str(checkpoint), "--rl_config", "config.yaml", "--num-nodes", "8"])
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
