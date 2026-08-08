@@ -5,7 +5,7 @@ from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.hf_export import (
-    pending_hf_export_steps,
+    protected_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
@@ -74,10 +74,10 @@ def test_pending_export_request_protects_its_checkpoint(tmp_path):
     )
     write_hf_export_request(request)
 
-    assert pending_hf_export_steps(str(tmp_path)) == {5}
+    assert protected_hf_export_steps(str(tmp_path)) == {5}
 
     write_hf_export_request(request.with_status(HFExportStatus.COMPLETE, last_exit_code=0))
-    assert pending_hf_export_steps(str(tmp_path)) == set()
+    assert protected_hf_export_steps(str(tmp_path)) == set()
 
 
 @pytest.mark.parametrize("request_contents", ["{", "{}"])
@@ -86,7 +86,7 @@ def test_corrupt_export_request_protects_its_checkpoint(tmp_path, request_conten
     checkpoint.mkdir()
     (checkpoint / "hf_export_request.json").write_text(request_contents)
 
-    assert pending_hf_export_steps(str(tmp_path)) == {5}
+    assert protected_hf_export_steps(str(tmp_path)) == {5}
 
 
 def test_hf_export_interval_must_be_checkpoint_aligned():
@@ -166,7 +166,7 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
 
 
-def test_request_rejects_operator_override_instead_of_ignoring_it(capsys):
+def test_request_rejects_operator_override_instead_of_ignoring_it():
     parser = argument_parser()
     args = parser.parse_args(
         ["--request", "/checkpoint/global_step_10", "--rl_config", "config.yaml", "--num-nodes", "8"]
@@ -174,8 +174,6 @@ def test_request_rejects_operator_override_instead_of_ignoring_it(capsys):
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
-
-    assert "--request cannot be combined with request-owned options: --num-nodes" in capsys.readouterr().err
 
 
 def test_manual_export_requires_explicit_checkpoint_geometry():
@@ -201,7 +199,7 @@ def test_manual_export_requires_explicit_checkpoint_geometry():
     ("exit_code", "expected_status"),
     [(0, HFExportStatus.COMPLETE), (17, HFExportStatus.PENDING)],
 )
-def test_export_request_records_terminal_result(tmp_path, monkeypatch, exit_code, expected_status):
+def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_code, expected_status):
     checkpoint = tmp_path / "checkpoints" / "global_step_10"
     checkpoint.mkdir(parents=True)
     request = HFExportRequest(

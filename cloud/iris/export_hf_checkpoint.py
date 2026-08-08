@@ -174,7 +174,11 @@ def argument_parser() -> argparse.ArgumentParser:
             f"(default: {DEFAULT_HF_EXPORT_TIMEOUT})"
         ),
     )
-    ap.add_argument("--no-wait", action="store_true", help="submit without recording request completion")
+    ap.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="submit a manual export and return immediately; request-driven exports must record completion",
+    )
     ap.add_argument("--dry-run", action="store_true", help="print the command and exit")
     return ap
 
@@ -246,7 +250,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
 
 
 def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command: list[str]) -> int:
-    """Submit one export job and persist the request's terminal state."""
+    """Submit one export job and persist its request lifecycle state."""
     if request is not None:
         request = request.with_status(
             HFExportStatus.IN_PROGRESS,

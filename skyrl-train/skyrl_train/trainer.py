@@ -82,7 +82,7 @@ from skyrl_train.callbacks import (
 )
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
 from skyrl_train.hf_export import (
-    pending_hf_export_steps,
+    protected_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
@@ -1930,7 +1930,7 @@ class RayPPOTrainer:
         if max_ckpts < 0:
             return
 
-        protected_steps = pending_hf_export_steps(self.cfg.trainer.ckpt_path)
+        protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
