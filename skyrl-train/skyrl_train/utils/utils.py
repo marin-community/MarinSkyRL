@@ -17,12 +17,12 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.config.callbacks import has_explicit_callbacks
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_HUB_UPLOAD_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
-    has_explicit_callbacks,
 )
 from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV

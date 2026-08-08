@@ -236,5 +236,5 @@ def test_export_request_records_terminal_result(tmp_path, monkeypatch, exit_code
     assert updated is not None
     assert updated.status is expected_status
     assert updated.attempts == 1
-    assert updated.timeout_seconds == 7200
+    assert updated.timeout == 7200
     assert updated.last_exit_code == exit_code

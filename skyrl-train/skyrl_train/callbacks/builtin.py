@@ -24,16 +24,16 @@ from typing import Any, Dict, List, Optional, Type
 from loguru import logger
 from omegaconf import DictConfig
 
+from skyrl_train.config.callbacks import has_explicit_callbacks
+from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.utils.io import io
-from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_HUB_UPLOAD_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
-    has_explicit_callbacks,
 )
 
 
@@ -249,8 +249,8 @@ class HFHubUploadCallback(TrainerCallback):
         upload_steps: int = -1,
         upload_on_train_end: bool = True,
         private: bool = False,
-        revision: str = "main",
-        upload_mode: str = "latest",
+        revision: str = DEFAULT_HF_HUB_REVISION,
+        upload_mode: str = DEFAULT_HF_UPLOAD_MODE,
         path_in_repo_prefix: str = "checkpoints",
     ):
         import os

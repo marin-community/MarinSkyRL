@@ -35,6 +35,7 @@ training run's Hub destination, the export-only job publishes the completed arti
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -227,11 +228,11 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
     if missing:
         parser.error(f"provide --request or all manual export options; missing {', '.join(missing)}")
     checkpoint_base_path = args.ckpt_path.rstrip("/")
-    export_path = args.export_path or f"{checkpoint_base_path.rsplit('/', 1)[0]}/exports"
+    export_path = args.export_path or os.path.join(os.path.dirname(checkpoint_base_path), "exports")
     request = HFExportRequest(
         step=args.step,
         checkpoint_base_path=checkpoint_base_path,
-        checkpoint_path=f"{checkpoint_base_path}/{GLOBAL_STEP_PREFIX}{args.step}",
+        checkpoint_path=os.path.join(checkpoint_base_path, f"{GLOBAL_STEP_PREFIX}{args.step}"),
         export_path=export_path,
         model_path=args.model_path,
         num_nodes=args.num_nodes,
@@ -249,7 +250,7 @@ def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command:
     if request is not None:
         request = request.with_status(
             HFExportStatus.IN_PROGRESS,
-            timeout_seconds=spec.timeout,
+            timeout=spec.timeout,
             increment_attempts=True,
         )
         write_hf_export_request(request)

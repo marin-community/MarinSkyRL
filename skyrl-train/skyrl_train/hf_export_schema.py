@@ -37,21 +37,21 @@ class HFExportRequest:
     hf_hub_revision: str = DEFAULT_HF_HUB_REVISION
     hf_upload_mode: HFUploadMode = DEFAULT_HF_UPLOAD_MODE
     attempts: int = 0
-    timeout_seconds: int | None = None
+    timeout: int | None = None
     last_exit_code: int | None = None
 
     def with_status(
         self,
         status: HFExportStatus,
         *,
-        timeout_seconds: int | None = None,
+        timeout: int | None = None,
         last_exit_code: int | None = None,
         increment_attempts: bool = False,
     ) -> "HFExportRequest":
         return replace(
             self,
             status=status,
-            timeout_seconds=timeout_seconds if timeout_seconds is not None else self.timeout_seconds,
+            timeout=timeout if timeout is not None else self.timeout,
             last_exit_code=last_exit_code,
             attempts=self.attempts + int(increment_attempts),
         )
