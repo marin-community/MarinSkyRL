@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -60,6 +61,21 @@ def test_contract_requires_baseline_to_shrink_with_cleanup(tmp_path, monkeypatch
 
     assert env_contract.main() == 1
     assert "regenerate the shrink-only baseline" in capsys.readouterr().out
+
+
+def test_contract_ignores_gitignored_scratch_files(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("/temp/\n")
+    scratch_dir = tmp_path / "temp"
+    scratch_dir.mkdir()
+    (scratch_dir / "probe.sh").write_text("export SCRATCH_ONLY_TOGGLE=1\n")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}\n")
+    monkeypatch.setattr(env_contract, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(env_contract, "BASELINE_PATH", baseline)
+    monkeypatch.setattr("sys.argv", ["check-env-var-contract"])
+
+    assert env_contract.main() == 0
 
 
 def test_managed_names_have_one_owner_and_config_control():

@@ -81,6 +81,34 @@ def test_reward_plot_uses_the_structured_rollout_failure_fraction(tmp_path, monk
     assert list(failure_axis.lines[0].get_ydata()) == [0.25]
 
 
+def test_reward_plot_uses_recursive_trailing_five_ema_across_restart_logs(tmp_path, monkeypatch):
+    captured = {}
+    real_subplots = parse_skyrl_metrics.plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        figure, axes = real_subplots(*args, **kwargs)
+        captured["axes"] = axes
+        return figure, axes
+
+    monkeypatch.setattr(parse_skyrl_metrics.plt, "subplots", capture_subplots)
+
+    parse_skyrl_metrics.generate_reward_plot(
+        {
+            "run-1.out": [
+                {"trainer/global_step": 1, "reward/avg_raw_reward": 0.0},
+                {"trainer/global_step": 2, "reward/avg_raw_reward": 1.0},
+            ],
+            "run-2.out": [{"trainer/global_step": 3, "reward/avg_raw_reward": 1.0}],
+        },
+        tmp_path / "reward.png",
+    )
+
+    reward_axis = captured["axes"][0]
+    (ema_line,) = [line for line in reward_axis.lines if line.get_label() == "trailing-5 EMA"]
+    assert list(ema_line.get_xdata()) == [1, 2, 3]
+    assert list(ema_line.get_ydata()) == pytest.approx([0.0, 1 / 3, 5 / 9])
+
+
 def test_legacy_python_dict_log_is_auto_detected(tmp_path, monkeypatch):
     log_path = tmp_path / "trainer.out"
     log_path.write_text(
