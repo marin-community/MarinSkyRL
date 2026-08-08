@@ -198,36 +198,10 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> t
     request = read_hf_export_request(args.request)
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
-    return request, ExportJobSpec(
-        request=request,
-        rl_config=args.rl_config,
-        cluster=args.cluster,
-        priority=args.priority,
-        train_data=args.train_data,
-        job_name=args.job_name,
-        timeout=args.timeout,
-        no_wait=False,
-    )
+    return request, operational_spec(args, request, no_wait=False)
 
 
-def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ExportJobSpec:
-    if args.ckpt_path is None or args.step is None or args.model_path is None:
-        parser.error("provide --request or all of --ckpt_path, --step, and --model_path")
-    checkpoint_base_path = args.ckpt_path.rstrip("/")
-    export_path = args.export_path or f"{checkpoint_base_path.rsplit('/', 1)[0]}/exports"
-    request = HFExportRequest(
-        step=args.step,
-        checkpoint_base_path=checkpoint_base_path,
-        checkpoint_path=f"{checkpoint_base_path}/global_step_{args.step}",
-        export_path=export_path,
-        model_path=args.model_path,
-        num_nodes=args.num_nodes if args.num_nodes is not None else 4,
-        gpus_per_node=args.gpus_per_node if args.gpus_per_node is not None else 8,
-        hf_hub_repo_id=args.hf_hub_repo_id,
-        hf_hub_private=bool(args.hf_hub_private),
-        hf_hub_revision=args.hf_hub_revision or DEFAULT_HF_HUB_REVISION,
-        hf_upload_mode=HFUploadMode(args.hf_upload_mode or DEFAULT_HF_UPLOAD_MODE),
-    )
+def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
     return ExportJobSpec(
         request=request,
         rl_config=args.rl_config,
@@ -236,8 +210,37 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
         train_data=args.train_data,
         job_name=args.job_name,
         timeout=args.timeout,
-        no_wait=args.no_wait,
+        no_wait=no_wait,
     )
+
+
+def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ExportJobSpec:
+    required = {
+        "--ckpt_path": args.ckpt_path,
+        "--step": args.step,
+        "--model_path": args.model_path,
+        "--num-nodes": args.num_nodes,
+        "--gpus-per-node": args.gpus_per_node,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        parser.error(f"provide --request or all manual export options; missing {', '.join(missing)}")
+    checkpoint_base_path = args.ckpt_path.rstrip("/")
+    export_path = args.export_path or f"{checkpoint_base_path.rsplit('/', 1)[0]}/exports"
+    request = HFExportRequest(
+        step=args.step,
+        checkpoint_base_path=checkpoint_base_path,
+        checkpoint_path=f"{checkpoint_base_path}/global_step_{args.step}",
+        export_path=export_path,
+        model_path=args.model_path,
+        num_nodes=args.num_nodes,
+        gpus_per_node=args.gpus_per_node,
+        hf_hub_repo_id=args.hf_hub_repo_id,
+        hf_hub_private=bool(args.hf_hub_private),
+        hf_hub_revision=args.hf_hub_revision or DEFAULT_HF_HUB_REVISION,
+        hf_upload_mode=HFUploadMode(args.hf_upload_mode or DEFAULT_HF_UPLOAD_MODE),
+    )
+    return operational_spec(args, request, no_wait=args.no_wait)
 
 
 def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command: list[str]) -> int:

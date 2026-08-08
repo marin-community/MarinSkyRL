@@ -2,7 +2,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
-from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, request_spec
+from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.hf_export import (
     pending_hf_export_steps,
@@ -104,20 +104,19 @@ def test_default_hf_export_interval_tracks_checkpoint_override():
     validate_hf_export_config(cfg)
 
 
-@pytest.mark.parametrize(
-    "trainer_config",
-    [
+def test_normal_training_rejects_in_band_hub_upload():
+    cfg = OmegaConf.create(
         {
-            "callbacks": [
-                {"type": "checkpoint", "save_steps": 5},
-                {"type": "hf_model_save", "save_steps": 5},
-                {"type": "hf_hub_upload", "upload_steps": 5, "repo_id": "org/model"},
-            ]
-        },
-    ],
-)
-def test_normal_training_rejects_in_band_hub_upload(trainer_config):
-    cfg = OmegaConf.create({"trainer": {**trainer_config, "hf_export_execution": False}})
+            "trainer": {
+                "callbacks": [
+                    {"type": "checkpoint", "save_steps": 5},
+                    {"type": "hf_model_save", "save_steps": 5},
+                    {"type": "hf_hub_upload", "upload_steps": 5, "repo_id": "org/model"},
+                ],
+                "hf_export_execution": False,
+            }
+        }
+    )
 
     with pytest.raises(ValueError, match="produced out of band"):
         validate_hf_export_config(cfg)
@@ -175,6 +174,25 @@ def test_request_rejects_operator_override_instead_of_ignoring_it():
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
+
+
+def test_manual_export_requires_explicit_checkpoint_geometry():
+    parser = argument_parser()
+    args = parser.parse_args(
+        [
+            "--ckpt_path",
+            "/checkpoint",
+            "--step",
+            "10",
+            "--model_path",
+            "org/model",
+            "--rl_config",
+            "config.yaml",
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        manual_spec(args, parser)
 
 
 @pytest.mark.parametrize(

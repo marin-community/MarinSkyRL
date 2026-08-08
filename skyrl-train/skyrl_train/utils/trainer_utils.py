@@ -125,7 +125,7 @@ def cleanup_old_checkpoints(
     checkpoint_base_path: str, max_checkpoints: int, protected_steps: set[int] | None = None
 ) -> None:
     """
-    Clean up old checkpoints, keeping only the most recent `max_checkpoints` checkpoints.
+    Keep the most recent `max_checkpoints` and protected checkpoints; remove the rest.
 
     Args:
         checkpoint_base_path: Base path where checkpoints are stored
