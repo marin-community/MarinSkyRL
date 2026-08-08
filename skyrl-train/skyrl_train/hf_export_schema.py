@@ -5,7 +5,14 @@ HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 HF_EXPORT_REQUEST_SCHEMA_VERSION = 1
 DEFAULT_HF_EXPORT_TIMEOUT = 7200
 DEFAULT_HF_HUB_REVISION = "main"
-DEFAULT_HF_UPLOAD_MODE = "latest"
+
+
+class HFUploadMode(StrEnum):
+    LATEST = "latest"
+    ALL = "all"
+
+
+DEFAULT_HF_UPLOAD_MODE = HFUploadMode.LATEST
 
 
 class HFExportStatus(StrEnum):
@@ -28,7 +35,7 @@ class HFExportRequest:
     hf_hub_repo_id: str | None = None
     hf_hub_private: bool = False
     hf_hub_revision: str = DEFAULT_HF_HUB_REVISION
-    hf_upload_mode: str = DEFAULT_HF_UPLOAD_MODE
+    hf_upload_mode: HFUploadMode = DEFAULT_HF_UPLOAD_MODE
     attempts: int = 0
     timeout_seconds: int | None = None
     last_exit_code: int | None = None

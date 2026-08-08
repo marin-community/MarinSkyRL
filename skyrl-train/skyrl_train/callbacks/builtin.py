@@ -26,7 +26,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.utils.io import io
-from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE
+from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import CHECKPOINT_CALLBACK_TYPE, HF_HUB_UPLOAD_CALLBACK_TYPE, HF_MODEL_SAVE_CALLBACK_TYPE
@@ -255,7 +255,7 @@ class HFHubUploadCallback(TrainerCallback):
         self.upload_on_train_end = upload_on_train_end
         self.private = private
         self.revision = revision
-        self.upload_mode = upload_mode
+        self.upload_mode = HFUploadMode(upload_mode)
         self.path_in_repo_prefix = path_in_repo_prefix
         self._pending_uploads: List[int] = []  # Steps that need uploading
         self._export_path: Optional[str] = None
@@ -368,7 +368,7 @@ class HFHubUploadCallback(TrainerCallback):
 
             with io.local_read_dir(model_path) as local_dir:
                 upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
-                if self.upload_mode == "all":
+                if self.upload_mode is HFUploadMode.ALL:
                     archive_path = f"{self.path_in_repo_prefix}/step_{step}"
                     upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
 

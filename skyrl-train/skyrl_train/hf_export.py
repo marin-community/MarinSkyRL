@@ -19,6 +19,7 @@ from skyrl_train.hf_export_schema import (
     HF_EXPORT_REQUEST_SCHEMA_VERSION,
     HFExportRequest,
     HFExportStatus,
+    HFUploadMode,
 )
 
 
@@ -38,7 +39,7 @@ def new_hf_export_request(
     hf_hub_repo_id: str | None = None,
     hf_hub_private: bool = False,
     hf_hub_revision: str = DEFAULT_HF_HUB_REVISION,
-    hf_upload_mode: str = DEFAULT_HF_UPLOAD_MODE,
+    hf_upload_mode: HFUploadMode = DEFAULT_HF_UPLOAD_MODE,
 ) -> HFExportRequest:
     return HFExportRequest(
         schema_version=HF_EXPORT_REQUEST_SCHEMA_VERSION,
@@ -91,6 +92,7 @@ def read_hf_export_request(checkpoint_path: str) -> HFExportRequest | None:
     with io.open_file(path, "r") as source:
         payload = json.load(source)
     payload["status"] = HFExportStatus(payload["status"])
+    payload["hf_upload_mode"] = HFUploadMode(payload["hf_upload_mode"])
     request = HFExportRequest(**payload)
     if request.schema_version != HF_EXPORT_REQUEST_SCHEMA_VERSION:
         raise ValueError(
@@ -107,7 +109,7 @@ def pending_hf_export_steps(checkpoint_base_path: str) -> set[int]:
         checkpoint_path = os.path.join(checkpoint_base_path, directory)
         try:
             request = read_hf_export_request(checkpoint_path)
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, KeyError, TypeError, ValueError) as error:
             step = extract_step_from_path(checkpoint_path)
             if step >= 0:
                 pending.add(step)

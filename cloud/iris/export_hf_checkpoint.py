@@ -47,6 +47,7 @@ from skyrl_train.hf_export_schema import (
     DEFAULT_HF_UPLOAD_MODE,
     HFExportRequest,
     HFExportStatus,
+    HFUploadMode,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -74,7 +75,7 @@ class ExportJobSpec:
     hf_hub_repo_id: str | None
     hf_hub_private: bool
     hf_hub_revision: str
-    hf_upload_mode: str
+    hf_upload_mode: HFUploadMode
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -170,7 +171,7 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--hf-hub-repo-id")
     ap.add_argument("--hf-hub-private", action="store_true", default=None)
     ap.add_argument("--hf-hub-revision")
-    ap.add_argument("--hf-upload-mode", choices=("latest", "all"))
+    ap.add_argument("--hf-upload-mode", choices=tuple(HFUploadMode))
     ap.add_argument(
         "--timeout",
         type=int,
@@ -249,7 +250,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
         hf_hub_repo_id=args.hf_hub_repo_id,
         hf_hub_private=bool(args.hf_hub_private),
         hf_hub_revision=args.hf_hub_revision or DEFAULT_HF_HUB_REVISION,
-        hf_upload_mode=args.hf_upload_mode or DEFAULT_HF_UPLOAD_MODE,
+        hf_upload_mode=HFUploadMode(args.hf_upload_mode or DEFAULT_HF_UPLOAD_MODE),
     )
 
 

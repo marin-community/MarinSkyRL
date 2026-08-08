@@ -11,6 +11,7 @@ from skyrl_train.hf_export import (
     read_hf_export_request,
     write_hf_export_request,
 )
+from skyrl_train.hf_export_schema import HFUploadMode
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 from skyrl_train.utils.utils import validate_hf_export_config
@@ -34,6 +35,7 @@ def _trainer_config(tmp_path, *, execute: bool = False):
 def test_normal_hf_save_records_rerunnable_request_without_live_export(tmp_path):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = _trainer_config(tmp_path)
+    trainer.all_timings = {}
     trainer.global_step = 10
     checkpoint = tmp_path / "checkpoints" / "global_step_10"
     checkpoint.mkdir(parents=True)
@@ -80,10 +82,11 @@ def test_pending_export_request_protects_its_checkpoint(tmp_path):
     assert pending_hf_export_steps(str(tmp_path)) == set()
 
 
-def test_corrupt_export_request_protects_its_checkpoint(tmp_path):
+@pytest.mark.parametrize("request_contents", ["{", "{}"])
+def test_corrupt_export_request_protects_its_checkpoint(tmp_path, request_contents):
     checkpoint = tmp_path / "global_step_5"
     checkpoint.mkdir()
-    (checkpoint / "hf_export_request.json").write_text("{")
+    (checkpoint / "hf_export_request.json").write_text(request_contents)
 
     assert pending_hf_export_steps(str(tmp_path)) == {5}
 
@@ -141,7 +144,7 @@ def test_export_job_owns_timeout_and_waits_for_completion():
             hf_hub_repo_id="org/exported-model",
             hf_hub_private=True,
             hf_hub_revision="main",
-            hf_upload_mode="latest",
+            hf_upload_mode=HFUploadMode.LATEST,
         )
     )
 
