@@ -213,6 +213,7 @@ trainer:
   max_ckpts_to_keep: -1
   ckpt_interval: 5
   hf_save_interval: 5
+  hf_export_execution: false
   hf_upload_mode: latest
   export_path: "${oc.env:HOME}/exports/"
   bf16: true

@@ -776,8 +776,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # Handle HF model saving
                 if self._control.should_save_hf_model:
-                    with Timer("save_hf_model", self.all_timings):
-                        await asyncio.to_thread(self.save_models)
+                    operation = "save_hf_model" if self.cfg.trainer.hf_export_execution else "queue_hf_export"
+                    with Timer(operation, self.all_timings):
+                        await asyncio.to_thread(self.handle_hf_model_save)
                     self._control.should_save_hf_model = False
 
                 # Handle evaluation

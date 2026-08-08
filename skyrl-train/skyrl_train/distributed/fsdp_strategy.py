@@ -905,7 +905,8 @@ class FSDPStrategy(DistributedStrategy):
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
-        dist.barrier()
+        # The Ray caller waits for every rank result. A trailing process-group
+        # barrier would only make idle ranks inherit rank 0's serialization timeout.
 
     # GroupedMoEShim ``.mlp.moe.`` segment + FSDP ``_fsdp_wrapped_module`` segment that
     # sit between the HF ``...mlp.`` prefix and the grouped ``experts.w1/...`` / ``router.gate``

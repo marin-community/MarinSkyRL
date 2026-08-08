@@ -1,0 +1,182 @@
+from argparse import Namespace
+import pytest
+from omegaconf import OmegaConf
+
+from cloud.iris import export_hf_checkpoint
+from cloud.iris.export_hf_checkpoint import build_command
+from skyrl_train.hf_export import (
+    HFExportStatus,
+    new_hf_export_request,
+    pending_hf_export_steps,
+    read_hf_export_request,
+    write_hf_export_request,
+)
+from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
+from skyrl_train.utils.utils import validate_hf_export_intervals
+
+
+def _trainer_config(tmp_path, *, execute: bool = False):
+    return OmegaConf.create(
+        {
+            "trainer": {
+                "ckpt_path": str(tmp_path / "checkpoints"),
+                "export_path": str(tmp_path / "exports"),
+                "strategy": "fsdp2",
+                "hf_export_execution": execute,
+                "placement": {"policy_num_nodes": 2, "policy_num_gpus_per_node": 4},
+                "policy": {"model": {"path": "org/model"}},
+                "hf_hub_repo_id": "org/exported-model",
+            }
+        }
+    )
+
+
+def test_normal_hf_save_records_rerunnable_request_without_live_export(tmp_path):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = _trainer_config(tmp_path)
+    trainer.global_step = 10
+    checkpoint = tmp_path / "checkpoints" / "global_step_10"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "trainer_state.pt").write_bytes(b"complete")
+    trainer.handle_hf_model_save()
+
+    request = read_hf_export_request(str(checkpoint))
+    assert request is not None
+    assert request.status is HFExportStatus.PENDING
+    assert request.step == 10
+    assert request.checkpoint_path == str(checkpoint)
+    assert request.export_path == str(tmp_path / "exports")
+    assert request.hf_hub_repo_id == "org/exported-model"
+    assert not (tmp_path / "exports").exists()
+
+
+def test_checkpoint_cleanup_retains_pending_export_source(tmp_path):
+    for step in (5, 10, 15):
+        (tmp_path / f"global_step_{step}").mkdir()
+
+    cleanup_old_checkpoints(str(tmp_path), max_checkpoints=1, protected_steps={5})
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["global_step_15", "global_step_5"]
+
+
+def test_pending_export_request_protects_its_checkpoint(tmp_path):
+    checkpoint = tmp_path / "global_step_5"
+    checkpoint.mkdir()
+    request = new_hf_export_request(
+        step=5,
+        checkpoint_path=str(checkpoint),
+        export_path=str(tmp_path / "exports"),
+        model_path="org/model",
+        strategy="fsdp2",
+        num_nodes=2,
+        gpus_per_node=4,
+    )
+    write_hf_export_request(request)
+
+    assert pending_hf_export_steps(str(tmp_path)) == {5}
+
+    write_hf_export_request(request.with_status(HFExportStatus.COMPLETE, last_exit_code=0))
+    assert pending_hf_export_steps(str(tmp_path)) == set()
+
+
+def test_hf_export_interval_must_be_checkpoint_aligned():
+    cfg = OmegaConf.create(
+        {"trainer": {"ckpt_interval": 3, "hf_save_interval": 5, "hf_export_execution": False}}
+    )
+
+    with pytest.raises(ValueError, match="multiple of trainer.ckpt_interval"):
+        validate_hf_export_intervals(cfg)
+
+
+@pytest.mark.parametrize(
+    "trainer_config",
+    [
+        {
+            "callbacks": [
+                {"type": "checkpoint", "save_steps": 5},
+                {"type": "hf_model_save", "save_steps": 5},
+                {"type": "hf_hub_upload", "upload_steps": 5, "repo_id": "org/model"},
+            ]
+        },
+    ],
+)
+def test_normal_training_rejects_in_band_hub_upload(trainer_config):
+    cfg = OmegaConf.create({"trainer": {**trainer_config, "hf_export_execution": False}})
+
+    with pytest.raises(ValueError, match="produced out of band"):
+        validate_hf_export_intervals(cfg)
+
+
+def test_export_job_owns_timeout_and_waits_for_completion():
+    command = build_command(
+        Namespace(
+            ckpt_path="s3://bucket/run/checkpoints",
+            step=10,
+            export_path="s3://bucket/run/exports",
+            rl_config="config.yaml",
+            model_path="org/model",
+            cluster="cw-rno2a",
+            num_nodes=8,
+            gpus_per_node=8,
+            priority="batch",
+            train_data='["dataset"]',
+            job_name="export-step-10",
+            timeout=7200,
+            no_wait=False,
+            hf_hub_repo_id="org/exported-model",
+            hf_hub_private=True,
+            hf_hub_revision="main",
+            hf_upload_mode="latest",
+        )
+    )
+
+    assert "++trainer.hf_export_execution=true" in command
+    assert "++trainer.callbacks=[]" in command
+    assert "++trainer.ckpt_interval=-1" in command
+    assert command[command.index("--timeout") + 1] == "7200"
+    assert "--no-wait" not in command
+    assert "++trainer.hf_hub_repo_id=org/exported-model" in command
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected_status"),
+    [(0, HFExportStatus.COMPLETE), (17, HFExportStatus.PENDING)],
+)
+def test_export_request_records_terminal_result(tmp_path, monkeypatch, exit_code, expected_status):
+    checkpoint = tmp_path / "checkpoints" / "global_step_10"
+    checkpoint.mkdir(parents=True)
+    request = new_hf_export_request(
+        step=10,
+        checkpoint_path=str(checkpoint),
+        export_path=str(tmp_path / "exports"),
+        model_path="org/model",
+        strategy="fsdp2",
+        num_nodes=2,
+        gpus_per_node=4,
+    )
+    write_hf_export_request(request)
+    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: exit_code)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "export_hf_checkpoint.py",
+            "--request",
+            str(checkpoint),
+            "--rl_config",
+            "config.yaml",
+            "--timeout",
+            "7200",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as result:
+        export_hf_checkpoint.main()
+
+    assert result.value.code == exit_code
+    updated = read_hf_export_request(str(checkpoint))
+    assert updated is not None
+    assert updated.status is expected_status
+    assert updated.attempts == 1
+    assert updated.timeout_seconds == 7200
+    assert updated.last_exit_code == exit_code

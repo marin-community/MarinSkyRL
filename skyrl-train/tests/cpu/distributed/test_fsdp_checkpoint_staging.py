@@ -51,3 +51,33 @@ def test_cloud_checkpoint_load_stages_only_its_rank_shards(monkeypatch, tmp_path
         "s3://bucket/checkpoints/step_28/policy/optim_world_size_8_rank_3.pt",
         "s3://bucket/checkpoints/step_28/policy/extra_state_world_size_8_rank_3.pt",
     ]
+
+
+def test_hf_export_serialization_has_no_trailing_barrier(monkeypatch, tmp_path):
+    class Config:
+        def save_pretrained(self, output_dir):
+            Path(output_dir, "config.json").write_text("{}")
+
+    class Model(torch.nn.Module):
+        config = Config()
+
+        def save_pretrained(self, output_dir, **kwargs):
+            Path(output_dir, "model.safetensors").write_bytes(b"weights")
+
+    strategy = object.__new__(FSDPStrategy)
+    monkeypatch.setattr(strategy, "is_rank_0", lambda: True)
+    monkeypatch.setattr(strategy, "get_rank", lambda: 0)
+    monkeypatch.setattr(strategy, "print", lambda *args: None)
+    monkeypatch.setattr(strategy, "_unwrap_model", lambda model: model)
+    monkeypatch.setattr(strategy, "_fix_fsdp_config", lambda config: config)
+    monkeypatch.setattr(fsdp_module, "fsdp_version", lambda model: 2)
+    monkeypatch.setattr(fsdp_module, "fsdp2_get_full_state_dict", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        fsdp_module.dist,
+        "barrier",
+        lambda: (_ for _ in ()).throw(AssertionError("serialization must not be followed by a process-group barrier")),
+    )
+
+    strategy.save_hf_model(Model(), str(tmp_path / "export"))
+
+    assert (tmp_path / "export" / "model.safetensors").read_bytes() == b"weights"

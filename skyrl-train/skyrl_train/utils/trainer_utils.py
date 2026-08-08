@@ -121,13 +121,16 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
         return []
 
 
-def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int) -> None:
+def cleanup_old_checkpoints(
+    checkpoint_base_path: str, max_checkpoints: int, protected_steps: set[int] | None = None
+) -> None:
     """
     Clean up old checkpoints, keeping only the most recent `max_checkpoints` checkpoints.
 
     Args:
         checkpoint_base_path: Base path where checkpoints are stored
-        max_checkpoints: Maximum number of checkpoints to keep
+        max_checkpoints: Maximum number of recent checkpoints to keep
+        protected_steps: Additional checkpoint steps retained until external work completes
     """
     if max_checkpoints < 0:
         return
@@ -146,8 +149,13 @@ def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int) -> 
 
     checkpoint_dirs.sort(key=extract_step)
 
-    # Remove oldest checkpoints
-    dirs_to_remove = checkpoint_dirs[:-max_checkpoints] if max_checkpoints > 0 else checkpoint_dirs
+    protected_steps = protected_steps or set()
+    recent = set(checkpoint_dirs[-max_checkpoints:]) if max_checkpoints > 0 else set()
+    dirs_to_remove = [
+        directory
+        for directory in checkpoint_dirs
+        if directory not in recent and extract_step(directory) not in protected_steps
+    ]
 
     for dir_name in dirs_to_remove:
         full_path = os.path.join(checkpoint_base_path, dir_name)

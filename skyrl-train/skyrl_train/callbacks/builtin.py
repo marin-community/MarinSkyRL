@@ -170,15 +170,15 @@ class EvaluationCallback(TrainerCallback):
 @register_callback("hf_model_save")
 class HFModelSaveCallback(TrainerCallback):
     """
-    Callback for saving models in HuggingFace format at regular intervals.
+    Callback for requesting Hugging Face exports at regular intervals.
 
-    This replaces the inline `hf_save_interval` logic in the training loop.
-    HF format models can be loaded directly with transformers and pushed to
-    the HuggingFace Hub.
+    Normal training records a request beside the immutable sharded checkpoint;
+    an export-only job later converts that checkpoint. Export-only runs execute
+    the conversion directly. This replaces the inline `hf_save_interval` logic.
 
     Args:
-        save_steps: Save HF model every N steps. Set to -1 or 0 to disable.
-        save_on_train_end: Whether to save final HF model when training ends.
+        save_steps: Request an HF export every N steps. Set to -1 or 0 to disable.
+        save_on_train_end: Whether to request a final HF export when training ends.
     """
 
     def __init__(self, save_steps: int = -1, save_on_train_end: bool = True):
@@ -1135,9 +1135,10 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     if hf_save_interval > 0:
         callbacks.append(HFModelSaveCallback(save_steps=hf_save_interval))
 
-    # HF Hub upload callback (uploads saved HF models to HuggingFace Hub)
+    # The export-only job publishes after conversion; normal training only records the destination in its request.
     hf_hub_repo_id = getattr(cfg.trainer, "hf_hub_repo_id", None)
-    if hf_hub_repo_id and hf_save_interval > 0:
+    hf_export_execution = getattr(cfg.trainer, "hf_export_execution", False)
+    if hf_export_execution and hf_hub_repo_id and hf_save_interval > 0:
         hf_hub_private = getattr(cfg.trainer, "hf_hub_private", False)
         hf_hub_revision = getattr(cfg.trainer, "hf_hub_revision", "main")
         hf_upload_mode = getattr(cfg.trainer, "hf_upload_mode", "latest")

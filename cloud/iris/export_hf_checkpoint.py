@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""Export a banked training checkpoint to HF safetensors, as an iris job.
+"""Export a banked training checkpoint to HF safetensors as an Iris job.
 
 WHY THIS EXISTS
 ---------------
-A run can finish with training checkpoints and no publishable model: ``save_hf_model``
-is gated on ``hf_save_interval``, and before the durable-``export_path`` fix it wrote to
-node-local disk that vanished with the job. Several completed runs are in that state.
+Normal training records ``hf_export_request.json`` beside each checkpoint selected by
+``hf_save_interval``. It never gathers live weights for Hugging Face serialization. Pass
+that checkpoint directory with ``--request`` to run the conversion on a separate Iris
+gang. The request remains pending after failure and becomes complete only after Iris
+reports success, so an interrupted or partial export is explicitly rerunnable.
 
 Converting those checkpoints offline is not practical for the megatron strategy. It
 writes a ``torch.distributed.checkpoint`` set (``__N_0.distcp`` + ``.metadata``) whose
@@ -14,9 +16,8 @@ to HF layout runs through ``bridge.save_hf_weights`` (mbridge), which needs the 
 runtime and a live process group at the original parallel geometry. There is no laptop
 path.
 
-So this does not reimplement the conversion. It re-runs **the trainer's own export**,
-which is already tested and already correct for both strategies, by exploiting a path
-the trainer has for a different purpose:
+This command does not reimplement conversion. It re-runs the trainer's own export by
+using its resume-at-max-steps path:
 
 ``FullyAsyncTrainer._train_loop`` checks, right after resuming, whether the resumed step
 is at or past ``max_steps``. If it is, the run is complete: it calls
@@ -25,9 +26,9 @@ callback then requests an HF save (``save_on_train_end and save_steps > 0``). Th
 ``save_models`` → ``save_hf_model`` → ``bridge.save_hf_weights``, followed by
 ``_flush_hf_uploads``, and exits 0.
 
-Setting ``max_steps`` to the checkpoint's own step therefore produces a job that loads
-the weights, exports them, and stops — **without training a single step**. Every piece is
-existing, exercised code; this script only supplies the argument combination.
+Setting ``max_steps`` to the checkpoint's own step produces a job that loads the weights,
+exports them, and stops without training a step. ``--timeout`` belongs to this export job;
+it is independent of the source training gang's process-group timeout.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -39,6 +40,8 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+
+from skyrl_train.hf_export import HFExportStatus, read_hf_export_request, write_hf_export_request
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -63,10 +66,16 @@ def build_command(args: argparse.Namespace) -> list[str]:
         f"++trainer.max_steps={args.step}",
         f"++trainer.ckpt_path={ckpt_root}",
         f"++trainer.export_path={export_path}",
-        # on_train_end only requests an HF save when save_steps > 0.
+        # Force legacy callbacks so an explicit training callback list cannot
+        # resave the source checkpoint or suppress this one-shot export.
+        "++trainer.callbacks=[]",
+        "++trainer.ckpt_interval=-1",
         "++trainer.hf_save_interval=1",
-        # Nothing should be pushed anywhere by an export job.
-        "++trainer.hf_hub_repo_id=null",
+        "++trainer.hf_export_execution=true",
+        f"++trainer.hf_hub_repo_id={args.hf_hub_repo_id or 'null'}",
+        f"++trainer.hf_hub_private={str(args.hf_hub_private).lower()}",
+        f"++trainer.hf_hub_revision={args.hf_hub_revision}",
+        f"++trainer.hf_upload_mode={args.hf_upload_mode}",
         "++trainer.enable_db_registration=false",
     ]
 
@@ -100,8 +109,11 @@ def build_command(args: argparse.Namespace) -> list[str]:
         # An export job must not be retried into a second export.
         "--max-retries",
         "0",
-        "--no-wait",
+        "--timeout",
+        str(args.timeout),
     ]
+    if args.no_wait:
+        cmd.append("--no-wait")
     if args.job_name:
         cmd += ["--job-name", args.job_name]
     for override in overrides:
@@ -111,10 +123,11 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt_path", required=True, help="s3:// checkpoint root holding global_step_N/")
-    ap.add_argument("--step", required=True, type=int, help="checkpoint step to export")
+    ap.add_argument("--request", help="global_step_N checkpoint directory containing hf_export_request.json")
+    ap.add_argument("--ckpt_path", help="checkpoint root holding global_step_N/")
+    ap.add_argument("--step", type=int, help="checkpoint step to export")
     ap.add_argument("--rl_config", required=True, help="the RL config the run was trained with")
-    ap.add_argument("--model_path", required=True, help="base model path, as at training time")
+    ap.add_argument("--model_path", help="base model path, as at training time")
     ap.add_argument("--cluster", default="cw-rno2a")
     ap.add_argument("--num-nodes", type=int, default=4)
     ap.add_argument("--gpus-per-node", type=int, default=8)
@@ -129,8 +142,45 @@ def main() -> None:
     )
     ap.add_argument("--export_path", help="defaults to <ckpt_path parent>/exports")
     ap.add_argument("--job-name", dest="job_name")
+    ap.add_argument("--hf-hub-repo-id")
+    ap.add_argument("--hf-hub-private", action="store_true")
+    ap.add_argument("--hf-hub-revision", default="main")
+    ap.add_argument("--hf-upload-mode", choices=("latest", "all"), default="latest")
+    ap.add_argument(
+        "--timeout",
+        type=int,
+        default=7200,
+        help="export-job timeout in seconds, independent of the training process group (default: 7200)",
+    )
+    ap.add_argument("--no-wait", action="store_true", help="submit without recording request completion")
     ap.add_argument("--dry-run", action="store_true", help="print the command and exit")
     args = ap.parse_args()
+
+    request = None
+    if args.request:
+        request = read_hf_export_request(args.request)
+        if request is None:
+            ap.error(f"no hf_export_request.json found under {args.request}")
+        if args.no_wait:
+            ap.error("--no-wait cannot be used with --request because completion must be recorded")
+        if request.status is HFExportStatus.COMPLETE:
+            print(f"[export-hf] global_step_{request.step} is already complete")
+            return
+        args.ckpt_path = request.checkpoint_path.rsplit("/", 1)[0]
+        args.step = request.step
+        args.export_path = request.export_path
+        args.model_path = request.model_path
+        args.num_nodes = request.num_nodes
+        args.gpus_per_node = request.gpus_per_node
+        args.hf_hub_repo_id = request.hf_hub_repo_id
+        args.hf_hub_private = request.hf_hub_private
+        args.hf_hub_revision = request.hf_hub_revision
+        args.hf_upload_mode = request.hf_upload_mode
+    elif args.ckpt_path is None or args.step is None or args.model_path is None:
+        ap.error("provide --request or all of --ckpt_path, --step, and --model_path")
+
+    if args.timeout <= 0:
+        ap.error("--timeout must be positive for an export job")
 
     cmd = build_command(args)
 
@@ -139,13 +189,25 @@ def main() -> None:
     if args.dry_run:
         return
 
+    if request is not None:
+        request = request.with_status(
+            HFExportStatus.IN_PROGRESS,
+            timeout_seconds=args.timeout,
+            increment_attempts=True,
+        )
+        write_hf_export_request(request)
+
     # The geometry must match training: the checkpoint is sharded to the parallel layout
     # the run used, and bridge.save_hf_weights gathers across that same mesh.
     print(
         f"[export-hf] geometry {args.num_nodes}x{args.gpus_per_node} GPU — this MUST match "
         f"the training geometry or the sharded load will not resolve"
     )
-    raise SystemExit(subprocess.call(cmd, cwd=str(_REPO_ROOT)))
+    exit_code = subprocess.call(cmd, cwd=str(_REPO_ROOT))
+    if request is not None:
+        status = HFExportStatus.COMPLETE if exit_code == 0 else HFExportStatus.PENDING
+        write_hf_export_request(request.with_status(status, last_exit_code=exit_code))
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

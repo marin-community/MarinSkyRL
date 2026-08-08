@@ -496,9 +496,48 @@ def _validate_cp_cfg(cfg: DictConfig):
         )
 
 
+def validate_hf_export_intervals(cfg: DictConfig) -> None:
+    """Require every out-of-band HF export to have a checkpoint at the same step."""
+    if cfg.trainer.get("hf_export_execution", False):
+        return
+
+    callbacks = cfg.trainer.get("callbacks")
+    if callbacks:
+        if any(callback.get("type") == "hf_hub_upload" for callback in callbacks):
+            raise ValueError(
+                "hf_hub_upload cannot run in normal training because HF exports are produced out of band; "
+                "publish only after the export request is complete"
+            )
+        checkpoint_intervals = [
+            int(callback.get("save_steps", -1))
+            for callback in callbacks
+            if callback.get("type") == "checkpoint" and int(callback.get("save_steps", -1)) > 0
+        ]
+        export_intervals = [
+            int(callback.get("save_steps", -1))
+            for callback in callbacks
+            if callback.get("type") == "hf_model_save" and int(callback.get("save_steps", -1)) > 0
+        ]
+    else:
+        checkpoint_interval = int(cfg.trainer.get("ckpt_interval", -1))
+        export_interval = int(cfg.trainer.get("hf_save_interval", -1))
+        checkpoint_intervals = [checkpoint_interval] if checkpoint_interval > 0 else []
+        export_intervals = [export_interval] if export_interval > 0 else []
+
+    for export_interval in export_intervals:
+        if not checkpoint_intervals or not any(
+            export_interval % checkpoint_interval == 0 for checkpoint_interval in checkpoint_intervals
+        ):
+            raise ValueError(
+                f"HF export interval {export_interval} must be a multiple of trainer.ckpt_interval "
+                f"or an explicit checkpoint callback interval; found {checkpoint_intervals or 'none'}"
+            )
+
+
 def validate_cfg(cfg: DictConfig):
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    validate_hf_export_intervals(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
     _validate_cp_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries

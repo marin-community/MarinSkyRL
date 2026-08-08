@@ -327,9 +327,7 @@ class DeepspeedStrategy(DistributedStrategy):
                 if tokenizer is not None:
                     tokenizer.save_pretrained(work_dir)
 
-        # Final barrier so others wait for upload to complete
-        if is_dist:
-            dist.barrier()
+        # The Ray caller waits for every rank result; no collective needs to span rank 0's upload.
 
     def _set_bf16_config(self, ds_config):
         # torch_autocast.enabled should be set in the config file

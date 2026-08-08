@@ -121,7 +121,7 @@ class TrainerControl:
         should_save: Set to True to request a checkpoint save
         should_evaluate: Set to True to request an evaluation run
         should_log: Set to True to request logging (default True)
-        should_save_hf_model: Set to True to request saving HF format model
+        should_save_hf_model: Set to True to request an HF-format export
     """
 
     should_training_stop: bool = False

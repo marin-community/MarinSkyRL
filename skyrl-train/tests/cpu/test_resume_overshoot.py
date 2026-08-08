@@ -66,6 +66,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     # epochs is read from cfg in _handle_resume_at_max_steps
     cfg = MagicMock()
     cfg.trainer.epochs = 1
+    cfg.trainer.hf_export_execution = True
     trainer.cfg = cfg
 
     # _create_trainer_state for the base trainer reads len(self.train_dataloader);

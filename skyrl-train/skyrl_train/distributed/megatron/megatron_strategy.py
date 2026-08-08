@@ -330,4 +330,4 @@ class MegatronStrategy(DistributedStrategy):
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
                 self.print(f"Successfully saved HF config and tokenizer to {output_dir}")
 
-        dist.barrier()
+        # The Ray caller waits for every rank result; no collective needs to span artifact publication.
