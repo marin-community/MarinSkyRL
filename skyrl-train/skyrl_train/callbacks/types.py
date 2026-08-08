@@ -1,0 +1,3 @@
+CHECKPOINT_CALLBACK_TYPE = "checkpoint"
+HF_MODEL_SAVE_CALLBACK_TYPE = "hf_model_save"
+HF_HUB_UPLOAD_CALLBACK_TYPE = "hf_hub_upload"

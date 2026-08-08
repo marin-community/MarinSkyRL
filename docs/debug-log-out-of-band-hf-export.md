@@ -39,7 +39,7 @@ misaligned checkpoint/export intervals and in-training Hub uploads that would ot
 look for an export before it exists. Legacy Iris Hub destinations are carried in the
 request and published by the export-only job after conversion.
 
-The required launcher and trainer CPU suites passed: 1,262 tests passed and 21 were
+The required launcher and trainer CPU suites passed: 1,264 tests passed and 20 were
 skipped.
 
 ## Future work

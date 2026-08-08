@@ -26,8 +26,10 @@ from omegaconf import DictConfig
 
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.utils.io import io
+from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
+from .types import CHECKPOINT_CALLBACK_TYPE, HF_HUB_UPLOAD_CALLBACK_TYPE, HF_MODEL_SAVE_CALLBACK_TYPE
 
 
 def _hf_hub_online():
@@ -83,7 +85,7 @@ def register_callback(name: str):
     return decorator
 
 
-@register_callback("checkpoint")
+@register_callback(CHECKPOINT_CALLBACK_TYPE)
 class CheckpointCallback(TrainerCallback):
     """
     Callback for saving training checkpoints at regular intervals.
@@ -167,7 +169,7 @@ class EvaluationCallback(TrainerCallback):
         return control
 
 
-@register_callback("hf_model_save")
+@register_callback(HF_MODEL_SAVE_CALLBACK_TYPE)
 class HFModelSaveCallback(TrainerCallback):
     """
     Callback for requesting Hugging Face exports at regular intervals.
@@ -206,7 +208,7 @@ class HFModelSaveCallback(TrainerCallback):
         return control
 
 
-@register_callback("hf_hub_upload")
+@register_callback(HF_HUB_UPLOAD_CALLBACK_TYPE)
 class HFHubUploadCallback(TrainerCallback):
     """
     Callback for uploading HuggingFace format models to HuggingFace Hub.
@@ -1140,8 +1142,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     hf_export_execution = getattr(cfg.trainer, "hf_export_execution", False)
     if hf_export_execution and hf_hub_repo_id and hf_save_interval > 0:
         hf_hub_private = getattr(cfg.trainer, "hf_hub_private", False)
-        hf_hub_revision = getattr(cfg.trainer, "hf_hub_revision", "main")
-        hf_upload_mode = getattr(cfg.trainer, "hf_upload_mode", "latest")
+        hf_hub_revision = getattr(cfg.trainer, "hf_hub_revision", DEFAULT_HF_HUB_REVISION)
+        hf_upload_mode = getattr(cfg.trainer, "hf_upload_mode", DEFAULT_HF_UPLOAD_MODE)
         callbacks.append(
             HFHubUploadCallback(
                 repo_id=hf_hub_repo_id,

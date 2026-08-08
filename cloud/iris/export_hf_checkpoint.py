@@ -30,10 +30,8 @@ Setting ``max_steps`` to the checkpoint's own step produces a job that loads the
 exports them, and stops without training a step. ``--timeout`` belongs to this export job;
 it is independent of the source training gang's process-group timeout.
 
-WHAT IT DOES NOT DO
--------------------
-It does not publish. The export lands in ``export_path`` on durable storage. Pushing to
-the Hub is a separate, owner-authorized step.
+The export lands in ``export_path`` on durable storage. When the request carries the
+training run's Hub destination, the export-only job publishes the completed artifact.
 """
 
 import argparse
@@ -41,7 +39,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from skyrl_train.hf_export import HFExportStatus, read_hf_export_request, write_hf_export_request
+from skyrl_train.hf_export import read_hf_export_request, write_hf_export_request
+from skyrl_train.hf_export_schema import (
+    DEFAULT_HF_EXPORT_TIMEOUT,
+    DEFAULT_HF_HUB_REVISION,
+    DEFAULT_HF_UPLOAD_MODE,
+    HFExportRequest,
+    HFExportStatus,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -121,7 +126,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def main() -> None:
+def argument_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--request", help="global_step_N checkpoint directory containing hf_export_request.json")
     ap.add_argument("--ckpt_path", help="checkpoint root holding global_step_N/")
@@ -144,51 +150,49 @@ def main() -> None:
     ap.add_argument("--job-name", dest="job_name")
     ap.add_argument("--hf-hub-repo-id")
     ap.add_argument("--hf-hub-private", action="store_true")
-    ap.add_argument("--hf-hub-revision", default="main")
-    ap.add_argument("--hf-upload-mode", choices=("latest", "all"), default="latest")
+    ap.add_argument("--hf-hub-revision", default=DEFAULT_HF_HUB_REVISION)
+    ap.add_argument("--hf-upload-mode", choices=("latest", "all"), default=DEFAULT_HF_UPLOAD_MODE)
     ap.add_argument(
         "--timeout",
         type=int,
-        default=7200,
-        help="export-job timeout in seconds, independent of the training process group (default: 7200)",
+        default=DEFAULT_HF_EXPORT_TIMEOUT,
+        help=(
+            "export-job timeout in seconds, independent of the training process group "
+            f"(default: {DEFAULT_HF_EXPORT_TIMEOUT})"
+        ),
     )
     ap.add_argument("--no-wait", action="store_true", help="submit without recording request completion")
     ap.add_argument("--dry-run", action="store_true", help="print the command and exit")
-    args = ap.parse_args()
+    return ap
 
-    request = None
-    if args.request:
-        request = read_hf_export_request(args.request)
-        if request is None:
-            ap.error(f"no hf_export_request.json found under {args.request}")
-        if args.no_wait:
-            ap.error("--no-wait cannot be used with --request because completion must be recorded")
-        if request.status is HFExportStatus.COMPLETE:
-            print(f"[export-hf] global_step_{request.step} is already complete")
-            return
-        args.ckpt_path = request.checkpoint_path.rsplit("/", 1)[0]
-        args.step = request.step
-        args.export_path = request.export_path
-        args.model_path = request.model_path
-        args.num_nodes = request.num_nodes
-        args.gpus_per_node = request.gpus_per_node
-        args.hf_hub_repo_id = request.hf_hub_repo_id
-        args.hf_hub_private = request.hf_hub_private
-        args.hf_hub_revision = request.hf_hub_revision
-        args.hf_upload_mode = request.hf_upload_mode
-    elif args.ckpt_path is None or args.step is None or args.model_path is None:
-        ap.error("provide --request or all of --ckpt_path, --step, and --model_path")
 
-    if args.timeout <= 0:
-        ap.error("--timeout must be positive for an export job")
+def hydrate_request(args: argparse.Namespace, parser: argparse.ArgumentParser) -> HFExportRequest | None:
+    """Hydrate export arguments from a durable request when one was selected."""
+    if not args.request:
+        if args.ckpt_path is None or args.step is None or args.model_path is None:
+            parser.error("provide --request or all of --ckpt_path, --step, and --model_path")
+        return None
 
-    cmd = build_command(args)
+    request = read_hf_export_request(args.request)
+    if request is None:
+        parser.error(f"no hf_export_request.json found under {args.request}")
+    if args.no_wait:
+        parser.error("--no-wait cannot be used with --request because completion must be recorded")
+    args.ckpt_path = request.checkpoint_base_path
+    args.step = request.step
+    args.export_path = request.export_path
+    args.model_path = request.model_path
+    args.num_nodes = request.num_nodes
+    args.gpus_per_node = request.gpus_per_node
+    args.hf_hub_repo_id = request.hf_hub_repo_id
+    args.hf_hub_private = request.hf_hub_private
+    args.hf_hub_revision = request.hf_hub_revision
+    args.hf_upload_mode = request.hf_upload_mode
+    return request
 
-    print("[export-hf] resuming step", args.step, "and exporting without training")
-    print("[export-hf]", " ".join(cmd))
-    if args.dry_run:
-        return
 
+def submit_export(args: argparse.Namespace, request: HFExportRequest | None, command: list[str]) -> int:
+    """Submit one export job and persist the request's terminal state."""
     if request is not None:
         request = request.with_status(
             HFExportStatus.IN_PROGRESS,
@@ -197,17 +201,36 @@ def main() -> None:
         )
         write_hf_export_request(request)
 
-    # The geometry must match training: the checkpoint is sharded to the parallel layout
-    # the run used, and bridge.save_hf_weights gathers across that same mesh.
     print(
         f"[export-hf] geometry {args.num_nodes}x{args.gpus_per_node} GPU — this MUST match "
         f"the training geometry or the sharded load will not resolve"
     )
-    exit_code = subprocess.call(cmd, cwd=str(_REPO_ROOT))
+    exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
     if request is not None:
         status = HFExportStatus.COMPLETE if exit_code == 0 else HFExportStatus.PENDING
         write_hf_export_request(request.with_status(status, last_exit_code=exit_code))
-    raise SystemExit(exit_code)
+    return exit_code
+
+
+def main() -> None:
+    parser = argument_parser()
+    args = parser.parse_args()
+    request = hydrate_request(args, parser)
+
+    if request is not None and request.status is HFExportStatus.COMPLETE:
+        print(f"[export-hf] global_step_{request.step} is already complete")
+        return
+
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive for an export job")
+
+    cmd = build_command(args)
+
+    print("[export-hf] resuming step", args.step, "and exporting without training")
+    print("[export-hf]", " ".join(cmd))
+    if args.dry_run:
+        return
+    raise SystemExit(submit_export(args, request, cmd))
 
 
 if __name__ == "__main__":

@@ -5,59 +5,21 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, replace
-from enum import StrEnum
+from dataclasses import asdict
 from pathlib import Path
 
 from loguru import logger
 
 from skyrl_train.utils.io import io
 from skyrl_train.utils.trainer_utils import extract_step_from_path, list_checkpoint_dirs
-
-HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
-HF_EXPORT_REQUEST_SCHEMA_VERSION = 1
-
-
-class HFExportStatus(StrEnum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETE = "complete"
-
-
-@dataclass(frozen=True)
-class HFExportRequest:
-    schema_version: int
-    status: HFExportStatus
-    step: int
-    checkpoint_path: str
-    export_path: str
-    model_path: str
-    strategy: str
-    num_nodes: int
-    gpus_per_node: int
-    hf_hub_repo_id: str | None = None
-    hf_hub_private: bool = False
-    hf_hub_revision: str = "main"
-    hf_upload_mode: str = "latest"
-    attempts: int = 0
-    timeout_seconds: int | None = None
-    last_exit_code: int | None = None
-
-    def with_status(
-        self,
-        status: HFExportStatus,
-        *,
-        timeout_seconds: int | None = None,
-        last_exit_code: int | None = None,
-        increment_attempts: bool = False,
-    ) -> "HFExportRequest":
-        return replace(
-            self,
-            status=status,
-            timeout_seconds=timeout_seconds if timeout_seconds is not None else self.timeout_seconds,
-            last_exit_code=last_exit_code,
-            attempts=self.attempts + int(increment_attempts),
-        )
+from skyrl_train.hf_export_schema import (
+    DEFAULT_HF_HUB_REVISION,
+    DEFAULT_HF_UPLOAD_MODE,
+    HF_EXPORT_REQUEST_FILENAME,
+    HF_EXPORT_REQUEST_SCHEMA_VERSION,
+    HFExportRequest,
+    HFExportStatus,
+)
 
 
 def hf_export_request_path(checkpoint_path: str) -> str:
@@ -67,25 +29,25 @@ def hf_export_request_path(checkpoint_path: str) -> str:
 def new_hf_export_request(
     *,
     step: int,
+    checkpoint_base_path: str,
     checkpoint_path: str,
     export_path: str,
     model_path: str,
-    strategy: str,
     num_nodes: int,
     gpus_per_node: int,
     hf_hub_repo_id: str | None = None,
     hf_hub_private: bool = False,
-    hf_hub_revision: str = "main",
-    hf_upload_mode: str = "latest",
+    hf_hub_revision: str = DEFAULT_HF_HUB_REVISION,
+    hf_upload_mode: str = DEFAULT_HF_UPLOAD_MODE,
 ) -> HFExportRequest:
     return HFExportRequest(
         schema_version=HF_EXPORT_REQUEST_SCHEMA_VERSION,
         status=HFExportStatus.PENDING,
         step=step,
+        checkpoint_base_path=checkpoint_base_path,
         checkpoint_path=checkpoint_path,
         export_path=export_path,
         model_path=model_path,
-        strategy=strategy,
         num_nodes=num_nodes,
         gpus_per_node=gpus_per_node,
         hf_hub_repo_id=hf_hub_repo_id,
@@ -96,7 +58,7 @@ def new_hf_export_request(
 
 
 def write_hf_export_request(request: HFExportRequest) -> str:
-    """Write one request atomically and return its path."""
+    """Persist one request and return its path; local writes replace atomically."""
     path = hf_export_request_path(request.checkpoint_path)
     payload = asdict(request)
     payload["status"] = request.status.value
@@ -145,7 +107,7 @@ def pending_hf_export_steps(checkpoint_base_path: str) -> set[int]:
         checkpoint_path = os.path.join(checkpoint_base_path, directory)
         try:
             request = read_hf_export_request(checkpoint_path)
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+        except (OSError, json.JSONDecodeError) as error:
             step = extract_step_from_path(checkpoint_path)
             if step >= 0:
                 pending.add(step)

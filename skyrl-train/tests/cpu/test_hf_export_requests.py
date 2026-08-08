@@ -13,7 +13,7 @@ from skyrl_train.hf_export import (
 )
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
-from skyrl_train.utils.utils import validate_hf_export_intervals
+from skyrl_train.utils.utils import validate_hf_export_config
 
 
 def _trainer_config(tmp_path, *, execute: bool = False):
@@ -45,6 +45,7 @@ def test_normal_hf_save_records_rerunnable_request_without_live_export(tmp_path)
     assert request is not None
     assert request.status is HFExportStatus.PENDING
     assert request.step == 10
+    assert request.checkpoint_base_path == str(tmp_path / "checkpoints")
     assert request.checkpoint_path == str(checkpoint)
     assert request.export_path == str(tmp_path / "exports")
     assert request.hf_hub_repo_id == "org/exported-model"
@@ -65,10 +66,10 @@ def test_pending_export_request_protects_its_checkpoint(tmp_path):
     checkpoint.mkdir()
     request = new_hf_export_request(
         step=5,
+        checkpoint_base_path=str(tmp_path),
         checkpoint_path=str(checkpoint),
         export_path=str(tmp_path / "exports"),
         model_path="org/model",
-        strategy="fsdp2",
         num_nodes=2,
         gpus_per_node=4,
     )
@@ -80,13 +81,19 @@ def test_pending_export_request_protects_its_checkpoint(tmp_path):
     assert pending_hf_export_steps(str(tmp_path)) == set()
 
 
+def test_corrupt_export_request_protects_its_checkpoint(tmp_path):
+    checkpoint = tmp_path / "global_step_5"
+    checkpoint.mkdir()
+    (checkpoint / "hf_export_request.json").write_text("{")
+
+    assert pending_hf_export_steps(str(tmp_path)) == {5}
+
+
 def test_hf_export_interval_must_be_checkpoint_aligned():
-    cfg = OmegaConf.create(
-        {"trainer": {"ckpt_interval": 3, "hf_save_interval": 5, "hf_export_execution": False}}
-    )
+    cfg = OmegaConf.create({"trainer": {"ckpt_interval": 3, "hf_save_interval": 5, "hf_export_execution": False}})
 
     with pytest.raises(ValueError, match="multiple of trainer.ckpt_interval"):
-        validate_hf_export_intervals(cfg)
+        validate_hf_export_config(cfg)
 
 
 @pytest.mark.parametrize(
@@ -105,7 +112,7 @@ def test_normal_training_rejects_in_band_hub_upload(trainer_config):
     cfg = OmegaConf.create({"trainer": {**trainer_config, "hf_export_execution": False}})
 
     with pytest.raises(ValueError, match="produced out of band"):
-        validate_hf_export_intervals(cfg)
+        validate_hf_export_config(cfg)
 
 
 def test_export_job_owns_timeout_and_waits_for_completion():
@@ -131,12 +138,21 @@ def test_export_job_owns_timeout_and_waits_for_completion():
         )
     )
 
-    assert "++trainer.hf_export_execution=true" in command
-    assert "++trainer.callbacks=[]" in command
-    assert "++trainer.ckpt_interval=-1" in command
-    assert command[command.index("--timeout") + 1] == "7200"
+    options = {
+        command[index]: command[index + 1] for index in range(len(command) - 1) if command[index].startswith("--")
+    }
+    overrides = {
+        value.split("=", 1)[0]: value.split("=", 1)[1]
+        for index, value in enumerate(command)
+        if index > 0 and command[index - 1] == "--skyrl_override"
+    }
+
+    assert overrides["++trainer.hf_export_execution"] == "true"
+    assert overrides["++trainer.callbacks"] == "[]"
+    assert overrides["++trainer.ckpt_interval"] == "-1"
+    assert options["--timeout"] == "7200"
     assert "--no-wait" not in command
-    assert "++trainer.hf_hub_repo_id=org/exported-model" in command
+    assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
 
 
 @pytest.mark.parametrize(
@@ -148,10 +164,10 @@ def test_export_request_records_terminal_result(tmp_path, monkeypatch, exit_code
     checkpoint.mkdir(parents=True)
     request = new_hf_export_request(
         step=10,
+        checkpoint_base_path=str(tmp_path / "checkpoints"),
         checkpoint_path=str(checkpoint),
         export_path=str(tmp_path / "exports"),
         model_path="org/model",
-        strategy="fsdp2",
         num_nodes=2,
         gpus_per_node=4,
     )
