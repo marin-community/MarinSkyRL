@@ -2,7 +2,7 @@
   "schema_version": 1,
   "record_status": "cycle_2_terminal_incomplete_ep8_allowance_exhausted_premetric_launch_environment_drift",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-08T14:15:48Z",
+  "revised_utc": "2026-08-08T14:30:03Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -708,6 +708,120 @@
           "Publish cycle 2 to the PR and issue, then independently read back the final handoff."
         ],
         "disposition_of_relaunch_suggestion": "Not applied within cycle 2. The environment drift is operationally correctable, but the frozen single-retry allowance is exhausted and a favorable third attempt is forbidden. A resumed comparison requires a separately recorded cycle."
+      },
+      "github_handoff_readback": {
+        "utc": "2026-08-08T14:30:03Z",
+        "publication_source_commit": "768d9a3042440aa7bcab6b46cd4e3f6f4c65a892",
+        "remote_head_exact_match": true,
+        "pr": {
+          "number": 338,
+          "url": "https://github.com/marin-community/MarinSkyRL/pull/338",
+          "state": "OPEN",
+          "is_draft": true,
+          "head_ref": "issue-335-repro-20260807",
+          "head_sha_at_readback": "768d9a3042440aa7bcab6b46cd4e3f6f4c65a892",
+          "body_sha256": "de816052d54206c53eccf4fb6ec29a5b3e6519a3ff0baf3cf7dcdb8d5a1fe2ec",
+          "body_exact_match": true,
+          "artifact_url": "https://github.com/marin-community/MarinSkyRL/blob/768d9a3042440aa7bcab6b46cd4e3f6f4c65a892/notes/artifacts/2026-08-07-pr338-67b-qualification.json"
+        },
+        "issue": {
+          "number": 335,
+          "url": "https://github.com/marin-community/MarinSkyRL/issues/335",
+          "state": "OPEN",
+          "comment_id": 5226527173,
+          "comment_node_id": "IC_kwDOSx5uL88AAAABN4Z5xQ",
+          "comment_url": "https://github.com/marin-community/MarinSkyRL/issues/335#issuecomment-5226527173",
+          "comment_author": "yonromai",
+          "comment_created_utc": "2026-08-08T14:25:22Z",
+          "comment_sha256": "c7c5514ba321838a076be5f1485495fb0213604d112f854720064097d4717207",
+          "comment_exact_match": true
+        },
+        "checks": [
+          {
+            "name": "request-cleanup",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "name": "lint",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "name": "infra_tests",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "name": "iris_launcher_tests",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "name": "skyrl_train_tests",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "name": "skyrl_train_macos_install",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "name": "skyrl_gym_tests",
+            "conclusion": "SUCCESS"
+          }
+        ],
+        "all_non_skipped_checks_success": true,
+        "publication_disposition": {
+          "pr_338": "draft and open",
+          "issue_335": "open",
+          "training_claim_published": false,
+          "comparison_claim_published": "incomplete_no_ep8_result"
+        }
+      },
+      "final_resource_release_readback": {
+        "utc": "2026-08-08T14:27:34Z",
+        "source": "fresh grouped Iris controller SQL over jobs, tasks, and current workers",
+        "query_result_sha256": "61348d28754af0739e64e7e49da2658246b5e33b8a4e7005a2bc77f694211b54",
+        "jobs": [
+          {
+            "job_id": "/romain/pr338-67b-c2-preflight-a01-20260807",
+            "state": "failed",
+            "finished_at_ms": 1786144678133,
+            "task_count": 1,
+            "tasks_with_worker": 0,
+            "accelerators_on_current_workers": 0
+          },
+          {
+            "job_id": "/romain/pr338-67b-c2-preflight-a02-20260807",
+            "state": "succeeded",
+            "finished_at_ms": 1786144891148,
+            "task_count": 1,
+            "tasks_with_worker": 0,
+            "accelerators_on_current_workers": 0
+          },
+          {
+            "job_id": "/romain/pr338-67b-c2-ep1-a01-20260807",
+            "state": "failed_post_metric_finalization",
+            "finished_at_ms": 1786195153625,
+            "task_count": 10,
+            "tasks_with_worker": 0,
+            "accelerators_on_current_workers": 0
+          },
+          {
+            "job_id": "/romain/pr338-67b-c2-ep8-a01-20260807",
+            "state": "failed_premetric_setup",
+            "finished_at_ms": 1786196237816,
+            "task_count": 10,
+            "tasks_with_worker": 0,
+            "accelerators_on_current_workers": 0
+          },
+          {
+            "job_id": "/romain/pr338-67b-c2-ep8-a02-20260807",
+            "state": "failed_premetric_setup",
+            "finished_at_ms": 1786197453654,
+            "task_count": 10,
+            "tasks_with_worker": 0,
+            "accelerators_on_current_workers": 0
+          }
+        ],
+        "cycle_2_tasks_with_worker": 0,
+        "cycle_2_accelerators_remaining": 0
       }
     }
   },
