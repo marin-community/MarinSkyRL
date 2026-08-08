@@ -70,7 +70,7 @@ def read_hf_export_request(checkpoint_path: str) -> HFExportRequest | None:
 
 
 def pending_hf_export_steps(checkpoint_base_path: str) -> set[int]:
-    """Return checkpoint steps whose export request is absent from completion."""
+    """Return steps with incomplete or unreadable export request files."""
     pending: set[int] = set()
     for directory in list_checkpoint_dirs(checkpoint_base_path):
         checkpoint_path = os.path.join(checkpoint_base_path, directory)

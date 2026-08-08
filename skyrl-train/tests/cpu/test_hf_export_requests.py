@@ -166,7 +166,7 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
 
 
-def test_request_rejects_operator_override_instead_of_ignoring_it():
+def test_request_rejects_operator_override_instead_of_ignoring_it(capsys):
     parser = argument_parser()
     args = parser.parse_args(
         ["--request", "/checkpoint/global_step_10", "--rl_config", "config.yaml", "--num-nodes", "8"]
@@ -174,6 +174,8 @@ def test_request_rejects_operator_override_instead_of_ignoring_it():
 
     with pytest.raises(SystemExit):
         request_spec(args, parser)
+
+    assert "--request cannot be combined with request-owned options: --num-nodes" in capsys.readouterr().err
 
 
 def test_manual_export_requires_explicit_checkpoint_geometry():
