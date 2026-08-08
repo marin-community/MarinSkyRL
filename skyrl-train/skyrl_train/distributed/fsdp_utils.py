@@ -244,30 +244,6 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
         return nullcontext()
 
 
-def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
-    """Attach expert-gradient averaging and return module and parameter counts."""
-
-    module_count = 0
-    parameter_count = 0
-    for experts in model.modules():
-        if not isinstance(experts, GrugMoeExperts):
-            continue
-
-        for handle in getattr(experts, "_ep_gradient_scale_handles", ()):
-            handle.remove()
-
-        ep_size = int(experts.ep_size)
-        handles = []
-        if ep_size > 1:
-            for parameter in experts.parameters():
-                if parameter.requires_grad:
-                    handles.append(parameter.register_hook(lambda grad, size=ep_size: grad / size))
-        experts._ep_gradient_scale_handles = handles
-        module_count += 1
-        parameter_count += len(handles)
-    return module_count, parameter_count
-
-
 # Fsdp2 load full state dict from `accelerate`
 # Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
 # NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
@@ -486,13 +462,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # assign=True: params are meta DTensors, replace storage in-place.
         model.load_state_dict(new_sd, assign=True)
         del new_sd
-        grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
-        if grug_parameters:
-            logger.info(
-                "[Grug-EP-GRAD] refreshed gradient averaging after checkpoint assignment "
-                f"(modules={grug_modules}, parameters={grug_parameters})"
-            )
-
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
         offload_fsdp2_model_to_cpu(model)
         torch.cuda.synchronize()
@@ -871,11 +840,12 @@ def apply_ep(
         )
         target.finish(ep_context)
         sharded += 1
-    grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
-    if grug_parameters:
+    grug_modules = [module for module in model.modules() if isinstance(module, GrugMoeExperts) and module.ep_size > 1]
+    if grug_modules:
+        grug_parameters = sum(parameter.requires_grad for module in grug_modules for parameter in module.parameters())
         logger.info(
-            "[Grug-EP-GRAD] enabled expert gradient averaging "
-            f"(ep_size={ep_mesh.size()}, modules={grug_modules}, parameters={grug_parameters})"
+            "[Grug-EP-GRAD] enabled expert-edge gradient averaging "
+            f"(ep_size={ep_mesh.size()}, modules={len(grug_modules)}, parameters={grug_parameters})"
         )
     return sharded
 
