@@ -5,13 +5,11 @@ from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, request_spec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.hf_export import (
-    HFExportStatus,
-    new_hf_export_request,
     pending_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
-from skyrl_train.hf_export_schema import HFUploadMode
+from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus, HFUploadMode
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 from skyrl_train.utils.utils import validate_hf_export_config
@@ -65,7 +63,7 @@ def test_checkpoint_cleanup_retains_pending_export_source(tmp_path):
 def test_pending_export_request_protects_its_checkpoint(tmp_path):
     checkpoint = tmp_path / "global_step_5"
     checkpoint.mkdir()
-    request = new_hf_export_request(
+    request = HFExportRequest(
         step=5,
         checkpoint_base_path=str(tmp_path),
         checkpoint_path=str(checkpoint),
@@ -126,25 +124,29 @@ def test_normal_training_rejects_in_band_hub_upload(trainer_config):
 
 
 def test_export_job_owns_timeout_and_waits_for_completion():
+    request = HFExportRequest(
+        step=10,
+        checkpoint_base_path="s3://bucket/run/checkpoints",
+        checkpoint_path="s3://bucket/run/checkpoints/global_step_10",
+        export_path="s3://bucket/run/exports",
+        model_path="org/model",
+        num_nodes=8,
+        gpus_per_node=8,
+        hf_hub_repo_id="org/exported-model",
+        hf_hub_private=True,
+        hf_hub_revision="main",
+        hf_upload_mode=HFUploadMode.LATEST,
+    )
     command = build_command(
         ExportJobSpec(
-            checkpoint_base_path="s3://bucket/run/checkpoints",
-            step=10,
-            export_path="s3://bucket/run/exports",
+            request=request,
             rl_config="config.yaml",
-            model_path="org/model",
             cluster="cw-rno2a",
-            num_nodes=8,
-            gpus_per_node=8,
             priority="batch",
             train_data='["dataset"]',
             job_name="export-step-10",
             timeout=7200,
             no_wait=False,
-            hf_hub_repo_id="org/exported-model",
-            hf_hub_private=True,
-            hf_hub_revision="main",
-            hf_upload_mode=HFUploadMode.LATEST,
         )
     )
 
@@ -182,7 +184,7 @@ def test_request_rejects_operator_override_instead_of_ignoring_it():
 def test_export_request_records_terminal_result(tmp_path, monkeypatch, exit_code, expected_status):
     checkpoint = tmp_path / "checkpoints" / "global_step_10"
     checkpoint.mkdir(parents=True)
-    request = new_hf_export_request(
+    request = HFExportRequest(
         step=10,
         checkpoint_base_path=str(tmp_path / "checkpoints"),
         checkpoint_path=str(checkpoint),

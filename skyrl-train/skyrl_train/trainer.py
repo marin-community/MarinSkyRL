@@ -82,13 +82,17 @@ from skyrl_train.callbacks import (
 )
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
 from skyrl_train.hf_export import (
-    HFExportStatus,
-    new_hf_export_request,
     pending_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
-from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
+from skyrl_train.hf_export_schema import (
+    DEFAULT_HF_HUB_REVISION,
+    DEFAULT_HF_UPLOAD_MODE,
+    HFExportRequest,
+    HFExportStatus,
+    HFUploadMode,
+)
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 _TRAINER_STATE_FILENAME = "trainer_state.pt"
@@ -2117,7 +2121,7 @@ class RayPPOTrainer:
             return
 
         placement = self.cfg.trainer.placement
-        request = new_hf_export_request(
+        request = HFExportRequest(
             step=self.global_step,
             checkpoint_base_path=self.cfg.trainer.ckpt_path,
             checkpoint_path=checkpoint_path,

@@ -23,8 +23,6 @@ class HFExportStatus(StrEnum):
 
 @dataclass(frozen=True)
 class HFExportRequest:
-    schema_version: int
-    status: HFExportStatus
     step: int
     checkpoint_base_path: str
     checkpoint_path: str
@@ -32,6 +30,8 @@ class HFExportRequest:
     model_path: str
     num_nodes: int
     gpus_per_node: int
+    schema_version: int = HF_EXPORT_REQUEST_SCHEMA_VERSION
+    status: HFExportStatus = HFExportStatus.PENDING
     hf_hub_repo_id: str | None = None
     hf_hub_private: bool = False
     hf_hub_revision: str = DEFAULT_HF_HUB_REVISION

@@ -13,8 +13,6 @@ from loguru import logger
 from skyrl_train.utils.io import io
 from skyrl_train.utils.trainer_utils import extract_step_from_path, list_checkpoint_dirs
 from skyrl_train.hf_export_schema import (
-    DEFAULT_HF_HUB_REVISION,
-    DEFAULT_HF_UPLOAD_MODE,
     HF_EXPORT_REQUEST_FILENAME,
     HF_EXPORT_REQUEST_SCHEMA_VERSION,
     HFExportRequest,
@@ -25,37 +23,6 @@ from skyrl_train.hf_export_schema import (
 
 def hf_export_request_path(checkpoint_path: str) -> str:
     return os.path.join(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
-
-
-def new_hf_export_request(
-    *,
-    step: int,
-    checkpoint_base_path: str,
-    checkpoint_path: str,
-    export_path: str,
-    model_path: str,
-    num_nodes: int,
-    gpus_per_node: int,
-    hf_hub_repo_id: str | None = None,
-    hf_hub_private: bool = False,
-    hf_hub_revision: str = DEFAULT_HF_HUB_REVISION,
-    hf_upload_mode: HFUploadMode = DEFAULT_HF_UPLOAD_MODE,
-) -> HFExportRequest:
-    return HFExportRequest(
-        schema_version=HF_EXPORT_REQUEST_SCHEMA_VERSION,
-        status=HFExportStatus.PENDING,
-        step=step,
-        checkpoint_base_path=checkpoint_base_path,
-        checkpoint_path=checkpoint_path,
-        export_path=export_path,
-        model_path=model_path,
-        num_nodes=num_nodes,
-        gpus_per_node=gpus_per_node,
-        hf_hub_repo_id=hf_hub_repo_id,
-        hf_hub_private=hf_hub_private,
-        hf_hub_revision=hf_hub_revision,
-        hf_upload_mode=hf_upload_mode,
-    )
 
 
 def write_hf_export_request(request: HFExportRequest) -> str:

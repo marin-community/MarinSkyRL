@@ -176,7 +176,7 @@ class HFModelSaveCallback(TrainerCallback):
 
     Normal training records a request beside the immutable sharded checkpoint;
     an export-only job later converts that checkpoint. Export-only runs execute
-    the conversion directly. This replaces the inline `hf_save_interval` logic.
+    the conversion directly.
 
     Args:
         save_steps: Request an HF export every N steps. Set to -1 or 0 to disable.
