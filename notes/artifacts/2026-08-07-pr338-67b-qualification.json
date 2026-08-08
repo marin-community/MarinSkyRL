@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "record_status": "cycle_2_terminal_blocked_ep8_allowance_exhausted",
+  "record_status": "cycle_2_terminal_incomplete_ep8_allowance_exhausted_premetric_launch_environment_drift",
   "created_utc": "2026-08-07T21:08:29Z",
-  "revised_utc": "2026-08-08T14:00:53Z",
+  "revised_utc": "2026-08-08T14:15:48Z",
   "objective": "Qualify PR #338 by comparing candidate EP1 and candidate EP8 on the bounded 67B live-online workload through accepted optimizer update 9.",
   "causal_scope": {
     "establishes": "Whether candidate EP8 and candidate EP1 remain in the decision-rule training regime through update 9.",
@@ -24,7 +24,7 @@
     },
     "cycle_2": {
       "created_utc": "2026-08-07T23:09:45Z",
-      "status": "terminal_blocked_ep8_allowance_exhausted_premetric_wandb_authorization",
+      "status": "terminal_incomplete_ep8_allowance_exhausted_premetric_launch_environment_drift",
       "corrected_cause": {
         "owner": "MarinSkyRL root dependency record",
         "old_pair": {
@@ -582,18 +582,22 @@
         "frozen_config_sha256": "b8159ceff5eb389241fc2f1e240f1d4bdb7b49e89d02a751f2acb1a866f482a5",
         "launch_log_sha256": "631ef7a30ce76d20185cb3b2021ed94d1f1967f303e5e6a3d3584429a9080a42",
         "retry_basis": "Attempt 1 failed in configuration validation before any WANDB_MIRROR metric row or numerical update; the frozen one-retry allowance therefore applies.",
-        "operational_correction": "Load the protected standard launch-host secrets environment so the unchanged frozen workload can pass W&B configuration validation.",
-          "secret_safe_readback": {
-            "wandb_api_key_present": true,
-            "secret_values_read_or_printed": false,
-            "environment_key_readback_sha256": "3068cd8c387f62323ebac6651629bb1b48f75a19eaf53d853d036781c7ab71bb"
-          },
+        "operational_correction": "Attempt 2 loaded the protected launch-host environment to supply the missing WANDB_API_KEY. That environment also supplied WANDB_ENTITY=dogml, unlike EP1's successful marin-community destination.",
+        "secret_safe_readback": {
+          "wandb_api_key_present": true,
+          "wandb_entity_present": true,
+          "secret_values_read_or_printed": false,
+          "environment_key_readback_sha256": "3068cd8c387f62323ebac6651629bb1b48f75a19eaf53d853d036781c7ab71bb"
+        },
           "setup_failure": {
             "accepted_metric_rows": 0,
             "numerical_updates": 0,
             "authenticated_account": "romain-yon",
             "wandb_entity": "dogml",
             "wandb_project": "snowball_67b_a2b_e10_7786",
+            "wandb_entity_source": "attempt-2 protected launch-host environment",
+            "ep1_successful_wandb_entity": "marin-community",
+            "exact_denied_permission": "unknown",
             "failure_stage": "skyrl_train.utils.tracking.Tracking.initialize -> wandb.init",
             "failure": "wandb.errors.errors.CommError: permission denied",
             "retry_eligible": false,
@@ -661,19 +665,49 @@
       ],
       "results": {
         "ep1": "attempt_1_accepted_updates_0_through_9_then_failed_post_metric_finalization",
-        "ep8": "attempt_1_failed_premetric_missing_wandb_key; attempt_2_failed_premetric_wandb_authorization; retry allowance exhausted",
+        "ep8": "attempt_1_failed_premetric_missing_wandb_key; attempt_2_failed_premetric_after_launch_environment_selected_dogml_and_wandb_init_returned_permission_denied; retry allowance exhausted",
         "comparison": "incomplete_no_accepted_ep8_numerical_result"
       },
       "terminal_disposition": {
         "outcome": "blocked_or_incomplete_after_arm_allowance",
-        "reason": "EP8 produced no accepted numerical result after its frozen attempt allowance. Attempt 1 lacked WANDB_API_KEY; attempt 2 received the key and authenticated, but wandb.init was denied write access to entity dogml before model initialization or a numerical update.",
+        "reason": "EP8 produced no accepted numerical result after its frozen attempt allowance. Attempt 1 lacked WANDB_API_KEY. Attempt 2 received the key, but its launch environment also selected entity dogml; the credential authenticated as romain-yon and wandb.init for project snowball_67b_a2b_e10_7786 returned the generic error permission denied before model initialization or a numerical update. The exact denied W&B permission is unknown. EP1 had successfully used the same project under entity marin-community.",
         "claims": {
           "ep1": "accepted protocol updates 0 through 9",
           "ep8": "no training result",
           "ep8_to_ep1_comparison": "no verdict",
           "component_scope": "the previously qualified component proof is unchanged"
         },
-        "next_question": "Provide a W&B credential with write access to dogml or select an explicitly writable entity, then include a real wandb.init authorization check in the exact-environment preflight before opening a distinct frozen qualification cycle."
+        "next_question": "If qualification resumes, bind EP8 to the same known-writable marin-community W&B destination used by EP1 and prove a real wandb.init in a cheap exact-environment preflight. Record any resumed work as a new qualification cycle; do not add a favorable third attempt to cycle 2."
+      },
+      "preflight_gap": {
+        "finding": "The passed preflight exercised the real entrypoint only through Hydra --cfg job composition. It did not validate WANDB_API_KEY presence or call wandb.init, so it did not cover the setup boundary that later stopped both EP8 attempts.",
+        "future_gate": "Before another full gang, a cheap exact-environment preflight must create and finish a real W&B run at the selected entity and project."
+      },
+      "high_tier_goal_review": {
+        "completed_utc": "2026-08-08T14:15:48Z",
+        "reviewed_head": "1cbb15fa211c0426f309ee358495c73455e2e906",
+        "kind": "GOAL",
+        "reviewers": [
+          {
+            "name": "Claude Opus 4.8",
+            "review_sha256": "7f552e064577a686dc2477fc23589ea3cc9a5dd547e0fd75343f50cd2cef2e47"
+          },
+          {
+            "name": "Codex GPT-5.6 Sol",
+            "review_sha256": "cfffeae67c4d1ba2ec417d7b85d44dbce71bcbbb98233cf793e7232512654158"
+          },
+          {
+            "name": "Gemini 3.6 Flash High",
+            "review_sha256": "f0ebd3ba349bf086970235097d1b3e840fd5d4572b54a3b70d7e6dbe3cdba596"
+          }
+        ],
+        "applied_findings": [
+          "Narrow the W&B cause to the observed generic permission denial and treat the exact denied permission as unknown.",
+          "Record that attempt 2 introduced WANDB_ENTITY=dogml while EP1 had succeeded under marin-community.",
+          "Record that the exact-environment preflight did not exercise wandb.init.",
+          "Publish cycle 2 to the PR and issue, then independently read back the final handoff."
+        ],
+        "disposition_of_relaunch_suggestion": "Not applied within cycle 2. The environment drift is operationally correctable, but the frozen single-retry allowance is exhausted and a favorable third attempt is forbidden. A resumed comparison requires a separately recorded cycle."
       }
     }
   },
