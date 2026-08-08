@@ -2102,7 +2102,7 @@ class RayPPOTrainer:
             self.save_models()
             return
 
-        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
         trainer_state_path = os.path.join(checkpoint_path, _TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise RuntimeError(

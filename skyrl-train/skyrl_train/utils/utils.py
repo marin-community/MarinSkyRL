@@ -22,6 +22,7 @@ from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_HUB_UPLOAD_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
+    has_explicit_callbacks,
 )
 from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
@@ -507,7 +508,7 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
         return
 
     callbacks = cfg.trainer.get("callbacks")
-    if callbacks:
+    if has_explicit_callbacks(cfg):
         if any(callback.get("type") == HF_HUB_UPLOAD_CALLBACK_TYPE for callback in callbacks):
             raise ValueError(
                 "hf_hub_upload cannot run in normal training because HF exports are produced out of band; "

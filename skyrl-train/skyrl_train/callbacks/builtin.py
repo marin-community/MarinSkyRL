@@ -29,7 +29,12 @@ from skyrl_train.utils.io import io
 from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
-from .types import CHECKPOINT_CALLBACK_TYPE, HF_HUB_UPLOAD_CALLBACK_TYPE, HF_MODEL_SAVE_CALLBACK_TYPE
+from .types import (
+    CHECKPOINT_CALLBACK_TYPE,
+    HF_HUB_UPLOAD_CALLBACK_TYPE,
+    HF_MODEL_SAVE_CALLBACK_TYPE,
+    has_explicit_callbacks,
+)
 
 
 def _hf_hub_online():
@@ -1102,8 +1107,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
         List of configured callbacks
     """
     # Check for new-style explicit callback configuration
-    callbacks_config = getattr(cfg.trainer, "callbacks", None)
-    if callbacks_config is not None and len(callbacks_config) > 0:
+    if has_explicit_callbacks(cfg):
         logger.info("Using explicit callback configuration from YAML")
         callbacks = create_callbacks_from_config(cfg)
         # Always add logging callback if not explicitly configured

@@ -49,6 +49,7 @@ from skyrl_train.hf_export_schema import (
     HFExportStatus,
     HFUploadMode,
 )
+from skyrl_train.utils.trainer_utils import GLOBAL_STEP_PREFIX
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -177,7 +178,7 @@ def argument_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[HFExportRequest, ExportJobSpec]:
+def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ExportJobSpec:
     hydrated_options = {
         "--ckpt_path": args.ckpt_path,
         "--step": args.step,
@@ -198,7 +199,7 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> t
     request = read_hf_export_request(args.request)
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
-    return request, operational_spec(args, request, no_wait=False)
+    return operational_spec(args, request, no_wait=False)
 
 
 def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_wait: bool) -> ExportJobSpec:
@@ -230,7 +231,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
     request = HFExportRequest(
         step=args.step,
         checkpoint_base_path=checkpoint_base_path,
-        checkpoint_path=f"{checkpoint_base_path}/global_step_{args.step}",
+        checkpoint_path=f"{checkpoint_base_path}/{GLOBAL_STEP_PREFIX}{args.step}",
         export_path=export_path,
         model_path=args.model_path,
         num_nodes=args.num_nodes,
@@ -270,7 +271,8 @@ def main() -> None:
     if args.timeout <= 0:
         parser.error("--timeout must be positive for an export job")
     if args.request:
-        request, spec = request_spec(args, parser)
+        spec = request_spec(args, parser)
+        request = spec.request
     else:
         request = None
         spec = manual_spec(args, parser)
