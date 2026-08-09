@@ -326,6 +326,7 @@ class TestBuildJobSpec:
     "strategy, expected_profile",
     [
         ("fsdp2", RuntimeProfile.FSDP),
+        ("deepspeed", RuntimeProfile.DEEPSPEED),
         ("megatron", RuntimeProfile.MEGATRON),
         (None, RuntimeProfile.FSDP),
     ],

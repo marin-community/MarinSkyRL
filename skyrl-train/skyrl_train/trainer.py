@@ -407,9 +407,6 @@ class RayPPOTrainer:
             await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
             await asyncio.to_thread(self.handle_hf_export)
-            if self.cfg.trainer.hf_export_execution:
-                logger.info("Saved final model.")
-                await asyncio.to_thread(self._flush_hf_uploads)
 
     async def _train_loop(self):
         """
@@ -2074,34 +2071,12 @@ class RayPPOTrainer:
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
         return global_step, str(checkpoint_path)
 
-    def save_models(self):
-        """
-        Save the model parameters in HF format at `cfg.trainer.export_path`.
-        """
-        policy_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "policy")
-        ray.get(
-            self.policy_model.async_run_ray_method("pass_through", "save_hf_model", policy_export_dir, self.tokenizer)
-        )
-        if self.critic_model is not None:
-            critic_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "critic")
-            ray.get(
-                self.critic_model.async_run_ray_method(
-                    "pass_through", "save_hf_model", critic_export_dir, self.tokenizer
-                )
-            )
-        logger.info("Successfully saved model weights.")
-
     def handle_hf_export(self) -> None:
-        """Execute an export-only run or persist its out-of-band request state."""
-        timer_label = "save_hf_model" if self.cfg.trainer.hf_export_execution else "queue_hf_export"
-        with Timer(timer_label, self.all_timings):
+        """Persist a request for out-of-band policy checkpoint conversion."""
+        with Timer("queue_hf_export", self.all_timings):
             self._handle_hf_export()
 
     def _handle_hf_export(self) -> None:
-        if self.cfg.trainer.hf_export_execution:
-            self.save_models()
-            return
-
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
         trainer_state_path = os.path.join(checkpoint_path, _TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
@@ -2139,19 +2114,6 @@ class RayPPOTrainer:
         )
         request_path = write_hf_export_request(request)
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
-
-    def _flush_hf_uploads(self) -> None:
-        """Re-process HF Hub uploads after the final model export is on disk.
-
-        ``on_train_end`` fires before ``save_models()``, so the final step's
-        upload was skipped on the first pass.  This retries it now that the
-        export exists.  No-op when no HFHubUploadCallback is registered.
-        """
-        from skyrl_train.callbacks.builtin import HFHubUploadCallback
-
-        for cb in getattr(self.callback_handler, "callbacks", []):
-            if isinstance(cb, HFHubUploadCallback):
-                cb.post_save_flush(self.global_step)
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""
@@ -2202,35 +2164,3 @@ class RayPPOTrainer:
             logger.warning(f"Failed to clean up temporary policy export directory {policy_export_dir}: {e}")
 
         logger.info("Successfully update ref model with policy model, training continue.")
-
-
-class CheckpointExportTrainer(RayPPOTrainer):
-    """Load one exact checkpoint, export it, and exit without a training lifecycle."""
-
-    def _configure_training_schedule(self) -> None:
-        configured_max_steps = self.cfg.trainer.max_steps
-        if configured_max_steps is None or configured_max_steps <= 0:
-            raise ValueError("HF export execution requires trainer.max_steps to select the checkpoint step")
-        max_steps = int(configured_max_steps)
-        if ResumeMode(self.cfg.trainer.resume_mode) is not ResumeMode.FROM_PATH or not self.cfg.trainer.get(
-            "resume_path"
-        ):
-            raise ValueError("HF export execution requires trainer.resume_mode=from_path and trainer.resume_path")
-        self.train_dataloader = None
-        self.total_training_steps = max_steps
-
-    def _num_steps_per_epoch(self) -> int:
-        return self.total_training_steps
-
-    async def _startup_generator(self) -> None:
-        """Checkpoint export has no rollout lifecycle to start."""
-
-    async def _train_loop(self) -> None:
-        with Timer("load_checkpoints"):
-            self.global_step, _ = self.load_checkpoints()
-        if self.global_step != self.total_training_steps:
-            raise ValueError(
-                "HF export checkpoint step mismatch: "
-                f"requested global_step_{self.total_training_steps}, loaded global_step_{self.global_step}"
-            )
-        await self._handle_resume_at_max_steps()

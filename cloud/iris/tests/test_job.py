@@ -494,7 +494,16 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
 
 
-def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "profile, expected_extras",
+    [
+        (RuntimeProfile.FSDP, ["fsdp", "vllm", "telemetry"]),
+        (RuntimeProfile.FSDP_EXPORT, ["cuda", "fsdp"]),
+    ],
+)
+def test_task_setup_executes_the_pinned_checkout_bootstrap(
+    tmp_path: Path, monkeypatch, profile: RuntimeProfile, expected_extras: list[str]
+) -> None:
     source = tmp_path / "source"
     bootstrap = source / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT
     bootstrap.parent.mkdir(parents=True)
@@ -546,10 +555,10 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "FAKE_CUDA_LIBRARY_PATH": str(cuda_library_path),
     }
 
-    subprocess.run(["bash", "-c", task_setup_script(commit, RuntimeProfile.FSDP)], env=env, check=True)
+    subprocess.run(["bash", "-c", task_setup_script(commit, profile)], env=env, check=True)
 
     assert _git_commit(checkout) == commit
-    assert uv_args.read_text().splitlines() == [
+    expected_uv_args = [
         "sync",
         "--project",
         str(checkout),
@@ -558,11 +567,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "symlink",
         "--no-group",
         "dev",
-        "--extra",
-        "fsdp",
-        "--extra",
-        "vllm",
-        "--extra",
-        "telemetry",
     ]
+    for extra in expected_extras:
+        expected_uv_args.extend(["--extra", extra])
+    assert uv_args.read_text().splitlines() == expected_uv_args
     assert runtime_file.read_text().startswith("export LD_LIBRARY_PATH=")

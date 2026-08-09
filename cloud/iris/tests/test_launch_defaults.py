@@ -625,6 +625,26 @@ def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     assert args.runtime_profile is RuntimeProfile.FSDP
 
 
+@pytest.mark.parametrize(
+    "strategy, expected_profile",
+    [
+        ("fsdp2", RuntimeProfile.FSDP_EXPORT),
+        ("deepspeed", RuntimeProfile.DEEPSPEED_EXPORT),
+        ("megatron", RuntimeProfile.MEGATRON_EXPORT),
+    ],
+)
+def test_checkpoint_export_entrypoint_selects_a_conversion_only_profile(tmp_path, strategy, expected_profile):
+    args = _strategy_args(
+        tmp_path,
+        strategy,
+        ["--entrypoint", "skyrl_train.entrypoints.checkpoint_export"],
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.runtime_profile is expected_profile
+
+
 def test_config_without_a_declared_strategy_selects_the_fsdp_profile(tmp_path):
     args = _args(tmp_path, "opencode")
 
@@ -688,3 +708,38 @@ trainer:
 
     with pytest.raises(SystemExit, match=r"policy_num_nodes \+ ref_num_nodes = 4"):
         resolve_launch_defaults(args)
+
+
+def test_checkpoint_export_requests_only_the_saved_policy_geometry(tmp_path):
+    rl_config = tmp_path / "placed.yaml"
+    rl_config.write_text(
+        """\
+trainer:
+  strategy: fsdp2
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+"""
+    )
+    args = create_parser().parse_args(
+        [
+            "--rl_config",
+            str(rl_config),
+            "--model_path",
+            "model",
+            "--cluster-config",
+            str(_cluster_config(tmp_path)),
+            "--num-nodes",
+            "2",
+            "--entrypoint",
+            "skyrl_train.entrypoints.checkpoint_export",
+        ]
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.num_nodes == 2
+    assert args.runtime_profile is RuntimeProfile.FSDP_EXPORT

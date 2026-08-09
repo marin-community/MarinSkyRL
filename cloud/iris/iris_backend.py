@@ -94,6 +94,7 @@ from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_sou
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
 from cloud.iris.runtime_environment import (
+    CHECKPOINT_EXPORT_ENTRYPOINT,
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
     RuntimeProfile,
@@ -771,11 +772,17 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
     ref_gpus = placement.get("ref_num_gpus_per_node")
     if not all(isinstance(value, int) and value > 0 for value in (policy_nodes, ref_nodes)):
         return
-    expected_nodes = policy_nodes + ref_nodes
+    checkpoint_export = args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT
+    expected_nodes = policy_nodes if checkpoint_export else policy_nodes + ref_nodes
     if args.num_nodes != expected_nodes:
+        topology_description = (
+            f"policy_num_nodes = {expected_nodes}"
+            if checkpoint_export
+            else f"policy_num_nodes + ref_num_nodes = {expected_nodes}"
+        )
         raise SystemExit(
             f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s disaggregated placement "
-            f"(policy_num_nodes + ref_num_nodes = {expected_nodes})."
+            f"({topology_description})."
         )
     declared_gpus = {value for value in (policy_gpus, ref_gpus) if isinstance(value, int) and value > 0}
     if declared_gpus and (len(declared_gpus) != 1 or args.gpus_per_node not in declared_gpus):
@@ -877,12 +884,17 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
         storage_root = _cluster_storage_root(cluster_config)
         args.rendezvous_dir = f"{storage_root}/rendezvous/{args.job_name}"
 
-    if args.record_literal is None:
+    if args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT:
+        args.record_literal = False
+    elif args.record_literal is None:
         harness = _rl_config_harness_name(args.rl_config)
         args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
 
     strategy = _rl_training_strategy(args)
-    expected_profile = runtime_profile_for_strategy(strategy)
+    expected_profile = runtime_profile_for_strategy(
+        strategy,
+        checkpoint_export=args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT,
+    )
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile
     elif args.runtime_profile != expected_profile:
@@ -961,6 +973,11 @@ def autoconfigure_ingress(args: argparse.Namespace) -> None:
     breaks non-streaming terminus-2). So we auto-enable controller ONLY for opencode; for
     that case the ingress host is cluster-determined (``iris.oa.dev``), removing the
     ``--ingress-host`` mismatch error class. Prefer default > flag > env var."""
+    if getattr(args, "entrypoint", None) == CHECKPOINT_EXPORT_ENTRYPOINT:
+        args.ingress_mode = "direct"
+        args.ingress_host = None
+        return
+
     target = str(getattr(args, "target_cluster", "") or "")
     cluster = str(getattr(args, "cluster", "") or "")
     is_cw = target.startswith("cw-") or cluster.startswith("cw-")
@@ -1163,6 +1180,11 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--rl-config", dest="rl_config", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--entrypoint",
+        default=None,
+        help="Override the config entrypoint for a dedicated non-training execution path.",
+    )
 
     parser.add_argument(
         "--model_path",
@@ -1996,6 +2018,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    if args.entrypoint:
+        train_cmd.extend(["--entrypoint", args.entrypoint])
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
     if args.resolved_config_uri:
         train_cmd.extend(["--resolved-config-uri", args.resolved_config_uri])
@@ -2032,9 +2056,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # terminal_bench_config.trials_dir at the durable shared store (s3://, creds auto-injected)
     # so rollouts persist + are inspectable post-hoc. Skip if the user opted out
     # (--trials-dir local) or already set it explicitly.
+    checkpoint_export = args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT
     trials_dir = (args.trials_dir or "auto").strip()
     user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
-    if trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
+    if not checkpoint_export and trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
         if trials_dir.lower() == "auto":
             trials_dir = f"s3://marin-us-east-02a/iris/{args.job_name}/trace_jobs"
         train_cmd.extend(["--skyrl_override", f"++terminal_bench_config.trials_dir={trials_dir}"])
@@ -2055,24 +2080,16 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # explicit ckpt_path from the YAML or a --skyrl_override (either wins).
     user_set_ckpt = any("trainer.ckpt_path=" in o for o in (args.skyrl_override or []))
     yaml_ckpt = load_config_trainer_ckpt_path(args.rl_config)
-    if not user_set_ckpt and not yaml_ckpt:
+    if not checkpoint_export and not user_set_ckpt and not yaml_ckpt:
         ckpt_path = f"s3://marin-us-east-02a/iris/{args.job_name}/checkpoints"
         train_cmd.extend(["--skyrl_override", f"++trainer.ckpt_path={ckpt_path}"])
         print(f"[rl-iris] Durable resumable ckpt_path: {ckpt_path}")
 
-    # export_path needs the SAME durable treatment as ckpt_path, and for a sharper reason.
-    # Left unset it is auto-derived to a node-local <experiments_dir>/<job>/exports
-    # (rl_config_translation.py). save_hf_model then writes the HF export on a POLICY WORKER
-    # while HFHubUploadCallback runs on the DRIVER, so the callback finds nothing, every
-    # upload fails, and the run ends with an empty repo — after which both nodes are reclaimed
-    # and the export is gone for good. Every completed run in the 2026-07 sweep lost its
-    # published model exactly this way; the training checkpoints survived only because
-    # ckpt_path was already durable. The callback reads through skyrl's fsspec io layer, so an
-    # s3:// export_path is visible from any node. Respect an explicit value from the YAML or a
-    # --skyrl_override (either wins).
+    # Export requests must name durable storage because conversion runs later in a separate gang.
+    # Respect an explicit value from the YAML or a --skyrl_override (either wins).
     user_set_export = any("trainer.export_path=" in o for o in (args.skyrl_override or []))
     yaml_export = load_config_trainer_export_path(args.rl_config)
-    if not user_set_export and not yaml_export:
+    if not checkpoint_export and not user_set_export and not yaml_export:
         export_path = f"s3://marin-us-east-02a/iris/{args.job_name}/exports"
         train_cmd.extend(["--skyrl_override", f"++trainer.export_path={export_path}"])
         print(f"[rl-iris] Durable export_path: {export_path}")
@@ -2156,7 +2173,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     # (file overrides shell; same semantics as the iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
-    if _rl_config_is_agentic(args.rl_config):
+    if args.entrypoint != CHECKPOINT_EXPORT_ENTRYPOINT and _rl_config_is_agentic(args.rl_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
         # The purge deletes stale snapshots across the shared RL org, so skip it on a

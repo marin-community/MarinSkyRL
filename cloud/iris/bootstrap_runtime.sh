@@ -14,7 +14,7 @@ profile="$4"
 install_mode="$5"
 
 case "$profile" in
-  fsdp|megatron) ;;
+  fsdp|deepspeed|megatron|fsdp-export|deepspeed-export|megatron-export) ;;
   *)
     echo "unsupported runtime profile: $profile" >&2
     exit 2
@@ -30,22 +30,44 @@ case "$install_mode" in
     ;;
 esac
 
-UV_PROJECT_ENVIRONMENT="$environment" uv sync \
-  --project "$project_root" \
-  --frozen \
-  --link-mode symlink \
-  "${dependency_group[@]}" \
-  --extra "$profile" \
-  --extra vllm \
-  --extra telemetry
+if [[ "$profile" == *-export ]]; then
+  strategy="${profile%-export}"
+  export_extras=(--extra "$strategy")
+  if [[ "$strategy" == fsdp ]]; then
+    export_extras=(--extra cuda "${export_extras[@]}")
+  fi
+  UV_PROJECT_ENVIRONMENT="$environment" uv sync \
+    --project "$project_root" \
+    --frozen \
+    --link-mode symlink \
+    "${dependency_group[@]}" \
+    "${export_extras[@]}"
+else
+  UV_PROJECT_ENVIRONMENT="$environment" uv sync \
+    --project "$project_root" \
+    --frozen \
+    --link-mode symlink \
+    "${dependency_group[@]}" \
+    --extra "$profile" \
+    --extra vllm \
+    --extra telemetry
+fi
 
 python="$environment/bin/python"
 cuda_library_path="$("$python" -c "import site; from pathlib import Path; print(':'.join(str(path) for root in site.getsitepackages() for path in sorted((Path(root) / 'nvidia').glob('*/lib')) if path.is_dir()))")"
 test -n "$cuda_library_path"
 printf 'export LD_LIBRARY_PATH=%q${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n' "$cuda_library_path" > "$runtime_file"
 source "$runtime_file"
-if [[ "$profile" == fsdp ]]; then
+if [[ "$profile" == fsdp || "$profile" == fsdp-export ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
+fi
+if [[ "$profile" == *-export ]]; then
+  "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"
+  case "$profile" in
+    deepspeed-export) "$python" -c "import deepspeed" ;;
+    megatron-export) "$python" -c "from megatron.bridge import AutoBridge" ;;
+  esac
+  exit 0
 fi
 "$python" - <<'PY'
 import memray

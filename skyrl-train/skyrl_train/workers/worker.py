@@ -1490,7 +1490,11 @@ class PolicyWorkerBase(Worker):
         )
 
     def load_checkpoint(
-        self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
+        self,
+        ckpt_dir: Path,
+        load_optimizer_states: bool = True,
+        load_lr_scheduler_states: bool = True,
+        load_runtime_state: bool = True,
     ):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
@@ -1499,6 +1503,7 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states,
+            load_runtime_state=load_runtime_state,
         )
         # Restore ZClip / StaleClip state if present. The actual ZClip/StaleClip
         # objects are lazy-instantiated on the first ppo_train() call, so we
@@ -1715,7 +1720,13 @@ class CriticWorkerBase(Worker):
             tokenizer=tokenizer,
         )
 
-    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
+    def load_checkpoint(
+        self,
+        ckpt_dir=None,
+        load_optimizer_states=True,
+        load_lr_scheduler_states=True,
+        load_runtime_state=True,
+    ):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
@@ -1723,6 +1734,7 @@ class CriticWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states,
+            load_runtime_state=load_runtime_state,
         )
         return states
 

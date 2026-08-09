@@ -504,9 +504,6 @@ def _validate_cp_cfg(cfg: DictConfig):
 
 def validate_hf_export_config(cfg: DictConfig) -> None:
     """Validate checkpoint alignment and deferred publication for HF exports."""
-    if cfg.trainer.get("hf_export_execution", False):
-        return
-
     callbacks = cfg.trainer.get("callbacks")
     if has_explicit_callbacks(cfg):
         if any(callback.get("type") == HF_HUB_UPLOAD_CALLBACK_TYPE for callback in callbacks):

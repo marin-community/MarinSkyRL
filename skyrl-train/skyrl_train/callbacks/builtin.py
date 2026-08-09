@@ -25,44 +25,13 @@ from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.config.callbacks import has_explicit_callbacks
-from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
-from skyrl_train.utils.io import io
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
     CHECKPOINT_CALLBACK_TYPE,
-    HF_HUB_UPLOAD_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
-
-
-def _hf_hub_online():
-    """Context manager: temporarily disable HF offline mode for a Hub network call.
-
-    ``HF_HUB_OFFLINE=1`` is commonly set so the model prestage reads a warm node-local cache, but it
-    makes ``create_repo`` / ``upload_folder`` raise ``offline mode is enabled``. huggingface_hub caches
-    the flag as a module constant at import time, so both the env var AND
-    ``huggingface_hub.constants.HF_HUB_OFFLINE`` must be cleared for the call, then restored.
-    """
-    import contextlib
-    import os
-
-    import huggingface_hub.constants as hc
-
-    @contextlib.contextmanager
-    def _cm():
-        prev_env = os.environ.pop("HF_HUB_OFFLINE", None)
-        prev_const = getattr(hc, "HF_HUB_OFFLINE", False)
-        hc.HF_HUB_OFFLINE = False
-        try:
-            yield
-        finally:
-            hc.HF_HUB_OFFLINE = prev_const
-            if prev_env is not None:
-                os.environ["HF_HUB_OFFLINE"] = prev_env
-
-    return _cm()
 
 
 # Registry mapping callback type names to classes
@@ -180,8 +149,7 @@ class HFModelSaveCallback(TrainerCallback):
     Callback for requesting Hugging Face exports at regular intervals.
 
     Normal training records a request beside the immutable sharded checkpoint;
-    an export-only job later converts that checkpoint. Export-only runs execute
-    the conversion directly.
+    a dedicated export job later converts and optionally publishes that checkpoint.
 
     Args:
         save_steps: Request an HF export every N steps. Set to -1 or 0 to disable.
@@ -211,240 +179,6 @@ class HFModelSaveCallback(TrainerCallback):
         if self.save_on_train_end and self.save_steps > 0:
             control.should_save_hf_model = True
         return control
-
-
-@register_callback(HF_HUB_UPLOAD_CALLBACK_TYPE)
-class HFHubUploadCallback(TrainerCallback):
-    """
-    Callback for uploading HuggingFace format models to HuggingFace Hub.
-
-    This callback uploads models saved by HFModelSaveCallback to a HuggingFace Hub
-    repository. It runs asynchronously after the HF model save to avoid blocking
-    training.
-
-    The callback requires:
-    - HF_TOKEN environment variable or huggingface-cli login
-    - huggingface_hub package installed
-
-    Args:
-        repo_id: HuggingFace Hub repository ID (e.g., "username/model-name").
-            If None, uses HF_HUB_REPO_ID environment variable.
-        upload_steps: Upload every N steps. Should match hf_save_interval.
-            Set to -1 or 0 to disable periodic uploads.
-        upload_on_train_end: Whether to upload the final model when training ends.
-        private: Whether to create a private repository.
-        revision: Branch to upload to (default: "main").
-        upload_mode: "latest" (default) uploads each saved step to the repo ROOT,
-            overwriting the previous root weights so the repo is always
-            from_pretrained-able with zero per-step bloat. "all" additionally
-            archives each step under "{path_in_repo_prefix}/step_{N}/" while still
-            keeping the newest weights at root.
-        path_in_repo_prefix: Prefix for the per-step archive path used only in
-            "all" mode (default: "checkpoints"). Archives go to "{prefix}/step_{N}/".
-    """
-
-    def __init__(
-        self,
-        repo_id: Optional[str] = None,
-        upload_steps: int = -1,
-        upload_on_train_end: bool = True,
-        private: bool = False,
-        revision: str = DEFAULT_HF_HUB_REVISION,
-        upload_mode: str = DEFAULT_HF_UPLOAD_MODE,
-        path_in_repo_prefix: str = "checkpoints",
-    ):
-        import os
-
-        self.repo_id = repo_id or os.environ.get("HF_HUB_REPO_ID")
-        self.upload_steps = upload_steps
-        self.upload_on_train_end = upload_on_train_end
-        self.private = private
-        self.revision = revision
-        self.upload_mode = HFUploadMode(upload_mode)
-        self.path_in_repo_prefix = path_in_repo_prefix
-        self._pending_uploads: List[int] = []  # Steps that need uploading
-        self._export_path: Optional[str] = None
-        self._api = None
-        self._final_step: Optional[int] = None
-
-    def _get_api(self):
-        """Lazy-load HuggingFace Hub API."""
-        if self._api is None:
-            try:
-                from huggingface_hub import HfApi
-
-                self._api = HfApi()
-            except ImportError:
-                logger.error("huggingface_hub not installed. Run: pip install huggingface_hub")
-                raise
-        return self._api
-
-    def _ensure_repo_exists(self) -> bool:
-        """Ensure the HuggingFace Hub repository exists, creating if needed."""
-        if not self.repo_id:
-            logger.warning("HFHubUploadCallback: No repo_id configured, skipping upload")
-            return False
-
-        try:
-            api = self._get_api()
-            with _hf_hub_online():
-                api.create_repo(
-                    repo_id=self.repo_id,
-                    repo_type="model",
-                    private=self.private,
-                    exist_ok=True,
-                )
-            return True
-        except Exception as e:
-            logger.error(f"HFHubUploadCallback: Failed to create/access repo {self.repo_id}: {e}")
-            return False
-
-    def on_train_begin(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        """Store export_path from trainer config at training start."""
-        trainer = kwargs.get("trainer")
-        if trainer is not None and hasattr(trainer, "cfg"):
-            self._export_path = getattr(trainer.cfg.trainer, "export_path", None)
-            logger.info(
-                f"HFHubUploadCallback initialized: repo={self.repo_id}, "
-                f"upload_steps={self.upload_steps}, export_path={self._export_path}"
-            )
-        return control
-
-    def on_step_end(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        """Queue upload after HF model save steps."""
-        if self.upload_steps > 0 and state.global_step % self.upload_steps == 0:
-            self._pending_uploads.append(state.global_step)
-        return control
-
-    def on_train_end(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        """Upload final model and process any pending uploads."""
-        if self.upload_on_train_end and self.upload_steps > 0:
-            # Add final step if not already pending
-            if state.global_step not in self._pending_uploads:
-                self._pending_uploads.append(state.global_step)
-
-        self._final_step = state.global_step
-
-        # Process all pending uploads.  The final step's export may not exist
-        # yet — on_train_end fires BEFORE save_models() in the training loop.
-        # The trainer calls post_save_flush() after the export lands.
-        self._process_pending_uploads()
-        return control
-
-    def _process_pending_uploads(self) -> None:
-        """Process all pending uploads."""
-        if not self._pending_uploads:
-            return
-
-        if not self._export_path:
-            logger.warning("HFHubUploadCallback: No export_path configured, skipping uploads")
-            return
-
-        if not self._ensure_repo_exists():
-            return
-
-        api = self._get_api()
-
-        requested = list(self._pending_uploads)
-        missing: list[int] = []
-
-        for step in requested:
-            model_path = os.path.join(self._export_path, f"global_step_{step}", "policy")
-
-            if not io.exists(model_path):
-                missing.append(step)
-                logger.warning(f"HFHubUploadCallback: Model path not found: {model_path}")
-                continue
-
-            with io.local_read_dir(model_path) as local_dir:
-                upload_targets = [("", f"Upload checkpoint at step {step} (root)")]
-                if self.upload_mode is HFUploadMode.ALL:
-                    archive_path = f"{self.path_in_repo_prefix}/step_{step}"
-                    upload_targets.append((archive_path, f"Archive checkpoint at step {step}"))
-
-                for path_in_repo, commit_message in upload_targets:
-                    dest = f"{self.repo_id}/{path_in_repo}" if path_in_repo else f"{self.repo_id} (root)"
-                    try:
-                        logger.info(f"HFHubUploadCallback: Uploading {model_path} to {dest}")
-                        with _hf_hub_online():
-                            api.upload_folder(
-                                folder_path=str(local_dir),
-                                repo_id=self.repo_id,
-                                path_in_repo=path_in_repo,
-                                repo_type="model",
-                                revision=self.revision,
-                                commit_message=commit_message,
-                            )
-                        logger.info(f"HFHubUploadCallback: Successfully uploaded step {step} to {dest}")
-                    except Exception as e:
-                        logger.error(f"HFHubUploadCallback: Failed to upload step {step} to {dest}: {e}")
-
-        if requested and len(missing) == len(requested):
-            # Every export the run asked to publish was absent. The per-step warnings above scroll
-            # past in a long training log, so a run can finish, exit 0, and leave an empty repo —
-            # which is how two completed 80-step runs produced no publishable model before anyone
-            # noticed. Say it once, loudly, with the reason most likely to apply.
-            logger.error(
-                "HFHubUploadCallback: PUBLISHED NOTHING — all %d requested export(s) %s were "
-                "missing under export_path=%s, so repo %s is empty. On a multi-node job this is "
-                "expected when export_path is node-local: the exports are written by the policy "
-                "worker while this callback runs on the head node, and the existence check and "
-                "upload are both local-filesystem operations. Point export_path at storage "
-                "visible to the uploading process.",
-                len(missing),
-                missing,
-                self._export_path,
-                self.repo_id,
-            )
-
-        self._pending_uploads.clear()
-
-    async def on_train_end_async(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        """Async version - uploads in background to not block training end."""
-        import asyncio
-
-        if self.upload_on_train_end and self.upload_steps > 0:
-            if state.global_step not in self._pending_uploads:
-                self._pending_uploads.append(state.global_step)
-
-        self._final_step = state.global_step
-
-        # Run uploads in thread pool to not block
-        if self._pending_uploads:
-            await asyncio.to_thread(self._process_pending_uploads)
-
-        return control
-
-    def post_save_flush(self, final_step: int) -> None:
-        """Re-process the final step's upload after ``save_models()`` has written it.
-
-        ``on_train_end`` fires *before* ``save_models()`` in the training loop, so
-        the final step's export is missing during the first upload pass.  The
-        trainer calls this method after the export is on disk to retry it.
-        """
-        if self.upload_on_train_end and self.upload_steps > 0:
-            self._pending_uploads.append(final_step)
-            self._process_pending_uploads()
 
 
 @register_callback("database_registration")
@@ -485,7 +219,6 @@ class DatabaseRegistrationCallback(TrainerCallback):
         **kwargs,
     ) -> Optional[TrainerControl]:
         """Record training start time and load Supabase credentials."""
-        import os
         from datetime import datetime, timezone
 
         # Only register from rank 0
@@ -537,7 +270,6 @@ class DatabaseRegistrationCallback(TrainerCallback):
         if not self.enabled or not self._supabase_ready:
             return control
 
-        import os
         from datetime import datetime, timezone
 
         try:
@@ -1141,24 +873,6 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     if hf_save_interval > 0:
         callbacks.append(HFModelSaveCallback(save_steps=hf_save_interval))
 
-    # The export-only job publishes after conversion; normal training only records the destination in its request.
-    hf_hub_repo_id = getattr(cfg.trainer, "hf_hub_repo_id", None)
-    hf_export_execution = getattr(cfg.trainer, "hf_export_execution", False)
-    if hf_export_execution and hf_hub_repo_id and hf_save_interval > 0:
-        hf_hub_private = getattr(cfg.trainer, "hf_hub_private", False)
-        hf_hub_revision = getattr(cfg.trainer, "hf_hub_revision", DEFAULT_HF_HUB_REVISION)
-        hf_upload_mode = getattr(cfg.trainer, "hf_upload_mode", DEFAULT_HF_UPLOAD_MODE)
-        callbacks.append(
-            HFHubUploadCallback(
-                repo_id=hf_hub_repo_id,
-                upload_steps=hf_save_interval,
-                upload_on_train_end=True,
-                private=hf_hub_private,
-                revision=hf_hub_revision,
-                upload_mode=hf_upload_mode,
-            )
-        )
-
     # Reference model update callback
     update_ref_every_epoch = getattr(cfg.trainer, "update_ref_every_epoch", False)
     if update_ref_every_epoch:
@@ -1372,7 +1086,6 @@ class DataTrackingCallback(TrainerCallback):
         **kwargs,
     ) -> Optional[TrainerControl]:
         import dataclasses
-        import os
 
         import torch
 
@@ -1420,7 +1133,6 @@ class DataTrackingCallback(TrainerCallback):
 
         Returns True if state was loaded, False if no artifact found.
         """
-        import os
 
         import torch
 
@@ -1480,8 +1192,6 @@ class BufferCheckpointCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        import os
-
         import torch
 
         from skyrl_train.utils.io import io
@@ -1541,7 +1251,6 @@ class BufferCheckpointCallback(TrainerCallback):
 
         Returns a list of GeneratedOutputGroup, or empty list if no file found.
         """
-        import os
 
         import torch
 

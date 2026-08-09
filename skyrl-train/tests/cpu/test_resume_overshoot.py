@@ -66,7 +66,6 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     # epochs is read from cfg in _handle_resume_at_max_steps
     cfg = MagicMock()
     cfg.trainer.epochs = 1
-    cfg.trainer.hf_export_execution = True
     trainer.cfg = cfg
 
     # _create_trainer_state for the base trainer reads len(self.train_dataloader);
@@ -76,7 +75,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     trainer.train_dataloader = dl
 
     trainer.save_checkpoints = MagicMock(name="save_checkpoints")
-    trainer.save_models = MagicMock(name="save_models")
+    trainer.handle_hf_export = MagicMock(name="handle_hf_export")
     trainer.policy_model = MagicMock(name="policy_model")
     return trainer
 
@@ -154,8 +153,7 @@ def test_train_end_saves_the_last_completed_step(cls):
     trainer.callback_handler = _RecordingCallbackHandler(requested)
     saved_steps = []
     trainer.save_checkpoints.side_effect = lambda: saved_steps.append(trainer.global_step)
-    trainer.save_models.side_effect = lambda: saved_steps.append(trainer.global_step)
-    trainer._flush_hf_uploads = MagicMock()
+    trainer.handle_hf_export.side_effect = lambda: saved_steps.append(trainer.global_step)
 
     asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
 
@@ -185,7 +183,7 @@ def test_handle_resume_at_max_steps_triggers_export_when_requested(cls):
 
     assert "on_train_end" in trainer.callback_handler.events
     trainer.save_checkpoints.assert_called_once()
-    trainer.save_models.assert_called_once()
+    trainer.handle_hf_export.assert_called_once()
 
 
 @pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
@@ -198,7 +196,7 @@ def test_handle_resume_at_max_steps_no_save_when_not_requested(cls):
     asyncio.run(trainer._handle_resume_at_max_steps())
 
     trainer.save_checkpoints.assert_not_called()
-    trainer.save_models.assert_not_called()
+    trainer.handle_hf_export.assert_not_called()
 
 
 def test_handle_resume_at_max_steps_backloads_when_colocate(monkeypatch):

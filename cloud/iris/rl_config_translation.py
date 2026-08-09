@@ -388,6 +388,15 @@ class ParsedRLConfig:
     data_kind: str = "tasks"
 
 
+@dataclass(frozen=True)
+class ParsedCheckpointExportConfig:
+    """Policy configuration needed to reconstruct a checkpoint for conversion."""
+
+    config_path: Path
+    config_groups: Dict[str, str]
+    trainer: Dict[str, Any]
+
+
 def validate_tp_divides_heads(
     tensor_parallel_size: int,
     num_attention_heads: Optional[int],
@@ -527,6 +536,24 @@ def parse_rl_config(
     )
 
 
+def parse_checkpoint_export_config(
+    config_path: str,
+    model_override: str,
+) -> ParsedCheckpointExportConfig:
+    """Read policy configuration without validating or materializing rollout settings."""
+    path = resolve_rl_config_path(config_path)
+    with path.open() as source:
+        raw = yaml.safe_load(source) or {}
+
+    trainer = resolve_paths_in_dict(copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path"})
+    trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
+    return ParsedCheckpointExportConfig(
+        config_path=path,
+        config_groups=dict(raw.get("config_groups", {})),
+        trainer=trainer,
+    )
+
+
 # Explicit mapping from custom environment import_paths to their base environment
 # types. Used to determine tunnel requirements for custom environments.
 IMPORT_PATH_TO_ENV_TYPE = {
@@ -635,6 +662,54 @@ def _format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
             return f"{prefix}{key}={value}"
     else:
         return f"{prefix}{key}={value}"
+
+
+_OPTIONAL_HYDRA_PATTERNS = {
+    ".engine_init_kwargs",
+    ".hf_hub_",
+    ".enable_db_registration",
+    ".optimizer_kwargs",
+    ".rope_scaling",
+    ".wrap_policy",
+    ".transformer_config_kwargs",
+}
+
+
+def build_checkpoint_export_hydra_args(
+    parsed: ParsedCheckpointExportConfig,
+    exp_args: Dict[str, Any],
+    hpc: Any,
+) -> List[str]:
+    """Build policy-only Hydra arguments for the standalone checkpoint converter."""
+    args = [f"+{group_name}={config_name}" for group_name, config_name in parsed.config_groups.items()]
+    trainer = copy.deepcopy(parsed.trainer)
+    placement = trainer.setdefault("placement", {})
+    num_nodes = int(exp_args.get("num_nodes", 1))
+    gpus_per_node = int(exp_args.get("gpus_per_node", getattr(hpc, "gpus_per_node", 4)))
+    placement["policy_num_nodes"] = num_nodes
+    configured_gpus_per_node = placement.get("policy_num_gpus_per_node")
+    placement["policy_num_gpus_per_node"] = (
+        gpus_per_node
+        if configured_gpus_per_node is None or int(configured_gpus_per_node) > gpus_per_node
+        else int(configured_gpus_per_node)
+    )
+
+    model_path = exp_args["model_path"]
+    policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
+    policy_model["path"] = model_path
+    model_source = model_source_for_path(
+        model_path,
+        exp_args.get("model_source_uri"),
+        exp_args.get("model_source_identity"),
+    )
+    if model_source:
+        policy_model["source_uri"] = model_source.uri
+        policy_model["source_identity"] = model_source.identity
+
+    for key, value in _flatten_dict(trainer, "trainer").items():
+        prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
+        args.append(_format_hydra_arg(key, value, prefix=prefix))
+    return args
 
 
 def build_skyrl_hydra_args(
@@ -786,16 +861,6 @@ def build_skyrl_hydra_args(
     # that node became a strict struct, so a plain "" override of a new subkey fails
     # ("Could not override ...transformer_config_kwargs.gradient_accumulation_fusion");
     # ++ force-adds the leaf while leaving the preset's other subkeys (recompute_*) intact.
-    optional_patterns = {
-        ".engine_init_kwargs",
-        ".hf_hub_",
-        ".enable_db_registration",
-        ".optimizer_kwargs",
-        ".rope_scaling",
-        ".wrap_policy",
-        ".transformer_config_kwargs",
-    }
-
     for section, values in [
         ("trainer", trainer),
         ("generator", generator),
@@ -803,7 +868,7 @@ def build_skyrl_hydra_args(
         ("environment", environment),
     ]:
         for key, val in _flatten_dict(values, section).items():
-            prefix = "++" if any(pattern in key for pattern in optional_patterns) else ""
+            prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
             args.append(_format_hydra_arg(key, val, prefix=prefix))
 
     # Teacher config (on-policy distillation) — all keys use ++ since the teacher

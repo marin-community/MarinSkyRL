@@ -53,6 +53,37 @@ def test_cloud_checkpoint_load_stages_only_its_rank_shards(monkeypatch, tmp_path
     ]
 
 
+def test_export_checkpoint_load_does_not_require_training_state(monkeypatch, tmp_path):
+    strategy = object.__new__(FSDPStrategy)
+    strategy.world_size = 8
+    strategy.fsdp_strategy = "fsdp"
+    monkeypatch.setattr(strategy, "get_rank", lambda: 3)
+    monkeypatch.setattr(strategy, "print", lambda *args: None)
+    staged_paths = []
+
+    @contextmanager
+    def stage_requested_files(paths):
+        staged_paths.extend(paths)
+        model_path = tmp_path / Path(paths[0]).name
+        torch.save(torch.nn.Linear(1, 1).state_dict(), model_path)
+        yield [str(model_path)]
+
+    monkeypatch.setattr(fsdp_module.io, "exists", lambda path: "extra_state" not in path and "optim" not in path)
+    monkeypatch.setattr(fsdp_module.io, "local_read_files", stage_requested_files)
+    monkeypatch.setattr(fsdp_module, "get_fsdp_state_ctx", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(fsdp_module.dist, "barrier", lambda: None)
+
+    strategy.load_checkpoint(
+        torch.nn.Linear(1, 1),
+        "s3://bucket/checkpoints/step_28/policy",
+        load_optimizer_states=False,
+        load_lr_scheduler_states=False,
+        load_runtime_state=False,
+    )
+
+    assert staged_paths == ["s3://bucket/checkpoints/step_28/policy/model_world_size_8_rank_3.pt"]
+
+
 def test_hf_export_serialization_has_no_trailing_barrier(monkeypatch, tmp_path):
     barrier_entered = False
 

@@ -760,20 +760,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
         return out
 
-    def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.policy.fsdp_config,
-            optimizer_config=self.cfg.trainer.policy.optimizer_config,
-            model_config=self.cfg.trainer.policy.model,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            num_training_steps=num_training_steps,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
-
+    def _build_policy_model(self, strategy: FSDPStrategy, model_path: str) -> HFModelWrapper:
         # Stage 3: surface the CP submesh/group on the worker so the Stage-4 forward wrap
         # can read it. cp_size==1 leaves both None (flag-off path untouched).
         self.cp_mesh = getattr(strategy, "cp_mesh", None)
@@ -830,6 +817,23 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     }
                 )
 
+        return wrapped_model
+
+    def init_model(self, model_path, num_training_steps: int = None):
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+        strategy = FSDPStrategy(
+            fsdp_config=self.cfg.trainer.policy.fsdp_config,
+            optimizer_config=self.cfg.trainer.policy.optimizer_config,
+            model_config=self.cfg.trainer.policy.model,
+            fsdp_strategy=self.cfg.trainer.strategy,
+            seed=self.cfg.trainer.seed,
+            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+            num_training_steps=num_training_steps,
+        )
+        strategy.setup_distributed()
+        self.strategy = strategy
+        wrapped_model = self._build_policy_model(strategy, model_path)
+
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
         )
@@ -852,6 +856,23 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
         self._maybe_start_host_ram_monitor()
+
+    def init_model_for_export(self, model_path: str) -> None:
+        """Initialize policy structure without training or rollout state."""
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+        strategy = FSDPStrategy(
+            fsdp_config=self.cfg.trainer.policy.fsdp_config,
+            optimizer_config=self.cfg.trainer.policy.optimizer_config,
+            model_config=self.cfg.trainer.policy.model,
+            fsdp_strategy=self.cfg.trainer.strategy,
+            seed=self.cfg.trainer.seed,
+            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+        )
+        strategy.setup_distributed()
+        self.strategy = strategy
+        wrapped_model = self._build_policy_model(strategy, model_path)
+        self.model = strategy.prepare(wrapped_model)
+        self.model.eval()
 
     def _maybe_start_host_ram_monitor(self):
         """Start the periodic host-RAM / cgroup-mem reporter on the POLICY worker.

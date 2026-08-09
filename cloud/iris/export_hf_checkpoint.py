@@ -9,26 +9,18 @@ that checkpoint directory with ``--request`` to run the conversion on a separate
 gang. The request remains pending after failure and becomes complete only after Iris
 reports success, so an interrupted or partial export is explicitly rerunnable.
 
-Converting those checkpoints offline is not practical for the megatron strategy. It
+Converting those checkpoints on a laptop is not practical for the Megatron strategy. It
 writes a ``torch.distributed.checkpoint`` set (``__N_0.distcp`` + ``.metadata``) whose
 tensors are Megatron-native — layer-stacked keys, grouped experts — and the conversion
 to HF layout runs through ``bridge.save_hf_weights`` (mbridge), which needs the Megatron
-runtime and a live process group at the original parallel geometry. There is no laptop
-path.
+runtime and a live process group at the saved parallel geometry.
 
-This command does not reimplement conversion. It re-runs the trainer's own export by
-using its resume-at-max-steps path:
-
-``FullyAsyncTrainer._train_loop`` checks, right after resuming, whether the resumed step
-is at or past ``max_steps``. If it is, the run is complete: it calls
-``_handle_resume_at_max_steps``, which fires ``on_train_end``, and the checkpoint
-callback then requests an HF save (``save_on_train_end and save_steps > 0``). That runs
-``save_models`` → ``save_hf_model`` → ``bridge.save_hf_weights``, followed by
-``_flush_hf_uploads``, and exits 0.
-
-Setting ``max_steps`` to the checkpoint's own step produces a job that loads the weights,
-exports them, and stops without training a step. ``--timeout`` belongs to this export job;
-it is independent of the source training gang's process-group timeout.
+The task enters ``skyrl_train.entrypoints.checkpoint_export`` instead of an RL entrypoint.
+It creates only the saved policy worker group, restores only model tensors, invokes the
+strategy's existing HF converter, and exits. It does not create rollout engines, datasets,
+generators, tracking, reference models, critics, optimizers, or schedulers. ``--timeout``
+belongs to this export job and is independent of the source training gang's process-group
+timeout.
 
 The export lands in ``export_path`` on durable storage. When the request carries the
 training run's Hub destination, the export-only job publishes the completed artifact.
@@ -73,26 +65,13 @@ def build_command(spec: ExportJobSpec) -> list[str]:
     request = spec.request
 
     overrides = [
-        # Resume this exact step, not whatever is newest. The step to publish is chosen
-        # by trailing-EMA reward, which is rarely the last one a run banked.
-        "++trainer.resume_mode=from_path",
-        f"++trainer.resume_path={request.checkpoint_path}",
-        # The load-bearing argument: resuming AT max_steps takes the
-        # already-complete branch, which finalizes and exits instead of training.
-        f"++trainer.max_steps={request.step}",
-        f"++trainer.ckpt_path={request.checkpoint_base_path}",
-        f"++trainer.export_path={request.export_path}",
-        # Force legacy callbacks so an explicit training callback list cannot
-        # resave the source checkpoint or suppress this one-shot export.
-        "++trainer.callbacks=[]",
-        "++trainer.ckpt_interval=-1",
-        "++trainer.hf_save_interval=1",
-        "++trainer.hf_export_execution=true",
-        f"++trainer.hf_hub_repo_id={request.hf_hub_repo_id or 'null'}",
-        f"++trainer.hf_hub_private={str(request.hf_hub_private).lower()}",
-        f"++trainer.hf_hub_revision={request.hf_hub_revision}",
-        f"++trainer.hf_upload_mode={request.hf_upload_mode}",
-        "++trainer.enable_db_registration=false",
+        f"++checkpoint_export.step={request.step}",
+        f"++checkpoint_export.checkpoint_path={request.checkpoint_path}",
+        f"++checkpoint_export.export_root={request.export_path}",
+        f"++checkpoint_export.hf_hub_repo_id={request.hf_hub_repo_id or 'null'}",
+        f"++checkpoint_export.hf_hub_private={str(request.hf_hub_private).lower()}",
+        f"++checkpoint_export.hf_hub_revision={request.hf_hub_revision}",
+        f"++checkpoint_export.hf_upload_mode={request.hf_upload_mode}",
     ]
 
     cmd = [
@@ -111,6 +90,8 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         spec.cluster,
         "--target-cluster",
         spec.cluster,
+        "--entrypoint",
+        "skyrl_train.entrypoints.checkpoint_export",
         "--priority",
         spec.priority,
         # An export job must not be retried into a second export.
@@ -280,7 +261,7 @@ def main() -> None:
 
     cmd = build_command(spec)
 
-    print("[export-hf] resuming step", spec.request.step, "and exporting without training")
+    print("[export-hf] converting checkpoint step", spec.request.step)
     print("[export-hf]", " ".join(cmd))
     if args.dry_run:
         return

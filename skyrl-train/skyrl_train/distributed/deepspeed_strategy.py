@@ -252,6 +252,7 @@ class DeepspeedStrategy(DistributedStrategy):
         load_module_strict=True,
         load_optimizer_states=True,
         load_lr_scheduler_states=True,
+        load_runtime_state=True,
     ):
         if isinstance(model, HFModelWrapper):
             model = model.model
@@ -272,7 +273,7 @@ class DeepspeedStrategy(DistributedStrategy):
             raise Exception(f"[deepspeed] failed to resume from checkpoint {ckpt_dir}")
 
         # Load RNG state for reproducibility (if present)
-        if "rng" in states:
+        if load_runtime_state and "rng" in states:
             self.load_rng_state(states["rng"])
             if self.is_rank_0():
                 self.print(f"[rank-{self.get_rank()}]: Loaded RNG state from checkpoint")

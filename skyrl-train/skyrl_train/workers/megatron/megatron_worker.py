@@ -449,6 +449,34 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
+    def init_model_for_export(self, model_path: str) -> None:
+        """Initialize Megatron model structure without optimizer or training state."""
+        self.init_configs(
+            model_path,
+            self.cfg.trainer.policy.megatron_config,
+            self.cfg.trainer.policy.megatron_config.model_config_kwargs,
+            self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+            bf16=self.cfg.trainer.bf16,
+            flash_attn=self.cfg.trainer.flash_attn,
+        )
+        self.actor_module = self.make_megatron_module(
+            wrap_with_ddp=False,
+            ddp_config=None,
+            bf16=self.cfg.trainer.bf16,
+        )
+        if self._local_rank == 0 and not os.path.exists(model_path):
+            load_pretrained_with_retry(lambda: snapshot_download(model_path), model_id=model_path)
+        torch.distributed.barrier()
+        if self._rank == 0:
+            print_model_size(self.actor_module[0])
+        self.model = MegatronModelWrapper(
+            config=self.cfg,
+            actor_module=self.actor_module,
+            logprob_chunk_size=OmegaConf.select(
+                self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
+            ),
+        )
+
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
         Overrides `PolicyWorkerBase.ppo_train` for megatron.

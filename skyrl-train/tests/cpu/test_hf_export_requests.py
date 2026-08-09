@@ -1,6 +1,4 @@
-import asyncio
 import json
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 from omegaconf import OmegaConf
@@ -8,14 +6,13 @@ from omegaconf import OmegaConf
 from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
 from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus, HFUploadMode
-from skyrl_train.trainer import CheckpointExportTrainer, RayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 from skyrl_train.utils.utils import validate_hf_export_config
 
@@ -23,7 +20,6 @@ from skyrl_train.utils.utils import validate_hf_export_config
 def _trainer_config(
     tmp_path,
     *,
-    execute: bool = False,
     model_path: str = "org/model",
     model_source_uri: str | None = None,
     model_source_identity: str | None = None,
@@ -33,7 +29,6 @@ def _trainer_config(
             "trainer": {
                 "ckpt_path": str(tmp_path / "checkpoints"),
                 "export_path": str(tmp_path / "exports"),
-                "hf_export_execution": execute,
                 "placement": {"policy_num_nodes": 2, "policy_num_gpus_per_node": 4},
                 "policy": {
                     "model": {
@@ -72,23 +67,6 @@ def _export_command(request):
             no_wait=False,
         )
     )
-
-
-class _DatasetFreeExportExperiment(BasePPOExp):
-    def get_tokenizer(self, padding_side="left"):
-        return object()
-
-    def get_train_dataset(self):
-        raise AssertionError("export execution must not initialize training data")
-
-    def get_eval_dataset(self):
-        raise AssertionError("export execution must not initialize evaluation data")
-
-    def get_colocate_pg(self, timeout=0):
-        return None
-
-    def get_policy_pg(self, timeout=0):
-        return None
 
 
 def _command_options(command):
@@ -176,7 +154,7 @@ def test_corrupt_export_request_protects_its_checkpoint(tmp_path, request_conten
 
 
 def test_hf_export_interval_must_be_checkpoint_aligned():
-    cfg = OmegaConf.create({"trainer": {"ckpt_interval": 3, "hf_save_interval": 5, "hf_export_execution": False}})
+    cfg = OmegaConf.create({"trainer": {"ckpt_interval": 3, "hf_save_interval": 5}})
 
     with pytest.raises(ValueError, match="multiple of trainer.ckpt_interval"):
         validate_hf_export_config(cfg)
@@ -199,7 +177,6 @@ def test_normal_training_rejects_in_band_hub_upload():
                     {"type": "hf_model_save", "save_steps": 5},
                     {"type": "hf_hub_upload", "upload_steps": 5, "repo_id": "org/model"},
                 ],
-                "hf_export_execution": False,
             }
         }
     )
@@ -230,66 +207,14 @@ def test_export_job_owns_timeout_and_waits_for_completion():
         if index > 0 and command[index - 1] == "--skyrl_override"
     }
 
-    assert overrides["++trainer.hf_export_execution"] == "true"
-    assert overrides["++trainer.callbacks"] == "[]"
-    assert overrides["++trainer.ckpt_interval"] == "-1"
+    assert options["--entrypoint"] == "skyrl_train.entrypoints.checkpoint_export"
+    assert overrides["++checkpoint_export.step"] == "10"
+    assert overrides["++checkpoint_export.checkpoint_path"] == request.checkpoint_path
+    assert overrides["++checkpoint_export.export_root"] == request.export_path
+    assert not any(key.startswith("++trainer.callbacks") for key in overrides)
     assert options["--timeout"] == "7200"
     assert "--no-wait" not in command
-    assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
-
-
-def test_export_experiment_constructs_without_train_or_eval_data():
-    config = OmegaConf.create({"trainer": {"hf_export_execution": True, "log_level": "INFO"}})
-
-    experiment = _DatasetFreeExportExperiment(config)
-
-    assert experiment.train_dataset is None
-    assert experiment.eval_dataset is None
-
-
-def test_export_trainer_constructs_without_a_dataloader():
-    config = OmegaConf.create(
-        {
-            "trainer": {
-                "hf_export_execution": True,
-                "max_steps": 12,
-                "resume_mode": "from_path",
-                "resume_path": "/checkpoints/global_step_12",
-                "epochs": 1,
-                "placement": {"colocate_all": False},
-                "fully_async": {"num_parallel_generation_workers": 4, "max_staleness_steps": 1},
-                "policy_mini_batch_size": 4,
-                "train_batch_size": 4,
-                "algorithm": {"dynamic_sampling": {"type": None}},
-            },
-            "generator": {"batched": False, "async_engine": True},
-        }
-    )
-
-    trainer = CheckpointExportTrainer(
-        cfg=config,
-        tracker=object(),
-        tokenizer=object(),
-        train_dataset=None,
-        inference_engine_client=object(),
-        generator=object(),
-        callbacks=[],
-    )
-
-    assert trainer.train_dataloader is None
-    assert trainer.total_training_steps == 12
-
-
-def test_export_trainer_rejects_a_different_loaded_checkpoint_step():
-    trainer = CheckpointExportTrainer.__new__(CheckpointExportTrainer)
-    trainer.total_training_steps = 12
-    trainer.load_checkpoints = Mock(return_value=(11, "/checkpoints/global_step_11"))
-    trainer._teardown = AsyncMock()
-
-    with pytest.raises(ValueError, match="requested global_step_12, loaded global_step_11"):
-        asyncio.run(trainer.train())
-
-    trainer._teardown.assert_awaited_once()
+    assert overrides["++checkpoint_export.hf_hub_repo_id"] == "org/exported-model"
 
 
 def test_export_job_materializes_request_model_source():

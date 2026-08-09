@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils import validate_cfg
 
-from skyrl_train.trainer import CheckpointExportTrainer, RayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import (
@@ -33,9 +33,7 @@ from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
 import asyncio
-from dataclasses import dataclass
 import multiprocessing as mp
-from typing import Protocol
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -45,72 +43,6 @@ mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
-
-
-class _TrainerFactory(Protocol):
-    def __call__(
-        self,
-        cfg: DictConfig,
-        tracker: Tracking,
-        tokenizer: PreTrainedTokenizerBase,
-        train_dataset: PromptDataset | None,
-        eval_dataset: PromptDataset | None,
-        inference_engine_client: InferenceEngineClient,
-        generator: GeneratorInterface,
-        colocate_pg: PlacementGroup | None,
-    ) -> RayPPOTrainer: ...
-
-
-@dataclass(frozen=True)
-class _TrainerInputs:
-    cfg: DictConfig
-    tracker: Tracking
-    tokenizer: PreTrainedTokenizerBase
-    train_dataset: PromptDataset | None
-    eval_dataset: PromptDataset | None
-    inference_engine_client: InferenceEngineClient
-    generator: GeneratorInterface
-    colocate_pg: PlacementGroup | None
-
-    def build(self, factory: _TrainerFactory) -> RayPPOTrainer:
-        return factory(
-            cfg=self.cfg,
-            tracker=self.tracker,
-            tokenizer=self.tokenizer,
-            train_dataset=self.train_dataset,
-            eval_dataset=self.eval_dataset,
-            inference_engine_client=self.inference_engine_client,
-            generator=self.generator,
-            colocate_pg=self.colocate_pg,
-        )
-
-
-class _ExperimentExecution(Protocol):
-    def datasets(self, experiment: "BasePPOExp") -> tuple[PromptDataset | None, PromptDataset | None]: ...
-
-    def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> RayPPOTrainer: ...
-
-
-class _TrainingExecution:
-    def datasets(self, experiment: "BasePPOExp") -> tuple[PromptDataset | None, PromptDataset | None]:
-        return experiment.get_train_dataset(), experiment.get_eval_dataset()
-
-    def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> RayPPOTrainer:
-        return inputs.build(experiment.get_trainer)
-
-
-class _CheckpointExportExecution:
-    def datasets(self, _experiment: "BasePPOExp") -> tuple[None, None]:
-        return None, None
-
-    def trainer(self, _experiment: "BasePPOExp", inputs: _TrainerInputs) -> CheckpointExportTrainer:
-        return inputs.build(CheckpointExportTrainer)
-
-
-def _experiment_execution(cfg: DictConfig) -> _ExperimentExecution:
-    if cfg.trainer.get("hf_export_execution", False):
-        return _CheckpointExportExecution()
-    return _TrainingExecution()
 
 
 def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
@@ -259,10 +191,10 @@ class BasePPOExp:
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
-        self.execution = _experiment_execution(cfg)
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
-        self.train_dataset, self.eval_dataset = self.execution.datasets(self)
+        self.train_dataset = self.get_train_dataset()
+        self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
@@ -512,7 +444,7 @@ class BasePPOExp:
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
-        trainer_inputs = _TrainerInputs(
+        trainer = self.get_trainer(
             cfg=self.cfg,
             tracker=tracker,
             tokenizer=tokenizer,
@@ -522,7 +454,6 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
-        trainer = self.execution.trainer(self, trainer_inputs)
 
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an

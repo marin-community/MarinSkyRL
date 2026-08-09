@@ -172,6 +172,36 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
 
         self._model_update_group_name = None
 
+    def init_model_for_export(self, model_id_or_path: str) -> None:
+        """Initialize DeepSpeed model structure without optimizer or training state."""
+        self.zero_stage = self.cfg.trainer.policy.deepspeed_config.zero_optimization.stage
+        strategy = DeepspeedStrategy(
+            self.cfg.trainer.policy.deepspeed_config,
+            seed=self.cfg.trainer.seed,
+            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+            zero_stage=self.zero_stage,
+            bf16=self.cfg.trainer.bf16,
+        )
+        strategy.setup_distributed()
+        self.strategy = strategy
+        self._normalize_mini_batch_size()
+        wrapped_model = HFModelWrapper(
+            model_id_or_path,
+            use_flash_attention_2=self.cfg.trainer.flash_attn,
+            bf16=self.cfg.trainer.bf16,
+            target_modules=self.cfg.trainer.policy.model.lora.target_modules,
+            exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
+            ds_config=strategy.get_ds_eval_config(),
+            sequence_parallel_size=self.sequence_parallel_size,
+            use_sample_packing=self.cfg.trainer.use_sample_packing,
+            rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+            rope_theta=get_rope_theta_config(self.cfg.trainer),
+            training_strategy=self.cfg.trainer.strategy,
+        )
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
+        self.model = strategy.prepare(wrapped_model)
+        self.model.eval()
+
     def process_sequences(self, sequences, input_len, eos_token_id, pad_token_id):
         return self.model.process_sequences(sequences, input_len, eos_token_id, pad_token_id)
 

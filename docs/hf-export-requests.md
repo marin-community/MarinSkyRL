@@ -37,16 +37,18 @@ The request owns checkpoint, model, geometry, export destination, and Hub
 settings. The command owns operational placement, priority, and timeout.
 Conflicting request-owned command-line options fail before submission.
 
-Export jobs do not accept or load training or evaluation data. They also skip
-generator startup. After loading the checkpoint, the trainer requires its
-recorded global step to equal the request step before it runs finalization.
+Export jobs enter a dedicated checkpoint converter instead of the configured RL
+entrypoint. The converter creates only the policy worker group at the geometry
+recorded in the request. It does not initialize training or evaluation data,
+rollout engines, a generator, tracking, reference or critic models, optimizers,
+schedulers, profilers, or weight synchronization. Before model initialization,
+it requires `trainer_state.pt` to record exactly the requested step.
 
 ## Trainer configuration
 
 `trainer.hf_save_interval` follows `trainer.ckpt_interval` by default. An
 explicit export interval must be a multiple of the checkpoint interval so every
-request refers to a completed checkpoint. `trainer.hf_export_execution` is
-reserved for the export job and must remain false during normal training.
+request refers to a completed checkpoint.
 
 Hub publication runs after conversion completes in the export job. Normal
 training may record a Hub destination in the request, but it does not run the
@@ -54,8 +56,9 @@ upload callback on the training ranks.
 
 ## Failure boundary
 
-The export job has its own timeout and exit status. Conversion no longer holds
-non-exporting training ranks at a trailing process-group barrier while one rank
-serializes or uploads the model. FSDP2, DeepSpeed, and Megatron retain the
-collectives required to gather weights; they do not add a barrier after the
-single-writer serialization phase.
+The export job has its own timeout and exit status. FSDP2 and Megatron conversion
+still require a distributed GPU gang at the saved policy geometry because their
+checkpoint formats are sharded. The export-specific runtime profiles install the
+selected FSDP2, DeepSpeed, or Megatron strategy without vLLM, Harbor, Daytona, or training telemetry.
+Conversion does not hold unrelated training or rollout ranks while one rank
+serializes or uploads the model.
