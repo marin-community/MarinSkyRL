@@ -33,6 +33,7 @@ from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
 import asyncio
+from dataclasses import dataclass
 import multiprocessing as mp
 from typing import Protocol
 
@@ -46,26 +47,56 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
+@dataclass(frozen=True)
+class _TrainerInputs:
+    cfg: DictConfig
+    tracker: Tracking
+    tokenizer: PreTrainedTokenizerBase
+    train_dataset: PromptDataset | None
+    eval_dataset: PromptDataset | None
+    inference_engine_client: InferenceEngineClient
+    generator: GeneratorInterface
+    colocate_pg: PlacementGroup | None
+
+
 class _ExperimentExecution(Protocol):
     def datasets(self, experiment: "BasePPOExp") -> tuple[PromptDataset | None, PromptDataset | None]: ...
 
-    def trainer(self, experiment: "BasePPOExp", **trainer_kwargs) -> RayPPOTrainer: ...
+    def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> RayPPOTrainer: ...
 
 
 class _TrainingExecution:
     def datasets(self, experiment: "BasePPOExp") -> tuple[PromptDataset | None, PromptDataset | None]:
         return experiment.get_train_dataset(), experiment.get_eval_dataset()
 
-    def trainer(self, experiment: "BasePPOExp", **trainer_kwargs) -> RayPPOTrainer:
-        return experiment.get_trainer(**trainer_kwargs)
+    def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> RayPPOTrainer:
+        return experiment.get_trainer(
+            cfg=inputs.cfg,
+            tracker=inputs.tracker,
+            tokenizer=inputs.tokenizer,
+            train_dataset=inputs.train_dataset,
+            eval_dataset=inputs.eval_dataset,
+            inference_engine_client=inputs.inference_engine_client,
+            generator=inputs.generator,
+            colocate_pg=inputs.colocate_pg,
+        )
 
 
 class _CheckpointExportExecution:
     def datasets(self, experiment: "BasePPOExp") -> tuple[None, None]:
         return None, None
 
-    def trainer(self, experiment: "BasePPOExp", **trainer_kwargs) -> CheckpointExportTrainer:
-        return CheckpointExportTrainer(**trainer_kwargs)
+    def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> CheckpointExportTrainer:
+        return CheckpointExportTrainer(
+            cfg=inputs.cfg,
+            tracker=inputs.tracker,
+            tokenizer=inputs.tokenizer,
+            train_dataset=inputs.train_dataset,
+            eval_dataset=inputs.eval_dataset,
+            inference_engine_client=inputs.inference_engine_client,
+            generator=inputs.generator,
+            colocate_pg=inputs.colocate_pg,
+        )
 
 
 def _experiment_execution(cfg: DictConfig) -> _ExperimentExecution:
@@ -221,7 +252,6 @@ class BasePPOExp:
         """
         self.cfg = cfg
         self.execution = _experiment_execution(cfg)
-        # Configure SkyRL log level from config
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset, self.eval_dataset = self.execution.datasets(self)
@@ -474,7 +504,7 @@ class BasePPOExp:
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
-        trainer_kwargs = dict(
+        trainer_inputs = _TrainerInputs(
             cfg=self.cfg,
             tracker=tracker,
             tokenizer=tokenizer,
@@ -484,7 +514,7 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
-        trainer = self.execution.trainer(self, **trainer_kwargs)
+        trainer = self.execution.trainer(self, trainer_inputs)
 
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an
