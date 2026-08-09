@@ -413,6 +413,24 @@ def test_runtime_bundle_uses_files_from_installed_vcs_distribution(tmp_path: Pat
     assert runtime_bundle.validate_bundled_runtime(workspace) == commit
 
 
+def test_runtime_bundle_can_load_hf_dataset_extractor(tmp_path: Path) -> None:
+    workspace = runtime_bundle.build_runtime_bundle(_git_commit(_REPOSITORY_ROOT))
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "huggingface_hub.py").write_text("snapshot_download = None\n")
+    (stubs / "tqdm.py").write_text("tqdm = None\n")
+
+    result = subprocess.run(
+        [sys.executable, "-S", "-m", "cloud.iris.extract_tasks_from_parquet", "--help"],
+        cwd=workspace,
+        env={**os.environ, "PYTHONPATH": str(stubs)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(
     runtime_checkout: tuple[Path, str],
 ) -> None:
