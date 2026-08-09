@@ -165,10 +165,11 @@ class RayPPOTrainer:
 
     def _configure_training_schedule(self):
         """
-        Hook for constructing the training dataloader. Subclasses can override
-        this to customize dataloader behavior. For instance, fully async training
-        needs a batch size of 1, among other features.
-        Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
+        Configure the execution schedule and, for training lifecycles, the dataloader.
+
+        The default builds a training dataloader. Fully async training overrides the
+        schedule geometry, while checkpoint export validates one exact resume step
+        and deliberately constructs no dataloader.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
         self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
@@ -359,19 +360,21 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
-        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
-        # This must happen before any generate() calls
+        await self._startup_generator()
+
+        try:
+            await self._train_loop()
+        finally:
+            await self._teardown()
+
+    async def _startup_generator(self) -> None:
+        """Initialize generator resources before any rollout can begin."""
         try:
             await self.generator.startup()
             logger.info("Generator startup complete")
         except Exception as e:
             logger.opt(depth=0).error("Generator startup failed: " + str(e))
             raise
-
-        try:
-            await self._train_loop()
-        finally:
-            await self._teardown()
 
     async def _handle_resume_at_max_steps(self) -> None:
         """Handle a run that resumed AT or PAST max_steps (already complete).
@@ -2225,12 +2228,8 @@ class CheckpointExportTrainer(RayPPOTrainer):
     def _num_steps_per_epoch(self) -> int:
         return self.total_training_steps
 
-    async def train(self) -> None:
-        """Run checkpoint load and finalization without starting the rollout generator."""
-        try:
-            await self._train_loop()
-        finally:
-            await self._teardown()
+    async def _startup_generator(self) -> None:
+        """Checkpoint export has no rollout lifecycle to start."""
 
     async def _train_loop(self) -> None:
         with Timer("load_checkpoints"):
