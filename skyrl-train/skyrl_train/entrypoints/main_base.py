@@ -394,6 +394,10 @@ class BasePPOExp:
             colocate_pg=colocate_pg,
         )
 
+    def get_checkpoint_export_trainer(self, **trainer_kwargs) -> CheckpointExportTrainer:
+        """Create the dataset- and rollout-free trainer used by standalone exports."""
+        return CheckpointExportTrainer(**trainer_kwargs)
+
     def get_tracker(self):
         """Initializes the tracker for experiment tracking.
 
@@ -456,9 +460,8 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
-        trainer = (
-            CheckpointExportTrainer(**trainer_kwargs) if self.export_execution else self.get_trainer(**trainer_kwargs)
-        )
+        trainer_factory = self.get_checkpoint_export_trainer if self.export_execution else self.get_trainer
+        trainer = trainer_factory(**trainer_kwargs)
 
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an
