@@ -24,9 +24,9 @@ the requested export step.
 ## Results
 
 The red tests reproduced both discarded dependencies: the command still passed `--train_data`, and export
-experiment construction called `get_train_dataset`. After the change, synchronous and fully asynchronous
-trainers construct an export schedule with no dataloader; experiment construction loads neither train nor
-evaluation data; generator startup is skipped; and a checkpoint-step mismatch fails before finalization.
+experiment construction called `get_train_dataset`. After the change, a dedicated checkpoint-export trainer
+constructs no dataloader; experiment construction loads neither train nor evaluation data; generator startup
+is skipped; and a checkpoint-step mismatch fails before finalization.
 
 ## Hypothesis 2
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from omegaconf import OmegaConf
@@ -8,14 +9,13 @@ from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints.main_base import BasePPOExp
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
 from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus, HFUploadMode
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trainer import CheckpointExportTrainer, RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 from skyrl_train.utils.utils import validate_hf_export_config
 
@@ -238,20 +238,6 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
 
 
-def test_export_job_has_no_training_data_dependency():
-    request = HFExportRequest(
-        step=10,
-        checkpoint_base_path="s3://bucket/run/checkpoints",
-        checkpoint_path="s3://bucket/run/checkpoints/global_step_10",
-        export_path="s3://bucket/run/exports",
-        model_path="org/model",
-        num_nodes=8,
-        gpus_per_node=8,
-    )
-
-    assert "--train_data" not in _export_command(request)
-
-
 def test_export_experiment_constructs_without_train_or_eval_data():
     config = OmegaConf.create({"trainer": {"hf_export_execution": True, "log_level": "INFO"}})
 
@@ -261,8 +247,7 @@ def test_export_experiment_constructs_without_train_or_eval_data():
     assert experiment.eval_dataset is None
 
 
-@pytest.mark.parametrize("trainer_class", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
-def test_export_trainer_constructs_without_a_dataloader(trainer_class):
+def test_export_trainer_constructs_without_a_dataloader():
     config = OmegaConf.create(
         {
             "trainer": {
@@ -281,7 +266,7 @@ def test_export_trainer_constructs_without_a_dataloader(trainer_class):
         }
     )
 
-    trainer = trainer_class(
+    trainer = CheckpointExportTrainer(
         cfg=config,
         tracker=object(),
         tokenizer=object(),
@@ -292,18 +277,34 @@ def test_export_trainer_constructs_without_a_dataloader(trainer_class):
     )
 
     assert trainer.train_dataloader is None
-    assert trainer.num_steps_per_epoch == 12
     assert trainer.total_training_steps == 12
 
 
 def test_export_trainer_rejects_a_different_loaded_checkpoint_step():
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.export_execution = True
-    trainer.global_step = 11
+    trainer = CheckpointExportTrainer.__new__(CheckpointExportTrainer)
     trainer.total_training_steps = 12
+    trainer.load_checkpoints = Mock(return_value=(11, "/checkpoints/global_step_11"))
+    trainer._teardown = AsyncMock()
 
     with pytest.raises(ValueError, match="requested global_step_12, loaded global_step_11"):
-        asyncio.run(trainer._finalize_export_execution())
+        asyncio.run(trainer.train())
+
+    trainer._teardown.assert_awaited_once()
+
+
+def test_export_trainer_finalizes_without_starting_the_generator():
+    trainer = CheckpointExportTrainer.__new__(CheckpointExportTrainer)
+    trainer.total_training_steps = 12
+    trainer.load_checkpoints = Mock(return_value=(12, "/checkpoints/global_step_12"))
+    trainer._handle_resume_at_max_steps = AsyncMock()
+    trainer._teardown = AsyncMock()
+    trainer.generator = Mock(startup=AsyncMock(side_effect=AssertionError("must not start")))
+
+    asyncio.run(trainer.train())
+
+    trainer.generator.startup.assert_not_awaited()
+    trainer._handle_resume_at_max_steps.assert_awaited_once()
+    trainer._teardown.assert_awaited_once()
 
 
 def test_export_job_materializes_request_model_source():

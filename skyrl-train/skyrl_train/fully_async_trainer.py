@@ -343,10 +343,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # at train() start; initialized False so the flag is always defined
         # (e.g. if train() is never reached, the weight-sync block stays a no-op).
         self._rollout_fanout_enabled = False
-        self._active_generator_tasks: List[asyncio.Task] = []
-
-        if self.export_execution:
-            return
 
         # Some async-specific validations
         assert self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size, (
@@ -381,15 +377,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
+        self._active_generator_tasks: List[asyncio.Task] = []
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """
-        if self.export_execution:
-            super()._build_train_dataloader_and_compute_training_steps()
-            return
-
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
@@ -511,20 +504,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Optionally swap the single-process generator for a K-actor rollout
         # dispatcher (gated; default OFF => no-op, self.generator unchanged).
-        if not self.export_execution:
-            self._maybe_enable_rollout_fanout()
+        self._maybe_enable_rollout_fanout()
 
         # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
         # This must happen before any generate() calls. When fan-out is enabled,
         # self.generator is now the RolloutDispatcher, whose startup() builds the
         # PlacementGroup + K coordinators and starts each coordinator's generator.
-        if not self.export_execution:
-            try:
-                await self.generator.startup()
-                logger.info("Generator startup complete")
-            except Exception as e:
-                logger.opt(depth=0).error("Generator startup failed: " + str(e))
-                raise
+        try:
+            await self.generator.startup()
+            logger.info("Generator startup complete")
+        except Exception as e:
+            logger.opt(depth=0).error("Generator startup failed: " + str(e))
+            raise
 
         try:
             await self._train_loop()
@@ -549,9 +540,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("load_checkpoints"):
                 self.global_step, checkpoint_path = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
-
-                if await self._finalize_export_execution():
-                    return
 
                 if self.global_step > 0:
                     # Load data consumption state into the tracker

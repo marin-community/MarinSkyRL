@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils import validate_cfg
 
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trainer import CheckpointExportTrainer, RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import (
@@ -446,7 +446,7 @@ class BasePPOExp:
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
-        trainer = self.get_trainer(
+        trainer_kwargs = dict(
             cfg=self.cfg,
             tracker=tracker,
             tokenizer=tokenizer,
@@ -455,6 +455,9 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             generator=generator,
             colocate_pg=self.colocate_pg,
+        )
+        trainer = (
+            CheckpointExportTrainer(**trainer_kwargs) if self.export_execution else self.get_trainer(**trainer_kwargs)
         )
 
         # Build the models. Pass the pre-reserved dedicated policy placement
@@ -508,8 +511,7 @@ class BasePPOExp:
                 try:
                     # generator.shutdown() is async; run it in a fresh event loop
                     # since asyncio.run() above may have already closed the loop.
-                    if not trainer.export_execution:
-                        asyncio.run(trainer.generator.shutdown())
+                    asyncio.run(trainer.generator.shutdown())
                 except Exception as e:
                     logger.warning(f"Error shutting down generator: {e}")
                 try:
