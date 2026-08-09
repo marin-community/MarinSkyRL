@@ -92,10 +92,10 @@ from skyrl_train.hf_export_schema import (
     HFExportRequest,
     HFExportStatus,
     HFUploadMode,
+    TRAINER_STATE_FILENAME,
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
-_TRAINER_STATE_FILENAME = "trainer_state.pt"
 
 
 class RayPPOTrainer:
@@ -1902,7 +1902,7 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": self.cfg,
         }
-        trainer_state_path = os.path.join(global_step_folder, _TRAINER_STATE_FILENAME)
+        trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
@@ -2012,7 +2012,7 @@ class RayPPOTrainer:
         # Define paths for different checkpoint components
         policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
-        trainer_state_path = os.path.join(checkpoint_path, _TRAINER_STATE_FILENAME)
+        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
         dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
 
         # Validate that required checkpoint files exist
@@ -2048,8 +2048,7 @@ class RayPPOTrainer:
                 "pass_through",
                 "load_checkpoint",
                 ckpt_dir=policy_ckpt_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_training_state=True,
             )
         )
         logger.info("Successfully loaded policy checkpoint")
@@ -2062,8 +2061,7 @@ class RayPPOTrainer:
                     "pass_through",
                     "load_checkpoint",
                     ckpt_dir=critic_ckpt_dir,
-                    load_optimizer_states=True,
-                    load_lr_scheduler_states=True,
+                    load_training_state=True,
                 )
             )
             logger.info("Successfully loaded critic checkpoint")
@@ -2078,7 +2076,7 @@ class RayPPOTrainer:
 
     def _handle_hf_export(self) -> None:
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
-        trainer_state_path = os.path.join(checkpoint_path, _TRAINER_STATE_FILENAME)
+        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise RuntimeError(
                 f"Cannot request HF export for global_step_{self.global_step}: "

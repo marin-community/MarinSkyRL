@@ -371,11 +371,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
         )
 
-    def init_model(self, model_path, num_training_steps: int = 1e9):
-        """
-        Initialize the model, optimizer, and scheduler for the policy worker.
-        """
-        # initialize the bridge and provider objects
+    def _initialize_policy_modules(self, model_path: str, *, for_training: bool) -> None:
+        """Construct the shared Megatron model graph at the checkpoint geometry."""
         self.init_configs(
             model_path,
             self.cfg.trainer.policy.megatron_config,
@@ -385,10 +382,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
         )
 
-        # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=True,
-            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
+            wrap_with_ddp=for_training,
+            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None,
             bf16=self.cfg.trainer.bf16,
         )
 
@@ -404,6 +400,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
+
+    def init_model(self, model_path, num_training_steps: int = 1e9):
+        """Initialize the model, optimizer, and scheduler for the policy worker."""
+        self._initialize_policy_modules(model_path, for_training=True)
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
@@ -451,24 +451,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def init_model_for_export(self, model_path: str) -> None:
         """Initialize Megatron model structure without optimizer or training state."""
-        self.init_configs(
-            model_path,
-            self.cfg.trainer.policy.megatron_config,
-            self.cfg.trainer.policy.megatron_config.model_config_kwargs,
-            self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
-            bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
-        )
-        self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=False,
-            ddp_config=None,
-            bf16=self.cfg.trainer.bf16,
-        )
-        if self._local_rank == 0 and not os.path.exists(model_path):
-            load_pretrained_with_retry(lambda: snapshot_download(model_path), model_id=model_path)
-        torch.distributed.barrier()
-        if self._rank == 0:
-            print_model_size(self.actor_module[0])
+        self._initialize_policy_modules(model_path, for_training=False)
         self.model = MegatronModelWrapper(
             config=self.cfg,
             actor_module=self.actor_module,

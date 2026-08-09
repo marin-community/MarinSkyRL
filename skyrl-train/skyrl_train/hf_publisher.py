@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import huggingface_hub.constants
 from huggingface_hub import HfApi
 
-from skyrl_train.hf_export_schema import HFUploadMode
+from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 from skyrl_train.utils.io import io
 
 
@@ -33,8 +33,8 @@ class HuggingFacePublisher:
 
     repo_id: str
     private: bool = False
-    revision: str = "main"
-    upload_mode: HFUploadMode = HFUploadMode.LATEST
+    revision: str = DEFAULT_HF_HUB_REVISION
+    upload_mode: HFUploadMode = DEFAULT_HF_UPLOAD_MODE
     api: HfApi | None = None
 
     def publish(self, export_path: str, step: int) -> None:

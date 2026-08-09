@@ -76,9 +76,7 @@ def test_export_checkpoint_load_does_not_require_training_state(monkeypatch, tmp
     strategy.load_checkpoint(
         torch.nn.Linear(1, 1),
         "s3://bucket/checkpoints/step_28/policy",
-        load_optimizer_states=False,
-        load_lr_scheduler_states=False,
-        load_runtime_state=False,
+        load_training_state=False,
     )
 
     assert staged_paths == ["s3://bucket/checkpoints/step_28/policy/model_world_size_8_rank_3.pt"]

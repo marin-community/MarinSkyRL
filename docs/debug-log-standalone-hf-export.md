@@ -2,19 +2,18 @@
 
 Replace the trainer-resume export path with a policy-only checkpoint conversion utility.
 
-## Initial status
+## Failure evidence
 
-An export request launches the configured RL entrypoint with `trainer.hf_export_execution=true`. The entrypoint
-still allocates rollout placement groups, inference engines, a generator, tracking, and any configured reference
-or critic models before selecting `CheckpointExportTrainer`. Four 64-GPU policy exports therefore requested an
-additional 16 rollout GPUs and timed out before loading their checkpoints.
+The former export path launched the configured RL entrypoint and selected its conversion-only trainer only after
+constructing the RL experiment. Four 64-GPU policy exports consequently requested an additional 16 rollout GPUs
+and timed out before loading their checkpoints.
 
 ## Hypothesis 1
 
 The export specialization occurs below the resource-allocation boundary. Selecting a dedicated entrypoint before
 the RL experiment is constructed will prevent rollout, dataset, tracking, reference, and critic initialization.
 
-## Changes to make
+## Design
 
 - Route export jobs to a dedicated Hydra entrypoint.
 - Give that entrypoint a policy-only worker-group controller with an explicit checkpoint/export contract.
@@ -31,12 +30,17 @@ tensors without optimizer, scheduler, RNG, or callback state. The FSDP checkpoin
 that conversion stages only the rank's model shard. Export runtime profiles resolve without the
 vLLM, Harbor, Daytona, and telemetry extras used by training jobs.
 
-The full launcher and trainer CPU run reached 1,282 passing tests. Five runtime-bundle tests were
-intentionally blocked by the repository's dirty-bundle guard and will be rerun after commit; the
-only other failure was a checked-in configuration baseline updated by this branch and is green
-after adding the dedicated export section.
+The complete launcher and trainer CPU gate passes, including the runtime-bundle identity checks
+that ensure Iris executes the committed checkout rather than stale installed package bytes.
 
-## Future work
+## Accelerator validation
 
-- [ ] Validate a small FSDP2 export on an accelerator after the CPU contract and Iris launcher tests pass.
-- [ ] Validate a Megatron export at its saved model-parallel geometry.
+An on-demand accelerator run should validate one small FSDP2 export and one Megatron export at each
+checkpoint's saved model-parallel geometry before either path is used for a production model.
+
+## Review dispositions
+
+The publisher and worker protocols are intentional test seams: conversion must prove that a failed or
+incomplete artifact is never published without constructing Ray actors or making Hub calls. The standalone
+entrypoint continues to use the production strategy converters so checkpoint and Hugging Face formats have
+one owner; only their training-state initialization is bypassed.

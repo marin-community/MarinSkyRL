@@ -130,6 +130,11 @@ DEFAULT_PRIORITY = "interactive"
 PRIORITY_NAMES = ("production", "interactive", "batch")
 
 
+def _is_checkpoint_export(args: argparse.Namespace) -> bool:
+    """Return whether this launch is the dedicated model-conversion job kind."""
+    return getattr(args, "entrypoint", None) == CHECKPOINT_EXPORT_ENTRYPOINT
+
+
 def _parse_quantity_to_gib(q: str) -> float:
     """Parse a Kubernetes or Iris byte quantity to GiB."""
     q = q.strip()
@@ -772,7 +777,7 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
     ref_gpus = placement.get("ref_num_gpus_per_node")
     if not all(isinstance(value, int) and value > 0 for value in (policy_nodes, ref_nodes)):
         return
-    checkpoint_export = args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT
+    checkpoint_export = _is_checkpoint_export(args)
     expected_nodes = policy_nodes if checkpoint_export else policy_nodes + ref_nodes
     if args.num_nodes != expected_nodes:
         topology_description = (
@@ -884,7 +889,7 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
         storage_root = _cluster_storage_root(cluster_config)
         args.rendezvous_dir = f"{storage_root}/rendezvous/{args.job_name}"
 
-    if args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT:
+    if _is_checkpoint_export(args):
         args.record_literal = False
     elif args.record_literal is None:
         harness = _rl_config_harness_name(args.rl_config)
@@ -893,7 +898,7 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     strategy = _rl_training_strategy(args)
     expected_profile = runtime_profile_for_strategy(
         strategy,
-        checkpoint_export=args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT,
+        checkpoint_export=_is_checkpoint_export(args),
     )
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile
@@ -973,7 +978,7 @@ def autoconfigure_ingress(args: argparse.Namespace) -> None:
     breaks non-streaming terminus-2). So we auto-enable controller ONLY for opencode; for
     that case the ingress host is cluster-determined (``iris.oa.dev``), removing the
     ``--ingress-host`` mismatch error class. Prefer default > flag > env var."""
-    if getattr(args, "entrypoint", None) == CHECKPOINT_EXPORT_ENTRYPOINT:
+    if _is_checkpoint_export(args):
         args.ingress_mode = "direct"
         args.ingress_host = None
         return
@@ -2056,7 +2061,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # terminal_bench_config.trials_dir at the durable shared store (s3://, creds auto-injected)
     # so rollouts persist + are inspectable post-hoc. Skip if the user opted out
     # (--trials-dir local) or already set it explicitly.
-    checkpoint_export = args.entrypoint == CHECKPOINT_EXPORT_ENTRYPOINT
+    checkpoint_export = _is_checkpoint_export(args)
     trials_dir = (args.trials_dir or "auto").strip()
     user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
     if not checkpoint_export and trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
@@ -2173,7 +2178,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     # (file overrides shell; same semantics as the iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
-    if args.entrypoint != CHECKPOINT_EXPORT_ENTRYPOINT and _rl_config_is_agentic(args.rl_config):
+    if not _is_checkpoint_export(args) and _rl_config_is_agentic(args.rl_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
         # The purge deletes stale snapshots across the shared RL org, so skip it on a

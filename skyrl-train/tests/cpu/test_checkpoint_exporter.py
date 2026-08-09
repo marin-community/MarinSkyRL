@@ -61,6 +61,14 @@ class FakeHubApi:
         self.uploads.append(kwargs)
 
 
+class FakePublisher:
+    def __init__(self):
+        self.calls = []
+
+    def publish(self, export_path: str, step: int) -> None:
+        self.calls.append((export_path, step))
+
+
 def _plan(tmp_path: Path, step: int = 12) -> CheckpointExportPlan:
     checkpoint_path = tmp_path / "checkpoints" / f"global_step_{step}"
     checkpoint_path.mkdir(parents=True)
@@ -103,11 +111,13 @@ def test_checkpoint_exporter_rejects_a_mismatched_checkpoint_marker(tmp_path):
 
 def test_checkpoint_exporter_rejects_a_missing_conversion_result(tmp_path):
     workers = MissingExportWorkers()
+    publisher = FakePublisher()
 
     with pytest.raises(RuntimeError, match="conversion produced no model"):
-        CheckpointExporter(_plan(tmp_path), workers, object()).run()
+        CheckpointExporter(_plan(tmp_path), workers, object(), publisher).run()
 
     assert workers.closed
+    assert publisher.calls == []
 
 
 def test_ray_policy_export_workers_loads_model_state_without_training_state():
@@ -128,9 +138,7 @@ def test_ray_policy_export_workers_loads_model_state_without_training_state():
             (),
             {
                 "ckpt_dir": "/checkpoints/global_step_12/policy",
-                "load_optimizer_states": False,
-                "load_lr_scheduler_states": False,
-                "load_runtime_state": False,
+                "load_training_state": False,
             },
         ),
         (
@@ -163,8 +171,6 @@ def test_hf_publisher_publishes_root_and_requested_archive(tmp_path):
 
     publisher.publish(str(export_path), step=12)
 
-    assert api.repositories == [
-        {"repo_id": "org/model", "repo_type": "model", "private": True, "exist_ok": True}
-    ]
+    assert api.repositories == [{"repo_id": "org/model", "repo_type": "model", "private": True, "exist_ok": True}]
     assert [upload["path_in_repo"] for upload in api.uploads] == ["", "checkpoints/step_12"]
     assert all(upload["folder_path"] == str(export_path) for upload in api.uploads)

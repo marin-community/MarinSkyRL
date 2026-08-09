@@ -10,9 +10,16 @@ import ray
 import torch
 from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.hf_export_schema import HFUploadMode
+from skyrl_train.hf_export_schema import (
+    DEFAULT_HF_HUB_REVISION,
+    DEFAULT_HF_UPLOAD_MODE,
+    HFUploadMode,
+    TRAINER_STATE_FILENAME,
+)
+from skyrl_train.hf_publisher import HuggingFacePublisher
+from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
@@ -22,8 +29,6 @@ from skyrl_train.utils.utils import (
     policy_spread_bundles,
 )
 from skyrl_train.workers.worker import PPORayActorGroup
-
-_TRAINER_STATE_FILENAME = "trainer_state.pt"
 
 
 @dataclass(frozen=True)
@@ -57,7 +62,7 @@ class PolicyExportWorkers(Protocol):
 
     def load_model_checkpoint(self, checkpoint_path: str) -> None: ...
 
-    def save_hf_model(self, export_path: str, tokenizer: object) -> None: ...
+    def save_hf_model(self, export_path: str, tokenizer: PreTrainedTokenizerBase) -> None: ...
 
     def close(self) -> None: ...
 
@@ -90,12 +95,10 @@ class RayPolicyExportWorkers:
         self._run(
             "load_checkpoint",
             ckpt_dir=checkpoint_path,
-            load_optimizer_states=False,
-            load_lr_scheduler_states=False,
-            load_runtime_state=False,
+            load_training_state=False,
         )
 
-    def save_hf_model(self, export_path: str, tokenizer: object) -> None:
+    def save_hf_model(self, export_path: str, tokenizer: PreTrainedTokenizerBase) -> None:
         self._run("save_hf_model", export_path, tokenizer)
 
     def close(self) -> None:
@@ -111,7 +114,7 @@ class CheckpointExporter:
         self,
         plan: CheckpointExportPlan,
         workers: PolicyExportWorkers,
-        tokenizer: object,
+        tokenizer: PreTrainedTokenizerBase,
         publisher: ExportPublisher | None = None,
     ):
         self._plan = plan
@@ -120,7 +123,7 @@ class CheckpointExporter:
         self._publisher = publisher
 
     def _validate_checkpoint(self) -> None:
-        trainer_state_path = os.path.join(self._plan.checkpoint_path, _TRAINER_STATE_FILENAME)
+        trainer_state_path = os.path.join(self._plan.checkpoint_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"completed checkpoint marker not found: {trainer_state_path}")
         with io.open_file(trainer_state_path, "rb") as source:
@@ -206,28 +209,22 @@ def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
 
 
 def export_tokenizer(cfg: DictConfig) -> PreTrainedTokenizerBase:
-    tokenizer = AutoTokenizer.from_pretrained(
-        cfg.trainer.policy.model.path,
-        trust_remote_code=True,
-        use_fast=not cfg.trainer.disable_fast_tokenizer,
+    return create_tokenizer(
+        model_path=cfg.trainer.policy.model.path,
+        disable_fast_tokenizer=cfg.trainer.disable_fast_tokenizer,
+        padding_side="left",
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    return tokenizer
 
 
-def hub_publisher(cfg: DictConfig) -> ExportPublisher | None:
+def hub_publisher(cfg: DictConfig) -> HuggingFacePublisher | None:
     repo_id = cfg.checkpoint_export.get("hf_hub_repo_id")
     if not repo_id:
         return None
-    from skyrl_train.hf_publisher import HuggingFacePublisher
-
     return HuggingFacePublisher(
         repo_id=str(repo_id),
         private=bool(cfg.checkpoint_export.get("hf_hub_private", False)),
-        revision=str(cfg.checkpoint_export.get("hf_hub_revision", "main")),
-        upload_mode=HFUploadMode(cfg.checkpoint_export.get("hf_upload_mode", HFUploadMode.LATEST)),
+        revision=str(cfg.checkpoint_export.get("hf_hub_revision", DEFAULT_HF_HUB_REVISION)),
+        upload_mode=HFUploadMode(cfg.checkpoint_export.get("hf_upload_mode", DEFAULT_HF_UPLOAD_MODE)),
     )
 
 

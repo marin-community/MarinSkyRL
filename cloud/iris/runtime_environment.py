@@ -14,7 +14,7 @@ CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
 
 
 class RuntimeProfile(StrEnum):
-    """Locked dependency set installed for one training strategy."""
+    """Locked dependency set installed for training or checkpoint conversion."""
 
     FSDP = "fsdp"
     FSDP_EXPORT = "fsdp-export"

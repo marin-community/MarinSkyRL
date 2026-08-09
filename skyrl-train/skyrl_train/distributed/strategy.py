@@ -54,9 +54,7 @@ class DistributedStrategy(ABC):
         optimizer,
         scheduler,
         load_module_strict,
-        load_optimizer_states,
-        load_lr_scheduler_states,
-        load_runtime_state,
+        load_training_state,
     ):
         """Load checkpoint"""
         pass

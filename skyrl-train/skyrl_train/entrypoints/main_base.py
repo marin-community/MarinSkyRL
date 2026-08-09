@@ -6,6 +6,7 @@ from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from skyrl_train.dataset import PromptDataset
+from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils import validate_cfg
 
 from skyrl_train.trainer import RayPPOTrainer
@@ -228,16 +229,11 @@ class BasePPOExp:
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.cfg.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+        return create_tokenizer(
+            model_path=self.cfg.trainer.policy.model.path,
+            disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
+            padding_side=padding_side,
         )
-        tokenizer.padding_side = padding_side
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-        return tokenizer
 
     def get_train_dataset(self):
         """Initializes the training dataset.

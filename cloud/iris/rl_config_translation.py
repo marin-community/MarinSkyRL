@@ -21,7 +21,7 @@ import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 import yaml
 
@@ -32,6 +32,13 @@ from marinskyrl.resource_locator import model_source_for_path
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
+
+
+class HPCGeometry(Protocol):
+    """Hardware geometry required while translating a launch configuration."""
+
+    gpus_per_node: int
+
 
 _CONTEXT_BUDGET_FIELDS = frozenset(
     {
@@ -678,14 +685,14 @@ _OPTIONAL_HYDRA_PATTERNS = {
 def build_checkpoint_export_hydra_args(
     parsed: ParsedCheckpointExportConfig,
     exp_args: Dict[str, Any],
-    hpc: Any,
+    hpc: HPCGeometry,
 ) -> List[str]:
     """Build policy-only Hydra arguments for the standalone checkpoint converter."""
     args = [f"+{group_name}={config_name}" for group_name, config_name in parsed.config_groups.items()]
     trainer = copy.deepcopy(parsed.trainer)
     placement = trainer.setdefault("placement", {})
     num_nodes = int(exp_args.get("num_nodes", 1))
-    gpus_per_node = int(exp_args.get("gpus_per_node", getattr(hpc, "gpus_per_node", 4)))
+    gpus_per_node = int(exp_args.get("gpus_per_node", hpc.gpus_per_node))
     placement["policy_num_nodes"] = num_nodes
     configured_gpus_per_node = placement.get("policy_num_gpus_per_node")
     placement["policy_num_gpus_per_node"] = (
@@ -715,7 +722,7 @@ def build_checkpoint_export_hydra_args(
 def build_skyrl_hydra_args(
     parsed: ParsedRLConfig,
     exp_args: Dict[str, Any],
-    hpc: Any,
+    hpc: HPCGeometry,
 ) -> List[str]:
     """Convert a parsed config + exp_args into Hydra CLI argument strings.
 
@@ -750,7 +757,7 @@ def build_skyrl_hydra_args(
 
     # Derive placement from num_nodes.
     num_nodes = int(exp_args.get("num_nodes", 1))
-    gpus_per_node = int(exp_args.get("gpus_per_node", getattr(hpc, "gpus_per_node", 4)))
+    gpus_per_node = int(exp_args.get("gpus_per_node", hpc.gpus_per_node))
     placement = dict(trainer.get("placement", {}))
 
     policy_num_nodes = exp_args.get("policy_num_nodes")
