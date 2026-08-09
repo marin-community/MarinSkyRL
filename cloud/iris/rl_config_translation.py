@@ -682,6 +682,37 @@ _OPTIONAL_HYDRA_PATTERNS = {
 }
 
 
+def _apply_policy_model_source(trainer: Dict[str, Any], exp_args: Dict[str, Any]) -> str | None:
+    """Apply the task-visible policy path and its replayable source identity."""
+    model_path = exp_args.get("model_path")
+    if not model_path:
+        return None
+    policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
+    policy_model["path"] = model_path
+    model_source = model_source_for_path(
+        model_path,
+        exp_args.get("model_source_uri"),
+        exp_args.get("model_source_identity"),
+    )
+    if model_source:
+        policy_model["source_uri"] = model_source.uri
+        policy_model["source_identity"] = model_source.identity
+    return model_path
+
+
+def _role_gpus_per_node(
+    placement: Dict[str, Any],
+    key: str,
+    launch_gpus_per_node: int,
+    *,
+    preserve_smaller_value: bool,
+) -> int:
+    configured = placement.get(key)
+    if preserve_smaller_value and configured is not None and int(configured) <= launch_gpus_per_node:
+        return int(configured)
+    return launch_gpus_per_node
+
+
 def build_checkpoint_export_hydra_args(
     parsed: ParsedCheckpointExportConfig,
     exp_args: Dict[str, Any],
@@ -694,24 +725,13 @@ def build_checkpoint_export_hydra_args(
     num_nodes = int(exp_args.get("num_nodes", 1))
     gpus_per_node = int(exp_args.get("gpus_per_node", hpc.gpus_per_node))
     placement["policy_num_nodes"] = num_nodes
-    configured_gpus_per_node = placement.get("policy_num_gpus_per_node")
-    placement["policy_num_gpus_per_node"] = (
-        gpus_per_node
-        if configured_gpus_per_node is None or int(configured_gpus_per_node) > gpus_per_node
-        else int(configured_gpus_per_node)
+    placement["policy_num_gpus_per_node"] = _role_gpus_per_node(
+        placement,
+        "policy_num_gpus_per_node",
+        gpus_per_node,
+        preserve_smaller_value=False,
     )
-
-    model_path = exp_args["model_path"]
-    policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
-    policy_model["path"] = model_path
-    model_source = model_source_for_path(
-        model_path,
-        exp_args.get("model_source_uri"),
-        exp_args.get("model_source_identity"),
-    )
-    if model_source:
-        policy_model["source_uri"] = model_source.uri
-        policy_model["source_identity"] = model_source.identity
+    _apply_policy_model_source(trainer, exp_args)
 
     for key, value in _flatten_dict(trainer, "trainer").items():
         prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
@@ -772,13 +792,12 @@ def build_skyrl_hydra_args(
     # (reserved whole) node than the node physically has — spreading a fixed
     # policy-rank count over MORE nodes.
     def _resolve_gpus_per_node(key: str) -> int:
-        yaml_val = placement.get(key)
-        if yaml_val is None:
-            return gpus_per_node
-        if exp_args.get("gpus_per_node") and int(yaml_val) > gpus_per_node:
-            # A YAML value LARGER than the node has is a mis-size; clamp to CLI.
-            return gpus_per_node
-        return int(yaml_val)
+        return _role_gpus_per_node(
+            placement,
+            key,
+            gpus_per_node,
+            preserve_smaller_value=True,
+        )
 
     placement["policy_num_gpus_per_node"] = _resolve_gpus_per_node("policy_num_gpus_per_node")
     placement["ref_num_gpus_per_node"] = _resolve_gpus_per_node("ref_num_gpus_per_node")
@@ -813,19 +832,8 @@ def build_skyrl_hydra_args(
         data["val_data"] = val_data
 
     # Model path and served_model_name for Harbor/LiteLLM compatibility.
-    model_path = exp_args.get("model_path")
+    model_path = _apply_policy_model_source(trainer, exp_args)
     if model_path:
-        model_source = model_source_for_path(
-            model_path,
-            exp_args.get("model_source_uri"),
-            exp_args.get("model_source_identity"),
-        )
-        policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
-        policy_model["path"] = model_path
-        if model_source:
-            policy_model["source_uri"] = model_source.uri
-            policy_model["source_identity"] = model_source.identity
-
         # served_model_name: strip the org prefix from "org/model" HF IDs, since
         # Harbor/LiteLLM requires model names with exactly one '/'.
         served_model_name = model_path.split("/")[-1] if "/" in model_path else model_path

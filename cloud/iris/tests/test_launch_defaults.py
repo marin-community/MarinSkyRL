@@ -710,7 +710,7 @@ trainer:
         resolve_launch_defaults(args)
 
 
-def test_checkpoint_export_requests_only_the_saved_policy_geometry(tmp_path):
+def test_checkpoint_export_rejects_including_reference_nodes_in_its_gang(tmp_path):
     rl_config = tmp_path / "placed.yaml"
     rl_config.write_text(
         """\
@@ -733,10 +733,11 @@ trainer:
             "--cluster-config",
             str(_cluster_config(tmp_path)),
             "--num-nodes",
-            "2",
+            "4",
             "--entrypoint",
             "skyrl_train.entrypoints.checkpoint_export",
         ]
     )
 
-    resolve_launch_defaults(args)
+    with pytest.raises(SystemExit, match=r"policy_num_nodes = 2"):
+        resolve_launch_defaults(args)

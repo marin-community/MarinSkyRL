@@ -92,6 +92,7 @@ from skyrl_train.hf_export_schema import (
     HFExportRequest,
     HFExportStatus,
     HFUploadMode,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
     TRAINER_STATE_FILENAME,
 )
 
@@ -1853,7 +1854,7 @@ class RayPPOTrainer:
         """
         # Create global step folder structure
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
-        policy_save_dir = os.path.join(global_step_folder, "policy")
+        policy_save_dir = os.path.join(global_step_folder, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
         io.makedirs(global_step_folder, exist_ok=True)
@@ -2010,7 +2011,7 @@ class RayPPOTrainer:
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
-        policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
+        policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
         dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
@@ -2141,7 +2142,11 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # TODO(tgriggs): Make policy-to-ref sync faster.
-        policy_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "policy")
+        policy_export_dir = os.path.join(
+            self.cfg.trainer.export_path,
+            f"{GLOBAL_STEP_PREFIX}{self.global_step}",
+            POLICY_CHECKPOINT_SUBDIRECTORY,
+        )
         ray.get(
             self.policy_model.async_run_ray_method("pass_through", "save_hf_model", policy_export_dir, self.tokenizer)
         )

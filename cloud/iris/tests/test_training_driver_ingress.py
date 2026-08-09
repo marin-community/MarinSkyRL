@@ -133,6 +133,7 @@ def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
         job_name="checkpoint-export",
         model_path="Qwen/Qwen3-8B",
         entrypoint="skyrl_train.entrypoints.checkpoint_export",
+        gpus=4,
     )
     runner = LocalRLRunner(cfg)
     invocation = {}
@@ -151,6 +152,7 @@ def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
     assert runner.run() == 0
     assert invocation["entrypoint"] == "skyrl_train.entrypoints.checkpoint_export"
     assert invocation["hydra_args"]
+    assert "trainer.placement.policy_num_gpus_per_node=4" in invocation["hydra_args"]
     assert not any(
         argument.startswith(("data.", "generator.", "environment.")) for argument in invocation["hydra_args"]
     )

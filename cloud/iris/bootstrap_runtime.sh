@@ -32,26 +32,19 @@ esac
 
 if [[ "$profile" == *-export ]]; then
   strategy="${profile%-export}"
-  export_extras=(--extra "$strategy")
+  runtime_extras=(--extra "$strategy")
   if [[ "$strategy" == fsdp ]]; then
-    export_extras=(--extra cuda "${export_extras[@]}")
+    runtime_extras=(--extra cuda "${runtime_extras[@]}")
   fi
-  UV_PROJECT_ENVIRONMENT="$environment" uv sync \
-    --project "$project_root" \
-    --frozen \
-    --link-mode symlink \
-    "${dependency_group[@]}" \
-    "${export_extras[@]}"
 else
-  UV_PROJECT_ENVIRONMENT="$environment" uv sync \
-    --project "$project_root" \
-    --frozen \
-    --link-mode symlink \
-    "${dependency_group[@]}" \
-    --extra "$profile" \
-    --extra vllm \
-    --extra telemetry
+  runtime_extras=(--extra "$profile" --extra vllm --extra telemetry)
 fi
+UV_PROJECT_ENVIRONMENT="$environment" uv sync \
+  --project "$project_root" \
+  --frozen \
+  --link-mode symlink \
+  "${dependency_group[@]}" \
+  "${runtime_extras[@]}"
 
 python="$environment/bin/python"
 cuda_library_path="$("$python" -c "import site; from pathlib import Path; print(':'.join(str(path) for root in site.getsitepackages() for path in sorted((Path(root) / 'nvidia').glob('*/lib')) if path.is_dir()))")"

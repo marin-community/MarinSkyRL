@@ -502,7 +502,7 @@ def _validate_cp_cfg(cfg: DictConfig):
 
 
 def validate_hf_export_config(cfg: DictConfig) -> None:
-    """Validate checkpoint alignment and deferred publication for HF exports."""
+    """Validate checkpoint and model-save callback interval alignment."""
     callbacks = cfg.trainer.get("callbacks")
     if has_explicit_callbacks(cfg):
 

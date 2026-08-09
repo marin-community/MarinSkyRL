@@ -7,6 +7,7 @@ from huggingface_hub import snapshot_download
 
 import asyncio
 import os
+from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from skyrl_train.utils.progress import tqdm
@@ -41,6 +42,11 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+class _MegatronInitMode(StrEnum):
+    TRAINING = "training"
+    CHECKPOINT_EXPORT = "checkpoint-export"
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -371,8 +377,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
         )
 
-    def _initialize_policy_modules(self, model_path: str, *, for_training: bool) -> None:
+    def _initialize_policy_modules(self, model_path: str, *, mode: _MegatronInitMode) -> None:
         """Construct the shared Megatron model graph at the checkpoint geometry."""
+        for_training = mode is _MegatronInitMode.TRAINING
         self.init_configs(
             model_path,
             self.cfg.trainer.policy.megatron_config,
@@ -403,7 +410,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """Initialize the model, optimizer, and scheduler for the policy worker."""
-        self._initialize_policy_modules(model_path, for_training=True)
+        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING)
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
@@ -451,7 +458,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def init_model_for_export(self, model_path: str) -> None:
         """Initialize Megatron model structure without optimizer or training state."""
-        self._initialize_policy_modules(model_path, for_training=False)
+        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.CHECKPOINT_EXPORT)
         self.model = MegatronModelWrapper(
             config=self.cfg,
             actor_module=self.actor_module,

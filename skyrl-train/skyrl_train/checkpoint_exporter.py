@@ -16,6 +16,7 @@ from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
     HFUploadMode,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
     TRAINER_STATE_FILENAME,
 )
 from skyrl_train.hf_publisher import HuggingFacePublisher
@@ -43,11 +44,11 @@ class CheckpointExportPlan:
 
     @property
     def policy_checkpoint_path(self) -> str:
-        return os.path.join(self.checkpoint_path, "policy")
+        return os.path.join(self.checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
 
     @property
     def policy_export_path(self) -> str:
-        return os.path.join(self.export_root, f"{GLOBAL_STEP_PREFIX}{self.step}", "policy")
+        return os.path.join(self.export_root, f"{GLOBAL_STEP_PREFIX}{self.step}", POLICY_CHECKPOINT_SUBDIRECTORY)
 
 
 @dataclass(frozen=True)
