@@ -393,24 +393,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
 
-    def _create_trainer_state(self, epoch: int) -> TrainerState:
-        """
-        Override to use num_steps_per_epoch for fully async training.
-
-        In fully async training, the dataloader has batch size of 1 and we
-        accumulate mini_batch_size samples before training, so the number
-        of steps per epoch is different from len(train_dataloader).
-        """
-        return TrainerState(
-            global_step=self.global_step,
-            epoch=epoch,
-            total_steps=self.total_training_steps,
-            num_steps_per_epoch=self.num_steps_per_epoch,
-            is_last_step=(self.global_step == self.total_training_steps),
-            is_epoch_end=(self.global_step % self.num_steps_per_epoch == 0) if self.num_steps_per_epoch > 0 else False,
-            metrics=dict(self.all_metrics),
-            timings=dict(self.all_timings),
-        )
+    def _num_steps_per_epoch(self) -> int:
+        """Account for fully async mini-batch accumulation."""
+        return self.num_steps_per_epoch
 
     def _cancel_generator_tasks(self) -> None:
         """Cancel any active generator tasks left over from an abnormal exit.

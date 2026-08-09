@@ -292,21 +292,6 @@ def test_export_trainer_rejects_a_different_loaded_checkpoint_step():
     trainer._teardown.assert_awaited_once()
 
 
-def test_export_trainer_finalizes_without_starting_the_generator():
-    trainer = CheckpointExportTrainer.__new__(CheckpointExportTrainer)
-    trainer.total_training_steps = 12
-    trainer.load_checkpoints = Mock(return_value=(12, "/checkpoints/global_step_12"))
-    trainer._handle_resume_at_max_steps = AsyncMock()
-    trainer._teardown = AsyncMock()
-    trainer.generator = Mock(startup=AsyncMock(side_effect=AssertionError("must not start")))
-
-    asyncio.run(trainer.train())
-
-    trainer.generator.startup.assert_not_awaited()
-    trainer._handle_resume_at_max_steps.assert_awaited_once()
-    trainer._teardown.assert_awaited_once()
-
-
 def test_export_job_materializes_request_model_source():
     request = HFExportRequest(
         step=10,

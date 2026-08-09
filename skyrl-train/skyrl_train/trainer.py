@@ -188,7 +188,7 @@ class RayPPOTrainer:
         Returns:
             TrainerState object with current training state
         """
-        num_steps_per_epoch = len(self.train_dataloader)
+        num_steps_per_epoch = self._num_steps_per_epoch()
         return TrainerState(
             global_step=self.global_step,
             epoch=epoch,
@@ -199,6 +199,9 @@ class RayPPOTrainer:
             metrics=dict(self.all_metrics),
             timings=dict(self.all_timings),
         )
+
+    def _num_steps_per_epoch(self) -> int:
+        return len(self.train_dataloader)
 
     def _get_ref_update_callback(self) -> Optional[RefModelUpdateCallback]:
         """Get the RefModelUpdateCallback if one exists in the callback handler."""
@@ -2208,9 +2211,10 @@ class CheckpointExportTrainer(RayPPOTrainer):
     """Load one exact checkpoint, export it, and exit without a training lifecycle."""
 
     def _build_train_dataloader_and_compute_training_steps(self) -> None:
-        max_steps = int(self.cfg.trainer.get("max_steps", 0) or 0)
-        if max_steps <= 0:
+        configured_max_steps = self.cfg.trainer.max_steps
+        if configured_max_steps is None or configured_max_steps <= 0:
             raise ValueError("HF export execution requires trainer.max_steps to select the checkpoint step")
+        max_steps = int(configured_max_steps)
         if ResumeMode(self.cfg.trainer.resume_mode) is not ResumeMode.FROM_PATH or not self.cfg.trainer.get(
             "resume_path"
         ):
@@ -2218,17 +2222,8 @@ class CheckpointExportTrainer(RayPPOTrainer):
         self.train_dataloader = None
         self.total_training_steps = max_steps
 
-    def _create_trainer_state(self, epoch: int) -> TrainerState:
-        return TrainerState(
-            global_step=self.global_step,
-            epoch=epoch,
-            total_steps=self.total_training_steps,
-            num_steps_per_epoch=self.total_training_steps,
-            is_last_step=(self.global_step == self.total_training_steps),
-            is_epoch_end=(self.global_step == self.total_training_steps),
-            metrics=dict(self.all_metrics),
-            timings=dict(self.all_timings),
-        )
+    def _num_steps_per_epoch(self) -> int:
+        return self.total_training_steps
 
     async def train(self) -> None:
         """Run checkpoint load and finalization without starting the rollout generator."""
