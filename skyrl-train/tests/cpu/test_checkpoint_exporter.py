@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -156,7 +157,7 @@ def test_ray_policy_export_workers_loads_model_state_without_training_state():
     assert group.killed
 
 
-def test_hf_publisher_publishes_root_and_requested_archive(tmp_path):
+def test_hf_publisher_publishes_root_and_requested_archive(tmp_path, monkeypatch):
     export_path = tmp_path / "exports" / "global_step_12" / "policy"
     export_path.mkdir(parents=True)
     (export_path / "model.safetensors").write_bytes(b"weights")
@@ -168,9 +169,11 @@ def test_hf_publisher_publishes_root_and_requested_archive(tmp_path):
         upload_mode=HFUploadMode.ALL,
         api=api,
     )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     publisher.publish(str(export_path), step=12)
 
     assert api.repositories == [{"repo_id": "org/model", "repo_type": "model", "private": True, "exist_ok": True}]
     assert [upload["path_in_repo"] for upload in api.uploads] == ["", "checkpoints/step_12"]
     assert all(upload["folder_path"] == str(export_path) for upload in api.uploads)
+    assert os.environ["HF_HUB_OFFLINE"] == "1"

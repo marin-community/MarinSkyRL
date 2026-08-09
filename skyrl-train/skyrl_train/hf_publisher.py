@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-import os
 from dataclasses import dataclass
 
 import huggingface_hub.constants
 from huggingface_hub import HfApi
 
+from skyrl_train.env_vars import HF_HUB_OFFLINE_ENV, EnvVarScope, temporarily_unset_managed_environment
 from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
 from skyrl_train.utils.io import io
 
@@ -16,15 +16,13 @@ from skyrl_train.utils.io import io
 @contextlib.contextmanager
 def hf_hub_online():
     """Temporarily allow an explicit Hub publication from an offline training environment."""
-    previous_environment = os.environ.pop("HF_HUB_OFFLINE", None)
     previous_constant = huggingface_hub.constants.HF_HUB_OFFLINE
-    huggingface_hub.constants.HF_HUB_OFFLINE = False
-    try:
-        yield
-    finally:
-        huggingface_hub.constants.HF_HUB_OFFLINE = previous_constant
-        if previous_environment is not None:
-            os.environ["HF_HUB_OFFLINE"] = previous_environment
+    with temporarily_unset_managed_environment(HF_HUB_OFFLINE_ENV, EnvVarScope.DRIVER):
+        huggingface_hub.constants.HF_HUB_OFFLINE = False
+        try:
+            yield
+        finally:
+            huggingface_hub.constants.HF_HUB_OFFLINE = previous_constant
 
 
 @dataclass(frozen=True)
