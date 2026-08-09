@@ -56,10 +56,6 @@ from skyrl_train.utils.trainer_utils import GLOBAL_STEP_PREFIX
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Any reachable dataset satisfies the trainer's construction-time size assert. This one
-# is small (514 rows) and is already part of the sweep, so an export pulls nothing new.
-DEFAULT_EXPORT_TRAIN_DATA = '["DCAgent/exp_rpt_curriculum-easy"]'
-
 
 @dataclass(frozen=True)
 class ExportJobSpec:
@@ -67,7 +63,6 @@ class ExportJobSpec:
     rl_config: str
     cluster: str
     priority: str
-    train_data: str
     job_name: str | None
     timeout: int
     no_wait: bool
@@ -112,15 +107,6 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         str(request.num_nodes),
         "--gpus-per-node",
         str(request.gpus_per_node),
-        # The trainer builds its prompts dataset before it can reach the
-        # resume-at-max-steps branch, and asserts the dataset is at least
-        # train_batch_size. The sweep configs carry data.train_data: [], so an
-        # export that passes no data dies at
-        # "dataset should be atleast as large as train_batch_size 64, got size 0"
-        # roughly eight minutes in, after the Ray head is already up. The rows are
-        # never consumed: max_steps is already reached, so zero steps run.
-        "--train_data",
-        spec.train_data,
         "--cluster",
         spec.cluster,
         "--target-cluster",
@@ -156,14 +142,6 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--priority", default="batch")
-    ap.add_argument(
-        "--train_data",
-        default=DEFAULT_EXPORT_TRAIN_DATA,
-        help=(
-            "JSON list of dataset paths. Never trained on — it only has to be large enough "
-            "for the trainer to construct. Override only if the default is unreachable."
-        ),
-    )
     ap.add_argument("--export_path", help="defaults to <ckpt_path parent>/exports")
     ap.add_argument("--job-name", dest="job_name")
     ap.add_argument("--hf-hub-repo-id")
@@ -223,7 +201,6 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         rl_config=args.rl_config,
         cluster=args.cluster,
         priority=args.priority,
-        train_data=args.train_data,
         job_name=args.job_name,
         timeout=args.timeout,
         no_wait=no_wait,

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -6,6 +7,8 @@ from omegaconf import OmegaConf
 from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -64,12 +67,28 @@ def _export_command(request):
             rl_config="config.yaml",
             cluster="cw-rno2a",
             priority="batch",
-            train_data='["dataset"]',
             job_name="export-step-10",
             timeout=7200,
             no_wait=False,
         )
     )
+
+
+class _DatasetFreeExportExperiment(BasePPOExp):
+    def get_tokenizer(self, padding_side="left"):
+        return object()
+
+    def get_train_dataset(self):
+        raise AssertionError("export execution must not initialize training data")
+
+    def get_eval_dataset(self):
+        raise AssertionError("export execution must not initialize evaluation data")
+
+    def get_colocate_pg(self, timeout=0):
+        return None
+
+    def get_policy_pg(self, timeout=0):
+        return None
 
 
 def _command_options(command):
@@ -217,6 +236,74 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     assert options["--timeout"] == "7200"
     assert "--no-wait" not in command
     assert overrides["++trainer.hf_hub_repo_id"] == "org/exported-model"
+
+
+def test_export_job_has_no_training_data_dependency():
+    request = HFExportRequest(
+        step=10,
+        checkpoint_base_path="s3://bucket/run/checkpoints",
+        checkpoint_path="s3://bucket/run/checkpoints/global_step_10",
+        export_path="s3://bucket/run/exports",
+        model_path="org/model",
+        num_nodes=8,
+        gpus_per_node=8,
+    )
+
+    assert "--train_data" not in _export_command(request)
+
+
+def test_export_experiment_constructs_without_train_or_eval_data():
+    config = OmegaConf.create({"trainer": {"hf_export_execution": True, "log_level": "INFO"}})
+
+    experiment = _DatasetFreeExportExperiment(config)
+
+    assert experiment.train_dataset is None
+    assert experiment.eval_dataset is None
+
+
+@pytest.mark.parametrize("trainer_class", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+def test_export_trainer_constructs_without_a_dataloader(trainer_class):
+    config = OmegaConf.create(
+        {
+            "trainer": {
+                "hf_export_execution": True,
+                "max_steps": 12,
+                "resume_mode": "from_path",
+                "resume_path": "/checkpoints/global_step_12",
+                "epochs": 1,
+                "placement": {"colocate_all": False},
+                "fully_async": {"num_parallel_generation_workers": 4, "max_staleness_steps": 1},
+                "policy_mini_batch_size": 4,
+                "train_batch_size": 4,
+                "algorithm": {"dynamic_sampling": {"type": None}},
+            },
+            "generator": {"batched": False, "async_engine": True},
+        }
+    )
+
+    trainer = trainer_class(
+        cfg=config,
+        tracker=object(),
+        tokenizer=object(),
+        train_dataset=None,
+        inference_engine_client=object(),
+        generator=object(),
+        callbacks=[],
+    )
+
+    assert trainer.train_dataloader is None
+    assert trainer.num_steps_per_epoch == 12
+    assert trainer.total_training_steps == 12
+
+
+def test_export_trainer_rejects_a_different_loaded_checkpoint_step():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.export_execution = True
+    trainer.global_step = 11
+    trainer.total_training_steps = 12
+
+    with pytest.raises(ValueError, match="requested global_step_12, loaded global_step_11"):
+        asyncio.run(trainer._finalize_export_execution())
 
 
 def test_export_job_materializes_request_model_source():

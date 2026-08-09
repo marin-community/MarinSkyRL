@@ -191,11 +191,12 @@ class BasePPOExp:
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        self.export_execution = bool(cfg.trainer.get("hf_export_execution", False))
         # Configure SkyRL log level from config
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
-        self.train_dataset = self.get_train_dataset()
-        self.eval_dataset = self.get_eval_dataset()
+        self.train_dataset = None if self.export_execution else self.get_train_dataset()
+        self.eval_dataset = None if self.export_execution else self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
@@ -507,7 +508,8 @@ class BasePPOExp:
                 try:
                     # generator.shutdown() is async; run it in a fresh event loop
                     # since asyncio.run() above may have already closed the loop.
-                    asyncio.run(trainer.generator.shutdown())
+                    if not trainer.export_execution:
+                        asyncio.run(trainer.generator.shutdown())
                 except Exception as e:
                     logger.warning(f"Error shutting down generator: {e}")
                 try:

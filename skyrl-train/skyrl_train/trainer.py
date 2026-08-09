@@ -99,6 +99,10 @@ _TRAINER_STATE_FILENAME = "trainer_state.pt"
 
 
 class RayPPOTrainer:
+    # Keep ordinary training as the default even for lightweight diagnostic and
+    # failure-path instances that intentionally bypass ``__init__``.
+    export_execution: bool = False
+
     # Whether this trainer drives the fully-async training loop (overridden True on
     # FullyAsyncRayPPOTrainer). Gates the DRIVER-side seq_mean_token_sum_norm_global
     # denominator precompute in train_critic_and_policy: only fully_async needs the
@@ -119,6 +123,7 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
+        self.export_execution = bool(cfg.trainer.get("hf_export_execution", False))
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
@@ -170,8 +175,22 @@ class RayPPOTrainer:
         needs a batch size of 1, among other features.
         Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
         """
+        if self.export_execution:
+            max_steps = int(self.cfg.trainer.get("max_steps", 0) or 0)
+            if max_steps <= 0:
+                raise ValueError("HF export execution requires trainer.max_steps to select the checkpoint step")
+            if ResumeMode(self.cfg.trainer.resume_mode) is not ResumeMode.FROM_PATH or not self.cfg.trainer.get(
+                "resume_path"
+            ):
+                raise ValueError("HF export execution requires trainer.resume_mode=from_path and trainer.resume_path")
+            self.train_dataloader = None
+            self.num_steps_per_epoch = max_steps
+            self.total_training_steps = max_steps
+            return
+
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
-        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        self.num_steps_per_epoch = len(self.train_dataloader)
+        self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
         max_steps = getattr(self.cfg.trainer, "max_steps", None)
         if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
@@ -188,14 +207,13 @@ class RayPPOTrainer:
         Returns:
             TrainerState object with current training state
         """
-        num_steps_per_epoch = len(self.train_dataloader)
         return TrainerState(
             global_step=self.global_step,
             epoch=epoch,
             total_steps=self.total_training_steps,
-            num_steps_per_epoch=num_steps_per_epoch,
+            num_steps_per_epoch=self.num_steps_per_epoch,
             is_last_step=(self.global_step == self.total_training_steps),
-            is_epoch_end=(self.global_step % num_steps_per_epoch == 0) if num_steps_per_epoch > 0 else False,
+            is_epoch_end=(self.global_step % self.num_steps_per_epoch == 0) if self.num_steps_per_epoch > 0 else False,
             metrics=dict(self.all_metrics),
             timings=dict(self.all_timings),
         )
@@ -358,12 +376,13 @@ class RayPPOTrainer:
         """
         # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
         # This must happen before any generate() calls
-        try:
-            await self.generator.startup()
-            logger.info("Generator startup complete")
-        except Exception as e:
-            logger.opt(depth=0).error("Generator startup failed: " + str(e))
-            raise
+        if not self.export_execution:
+            try:
+                await self.generator.startup()
+                logger.info("Generator startup complete")
+            except Exception as e:
+                logger.opt(depth=0).error("Generator startup failed: " + str(e))
+                raise
 
         try:
             await self._train_loop()
@@ -390,6 +409,18 @@ class RayPPOTrainer:
             epoch=max(self.cfg.trainer.epochs - 1, 0),
         )
         logger.info("Training already complete on resume — exiting cleanly.")
+
+    async def _finalize_export_execution(self) -> bool:
+        """Finalize an export only when the requested checkpoint step loaded exactly."""
+        if not self.export_execution:
+            return False
+        if self.global_step != self.total_training_steps:
+            raise ValueError(
+                "HF export checkpoint step mismatch: "
+                f"requested global_step_{self.total_training_steps}, loaded global_step_{self.global_step}"
+            )
+        await self._handle_resume_at_max_steps()
+        return True
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
         """Run train-end callbacks and saves at the last completed optimizer step."""
@@ -431,6 +462,9 @@ class RayPPOTrainer:
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
                 self.global_step, _ = self.load_checkpoints()
+
+            if await self._finalize_export_execution():
+                return
 
             # Resume-overshoot guard: if we resumed AT or PAST max_steps the run is
             # already complete. The loaded `global_step` is the *completed* step count

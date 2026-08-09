@@ -37,6 +37,10 @@ The request owns checkpoint, model, geometry, export destination, and Hub
 settings. The command owns operational placement, priority, and timeout.
 Conflicting request-owned command-line options fail before submission.
 
+Export jobs do not accept or load training or evaluation data. They also skip
+generator startup. After loading the checkpoint, the trainer requires its
+recorded global step to equal the request step before it runs finalization.
+
 ## Trainer configuration
 
 `trainer.hf_save_interval` follows `trainer.ckpt_interval` by default. An
