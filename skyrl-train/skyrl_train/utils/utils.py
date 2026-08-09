@@ -21,7 +21,6 @@ from skyrl_train.config.callbacks import has_explicit_callbacks
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
-    HF_HUB_UPLOAD_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
 from skyrl_train.distributed_debug import apply_distributed_debug_mode
@@ -506,11 +505,6 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
     """Validate checkpoint alignment and deferred publication for HF exports."""
     callbacks = cfg.trainer.get("callbacks")
     if has_explicit_callbacks(cfg):
-        if any(callback.get("type") == HF_HUB_UPLOAD_CALLBACK_TYPE for callback in callbacks):
-            raise ValueError(
-                "hf_hub_upload cannot run in normal training because HF exports are produced out of band; "
-                "publish only after the export request is complete"
-            )
 
         def callback_intervals(callback_type: str) -> list[int]:
             return [

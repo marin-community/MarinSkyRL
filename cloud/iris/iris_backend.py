@@ -97,6 +97,7 @@ from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
+    RuntimeMode,
     RuntimeProfile,
     runtime_profile_for_strategy,
     task_setup_script,
@@ -131,7 +132,6 @@ PRIORITY_NAMES = ("production", "interactive", "batch")
 
 
 def _is_checkpoint_export(args: argparse.Namespace) -> bool:
-    """Return whether this launch is the dedicated model-conversion job kind."""
     return getattr(args, "entrypoint", None) == CHECKPOINT_EXPORT_ENTRYPOINT
 
 
@@ -898,7 +898,7 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     strategy = _rl_training_strategy(args)
     expected_profile = runtime_profile_for_strategy(
         strategy,
-        checkpoint_export=_is_checkpoint_export(args),
+        mode=RuntimeMode.CHECKPOINT_EXPORT if _is_checkpoint_export(args) else RuntimeMode.TRAINING,
     )
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile

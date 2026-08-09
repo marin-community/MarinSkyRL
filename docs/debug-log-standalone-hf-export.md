@@ -44,3 +44,8 @@ The publisher and worker protocols are intentional test seams: conversion must p
 incomplete artifact is never published without constructing Ray actors or making Hub calls. The standalone
 entrypoint continues to use the production strategy converters so checkpoint and Hugging Face formats have
 one owner; only their training-state initialization is bypassed.
+
+The Iris launcher keeps export decisions in its shared job builder because both training and conversion must
+produce the same task protocol, runtime identity, and source bundle. A single job-kind predicate owns the
+distinction; the guarded sites suppress training-only defaults or resources rather than implementing separate
+conversion behavior.

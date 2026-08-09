@@ -819,8 +819,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         return wrapped_model
 
-    def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+    def _create_strategy(self, *, num_training_steps: int | None = None) -> FSDPStrategy:
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
@@ -832,6 +831,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
         strategy.setup_distributed()
         self.strategy = strategy
+        return strategy
+
+    def init_model(self, model_path, num_training_steps: int = None):
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+        strategy = self._create_strategy(num_training_steps=num_training_steps)
         wrapped_model = self._build_policy_model(strategy, model_path)
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
@@ -860,16 +864,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def init_model_for_export(self, model_path: str) -> None:
         """Initialize policy structure without training or rollout state."""
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.policy.fsdp_config,
-            optimizer_config=self.cfg.trainer.policy.optimizer_config,
-            model_config=self.cfg.trainer.policy.model,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
+        strategy = self._create_strategy()
         wrapped_model = self._build_policy_model(strategy, model_path)
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()

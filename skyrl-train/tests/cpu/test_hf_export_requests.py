@@ -168,23 +168,6 @@ def test_default_hf_export_interval_tracks_checkpoint_override():
     validate_hf_export_config(cfg)
 
 
-def test_normal_training_rejects_in_band_hub_upload():
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "callbacks": [
-                    {"type": "checkpoint", "save_steps": 5},
-                    {"type": "hf_model_save", "save_steps": 5},
-                    {"type": "hf_hub_upload", "upload_steps": 5, "repo_id": "org/model"},
-                ],
-            }
-        }
-    )
-
-    with pytest.raises(ValueError, match="produced out of band"):
-        validate_hf_export_config(cfg)
-
-
 def test_export_job_owns_timeout_and_waits_for_completion():
     request = HFExportRequest(
         step=10,

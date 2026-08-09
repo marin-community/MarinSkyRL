@@ -24,8 +24,18 @@ class RuntimeProfile(StrEnum):
     MEGATRON_EXPORT = "megatron-export"
 
 
-def runtime_profile_for_strategy(strategy: str | None, *, checkpoint_export: bool = False) -> RuntimeProfile:
+class RuntimeMode(StrEnum):
+    TRAINING = "training"
+    CHECKPOINT_EXPORT = "checkpoint-export"
+
+
+def runtime_profile_for_strategy(
+    strategy: str | None,
+    *,
+    mode: RuntimeMode = RuntimeMode.TRAINING,
+) -> RuntimeProfile:
     """Return the locked dependency profile for a trainer strategy."""
+    checkpoint_export = mode is RuntimeMode.CHECKPOINT_EXPORT
     if strategy == "megatron":
         return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON
     if strategy == "deepspeed":

@@ -23,6 +23,7 @@ from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
+from skyrl_train.utils.trainer_utils import GLOBAL_STEP_PREFIX
 from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
     policy_per_gpu_bundles_enabled,
@@ -46,7 +47,7 @@ class CheckpointExportPlan:
 
     @property
     def policy_export_path(self) -> str:
-        return os.path.join(self.export_root, f"global_step_{self.step}", "policy")
+        return os.path.join(self.export_root, f"{GLOBAL_STEP_PREFIX}{self.step}", "policy")
 
 
 @dataclass(frozen=True)

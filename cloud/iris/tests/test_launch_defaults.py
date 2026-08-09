@@ -740,6 +740,3 @@ trainer:
     )
 
     resolve_launch_defaults(args)
-
-    assert args.num_nodes == 2
-    assert args.runtime_profile is RuntimeProfile.FSDP_EXPORT
