@@ -379,7 +379,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # them even when an exception skips the per-epoch epilogue.
         self._active_generator_tasks: List[asyncio.Task] = []
 
-    def _build_train_dataloader_and_compute_training_steps(self):
+    def _configure_training_schedule(self):
         """
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """

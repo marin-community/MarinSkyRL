@@ -128,7 +128,7 @@ class RayPPOTrainer:
         self.generator = generator
         self.train_dataloader = None
         self.total_training_steps = None
-        self._build_train_dataloader_and_compute_training_steps()
+        self._configure_training_schedule()
 
         self.eval_dataloader = (
             build_dataloader(self.cfg, eval_dataset, is_train=False) if eval_dataset is not None else None
@@ -163,7 +163,7 @@ class RayPPOTrainer:
         # Trainer control object for callback coordination
         self._control = TrainerControl()
 
-    def _build_train_dataloader_and_compute_training_steps(self):
+    def _configure_training_schedule(self):
         """
         Hook for constructing the training dataloader. Subclasses can override
         this to customize dataloader behavior. For instance, fully async training
@@ -2210,7 +2210,7 @@ class RayPPOTrainer:
 class CheckpointExportTrainer(RayPPOTrainer):
     """Load one exact checkpoint, export it, and exit without a training lifecycle."""
 
-    def _build_train_dataloader_and_compute_training_steps(self) -> None:
+    def _configure_training_schedule(self) -> None:
         configured_max_steps = self.cfg.trainer.max_steps
         if configured_max_steps is None or configured_max_steps <= 0:
             raise ValueError("HF export execution requires trainer.max_steps to select the checkpoint step")

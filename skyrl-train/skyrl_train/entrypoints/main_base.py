@@ -47,6 +47,20 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
+class _TrainerFactory(Protocol):
+    def __call__(
+        self,
+        cfg: DictConfig,
+        tracker: Tracking,
+        tokenizer: PreTrainedTokenizerBase,
+        train_dataset: PromptDataset | None,
+        eval_dataset: PromptDataset | None,
+        inference_engine_client: InferenceEngineClient,
+        generator: GeneratorInterface,
+        colocate_pg: PlacementGroup | None,
+    ) -> RayPPOTrainer: ...
+
+
 @dataclass(frozen=True)
 class _TrainerInputs:
     cfg: DictConfig
@@ -57,6 +71,18 @@ class _TrainerInputs:
     inference_engine_client: InferenceEngineClient
     generator: GeneratorInterface
     colocate_pg: PlacementGroup | None
+
+    def build(self, factory: _TrainerFactory) -> RayPPOTrainer:
+        return factory(
+            cfg=self.cfg,
+            tracker=self.tracker,
+            tokenizer=self.tokenizer,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            inference_engine_client=self.inference_engine_client,
+            generator=self.generator,
+            colocate_pg=self.colocate_pg,
+        )
 
 
 class _ExperimentExecution(Protocol):
@@ -70,33 +96,15 @@ class _TrainingExecution:
         return experiment.get_train_dataset(), experiment.get_eval_dataset()
 
     def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> RayPPOTrainer:
-        return experiment.get_trainer(
-            cfg=inputs.cfg,
-            tracker=inputs.tracker,
-            tokenizer=inputs.tokenizer,
-            train_dataset=inputs.train_dataset,
-            eval_dataset=inputs.eval_dataset,
-            inference_engine_client=inputs.inference_engine_client,
-            generator=inputs.generator,
-            colocate_pg=inputs.colocate_pg,
-        )
+        return inputs.build(experiment.get_trainer)
 
 
 class _CheckpointExportExecution:
-    def datasets(self, experiment: "BasePPOExp") -> tuple[None, None]:
+    def datasets(self, _experiment: "BasePPOExp") -> tuple[None, None]:
         return None, None
 
-    def trainer(self, experiment: "BasePPOExp", inputs: _TrainerInputs) -> CheckpointExportTrainer:
-        return CheckpointExportTrainer(
-            cfg=inputs.cfg,
-            tracker=inputs.tracker,
-            tokenizer=inputs.tokenizer,
-            train_dataset=inputs.train_dataset,
-            eval_dataset=inputs.eval_dataset,
-            inference_engine_client=inputs.inference_engine_client,
-            generator=inputs.generator,
-            colocate_pg=inputs.colocate_pg,
-        )
+    def trainer(self, _experiment: "BasePPOExp", inputs: _TrainerInputs) -> CheckpointExportTrainer:
+        return inputs.build(CheckpointExportTrainer)
 
 
 def _experiment_execution(cfg: DictConfig) -> _ExperimentExecution:
