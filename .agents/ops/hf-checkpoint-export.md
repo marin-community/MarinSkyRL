@@ -19,13 +19,15 @@ python -m cloud.iris.export_hf_checkpoint \
 ```
 
 Always inspect `--dry-run` output first. The configuration and parallel geometry must match the
-checkpoint. The tool supplies nonempty placeholder training data because trainer construction
-precedes the resume-at-max branch. It disables Hub upload and database registration; export and
-publication are separate operations.
+checkpoint. Export execution uses a dedicated trainer lifecycle: it does not accept or load train
+or evaluation data, does not construct a dataloader, and does not start the rollout generator. It
+disables database registration. Hub publication runs only when the export request names a Hub
+destination.
 
 ## Diagnose failures
 
-- A dataset-size assertion means the placeholder training data was not applied.
+- Any dataset load or dataset-size assertion is an export-contract regression; export jobs do not
+  depend on training data.
 - An empty node-local destination means `export_path` was not durable and visible to the callback.
 - Teardown process noise often follows the real error; inspect a bounded tail large enough to cover
   the first causal traceback.

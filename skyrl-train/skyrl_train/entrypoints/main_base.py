@@ -34,6 +34,7 @@ from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
 import asyncio
 import multiprocessing as mp
+from typing import Protocol
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -43,6 +44,34 @@ mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
+
+
+class _ExperimentExecution(Protocol):
+    def datasets(self, experiment: "BasePPOExp") -> tuple[PromptDataset | None, PromptDataset | None]: ...
+
+    def trainer(self, experiment: "BasePPOExp", **trainer_kwargs) -> RayPPOTrainer: ...
+
+
+class _TrainingExecution:
+    def datasets(self, experiment: "BasePPOExp") -> tuple[PromptDataset | None, PromptDataset | None]:
+        return experiment.get_train_dataset(), experiment.get_eval_dataset()
+
+    def trainer(self, experiment: "BasePPOExp", **trainer_kwargs) -> RayPPOTrainer:
+        return experiment.get_trainer(**trainer_kwargs)
+
+
+class _CheckpointExportExecution:
+    def datasets(self, experiment: "BasePPOExp") -> tuple[None, None]:
+        return None, None
+
+    def trainer(self, experiment: "BasePPOExp", **trainer_kwargs) -> CheckpointExportTrainer:
+        return CheckpointExportTrainer(**trainer_kwargs)
+
+
+def _experiment_execution(cfg: DictConfig) -> _ExperimentExecution:
+    if cfg.trainer.get("hf_export_execution", False):
+        return _CheckpointExportExecution()
+    return _TrainingExecution()
 
 
 def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
@@ -191,12 +220,11 @@ class BasePPOExp:
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
-        self.export_execution = bool(cfg.trainer.get("hf_export_execution", False))
+        self.execution = _experiment_execution(cfg)
         # Configure SkyRL log level from config
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
-        self.train_dataset = None if self.export_execution else self.get_train_dataset()
-        self.eval_dataset = None if self.export_execution else self.get_eval_dataset()
+        self.train_dataset, self.eval_dataset = self.execution.datasets(self)
         self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
@@ -394,10 +422,6 @@ class BasePPOExp:
             colocate_pg=colocate_pg,
         )
 
-    def get_checkpoint_export_trainer(self, **trainer_kwargs) -> CheckpointExportTrainer:
-        """Create the dataset- and rollout-free trainer used by standalone exports."""
-        return CheckpointExportTrainer(**trainer_kwargs)
-
     def get_tracker(self):
         """Initializes the tracker for experiment tracking.
 
@@ -460,8 +484,7 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
-        trainer_factory = self.get_checkpoint_export_trainer if self.export_execution else self.get_trainer
-        trainer = trainer_factory(**trainer_kwargs)
+        trainer = self.execution.trainer(self, **trainer_kwargs)
 
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an
