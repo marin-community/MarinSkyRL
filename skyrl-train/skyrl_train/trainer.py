@@ -2121,14 +2121,17 @@ class RayPPOTrainer:
             return
 
         placement = self.cfg.trainer.placement
+        model = self.cfg.trainer.policy.model
         request = HFExportRequest(
             step=self.global_step,
             checkpoint_base_path=self.cfg.trainer.ckpt_path,
             checkpoint_path=checkpoint_path,
             export_path=self.cfg.trainer.export_path,
-            model_path=self.cfg.trainer.policy.model.path,
+            model_path=model.path,
             num_nodes=placement.policy_num_nodes,
             gpus_per_node=placement.policy_num_gpus_per_node,
+            model_source_uri=model.source_uri,
+            model_source_identity=model.source_identity,
             hf_hub_repo_id=self.cfg.trainer.get("hf_hub_repo_id"),
             hf_hub_private=self.cfg.trainer.get("hf_hub_private", False),
             hf_hub_revision=self.cfg.trainer.get("hf_hub_revision", DEFAULT_HF_HUB_REVISION),

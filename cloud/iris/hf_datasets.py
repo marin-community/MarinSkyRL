@@ -1,7 +1,7 @@
 """HuggingFace dataset helpers for the Iris RL launcher.
 
-Detects HF dataset identifiers, detects the on-disk task-dataset format
-(raw task dirs vs parquet-with-``task_binary``), and downloads dataset snapshots.
+Detects the on-disk task-dataset format (raw task dirs versus parquet with
+``task_binary``) and downloads dataset snapshots.
 """
 
 from __future__ import annotations
@@ -11,26 +11,6 @@ from pathlib import Path
 from typing import Optional
 
 from huggingface_hub import snapshot_download
-
-
-def is_hf_dataset_path(path: str) -> bool:
-    """Check if a string looks like a HuggingFace dataset identifier.
-
-    HF identifiers have the form ``org/repo-name``: exactly one ``/`` and no
-    filesystem path separators like ``./`` or ``../``.
-    """
-    if not path:
-        return False
-    if path.count("/") != 1:
-        return False
-    if path.startswith(("./", "../", "/", "~")):
-        return False
-    if "\\" in path:
-        return False
-    parts = path.split("/")
-    if not all(p.strip() for p in parts):
-        return False
-    return True
 
 
 def is_raw_tasks_directory(snapshot_dir) -> bool:

@@ -47,6 +47,7 @@ from cloud.iris.rl_data import (
     derive_skyrl_export_path,
     resolve_rl_train_data,
 )
+from marinskyrl.resource_locator import model_source_for_path
 
 
 @dataclass
@@ -56,6 +57,8 @@ class LocalRLConfig:
     rl_config_path: str
     job_name: str
     model_path: str
+    model_source_uri: str | None = None
+    model_source_identity: str | None = None
     train_data: List[str] = field(default_factory=list)
     val_data: List[str] = field(default_factory=list)
     experiments_dir: str = "experiments"
@@ -81,6 +84,9 @@ class LocalRLConfig:
     target_cluster: str = ""  # set => federated: mint at the PARENT for the mirrored endpoint
     parent_controller_config: str = ""  # marin.yaml path for federated parent-minting
     vllm_http_port: int = 8000  # local vLLM HTTP endpoint (= generator.http_endpoint_port)
+
+    def __post_init__(self) -> None:
+        model_source_for_path(self.model_path, self.model_source_uri, self.model_source_identity)
 
 
 class LocalRLRunner:
@@ -400,6 +406,8 @@ class LocalRLRunner:
             "job_name": self.config.job_name,
             "experiments_dir": self.config.experiments_dir,
             "model_path": self.config.model_path,
+            "model_source_uri": self.config.model_source_uri,
+            "model_source_identity": self.config.model_source_identity,
             "train_data": self.config.train_data,
             "val_data": self.config.val_data,
             "num_nodes": self.config.num_nodes,
@@ -517,6 +525,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--model_path", required=True, help="Model path or HuggingFace ID.")
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
+    parser.add_argument("--model-source-uri")
+    parser.add_argument("--model-source-identity")
 
     parser.add_argument("--job_name", required=True, help="Name for this training job.")
     parser.add_argument("--job-name", dest="job_name", help=argparse.SUPPRESS)
@@ -631,6 +641,8 @@ def main() -> None:
         rl_config_path=args.rl_config,
         job_name=args.job_name,
         model_path=args.model_path,
+        model_source_uri=args.model_source_uri,
+        model_source_identity=args.model_source_identity,
         train_data=train_data,
         val_data=val_data,
         experiments_dir=args.experiments_dir,

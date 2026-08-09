@@ -16,12 +16,13 @@ from collections.abc import Sequence
 
 import fsspec
 from loguru import logger
+from marinskyrl.resource_locator import is_cloud_uri
 from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
 
 def is_cloud_path(path: str) -> bool:
     """Check if the given path is a cloud storage path."""
-    return path.startswith(("s3://", "gs://", "gcs://"))
+    return is_cloud_uri(path)
 
 
 def _get_filesystem(path: str):

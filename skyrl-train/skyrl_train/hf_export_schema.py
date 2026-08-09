@@ -1,6 +1,8 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+from marinskyrl.resource_locator import validate_replayable_model_reference
+
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 HF_EXPORT_REQUEST_SCHEMA_VERSION = 1
 DEFAULT_HF_EXPORT_TIMEOUT = 7200
@@ -30,6 +32,8 @@ class HFExportRequest:
     model_path: str
     num_nodes: int
     gpus_per_node: int
+    model_source_uri: str | None = None
+    model_source_identity: str | None = None
     schema_version: int = HF_EXPORT_REQUEST_SCHEMA_VERSION
     status: HFExportStatus = HFExportStatus.PENDING
     hf_hub_repo_id: str | None = None
@@ -39,6 +43,9 @@ class HFExportRequest:
     attempts: int = 0
     timeout: int | None = None
     last_exit_code: int | None = None
+
+    def __post_init__(self) -> None:
+        validate_replayable_model_reference(self.model_path, self.model_source_uri, self.model_source_identity)
 
     def with_status(
         self,

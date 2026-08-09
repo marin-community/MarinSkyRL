@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Mapping, Optional
 import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
+from marinskyrl.resource_locator import model_source_for_path
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
@@ -732,7 +733,16 @@ def build_skyrl_hydra_args(
     # Model path and served_model_name for Harbor/LiteLLM compatibility.
     model_path = exp_args.get("model_path")
     if model_path:
-        trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_path
+        model_source = model_source_for_path(
+            model_path,
+            exp_args.get("model_source_uri"),
+            exp_args.get("model_source_identity"),
+        )
+        policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
+        policy_model["path"] = model_path
+        if model_source:
+            policy_model["source_uri"] = model_source.uri
+            policy_model["source_identity"] = model_source.identity
 
         # served_model_name: strip the org prefix from "org/model" HF IDs, since
         # Harbor/LiteLLM requires model names with exactly one '/'.

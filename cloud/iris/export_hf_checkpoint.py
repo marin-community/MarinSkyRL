@@ -41,6 +41,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from cloud.iris.model_paths import model_source_cli_args
+from marinskyrl.resource_locator import ModelLocatorError
 from skyrl_train.hf_export import read_hf_export_request, write_hf_export_request
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
@@ -131,6 +133,7 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         "--timeout",
         str(spec.timeout),
     ]
+    cmd.extend(model_source_cli_args(request.model_source_uri, request.model_source_identity))
     if spec.no_wait:
         cmd.append("--no-wait")
     if spec.job_name:
@@ -147,6 +150,8 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--step", type=int, help="checkpoint step to export")
     ap.add_argument("--rl_config", required=True, help="the RL config the run was trained with")
     ap.add_argument("--model_path", help="base model path, as at training time")
+    ap.add_argument("--model-source-uri", help="object-store model source for a task-local --model_path")
+    ap.add_argument("--model-source-identity", help="immutable identity for --model-source-uri")
     ap.add_argument("--cluster", default="cw-rno2a")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
@@ -189,6 +194,8 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
         "--step": args.step,
         "--export_path": args.export_path,
         "--model_path": args.model_path,
+        "--model-source-uri": args.model_source_uri,
+        "--model-source-identity": args.model_source_identity,
         "--num-nodes": args.num_nodes,
         "--gpus-per-node": args.gpus_per_node,
         "--hf-hub-repo-id": args.hf_hub_repo_id,
@@ -201,7 +208,10 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
         parser.error(f"--request cannot be combined with request-owned options: {', '.join(conflicts)}")
     if args.no_wait:
         parser.error("--no-wait cannot be used with --request because completion must be recorded")
-    request = read_hf_export_request(args.request)
+    try:
+        request = read_hf_export_request(args.request)
+    except ValueError as error:
+        parser.error(f"invalid HF export request: {error}")
     if request is None:
         parser.error(f"no hf_export_request.json found under {args.request}")
     return operational_spec(args, request, no_wait=False)
@@ -233,19 +243,24 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
         parser.error(f"provide --request or all manual export options; missing {', '.join(missing)}")
     checkpoint_base_path = args.ckpt_path.rstrip("/")
     export_path = args.export_path or os.path.join(os.path.dirname(checkpoint_base_path), "exports")
-    request = HFExportRequest(
-        step=args.step,
-        checkpoint_base_path=checkpoint_base_path,
-        checkpoint_path=os.path.join(checkpoint_base_path, f"{GLOBAL_STEP_PREFIX}{args.step}"),
-        export_path=export_path,
-        model_path=args.model_path,
-        num_nodes=args.num_nodes,
-        gpus_per_node=args.gpus_per_node,
-        hf_hub_repo_id=args.hf_hub_repo_id,
-        hf_hub_private=bool(args.hf_hub_private),
-        hf_hub_revision=args.hf_hub_revision or DEFAULT_HF_HUB_REVISION,
-        hf_upload_mode=HFUploadMode(args.hf_upload_mode or DEFAULT_HF_UPLOAD_MODE),
-    )
+    try:
+        request = HFExportRequest(
+            step=args.step,
+            checkpoint_base_path=checkpoint_base_path,
+            checkpoint_path=os.path.join(checkpoint_base_path, f"{GLOBAL_STEP_PREFIX}{args.step}"),
+            export_path=export_path,
+            model_path=args.model_path,
+            num_nodes=args.num_nodes,
+            gpus_per_node=args.gpus_per_node,
+            model_source_uri=args.model_source_uri,
+            model_source_identity=args.model_source_identity,
+            hf_hub_repo_id=args.hf_hub_repo_id,
+            hf_hub_private=bool(args.hf_hub_private),
+            hf_hub_revision=args.hf_hub_revision or DEFAULT_HF_HUB_REVISION,
+            hf_upload_mode=HFUploadMode(args.hf_upload_mode or DEFAULT_HF_UPLOAD_MODE),
+        )
+    except ModelLocatorError as error:
+        parser.error(str(error))
     return operational_spec(args, request, no_wait=args.no_wait)
 
 

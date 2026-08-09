@@ -10,7 +10,10 @@ serialization, and optional Hugging Face Hub publication.
 
 The request is written only after the source checkpoint completes. It records
 the immutable checkpoint path, export destination, model and parallel geometry,
-Hub settings, attempt count, timeout, and last exit code.
+Hub settings, attempt count, timeout, and last exit code. A task-local model path
+must include the object-store source and immutable identity needed to materialize
+the same model in the export gang. A Hugging Face repository ID is independently
+resolvable and does not require a source URI.
 
 The export job marks the request `in_progress` before submission. A successful
 Iris job marks it `complete`; a failed job returns it to `pending`, so the same

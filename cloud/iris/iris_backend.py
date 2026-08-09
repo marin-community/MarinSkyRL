@@ -86,7 +86,8 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
-from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
+from cloud.iris.model_paths import model_source_cli_args, unsupported_model_path_message
+from marinskyrl.resource_locator import ModelLocatorError, is_cloud_uri, is_hugging_face_repo_id, model_source_for_path
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
@@ -1838,8 +1839,12 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
 
 def normalize(args: argparse.Namespace) -> None:
     """Resolve the RL config and validate the requested worker topology."""
-    if is_object_store_model_path(args.model_path):
+    if is_cloud_uri(args.model_path):
         raise SystemExit(unsupported_model_path_message(args.model_path))
+    try:
+        model_source_for_path(args.model_path, args.model_source_uri, args.model_source_identity)
+    except ModelLocatorError as error:
+        raise SystemExit(str(error)) from error
 
     try:
         source = resolve_rl_config_path(args.rl_config)
@@ -1927,6 +1932,34 @@ def _build_task_shell(
     return ["bash", "-c", bash]
 
 
+def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
+    """Resolve per-node model materialization, prestaging, and tokenizer flags.
+
+    Offline or tokenizer-overridden Hub models are staged once per node before Ray;
+    task-local models are used directly after optional object-store materialization.
+    """
+    model_args = model_source_cli_args(args.model_source_uri, args.model_source_identity)
+    is_hub_model = is_hugging_face_repo_id(args.model_path)
+    if args.model_source_uri or not is_hub_model:
+        model_args.extend(["--model-local-path", args.model_path])
+
+    config_env = load_config_extra_env(args.rl_config)
+    policy_chat_template = load_config_policy_chat_template(args.rl_config)
+    offline = str(config_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
+    if (offline or policy_chat_template) and is_hub_model:
+        model_args.extend(["--prestage-model", args.model_path])
+        warm_source = args.model_warm_source
+        if warm_source is None:
+            warm_source = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
+        elif warm_source.strip().lower() in ("none", "off", ""):
+            warm_source = None
+        if warm_source:
+            model_args.extend(["--model-warm-source", warm_source])
+    if policy_chat_template:
+        model_args.extend(["--policy-chat-template", policy_chat_template])
+    return model_args
+
+
 def build_task_command(args: argparse.Namespace) -> List[str]:
     """Build the per-replica command for a resolved RL launch.
 
@@ -1963,6 +1996,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
     if args.resolved_config_uri:
         train_cmd.extend(["--resolved-config-uri", args.resolved_config_uri])
     if args.train_data and args.train_data != "[]":
@@ -2074,50 +2108,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--train-data", args.train_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
-    if args.model_source_uri:
-        controller_cmd.extend(
-            [
-                "--model-source-uri",
-                args.model_source_uri,
-                "--model-local-path",
-                args.model_path,
-                "--model-source-identity",
-                args.model_source_identity,
-            ]
-        )
-    # Per-NODE model pre-staging, coupled to HF_HUB_OFFLINE. A config that runs the
-    # FSDP ranks offline (extra_env HF_HUB_OFFLINE=1) has NO warm cache unless the
-    # weights are pulled first; without pre-staging each of the N*8 ranks would race
-    # HF Hub online inside init_model and a slow straggler blows the 20-min c10d store
-    # barrier (the 80B init-straggle kill, 2026-07-10). When the config is offline,
-    # forward the model repo-id so the controller pre-downloads it ONCE PER NODE into
-    # the node-local HF cache before Ray — off the collective critical path. Online
-    # configs are byte-identical (no flag forwarded).
-    _cfg_env = load_config_extra_env(args.rl_config)
-    _policy_chat_template = load_config_policy_chat_template(args.rl_config)
-    _offline = str(_cfg_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
-    # A policy_chat_template override rewrites the node-local tokenizer cache, so it REQUIRES
-    # a prestage even when the config is not offline (nothing to rewrite otherwise).
-    if _offline or _policy_chat_template:
-        if args.model_path:
-            controller_cmd.extend(["--prestage-model", args.model_path])
-            # In-region warm source. Default = auto-derive the CW-S3 convention path from
-            # the repo id; a seed job (mirror_hf_to_s3.py) populates it once and every node
-            # then S3-syncs from there instead of cold-pulling from HF Hub. When the source
-            # is un-seeded the controller falls back to the HF prestage (byte-identical to
-            # pre-warm-path). 'none'/'off' disables the warm path entirely (pure HF prestage).
-            warm = args.model_warm_source
-            if warm is None:
-                warm = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
-            elif warm.strip().lower() in ("none", "off", ""):
-                warm = None
-            if warm:
-                controller_cmd.extend(["--model-warm-source", warm])
-    # Force the delphi chat template onto every node's tokenizer cache (single-turn RLVR).
-    # Repo-relative path (resolved in-pod against /app by the controller). No-op for configs
-    # without policy_chat_template.
-    if _policy_chat_template:
-        controller_cmd.extend(["--policy-chat-template", _policy_chat_template])
+    controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 

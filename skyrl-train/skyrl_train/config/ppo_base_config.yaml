@@ -30,6 +30,8 @@ trainer:
     grug_query_bias_update_mode: "frozen"
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      source_uri: null
+      source_identity: null
       lora:
           rank: 0
           alpha: 16
