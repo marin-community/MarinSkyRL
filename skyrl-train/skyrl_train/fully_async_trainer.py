@@ -491,16 +491,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # dispatcher (gated; default OFF => no-op, self.generator unchanged).
         self._maybe_enable_rollout_fanout()
 
-        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
-        # This must happen before any generate() calls. When fan-out is enabled,
-        # self.generator is now the RolloutDispatcher, whose startup() builds the
-        # PlacementGroup + K coordinators and starts each coordinator's generator.
-        try:
-            await self.generator.startup()
-            logger.info("Generator startup complete")
-        except Exception as e:
-            logger.opt(depth=0).error("Generator startup failed: " + str(e))
-            raise
+        await self._startup_generator()
 
         try:
             await self._train_loop()

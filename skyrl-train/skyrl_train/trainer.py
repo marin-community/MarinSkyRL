@@ -164,13 +164,7 @@ class RayPPOTrainer:
         self._control = TrainerControl()
 
     def _configure_training_schedule(self):
-        """
-        Configure the execution schedule and, for training lifecycles, the dataloader.
-
-        The default builds a training dataloader. Fully async training overrides the
-        schedule geometry, while checkpoint export validates one exact resume step
-        and deliberately constructs no dataloader.
-        """
+        """Set ``total_training_steps`` and any inputs required to execute that schedule."""
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
         self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
         max_steps = getattr(self.cfg.trainer, "max_steps", None)
