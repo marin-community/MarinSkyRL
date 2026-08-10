@@ -32,10 +32,13 @@ LIBRARY_PATH=/.singularity.d/libs for Triton JIT gcc.
 import os
 
 import torch
+from omegaconf import OmegaConf
 
 import skyrl_train.model_wrapper as _mw
 import skyrl_train.distributed.cp_utils as _cp
 from skyrl_train.model_wrapper import HFModelWrapper
+from skyrl_train.utils.policy_math import compute_approx_kl
+from skyrl_train.utils.policy_losses import ppo_policy_loss
 
 # Import the oracle by file (tests/gpu is not a package on the import path under
 # the torchrun launch; add the test dir to sys.path defensively).
@@ -238,9 +241,6 @@ def _test_unshard_matches_oracle(cp_mesh, cp_size, rank):
 def _ppo_loss_all_modes(action_log_probs, loss_mask):
     """Run ppo_policy_loss for all four reduce_loss modes with fixed synthetic
     old_log_probs / advantages so cp=1 and cp=2 are compared apples-to-apples."""
-    from omegaconf import OmegaConf
-    from skyrl_train.utils.ppo_utils import ppo_policy_loss
-
     B, A = action_log_probs.shape
     # Deterministic synthetic inputs, IDENTICAL for cp=1 and cp=2 (do NOT derive
     # from action_log_probs — that would feed each model its own logp into BOTH
@@ -273,8 +273,6 @@ def _ppo_loss_all_modes(action_log_probs, loss_mask):
 
 
 def _ref_kl(policy_logp, ref_logp, loss_mask):
-    from skyrl_train.utils.ppo_utils import compute_approx_kl
-
     return compute_approx_kl(policy_logp, ref_logp, loss_mask=loss_mask, kl_estimator_type="k3")
 
 

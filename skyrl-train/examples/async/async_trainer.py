@@ -5,7 +5,7 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer
-from skyrl_train.utils.ppo_utils import normalize_advantages_dict
+from skyrl_train.utils.policy_math import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode

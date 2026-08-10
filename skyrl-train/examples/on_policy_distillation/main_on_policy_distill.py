@@ -6,11 +6,8 @@ import hydra
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import config_dir, validate_cfg
-from skyrl_train.utils.ppo_utils import (
-    register_advantage_estimator,
-    register_policy_loss,
-    reduce_loss,
-)
+from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
+from skyrl_train.utils.loss_reduction import reduce_loss
 from skyrl_train.training_batch import TrainingInputBatch
 
 
@@ -52,8 +49,7 @@ def compute_importance_sampling_policy_loss(
     loss = -torch.exp(log_probs - old_log_probs) * advantages
 
     loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
-    # return loss and a dummy clip ratio value as we aren't clipping here
-    return loss, 0.0
+    return loss, {}
 
 
 class OnPolicyDistillationExp(BasePPOExp):

@@ -506,20 +506,31 @@ It can be helpful to understand the final loss formulation to see how the differ
       advantages: torch.Tensor,
       config: DictConfig, # trainer.algorithm config
       loss_mask: Optional[torch.Tensor] = None,
-  ) -> torch.Tensor:
+  ) -> tuple[torch.Tensor, dict[str, float]]:
 
       ratio = (log_probs - old_log_probs).exp()
       surr1 = ratio * advantages
       surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
       loss = -torch.min(surr1, surr2)
-      clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+      clip_metrics = clipping_metrics(
+          ratio,
+          -surr2 > -surr1,
+          loss_mask,
+          eps_clip_low=config.eps_clip_low,
+          eps_clip_high=config.eps_clip_high,
+      )
       clip_pg_losses1 = loss
       if config.policy_loss_type == "dual_clip":
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
       loss = reduce_loss(loss, loss_mask, config.loss_reduction)
-      return loss, clip_ratio
+      return loss, clip_metrics
+
+Workers retain ``policy/ppo_clip_ratio`` as the pooled clipping fraction and also emit
+``policy/ppo_clip_ratio_low`` and ``policy/ppo_clip_ratio_high`` for the bound that changed the objective.
+``policy/ppo_clip_pressure_low`` and ``policy/ppo_clip_pressure_high`` report the fraction of ratios outside each
+bound before the loss decides whether clipping binds for that token.
 
 
 Generator Configuration

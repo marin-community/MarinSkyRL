@@ -26,6 +26,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -359,7 +360,8 @@ async def test_megatron_train(
         assert isinstance(result, dict), "Result should be a dictionary of training stats"
         assert "policy_loss" in result
         assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
+        for key in POLICY_CLIP_METRIC_KEYS:
+            assert key in result
         assert "policy_entropy" in result
         for k, v in result.items():
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
@@ -392,7 +394,14 @@ async def test_megatron_train(
     print("\n\n")
     print("fsdp results: ", results_fsdp[0])
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "final_loss"]
+    keys_to_compare = [
+        "policy_loss",
+        "policy_lr",
+        *POLICY_CLIP_METRIC_KEYS,
+        "policy_entropy",
+        "policy_kl",
+        "final_loss",
+    ]
     for i, result in enumerate(results_fsdp):
         for k in keys_to_compare:
             if k == "policy_entropy":
@@ -457,7 +466,8 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         assert isinstance(result, dict), "Result should be a dictionary of training stats"
         assert "policy_loss" in result
         assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
+        for key in POLICY_CLIP_METRIC_KEYS:
+            assert key in result
         assert "policy_entropy" in result
         for k, v in result.items():
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
@@ -493,7 +503,14 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     print("\n\n")
     print("megatron results dp: ", results_megatron_dp)
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "raw_grad_norm"]
+    keys_to_compare = [
+        "policy_loss",
+        "policy_lr",
+        *POLICY_CLIP_METRIC_KEYS,
+        "policy_entropy",
+        "policy_kl",
+        "raw_grad_norm",
+    ]
     for i, result in enumerate(results_megatron_dp):
         for k in keys_to_compare:
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"

@@ -18,10 +18,7 @@ import torch
 from skyrl_train.utils.span_tagger import SPAN_OTHER, SPAN_THINK, SPAN_ACTION, SPAN_EDIT
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping, _potential
 from skyrl_train.utils.test_delta_parser import TestRunResult
-from skyrl_train.utils.ppo_utils import (
-    compute_rloo_n_outcome_advantage,
-    compute_rloo_n_pbs_advantage,
-)
+from skyrl_train.utils.advantage_estimators import compute_rloo_n_outcome_advantage, compute_rloo_n_pbs_advantage
 
 
 def _cfg():

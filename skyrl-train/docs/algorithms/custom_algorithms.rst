@@ -16,7 +16,7 @@ You can register custom advantage estimators using either a decorator or the reg
 
 .. code-block:: python
 
-   from skyrl_train.utils.ppo_utils import register_advantage_estimator, AdvantageEstimatorRegistry
+   from skyrl_train.utils.algorithm_registry import register_advantage_estimator, AdvantageEstimatorRegistry
    import torch
 
    # Using the decorator
@@ -48,14 +48,13 @@ Similarly, you can register custom policy loss functions:
 
 .. code-block:: python
 
-   from skyrl_train.utils.ppo_utils import register_policy_loss, PolicyLossRegistry
+   from skyrl_train.utils.algorithm_registry import register_policy_loss, PolicyLossRegistry
 
    @register_policy_loss("reinforce")
    def compute_reinforce_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
        # Your custom policy loss implementation (like REINFORCE)
        loss = (-log_probs * advantages).mean()
-       # return loss and clip ratio
-       return loss, 0.0
+       return loss, {}
 
 Registry Ray Distribution
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -65,7 +64,7 @@ The registry system handles Ray actor synchronization when Ray is initialized. F
 .. code-block:: python
 
    import ray
-   from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, sync_registries
+   from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry, sync_registries
 
    # Register a function on the main process
    def my_function(**kwargs):

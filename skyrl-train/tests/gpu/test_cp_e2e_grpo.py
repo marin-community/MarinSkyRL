@@ -51,8 +51,10 @@ import traceback
 
 import torch
 import torch.distributed as dist
+from omegaconf import OmegaConf
 
 import skyrl_train.model_wrapper as _mw
+from skyrl_train.utils.policy_losses import ppo_policy_loss
 import skyrl_train.distributed.cp_utils as _cp
 from skyrl_train.model_wrapper import HFModelWrapper
 from tests.distributed_runtime_constants import GPU_TEST_PROCESS_GROUP_TIMEOUT_SECONDS
@@ -142,10 +144,6 @@ def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4, cp_group=
     all_gather backward reduce-scatters each token's grad to its OWNING cp rank, so
     each rank holds only its shard's contribution; summing across the cp group
     reconstructs the full-sequence gradient (== the cp=1 gradient)."""
-    import torch.distributed as _dist
-    from omegaconf import OmegaConf
-    from skyrl_train.utils.ppo_utils import ppo_policy_loss
-
     model.model.train()
     opt = torch.optim.SGD(model.model.parameters(), lr=lr)  # SGD = deterministic, no state
 
@@ -185,7 +183,7 @@ def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4, cp_group=
         # shard's grad after the unshard's reduce-scatter backward.
         for p in model.model.parameters():
             if p.grad is not None:
-                _dist.all_reduce(p.grad, op=_dist.ReduceOp.SUM, group=cp_group)
+                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM, group=cp_group)
     gnorm = _grad_norm(model)
     opt.step()
     return loss.float().item(), gnorm

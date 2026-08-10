@@ -14,7 +14,7 @@ import torch.distributed as dist  # noqa: E402
 
 
 def _kill_registry_actors() -> None:
-    registry_module = sys.modules.get("skyrl_train.utils.ppo_utils")
+    registry_module = sys.modules.get("skyrl_train.utils.function_registry")
     if registry_module is None:
         return
     for registry in registry_module.BaseFunctionRegistry.__subclasses__():

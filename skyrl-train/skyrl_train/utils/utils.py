@@ -32,6 +32,7 @@ from .constants import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
 )
+from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 from .logging_utils import format_exception_text
 from .nccl_environment import worker_nccl_environment
 
@@ -537,8 +538,6 @@ def validate_cfg(cfg: DictConfig):
     validate_hf_export_config(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
     _validate_cp_cfg(cfg)
-    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
-
     assert cfg.trainer.sequence_parallel_backend == "ulysses", (
         f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
     )
@@ -578,8 +577,6 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
-    repopulate_all_registries()
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
 
@@ -1343,10 +1340,6 @@ def initialize_ray(cfg: DictConfig):
     Args:
         cfg: Training config
     """
-    from .ppo_utils import (
-        sync_registries,
-    )
-
     debug_environment = apply_distributed_debug_mode(cfg)
     if debug_environment:
         manifest = write_process_manifest("driver", environment=debug_environment)

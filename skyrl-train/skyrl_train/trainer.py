@@ -32,18 +32,14 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, prep
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.utils import ppo_utils, trainer_utils
+from skyrl_train.utils import trainer_utils
 from skyrl_train.utils.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils.ppo_utils import (
-    compute_approx_kl,
-    masked_mean,
-    get_kl_controller,
-    FixedKLController,
-    AdaptiveKLController,
-    normalize_advantages_dict,
-)
+from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
+from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
+from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
+from skyrl_train.utils.loss_reduction import compute_global_loss_denom
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -1110,7 +1106,7 @@ class RayPPOTrainer:
         # un-chunked (-> each micro-batch sees rollout_logprobs=None), the
         # worker's TIS diagnostics already guard `is not None`, and
         # ppo_policy_loss skips the TIS importance ratio when rollout_logprobs
-        # is None (see ppo_utils.ppo_policy_loss). We surface the skip via a
+        # is None (see policy_losses.ppo_policy_loss). We surface the skip via a
         # `tis/batch_skipped_no_logprobs` metric (set on the driver below) so the
         # failure mode is observable; the relaunch skip-fraction is the live
         # systematic-vs-intermittent diagnostic.
@@ -1326,7 +1322,7 @@ class RayPPOTrainer:
             grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
             last_step_rewards = token_level_rewards[is_last_step]
             # compatible with any advantage estimator
-            last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
+            last_step_advantages, last_step_returns = compute_advantages_and_returns(
                 token_level_rewards=last_step_rewards,
                 response_mask=response_mask[is_last_step],
                 index=index[is_last_step.cpu().numpy()],
@@ -1355,7 +1351,7 @@ class RayPPOTrainer:
             # estimator ignores the extra kwarg), and when the key is absent
             # (channel off) token_level_shaping is None -> byte-identical path.
             token_level_shaping = data["token_level_shaping"] if "token_level_shaping" in data else None
-            advantages, returns = ppo_utils.compute_advantages_and_returns(
+            advantages, returns = compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
                 index=data.metadata["uids"],
@@ -1709,13 +1705,13 @@ class RayPPOTrainer:
         # relocation), so the scalar all_reduce over the full policy PG never completes
         # (the 80B gs1 wedge, NCCL collective #288606 NumelIn=1, py-spy-confirmed at
         # worker.py's seq_mean_token_sum_norm_global normalizer). Z here is BIT-IDENTICAL
-        # to the old summed-over-ranks value (see ppo_utils.compute_global_loss_denom).
+        # to the old summed-over-ranks value (see loss_reduction.compute_global_loss_denom).
         # Gated to fully_async so sync RL keeps the exact legacy in-worker all_reduce
         # (byte-identical); the worker falls back to that path when this key is absent.
         if self.is_fully_async and self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
             actor_infos = self.policy_model.actor_infos
             ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
-            data.metadata["global_loss_denom"] = ppo_utils.compute_global_loss_denom(
+            data.metadata["global_loss_denom"] = compute_global_loss_denom(
                 data["advantages"],
                 self.cfg.trainer.algorithm.max_seq_len,
                 ranks_per_dp_group,

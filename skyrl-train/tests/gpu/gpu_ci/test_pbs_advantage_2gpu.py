@@ -27,7 +27,7 @@ from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, get_test_actor_config, validate_cfg
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils import ppo_utils
+from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def test_pbs_dispatcher_on_gpu(ray_init_fixture):
     index = np.array(["g0", "g0", "g1", "g1"])
 
     # Pure RLOO-N reference (no shaping channel).
-    base, _ = ppo_utils.compute_advantages_and_returns(
+    base, _ = compute_advantages_and_returns(
         token_level_rewards=tlr,
         response_mask=rm,
         index=index,
@@ -72,7 +72,7 @@ def test_pbs_dispatcher_on_gpu(ray_init_fixture):
 
     # rloo_n_pbs with zeros channel == base (byte-identical).
     zeros = torch.zeros_like(rm)
-    adv_zeros, _ = ppo_utils.compute_advantages_and_returns(
+    adv_zeros, _ = compute_advantages_and_returns(
         token_level_rewards=tlr,
         response_mask=rm,
         index=index,
@@ -86,7 +86,7 @@ def test_pbs_dispatcher_on_gpu(ray_init_fixture):
     # rloo_n_pbs with a positive edit-token shaping on sample 0, token 2.
     shaping = torch.zeros_like(rm)
     shaping[0, 2] = 0.25
-    adv_pbs, _ = ppo_utils.compute_advantages_and_returns(
+    adv_pbs, _ = compute_advantages_and_returns(
         token_level_rewards=tlr,
         response_mask=rm,
         index=index,

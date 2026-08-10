@@ -18,12 +18,9 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import config_dir, create_teacher_inference_engines_from_config
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.utils.ppo_utils import (
-    register_advantage_estimator,
-    register_policy_loss,
-    reduce_loss,
-    masked_mean,
-)
+from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
+from skyrl_train.utils.loss_reduction import reduce_loss
+from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distillation_trainer import DistillationTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from examples.terminal_bench.entrypoints.main_tbench import TerminalBenchExp
@@ -68,7 +65,7 @@ def compute_importance_sampling_policy_loss(
 ):
     loss = -torch.exp(log_probs - old_log_probs) * advantages
     loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
-    return loss, 0.0
+    return loss, {}
 
 
 class OnPolicyDistillationLogitsTerminalBenchExp(TerminalBenchExp):

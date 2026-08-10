@@ -9,7 +9,7 @@ import numpy as np
 from omegaconf import DictConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry
+from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry
 
 
 # Example of custom advantage estimator: "simple_baseline"
