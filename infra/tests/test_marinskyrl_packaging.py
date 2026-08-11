@@ -134,3 +134,38 @@ def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
 
     assert config_release is not None
     assert config_release.group(1) == harbor_commit
+
+
+@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
+def test_rollout_closure_keeps_vllm_and_flashinfer_on_pytorchs_cuda_runtime(policy_extra: str) -> None:
+    exported = subprocess.run(
+        [
+            "uv",
+            "export",
+            "--locked",
+            "--no-dev",
+            "--no-hashes",
+            "--extra",
+            policy_extra,
+            "--extra",
+            "vllm",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+    assert any(requirement.startswith("vllm @") for requirement in exported)
+    assert any(requirement.startswith("flashinfer-python==") for requirement in exported)
+    assert any(requirement.startswith("flashinfer-cubin==") for requirement in exported)
+    assert any(requirement.startswith("flashinfer-jit-cache==") for requirement in exported)
+    assert any(requirement.startswith("humming-kernels==") for requirement in exported)
+    assert any(requirement.startswith("cuda-tile==") for requirement in exported)
+    cuda_runtime_requirements = [
+        requirement for requirement in exported if requirement.startswith("nvidia-cuda-runtime")
+    ]
+    assert len(cuda_runtime_requirements) == 1
+    assert cuda_runtime_requirements[0].startswith("nvidia-cuda-runtime-cu12==")
+    assert not any(requirement.startswith("nvidia-cuda-nvcc==") for requirement in exported)
+    assert not any(requirement.startswith("nvidia-cuda-tileiras==") for requirement in exported)
