@@ -52,7 +52,7 @@ _MUONH_OPTIMIZER_NAME = "MuonH"
 
 
 def resolve_fsdp_parameter_storage_dtype(optimizer_name: str, configured_dtype: str | None) -> torch.dtype:
-    """Resolve persistent FSDP parameter storage separately from compute precision.
+    """Return the FSDP parameter storage dtype.
 
     An unset dtype preserves MuonH parameters in FP32 and stores parameters for every other optimizer in BF16.
     """
