@@ -178,19 +178,19 @@ def test_fsdp_parameter_storage_dtype_defaults_and_overrides_optimizer():
 
     assert policy.fsdp_parameter_storage_dtype is None
     assert critic.fsdp_parameter_storage_dtype is None
-    assert resolve_fsdp_parameter_storage_dtype(policy) == torch.bfloat16
-    assert resolve_fsdp_parameter_storage_dtype(critic) == torch.bfloat16
+    assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.bfloat16
+    assert resolve_fsdp_parameter_storage_dtype(critic.optimizer, critic.fsdp_parameter_storage_dtype) == torch.bfloat16
 
     policy.optimizer = "MuonH"
-    assert resolve_fsdp_parameter_storage_dtype(policy) == torch.float32
+    assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.float32
     policy.fsdp_parameter_storage_dtype = "bfloat16"
-    assert resolve_fsdp_parameter_storage_dtype(policy) == torch.bfloat16
+    assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.bfloat16
 
     critic.fsdp_parameter_storage_dtype = "float32"
-    assert resolve_fsdp_parameter_storage_dtype(critic) == torch.float32
+    assert resolve_fsdp_parameter_storage_dtype(critic.optimizer, critic.fsdp_parameter_storage_dtype) == torch.float32
 
     with pytest.raises(ValueError, match="must be float32 or bfloat16"):
-        resolve_fsdp_parameter_storage_dtype(_Config(optimizer="AdamW", fsdp_parameter_storage_dtype="float16"))
+        resolve_fsdp_parameter_storage_dtype("AdamW", "float16")
 
 
 def test_fsdp_strategy_selects_only_explicit_muonh(monkeypatch):

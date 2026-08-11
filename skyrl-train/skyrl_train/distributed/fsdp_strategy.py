@@ -9,7 +9,6 @@ import gc
 import json
 from loguru import logger
 import numpy as np
-from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 from torch import optim
@@ -52,17 +51,9 @@ _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
 
 
-def resolve_fsdp_parameter_storage_dtype(optimizer_config: DictConfig | None) -> torch.dtype:
+def resolve_fsdp_parameter_storage_dtype(optimizer_name: str, configured_dtype: object | None) -> torch.dtype:
     """Resolve persistent FSDP training-parameter storage independently of compute precision."""
-    configured_dtype = (
-        optimizer_config.get("fsdp_parameter_storage_dtype", None) if optimizer_config is not None else None
-    )
     if configured_dtype is None:
-        optimizer_name = (
-            optimizer_config.get("optimizer", _DEFAULT_OPTIMIZER_NAME)
-            if optimizer_config is not None
-            else _DEFAULT_OPTIMIZER_NAME
-        )
         return torch.float32 if optimizer_name == _MUONH_OPTIMIZER_NAME else torch.bfloat16
     if PrecisionType.is_fp32(configured_dtype):
         return torch.float32
@@ -106,9 +97,16 @@ class FSDPStrategy(DistributedStrategy):
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
         self.optimizer_name = (
-            optimizer_config.get("optimizer", _DEFAULT_OPTIMIZER_NAME) if optimizer_config is not None else None
+            optimizer_config.get("optimizer", _DEFAULT_OPTIMIZER_NAME)
+            if optimizer_config is not None
+            else _DEFAULT_OPTIMIZER_NAME
         )
-        self.parameter_storage_dtype = resolve_fsdp_parameter_storage_dtype(optimizer_config)
+        configured_storage_dtype = (
+            optimizer_config.get("fsdp_parameter_storage_dtype", None) if optimizer_config is not None else None
+        )
+        self.parameter_storage_dtype = resolve_fsdp_parameter_storage_dtype(
+            self.optimizer_name, configured_storage_dtype
+        )
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
