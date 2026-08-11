@@ -35,7 +35,7 @@ The positive-outcome gate leaves zero-reward responses unchanged. A two-token co
 - The first red contract failed at import because no shared shaping module existed.
 - Focused shaping, generator, configuration, and trainer-utility tests pass, including async concatenation and dynamic sampling.
 - The repository's YAML-policy test caught an explanatory comment in the root config; the comment was removed and the contract now passes.
-- The full launcher and trainer CPU gate passes: 1,316 passed and 21 skipped.
+- The full launcher and trainer CPU gate passes: 1,317 passed and 20 skipped.
 
 ## Future work
 
