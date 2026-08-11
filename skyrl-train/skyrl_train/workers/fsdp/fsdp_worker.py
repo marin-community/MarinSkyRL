@@ -785,7 +785,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             wrapped_model = HFModelWrapper(
                 model_path,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # Storage precision is independent of FSDP's BF16 forward-compute policy.
+                # Initial parameter storage is independent of FSDP's configurable compute precision.
                 bf16=strategy.parameter_storage_dtype == torch.bfloat16,
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
@@ -1217,7 +1217,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 model_path,
                 "critic",
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # Storage precision is independent of FSDP's BF16 forward-compute policy.
+                # Initial parameter storage is independent of FSDP's configurable compute precision.
                 bf16=strategy.parameter_storage_dtype == torch.bfloat16,
                 lora_rank=self.cfg.trainer.critic.model.lora.rank,
                 lora_alpha=self.cfg.trainer.critic.model.lora.alpha,

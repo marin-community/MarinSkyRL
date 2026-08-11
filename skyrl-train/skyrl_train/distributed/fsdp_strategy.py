@@ -51,8 +51,13 @@ _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
 
 
-def resolve_fsdp_parameter_storage_dtype(optimizer_name: str, configured_dtype: object | None) -> torch.dtype:
-    """Resolve persistent FSDP training-parameter storage independently of compute precision."""
+def resolve_fsdp_parameter_storage_dtype(
+    optimizer_name: str, configured_dtype: str | int | torch.dtype | None
+) -> torch.dtype:
+    """Resolve persistent FSDP parameter storage separately from compute precision.
+
+    An unset dtype preserves MuonH parameters in FP32 and stores parameters for every other optimizer in BF16.
+    """
     if configured_dtype is None:
         return torch.float32 if optimizer_name == _MUONH_OPTIMIZER_NAME else torch.bfloat16
     if PrecisionType.is_fp32(configured_dtype):
@@ -499,7 +504,6 @@ class FSDPStrategy(DistributedStrategy):
         optim_config = self.optimizer_config
         if optim_config is not None:
             optimizer_name = self.optimizer_name
-            assert optimizer_name is not None
             if optimizer_name == "Muon":
                 # Hybrid Muon recipe: Muon on the 2-D hidden matmul weights,
                 # AdamW on embeddings / final head / norms / biases / 1-D params.
