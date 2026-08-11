@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from skyrl_train.generators.generator_types import GeneratorOutput
+from skyrl_train.generators.generator_types import GeneratorOutput, RewardShapingComponents, RewardShapingLoopSpan
 
 
 SHAPING_METRIC_PREFIX = "generate/reward_shaping"
@@ -169,7 +169,7 @@ def _window_hashes(tokens: Sequence[int], window: int) -> list[int]:
     return hashes
 
 
-def _merge_spans(spans: list[tuple[int, int]]) -> list[dict[str, int]]:
+def _merge_spans(spans: list[tuple[int, int]]) -> list[RewardShapingLoopSpan]:
     if not spans:
         return []
     merged: list[list[int]] = []
@@ -185,7 +185,7 @@ def _repeated_spans(
     response_ids: Sequence[int],
     loss_mask: Sequence[int],
     config: LoopPenaltyConfig,
-) -> tuple[list[dict[str, int]], int]:
+) -> tuple[list[RewardShapingLoopSpan], int]:
     repeated_spans: list[tuple[int, int]] = []
     penalized_occurrences = 0
     window = config.window_tokens
@@ -244,9 +244,13 @@ def _add_penalty(
     return shaped
 
 
-def _metric_key(value: Any) -> str:
+def _metric_key(value: str | None) -> str:
     normalized = "missing" if value is None else str(value).strip().lower()
     return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_") or "missing"
+
+
+def _empty_components() -> RewardShapingComponents:
+    return {"loop": 0.0, "non_termination": 0.0, "successful_length": 0.0}
 
 
 def infer_stop_reason(response_ids: Sequence[int], eos_token_id: int | None, max_generate_length: int) -> str:
@@ -383,9 +387,8 @@ def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, A
     if len(excluded) != batch_size:
         raise ValueError("exclude_from_baseline must have one entry per trajectory")
 
-    zero_components = {"loop": 0.0, "non_termination": 0.0, "successful_length": 0.0}
-    components = [dict(zero_components) for _ in range(batch_size)]
-    all_loop_spans: list[list[dict[str, int]]] = []
+    components = [_empty_components() for _ in range(batch_size)]
+    all_loop_spans: list[list[RewardShapingLoopSpan]] = []
     repeated_occurrences: list[int] = []
     shaped_rewards = [list(reward) if isinstance(reward, list) else float(reward) for reward in rewards]
     response_lengths = [sum(bool(value) for value in loss_mask) for loss_mask in loss_masks]
@@ -399,7 +402,7 @@ def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, A
     for group in groups:
         final_index = group[-1]
         trajectory_length = sum(response_lengths[index] for index in group)
-        sample_components = dict(zero_components)
+        sample_components = _empty_components()
 
         if not excluded[final_index]:
             sample_components["loop"] = -min(

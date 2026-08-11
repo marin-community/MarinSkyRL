@@ -31,6 +31,17 @@ class GeneratorInput(TypedDict):
     batch_metadata: Optional[BatchMetadata]
 
 
+class RewardShapingComponents(TypedDict):
+    loop: float
+    non_termination: float
+    successful_length: float
+
+
+class RewardShapingLoopSpan(TypedDict):
+    start: int
+    end: int
+
+
 class GeneratorOutput(TypedDict):
     """Normalized output shared by trajectory generators and trainer consumers.
 
@@ -42,8 +53,8 @@ class GeneratorOutput(TypedDict):
     response_ids: List[List[int]]
     rewards: Union[List[float], List[List[float]]]
     unshaped_rewards: Optional[List[float]]
-    reward_shaping_components: Optional[List[Dict[str, float]]]
-    reward_shaping_loop_spans: Optional[List[List[Dict[str, int]]]]
+    reward_shaping_components: Optional[List[RewardShapingComponents]]
+    reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
     reward_shaping_versions: Optional[List[int]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
