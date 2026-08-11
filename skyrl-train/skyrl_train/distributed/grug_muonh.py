@@ -110,7 +110,7 @@ def _matrix_norm(
     value: Tensor,
     reference: DTensor | None,
 ) -> Tensor:
-    """Return trailing-matrix norms with FP32 accumulation and shard reductions."""
+    """Return the global norm of each trailing matrix in ``value``."""
     axes = (-2, -1)
     squared_norm = torch.linalg.vector_norm(value, dim=axes, keepdim=True, dtype=torch.float32).square_()
     if reference is not None:

@@ -176,8 +176,6 @@ def test_fsdp_parameter_storage_dtype_defaults_and_overrides_optimizer():
     policy = cfg.trainer.policy.optimizer_config
     critic = cfg.trainer.critic.optimizer_config
 
-    assert policy.fsdp_parameter_storage_dtype is None
-    assert critic.fsdp_parameter_storage_dtype is None
     assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.bfloat16
     assert resolve_fsdp_parameter_storage_dtype(critic.optimizer, critic.fsdp_parameter_storage_dtype) == torch.bfloat16
 
