@@ -41,22 +41,17 @@ from .nccl_environment import worker_nccl_environment
 MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2"})
 
 
-def strategy_supports_moe_router_replay(strategy: str) -> bool:
-    """Return whether a training strategy consumes captured MoE routes."""
-    return strategy in MOE_ROUTER_REPLAY_STRATEGIES
-
-
 def moe_router_replay_requested(cfg: DictConfig) -> bool:
     return bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
 
 
 def moe_router_replay_enabled(cfg: DictConfig) -> bool:
-    return strategy_supports_moe_router_replay(cfg.trainer.strategy) and moe_router_replay_requested(cfg)
+    return cfg.trainer.strategy in MOE_ROUTER_REPLAY_STRATEGIES and moe_router_replay_requested(cfg)
 
 
 def validate_moe_router_replay_config(cfg: DictConfig) -> None:
     """Reject router replay on strategies that silently ignore captured routes."""
-    if moe_router_replay_requested(cfg) and not strategy_supports_moe_router_replay(cfg.trainer.strategy):
+    if moe_router_replay_requested(cfg) and cfg.trainer.strategy not in MOE_ROUTER_REPLAY_STRATEGIES:
         supported = ", ".join(sorted(MOE_ROUTER_REPLAY_STRATEGIES))
         raise ValueError(
             f"trainer.policy.fsdp_config.moe_router_replay is not supported with "
