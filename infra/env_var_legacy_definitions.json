@@ -269,7 +269,6 @@
   "skyrl-train/skyrl_train/utils/utils.py::python-assignment::CUDA_DEVICE_MAX_CONNECTIONS": 1,
   "skyrl-train/skyrl_train/utils/utils.py::python-assignment::CUDA_VISIBLE_DEVICES": 1,
   "skyrl-train/skyrl_train/utils/utils.py::python-assignment::HARBOR_DISTRIBUTED_CONTAINERS": 1,
-  "skyrl-train/skyrl_train/utils/utils.py::python-assignment::LD_LIBRARY_PATH": 1,
   "skyrl-train/skyrl_train/utils/utils.py::python-assignment::LOCAL_RANK": 2,
   "skyrl-train/skyrl_train/utils/utils.py::python-assignment::MLFLOW_TRACKING_TOKEN": 1,
   "skyrl-train/skyrl_train/utils/utils.py::python-assignment::MLFLOW_TRACKING_URI": 1,

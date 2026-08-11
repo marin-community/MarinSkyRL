@@ -47,12 +47,13 @@ UV_PROJECT_ENVIRONMENT="$environment" uv sync \
   "${runtime_extras[@]}"
 
 python="$environment/bin/python"
-cuda_library_path="$("$python" -c "import site; from pathlib import Path; print(':'.join(str(path) for root in site.getsitepackages() for path in sorted((Path(root) / 'nvidia').glob('*/lib')) if path.is_dir()))")"
-test -n "$cuda_library_path"
-printf 'export LD_LIBRARY_PATH=%q${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n' "$cuda_library_path" > "$runtime_file"
+"$python" "$project_root/cloud/iris/env_vars.py" write-frozen-cuda-runtime "$runtime_file"
 source "$runtime_file"
 if [[ "$profile" == fsdp || "$profile" == fsdp-export ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
+fi
+if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
+  "$python" -c "import transformer_engine.common"
 fi
 if [[ "$profile" == *-export ]]; then
   "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"

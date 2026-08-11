@@ -36,18 +36,6 @@ SKYRL_WORKER_NCCL_TIMEOUT_IN_S = get_worker_nccl_timeout_s()
 Timeout for initializing the NCCL process group for the worker, defaults to 30 minutes.
 """
 
-# For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
-SKYRL_LD_LIBRARY_PATH_EXPORT = str(os.environ.get("SKYRL_LD_LIBRARY_PATH_EXPORT", "False")).lower() in (
-    "true",
-    "1",
-    "yes",
-)
-"""
-Whether to export ``LD_LIBRARY_PATH`` environment variable from the driver to the workers with Ray's runtime env.
-
-For example, if you are using RDMA, you may need to customize the ``LD_LIBRARY_PATH`` to include the RDMA libraries (Ex: EFA on AWS).
-"""
-
 SKYRL_PYTHONPATH_EXPORT = str(os.environ.get("SKYRL_PYTHONPATH_EXPORT", "False")).lower() in (
     "true",
     "1",

@@ -509,6 +509,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     bootstrap.parent.mkdir(parents=True)
     bootstrap.write_bytes((_REPOSITORY_ROOT / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT).read_bytes())
     bootstrap.chmod(0o755)
+    env_vars_source = source / "cloud/iris/env_vars.py"
+    env_vars_source.write_bytes((_REPOSITORY_ROOT / "cloud/iris/env_vars.py").read_bytes())
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
@@ -530,6 +532,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     (environment / "bin").mkdir(parents=True)
     cuda_library_path = tmp_path / "cuda" / "lib"
     cuda_library_path.mkdir(parents=True)
+    nvrtc_home = tmp_path / "cuda" / "nvrtc"
+    nvrtc_home.mkdir(parents=True)
     uv_args = tmp_path / "uv-args"
     fake_uv = fake_bin / "uv"
     fake_uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_UV_ARGS"\n')
@@ -538,7 +542,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     fake_python.write_text(
         "#!/bin/sh\n"
         'case "$2" in\n'
-        '  *"import site"*) printf "%s\\n" "$FAKE_CUDA_LIBRARY_PATH" ;;\n'
+        '  write-frozen-cuda-runtime) printf "export LD_LIBRARY_PATH=%s\\nexport NVRTC_HOME=%s\\n" '
+        '"$FAKE_CUDA_LIBRARY_PATH" "$FAKE_NVRTC_HOME" > "$3" ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n"
     )
@@ -553,6 +558,7 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
         "IRIS_VENV": str(environment),
         "FAKE_UV_ARGS": str(uv_args),
         "FAKE_CUDA_LIBRARY_PATH": str(cuda_library_path),
+        "FAKE_NVRTC_HOME": str(nvrtc_home),
     }
 
     subprocess.run(["bash", "-c", task_setup_script(commit, profile)], env=env, check=True)

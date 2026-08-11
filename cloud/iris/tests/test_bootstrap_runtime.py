@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -37,9 +38,11 @@ def _fake_frozen_runtime(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "harbor/models/trial",
         "harbor/trial",
         "harbor/utils",
-        "nvidia/cuda/lib",
+        "nvidia/cuda_runtime/lib",
+        "nvidia/cuda_nvrtc/lib",
         "quack",
         "skyrl_train/models",
+        "transformer_engine/common",
         "vllm/model_executor",
     ):
         (site_packages / package).mkdir(parents=True, exist_ok=True)
@@ -55,6 +58,8 @@ def _fake_frozen_runtime(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "quack",
         "skyrl_train",
         "skyrl_train/models",
+        "transformer_engine",
+        "transformer_engine/common",
         "vllm/model_executor",
     ):
         _write_module(site_packages, f"{package}/__init__.py")
@@ -67,6 +72,11 @@ def _fake_frozen_runtime(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     _write_module(site_packages, "vllm/__init__.py", "__version__ = 'test'\n")
     _write_module(site_packages, "vllm/_C.py")
     _write_module(site_packages, "vllm/cumem_allocator.py")
+    _write_module(
+        site_packages,
+        "transformer_engine/common/__init__.py",
+        "import os\nfrom pathlib import Path\nassert (Path(os.environ['NVRTC_HOME']) / 'lib').is_dir()\n",
+    )
     _write_module(
         site_packages,
         "vllm/model_executor/models.py",
@@ -168,6 +178,7 @@ def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_pat
         ("daytona.py", "No module named 'daytona'"),
         ("harbor/utils/traces_utils.py", "harbor.utils.traces_utils"),
         ("memray.py", "No module named 'memray'"),
+        ("transformer_engine/common", "transformer_engine.common"),
     ],
 )
 def test_bootstrap_rejects_incomplete_agentic_debug_runtime(
@@ -175,7 +186,11 @@ def test_bootstrap_rejects_incomplete_agentic_debug_runtime(
 ) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path)
     site_packages = next((environment / "lib").glob("python*/site-packages"))
-    (site_packages / missing_module).unlink()
+    missing_path = site_packages / missing_module
+    if missing_path.is_dir():
+        shutil.rmtree(missing_path)
+    else:
+        missing_path.unlink()
 
     result = _run_bootstrap(environment, process_environment, "megatron")
 

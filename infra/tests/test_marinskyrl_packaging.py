@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.parser import Parser
+from itertools import combinations
 from pathlib import Path
 import re
 import subprocess
 import tomllib
 import zipfile
 
+from packaging.requirements import Requirement
 import pytest
 
 
@@ -136,36 +138,66 @@ def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
     assert config_release.group(1) == harbor_commit
 
 
-@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
-def test_rollout_closure_keeps_vllm_and_flashinfer_on_pytorchs_cuda_runtime(policy_extra: str) -> None:
+def _valid_extra_combinations() -> list[tuple[str, ...]]:
+    extras = tuple(PYPROJECT["project"]["optional-dependencies"])
+    conflicts = [frozenset(item["extra"] for item in conflict) for conflict in PYPROJECT["tool"]["uv"]["conflicts"]]
+    return [
+        selected
+        for size in range(len(extras) + 1)
+        for selected in combinations(extras, size)
+        if not any(conflict.issubset(selected) for conflict in conflicts)
+    ]
+
+
+def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
+    command = ["uv", "export", "--frozen", "--no-annotate", "--no-dev", "--no-hashes"]
+    for extra in extras:
+        command.extend(("--extra", extra))
     exported = subprocess.run(
-        [
-            "uv",
-            "export",
-            "--locked",
-            "--no-dev",
-            "--no-hashes",
-            "--extra",
-            policy_extra,
-            "--extra",
-            "vllm",
-        ],
+        command,
         cwd=REPOSITORY_ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout.splitlines()
+    return [Requirement(line) for line in exported if line and not line.startswith(("#", "-e "))]
 
-    assert any(requirement.startswith("vllm @") for requirement in exported)
-    assert any(requirement.startswith("flashinfer-python==") for requirement in exported)
-    assert any(requirement.startswith("flashinfer-cubin==") for requirement in exported)
-    assert any(requirement.startswith("flashinfer-jit-cache==") for requirement in exported)
-    assert any(requirement.startswith("humming-kernels==") for requirement in exported)
-    assert any(requirement.startswith("cuda-tile==") for requirement in exported)
-    cuda_runtime_requirements = [
-        requirement for requirement in exported if requirement.startswith("nvidia-cuda-runtime")
-    ]
-    assert len(cuda_runtime_requirements) == 1
-    assert cuda_runtime_requirements[0].startswith("nvidia-cuda-runtime-cu12==")
-    assert not any(requirement.startswith("nvidia-cuda-nvcc==") for requirement in exported)
-    assert not any(requirement.startswith("nvidia-cuda-tileiras==") for requirement in exported)
+
+def test_every_valid_extra_closure_uses_one_pinned_cuda12_runtime() -> None:
+    linux_platforms = (
+        {"sys_platform": "linux", "platform_machine": "x86_64"},
+        {"sys_platform": "linux", "platform_machine": "aarch64"},
+    )
+    failures = []
+    gpu_extras = {"cuda", "deepspeed", "fsdp", "megatron", "vllm"}
+    extra_combinations = _valid_extra_combinations()
+    exported_closures = map(_exported_requirements, extra_combinations)
+    for extras, requirements in zip(extra_combinations, exported_closures, strict=True):
+        for platform in linux_platforms:
+            runtimes = {
+                (requirement.name, str(requirement.specifier))
+                for requirement in requirements
+                if requirement.name.startswith("nvidia-cuda-runtime")
+                and (requirement.marker is None or requirement.marker.evaluate(platform))
+            }
+            if len(runtimes) > 1:
+                failures.append((extras, platform["platform_machine"], sorted(runtimes)))
+            if "cpu" not in extras and gpu_extras.intersection(extras):
+                assert runtimes == {("nvidia-cuda-runtime-cu12", "==12.9.79")}, (
+                    extras,
+                    platform["platform_machine"],
+                    sorted(runtimes),
+                )
+
+    assert not failures
+
+
+@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
+def test_rollout_closure_keeps_vllm_and_flashinfer(policy_extra: str) -> None:
+    exported = _exported_requirements((policy_extra, "vllm"))
+    names = {requirement.name for requirement in exported}
+
+    assert {"vllm", "flashinfer-python", "flashinfer-cubin", "flashinfer-jit-cache"}.issubset(names)
+    assert {"humming-kernels", "cuda-tile"}.issubset(names)
+    assert "nvidia-cuda-nvcc" not in names
+    assert "nvidia-cuda-tileiras" not in names

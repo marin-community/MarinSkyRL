@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import site
 import socket
 import sys
 from contextlib import contextmanager
@@ -53,6 +55,8 @@ VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
+LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
+NVRTC_HOME_ENV = "NVRTC_HOME"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -94,6 +98,18 @@ ENV_VAR_SPECS = (
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.DRIVER}),
     ),
+    EnvVarSpec(
+        LD_LIBRARY_PATH_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        NVRTC_HOME_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
 )
 
 _SPECS_BY_NAME = {spec.name: spec for spec in ENV_VAR_SPECS}
@@ -134,6 +150,11 @@ class EnvVarManager:
     @classmethod
     def from_config(cls, config: Any, *, environ: Mapping[str, str] | None = None) -> "EnvVarManager":
         ambient = os.environ if environ is None else environ
+        values = {}
+        if library_path := ambient.get(LD_LIBRARY_PATH_ENV):
+            values[LD_LIBRARY_PATH_ENV] = library_path
+        if nvrtc_home := ambient.get(NVRTC_HOME_ENV):
+            values[NVRTC_HOME_ENV] = nvrtc_home
         raw_mode = ambient.get(DEBUG_MODE_ENV, _config_value(config, "trainer.debug_mode", "off"))
         try:
             mode = DistributedDebugMode(str(raw_mode))
@@ -141,15 +162,42 @@ class EnvVarManager:
             choices = ", ".join(mode.value for mode in DistributedDebugMode)
             raise ValueError(f"trainer.debug_mode must be one of: {choices}; got {raw_mode!r}") from error
         if mode is DistributedDebugMode.OFF:
-            return cls({})
+            return cls(values)
 
         artifact_root = ambient.get(DEBUG_ARTIFACT_DIR_ENV) or cls._artifact_root(config)
-        return cls(cls._distributed_values(artifact_root))
+        values.update(cls._distributed_values(artifact_root))
+        return cls(values)
 
     @classmethod
     def for_distributed_launch(cls, *, job_name: str, artifact_root: str | None = None) -> "EnvVarManager":
         root = artifact_root or f"/tmp/skyrl-debug/{_safe_component(job_name)}"
         return cls(cls._distributed_values(root))
+
+    @classmethod
+    def for_frozen_cuda_runtime(
+        cls,
+        site_packages: list[str],
+    ) -> "EnvVarManager":
+        """Resolve Python-wheel CUDA library paths for task and Ray worker processes."""
+        nvidia_roots = [Path(root) / "nvidia" for root in site_packages if (Path(root) / "nvidia").is_dir()]
+        library_paths = sorted(path for root in nvidia_roots for path in root.glob("*/lib") if path.is_dir())
+        nvrtc_homes = [root / "cuda_nvrtc" for root in nvidia_roots if (root / "cuda_nvrtc" / "lib").is_dir()]
+        if not library_paths:
+            raise RuntimeError("The frozen GPU runtime has no Python-wheel CUDA library directories")
+        if len(nvrtc_homes) != 1:
+            raise RuntimeError(f"The frozen GPU runtime must have exactly one NVRTC home; found {nvrtc_homes}")
+
+        library_path = os.pathsep.join(str(path) for path in library_paths)
+        return cls({LD_LIBRARY_PATH_ENV: library_path, NVRTC_HOME_ENV: str(nvrtc_homes[0])})
+
+    def write_shell_activation(self, path: Path, scope: EnvVarScope) -> None:
+        """Write managed values as a sourceable shell activation file."""
+        values = self.environment_for(scope)
+        lines = []
+        for name, value in sorted(values.items()):
+            suffix = f"${{{name}:+:${name}}}" if name == LD_LIBRARY_PATH_ENV else ""
+            lines.append(f"export {name}={shlex.quote(value)}{suffix}\n")
+        path.write_text("".join(lines))
 
     @staticmethod
     def _artifact_root(config: Any) -> str:
@@ -292,11 +340,18 @@ def wandb_launch_environment(*, entity: str | None, environ: Mapping[str, str] |
 
 
 def _main(argv: list[str]) -> None:
-    if len(argv) < 5 or argv[1] != "run-grug-gpu-gate" or argv[3] != "--":
-        raise SystemExit(f"usage: {argv[0]} run-grug-gpu-gate REPOSITORY_ROOT -- COMMAND [ARG ...]")
-    environment = dict(os.environ)
-    environment.update(grug_gpu_gate_environment(argv[2]))
-    os.execvpe(argv[4], argv[4:], environment)
+    if len(argv) == 3 and argv[1] == "write-frozen-cuda-runtime":
+        manager = EnvVarManager.for_frozen_cuda_runtime(site.getsitepackages())
+        manager.write_shell_activation(Path(argv[2]), EnvVarScope.TASK_RUNTIME)
+        return
+    if len(argv) >= 5 and argv[1] == "run-grug-gpu-gate" and argv[3] == "--":
+        environment = dict(os.environ)
+        environment.update(grug_gpu_gate_environment(argv[2]))
+        os.execvpe(argv[4], argv[4:], environment)
+    raise SystemExit(
+        f"usage: {argv[0]} write-frozen-cuda-runtime ACTIVATION_FILE | "
+        "run-grug-gpu-gate REPOSITORY_ROOT -- COMMAND [ARG ...]"
+    )
 
 
 if __name__ == "__main__":

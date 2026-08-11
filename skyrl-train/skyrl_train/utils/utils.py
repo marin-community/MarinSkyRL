@@ -30,7 +30,6 @@ from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 
 from .constants import (
-    SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
 )
@@ -1281,12 +1280,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # the trace for a diagnostic run, set NCCL_DEBUG=INFO (+ NCCL_DEBUG_SUBSYS) in
     # the config's extra_env -- the passthrough loop above forwards both.)
     env_vars.setdefault("NCCL_DEBUG", "WARN")
-
-    if SKYRL_LD_LIBRARY_PATH_EXPORT:
-        # export `LD_LIBRARY_PATH` to ray runtime env.
-        # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
-        logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
-        env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
 
     if SKYRL_PYTHONPATH_EXPORT:
         # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
