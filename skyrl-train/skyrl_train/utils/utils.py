@@ -47,15 +47,18 @@ def strategy_supports_moe_router_replay(strategy: str) -> bool:
 
 
 def moe_router_replay_enabled(cfg: DictConfig) -> bool:
-    """Resolve router replay and reject strategies that silently ignore it."""
-    enabled = bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
-    if enabled and not strategy_supports_moe_router_replay(cfg.trainer.strategy):
+    """Return whether the policy requests MoE router replay."""
+    return bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
+
+
+def validate_moe_router_replay_config(cfg: DictConfig) -> None:
+    """Reject router replay on strategies that silently ignore captured routes."""
+    if moe_router_replay_enabled(cfg) and not strategy_supports_moe_router_replay(cfg.trainer.strategy):
         supported = ", ".join(sorted(MOE_ROUTER_REPLAY_STRATEGIES))
         raise ValueError(
             f"trainer.policy.fsdp_config.moe_router_replay is not supported with "
             f"trainer.strategy='{cfg.trainer.strategy}'; use one of: {supported}"
         )
-    return enabled
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
@@ -554,7 +557,7 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
-    moe_router_replay_enabled(cfg)
+    validate_moe_router_replay_config(cfg)
     # Validate generation config separately
     validate_generator_cfg(cfg)
     validate_hf_export_config(cfg)
@@ -1010,9 +1013,7 @@ def _validate_dcp_cfg(cfg: DictConfig):
     # bf16-tie floor; job 905835 / DCP GQA-LSE fp32 fix). Fail-closed by default — without
     # the env var the original hard assertion stands. (Mirrors the vLLM guard so the two
     # never disagree; the SIF's vLLM honors the same flag.)
-    training_replay = strategy_supports_moe_router_replay(cfg.trainer.strategy) and bool(
-        cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)
-    )
+    training_replay = strategy_supports_moe_router_replay(cfg.trainer.strategy) and moe_router_replay_enabled(cfg)
     r3_capture = (
         bool(gen.get("enable_return_routed_experts", False))
         or bool(gen.get("engine_init_kwargs", {}).get("enable_return_routed_experts", False))
