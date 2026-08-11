@@ -56,6 +56,41 @@ class _RepeatedWindow:
     occurrences: int = 1
 
 
+@dataclass(frozen=True)
+class _NormalizedReward:
+    values: tuple[float, ...]
+    scalar: bool
+
+    @classmethod
+    def from_output(cls, reward: float | Sequence[float]) -> "_NormalizedReward":
+        if isinstance(reward, Sequence) and not isinstance(reward, (str, bytes)):
+            return cls(tuple(float(value) for value in reward), scalar=False)
+        return cls((float(reward),), scalar=True)
+
+    @property
+    def outcome(self) -> float:
+        return self.values[-1] if self.values else 0.0
+
+    @property
+    def total(self) -> float:
+        return sum(self.values)
+
+    def to_output(self) -> float | list[float]:
+        return self.values[0] if self.scalar else list(self.values)
+
+    def with_penalty(self, loss_mask: Sequence[int], penalty: float) -> float | list[float]:
+        if self.scalar:
+            return self.values[0] + penalty
+        shaped = list(self.values)
+        if penalty == 0:
+            return shaped
+        active_positions = [position for position, active in enumerate(loss_mask) if active]
+        if not active_positions:
+            raise ValueError("cannot apply a trajectory penalty without a trainable response token")
+        shaped[active_positions[-1]] += penalty
+        return shaped
+
+
 def _section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     value = config.get(name, {})
     if value is None:
@@ -215,35 +250,6 @@ def _repeated_spans(
     return _merge_spans(repeated_spans), penalized_occurrences
 
 
-def _outcome_reward(reward: float | Sequence[float]) -> float:
-    if isinstance(reward, Sequence) and not isinstance(reward, (str, bytes)):
-        return float(reward[-1]) if reward else 0.0
-    return float(reward)
-
-
-def _optimization_reward(reward: float | Sequence[float]) -> float:
-    if isinstance(reward, Sequence) and not isinstance(reward, (str, bytes)):
-        return float(sum(reward))
-    return float(reward)
-
-
-def _add_penalty(
-    reward: float | Sequence[float],
-    loss_mask: Sequence[int],
-    penalty: float,
-) -> float | list[float]:
-    if not isinstance(reward, Sequence) or isinstance(reward, (str, bytes)):
-        return float(reward) + penalty
-    shaped = [float(value) for value in reward]
-    if penalty == 0:
-        return shaped
-    active_positions = [position for position, active in enumerate(loss_mask) if active]
-    if not active_positions:
-        raise ValueError("cannot apply a trajectory penalty without a trainable response token")
-    shaped[active_positions[-1]] += penalty
-    return shaped
-
-
 def _metric_key(value: str | None) -> str:
     normalized = "missing" if value is None else str(value).strip().lower()
     return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_") or "missing"
@@ -301,7 +307,7 @@ def refresh_trajectory_reward_shaping_metrics(output: GeneratorOutput) -> None:
     groups = _trajectory_groups(output, batch_size)
     response_lengths = [sum(bool(value) for value in loss_mask) for loss_mask in output["loss_masks"]]
     trajectory_components = [components[group[-1]] for group in groups]
-    shaped_totals = [_optimization_reward(output["rewards"][group[-1]]) for group in groups]
+    shaped_totals = [_NormalizedReward.from_output(output["rewards"][group[-1]]).total for group in groups]
     penalties = [sum(values.values()) for values in trajectory_components]
     trajectory_lengths = [sum(response_lengths[index] for index in group) for group in groups]
     trajectory_stops = [stop_reasons[group[-1]] for group in groups]
@@ -371,13 +377,14 @@ def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, A
     if len(stop_reasons) != batch_size:
         raise ValueError("stop reasons must have one entry per trajectory")
 
+    normalized_rewards = [_NormalizedReward.from_output(reward) for reward in rewards]
     existing_outcomes = output.get("unshaped_rewards")
     if existing_outcomes is not None and len(existing_outcomes) != batch_size:
         raise ValueError("unshaped rewards must have one entry per trajectory")
     outcomes = (
         [float(value) for value in existing_outcomes]
         if existing_outcomes is not None
-        else [_outcome_reward(reward) for reward in rewards]
+        else [reward.outcome for reward in normalized_rewards]
     )
     output["unshaped_rewards"] = outcomes
 
@@ -390,7 +397,7 @@ def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, A
     components = [_empty_components() for _ in range(batch_size)]
     all_loop_spans: list[list[RewardShapingLoopSpan]] = []
     repeated_occurrences: list[int] = []
-    shaped_rewards = [list(reward) if isinstance(reward, list) else float(reward) for reward in rewards]
+    shaped_rewards = [reward.to_output() for reward in normalized_rewards]
     response_lengths = [sum(bool(value) for value in loss_mask) for loss_mask in loss_masks]
     accepted_stops = set(config.non_termination.accepted_stop_reasons)
     for response, loss_mask in zip(response_ids, loss_masks):
@@ -422,7 +429,7 @@ def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, A
                 )
 
         penalty = sum(sample_components.values())
-        shaped_rewards[final_index] = _add_penalty(rewards[final_index], loss_masks[final_index], penalty)
+        shaped_rewards[final_index] = normalized_rewards[final_index].with_penalty(loss_masks[final_index], penalty)
         components[final_index] = sample_components
 
     output["rewards"] = shaped_rewards
