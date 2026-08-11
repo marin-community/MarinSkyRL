@@ -92,7 +92,7 @@ def test_correlates_per_trial_no_bleed_for_identical_seed_group(tmp_path, monkey
         _entry("A", 2.0, [1, 10], [11], [-0.3]),
         _entry("B", 2.1, [1, 20], [21], [-0.4]),
     ]
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
 
     ra = _result("A")
     a = _correlate(_fake_self(), ra, None)
@@ -142,7 +142,7 @@ def test_correlation_excludes_auxiliary_call_from_tito_stream(tmp_path, monkeypa
         _entry("A", 1.5, [99], [90], [-0.2]),
         _entry("A", 2.0, [1, 10, 2], [11], [-0.3]),
     ]
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
 
     rollout_details = _correlate(_fake_self(), _result("A"), None)
 
@@ -152,7 +152,7 @@ def test_correlation_excludes_auxiliary_call_from_tito_stream(tmp_path, monkeypa
 
 def test_noop_when_flag_off(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
     )
     assert _correlate(_fake_self(collect=False), _result("A"), None) is None
@@ -160,7 +160,7 @@ def test_noop_when_flag_off(tmp_path, monkeypatch):
 
 def test_noop_when_already_populated(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
     )
     existing = [{"completion_token_ids": [[99]], "logprobs": [[-0.9]]}]
@@ -169,25 +169,25 @@ def test_noop_when_already_populated(tmp_path, monkeypatch):
 
 def test_noop_when_no_correlation_id(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
     )
     assert _correlate(_fake_self(), _result(None), None) is None
 
 
 def test_noop_when_env_unset(tmp_path, monkeypatch):
-    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    monkeypatch.delenv("SKYRL_IRIS_LITERAL_LOG_PATH", raising=False)
     assert _correlate(_fake_self(), _result("A"), None) is None
 
 
 def test_noop_when_log_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", str(tmp_path / "nope.jsonl"))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", str(tmp_path / "nope.jsonl"))
     assert _correlate(_fake_self(), _result("A"), None) is None
 
 
 def test_noop_when_trial_absent_from_log(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
     )
     assert _correlate(_fake_self(), _result("Z"), None) is None
@@ -217,16 +217,16 @@ def _chat_self(collect=True, tokenizer=None, literal_log_path=None):
 
 def test_chat_history_resolves_log_from_cfg_path_when_env_unset(tmp_path, monkeypatch):
     """The Ray-boundary fix: the log path is threaded via cfg (self._literal_log_path);
-    the helper must resolve it even when OTAGENT_LITERAL_LOG_PATH is absent from the
+    the helper must resolve it even when SKYRL_IRIS_LITERAL_LOG_PATH is absent from the
     worker env (which is exactly what broke fullgate14 → tis/skipped_fraction=1.0)."""
-    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    monkeypatch.delenv("SKYRL_IRIS_LITERAL_LOG_PATH", raising=False)
     log = _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "task"}], [5, 6])])
     ch = _build_chat(_chat_self(literal_log_path=log), _result("A"))
     assert ch == [{"role": "user", "content": "task"}, {"role": "assistant", "content": "assistant-final:5,6"}]
 
 
 def test_correlate_resolves_log_from_cfg_path_when_env_unset(tmp_path, monkeypatch):
-    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    monkeypatch.delenv("SKYRL_IRIS_LITERAL_LOG_PATH", raising=False)
     log = _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])])
     out = _correlate(_fake_self(literal_log_path=log), _result("A"), None)
     assert out[0]["completion_token_ids"] == [[10]]
@@ -258,7 +258,7 @@ def test_chat_history_uses_last_request_plus_decoded_final_completion(tmp_path, 
         _entry_msgs("A", 1.0, convo_t1, [10, 11]),
         _entry_msgs("A", 2.0, convo_t2, [20, 21]),
     ]
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
     ch = _build_chat(_chat_self(), _result("A"))
     # base = last request's messages (the full convo) + appended final assistant.
     assert ch[:-1] == convo_t2
@@ -267,14 +267,14 @@ def test_chat_history_uses_last_request_plus_decoded_final_completion(tmp_path, 
 
 def test_chat_history_single_turn(tmp_path, monkeypatch):
     msgs = [{"role": "user", "content": "one-shot task"}]
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [_entry_msgs("A", 1.0, msgs, [7, 8, 9])]))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, [_entry_msgs("A", 1.0, msgs, [7, 8, 9])]))
     ch = _build_chat(_chat_self(), _result("A"))
     assert ch == msgs + [{"role": "assistant", "content": "assistant-final:7,8,9"}]
 
 
 def test_chat_history_none_when_flag_off(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
     )
     assert _build_chat(_chat_self(collect=False), _result("A")) is None
@@ -282,20 +282,20 @@ def test_chat_history_none_when_flag_off(tmp_path, monkeypatch):
 
 def test_chat_history_none_when_no_correlation_id(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
     )
     assert _build_chat(_chat_self(), _result(None)) is None
 
 
 def test_chat_history_none_when_env_unset(tmp_path, monkeypatch):
-    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    monkeypatch.delenv("SKYRL_IRIS_LITERAL_LOG_PATH", raising=False)
     assert _build_chat(_chat_self(), _result("A")) is None
 
 
 def test_chat_history_none_when_trial_absent(tmp_path, monkeypatch):
     monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
+        "SKYRL_IRIS_LITERAL_LOG_PATH",
         _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
     )
     assert _build_chat(_chat_self(), _result("Z")) is None
@@ -304,14 +304,14 @@ def test_chat_history_none_when_trial_absent(tmp_path, monkeypatch):
 def test_chat_history_none_when_no_completion_bearing_record(tmp_path, monkeypatch):
     # status 200 but empty completion -> not a usable turn -> None (honest drop).
     e = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [])
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
     assert _build_chat(_chat_self(), _result("A")) is None
 
 
 def test_chat_history_none_when_request_has_no_messages(tmp_path, monkeypatch):
     e = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])
     e["request"] = {}  # malformed: no messages
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
     assert _build_chat(_chat_self(), _result("A")) is None
 
 
@@ -319,7 +319,7 @@ def test_chat_history_picks_latest_timestamp_regardless_of_order(tmp_path, monke
     # Entries out of order in the file; the LATEST timestamp must be the base.
     early = _entry_msgs("A", 1.0, [{"role": "user", "content": "early"}], [1])
     late = _entry_msgs("A", 9.0, [{"role": "user", "content": "late"}], [2])
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [late, early]))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, [late, early]))
     ch = _build_chat(_chat_self(), _result("A"))
     assert ch[0] == {"role": "user", "content": "late"}
 
@@ -341,7 +341,7 @@ def test_chat_history_normalizes_openai_shaped_messages(tmp_path, monkeypatch):
         },
         {"role": "tool", "content": [{"type": "text", "text": "exit 0"}], "tool_call_id": "c1"},
     ]
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [_entry_msgs("A", 1.0, raw, [5, 6])]))
+    monkeypatch.setenv("SKYRL_IRIS_LITERAL_LOG_PATH", _write_log(tmp_path, [_entry_msgs("A", 1.0, raw, [5, 6])]))
     ch = _build_chat(_chat_self(), _result("A"))
     assert ch is not None
     # every kept message is a plain {role, content:str} — no list content, no tool_calls

@@ -16,7 +16,7 @@ from fsspec.spec import AbstractFileSystem
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
-S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
+S3_ADDRESSING_STYLE_ENV = "SKYRL_IRIS_S3_ADDRESSING_STYLE"
 
 
 @dataclass(frozen=True)
