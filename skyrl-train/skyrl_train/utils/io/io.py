@@ -12,14 +12,18 @@ Uses fsspec for cloud storage abstraction.
 import os
 import tempfile
 from contextlib import contextmanager
+from collections.abc import Sequence
+from pathlib import Path
+
 import fsspec
 from loguru import logger
-from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry, ClientError
+from marinskyrl.resource_locator import is_cloud_uri
+from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
 
 def is_cloud_path(path: str) -> bool:
     """Check if the given path is a cloud storage path."""
-    return path.startswith(("s3://", "gs://", "gcs://"))
+    return is_cloud_uri(path)
 
 
 def _get_filesystem(path: str):
@@ -42,17 +46,30 @@ def open_file(path: str, mode: str = "rb"):
 
     fs = _get_filesystem(path)
     norm = fs._strip_protocol(path)
+    if path.startswith("s3://"):
+        return call_with_s3_retry(fs, fs.open, norm, mode)
+    return fs.open(norm, mode)
+
+
+def write_bytes_atomic(path: str, payload: bytes) -> None:
+    """Write one object; local paths use fsync plus atomic replacement."""
+    if is_cloud_path(path):
+        with open_file(path, "wb") as destination:
+            destination.write(payload)
+        return
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
     try:
-        return fs.open(norm, mode)
-    except ClientError as e:
-        code = getattr(e, "response", {}).get("Error", {}).get("Code")
-        if code in {"ExpiredToken", "ExpiredTokenException", "RequestExpired"} and hasattr(fs, "connect"):
-            try:
-                fs.connect(refresh=True)
-            except Exception:
-                pass
-            return fs.open(norm, mode)
-        raise
+        with os.fdopen(file_descriptor, "wb") as temporary:
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 def makedirs(path: str, exist_ok: bool = True) -> None:
@@ -129,6 +146,52 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     else:
         fs.get(cloud_path.rstrip("/") + "/", local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
+
+
+def download_file(cloud_path: str, local_path: str) -> None:
+    """Download one cloud object atomically to a local file."""
+    if not is_cloud_path(cloud_path):
+        raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
+
+    fs = _get_filesystem(cloud_path)
+    local_dir = os.path.dirname(local_path)
+    if local_dir:
+        os.makedirs(local_dir, exist_ok=True)
+    partial_path = f"{local_path}.partial"
+    try:
+        if cloud_path.startswith("s3://"):
+            call_with_s3_retry(fs, fs.get, fs._strip_protocol(cloud_path), partial_path, recursive=False)
+        else:
+            fs.get(cloud_path, partial_path, recursive=False)
+        os.replace(partial_path, local_path)
+    finally:
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
+    logger.info(f"Downloaded {cloud_path} to {local_path}")
+
+
+@contextmanager
+def local_read_files(input_paths: Sequence[str]):
+    """Stage an explicit set of cloud objects locally without reading sibling objects."""
+    paths = list(input_paths)
+    cloud_paths = [is_cloud_path(path) for path in paths]
+    if any(cloud_paths) and not all(cloud_paths):
+        raise ValueError("input_paths must be entirely local or entirely cloud-backed")
+
+    if not any(cloud_paths):
+        missing_paths = [path for path in paths if not exists(path)]
+        if missing_paths:
+            raise FileNotFoundError(f"Paths do not exist: {missing_paths}")
+        yield paths
+        return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        local_paths = []
+        for index, input_path in enumerate(paths):
+            local_path = os.path.join(temp_dir, str(index), os.path.basename(input_path))
+            download_file(input_path, local_path)
+            local_paths.append(local_path)
+        yield local_paths
 
 
 @contextmanager

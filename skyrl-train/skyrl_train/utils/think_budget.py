@@ -2,7 +2,7 @@
 
 Mechanism 4 of the loop-behavior reward plan: apply gentle *active* pressure
 against thinking-faff. F7's loss down-weighting (``build_think_weighted_loss_mask``
-in ``ppo_utils.py``) is the *passive* half — it stops RL from *reinforcing*
+in ``loss_reduction.py``) is the *passive* half — it stops RL from *reinforcing*
 think-token growth (credit no longer flows full-strength to ``<think>`` tokens).
 M4 is the *active* half — a small negative token reward on ``<think>`` tokens that
 *penalizes* faffing, ``capped per turn`` so it can never dominate the outcome.

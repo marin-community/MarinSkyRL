@@ -46,6 +46,19 @@ from skyrl_train.weight_sync.weight_extractor import (
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 
 
+def _fsdp_moe_model_kwargs(fsdp_config) -> dict[str, bool]:
+    """Translate one role's FSDP MoE settings into ``HFModelWrapper`` options.
+
+    Expert parallelism operates on the grouped model structure created by the wrapper, so every FSDP role
+    must derive these options from the same role-specific config that its ``FSDPStrategy`` consumes.
+    """
+    return {
+        "moe_router_replay": bool(fsdp_config.get("moe_router_replay", False)),
+        "moe_grouped_gemm": bool(fsdp_config.get("moe_grouped_gemm", False)),
+        "use_grouped_mm": bool(fsdp_config.get("use_grouped_mm", False)),
+    }
+
+
 @dataclass(frozen=True)
 class GrugValidationSnapshot:
     """Test-only snapshot of one policy rank's loaded Grug state."""
@@ -747,20 +760,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
         return out
 
-    def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.policy.fsdp_config,
-            optimizer_config=self.cfg.trainer.policy.optimizer_config,
-            model_config=self.cfg.trainer.policy.model,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            num_training_steps=num_training_steps,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
-
+    def _build_policy_model(self, strategy: FSDPStrategy, model_path: str) -> HFModelWrapper:
         # Stage 3: surface the CP submesh/group on the worker so the Stage-4 forward wrap
         # can read it. cp_size==1 leaves both None (flag-off path untouched).
         self.cp_mesh = getattr(strategy, "cp_mesh", None)
@@ -797,9 +797,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
-                moe_router_replay=bool(self.cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-                moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
-                use_grouped_mm=bool(self.cfg.trainer.policy.fsdp_config.get("use_grouped_mm", False)),
+                **_fsdp_moe_model_kwargs(self.cfg.trainer.policy.fsdp_config),
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.policy.fsdp_config.get("context_parallel_size", 1)),
                 # Stage 4: surface the CP submesh + rotate method so the forward
@@ -817,6 +815,27 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         "use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant
                     }
                 )
+
+        return wrapped_model
+
+    def _create_strategy(self, *, num_training_steps: int | None = None) -> FSDPStrategy:
+        strategy = FSDPStrategy(
+            fsdp_config=self.cfg.trainer.policy.fsdp_config,
+            optimizer_config=self.cfg.trainer.policy.optimizer_config,
+            model_config=self.cfg.trainer.policy.model,
+            fsdp_strategy=self.cfg.trainer.strategy,
+            seed=self.cfg.trainer.seed,
+            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+            num_training_steps=num_training_steps,
+        )
+        strategy.setup_distributed()
+        self.strategy = strategy
+        return strategy
+
+    def init_model(self, model_path, num_training_steps: int = None):
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+        strategy = self._create_strategy(num_training_steps=num_training_steps)
+        wrapped_model = self._build_policy_model(strategy, model_path)
 
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (wrapped_model, None, None),
@@ -840,6 +859,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
         self._maybe_start_host_ram_monitor()
+
+    def init_model_for_export(self, model_path: str) -> None:
+        """Initialize policy structure without training or rollout state."""
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+        strategy = self._create_strategy()
+        wrapped_model = self._build_policy_model(strategy, model_path)
+        self.model = strategy.prepare(wrapped_model)
+        self.model.eval()
 
     def _maybe_start_host_ram_monitor(self):
         """Start the periodic host-RAM / cgroup-mem reporter on the POLICY worker.
@@ -1273,6 +1300,12 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.cp_group = getattr(strategy, "cp_group", None)
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        validate_grug_expert_parallel_options(
+            getattr(model_config, "model_type", None),
+            expert_model_parallel_size=strategy.ep_size,
+            use_grouped_mm=bool(self.cfg.trainer.ref.fsdp_config.get("use_grouped_mm", False)),
+            ep_comm_backend=str(self.cfg.trainer.ref.fsdp_config.get("ep_comm_backend", DEFAULT_EP_COMM_BACKEND)),
+        )
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -1286,6 +1319,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
+                **_fsdp_moe_model_kwargs(self.cfg.trainer.ref.fsdp_config),
                 attn_backend=self.cfg.trainer.get("attn_backend", "auto"),
                 context_parallel_size=int(self.cfg.trainer.ref.fsdp_config.get("context_parallel_size", 1)),
                 # Stage 4: ref-logprob forward must CP-shard identically to the

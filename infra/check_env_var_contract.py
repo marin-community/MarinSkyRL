@@ -11,6 +11,7 @@ import argparse
 import ast
 import json
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -149,11 +150,21 @@ def _yaml_extra_env_definitions(path: Path) -> Counter[str]:
     return definitions
 
 
+def _repository_files() -> list[Path]:
+    if not (REPO_ROOT / ".git").exists():
+        return [path for path in REPO_ROOT.rglob("*") if path.is_file()]
+
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        check=True,
+        capture_output=True,
+    )
+    return [REPO_ROOT / path for path in result.stdout.decode().split("\0") if path]
+
+
 def definitions() -> Counter[str]:
     found: Counter[str] = Counter()
-    for absolute_path in REPO_ROOT.rglob("*"):
-        if not absolute_path.is_file():
-            continue
+    for absolute_path in _repository_files():
         path = absolute_path.relative_to(REPO_ROOT)
         if _is_excluded(path):
             continue

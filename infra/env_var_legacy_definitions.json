@@ -248,7 +248,6 @@
   "skyrl-train/scripts/launch_reshard_iris.sh::shell-export::HF_HUB_OFFLINE": 1,
   "skyrl-train/scripts/multi_node_nccl_test.py::python-assignment::MASTER_ADDR": 1,
   "skyrl-train/scripts/multi_node_nccl_test.py::python-assignment::MASTER_PORT": 1,
-  "skyrl-train/skyrl_train/callbacks/builtin.py::python-assignment::HF_HUB_OFFLINE": 1,
   "skyrl-train/skyrl_train/entrypoints/main_base.py::python-assignment::SKYRL_FUSE_WEIGHTS": 1,
   "skyrl-train/skyrl_train/entrypoints/main_base.py::python-assignment::VLLM_ALLOW_INSECURE_SERIALIZATION": 1,
   "skyrl-train/skyrl_train/inference_engines/ray_wrapped_inference_engine.py::python-assignment::CUDA_VISIBLE_DEVICES": 2,

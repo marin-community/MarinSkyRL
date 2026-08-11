@@ -29,22 +29,24 @@ from skyrl_train.generators.base import (
 )
 import copy
 from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
+from skyrl_train.generators.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.utils import ppo_utils, trainer_utils
+from skyrl_train.utils import trainer_utils
 from skyrl_train.utils.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils.ppo_utils import (
-    compute_approx_kl,
-    masked_mean,
-    get_kl_controller,
-    FixedKLController,
-    AdaptiveKLController,
-    normalize_advantages_dict,
+from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
+from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
+from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
+from skyrl_train.utils.loss_reduction import compute_global_loss_denom
+from skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    MeshRank,
+    collect_actor_results,
+    concatenate_outputs_after_mesh_dispatch,
 )
-from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -76,6 +78,20 @@ from skyrl_train.callbacks import (
     RefModelUpdateCallback,
 )
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
+from skyrl_train.hf_export import (
+    protected_hf_export_steps,
+    read_hf_export_request,
+    write_hf_export_request,
+)
+from skyrl_train.hf_export_schema import (
+    DEFAULT_HF_HUB_REVISION,
+    DEFAULT_HF_UPLOAD_MODE,
+    HFExportRequest,
+    HFExportStatus,
+    HFUploadMode,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
+    TRAINER_STATE_FILENAME,
+)
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
@@ -108,9 +124,11 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
+        self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
+        self.generator.set_trajectory_sink(self.trajectory_sink)
         self.train_dataloader = None
         self.total_training_steps = None
-        self._build_train_dataloader_and_compute_training_steps()
+        self._configure_training_schedule()
 
         self.eval_dataloader = (
             build_dataloader(self.cfg, eval_dataset, is_train=False) if eval_dataset is not None else None
@@ -145,13 +163,8 @@ class RayPPOTrainer:
         # Trainer control object for callback coordination
         self._control = TrainerControl()
 
-    def _build_train_dataloader_and_compute_training_steps(self):
-        """
-        Hook for constructing the training dataloader. Subclasses can override
-        this to customize dataloader behavior. For instance, fully async training
-        needs a batch size of 1, among other features.
-        Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
-        """
+    def _configure_training_schedule(self):
+        """Set ``total_training_steps`` and any inputs required to execute that schedule."""
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
         self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
         max_steps = getattr(self.cfg.trainer, "max_steps", None)
@@ -170,7 +183,7 @@ class RayPPOTrainer:
         Returns:
             TrainerState object with current training state
         """
-        num_steps_per_epoch = len(self.train_dataloader)
+        num_steps_per_epoch = self._num_steps_per_epoch()
         return TrainerState(
             global_step=self.global_step,
             epoch=epoch,
@@ -181,6 +194,9 @@ class RayPPOTrainer:
             metrics=dict(self.all_metrics),
             timings=dict(self.all_timings),
         )
+
+    def _num_steps_per_epoch(self) -> int:
+        return len(self.train_dataloader)
 
     def _get_ref_update_callback(self) -> Optional[RefModelUpdateCallback]:
         """Get the RefModelUpdateCallback if one exists in the callback handler."""
@@ -207,6 +223,7 @@ class RayPPOTrainer:
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
+                trajectory_sink=self.trajectory_sink,
             )
         else:
             eval_metrics = await evaluate(
@@ -215,6 +232,7 @@ class RayPPOTrainer:
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
+                trajectory_sink=self.trajectory_sink,
             )
         return eval_metrics
 
@@ -338,19 +356,21 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
-        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
-        # This must happen before any generate() calls
+        await self._startup_generator()
+
+        try:
+            await self._train_loop()
+        finally:
+            await self._teardown()
+
+    async def _startup_generator(self) -> None:
+        """Initialize generator resources before any rollout can begin."""
         try:
             await self.generator.startup()
             logger.info("Generator startup complete")
         except Exception as e:
             logger.opt(depth=0).error("Generator startup failed: " + str(e))
             raise
-
-        try:
-            await self._train_loop()
-        finally:
-            await self._teardown()
 
     async def _handle_resume_at_max_steps(self) -> None:
         """Handle a run that resumed AT or PAST max_steps (already complete).
@@ -388,10 +408,7 @@ class RayPPOTrainer:
                 logger.info("Saved final checkpoint.")
             await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
         if self._control.should_save_hf_model:
-            with Timer("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final model.")
-                await asyncio.to_thread(self._flush_hf_uploads)
+            await asyncio.to_thread(self.handle_hf_export)
 
     async def _train_loop(self):
         """
@@ -606,8 +623,7 @@ class RayPPOTrainer:
 
                 # Handle HF model saving
                 if self._control.should_save_hf_model:
-                    with Timer("save_hf_model", self.all_timings):
-                        self.save_models()
+                    self.handle_hf_export()
                     self._control.should_save_hf_model = False
 
                 # Handle evaluation
@@ -1095,7 +1111,7 @@ class RayPPOTrainer:
         # un-chunked (-> each micro-batch sees rollout_logprobs=None), the
         # worker's TIS diagnostics already guard `is not None`, and
         # ppo_policy_loss skips the TIS importance ratio when rollout_logprobs
-        # is None (see ppo_utils.ppo_policy_loss). We surface the skip via a
+        # is None (see policy_losses.ppo_policy_loss). We surface the skip via a
         # `tis/batch_skipped_no_logprobs` metric (set on the driver below) so the
         # failure mode is observable; the relaunch skip-fraction is the live
         # systematic-vs-intermittent diagnostic.
@@ -1190,7 +1206,6 @@ class RayPPOTrainer:
         """
         # NOTE: we assume that .generate returns samples in the same order as passed in
         generator_output: GeneratorOutput = await self.generator.generate(input_batch)
-
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
@@ -1311,7 +1326,7 @@ class RayPPOTrainer:
             grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
             last_step_rewards = token_level_rewards[is_last_step]
             # compatible with any advantage estimator
-            last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
+            last_step_advantages, last_step_returns = compute_advantages_and_returns(
                 token_level_rewards=last_step_rewards,
                 response_mask=response_mask[is_last_step],
                 index=index[is_last_step.cpu().numpy()],
@@ -1340,7 +1355,7 @@ class RayPPOTrainer:
             # estimator ignores the extra kwarg), and when the key is absent
             # (channel off) token_level_shaping is None -> byte-identical path.
             token_level_shaping = data["token_level_shaping"] if "token_level_shaping" in data else None
-            advantages, returns = ppo_utils.compute_advantages_and_returns(
+            advantages, returns = compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
                 index=data.metadata["uids"],
@@ -1694,13 +1709,13 @@ class RayPPOTrainer:
         # relocation), so the scalar all_reduce over the full policy PG never completes
         # (the 80B gs1 wedge, NCCL collective #288606 NumelIn=1, py-spy-confirmed at
         # worker.py's seq_mean_token_sum_norm_global normalizer). Z here is BIT-IDENTICAL
-        # to the old summed-over-ranks value (see ppo_utils.compute_global_loss_denom).
+        # to the old summed-over-ranks value (see loss_reduction.compute_global_loss_denom).
         # Gated to fully_async so sync RL keeps the exact legacy in-worker all_reduce
         # (byte-identical); the worker falls back to that path when this key is absent.
         if self.is_fully_async and self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
             actor_infos = self.policy_model.actor_infos
             ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
-            data.metadata["global_loss_denom"] = ppo_utils.compute_global_loss_denom(
+            data.metadata["global_loss_denom"] = compute_global_loss_denom(
                 data["advantages"],
                 self.cfg.trainer.algorithm.max_seq_len,
                 ranks_per_dp_group,
@@ -1709,21 +1724,41 @@ class RayPPOTrainer:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
                     self.critic_model.backload_to_gpu()
-                    critic_statuses = ray.get(self.critic_model.async_run_ray_method("mesh", "ppo_train", data))
+                    critic_refs = self.critic_model.async_run_ray_method("mesh", "ppo_train", data)
+                    critic_statuses = collect_actor_results(
+                        self.critic_model.actor_infos,
+                        critic_refs,
+                        operation="critic ppo_train",
+                    )
                     self.critic_model.offload_to_cpu()
             with Timer("policy_train", self.all_timings):
                 self.policy_model.backload_to_gpu()
-                policy_statuses = ray.get(self.policy_model.async_run_ray_method("mesh", "ppo_train", data))
+                policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
+                policy_statuses = collect_actor_results(
+                    self.policy_model.actor_infos,
+                    policy_refs,
+                    operation="policy ppo_train",
+                )
         else:
             if self.critic_model is not None:
                 with Timer("policy_critic_overlap_train", self.all_timings):
                     policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
                     critic_refs = self.critic_model.async_run_ray_method("mesh", "ppo_train", data)
-                    policy_statuses = ray.get(policy_refs)
-                    critic_statuses = ray.get(critic_refs)
+                    all_statuses = collect_actor_results(
+                        self.policy_model.actor_infos + self.critic_model.actor_infos,
+                        policy_refs + critic_refs,
+                        operation="policy and critic ppo_train",
+                    )
+                    policy_statuses = all_statuses[: len(policy_refs)]
+                    critic_statuses = all_statuses[len(policy_refs) :]
             else:
                 with Timer("policy_train", self.all_timings):
-                    policy_statuses = ray.get(self.policy_model.async_run_ray_method("mesh", "ppo_train", data))
+                    policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
+                    policy_statuses = collect_actor_results(
+                        self.policy_model.actor_infos,
+                        policy_refs,
+                        operation="policy ppo_train",
+                    )
 
         empty_cache_refs = []
         if self.critic_model is not None:
@@ -1819,7 +1854,7 @@ class RayPPOTrainer:
         """
         # Create global step folder structure
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
-        policy_save_dir = os.path.join(global_step_folder, "policy")
+        policy_save_dir = os.path.join(global_step_folder, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
         io.makedirs(global_step_folder, exist_ok=True)
@@ -1868,7 +1903,7 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": self.cfg,
         }
-        trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
+        trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
@@ -1893,6 +1928,8 @@ class RayPPOTrainer:
         if max_ckpts < 0:
             return
 
+        protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
+
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
         try:
@@ -1901,6 +1938,7 @@ class RayPPOTrainer:
                 cleanup_old_checkpoints,
                 self.cfg.trainer.ckpt_path,
                 max_ckpts,
+                protected_steps,
             )
         except ray.exceptions.RayError as e:
             # Best-effort: cleanup runs only after a successful checkpoint save,
@@ -1912,7 +1950,7 @@ class RayPPOTrainer:
 
         # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
         # suffices; the per-node fan-out above only matters for node-local dirs.
-        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, max_ckpts)
+        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, max_ckpts, protected_steps)
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """
@@ -1973,9 +2011,9 @@ class RayPPOTrainer:
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
-        policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
+        policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
-        trainer_state_path = os.path.join(checkpoint_path, "trainer_state.pt")
+        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
         dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
 
         # Validate that required checkpoint files exist
@@ -2011,8 +2049,7 @@ class RayPPOTrainer:
                 "pass_through",
                 "load_checkpoint",
                 ckpt_dir=policy_ckpt_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_training_state=True,
             )
         )
         logger.info("Successfully loaded policy checkpoint")
@@ -2025,8 +2062,7 @@ class RayPPOTrainer:
                     "pass_through",
                     "load_checkpoint",
                     ckpt_dir=critic_ckpt_dir,
-                    load_optimizer_states=True,
-                    load_lr_scheduler_states=True,
+                    load_training_state=True,
                 )
             )
             logger.info("Successfully loaded critic checkpoint")
@@ -2034,35 +2070,49 @@ class RayPPOTrainer:
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
         return global_step, str(checkpoint_path)
 
-    def save_models(self):
-        """
-        Save the model parameters in HF format at `cfg.trainer.export_path`.
-        """
-        policy_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "policy")
-        ray.get(
-            self.policy_model.async_run_ray_method("pass_through", "save_hf_model", policy_export_dir, self.tokenizer)
-        )
-        if self.critic_model is not None:
-            critic_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "critic")
-            ray.get(
-                self.critic_model.async_run_ray_method(
-                    "pass_through", "save_hf_model", critic_export_dir, self.tokenizer
-                )
+    def handle_hf_export(self) -> None:
+        """Persist a request for out-of-band policy checkpoint conversion."""
+        with Timer("queue_hf_export", self.all_timings):
+            self._handle_hf_export()
+
+    def _handle_hf_export(self) -> None:
+        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
+        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
+        if not io.exists(trainer_state_path):
+            raise RuntimeError(
+                f"Cannot request HF export for global_step_{self.global_step}: "
+                f"completed checkpoint marker is missing at {trainer_state_path}"
             )
-        logger.info("Successfully saved model weights.")
 
-    def _flush_hf_uploads(self) -> None:
-        """Re-process HF Hub uploads after the final model export is on disk.
+        existing = read_hf_export_request(checkpoint_path)
+        if existing is not None:
+            if existing.status is HFExportStatus.COMPLETE:
+                logger.info(f"HF export for global_step_{self.global_step} is already complete")
+            else:
+                logger.info(
+                    f"HF export for global_step_{self.global_step} is already recorded with status={existing.status.value}"
+                )
+            return
 
-        ``on_train_end`` fires before ``save_models()``, so the final step's
-        upload was skipped on the first pass.  This retries it now that the
-        export exists.  No-op when no HFHubUploadCallback is registered.
-        """
-        from skyrl_train.callbacks.builtin import HFHubUploadCallback
-
-        for cb in getattr(self.callback_handler, "callbacks", []):
-            if isinstance(cb, HFHubUploadCallback):
-                cb.post_save_flush(self.global_step)
+        placement = self.cfg.trainer.placement
+        model = self.cfg.trainer.policy.model
+        request = HFExportRequest(
+            step=self.global_step,
+            checkpoint_base_path=self.cfg.trainer.ckpt_path,
+            checkpoint_path=checkpoint_path,
+            export_path=self.cfg.trainer.export_path,
+            model_path=model.path,
+            num_nodes=placement.policy_num_nodes,
+            gpus_per_node=placement.policy_num_gpus_per_node,
+            model_source_uri=model.source_uri,
+            model_source_identity=model.source_identity,
+            hf_hub_repo_id=self.cfg.trainer.get("hf_hub_repo_id"),
+            hf_hub_private=self.cfg.trainer.get("hf_hub_private", False),
+            hf_hub_revision=self.cfg.trainer.get("hf_hub_revision", DEFAULT_HF_HUB_REVISION),
+            hf_upload_mode=HFUploadMode(self.cfg.trainer.get("hf_upload_mode", DEFAULT_HF_UPLOAD_MODE)),
+        )
+        request_path = write_hf_export_request(request)
+        logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""
@@ -2092,7 +2142,11 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # TODO(tgriggs): Make policy-to-ref sync faster.
-        policy_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "policy")
+        policy_export_dir = os.path.join(
+            self.cfg.trainer.export_path,
+            f"{GLOBAL_STEP_PREFIX}{self.global_step}",
+            POLICY_CHECKPOINT_SUBDIRECTORY,
+        )
         ray.get(
             self.policy_model.async_run_ray_method("pass_through", "save_hf_model", policy_export_dir, self.tokenizer)
         )

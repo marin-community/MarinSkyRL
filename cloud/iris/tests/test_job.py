@@ -77,13 +77,14 @@ def _write_runtime_files(root: Path, marker: str) -> None:
     runtime_package = root / "cloud" / "iris"
     runtime_package.mkdir(parents=True)
     (runtime_package / "runtime_bundle_files.txt").write_text(
-        "cloud/iris/__init__.py\ncloud/iris/task_runtime.py\nchat_templates/delphi_v0.jinja2\n"
+        "cloud/iris/__init__.py\ncloud/iris/task_runtime.py\nchat_templates/delphi_v0.jinja2\nchat_templates/delphi_v1.jinja2\n"
     )
     (runtime_package / "__init__.py").write_text("")
     (runtime_package / "task_runtime.py").write_text(f'RUNTIME_MARKER = "{marker}"\n')
     chat_templates = root / "chat_templates"
     chat_templates.mkdir()
     (chat_templates / "delphi_v0.jinja2").write_text(f"{marker.replace('-', ' ')} template\n")
+    (chat_templates / "delphi_v1.jinja2").write_text(f"{marker.replace('-', ' ')} v1 template\n")
 
 
 def _runtime_checkout(tmp_path: Path) -> tuple[Path, str]:
@@ -371,10 +372,12 @@ def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(
 
     assert (workspace / "cloud" / "iris" / "task_runtime.py").read_text() == ('RUNTIME_MARKER = "selected-checkout"\n')
     assert (workspace / "chat_templates" / "delphi_v0.jinja2").read_text() == "selected checkout template\n"
+    assert (workspace / "chat_templates" / "delphi_v1.jinja2").read_text() == "selected checkout v1 template\n"
     identity = json.loads((workspace / ".marinskyrl-runtime.json").read_text())
     assert identity["launcher_commit"] == commit
     assert {entry["path"] for entry in identity["files"]} == {
         "chat_templates/delphi_v0.jinja2",
+        "chat_templates/delphi_v1.jinja2",
         "cloud/iris/__init__.py",
         "cloud/iris/task_runtime.py",
     }
@@ -408,6 +411,24 @@ def test_runtime_bundle_uses_files_from_installed_vcs_distribution(tmp_path: Pat
         'RUNTIME_MARKER = "installed-vcs-distribution"\n'
     )
     assert runtime_bundle.validate_bundled_runtime(workspace) == commit
+
+
+def test_runtime_bundle_can_load_hf_dataset_extractor(tmp_path: Path) -> None:
+    workspace = runtime_bundle.build_runtime_bundle(_git_commit(_REPOSITORY_ROOT))
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "huggingface_hub.py").write_text("snapshot_download = None\n")
+    (stubs / "tqdm.py").write_text("tqdm = None\n")
+
+    result = subprocess.run(
+        [sys.executable, "-S", "-m", "cloud.iris.extract_tasks_from_parquet", "--help"],
+        cwd=workspace,
+        env={**os.environ, "PYTHONPATH": str(stubs)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_runtime_bundle_rejects_a_synced_file_that_differs_from_its_identity(
@@ -473,7 +494,16 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
 
 
-def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "profile, expected_extras",
+    [
+        (RuntimeProfile.FSDP, ["fsdp", "vllm", "telemetry"]),
+        (RuntimeProfile.FSDP_EXPORT, ["cuda", "fsdp"]),
+    ],
+)
+def test_task_setup_executes_the_pinned_checkout_bootstrap(
+    tmp_path: Path, monkeypatch, profile: RuntimeProfile, expected_extras: list[str]
+) -> None:
     source = tmp_path / "source"
     bootstrap = source / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT
     bootstrap.parent.mkdir(parents=True)
@@ -525,10 +555,10 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "FAKE_CUDA_LIBRARY_PATH": str(cuda_library_path),
     }
 
-    subprocess.run(["bash", "-c", task_setup_script(commit, RuntimeProfile.FSDP)], env=env, check=True)
+    subprocess.run(["bash", "-c", task_setup_script(commit, profile)], env=env, check=True)
 
     assert _git_commit(checkout) == commit
-    assert uv_args.read_text().splitlines() == [
+    expected_uv_args = [
         "sync",
         "--project",
         str(checkout),
@@ -537,11 +567,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(tmp_path: Path, monke
         "symlink",
         "--no-group",
         "dev",
-        "--extra",
-        "fsdp",
-        "--extra",
-        "vllm",
-        "--extra",
-        "telemetry",
     ]
+    for extra in expected_extras:
+        expected_uv_args.extend(["--extra", extra])
+    assert uv_args.read_text().splitlines() == expected_uv_args
     assert runtime_file.read_text().startswith("export LD_LIBRARY_PATH=")

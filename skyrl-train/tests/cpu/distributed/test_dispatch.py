@@ -1,11 +1,17 @@
+import os
+import pickle
+import threading
+
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.distributed.dispatch import (
+    WorkerGroupTaskError,
     MeshDispatch,
     PassThroughDispatch,
     MeshRank,
     ActorInfo,
     DispatchRegistry,
     Dispatch,
+    collect_actor_results,
 )
 import ray
 import torch
@@ -35,6 +41,20 @@ class RayActor:
         # Mirror skyrl_train.workers.worker.Worker.get_ray_node_id so the
         # SKYRL_R3_DECENTRAL path can resolve this actor's node id.
         return ray.get_runtime_context().get_node_id()
+
+    def raise_oom(self):
+        raise torch.OutOfMemoryError("injected policy-rank OOM")
+
+    def exit_process(self):
+        os._exit(17)
+
+    def wait_without_progress(self):
+        # The unresolved peer is the fault input. Bound it so a broken collector
+        # cannot leave the CPU suite blocked indefinitely.
+        threading.Event().wait(10)
+
+    def ping(self):
+        return "alive"
 
 
 class RayActorGroup:
@@ -79,6 +99,32 @@ def test_pass_through_dispatch():
     actor_group = RayActorGroup(num_actors)
     ret = actor_group.pass_through_dispatch(1, 2)
     assert ret is None
+
+
+@pytest.mark.parametrize("failure_method", ["raise_oom", "exit_process"])
+def test_collect_actor_results_kills_blocked_gang_on_rank_error(failure_method):
+    actors = [RayActor.remote(0, 0), RayActor.remote(1, 1)]
+    actor_infos = [
+        ActorInfo(
+            actor,
+            MeshRank(dp=index, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1),
+        )
+        for index, actor in enumerate(actors)
+    ]
+    refs = [getattr(actors[0], failure_method).remote(), actors[1].wait_without_progress.remote()]
+
+    with pytest.raises(WorkerGroupTaskError) as error:
+        collect_actor_results(actor_infos, refs, operation="policy ppo_train")
+
+    assert error.value.operation == "policy ppo_train"
+    assert error.value.actor_index == 0
+    assert error.value.mesh_rank == actor_infos[0].rank
+    restored_error = pickle.loads(pickle.dumps(error.value))
+    assert restored_error.operation == error.value.operation
+    assert restored_error.actor_index == error.value.actor_index
+    assert restored_error.mesh_rank == error.value.mesh_rank
+    with pytest.raises(ray.exceptions.ActorDiedError):
+        ray.get(actors[1].ping.remote(), timeout=5)
 
 
 def test_mesh_dispatch_with_mixed():

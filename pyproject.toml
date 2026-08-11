@@ -167,7 +167,8 @@ override-dependencies = [
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",
     "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
-    "humming-kernels[cu12]==0.1.4 ; sys_platform == 'linux'",
+    "humming-kernels==0.1.4 ; sys_platform == 'linux'",
+    "cuda-tile==1.3.0 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
@@ -223,7 +224,7 @@ mamba-ssm = [
     { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
-harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-01a904ab5a1e3a6ad6ad4f96cc39e82242e4ff8c/harbor_config-0.1.0-py3-none-any.whl" }
+harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-24e5e67ac93d21c1a2202d6906f6093e0a57b86c/harbor_config-0.1.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -243,7 +244,7 @@ explicit = true
 [tool.marin-style]
 checks = ["ruff-check", "ruff-format"]
 ruff_version = "0.14.3"
-include = ["skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**", "scripts/**"]
+include = ["marinskyrl/**", "skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**", "scripts/**"]
 
 [tool.ruff]
 line-length = 120

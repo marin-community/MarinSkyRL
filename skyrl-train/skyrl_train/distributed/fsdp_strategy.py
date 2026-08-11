@@ -774,8 +774,7 @@ class FSDPStrategy(DistributedStrategy):
         scheduler=None,
         tag=None,
         load_module_strict=True,
-        load_optimizer_states=True,
-        load_lr_scheduler_states=True,
+        load_training_state=True,
     ):
         """Load model checkpoint for FSDP"""
         import warnings
@@ -795,34 +794,39 @@ class FSDPStrategy(DistributedStrategy):
         rank = self.get_rank()
         world_size = self.world_size
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-            # Check if checkpoint files exist
-            if not io.exists(model_path):
-                raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-            if not io.exists(extra_path):
-                raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        if not io.exists(model_path):
+            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+        if load_training_state and not io.exists(extra_path):
+            raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        optim_exists = load_training_state and io.exists(optim_path)
 
-            # Optimizer path is optional since we may not save optimizer states initially
-            optim_exists = io.exists(optim_path)
-
-            self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        if load_training_state:
             self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
-            if optim_exists:
-                self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
+        if optim_exists:
+            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
-            # Load state dictionaries from disk
-            with io.open_file(model_path, "rb") as f:
+        checkpoint_paths = [model_path]
+        if optim_exists:
+            checkpoint_paths.append(optim_path)
+        if load_training_state:
+            checkpoint_paths.append(extra_path)
+        with io.local_read_files(checkpoint_paths) as local_paths:
+            staged_paths = dict(zip(checkpoint_paths, local_paths, strict=True))
+            with io.open_file(staged_paths[model_path], "rb") as f:
                 model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
-            with io.open_file(extra_path, "rb") as f:
-                extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            extra_state_dict = {}
+            if load_training_state:
+                with io.open_file(staged_paths[extra_path], "rb") as f:
+                    extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
             optimizer_state_dict = {}
-            if optim_exists and load_optimizer_states:
-                with io.open_file(optim_path, "rb") as f:
+            if optim_exists:
+                with io.open_file(staged_paths[optim_path], "rb") as f:
                     optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
@@ -841,17 +845,17 @@ class FSDPStrategy(DistributedStrategy):
                 self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
                 # Load optimizer state dict if optimizer object is provided and loading is requested
-                if optimizer is not None and load_optimizer_states and optimizer_state_dict:
+                if optimizer is not None and optimizer_state_dict:
                     optimizer.load_state_dict(optimizer_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
 
                 # Load scheduler state dict if scheduler object is provided and loading is requested
-                if scheduler is not None and load_lr_scheduler_states:
+                if scheduler is not None and load_training_state:
                     scheduler.load_state_dict(lr_scheduler_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
 
         # Load RNG state for reproducibility
-        if "rng" in extra_state_dict:
+        if load_training_state and "rng" in extra_state_dict:
             self.load_rng_state(extra_state_dict["rng"])
 
         # Wait for all ranks to finish loading
@@ -931,7 +935,8 @@ class FSDPStrategy(DistributedStrategy):
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
-        dist.barrier()
+        # The Ray caller waits for every rank result. A trailing process-group
+        # barrier would only make idle ranks inherit rank 0's serialization timeout.
 
     # GroupedMoEShim ``.mlp.moe.`` segment + FSDP ``_fsdp_wrapped_module`` segment that
     # sit between the HF ``...mlp.`` prefix and the grouped ``experts.w1/...`` / ``router.gate``

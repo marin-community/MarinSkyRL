@@ -9,7 +9,7 @@ from typing import Optional
 from omegaconf import DictConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 
 
 # Example of custom policy loss: "reinforce"
@@ -26,8 +26,7 @@ def compute_reinforce_policy_loss(
     # Classic REINFORCE: minimize -log_prob * advantage
     loss = (-log_probs * advantages).mean()
 
-    # Return loss and dummy clip_ratio (no clipping in REINFORCE)
-    return loss, 0.0
+    return loss, {}
 
 
 # Register the custom policy loss

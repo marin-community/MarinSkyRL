@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
 from omegaconf import OmegaConf, DictConfig
 from enum import Enum
@@ -12,6 +13,10 @@ import numpy as np
 from collections import defaultdict
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
 from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.generators.trajectory_reward_shaping import (
+    REWARD_SHAPING_ROW_KEYS,
+    refresh_trajectory_reward_shaping_metrics,
+)
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
@@ -121,13 +126,16 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
         return []
 
 
-def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int) -> None:
+def cleanup_old_checkpoints(
+    checkpoint_base_path: str, max_checkpoints: int, protected_steps: set[int] | None = None
+) -> None:
     """
-    Clean up old checkpoints, keeping only the most recent `max_checkpoints` checkpoints.
+    Keep the most recent `max_checkpoints` and protected checkpoints; remove the rest.
 
     Args:
         checkpoint_base_path: Base path where checkpoints are stored
-        max_checkpoints: Maximum number of checkpoints to keep
+        max_checkpoints: Maximum number of recent checkpoints to keep
+        protected_steps: Additional checkpoint steps retained until external work completes
     """
     if max_checkpoints < 0:
         return
@@ -146,8 +154,13 @@ def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int) -> 
 
     checkpoint_dirs.sort(key=extract_step)
 
-    # Remove oldest checkpoints
-    dirs_to_remove = checkpoint_dirs[:-max_checkpoints] if max_checkpoints > 0 else checkpoint_dirs
+    protected_steps = protected_steps or set()
+    recent = set(checkpoint_dirs[-max_checkpoints:]) if max_checkpoints > 0 else set()
+    dirs_to_remove = [
+        directory
+        for directory in checkpoint_dirs
+        if directory not in recent and extract_step(directory) not in protected_steps
+    ]
 
     for dir_name in dirs_to_remove:
         full_path = os.path.join(checkpoint_base_path, dir_name)
@@ -412,6 +425,9 @@ def handle_replace_sampling(
 
             if generator_output["rollout_logprobs"]:
                 generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
+            for key in REWARD_SHAPING_ROW_KEYS:
+                if generator_output.get(key) is not None:
+                    generator_output[key][bad_idx] = deepcopy(generator_output[key][replacement_idx])
 
         # Update UIDs accordingly
         replaced_uids = uids.copy()
@@ -420,6 +436,7 @@ def handle_replace_sampling(
 
         logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
         logger.info("==================================================")
+        refresh_trajectory_reward_shaping_metrics(generator_output)
 
         return generator_output, replaced_uids, False
     else:
@@ -559,6 +576,10 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
 
     if output.get("stop_reasons"):
         filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
+    for key in REWARD_SHAPING_ROW_KEYS:
+        if output.get(key) is not None:
+            filtered[key] = [deepcopy(output[key][i]) for i in kept_indices]
+    refresh_trajectory_reward_shaping_metrics(filtered)
 
     return filtered
 

@@ -9,6 +9,7 @@ from verifiers import load_environment
 from verifiers.types import GenerateOutputs, ProcessedOutputs, GenerateInputs
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl_train.generators.trajectory_reward_shaping import infer_stop_reason
 from skyrl_train.generators.utils import get_rollout_metrics
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ class VerifiersGenerator(GeneratorInterface):
             http_client=http_client,
         )
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         assert "env_extras" in input_batch, "Verifiers dataset fields are passed through env_extras"
 
         # Defaults are based on Verifiers' defaults.
@@ -131,6 +132,12 @@ class VerifiersGenerator(GeneratorInterface):
             max_seq_len=self.generator_cfg.max_input_length + self.generator_cfg.sampling_params.max_generate_length,
             mask_env_responses=True,
         )
+        max_generate_length = self.generator_cfg.sampling_params.max_generate_length
+        eos_token_id = self.tokenizer.eos_token_id
+        stop_reasons = [
+            infer_stop_reason(completion_ids, eos_token_id, max_generate_length)
+            for completion_ids in processed_outputs.completion_ids
+        ]
 
         # Convert output to SkyRL format.
         return GeneratorOutput(
@@ -138,6 +145,7 @@ class VerifiersGenerator(GeneratorInterface):
             response_ids=processed_outputs.completion_ids,
             rewards=processed_outputs.rewards,
             loss_masks=processed_outputs.completion_mask,
+            stop_reasons=stop_reasons,
             rollout_logprobs=processed_outputs.completion_logprobs,
             rollout_metrics=get_rollout_metrics(processed_outputs.completion_ids, processed_outputs.rewards),
         )
@@ -176,6 +184,7 @@ class VerifiersGenerator(GeneratorInterface):
             response_ids=response_ids,
             rewards=rewards,
             loss_masks=loss_masks,
+            stop_reasons=["error"] * batch_size,
             rollout_logprobs=rollout_logprobs,
             rollout_metrics=get_rollout_metrics(response_ids, rewards),
         )

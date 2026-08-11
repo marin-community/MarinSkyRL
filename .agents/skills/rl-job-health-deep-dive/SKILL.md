@@ -1,17 +1,19 @@
 ---
 name: rl-job-health-deep-dive
 description: >-
-  Diagnose one live or suspect Iris RL job and return an evidence-backed KILL, NO-KILL, or ERROR
-  recommendation. Use when ordinary state and metric checks cannot distinguish progress from a
-  silent stall, or when validating a new model, geometry, configuration, or image. This is a
-  read-only repository role: it never edits code, commits, pushes, opens PRs, or kills jobs.
+  Diagnose one live or suspect RL job on Iris or an explicitly selected supported backend and return
+  an evidence-backed KILL, NO-KILL, or ERROR recommendation. Use when ordinary state and metric
+  checks cannot distinguish progress from a silent stall, or when validating a new model, geometry,
+  configuration, or image. This is a read-only repository role: it never edits code, commits,
+  pushes, opens PRs, or kills jobs.
 ---
 
-# Deep-dive one Iris RL job
+# Deep-dive one RL job
 
 Inspect one job and return a recommendation to its supervisor. Read
-`.agents/ops/coreweave.md` for access and capture procedures and
-`.agents/ops/rl-diagnostics.md` for signal interpretation before probing.
+`.agents/ops/watch-coreweave-rl.md` for local capture and artifact layout and
+`.agents/ops/rl-diagnostics.md` for signal interpretation before probing. Read the backend-specific
+runbook routed from the watcher runbook only when live evidence is required.
 
 ## Diagnostic mode
 
@@ -38,9 +40,11 @@ If an ops document is stale or incomplete, report the discrepancy. Do not repair
 
 ## Capture before analysis
 
-Sync the durable job logs and analyze the local evidence bundle. Use live probes only for evidence
-that disappears with the job, such as per-rank GPU state or process stacks. Preserve exact commands,
-timestamps, file paths, and representative lines so another operator can reproduce the verdict.
+Inspect the canonical local syncdown first. Verify its manifest freshness and artifact statuses,
+then run a targeted watcher refresh if required evidence is stale or was not requested. Query the
+cluster only when local evidence is unavailable or contradictory, or for evidence that disappears
+with the job, such as per-rank GPU state or process stacks. Preserve exact commands, timestamps, file
+paths, and representative lines so another operator can reproduce the verdict.
 
 Return `ERROR` when required evidence cannot be obtained or authoritative signals remain
 unreconciled. Missing evidence is not a conservative `NO-KILL`.

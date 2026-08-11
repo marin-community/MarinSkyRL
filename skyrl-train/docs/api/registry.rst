@@ -6,38 +6,38 @@ The registry system in SkyRL Train provides a way to register and manage custom 
 Base Registry Classes
 ---------------------
 
-.. autoclass:: skyrl_train.utils.ppo_utils.BaseFunctionRegistry
+.. autoclass:: skyrl_train.utils.function_registry.BaseFunctionRegistry
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: skyrl_train.utils.ppo_utils.RegistryActor
+.. autoclass:: skyrl_train.utils.function_registry.RegistryActor
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autofunction:: skyrl_train.utils.ppo_utils.sync_registries
+.. autofunction:: skyrl_train.utils.algorithm_registry.sync_registries
     
 Advantage Estimator Registry
 -----------------------------
 
 The advantage estimator registry manages functions that compute advantages and returns for reinforcement learning algorithms.
 
-.. autoclass:: skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry
+.. autoclass:: skyrl_train.utils.algorithm_registry.AdvantageEstimatorRegistry
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: skyrl_train.utils.ppo_utils.AdvantageEstimator
+.. autoclass:: skyrl_train.utils.algorithm_registry.AdvantageEstimator
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autofunction:: skyrl_train.utils.ppo_utils.register_advantage_estimator
+.. autofunction:: skyrl_train.utils.algorithm_registry.register_advantage_estimator
 
 
 Policy Loss Registry
@@ -45,16 +45,16 @@ Policy Loss Registry
 
 The policy loss registry manages functions that compute policy losses for PPO and related algorithms.
 
-.. autoclass:: skyrl_train.utils.ppo_utils.PolicyLossRegistry
+.. autoclass:: skyrl_train.utils.algorithm_registry.PolicyLossRegistry
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: skyrl_train.utils.ppo_utils.PolicyLossType
+.. autoclass:: skyrl_train.utils.algorithm_registry.PolicyLossType
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autofunction:: skyrl_train.utils.ppo_utils.register_policy_loss
+.. autofunction:: skyrl_train.utils.algorithm_registry.register_policy_loss

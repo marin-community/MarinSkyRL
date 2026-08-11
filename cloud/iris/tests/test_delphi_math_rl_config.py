@@ -70,6 +70,49 @@ def test_delphi_config_flattens_environment_and_caps_into_hydra_args():
     assert not any("model_num_attention_heads" in a for a in args)
 
 
+def test_iris_derives_durable_training_trajectory_path():
+    parsed = parse_rl_config(_CONFIG)
+    args = build_skyrl_hydra_args(
+        parsed,
+        {"job_name": "retained-run", "experiments_dir": "s3://bucket/iris/", "num_nodes": 4},
+        _HPCStub(),
+    )
+
+    assert (
+        "generator.trajectory_retention.output_path='s3://bucket/iris/retained-run/trace_jobs/training_trajectories'"
+        in args
+    )
+
+
+def test_model_source_locator_reaches_trainer_config():
+    parsed = parse_rl_config(_CONFIG)
+    exp_args = {
+        "job_name": "exportable-run",
+        "model_path": "/tmp/materialized-model",
+        "model_source_uri": "s3://models/policy",
+        "model_source_identity": "policy@abc123",
+        "num_nodes": 4,
+    }
+
+    args = build_skyrl_hydra_args(parsed, exp_args, _HPCStub())
+
+    assert "trainer.policy.model.source_uri='s3://models/policy'" in args
+    assert "trainer.policy.model.source_identity='policy@abc123'" in args
+
+
+def test_partial_model_source_is_rejected_during_config_translation():
+    parsed = parse_rl_config(_CONFIG)
+    exp_args = {
+        "job_name": "invalid-exportable-run",
+        "model_path": "/tmp/materialized-model",
+        "model_source_identity": "policy@abc123",
+        "num_nodes": 4,
+    }
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        build_skyrl_hydra_args(parsed, exp_args, _HPCStub())
+
+
 def test_tp_guard_rejects_tp8_on_42_heads():
     with pytest.raises(ValueError, match="does not divide"):
         validate_tp_divides_heads(8, 42)

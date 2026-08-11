@@ -67,7 +67,6 @@ def _build_generator(tokenizer, model_name: str, chat_template_config, extra_ove
         "max_input_length": 200,
         "batched": False,
         "max_turns": 3,
-        "zero_reward_on_non_stop": False,
         "apply_overlong_filtering": False,
         "use_conversation_multi_turn": True,
         "chat_template": chat_template_config,

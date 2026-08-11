@@ -48,7 +48,13 @@ class DistributedStrategy(ABC):
 
     @abstractmethod
     def load_checkpoint(
-        self, model, ckpt_dir, optimizer, scheduler, load_module_strict, load_optimizer_states, load_lr_scheduler_states
+        self,
+        model,
+        ckpt_dir,
+        optimizer,
+        scheduler,
+        load_module_strict,
+        load_training_state,
     ):
         """Load checkpoint"""
         pass

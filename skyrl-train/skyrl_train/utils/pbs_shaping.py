@@ -27,7 +27,7 @@ Construction (this module):
 
 The result is a per-token ``token_level_shaping`` list (same length / layout as
 ``response_ids``) that the generator writes into the Stage-B channel; the
-Stage-C advantage estimator (``rloo_n_pbs`` in ``ppo_utils.py``) adds it,
+Stage-C advantage estimator (``rloo_n_pbs`` in ``advantage_estimators.py``) adds it,
 additively + separately, onto RLOO-N's outcome advantage.
 
 Pure / CPU-only; no torch dependency. Unit-testable in isolation.

@@ -16,7 +16,7 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
-from skyrl_train.utils.ppo_utils import compute_rloo_n_outcome_advantage
+from skyrl_train.utils.advantage_estimators import compute_rloo_n_outcome_advantage
 
 
 @pytest.fixture

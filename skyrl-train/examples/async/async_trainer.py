@@ -5,7 +5,7 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer
-from skyrl_train.utils.ppo_utils import normalize_advantages_dict
+from skyrl_train.utils.policy_math import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode
@@ -92,8 +92,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                     with Timer("save_checkpoints", self.all_timings):
                         self.save_checkpoints()
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                    with Timer("save_hf_model", self.all_timings):
-                        self.save_models()
+                    self.handle_hf_export()
                 self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
                 self.all_timings = {}
                 self.global_step += 1
@@ -111,9 +110,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
-            with Timer("save_hf_model", self.all_timings):
-                self.save_models()
-                logger.info("Saved final model.")
+            self.handle_hf_export()
         logger.info("Training done!")
 
     async def _run_training(self, generation_buffer):

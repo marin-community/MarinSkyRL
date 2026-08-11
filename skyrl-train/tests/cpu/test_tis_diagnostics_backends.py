@@ -3,8 +3,9 @@
 The diagnostics (tis/imp_ratio_mean, tis/imp_ratio_capped_fraction,
 tis/log_ratio_abs_mean) are a pure function of tensors every backend
 materializes for the TIS loss, computed by the shared
-`skyrl_train.utils.ppo_utils.compute_tis_diagnostics` (arithmetic covered in
-tests/cpu/utils/test_ppo_utils.py). These tests pin the two call sites: the
+`skyrl_train.utils.importance_ratio_diagnostics.compute_tis_diagnostics`
+(arithmetic covered in tests/cpu/utils/test_policy_optimization.py).
+These tests pin the two call sites: the
 FSDP path (`PolicyWorkerBase.training_step` status dict) and the Megatron path
 (`MegatronModelWrapper.forward_backward_mini_batch` per-micro metrics dicts).
 The Megatron path silently emitting NO tis/* keys is the production blind spot
@@ -21,7 +22,8 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.ppo_utils import TIS_DIAG_KEYS, compute_tis_diagnostics
+from skyrl_train.utils.importance_ratio_diagnostics import TIS_DIAG_KEYS, compute_tis_diagnostics
+from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
 from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
@@ -66,7 +68,7 @@ def _tis_tensors():
 
 
 def _fake_policy_loss_fn(log_probs, old_log_probs, advantages, config=None, loss_mask=None, rollout_logprobs=None):
-    return torch.tensor(0.25), 0.0
+    return torch.tensor(0.25), {}
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +144,11 @@ def test_fsdp_training_step_emits_tis_diagnostics(monkeypatch):
 def test_fsdp_training_step_no_tis_keys_when_disabled(monkeypatch):
     status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
     assert not any(key.startswith("tis/") for key in status)
+
+
+def test_fsdp_training_step_completes_clip_metric_contract(monkeypatch):
+    status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
+    assert {key: status[key] for key in POLICY_CLIP_METRIC_KEYS} == dict.fromkeys(POLICY_CLIP_METRIC_KEYS, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +256,10 @@ def test_megatron_mini_batch_no_tis_keys_when_disabled(single_rank_group, monkey
     metrics_list = _megatron_mini_batch_metrics(use_tis=False, rollout_lp=rollout_lp, monkeypatch=monkeypatch)
     for metrics in metrics_list:
         assert not any(key.startswith("tis/") for key in metrics)
+
+
+def test_megatron_mini_batch_completes_clip_metric_contract(single_rank_group, monkeypatch):
+    _, rollout_lp, _ = _tis_tensors()
+    metrics_list = _megatron_mini_batch_metrics(use_tis=False, rollout_lp=rollout_lp, monkeypatch=monkeypatch)
+    for metrics in metrics_list:
+        assert {key: metrics[key] for key in POLICY_CLIP_METRIC_KEYS} == dict.fromkeys(POLICY_CLIP_METRIC_KEYS, 0.0)

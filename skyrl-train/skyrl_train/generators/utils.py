@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.generators.trajectory_reward_shaping import refresh_trajectory_reward_shaping_metrics
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -673,6 +674,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     rollout_metrics.update(_merge_batch_failure_metrics(generator_outputs))
 
     result["rollout_metrics"] = rollout_metrics
+    refresh_trajectory_reward_shaping_metrics(result)
 
     # Validate the generator output using the number of prompts
     # Import here to avoid circular dependency.

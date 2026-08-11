@@ -147,6 +147,21 @@ def test_fsdp_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_pa
     assert megatron.returncode == 0, megatron.stderr
 
 
+def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    _write_module(site_packages, "flash_attn_2_cuda.py")
+    _write_module(site_packages, "ray.py")
+    _write_module(site_packages, "skyrl_train/checkpoint_exporter.py", "class CheckpointExporter: pass\n")
+    (site_packages / "daytona.py").unlink()
+    (site_packages / "memray.py").unlink()
+    (site_packages / "harbor" / "utils" / "traces_utils.py").unlink()
+
+    result = _run_bootstrap(environment, process_environment, "fsdp-export")
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     ("missing_module", "expected_error"),
     [

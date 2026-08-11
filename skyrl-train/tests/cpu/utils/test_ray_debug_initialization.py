@@ -27,7 +27,7 @@ def test_ray_initialization_persists_distributed_debug_contract(tmp_path, monkey
     monkeypatch.setenv(FR_DUMP_TEMP_FILE_ENV, "/tmp/nccl_fr_rank")
     monkeypatch.setenv(NCCL_DEBUG_INFO_TEMP_FILE_ENV, "/tmp/nccl_fr_rank")
     monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
-    monkeypatch.setattr("skyrl_train.utils.ppo_utils.sync_registries", lambda: None)
+    monkeypatch.setattr("skyrl_train.utils.utils.sync_registries", lambda: None)
     ray_init: dict[str, object] = {}
     monkeypatch.setattr(ray, "init", lambda **kwargs: ray_init.update(kwargs))
 

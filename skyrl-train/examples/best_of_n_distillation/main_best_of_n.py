@@ -25,11 +25,8 @@ from skyrl_train.distillation_trainer import DistillationTrainer
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
-from skyrl_train.utils.ppo_utils import (
-    register_advantage_estimator,
-    register_policy_loss,
-    reduce_loss,
-)
+from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
+from skyrl_train.utils.loss_reduction import reduce_loss
 from skyrl_train.utils.distillation_utils import best_of_n_select
 import hydra
 from typing import List
@@ -120,7 +117,7 @@ def sft_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollo
     """SFT loss — maximize log probability of selected tokens."""
     loss = -log_probs
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
-    return loss, 0.0
+    return loss, {}
 
 
 # Uniform advantage estimator: all advantages = 1.0 (for SFT mode)
