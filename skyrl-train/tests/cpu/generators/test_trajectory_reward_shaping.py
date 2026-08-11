@@ -96,9 +96,7 @@ def test_loop_and_non_termination_penalties_compose_from_raw_trajectory():
     )
 
     assert output["rewards"] == pytest.approx([0.3])
-    assert output["reward_shaping_components"] == [
-        {"loop": -0.2, "non_termination": -0.3, "successful_length": -0.2}
-    ]
+    assert output["reward_shaping_components"] == [{"loop": -0.2, "non_termination": -0.3, "successful_length": -0.2}]
     assert output["reward_shaping_loop_spans"] == [[{"start": 2, "end": 6}]]
     assert output["reward_shaping_versions"] == [1]
     assert output["rollout_metrics"]["generate/reward_shaping/loop_incidence"] == 1.0
