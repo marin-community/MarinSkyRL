@@ -167,7 +167,6 @@ override-dependencies = [
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",
     "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
-    # PyTorch owns the CUDA 12.9 runtime. Keep these packages, but not extras that vendor another toolkit.
     "humming-kernels==0.1.4 ; sys_platform == 'linux'",
     "cuda-tile==1.3.0 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
