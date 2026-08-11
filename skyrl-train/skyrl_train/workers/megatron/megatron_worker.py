@@ -31,14 +31,19 @@ from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.models.grug_moe import validate_grug_training_strategy
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.training_batch import (
+    GLOBAL_LOSS_DENOM_METADATA_KEY,
+    TrainingBatchIterator,
+    TrainingOutputBatch,
+    gradient_accumulation_steps,
+)
+from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
     CriticWorkerBase,
 )
-from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
+from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 
@@ -466,19 +471,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ),
         )
 
+    # This cannot inherit PolicyWorkerBase.ppo_train: Megatron Core must own
+    # pipeline scheduling and gradient accumulation, so only policy semantics
+    # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
-        """
-        Overrides `PolicyWorkerBase.ppo_train` for megatron.
+        """Train through Megatron Core's pipeline scheduler."""
+        dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
-        Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
-        worker MegatronModelWrapper.forward_backward_mini_batch method.
-        """
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
-
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+        micro_batches_per_mini_batch = gradient_accumulation_steps(
+            self.policy_mini_batch_size_per_gpu,
+            self.cfg.trainer.micro_train_batch_size_per_gpu,
         )
 
         status_list = []
@@ -505,17 +507,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 position_ids.masked_fill_(attention_mask == 0, 0)
 
                 micro_buffer.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": experience.num_actions,
-                        "old_action_log_probs": experience.action_log_probs,
-                        "base_action_log_probs": experience.base_action_log_probs,
-                        "advantages": experience.advantages,
-                        "loss_mask": experience.loss_mask,
-                        "rollout_action_logprobs": experience.rollout_logprobs,
-                    }
+                    MegatronPolicyMicroBatch(
+                        sequences=sequences,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        num_actions=experience.num_actions,
+                        old_action_log_probs=experience.action_log_probs,
+                        base_action_log_probs=experience.base_action_log_probs,
+                        advantages=experience.advantages,
+                        loss_mask=experience.loss_mask,
+                        rollout_action_logprobs=experience.rollout_logprobs,
+                        response_span_tags=experience.response_span_tags,
+                        global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
+                    )
                 )
 
                 if len(micro_buffer) == micro_batches_per_mini_batch:
@@ -524,8 +528,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     for chunk in self.actor_module:
                         # if use distributed optimizer, zero grad buffer will be handled by optimizer
                         chunk.zero_grad_buffer()
-                    seq_len = micro_buffer[0]["sequences"].shape[1]
-                    micro_bsz = micro_buffer[0]["sequences"].shape[0]
+                    seq_len = micro_buffer[0].sequences.shape[1]
+                    micro_bsz = micro_buffer[0].sequences.shape[0]
 
                     metrics_list = self.model.forward_backward_mini_batch(
                         micro_batches=micro_buffer,
@@ -552,22 +556,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             status["raw_grad_norm"] = grad_norm
 
                         # attach response_length
-                        status["response_length"] = micro_buffer[i]["num_actions"]
+                        status["response_length"] = micro_buffer[i].num_actions
 
                         status = self.strategy.all_reduce(status)
                         status_list.append(status)
                         for k, v in status.items():
                             all_metrics[k].append(v)
 
-                    short_status = {
-                        "pg": status_list[-1]["policy_loss"],
-                        "glen": status_list[-1]["response_length"],
-                        "policy_lr": status_list[-1]["policy_lr"],
-                        "ent": status_list[-1]["policy_entropy"],
-                    }
-                    if "raw_grad_norm" in status_list[-1]:
-                        short_status["grad_norm"] = status_list[-1]["raw_grad_norm"]
-                    pbar.set_postfix(short_status)
+                    pbar.set_postfix(policy_progress_metrics(status_list[-1]))
 
                     policy_update_steps += 1
                     micro_buffer = []
@@ -580,11 +576,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.stop_and_save()
             self.profiler.stop_trace()
 
-        # not needed beyond status logging
-        all_metrics.pop("response_length", None)
-
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps
+        status_mean = policy_training_metrics(all_metrics, policy_update_steps)
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}

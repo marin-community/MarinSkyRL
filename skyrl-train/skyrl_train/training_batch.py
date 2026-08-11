@@ -1,12 +1,37 @@
-"""Defines interfaces for training data."""
+"""Training batch containers and iteration."""
 
-from typing import TypedDict, Dict, Any, List, Optional, Generic, TypeVar
+import io
+import math
+import pickle
+from typing import Any, Dict, Generic, Iterator, List, Optional, TypeVar, TypedDict
+
 import torch
 from jaxtyping import Float, Integer
-import pickle
-import io
+
+from skyrl_train.dataset.replay_buffer import Experience
 
 DictType = TypeVar("DictType")
+GLOBAL_LOSS_DENOM_METADATA_KEY = "global_loss_denom"
+
+
+def per_data_parallel_batch_size(mini_batch_size: int, samples_per_prompt: int, data_parallel_size: int) -> int:
+    """Return a role's per-data-parallel-rank mini-batch size."""
+    if data_parallel_size < 1:
+        raise ValueError(f"data_parallel_size must be positive, got {data_parallel_size}")
+    return mini_batch_size * samples_per_prompt // data_parallel_size
+
+
+def gradient_accumulation_steps(per_rank_mini_batch_size: int, micro_batch_size: int) -> int:
+    """Return the number of microbatches in one optimizer update."""
+    if micro_batch_size < 1:
+        raise ValueError(f"micro_batch_size must be positive, got {micro_batch_size}")
+    steps, remainder = divmod(per_rank_mini_batch_size, micro_batch_size)
+    if steps < 1 or remainder:
+        raise ValueError(
+            f"per-rank mini-batch size {per_rank_mini_batch_size} must be a positive multiple "
+            f"of micro-batch size {micro_batch_size}"
+        )
+    return steps
 
 
 # NOTE (sumanthrh): This is inspired by `TensorDict` but is much simpler.
@@ -357,6 +382,50 @@ class TrainingInputBatch(TensorBatch[TrainingInput]):
     """Training input data"""
 
     pass
+
+
+class TrainingBatchIterator(Iterator[Experience]):
+    """Yield reusable ``Experience`` microbatches from a training batch."""
+
+    def __init__(self, data: TrainingInputBatch, sample_batch_size: int):
+        if sample_batch_size < 1:
+            raise ValueError(f"sample_batch_size must be positive, got {sample_batch_size}")
+        self._chunks = data.chunk(sample_batch_size)
+        self._iterator = iter(self._chunks)
+        self._length = math.ceil(data.batch_size / sample_batch_size)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __iter__(self) -> "TrainingBatchIterator":
+        return self
+
+    def __next__(self) -> Experience:
+        try:
+            return self._experience(next(self._iterator))
+        except StopIteration:
+            self._iterator = iter(self._chunks)
+            raise
+
+    @staticmethod
+    def _experience(batch: TrainingInputBatch) -> Experience:
+        return Experience(
+            sequences=batch["sequences"],
+            action_log_probs=batch["action_log_probs"],
+            base_action_log_probs=batch["base_action_log_probs"],
+            values=batch["values"],
+            returns=batch["returns"],
+            advantages=batch["advantages"],
+            attention_mask=batch["attention_mask"],
+            loss_mask=batch["loss_mask"],
+            action_mask=batch["response_mask"],
+            num_actions=batch.metadata["response_length"],
+            rollout_logprobs=batch.get("rollout_logprobs"),
+            rollout_routed_experts=batch.get("rollout_routed_experts"),
+            response_span_tags=batch.get("response_span_tags"),
+            info={},
+            metadata=batch.metadata,
+        )
 
 
 class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):

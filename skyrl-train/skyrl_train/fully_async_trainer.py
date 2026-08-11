@@ -269,11 +269,6 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
-    # Drives the fully-async loop -> enables the DRIVER-side collective-free
-    # seq_mean_token_sum_norm_global denominator precompute in train_critic_and_policy
-    # (the 80B gs1 NCCL-desync fix). See RayPPOTrainer.is_fully_async.
-    is_fully_async: bool = True
-
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)

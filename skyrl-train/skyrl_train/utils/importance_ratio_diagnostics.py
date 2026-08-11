@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+from loguru import logger
 
 from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 
@@ -18,6 +19,7 @@ LOG_RATIO_BASE_METRIC_KEYS = (
     "n_tokens_dp_gt_10pct",
     "n_tokens_dp_gt_50pct",
     "log_ratio_abs_p99",
+    "log_ratio_diagnostics_failed",
 )
 
 
@@ -38,6 +40,39 @@ class LogRatioAccumulator:
     topk_abs: torch.Tensor
     bucket_sums: torch.Tensor
     bucket_counts: torch.Tensor
+
+
+class LogRatioMonitor:
+    """Accumulate a fixed-key log-ratio metric contract across microbatches."""
+
+    def __init__(self, device: torch.device):
+        self._accumulator = _empty_log_ratio_accumulator(device)
+        self._failed = False
+
+    def add(self, log_probs: torch.Tensor, old_log_probs: torch.Tensor, loss_mask: torch.Tensor) -> None:
+        if self._failed:
+            return
+        try:
+            partial = compute_log_ratio_partial(log_probs, old_log_probs, loss_mask)
+            merge_log_ratio_partial(self._accumulator, partial)
+        except Exception as error:
+            logger.warning(f"Log-ratio diagnostics skipped after accumulation failed: {error!r}")
+            self._failed = True
+
+    def metrics(self) -> dict[str, float]:
+        if self._failed:
+            return _failed_log_ratio_metrics()
+        try:
+            return finalize_log_ratio_metrics(self._accumulator)
+        except Exception as error:
+            logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
+            return _failed_log_ratio_metrics()
+
+
+def _failed_log_ratio_metrics() -> dict[str, float]:
+    metrics = _log_ratio_diag_zero_metrics()
+    metrics["log_ratio_diagnostics_failed"] = 1.0
+    return metrics
 
 
 def compute_tis_diagnostics(
@@ -208,6 +243,7 @@ def finalize_log_ratio_metrics(acc: LogRatioAccumulator, n_position_buckets: int
                 acc.n_gt_10pct.float(),
                 acc.n_gt_50pct.float(),
                 abs_p99.float(),
+                torch.zeros((), device=device, dtype=torch.float32),
             ]
         )
         .cpu()

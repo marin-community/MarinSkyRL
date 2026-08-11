@@ -264,10 +264,16 @@ def _ppo_loss_all_modes(action_log_probs, loss_mask):
                 "use_tis": False,
                 "tis_imp_ratio_cap": 2.0,
                 "max_seq_len": max_seq_len,
-                "global_loss_denom": float(B * max_seq_len),
             }
         )
-        loss, _ = ppo_policy_loss(action_log_probs, old_log_probs, advantages, cfg, loss_mask=loss_mask)
+        loss, _ = ppo_policy_loss(
+            action_log_probs,
+            old_log_probs,
+            advantages,
+            cfg,
+            loss_mask=loss_mask,
+            global_loss_denom=float(B * max_seq_len),
+        )
         results[mode] = loss.float().item()
     return results
 

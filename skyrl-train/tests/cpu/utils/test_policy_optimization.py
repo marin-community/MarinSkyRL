@@ -9,6 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs, reduce_loss
 from skyrl_train.utils.policy_math import compute_approx_kl
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -370,31 +371,105 @@ def test_global_loss_denom_driver_matches_allreduce_sum():
     assert compute_global_loss_denom(adv_zero, max_seq_len, 4) == 1.0 * max_seq_len
 
 
-def test_default_config_declares_global_loss_denom_null():
-    """`global_loss_denom` must be DECLARED (default null) in ppo_base_config.yaml.
+def _mask_sum_policy_loss(
+    log_probs,
+    old_log_probs,
+    advantages,
+    config,
+    loss_mask=None,
+    rollout_logprobs=None,
+    global_loss_denom=None,
+):
+    del old_log_probs, advantages, config, rollout_logprobs, global_loss_denom
+    return (log_probs * loss_mask).sum(), {}
 
-    Regression guard for the arm1 (seq_mean_token_sum_norm_global) crash at
-    global_step 1: FSDPPolicyWorkerBase.ppo_train assigns
-    cfg.trainer.algorithm.global_loss_denom at runtime, but the key was not declared
-    in the base config, so OmegaConf struct mode raised
-    ConfigAttributeError("Key 'global_loss_denom' is not in struct"). This asserts the
-    key now exists (default None) AND that the runtime assignment is legal under struct
-    mode (reproducing the worker.py:752 assignment site), while leaving the default-path
-    read (getattr(config, "global_loss_denom", None)) at None.
-    """
-    pytest.importorskip("hydra")
-    from skyrl_train.config.utils import get_default_config
 
-    cfg = get_default_config()
-    algo = cfg.trainer.algorithm
-    # Declared and defaulted to null -> default (non-seqnorm) path read is None.
-    assert "global_loss_denom" in algo, "global_loss_denom must be declared in ppo_base_config.yaml"
-    assert algo.global_loss_denom is None
-    assert getattr(algo, "global_loss_denom", "SENTINEL") is None
+@pytest.mark.parametrize("loss_reduction", ["token_mean", "seq_mean_token_sum_norm_global"])
+def test_policy_objective_scheduler_and_caller_scaling_have_gradient_parity(loss_reduction):
+    config = OmegaConf.create(
+        {
+            "loss_reduction": loss_reduction,
+            "think_token_weight": 1.0,
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+            "use_kl_loss": False,
+            "kl_loss_coef": 0.0,
+            "kl_estimator_type": "k1",
+            "use_tis": False,
+            "tis_imp_ratio_cap": 2.0,
+        }
+    )
+    accumulation_steps = 3
+    common = {
+        "old_action_log_probs": torch.zeros(1, 2),
+        "base_action_log_probs": None,
+        "advantages": torch.ones(1, 2),
+        "loss_mask": torch.ones(1, 2),
+        "rollout_logprobs": None,
+        "response_span_tags": None,
+        "token_entropy": torch.zeros(1, 2),
+        "config": config,
+        "policy_loss_fn": _mask_sum_policy_loss,
+        "accumulation_steps": accumulation_steps,
+        "global_loss_denom": 12.0,
+    }
 
-    # Reproduce the worker.py:752 runtime assignment under struct mode -> must NOT raise.
-    algo.global_loss_denom = max(7.0, 1.0) * 4096  # global_num_seqs * max_seq_len
-    assert algo.global_loss_denom == 7.0 * 4096
+    caller_log_probs = torch.tensor([[1.0, 2.0]], requires_grad=True)
+    caller = compute_policy_objective(
+        action_log_probs=caller_log_probs,
+        scaling=LossScaling.CALLER,
+        **common,
+    )
+    caller.optimization_loss.backward()
+
+    scheduler_log_probs = torch.tensor([[1.0, 2.0]], requires_grad=True)
+    scheduler = compute_policy_objective(
+        action_log_probs=scheduler_log_probs,
+        scaling=LossScaling.MEGATRON_PIPELINE,
+        **common,
+    )
+    (scheduler.optimization_loss / accumulation_steps).backward()
+
+    torch.testing.assert_close(scheduler_log_probs.grad, caller_log_probs.grad, rtol=0, atol=0)
+    assert caller.unscaled_loss.item() == pytest.approx(3.0)
+    assert scheduler.unscaled_loss.item() == pytest.approx(3.0)
+    expected_caller_loss = 3.0 if loss_reduction == "seq_mean_token_sum_norm_global" else 1.0
+    expected_scheduler_loss = 9.0 if loss_reduction == "seq_mean_token_sum_norm_global" else 3.0
+    assert caller.optimization_loss.item() == pytest.approx(expected_caller_loss)
+    assert scheduler.optimization_loss.item() == pytest.approx(expected_scheduler_loss)
+    assert "global_loss_denom" not in config
+
+
+def test_policy_objective_applies_think_weight_before_policy_loss():
+    config = OmegaConf.create(
+        {
+            "loss_reduction": "token_mean",
+            "think_token_weight": 0.25,
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+            "use_kl_loss": False,
+            "kl_loss_coef": 0.0,
+            "kl_estimator_type": "k1",
+            "use_tis": False,
+            "tis_imp_ratio_cap": 2.0,
+        }
+    )
+    result = compute_policy_objective(
+        action_log_probs=torch.ones(1, 4),
+        old_action_log_probs=torch.zeros(1, 4),
+        base_action_log_probs=None,
+        advantages=torch.ones(1, 4),
+        loss_mask=torch.ones(1, 4),
+        rollout_logprobs=None,
+        response_span_tags=torch.tensor([[1, 0, 1, 0]]),
+        token_entropy=torch.zeros(1, 4),
+        config=config,
+        policy_loss_fn=_mask_sum_policy_loss,
+        accumulation_steps=1,
+        scaling=LossScaling.CALLER,
+    )
+
+    assert result.policy_loss.item() == pytest.approx(2.5)
 
 
 @pytest.mark.parametrize(

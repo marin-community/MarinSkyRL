@@ -16,9 +16,10 @@ from unittest.mock import MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
+import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.models.grug_query_bias import (
@@ -29,7 +30,6 @@ from skyrl_train.models.grug_query_bias import (
 )
 import numpy as np
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
-from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
@@ -50,6 +50,46 @@ class DummyDataset:
 
     def collate_fn(self, batch):
         return batch
+
+
+class _CapturingPolicyGroup:
+    def __init__(self):
+        self.actor_infos = [SimpleNamespace(rank=SimpleNamespace(dp_size=2)) for _ in range(4)]
+        self.training_batch = None
+
+    def async_run_ray_method(self, dispatch_type, method_name, *args):
+        del dispatch_type
+        if method_name == "ppo_train":
+            self.training_batch = args[0]
+            return [object()]
+        if method_name == "empty_cache":
+            return []
+        raise AssertionError(f"Unexpected policy method: {method_name}")
+
+
+def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {"trainer": {"algorithm": {"loss_reduction": "seq_mean_token_sum_norm_global", "max_seq_len": 8}}}
+    )
+    trainer.global_step = 3
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.colocate_all = False
+    trainer.critic_model = None
+    trainer.policy_model = _CapturingPolicyGroup()
+
+    status = TrainingOutputBatch()
+    status.metadata = {"train_status": {}}
+    monkeypatch.setattr(trainer_module, "collect_actor_results", lambda *args, **kwargs: [status])
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    batch = TrainingInputBatch({"advantages": torch.tensor([[1.0, 0.0], [0.0, 2.0]])})
+    batch.metadata = {}
+
+    trainer.train_critic_and_policy(batch)
+
+    assert trainer.policy_model.training_batch.metadata["global_loss_denom"] == 32.0
 
 
 @pytest.fixture
@@ -787,7 +827,7 @@ def test_ppo_train_batch_calculations():
         # Mock dependencies
         worker.strategy = MagicMock()
         worker.strategy.is_rank_0.return_value = False  # Disable progress bars
-        worker.strategy.all_reduce.return_value = {"loss": 0.5, "lr": 1e-4}
+        worker.strategy.all_reduce.side_effect = lambda status, *args, **kwargs: status
 
         # Always set model for all worker types (policy/critic need this for ppo_train)
         worker.model = MagicMock()
@@ -802,14 +842,17 @@ def test_ppo_train_batch_calculations():
 
     def mock_policy_training_step(experience, global_step, local_step, accumulation_steps):
         policy_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
-        return {"policy_loss": 0.5, "policy_lr": 1e-4, "entropy": 2.0}
+        return {
+            "policy_loss": 0.5,
+            "policy_lr": 1e-4,
+            "policy_entropy": 2.0,
+            "response_length": response_length,
+        }
 
     policy_worker.training_step = mock_policy_training_step
 
     # Calculate expected values based on new accumulation logic
-    dataloader = BatchIterator(
-        dummy_databatch, sample_batch_size=cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-    )
+    dataloader = TrainingBatchIterator(dummy_databatch, cfg.trainer.micro_train_batch_size_per_gpu)
     total_micro_batches = len(dataloader)  # Should be 6
     micro_batches_per_mini_batch = (
         policy_worker.policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu

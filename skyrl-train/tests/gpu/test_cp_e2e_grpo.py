@@ -171,10 +171,16 @@ def _grpo_step(model, input_ids, attention_mask, num_actions, lr=1e-4, cp_group=
             "use_tis": False,
             "tis_imp_ratio_cap": 2.0,
             "max_seq_len": 64,
-            "global_loss_denom": float(B * 64),
         }
     )
-    loss, _ = ppo_policy_loss(action_log_probs, old_log_probs, advantages, cfg, loss_mask=loss_mask)
+    loss, _ = ppo_policy_loss(
+        action_log_probs,
+        old_log_probs,
+        advantages,
+        cfg,
+        loss_mask=loss_mask,
+        global_loss_denom=float(B * 64),
+    )
     opt.zero_grad()
     loss.backward()
     if cp_group is not None:

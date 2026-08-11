@@ -21,7 +21,7 @@ from collections import defaultdict
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
@@ -40,7 +40,10 @@ from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
-from skyrl_train.utils.loss_reduction import compute_global_loss_denom
+from skyrl_train.utils.loss_reduction import (
+    GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
+    compute_global_loss_denom,
+)
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -97,13 +100,6 @@ _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
 class RayPPOTrainer:
-    # Whether this trainer drives the fully-async training loop (overridden True on
-    # FullyAsyncRayPPOTrainer). Gates the DRIVER-side seq_mean_token_sum_norm_global
-    # denominator precompute in train_critic_and_policy: only fully_async needs the
-    # collective moved off the async ppo_train hot path (the 80B gs1 wedge). Sync RL
-    # keeps the legacy in-worker all_reduce (byte-identical).
-    is_fully_async: bool = False
-
     def __init__(
         self,
         cfg: DictConfig,
@@ -1701,21 +1697,13 @@ class RayPPOTrainer:
         # as "no signal" and skip damping.
         data.metadata["stale_min"] = self.all_metrics.get("async/staleness_min")
         # ── Global length-unbiased normalizer (seq_mean_token_sum_norm_global) ──
-        # Precompute the SINGLE global denominator Z on the DRIVER, collective-free, and
-        # stash it in the batch metadata for every policy rank to read (chunk() replicates
-        # metadata to every dp-chunk). This replaces the historical in-ppo_train cross-DP
-        # all_reduce (worker.py), which DEADLOCKS under fully_async + R3-decentral: the 64
-        # policy ranks do NOT co-arrive at ppo_train's top-of-body (staggered R3-chunk
-        # relocation), so the scalar all_reduce over the full policy PG never completes
-        # (the 80B gs1 wedge, NCCL collective #288606 NumelIn=1, py-spy-confirmed at
-        # worker.py's seq_mean_token_sum_norm_global normalizer). Z here is BIT-IDENTICAL
-        # to the old summed-over-ranks value (see loss_reduction.compute_global_loss_denom).
-        # Gated to fully_async so sync RL keeps the exact legacy in-worker all_reduce
-        # (byte-identical); the worker falls back to that path when this key is absent.
-        if self.is_fully_async and self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
+        # Every backend consumes the denominator from batch metadata. Keeping this
+        # contract at the driver boundary prevents a worker override from silently
+        # bypassing policy-loss semantics and avoids an in-worker collective.
+        if self.cfg.trainer.algorithm.loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
             actor_infos = self.policy_model.actor_infos
             ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
-            data.metadata["global_loss_denom"] = compute_global_loss_denom(
+            data.metadata[GLOBAL_LOSS_DENOM_METADATA_KEY] = compute_global_loss_denom(
                 data["advantages"],
                 self.cfg.trainer.algorithm.max_seq_len,
                 ranks_per_dp_group,

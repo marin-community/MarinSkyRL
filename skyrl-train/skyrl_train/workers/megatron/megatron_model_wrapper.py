@@ -1,5 +1,7 @@
-from typing import Any, Optional, Callable, List
+from dataclasses import dataclass
 from functools import partial
+from typing import Any, Callable, List, Optional
+
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
@@ -14,9 +16,8 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean
-from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
-from skyrl_train.utils.policy_losses import complete_clip_metrics
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -33,6 +34,23 @@ from skyrl_train.distributed.megatron.megatron_utils import (
 # the policy config key, preserving prior behavior) from an explicit None (=> chunking
 # disabled). A plain None default could not tell these apart.
 _UNSET = object()
+
+
+@dataclass(frozen=True)
+class MegatronPolicyMicroBatch:
+    """Typed policy payload consumed by the Megatron pipeline scheduler."""
+
+    sequences: torch.Tensor
+    attention_mask: torch.Tensor
+    position_ids: torch.Tensor
+    num_actions: int
+    old_action_log_probs: torch.Tensor
+    base_action_log_probs: Optional[torch.Tensor]
+    advantages: torch.Tensor
+    loss_mask: torch.Tensor
+    rollout_action_logprobs: Optional[torch.Tensor]
+    response_span_tags: Optional[torch.Tensor]
+    global_loss_denom: Optional[float]
 
 
 class MegatronModelWrapper:
@@ -127,6 +145,35 @@ class MegatronModelWrapper:
             return unpack_packed_token_values(token_entropies, packed_seq_params, attention_mask)
         return scatter_token_values(token_entropies, attention_mask, drop_last=False)
 
+    def _forward_micro_batch(self, model, sequences, attention_mask, position_ids):
+        """Run the shared packed or left-unpadded Megatron model boundary."""
+        attention_mask = attention_mask.to(bool)
+        if self.use_sample_packing:
+            model_sequences, packed_seq_params = preprocess_packed_seqs(
+                sequences,
+                attention_mask,
+                pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+            )
+            model_attention_mask = None
+            model_position_ids = None
+        else:
+            model_sequences, model_attention_mask, model_position_ids = remove_left_padding(
+                sequences,
+                attention_mask,
+                position_ids,
+                pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+            )
+            packed_seq_params = None
+
+        outputs = model(
+            model_sequences,
+            model_position_ids,
+            model_attention_mask,
+            packed_seq_params=packed_seq_params,
+            fp32_output=False,
+        )
+        return outputs, packed_seq_params
+
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
@@ -164,33 +211,9 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
             sequences = batch["sequences"]
-            attention_mask = batch["attention_mask"].to(bool)
+            attention_mask = batch["attention_mask"]
             position_ids = batch["position_ids"]
-
-            if self.use_sample_packing:
-                new_sequences, packed_seq_params = preprocess_packed_seqs(
-                    sequences,
-                    attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                )
-                new_attention_mask = None
-                new_position_ids = None
-            else:
-                new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
-                    sequences,
-                    attention_mask,
-                    position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                )
-                packed_seq_params = None
-
-            outputs = model(
-                new_sequences,
-                new_position_ids,
-                new_attention_mask,
-                packed_seq_params=packed_seq_params,
-                fp32_output=False,
-            )
+            outputs, packed_seq_params = self._forward_micro_batch(model, sequences, attention_mask, position_ids)
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
 
@@ -221,7 +244,7 @@ class MegatronModelWrapper:
 
     def forward_backward_mini_batch(
         self,
-        micro_batches: List[dict],
+        micro_batches: List[MegatronPolicyMicroBatch],
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
@@ -230,10 +253,9 @@ class MegatronModelWrapper:
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
 
         Args:
-            micro_batches: A list of micro-batch dicts. Each dict must contain keys:
-                "sequences", "attention_mask", "position_ids", "num_actions",
-                "old_action_log_probs", "base_action_log_probs", "advantages",
-                "loss_mask", "rollout_action_logprobs".
+            micro_batches: Typed policy micro-batches containing model inputs,
+                policy targets, response span tags, and the optional global loss
+                denominator.
             seq_len: Sequence length (tokens) per sample (assumed same across micros after padding).
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
@@ -242,115 +264,70 @@ class MegatronModelWrapper:
             List[dict]: one metrics dict per micro-batch in order.
         """
         forward_backward_func = get_forward_backward_func()
+        log_ratio_monitor = None
+        completed_microbatches = 0
 
         def loss_func(logits, data, packed_seq_params):
-            sequences = data["sequences"]
-            num_actions = data["num_actions"]
-            old_action_log_probs = data["old_action_log_probs"]
-            base_action_log_probs = data["base_action_log_probs"]
-            advantages = data["advantages"]
-            loss_mask = data["loss_mask"]
-            rollout_action_logprobs = data["rollout_action_logprobs"]
+            nonlocal completed_microbatches, log_ratio_monitor
+            sequences = data.sequences
+            num_actions = data.num_actions
+            old_action_log_probs = data.old_action_log_probs
+            base_action_log_probs = data.base_action_log_probs
+            advantages = data.advantages
+            loss_mask = data.loss_mask
+            rollout_action_logprobs = data.rollout_action_logprobs
+            response_span_tags = data.response_span_tags
 
             # temperature normalization
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = self._token_logprobs(logits, sequences, data["attention_mask"].to(bool), packed_seq_params)
+            token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
-            # policy loss should be calculated based on the selected token logprobs
-            policy_loss, policy_loss_metrics = self.policy_loss_fn(
-                action_log_probs,
-                old_action_log_probs,
-                advantages,
-                config=self.cfg.trainer.algorithm,
+            token_entropies = self._token_entropies(logits, data.attention_mask.to(bool), packed_seq_params)
+            objective = compute_policy_objective(
+                action_log_probs=action_log_probs,
+                old_action_log_probs=old_action_log_probs,
+                base_action_log_probs=base_action_log_probs,
+                advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                response_span_tags=response_span_tags,
+                token_entropy=token_entropies[:, -num_actions - 1 : -1],
+                config=self.cfg.trainer.algorithm,
+                policy_loss_fn=self.policy_loss_fn,
+                accumulation_steps=len(micro_batches),
+                scaling=LossScaling.MEGATRON_PIPELINE,
+                global_loss_denom=data.global_loss_denom,
             )
-
-            with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
-                token_entropies = self._token_entropies(logits, data["attention_mask"].to(bool), packed_seq_params)
-                entropy_BS = token_entropies[:, -num_actions - 1 : -1]
-                entropy = masked_mean(entropy_BS, loss_mask)
-
-            if self.cfg.trainer.algorithm.use_entropy_loss:
-                entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
-            else:
-                entropy_loss_term = torch.tensor(0.0)
-
-            if self.cfg.trainer.algorithm.use_kl_loss:
-                kl_loss = compute_approx_kl(
-                    action_log_probs,
-                    base_action_log_probs,
-                    loss_mask=loss_mask,
-                    kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-                )
-                kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
-            else:
-                kl_loss = torch.tensor(0.0)
-            kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
-
-            loss = policy_loss + kl_loss_term - entropy_loss_term
+            if log_ratio_monitor is None:
+                log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
+            log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
+            completed_microbatches += 1
 
             metrics = {
-                "final_loss": loss.detach().item(),
-                "policy_loss": policy_loss.detach().item(),
-                "policy_entropy": entropy.detach().item(),
-                "policy_kl": kl_loss.detach().item(),
+                "final_loss": objective.unscaled_loss.detach().item(),
+                "policy_loss": objective.policy_loss.detach().item(),
+                "policy_entropy": objective.entropy.detach().item(),
+                "policy_kl": objective.kl_loss.detach().item(),
             }
-            metrics.update(complete_clip_metrics(policy_loss_metrics))
-            # TIS importance-ratio diagnostics — same helper as the FSDP path
-            # (PolicyWorkerBase.training_step), so both backends emit identical
-            # keys with identical semantics. The helper's fallback branch keeps
-            # the keyset identical when rollout logprobs are absent.
-            if self.cfg.trainer.algorithm.use_tis:
-                metrics.update(
-                    compute_tis_diagnostics(
-                        old_action_log_probs,
-                        rollout_action_logprobs,
-                        loss_mask,
-                        cap=self.cfg.trainer.algorithm.tis_imp_ratio_cap,
-                    )
-                )
-            return loss, metrics
+            metrics.update(objective.metrics)
+            if completed_microbatches == len(micro_batches):
+                metrics.update(log_ratio_monitor.metrics())
+            return objective.optimization_loss, metrics
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            sequences = batch["sequences"]
-            attention_mask = batch["attention_mask"].to(bool)
-            position_ids = batch["position_ids"]
-
-            if self.use_sample_packing:
-                new_sequences, packed_seq_params = preprocess_packed_seqs(
-                    sequences,
-                    attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                )
-                new_attention_mask = None
-                new_position_ids = None
-            else:
-                new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
-                    sequences,
-                    attention_mask,
-                    position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                )
-                packed_seq_params = None
-
-            outputs = model(
-                new_sequences,
-                new_position_ids,
-                new_attention_mask,
-                packed_seq_params=packed_seq_params,
-                fp32_output=False,
-            )
+            sequences = batch.sequences
+            attention_mask = batch.attention_mask
+            position_ids = batch.position_ids
+            outputs, packed_seq_params = self._forward_micro_batch(model, sequences, attention_mask, position_ids)
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 
-        # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
         metrics_list = forward_backward_func(

@@ -156,7 +156,6 @@ trainer:
     value_head_prefix: "value_head"
     policy_loss_type: "regular"
     loss_reduction: "token_mean"
-    global_loss_denom: null
     grpo_norm_by_std: true
     rloo_n_min_group_size: 4
     rloo_n_filter_zero_reward_groups: true

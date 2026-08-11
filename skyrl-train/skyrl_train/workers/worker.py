@@ -35,20 +35,21 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.utils.policy_math import ppo_critic_loss, compute_approx_kl
+from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
-    _empty_log_ratio_accumulator,
-    _log_ratio_diag_zero_metrics,
-    compute_log_ratio_partial,
-    compute_tis_diagnostics,
-    finalize_log_ratio_metrics,
-    merge_log_ratio_partial,
+    LogRatioMonitor,
 )
-from skyrl_train.utils.loss_reduction import build_think_weighted_loss_mask
-from skyrl_train.utils.policy_losses import complete_clip_metrics
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.dataset.replay_buffer import Experience
-from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import (
+    GLOBAL_LOSS_DENOM_METADATA_KEY,
+    TrainingBatchIterator,
+    TrainingInputBatch,
+    TrainingOutputBatch,
+    gradient_accumulation_steps,
+    per_data_parallel_batch_size,
+)
+from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasCapturePlan,
@@ -927,9 +928,10 @@ class PolicyWorkerBase(Worker):
         if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
             raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
 
-        dp_size = self.mesh_rank.dp_size
-        self.policy_mini_batch_size_per_gpu = (
-            self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
+        self.policy_mini_batch_size_per_gpu = per_data_parallel_batch_size(
+            self.cfg.trainer.policy_mini_batch_size,
+            self.cfg.generator.n_samples_per_prompt,
+            self.mesh_rank.dp_size,
         )
 
     def _grug_causal_lm(self) -> GrugMoeForCausalLM | None:
@@ -1029,53 +1031,15 @@ class PolicyWorkerBase(Worker):
                 delattr(self, "_stale_clip_state_to_restore")
         # Stash for training_step to consume (avoids changing its signature).
         self._current_stale_min = stale_min
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
-
-        # ── Global length-unbiased normalizer (seq_mean_token_sum_norm_global only) ──
-        # Z = global_num_seqs * max_seq_len. The masked per-micro-batch loss-SUM is
-        # divided by this single global denom (instead of a per-microbatch mean-of-means),
-        # so the realized objective is one global normalization over the whole DP batch
-        # (the crux fix for the async/grad-accum size bias).
-        #
-        # PREFERRED PATH (async-safe): the DRIVER precomputes Z collective-free and passes
-        # it in train_data.metadata["global_loss_denom"] (trainer.train_critic_and_policy,
-        # fully_async). No cross-DP all_reduce fires from inside ppo_train. This is the fix
-        # for the 80B gs1 wedge: under fully_async + R3-decentral the 64 policy ranks do
-        # NOT co-arrive at this top-of-body collective (staggered R3-chunk relocation), so
-        # the historical inline all_reduce over the full policy PG deadlocked (NCCL
-        # collective #288606, ALLREDUCE NumelIn=1). Z is BIT-IDENTICAL to the summed value.
-        #
-        # FALLBACK PATH (metadata key absent -- sync RL / any caller without the driver
-        # precompute): the original per-rank count + single-scalar all_reduce(sum),
-        # BYTE-IDENTICAL to pre-fix. Safe there because sync dispatch co-arrives at
-        # ppo_train. clamp(min=1) so an all-zero-advantage batch still yields a valid
-        # denom. No-op for every other loss_reduction (gated).
-        if self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
-            precomputed_denom = train_data.metadata.get("global_loss_denom")
-            if precomputed_denom is not None:
-                self.cfg.trainer.algorithm.global_loss_denom = precomputed_denom
-            else:
-                advantages_all = train_data["advantages"]
-                # Count sequences with a non-zero advantage locally (zero-advantage seqs
-                # -- excluded / k<2 / zero-variance RLOO groups -- contribute no gradient,
-                # so they must not inflate Z).
-                local_num_seqs = float((advantages_all.abs().sum(dim=-1) > 0).sum().item())
-                global_num_seqs = self.strategy.all_reduce(
-                    torch.tensor(local_num_seqs, device=torch.cuda.current_device()), op="sum"
-                )
-                global_num_seqs = float(global_num_seqs.item())
-                self.cfg.trainer.algorithm.global_loss_denom = (
-                    max(global_num_seqs, 1.0) * self.cfg.trainer.algorithm.max_seq_len
-                )
+        dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
         # Clear fragmented GPU memory before training to avoid OOM at step boundaries
         # (matches CriticWorkerBase.ppo_train behavior)
         torch.cuda.empty_cache()
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+        micro_batches_per_mini_batch = gradient_accumulation_steps(
+            self.policy_mini_batch_size_per_gpu,
+            self.cfg.trainer.micro_train_batch_size_per_gpu,
         )
         # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
         accumulation_steps = micro_batches_per_mini_batch
@@ -1150,39 +1114,13 @@ class PolicyWorkerBase(Worker):
                 #     status["kl"] *= status["response_length"]
                 #     status["kl"] /= status["response_length"]
 
-                short_status = {}
-
-                if "policy_loss" in status:
-                    short_status = {
-                        "pg": status["policy_loss"],
-                        "glen": status["response_length"],
-                        "policy_lr": status["policy_lr"],
-                        "ent": status["policy_entropy"],
-                    }
-                    if "raw_grad_norm" in status:
-                        short_status["grad_norm"] = status["raw_grad_norm"]
-                    if "reward" in status:
-                        short_status["rm"] = status["reward"]
-
-                if "critic_loss" in status:
-                    short_status["cri"] = status["critic_loss"]
-                    short_status["vals"] = status["values"]
-                    short_status["cri_lr"] = status["critic_lr"]
-
-                if "ptx_loss" in status:
-                    short_status["ptx"] = status["ptx_loss"]
-
                 status_list.append(status)
                 for k, v in status.items():
                     all_metrics[k].append(v)
-                pbar.set_postfix(short_status)
+                pbar.set_postfix(policy_progress_metrics(status))
 
         torch.distributed.barrier()
-        # not needed beyond status logging
-        all_metrics.pop("response_length", None)
-
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps / accumulation_steps
+        status_mean = policy_training_metrics(all_metrics, policy_update_steps / accumulation_steps)
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
@@ -1226,17 +1164,6 @@ class PolicyWorkerBase(Worker):
             )
         )
 
-        # Stage D (F7): down-weight <think> tokens in the POLICY loss only. Build a
-        # per-token weighted loss mask (THINK positions scaled by think_token_weight,
-        # everything else == loss_mask). At think_token_weight==1.0 (default) or when
-        # span tags are absent, build_think_weighted_loss_mask returns the ORIGINAL
-        # loss_mask object -> the policy-loss path is byte-identical to today. The
-        # weighting is intentionally NOT applied to entropy / KL / TIS diagnostics,
-        # which keep the unweighted 0/1 loss_mask (they measure the policy, not the
-        # credit weighting).
-        think_token_weight = float(getattr(self.cfg.trainer.algorithm, "think_token_weight", 1.0))
-        policy_loss_mask = build_think_weighted_loss_mask(loss_mask, response_span_tags, think_token_weight)
-
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -1254,65 +1181,27 @@ class PolicyWorkerBase(Worker):
             if grug_capture_started:
                 assert grug_query_bias_window is not None
                 grug_query_bias_window.observe_microbatch()
-            # loss function
-            # TODO: recompute advantages
-            policy_loss, policy_loss_metrics = self.policy_loss_fn(
-                action_log_probs,
-                old_action_log_probs,
-                advantages,
-                config=self.cfg.trainer.algorithm,
-                loss_mask=policy_loss_mask,
+            token_entropy = output["entropy"][:, -num_actions - 1 : -1]
+            objective = compute_policy_objective(
+                action_log_probs=action_log_probs,
+                old_action_log_probs=old_action_log_probs,
+                base_action_log_probs=base_action_log_probs,
+                advantages=advantages,
+                loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                response_span_tags=response_span_tags,
+                token_entropy=token_entropy,
+                config=self.cfg.trainer.algorithm,
+                policy_loss_fn=self.policy_loss_fn,
+                accumulation_steps=accumulation_steps,
+                scaling=LossScaling.CALLER,
+                global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
             )
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
-
-        # TIS importance-ratio diagnostics. Emitted on EVERY rank with an
-        # identical key set whenever use_tis is on, so the per-key
-        # all_reduce(status) stays keyset-compatible.
-        tis_diag = {}
-        if self.cfg.trainer.algorithm.use_tis:
-            tis_diag = compute_tis_diagnostics(
-                old_action_log_probs,
-                rollout_action_logprobs,
-                loss_mask,
-                cap=self.cfg.trainer.algorithm.tis_imp_ratio_cap,
-            )
-
-        # entropy loss
-        with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
-            # batch_size, seqlen
-            entropy_BS = output["entropy"]
-            entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-            entropy = masked_mean(entropy_BS, loss_mask)
-
-        if self.cfg.trainer.algorithm.use_entropy_loss:
-            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
-        else:
-            entropy_loss_term = torch.tensor(0.0)
-
-        # kl loss
-        if self.cfg.trainer.algorithm.use_kl_loss:
-            kl_loss = compute_approx_kl(
-                action_log_probs,
-                base_action_log_probs,
-                loss_mask=loss_mask,
-                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-            )
-            kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
-        else:
-            kl_loss = torch.tensor(0.0)
-        kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
-
-        if self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm_global":
-            # The policy term is already normalized by the SINGLE global denominator
-            # Z = global_num_seqs * max_seq_len (set on the driver before the epoch loop),
-            # so dividing it again by accumulation_steps would double-normalize it. The
-            # KL / entropy auxiliary terms are per-micro-batch means and DO still need the
-            # /accumulation_steps to average correctly across the gradient-accumulation window.
-            loss = policy_loss + (kl_loss_term - entropy_loss_term) / accumulation_steps
-        else:
-            loss = policy_loss + kl_loss_term - entropy_loss_term
-            loss = loss / accumulation_steps
+        loss = objective.optimization_loss
+        policy_loss = objective.policy_loss
+        entropy = objective.entropy
+        kl_loss = objective.kl_loss
         # FIX-6 (#232): wrap backward in the CP ring-SDPA dispatcher span so a CP
         # training step's gradient-checkpoint recompute dispatches to ring attention
         # (matching the saved full-length q/k/v) instead of plain SDPA on the
@@ -1344,19 +1233,9 @@ class PolicyWorkerBase(Worker):
         # micro-batches makes that signal more representative). The final scalar
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.
-        if local_step % accumulation_steps == 0 or getattr(self, "_ratio_diag_acc", None) is None:
-            self._ratio_diag_acc = _empty_log_ratio_accumulator(device=action_log_probs.device)
-        try:
-            partial = compute_log_ratio_partial(
-                log_probs=action_log_probs,
-                old_log_probs=old_action_log_probs,
-                loss_mask=loss_mask,
-            )
-            merge_log_ratio_partial(self._ratio_diag_acc, partial)
-        except Exception as _e:
-            logger.warning(
-                f"compute_log_ratio_partial failed at local_step={local_step}: {_e!r}; skipping this micro-batch"
-            )
+        if local_step % accumulation_steps == 0 or getattr(self, "_log_ratio_monitor", None) is None:
+            self._log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
+        self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 
         grad_norm = None
         ratio_diag = {}
@@ -1417,24 +1296,20 @@ class PolicyWorkerBase(Worker):
             # Finalize the accumulated diagnostics. Every rank must emit identical
             # keys (the full set from _log_ratio_diag_zero_metrics) — the per-key
             # all_reduce(status) deadlocks otherwise (killed v2/v3 of this diag).
-            try:
-                ratio_diag = finalize_log_ratio_metrics(self._ratio_diag_acc)
-            except Exception as _e:
-                logger.warning(f"finalize_log_ratio_metrics failed: {_e!r}; emitting zeros")
-                ratio_diag = _log_ratio_diag_zero_metrics()
-            self._ratio_diag_acc = None  # reset for next global_step
+            ratio_diag = self._log_ratio_monitor.metrics()
+            self._log_ratio_monitor = None
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
 
         # status
         status = {
-            "final_loss": loss.item(),
+            "final_loss": objective.unscaled_loss.item(),
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "policy_entropy": entropy.item(),
         }
-        status.update(complete_clip_metrics(policy_loss_metrics))
+        status.update(objective.metrics)
         # Per-token log-ratio diagnostics — visibility into which tokens
         # carry the gradient signal (heaviest-hit token, fraction of tokens
         # with large probability changes, per-position aggregations).
@@ -1442,9 +1317,6 @@ class PolicyWorkerBase(Worker):
         status.update(ratio_diag)
         # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
         status.update(spike_diag)
-        # TIS importance-ratio diagnostics. Empty dict when use_tis is off; when on
-        # it carries an identical key set on every rank (keyset-safe all_reduce).
-        status.update(tis_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
@@ -1571,9 +1443,10 @@ class CriticWorkerBase(Worker):
         if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
             raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
 
-        dp_size = self.mesh_rank.dp_size
-        self.critic_mini_batch_size_per_gpu = (
-            self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
+        self.critic_mini_batch_size_per_gpu = per_data_parallel_batch_size(
+            self.cfg.trainer.critic_mini_batch_size,
+            self.cfg.generator.n_samples_per_prompt,
+            self.mesh_rank.dp_size,
         )
 
     def _forward_micro_batch(
@@ -1611,15 +1484,14 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
+        dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
         torch.cuda.empty_cache()
         self.model.train()
 
-        micro_batches_per_mini_batch = (
-            self.critic_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+        micro_batches_per_mini_batch = gradient_accumulation_steps(
+            self.critic_mini_batch_size_per_gpu,
+            self.cfg.trainer.micro_train_batch_size_per_gpu,
         )
         # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
         accumulation_steps = micro_batches_per_mini_batch
@@ -1648,7 +1520,7 @@ class CriticWorkerBase(Worker):
 
         torch.distributed.barrier()
 
-        status_mean = reduce_metrics(all_metrics)
+        status_mean = mean_metrics(all_metrics)
         status_mean["critic_update_steps"] = critic_update_steps / accumulation_steps
 
         output = TrainingOutputBatch()

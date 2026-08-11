@@ -6,7 +6,7 @@ licensed under Apache 2.0.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, TypeAlias
 
 import torch
 
@@ -14,6 +14,22 @@ from skyrl_train.utils.policy_math import masked_mean, right_pad_to_match
 
 
 SPAN_THINK_TAG: int = 1  # mirrors span_tagger.SPAN_THINK (kept local to avoid a torch-free import cycle)
+TOKEN_MEAN_LOSS_REDUCTION = "token_mean"
+SEQUENCE_MEAN_LOSS_REDUCTION = "sequence_mean"
+SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION = "seq_mean_token_sum_norm"
+GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION = "seq_mean_token_sum_norm_global"
+LossReduction: TypeAlias = Literal[
+    "token_mean",
+    "sequence_mean",
+    "seq_mean_token_sum_norm",
+    "seq_mean_token_sum_norm_global",
+]
+SUPPORTED_LOSS_REDUCTIONS: tuple[LossReduction, ...] = (
+    TOKEN_MEAN_LOSS_REDUCTION,
+    SEQUENCE_MEAN_LOSS_REDUCTION,
+    SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
+    GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
+)
 
 
 def build_think_weighted_loss_mask(
@@ -55,17 +71,17 @@ def build_think_weighted_loss_mask(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"],
+    loss_reduction: LossReduction,
     max_seq_len: Optional[int] = None,
     global_denom: Optional[float] = None,
 ) -> torch.Tensor:
-    if loss_reduction == "token_mean":
+    if loss_reduction == TOKEN_MEAN_LOSS_REDUCTION:
         # sum over *all* valid tokens, divide by total valid-token count
         loss = masked_mean(loss, loss_mask)
-    elif loss_reduction == "sequence_mean":
+    elif loss_reduction == SEQUENCE_MEAN_LOSS_REDUCTION:
         # per-sequence token-mean (dim=-1), then batch-mean
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
-    elif loss_reduction == "seq_mean_token_sum_norm":
+    elif loss_reduction == SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
         # per-sequence token-sum, normalized by the max sequence length, then batch mean
         # this is the Dr. GRPO loss reduction to avoid length bias by normalizing by a constant
         assert max_seq_len is not None, "max_seq_len must be provided for seq_mean_token_sum_norm loss reduction"
@@ -76,7 +92,7 @@ def reduce_loss(
             # If no mask, assume all tokens are valid
             seq_losses = torch.sum(loss, dim=-1) / max_seq_len
         loss = torch.mean(seq_losses)
-    elif loss_reduction == "seq_mean_token_sum_norm_global":
+    elif loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
         # Sum each micro-batch numerator against the driver-computed global denominator.
         # This term is already normalized, so callers must not divide by accumulation steps.
         assert global_denom is not None, "global_denom must be provided for seq_mean_token_sum_norm_global"

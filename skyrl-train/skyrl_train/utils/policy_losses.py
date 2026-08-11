@@ -7,15 +7,24 @@ licensed under Apache 2.0.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
-from typing import Optional
+from enum import StrEnum
+from typing import Optional, Protocol
 
 import loguru
 import torch
 from omegaconf import DictConfig
 
-from skyrl_train.utils.loss_reduction import reduce_loss
+from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
+from skyrl_train.utils.loss_reduction import (
+    GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
+    SEQUENCE_MEAN_LOSS_REDUCTION,
+    SUPPORTED_LOSS_REDUCTIONS,
+    LossReduction,
+    build_think_weighted_loss_mask,
+    reduce_loss,
+)
 from skyrl_train.utils.algorithm_registry import PolicyLossType, register_policy_loss
-from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
+from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, compute_approx_kl, masked_mean, safe_exp_delta
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,48 @@ class PolicyClipMetrics:
 
 
 POLICY_CLIP_METRIC_KEYS = tuple(field.name for field in fields(PolicyClipMetrics))
+
+
+class LossScaling(StrEnum):
+    """Which layer divides an objective across accumulated microbatches."""
+
+    CALLER = "caller"
+    MEGATRON_PIPELINE = "megatron_pipeline"
+
+
+@dataclass(frozen=True)
+class PolicyObjective:
+    """Backend-neutral policy objective and its observable components."""
+
+    optimization_loss: torch.Tensor
+    unscaled_loss: torch.Tensor
+    policy_loss: torch.Tensor
+    entropy: torch.Tensor
+    kl_loss: torch.Tensor
+    metrics: dict[str, float]
+
+
+@dataclass(frozen=True)
+class PolicyAuxiliaryTerms:
+    entropy: torch.Tensor
+    kl_loss: torch.Tensor
+    loss: torch.Tensor
+
+
+class PolicyLossFunction(Protocol):
+    """Callable contract implemented by registered policy losses."""
+
+    def __call__(
+        self,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        *,
+        config: DictConfig,
+        loss_mask: Optional[torch.Tensor],
+        rollout_logprobs: Optional[torch.Tensor],
+        global_loss_denom: Optional[float],
+    ) -> tuple[torch.Tensor, dict[str, float]]: ...
 
 
 def _masked_fraction(condition: torch.Tensor, loss_mask: Optional[torch.Tensor]) -> float:
@@ -75,6 +126,156 @@ def complete_clip_metrics(metrics: dict[str, float]) -> dict[str, float]:
     return PolicyClipMetrics().as_dict() | metrics
 
 
+def _compute_policy_auxiliary_terms(
+    *,
+    action_log_probs: torch.Tensor,
+    base_action_log_probs: Optional[torch.Tensor],
+    token_entropy: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+    config: DictConfig,
+) -> PolicyAuxiliaryTerms:
+    entropy = masked_mean(token_entropy, loss_mask)
+    entropy_term = entropy * config.entropy_loss_coef if config.use_entropy_loss else entropy.new_zeros(())
+
+    if config.use_kl_loss:
+        if base_action_log_probs is None:
+            raise ValueError("base_action_log_probs are required when use_kl_loss is enabled")
+        kl_loss = compute_approx_kl(
+            action_log_probs,
+            base_action_log_probs,
+            loss_mask=loss_mask,
+            kl_estimator_type=config.kl_estimator_type,
+        )
+        kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
+    else:
+        kl_loss = action_log_probs.new_zeros(())
+    return PolicyAuxiliaryTerms(
+        entropy=entropy,
+        kl_loss=kl_loss,
+        loss=kl_loss * config.kl_loss_coef - entropy_term,
+    )
+
+
+def _scale_policy_objective(
+    policy_loss: torch.Tensor,
+    auxiliary_loss: torch.Tensor,
+    *,
+    accumulation_steps: int,
+    scaling: LossScaling,
+    loss_reduction: LossReduction,
+) -> torch.Tensor:
+    globally_normalized = loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION
+    if scaling is LossScaling.MEGATRON_PIPELINE:
+        # Megatron Core divides the closure result by the number of microbatches.
+        # A globally normalized policy term already spans that window, so multiply
+        # it here to cancel Megatron's division while auxiliaries remain averaged.
+        policy_scale = accumulation_steps if globally_normalized else 1
+        return policy_loss * policy_scale + auxiliary_loss
+    if scaling is LossScaling.CALLER:
+        if globally_normalized:
+            return policy_loss + auxiliary_loss / accumulation_steps
+        return (policy_loss + auxiliary_loss) / accumulation_steps
+    raise ValueError(f"Unknown loss scaling owner: {scaling!r}")
+
+
+def _policy_objective_metrics(
+    policy_loss_metrics: dict[str, float],
+    *,
+    old_action_log_probs: torch.Tensor,
+    rollout_logprobs: Optional[torch.Tensor],
+    loss_mask: Optional[torch.Tensor],
+    config: DictConfig,
+) -> dict[str, float]:
+    metrics = complete_clip_metrics(policy_loss_metrics)
+    if config.use_tis:
+        metrics.update(
+            compute_tis_diagnostics(
+                old_action_log_probs,
+                rollout_logprobs,
+                loss_mask,
+                cap=config.tis_imp_ratio_cap,
+            )
+        )
+    return metrics
+
+
+def compute_policy_objective(
+    *,
+    action_log_probs: torch.Tensor,
+    old_action_log_probs: torch.Tensor,
+    base_action_log_probs: Optional[torch.Tensor],
+    advantages: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+    rollout_logprobs: Optional[torch.Tensor],
+    response_span_tags: Optional[torch.Tensor],
+    token_entropy: torch.Tensor,
+    config: DictConfig,
+    policy_loss_fn: PolicyLossFunction,
+    accumulation_steps: int,
+    scaling: LossScaling,
+    global_loss_denom: Optional[float] = None,
+) -> PolicyObjective:
+    """Build a policy objective independent of the backend execution loop.
+
+    Backends must backpropagate ``optimization_loss``. ``unscaled_loss`` is the
+    backend-independent value to report; it combines policy and auxiliary terms
+    before caller- or scheduler-owned gradient-accumulation scaling.
+    """
+    if accumulation_steps < 1:
+        raise ValueError(f"accumulation_steps must be positive, got {accumulation_steps}")
+    globally_normalized = config.loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION
+    if globally_normalized and global_loss_denom is None:
+        raise ValueError(
+            f"global_loss_denom is required for {GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION}"
+        )
+
+    policy_loss_mask = build_think_weighted_loss_mask(
+        loss_mask,
+        response_span_tags,
+        float(config.think_token_weight),
+    )
+    policy_loss, policy_loss_metrics = policy_loss_fn(
+        action_log_probs,
+        old_action_log_probs,
+        advantages,
+        config=config,
+        loss_mask=policy_loss_mask,
+        rollout_logprobs=rollout_logprobs,
+        global_loss_denom=global_loss_denom,
+    )
+
+    auxiliary = _compute_policy_auxiliary_terms(
+        action_log_probs=action_log_probs,
+        base_action_log_probs=base_action_log_probs,
+        token_entropy=token_entropy,
+        loss_mask=loss_mask,
+        config=config,
+    )
+    unscaled_loss = policy_loss + auxiliary.loss
+    optimization_loss = _scale_policy_objective(
+        policy_loss,
+        auxiliary.loss,
+        accumulation_steps=accumulation_steps,
+        scaling=scaling,
+        loss_reduction=config.loss_reduction,
+    )
+    metrics = _policy_objective_metrics(
+        policy_loss_metrics,
+        old_action_log_probs=old_action_log_probs,
+        rollout_logprobs=rollout_logprobs,
+        loss_mask=loss_mask,
+        config=config,
+    )
+    return PolicyObjective(
+        optimization_loss=optimization_loss,
+        unscaled_loss=unscaled_loss,
+        policy_loss=policy_loss,
+        entropy=auxiliary.entropy,
+        kl_loss=auxiliary.kl_loss,
+        metrics=metrics,
+    )
+
+
 @register_policy_loss(PolicyLossType.REGULAR)
 @register_policy_loss(PolicyLossType.DUAL_CLIP)
 def ppo_policy_loss(
@@ -84,17 +285,12 @@ def ppo_policy_loss(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
     loss_reduction = config.loss_reduction
-    assert loss_reduction in [
-        "token_mean",
-        "sequence_mean",
-        "seq_mean_token_sum_norm",
-        "seq_mean_token_sum_norm_global",
-    ], (
-        "loss_reduction must be 'token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', "
-        "or 'seq_mean_token_sum_norm_global'"
+    assert loss_reduction in SUPPORTED_LOSS_REDUCTIONS, (
+        f"loss_reduction must be one of {list(SUPPORTED_LOSS_REDUCTIONS)}"
     )
 
     ratio = safe_exp_delta(log_probs - old_log_probs, out_dtype=log_probs.dtype)
@@ -128,7 +324,7 @@ def ppo_policy_loss(
         loss_mask,
         loss_reduction,
         config.max_seq_len,
-        global_denom=getattr(config, "global_loss_denom", None),
+        global_denom=global_loss_denom,
     )
     return loss, clip_metrics
 
@@ -141,6 +337,7 @@ def sapo_policy_loss(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     SAPO (Soft Adaptive Policy Optimization) policy loss function.
@@ -152,8 +349,10 @@ def sapo_policy_loss(
     """
     # SAPO has only been established as stable with sequence_mean reduction.
     loss_reduction = config.loss_reduction
-    if loss_reduction != "sequence_mean":
-        loguru.logger.warning(f"With SAPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
+    if loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION:
+        loguru.logger.warning(
+            f"With SAPO it's recommended to use '{SEQUENCE_MEAN_LOSS_REDUCTION}' loss reduction; got {loss_reduction}"
+        )
 
     # temperature for positive and negative token updates
     tau_pos = torch.as_tensor(config.sapo.tau_pos, dtype=advantages.dtype, device=advantages.device)
@@ -185,7 +384,7 @@ def sapo_policy_loss(
     loss = -gates * advantages
 
     # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len, global_denom=global_loss_denom)
 
     return loss, {}
 
@@ -198,6 +397,7 @@ def gspo_policy_loss(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     GSPO (Group Sequence Policy Optimization) policy loss function,
@@ -213,8 +413,10 @@ def gspo_policy_loss(
     """
     # GSPO has only been established as stable with sequence_mean reduction.
     loss_reduction = config.loss_reduction
-    if loss_reduction != "sequence_mean":
-        loguru.logger.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
+    if loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION:
+        loguru.logger.warning(
+            f"With GSPO it's recommended to use '{SEQUENCE_MEAN_LOSS_REDUCTION}' loss reduction; got {loss_reduction}"
+        )
 
     # Compute log ratios
     log_ratio = log_probs - old_log_probs
@@ -243,7 +445,7 @@ def gspo_policy_loss(
         eps_clip_high=config.eps_clip_high,
     )
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len, global_denom=global_loss_denom)
 
     return loss, clip_metrics
 
@@ -256,6 +458,7 @@ def compute_policy_loss_cispo(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Implementation of CISPO (Clipped IS-weight Policy Optimization) loss function,
     as proposed in https://arxiv.org/abs/2506.13585.
@@ -279,7 +482,13 @@ def compute_policy_loss_cispo(
         eps_clip_high=config.cispo.cispo_eps_clip_high,
     )
 
-    loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    loss = reduce_loss(
+        loss,
+        loss_mask,
+        config.loss_reduction,
+        config.max_seq_len,
+        global_denom=global_loss_denom,
+    )
     return loss, clip_metrics
 
 
@@ -291,6 +500,7 @@ def compute_policy_loss_clip_cov(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Clip-Cov policy loss function implementation.
 
@@ -345,6 +555,7 @@ def compute_policy_loss_clip_cov(
         loss_mask=loss_mask,
         loss_reduction=config.loss_reduction,
         max_seq_len=config.max_seq_len,
+        global_denom=global_loss_denom,
     )
 
     return pg_loss, clipping_metrics(
@@ -365,6 +576,7 @@ def compute_policy_loss_kl_cov(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """KL-Cov policy loss function implementation.
 
@@ -411,6 +623,7 @@ def compute_policy_loss_kl_cov(
         loss_mask=loss_mask,
         loss_reduction=config.loss_reduction,
         max_seq_len=config.max_seq_len,
+        global_denom=global_loss_denom,
     )
 
     return pg_loss, {}

@@ -35,6 +35,7 @@ from .constants import (
 )
 from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 from .logging_utils import format_exception_text
+from .loss_reduction import SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
 
 
@@ -590,13 +591,9 @@ def validate_cfg(cfg: DictConfig):
         f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
     )
 
-    assert cfg.trainer.algorithm.loss_reduction in (
-        "token_mean",
-        "sequence_mean",
-        "seq_mean_token_sum_norm",
-        "seq_mean_token_sum_norm_global",
-    ), (
-        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', 'seq_mean_token_sum_norm_global']`"
+    assert cfg.trainer.algorithm.loss_reduction in SUPPORTED_LOSS_REDUCTIONS, (
+        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
+        f"Must be one of {list(SUPPORTED_LOSS_REDUCTIONS)}"
     )
 
     # add field to algorithm config needed for loss functions
