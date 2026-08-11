@@ -67,6 +67,7 @@ from skyrl_train.utils.trainer_utils import (
 )
 from skyrl_train.utils.utils import (
     configure_ray_worker_logging,
+    moe_router_replay_enabled,
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
@@ -1054,7 +1055,7 @@ class RayPPOTrainer:
         # MoE router-replay capture rail (Stage 1): only pull routed_experts when
         # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical
         # (the field is never even passed to the collator nor set on the batch).
-        moe_router_replay = bool(self.cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
+        moe_router_replay = moe_router_replay_enabled(self.cfg)
         routed_experts = generator_output.get("rollout_routed_experts", None) if moe_router_replay else None
         # Deterministic dtype for the rollout_routed_experts transport tensor:
         # resolve the model's expert count once (memoized) and pass it to the
