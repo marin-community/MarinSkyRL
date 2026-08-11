@@ -560,9 +560,9 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
-    validate_moe_router_replay_config(cfg)
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
     _validate_cp_cfg(cfg)

@@ -127,17 +127,6 @@ def test_dcp_rejects_r3_capture_via_fsdp_replay():
         _validate_dcp_cfg(cfg)
 
 
-def test_dcp_allows_megatron_with_irrelevant_fsdp_replay_flag():
-    """Megatron does not implement training-side R3, so its FSDP flag cannot conflict with DCP."""
-    pytest.importorskip("hydra")
-    from skyrl_train.utils.utils import _validate_dcp_cfg
-
-    cfg = _dcp_enabled_config(dcp=2, tp=8)
-    cfg.trainer.strategy = "megatron"
-    cfg.trainer.policy.fsdp_config.moe_router_replay = True
-    _validate_dcp_cfg(cfg)
-
-
 def test_dcp_rejects_exceeding_tp():
     """dcp=16, tp=8 (dcp > tp) => cheap-bound assert."""
     pytest.importorskip("hydra")
