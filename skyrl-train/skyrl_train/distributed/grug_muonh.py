@@ -184,7 +184,7 @@ def _matrix_step_(
     muon_eps: float = _DEFAULT_EPS,
     clamp_final_norm: bool,
 ) -> None:
-    """Apply shard-local HyperBall, gathering Muon directions except expert-axis-sharded stacks."""
+    """Update ``parameter`` in place, consuming ``direction`` as scratch storage."""
     parameter_value = _move_to_mesh_device(parameter)
     direction_value = _move_to_mesh_device(direction)
     parameter_is_dtensor = isinstance(parameter_value, DTensor)
