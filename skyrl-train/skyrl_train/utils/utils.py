@@ -47,7 +47,6 @@ def strategy_supports_moe_router_replay(strategy: str) -> bool:
 
 
 def moe_router_replay_enabled(cfg: DictConfig) -> bool:
-    """Return whether the policy requests MoE router replay."""
     return bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
 
 
