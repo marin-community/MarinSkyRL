@@ -1,6 +1,9 @@
 """Durable resource-reference contracts shared by training and launch tooling."""
 
 from dataclasses import dataclass
+import os
+import posixpath
+from urllib.parse import urlsplit, urlunsplit
 
 CLOUD_URI_SCHEMES = frozenset({"s3", "gs", "gcs"})
 CLOUD_URI_PREFIXES = tuple(f"{scheme}://" for scheme in sorted(CLOUD_URI_SCHEMES))
@@ -13,6 +16,15 @@ class ModelLocatorError(ValueError):
 def is_cloud_uri(path: str) -> bool:
     """Return whether a path uses a supported object-store scheme."""
     return path.startswith(CLOUD_URI_PREFIXES)
+
+
+def join_resource_path(root: str, *parts: str) -> str:
+    """Join local or object-store path components without corrupting URI syntax."""
+    if not is_cloud_uri(root):
+        return os.path.join(root, *parts)
+    parsed = urlsplit(root)
+    joined_path = posixpath.join(parsed.path, *parts)
+    return urlunsplit((parsed.scheme, parsed.netloc, joined_path, parsed.query, parsed.fragment))
 
 
 def is_hugging_face_repo_id(repo_id: str) -> bool:

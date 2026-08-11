@@ -25,6 +25,7 @@ from skyrl_train.callbacks.types import (
 )
 from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.generators.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
+from skyrl_train.generators.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 
@@ -692,9 +693,6 @@ def validate_generator_cfg(cfg: DictConfig):
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
         ValueError: when cfg.generator.sampling_params.logprobs > 0
     """
-
-    # Local import breaks the utils-package initialization cycle: trajectory retention uses utils.io.
-    from skyrl_train.generators.trajectory_retention import parse_trajectory_retention_config
 
     parse_trajectory_reward_shaping_config(cfg.generator.get("trajectory_reward_shaping"))
     parse_trajectory_retention_config(cfg.generator.get("trajectory_retention"))

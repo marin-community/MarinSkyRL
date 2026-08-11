@@ -53,16 +53,12 @@ class GeneratorInterface(ABC):
         shape_trajectory_rewards(output, self.generator_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         if self.trajectory_sink is not None:
-            await retain_trajectories(
-                self.trajectory_sink,
-                input_batch,
-                output,
-                generator_name=type(self).__name__,
-            )
+            await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
     def set_trajectory_sink(self, sink: TrajectorySink) -> None:
         """Attach the trainer-owned sink used by shared output finalization."""
+        sink.bind_generator(type(self).__name__)
         self.trajectory_sink = sink
 
     @abstractmethod

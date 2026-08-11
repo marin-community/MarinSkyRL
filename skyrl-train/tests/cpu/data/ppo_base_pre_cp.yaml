@@ -343,7 +343,6 @@ generator:
       penalty_per_token: 0.0
       max_penalty: 0.2
   trajectory_retention:
-    schema_version: 1
     enabled: true
     output_path: ${trainer.export_path}/training_trajectories
     run_id: ${trainer.run_name}

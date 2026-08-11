@@ -74,7 +74,7 @@ def test_iris_derives_durable_training_trajectory_path():
     parsed = parse_rl_config(_CONFIG)
     args = build_skyrl_hydra_args(
         parsed,
-        {"job_name": "retained-run", "experiments_dir": "s3://bucket/iris", "num_nodes": 4},
+        {"job_name": "retained-run", "experiments_dir": "s3://bucket/iris/", "num_nodes": 4},
         _HPCStub(),
     )
 

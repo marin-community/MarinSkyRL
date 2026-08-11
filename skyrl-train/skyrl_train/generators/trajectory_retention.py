@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import gzip
 import hashlib
 import json
@@ -13,8 +13,20 @@ from omegaconf import DictConfig
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.generators.generator_types import GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.trajectory_reward_shaping import DEFAULT_ACCEPTED_STOP_REASONS, NormalizedReward
+from marinskyrl.resource_locator import join_resource_path
+from skyrl_train.generators.generator_types import (
+    GeneratorInput,
+    GeneratorOutput,
+    RewardShapingComponents,
+    RewardShapingLoopSpan,
+    TrajectoryID,
+)
+from skyrl_train.generators.trajectory_retention_config import (
+    TrajectoryRetentionConfig,
+    parse_trajectory_retention_config,
+)
+from skyrl_train.generators.trajectory_reward_shaping import NormalizedReward
+from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.utils.io import io
 
 
@@ -24,31 +36,6 @@ _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
 _SELECTION_MANDATORY = "mandatory"
-
-
-@dataclass(frozen=True)
-class TrajectoryRetentionConfig:
-    schema_version: int = RETENTION_SCHEMA_VERSION
-    enabled: bool = True
-    output_path: str = ""
-    run_id: str = ""
-    phases: tuple[str, ...] = ("train",)
-    sample_count_per_step: int = 1
-    sample_fraction: float = 0.0
-    always_retain_failures: bool = True
-    always_retain_non_terminating: bool = True
-    always_retain_loops: bool = True
-    accepted_stop_reasons: tuple[str, ...] = DEFAULT_ACCEPTED_STOP_REASONS
-    reward_below: float | None = None
-    reward_above: float | None = None
-    max_bytes_per_step: int = 8 * 1024 * 1024
-    max_bytes_per_run: int = 256 * 1024 * 1024
-    required: bool = False
-    redact_fields: tuple[str, ...] = ()
-    model_path: str | None = None
-    model_source_identity: str | None = None
-    resume_path: str | None = None
-    inference_backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,15 +55,6 @@ class _LedgerEntry:
             reasons=tuple(str(reason) for reason in value.get("reasons", ())),
             sample_score=int(value.get("sample_score", 0)),
         )
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "path": self.path,
-            "bytes": self.bytes,
-            "step": self.step,
-            "reasons": list(self.reasons),
-            "sample_score": self.sample_score,
-        }
 
 
 @dataclass
@@ -98,18 +76,9 @@ class _RetentionLedger:
             total_bytes=int(value.get("total_bytes", 0)),
             step_bytes={str(step): int(byte_count) for step, byte_count in value.get("step_bytes", {}).items()},
             records={
-                str(record_id): _LedgerEntry.from_json(entry)
-                for record_id, entry in value.get("records", {}).items()
+                str(record_id): _LedgerEntry.from_json(entry) for record_id, entry in value.get("records", {}).items()
             },
         )
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "total_bytes": self.total_bytes,
-            "step_bytes": self.step_bytes,
-            "records": {record_id: entry.to_json() for record_id, entry in self.records.items()},
-        }
 
 
 @dataclass(frozen=True)
@@ -133,59 +102,46 @@ class _TrajectoryIdentity:
     environment_class: str
     environment_extras: Any
 
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "instance_id": self.instance_id,
-            "repetition_id": self.repetition_id,
-            "row_indices": list(self.row_indices),
-            "environment_class": self.environment_class,
-            "environment_extras": self.environment_extras,
-        }
-
 
 @dataclass(frozen=True)
 class _PromptTrace:
     messages: Any
     token_ids: tuple[int, ...]
 
-    def to_json(self) -> dict[str, Any]:
-        return {"messages": self.messages, "token_ids": list(self.token_ids)}
+
+@dataclass(frozen=True)
+class _TraceMessage:
+    role: str
+    content: str
+
+
+@dataclass(frozen=True)
+class _StepBoundary:
+    row_index: int
+    token_start: int
+    token_end: int
+    stop_reason: str | None
+    is_last_step: bool | None
 
 
 @dataclass(frozen=True)
 class _ResponseTrace:
-    messages: Any
+    messages: tuple[_TraceMessage, ...] | None
     text: str | None
     token_ids: tuple[int, ...]
     loss_mask: tuple[int, ...]
-    trainable_spans: tuple[dict[str, int], ...]
-    step_boundaries: tuple[dict[str, Any], ...]
+    trainable_spans: tuple[RewardShapingLoopSpan, ...]
+    step_boundaries: tuple[_StepBoundary, ...]
     stop_reason: str | None
     generation_limit: int | None
-    loop_spans: tuple[Any, ...]
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "messages": self.messages,
-            "text": self.text,
-            "token_ids": list(self.token_ids),
-            "loss_mask": list(self.loss_mask),
-            "trainable_spans": list(self.trainable_spans),
-            "step_boundaries": list(self.step_boundaries),
-            "stop_reason": self.stop_reason,
-            "generation_limit": self.generation_limit,
-            "loop_spans": list(self.loop_spans),
-        }
+    loop_spans: tuple[RewardShapingLoopSpan, ...]
 
 
 @dataclass(frozen=True)
 class _RewardTrace:
     outcome: float
     shaped: float
-    components: Any
-
-    def to_json(self) -> dict[str, Any]:
-        return {"outcome": self.outcome, "shaped": self.shaped, "components": self.components}
+    components: RewardShapingComponents | None
 
 
 @dataclass(frozen=True)
@@ -198,18 +154,6 @@ class _ProvenanceTrace:
     model_version_step: int
     sampling: dict[str, Any]
     reward_shaping_schema_version: int | None
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "generator": self.generator,
-            "inference_backend": self.inference_backend,
-            "model_path": self.model_path,
-            "model_source_identity": self.model_source_identity,
-            "resume_path": self.resume_path,
-            "model_version_step": self.model_version_step,
-            "sampling": self.sampling,
-            "reward_shaping_schema_version": self.reward_shaping_schema_version,
-        }
 
 
 @dataclass(frozen=True)
@@ -226,88 +170,8 @@ class TrajectoryRecord:
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 
-    @classmethod
-    def from_json(cls, value: Mapping[str, Any]) -> "TrajectoryRecord":
-        return cls(
-            schema_version=int(value["schema_version"]),
-            record_id=str(value["record_id"]),
-            run_id=str(value["run_id"]),
-            global_step=int(value["global_step"]),
-            phase=str(value["phase"]),
-            trajectory=_TrajectoryIdentity(
-                instance_id=str(value["trajectory"]["instance_id"]),
-                repetition_id=int(value["trajectory"]["repetition_id"]),
-                row_indices=tuple(int(index) for index in value["trajectory"]["row_indices"]),
-                environment_class=str(value["trajectory"]["environment_class"]),
-                environment_extras=value["trajectory"]["environment_extras"],
-            ),
-            prompt=_PromptTrace(
-                messages=value["prompt"]["messages"],
-                token_ids=tuple(int(token) for token in value["prompt"]["token_ids"]),
-            ),
-            response=_ResponseTrace(
-                messages=value["response"]["messages"],
-                text=value["response"]["text"],
-                token_ids=tuple(int(token) for token in value["response"]["token_ids"]),
-                loss_mask=tuple(int(active) for active in value["response"]["loss_mask"]),
-                trainable_spans=tuple(value["response"]["trainable_spans"]),
-                step_boundaries=tuple(value["response"]["step_boundaries"]),
-                stop_reason=value["response"]["stop_reason"],
-                generation_limit=value["response"]["generation_limit"],
-                loop_spans=tuple(value["response"]["loop_spans"]),
-            ),
-            reward=_RewardTrace(
-                outcome=float(value["reward"]["outcome"]),
-                shaped=float(value["reward"]["shaped"]),
-                components=value["reward"]["components"],
-            ),
-            metrics=dict(value["metrics"]),
-            provenance=_ProvenanceTrace(
-                generator=str(value["provenance"]["generator"]),
-                inference_backend=value["provenance"]["inference_backend"],
-                model_path=value["provenance"]["model_path"],
-                model_source_identity=value["provenance"]["model_source_identity"],
-                resume_path=value["provenance"]["resume_path"],
-                model_version_step=int(value["provenance"]["model_version_step"]),
-                sampling=dict(value["provenance"]["sampling"]),
-                reward_shaping_schema_version=value["provenance"]["reward_shaping_schema_version"],
-            ),
-        )
-
     def to_json(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "record_id": self.record_id,
-            "run_id": self.run_id,
-            "global_step": self.global_step,
-            "phase": self.phase,
-            "trajectory": self.trajectory.to_json(),
-            "prompt": self.prompt.to_json(),
-            "response": self.response.to_json(),
-            "reward": self.reward.to_json(),
-            "metrics": self.metrics,
-            "provenance": self.provenance.to_json(),
-        }
-
-    @property
-    def instance_id(self) -> str:
-        return self.trajectory.instance_id
-
-    @property
-    def repetition_id(self) -> int:
-        return self.trajectory.repetition_id
-
-    @property
-    def outcome(self) -> float:
-        return self.reward.outcome
-
-    @property
-    def stop_reason(self) -> str | None:
-        return self.response.stop_reason
-
-    @property
-    def loop_spans(self) -> Sequence[Any]:
-        return self.response.loop_spans
+        return to_jsonable(self)
 
 
 class TrajectoryWriter(Protocol):
@@ -324,10 +188,10 @@ class TrajectoryWriter(Protocol):
 
 class _FilesystemTrajectoryWriter:
     def __init__(self, output_path: str):
-        self.output_path = output_path.rstrip("/")
+        self.output_path = output_path
 
     def _path(self, relative_path: str) -> str:
-        return posixpath.join(self.output_path, relative_path)
+        return join_resource_path(self.output_path, relative_path)
 
     def exists(self, relative_path: str) -> bool:
         return io.exists(self._path(relative_path))
@@ -346,100 +210,13 @@ class _FilesystemTrajectoryWriter:
         self._write(relative_path, payload)
 
     def write_json(self, relative_path: str, value: dict[str, Any]) -> None:
-        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        self._write(relative_path, payload)
+        self._write(relative_path, canonical_json_bytes(value))
 
     def remove(self, relative_path: str) -> None:
         io.remove(self._path(relative_path))
 
     def _write(self, relative_path: str, payload: bytes) -> None:
         io.write_bytes_atomic(self._path(relative_path), payload)
-
-
-def parse_trajectory_retention_config(config: Mapping[str, Any] | None) -> TrajectoryRetentionConfig:
-    """Parse and validate the shared trajectory-retention policy."""
-    defaults = TrajectoryRetentionConfig()
-    if config is None:
-        return TrajectoryRetentionConfig(enabled=False)
-    if not isinstance(config, Mapping):
-        raise ValueError("generator.trajectory_retention must be a mapping")
-
-    phases_value = config.get("phases", defaults.phases)
-    redact_value = config.get("redact_fields", defaults.redact_fields)
-    accepted_stops_value = config.get("accepted_stop_reasons", defaults.accepted_stop_reasons)
-    if not isinstance(phases_value, Sequence) or isinstance(phases_value, (str, bytes)):
-        raise ValueError("trajectory_retention.phases must be a sequence")
-    if not isinstance(redact_value, Sequence) or isinstance(redact_value, (str, bytes)):
-        raise ValueError("trajectory_retention.redact_fields must be a sequence")
-    if not isinstance(accepted_stops_value, Sequence) or isinstance(accepted_stops_value, (str, bytes)):
-        raise ValueError("trajectory_retention.accepted_stop_reasons must be a sequence")
-
-    parsed = TrajectoryRetentionConfig(
-        schema_version=int(config.get("schema_version", defaults.schema_version)),
-        enabled=bool(config.get("enabled", defaults.enabled)),
-        output_path=str(config.get("output_path", defaults.output_path) or ""),
-        run_id=str(config.get("run_id", defaults.run_id) or ""),
-        phases=tuple(str(phase).lower() for phase in phases_value),
-        sample_count_per_step=int(config.get("sample_count_per_step", defaults.sample_count_per_step)),
-        sample_fraction=float(config.get("sample_fraction", defaults.sample_fraction)),
-        always_retain_failures=bool(config.get("always_retain_failures", defaults.always_retain_failures)),
-        always_retain_non_terminating=bool(
-            config.get("always_retain_non_terminating", defaults.always_retain_non_terminating)
-        ),
-        always_retain_loops=bool(config.get("always_retain_loops", defaults.always_retain_loops)),
-        accepted_stop_reasons=tuple(str(reason).strip().lower() for reason in accepted_stops_value),
-        reward_below=_optional_float(config.get("reward_below", defaults.reward_below)),
-        reward_above=_optional_float(config.get("reward_above", defaults.reward_above)),
-        max_bytes_per_step=int(config.get("max_bytes_per_step", defaults.max_bytes_per_step)),
-        max_bytes_per_run=int(config.get("max_bytes_per_run", defaults.max_bytes_per_run)),
-        required=bool(config.get("required", defaults.required)),
-        redact_fields=tuple(str(field) for field in redact_value),
-        model_path=_optional_string(config.get("model_path", defaults.model_path)),
-        model_source_identity=_optional_string(
-            config.get("model_source_identity", defaults.model_source_identity)
-        ),
-        resume_path=_optional_string(config.get("resume_path", defaults.resume_path)),
-        inference_backend=_optional_string(config.get("inference_backend", defaults.inference_backend)),
-    )
-    _validate_config(parsed)
-    return parsed
-
-
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
-
-
-def _optional_string(value: Any) -> str | None:
-    return None if value in (None, "") else str(value)
-
-
-def _validate_config(config: TrajectoryRetentionConfig) -> None:
-    if config.schema_version != RETENTION_SCHEMA_VERSION:
-        raise ValueError(f"trajectory retention schema_version must be {RETENTION_SCHEMA_VERSION}")
-    if config.enabled and (not config.output_path or not config.run_id):
-        raise ValueError("enabled trajectory retention requires output_path and run_id")
-    if not set(config.phases).issubset({"train", "eval"}) or not config.phases:
-        raise ValueError("trajectory_retention.phases must contain train and/or eval")
-    if config.sample_count_per_step < 0:
-        raise ValueError("trajectory_retention.sample_count_per_step must be non-negative")
-    if not 0.0 <= config.sample_fraction <= 1.0:
-        raise ValueError("trajectory_retention.sample_fraction must be between 0 and 1")
-    if config.max_bytes_per_step < 0 or config.max_bytes_per_run < 0:
-        raise ValueError("trajectory retention byte bounds must be non-negative")
-    if config.max_bytes_per_step > config.max_bytes_per_run:
-        raise ValueError("trajectory retention per-step bound cannot exceed its run bound")
-    if not config.accepted_stop_reasons:
-        raise ValueError("trajectory_retention.accepted_stop_reasons cannot be empty")
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return [_json_safe(item) for item in value]
-    return str(value)
 
 
 def _trajectory_key(trajectory_id: TrajectoryID) -> tuple[str, int]:
@@ -471,7 +248,7 @@ def _group_rows(input_batch: GeneratorInput, output: GeneratorOutput) -> list[_T
     ]
 
 
-def _active_spans(loss_mask: Sequence[int]) -> list[dict[str, int]]:
+def _active_spans(loss_mask: Sequence[int]) -> list[RewardShapingLoopSpan]:
     spans = []
     start = None
     for index, active in enumerate(loss_mask):
@@ -493,20 +270,20 @@ def _decode(tokenizer: PreTrainedTokenizerBase | None, token_ids: Sequence[int])
 
 def _step_boundaries(
     output: GeneratorOutput, row_indices: Sequence[int], stop_reasons: Sequence[str | None]
-) -> list[dict[str, Any]]:
+) -> list[_StepBoundary]:
     boundaries = []
     token_start = 0
     final_steps = output.get("is_last_step")
     for row_index in row_indices:
         token_end = token_start + len(output["response_ids"][row_index])
         boundaries.append(
-            {
-                "row_index": row_index,
-                "token_start": token_start,
-                "token_end": token_end,
-                "stop_reason": stop_reasons[row_index],
-                "is_last_step": None if final_steps is None else final_steps[row_index],
-            }
+            _StepBoundary(
+                row_index=row_index,
+                token_start=token_start,
+                token_end=token_end,
+                stop_reason=stop_reasons[row_index],
+                is_last_step=None if final_steps is None else final_steps[row_index],
+            )
         )
         token_start = token_end
     return boundaries
@@ -523,6 +300,12 @@ def _redact(record: dict[str, Any], fields: Sequence[str]) -> None:
             current = current[part]
         if isinstance(current, dict) and parts[-1] in current:
             current[parts[-1]] = "[REDACTED]"
+
+
+def _serialized_record(record: TrajectoryRecord, redact_fields: Sequence[str]) -> dict[str, Any]:
+    serialized = record.to_json()
+    _redact(serialized, redact_fields)
+    return serialized
 
 
 def build_trajectory_records(
@@ -557,63 +340,57 @@ def build_trajectory_records(
         prompt_ids = output["prompt_token_ids"][row_indices[0]]
         normalized_reward = NormalizedReward.from_output(output["rewards"][final_index])
         shaped_reward = normalized_reward.total
-        outcome = (
-            float(unshaped[final_index]) if unshaped is not None else normalized_reward.outcome
-        )
+        outcome = float(unshaped[final_index]) if unshaped is not None else normalized_reward.outcome
         response_text = _decode(tokenizer, response_ids)
-        record = {
-            "schema_version": config.schema_version,
-            "record_id": "",
-            "run_id": config.run_id,
-            "global_step": metadata.global_step,
-            "phase": metadata.training_phase,
-            "trajectory": {
-                "instance_id": trajectory_id.instance_id,
-                "repetition_id": trajectory_id.repetition_id,
-                "row_indices": row_indices,
-                "environment_class": input_batch["env_classes"][prompt_index],
-                "environment_extras": _json_safe(input_batch["env_extras"][prompt_index]),
-            },
-            "prompt": {
-                "messages": _json_safe(input_batch["prompts"][prompt_index]),
-                "token_ids": list(prompt_ids),
-            },
-            "response": {
-                "messages": None if response_text is None else [{"role": "assistant", "content": response_text}],
-                "text": response_text,
-                "token_ids": response_ids,
-                "loss_mask": loss_mask,
-                "trainable_spans": _active_spans(loss_mask),
-                "step_boundaries": _step_boundaries(output, row_indices, stop_reasons),
-                "stop_reason": stop_reasons[final_index],
-                "generation_limit": (input_batch.get("sampling_params") or {}).get(
+        record = TrajectoryRecord(
+            schema_version=RETENTION_SCHEMA_VERSION,
+            record_id="",
+            run_id=config.run_id,
+            global_step=metadata.global_step,
+            phase=metadata.training_phase,
+            trajectory=_TrajectoryIdentity(
+                instance_id=trajectory_id.instance_id,
+                repetition_id=trajectory_id.repetition_id,
+                row_indices=row_indices,
+                environment_class=input_batch["env_classes"][prompt_index],
+                environment_extras=to_jsonable(input_batch["env_extras"][prompt_index]),
+            ),
+            prompt=_PromptTrace(
+                messages=to_jsonable(input_batch["prompts"][prompt_index]),
+                token_ids=tuple(prompt_ids),
+            ),
+            response=_ResponseTrace(
+                messages=None if response_text is None else (_TraceMessage(role="assistant", content=response_text),),
+                text=response_text,
+                token_ids=tuple(response_ids),
+                loss_mask=tuple(loss_mask),
+                trainable_spans=tuple(_active_spans(loss_mask)),
+                step_boundaries=tuple(_step_boundaries(output, row_indices, stop_reasons)),
+                stop_reason=stop_reasons[final_index],
+                generation_limit=(input_batch.get("sampling_params") or {}).get(
                     "max_tokens", (input_batch.get("sampling_params") or {}).get("max_generate_length")
                 ),
-                "loop_spans": [] if loop_spans is None else loop_spans[final_index],
-            },
-            "reward": {
-                "outcome": outcome,
-                "shaped": shaped_reward,
-                "components": None if components is None else components[final_index],
-            },
-            "metrics": _json_safe(output.get("rollout_metrics") or {}),
-            "provenance": {
-                "generator": generator_name,
-                "inference_backend": config.inference_backend,
-                "model_path": config.model_path,
-                "model_source_identity": config.model_source_identity,
-                "resume_path": config.resume_path,
-                "model_version_step": model_version_step,
-                "sampling": _json_safe(input_batch.get("sampling_params") or {}),
-                "reward_shaping_schema_version": (
-                    None if shaping_versions is None else shaping_versions[final_index]
-                ),
-            },
-        }
-        _redact(record, config.redact_fields)
-        digest_source = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        record["record_id"] = hashlib.sha256(digest_source).hexdigest()
-        records.append(TrajectoryRecord.from_json(record))
+                loop_spans=tuple(() if loop_spans is None else loop_spans[final_index]),
+            ),
+            reward=_RewardTrace(
+                outcome=outcome,
+                shaped=shaped_reward,
+                components=None if components is None else components[final_index],
+            ),
+            metrics=to_jsonable(output.get("rollout_metrics") or {}),
+            provenance=_ProvenanceTrace(
+                generator=generator_name,
+                inference_backend=config.inference_backend,
+                model_path=config.model_path,
+                model_source_identity=config.model_source_identity,
+                resume_path=config.resume_path,
+                model_version_step=model_version_step,
+                sampling=to_jsonable(input_batch.get("sampling_params") or {}),
+                reward_shaping_schema_version=None if shaping_versions is None else shaping_versions[final_index],
+            ),
+        )
+        digest_source = canonical_json_bytes(_serialized_record(record, config.redact_fields))
+        records.append(replace(record, record_id=hashlib.sha256(digest_source).hexdigest()))
     return records
 
 
@@ -643,28 +420,35 @@ class TrajectorySink:
         self.writer = writer or _FilesystemTrajectoryWriter(config.output_path)
         self._lock = threading.Lock()
         self._ledger: _RetentionLedger | None = None
+        self._generator_name: str | None = None
+
+    def bind_generator(self, generator_name: str) -> None:
+        """Bind the generator identity once when the sink is attached."""
+        if self._generator_name not in (None, generator_name):
+            raise ValueError(f"trajectory sink is already bound to {self._generator_name}")
+        self._generator_name = generator_name
 
     def retain(
         self,
         input_batch: GeneratorInput,
         output: GeneratorOutput,
-        *,
-        generator_name: str,
     ) -> dict[str, float]:
+        """Retain eligible records, or return no metrics when retention does not apply."""
         if not self.config.enabled:
             return {}
         metadata = input_batch.get("batch_metadata")
         if metadata is None or metadata.training_phase not in self.config.phases:
             return {}
+        if self._generator_name is None:
+            raise ValueError("trajectory sink must be bound to a generator before retention")
 
         with self._lock:
-            return self._retain_locked(input_batch, output, generator_name)
+            return self._retain_locked(input_batch, output)
 
     def _retain_locked(
         self,
         input_batch: GeneratorInput,
         output: GeneratorOutput,
-        generator_name: str,
     ) -> dict[str, float]:
         metrics = _empty_metrics()
         records = build_trajectory_records(
@@ -672,7 +456,7 @@ class TrajectorySink:
             output,
             self.config,
             self.tokenizer,
-            generator_name=generator_name,
+            generator_name=self._generator_name,
         )
         metrics[f"{RETENTION_METRIC_PREFIX}/candidates"] = float(len(records))
         try:
@@ -690,7 +474,7 @@ class TrajectorySink:
 
         if ledger_changed:
             try:
-                self.writer.write_json(_LEDGER_NAME, ledger.to_json())
+                self.writer.write_json(_LEDGER_NAME, to_jsonable(ledger))
             except Exception as error:
                 if self.config.required:
                     raise
@@ -766,10 +550,9 @@ class TrajectorySink:
         metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(len(payload))
         return True
 
-    @staticmethod
-    def _encode_record(record: TrajectoryRecord) -> bytes:
+    def _encode_record(self, record: TrajectoryRecord) -> bytes:
         return gzip.compress(
-            json.dumps(record.to_json(), sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            canonical_json_bytes(_serialized_record(record, self.config.redact_fields)),
             mtime=0,
         )
 
@@ -841,15 +624,14 @@ class TrajectorySink:
         del ledger.records[displaced_id]
 
     def _is_mandatory(self, record: TrajectoryRecord) -> bool:
-        outcome = record.outcome
-        stop_reason = record.stop_reason
+        outcome = record.reward.outcome
+        stop_reason = record.response.stop_reason
         normalized_stop = None if stop_reason is None else str(stop_reason).strip().lower()
         return any(
             (
                 self.config.always_retain_failures and outcome <= 0.0,
-                self.config.always_retain_non_terminating
-                and normalized_stop not in self.config.accepted_stop_reasons,
-                self.config.always_retain_loops and bool(record.loop_spans),
+                self.config.always_retain_non_terminating and normalized_stop not in self.config.accepted_stop_reasons,
+                self.config.always_retain_loops and bool(record.response.loop_spans),
                 self.config.reward_below is not None and outcome <= self.config.reward_below,
                 self.config.reward_above is not None and outcome >= self.config.reward_above,
             )
@@ -862,8 +644,8 @@ class TrajectorySink:
                 record.run_id,
                 record.phase,
                 str(record.global_step),
-                record.instance_id,
-                str(record.repetition_id),
+                record.trajectory.instance_id,
+                str(record.trajectory.repetition_id),
             )
         )
 
@@ -877,12 +659,12 @@ class TrajectorySink:
 
     @staticmethod
     def _record_path(record: TrajectoryRecord) -> str:
-        safe_instance = hashlib.sha256(record.instance_id.encode("utf-8")).hexdigest()[:12]
+        safe_instance = hashlib.sha256(record.trajectory.instance_id.encode("utf-8")).hexdigest()[:12]
         return posixpath.join(
             f"schema_v{record.schema_version}",
             f"phase={record.phase}",
             f"step={record.global_step:08d}",
-            f"{safe_instance}-r{record.repetition_id}-{record.record_id}.json.gz",
+            f"{safe_instance}-r{record.trajectory.repetition_id}-{record.record_id}.json.gz",
         )
 
 
@@ -890,15 +672,12 @@ async def retain_trajectories(
     sink: TrajectorySink,
     input_batch: GeneratorInput,
     output: GeneratorOutput,
-    *,
-    generator_name: str,
 ) -> None:
     """Persist normalized trajectories without blocking the trainer event loop."""
     metrics = await asyncio.to_thread(
         sink.retain,
         input_batch,
         output,
-        generator_name=generator_name,
     )
     if not metrics:
         return

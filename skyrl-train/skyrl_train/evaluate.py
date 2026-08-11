@@ -158,8 +158,8 @@ async def evaluate_step_wise(
     cfg: DictConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
+    trajectory_sink: TrajectorySink,
     val_set_name: str | None = None,
-    trajectory_sink: TrajectorySink | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories for step-wise training.
 
@@ -174,7 +174,7 @@ async def evaluate_step_wise(
         tokenizer (AutoTokenizer): tokenizer to use
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
-        trajectory_sink (TrajectorySink | None): trainer-owned retention sink; a standalone evaluation builds one from cfg
+        trajectory_sink (TrajectorySink): trainer-owned retention sink
 
     Returns:
         Dict[str, float]: evaluation metrics
@@ -184,8 +184,7 @@ async def evaluate_step_wise(
     run_name = getattr(cfg.trainer, "run_name", None) or "eval"
     eval_step = global_step if global_step is not None else 0
     has_eval_session = hasattr(generator, "start_eval_session")
-    active_sink = trajectory_sink or make_trajectory_sink(cfg.generator, tokenizer)
-    generator.set_trajectory_sink(active_sink)
+    generator.set_trajectory_sink(trajectory_sink)
 
     if has_eval_session:
         await generator.start_eval_session(

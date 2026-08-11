@@ -114,6 +114,12 @@ def _records(output_path: Path) -> list[dict]:
     return records
 
 
+def _sink(config, writer=None) -> TrajectorySink:
+    sink = TrajectorySink(config, _Tokenizer(), writer=writer)
+    sink.bind_generator("SkyRLGymGenerator")
+    return sink
+
+
 def test_normalized_output_produces_complete_core_trace_schema():
     records = build_trajectory_records(
         _input(),
@@ -192,10 +198,10 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
     assert record["reward"] == {"outcome": 1.0, "shaped": 1.0, "components": None}
 
 
-def test_training_retention_is_independent_of_validation_and_keeps_anomalies(tmp_path):
-    sink = TrajectorySink(_config(tmp_path), _Tokenizer())
+def test_train_phase_retains_sample_and_anomalies(tmp_path):
+    sink = _sink(_config(tmp_path))
 
-    metrics = sink.retain(_input(phase="train"), _output(), generator_name="SkyRLGymGenerator")
+    metrics = sink.retain(_input(phase="train"), _output())
 
     records = _records(tmp_path)
     assert {record["trajectory"]["instance_id"] for record in records} == {"a", "b", "c"}
@@ -206,15 +212,15 @@ def test_training_retention_is_independent_of_validation_and_keeps_anomalies(tmp
 
 
 def test_resume_is_idempotent_and_new_content_appends(tmp_path):
-    first_sink = TrajectorySink(_config(tmp_path), _Tokenizer())
-    first_sink.retain(_input(), _output(), generator_name="SkyRLGymGenerator")
+    first_sink = _sink(_config(tmp_path))
+    first_sink.retain(_input(), _output())
     original_paths = {path.relative_to(tmp_path) for path in tmp_path.rglob("*.json.gz")}
 
-    resumed_sink = TrajectorySink(_config(tmp_path), _Tokenizer())
-    duplicate_metrics = resumed_sink.retain(_input(), _output(), generator_name="SkyRLGymGenerator")
+    resumed_sink = _sink(_config(tmp_path))
+    duplicate_metrics = resumed_sink.retain(_input(), _output())
     changed_output = _output()
     changed_output["response_ids"][1] = [20, 99]
-    resumed_sink.retain(_input(), changed_output, generator_name="SkyRLGymGenerator")
+    resumed_sink.retain(_input(), changed_output)
 
     final_paths = {path.relative_to(tmp_path) for path in tmp_path.rglob("*.json.gz")}
     assert duplicate_metrics["generate/trajectory_retention/duplicates"] == 3.0
@@ -232,8 +238,8 @@ def test_retention_is_deterministic_and_enforces_compressed_byte_bound_before_wr
         max_bytes_per_step=1,
     )
 
-    first = TrajectorySink(config, _Tokenizer()).retain(_input(), output, generator_name="SkyRLGymGenerator")
-    second = TrajectorySink(config, _Tokenizer()).retain(_input(), output, generator_name="SkyRLGymGenerator")
+    first = _sink(config).retain(_input(), output)
+    second = _sink(config).retain(_input(), output)
 
     assert first["generate/trajectory_retention/written"] == 0.0
     assert first["generate/trajectory_retention/dropped_by_bounds"] == 3.0
@@ -255,7 +261,7 @@ def test_custom_stop_contract_controls_non_termination_selection(tmp_path):
         accepted_stop_reasons=["length"],
     )
 
-    TrajectorySink(config, _Tokenizer()).retain(_input(), output, generator_name="SkyRLGymGenerator")
+    _sink(config).retain(_input(), output)
 
     assert _records(tmp_path) == []
 
@@ -271,7 +277,7 @@ def test_reward_extreme_is_retained_after_redaction(tmp_path):
         redact_fields=["prompt.messages"],
     )
 
-    TrajectorySink(config, _Tokenizer()).retain(_input(), _output(), generator_name="SkyRLGymGenerator")
+    _sink(config).retain(_input(), _output())
 
     records = _records(tmp_path)
     assert len(records) == 1
@@ -288,7 +294,7 @@ def test_sample_count_is_global_and_order_independent_across_async_completions(t
 
     retained_ids = []
     for directory, order in ((tmp_path / "forward", range(3)), (tmp_path / "reverse", reversed(range(3)))):
-        sink = TrajectorySink(_config(directory, **config_overrides), _Tokenizer())
+        sink = _sink(_config(directory, **config_overrides))
         for index in order:
             input_batch = _input()
             output = _output()
@@ -307,7 +313,7 @@ def test_sample_count_is_global_and_order_independent_across_async_completions(t
                 "trajectory_ids",
             ):
                 output[key] = [output[key][index]]
-            sink.retain(input_batch, output, generator_name="SkyRLGymGenerator")
+            sink.retain(input_batch, output)
         records = _records(directory)
         assert len(records) == 1
         retained_ids.append(records[0]["record_id"])
@@ -338,19 +344,19 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
 
 
 def test_best_effort_failure_is_reported_and_required_failure_raises(tmp_path):
-    best_effort = TrajectorySink(_config(tmp_path, required=False), _Tokenizer(), writer=_FailingWriter())
-    metrics = best_effort.retain(_input(), _output(), generator_name="SkyRLGymGenerator")
+    best_effort = _sink(_config(tmp_path, required=False), writer=_FailingWriter())
+    metrics = best_effort.retain(_input(), _output())
 
     assert metrics["generate/trajectory_retention/write_errors"] == 3.0
     assert metrics["generate/trajectory_retention/written"] == 0.0
 
-    required = TrajectorySink(_config(tmp_path, required=True), _Tokenizer(), writer=_FailingWriter())
+    required = _sink(_config(tmp_path, required=True), writer=_FailingWriter())
     with pytest.raises(OSError, match="storage unavailable"):
-        required.retain(_input(), _output(), generator_name="SkyRLGymGenerator")
+        required.retain(_input(), _output())
 
 
 def test_disabled_sink_is_a_noop(tmp_path):
-    sink = TrajectorySink(_config(tmp_path, enabled=False), _Tokenizer())
+    sink = _sink(_config(tmp_path, enabled=False))
 
-    assert sink.retain(_input(), _output(), generator_name="SkyRLGymGenerator") == {}
+    assert sink.retain(_input(), _output()) == {}
     assert list(tmp_path.iterdir()) == []

@@ -25,6 +25,7 @@ from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.config.callbacks import has_explicit_callbacks
+from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
@@ -324,21 +325,9 @@ class DatabaseRegistrationCallback(TrainerCallback):
         except Exception:
             pass
 
-        # Build training parameters (serialize config)
-        def _to_jsonable(obj):
-            """Convert OmegaConf to JSON-serializable dict."""
-            if hasattr(obj, "items"):
-                return {k: _to_jsonable(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [_to_jsonable(v) for v in obj]
-            elif isinstance(obj, (int, float, str, bool, type(None))):
-                return obj
-            else:
-                return str(obj)
-
         training_params = {
-            "trainer": _to_jsonable(cfg.trainer) if hasattr(cfg, "trainer") else {},
-            "generator": _to_jsonable(cfg.generator) if hasattr(cfg, "generator") else {},
+            "trainer": to_jsonable(cfg.trainer) if hasattr(cfg, "trainer") else {},
+            "generator": to_jsonable(cfg.generator) if hasattr(cfg, "generator") else {},
             "algorithm": str(getattr(cfg.trainer.algorithm, "advantage_estimator", "unknown")),
         }
 
