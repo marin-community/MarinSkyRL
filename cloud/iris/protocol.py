@@ -11,6 +11,7 @@ from cloud.iris.runtime_environment import RuntimeProfile
 
 class AttemptState(StrEnum):
     PREPARED = "prepared"
+    SUBMITTED = "submitted"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 

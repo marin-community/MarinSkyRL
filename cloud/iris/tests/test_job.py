@@ -40,13 +40,15 @@ from iris.rpc import job_pb2  # noqa: E402
 @dataclass(frozen=True)
 class FakeLaunchBackend(JobBackend):
     outcome: IrisLaunchOutcome
+    expected_no_wait: bool = False
 
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
         assert spec.request.config_yaml
         assert Path(config_path).is_file()
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
+    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome:
         self.validate(spec, config_path)
+        assert no_wait is self.expected_no_wait
         return self.outcome
 
 
@@ -58,8 +60,9 @@ class FailedLaunchBackend(JobBackend):
         assert spec.request.config_yaml
         assert Path(config_path).is_file()
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
+    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome:
         self.validate(spec, config_path)
+        assert not no_wait
         raise self.error
 
 
@@ -238,6 +241,26 @@ def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
     assert json.loads(attempt.read_text()) == terminal
 
 
+def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    backend = FakeLaunchBackend(
+        IrisLaunchOutcome(
+            job_id="/power/iceball-test",
+            job_state="submitted",
+            exit_code=0,
+        ),
+        expected_no_wait=True,
+    )
+
+    response = execute_job(envelope, backend=backend, no_wait=True)
+
+    assert response.state == AttemptState.SUBMITTED
+    assert response.iris_job_id == "/power/iceball-test"
+    assert response.model is None
+    assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
+    assert not Path(envelope.request.output.attempts_root.removeprefix("file://")).exists()
+
+
 def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
 
@@ -265,6 +288,12 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
     assert args.memory == "800GB"
     assert args.disk == "4TB"
     assert args.wandb_entity == "marin-community"
+
+
+def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:
+    args = create_parser().parse_args(job_launch_argv(_spec(tmp_path), "config.yaml", no_wait=True))
+
+    assert args.no_wait
 
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:
@@ -462,8 +491,9 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(asdict(envelope)))
 
-    def fake_launch(_spec: SkyRLJobSpec, *, dry_run: bool) -> SkyRLTerminalResponse:
+    def fake_launch(_spec: SkyRLJobSpec, *, dry_run: bool, no_wait: bool) -> SkyRLTerminalResponse:
         assert dry_run
+        assert not no_wait
         print("human launcher log")
         return SkyRLTerminalResponse(
             run_id=envelope.request.run_id,
@@ -484,6 +514,43 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
     assert exit_code == 0
     assert json.loads(captured.out)["state"] == "prepared"
     assert "human launcher log" in captured.err
+
+
+def test_cli_no_wait_returns_submitted_json(tmp_path: Path, monkeypatch, capsys) -> None:
+    envelope = _spec(tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(asdict(envelope)))
+
+    def fake_launch(_spec: SkyRLJobSpec, *, dry_run: bool, no_wait: bool) -> SkyRLTerminalResponse:
+        assert not dry_run
+        assert no_wait
+        return SkyRLTerminalResponse(
+            run_id=envelope.request.run_id,
+            attempt_id=envelope.request.attempt_id,
+            state=AttemptState.SUBMITTED,
+            iris_job_id="/power/iceball-test",
+            iris_job_state="submitted",
+            runtime=envelope.request.runtime,
+            model=None,
+            failure=None,
+        )
+
+    monkeypatch.setattr(job, "execute_job", fake_launch)
+
+    exit_code = job.main(["iris", "launch", "--request", str(request_path), "--no-wait"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out) == {
+        "attempt_id": "attempt-1",
+        "failure": None,
+        "iris_job_id": "/power/iceball-test",
+        "iris_job_state": "submitted",
+        "model": None,
+        "run_id": "iceball-test",
+        "runtime": {"commit": envelope.request.runtime.commit, "profile": "fsdp"},
+        "state": "submitted",
+    }
 
 
 def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeypatch) -> None:

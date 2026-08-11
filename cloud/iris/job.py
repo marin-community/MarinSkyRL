@@ -39,7 +39,7 @@ class JobBackend(Protocol):
 
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome: ...
+    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome: ...
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
@@ -118,9 +118,10 @@ def execute_job(
     spec: SkyRLJobSpec,
     *,
     dry_run: bool = False,
+    no_wait: bool = False,
     backend: JobBackend | None = None,
 ) -> SkyRLTerminalResponse:
-    """Validate, submit, monitor, and commit one MarinSkyRL artifact attempt."""
+    """Submit one job, optionally detach, or monitor and commit its terminal result."""
     request = spec.request
     runtime_bundle_inputs(request.runtime.commit)
     if _path_exists(request.output.terminal_manifest_uri):
@@ -143,13 +144,24 @@ def execute_job(
                 failure=None,
             )
         try:
-            outcome = active_backend.launch(spec, config_file.name)
+            outcome = active_backend.launch(spec, config_file.name, no_wait=no_wait)
         except JobFailedError as error:
             job_state = iris_job_state_name(error.status.state)
             outcome = IrisLaunchOutcome(job_id=str(error.job_id), job_state=job_state, exit_code=1)
 
     if outcome.exit_code != 0:
         return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
+    if no_wait:
+        return SkyRLTerminalResponse(
+            run_id=request.run_id,
+            attempt_id=request.attempt_id,
+            state=AttemptState.SUBMITTED,
+            iris_job_id=outcome.job_id,
+            iris_job_state=outcome.job_state,
+            runtime=request.runtime,
+            model=None,
+            failure=None,
+        )
 
     try:
         model = _policy_export(request)
@@ -186,6 +198,7 @@ def create_parser() -> argparse.ArgumentParser:
     launch_parser = iris_commands.add_parser("launch")
     launch_parser.add_argument("--request", required=True)
     launch_parser.add_argument("--dry-run", action="store_true")
+    launch_parser.add_argument("--no-wait", action="store_true", help="Submit and return without following job logs.")
 
     build_parser = iris_commands.add_parser("build-request", help="Build a SkyRLJobSpec JSON from an RL YAML config.")
     build_parser.add_argument("--config", required=True, help="Path to the RL YAML config.")
@@ -268,10 +281,10 @@ def main(argv: list[str] | None = None) -> int:
     with open(args.request) as source:
         spec = job_spec(json.load(source))
     with contextlib.redirect_stdout(sys.stderr):
-        response = execute_job(spec, dry_run=args.dry_run)
+        response = execute_job(spec, dry_run=args.dry_run, no_wait=args.no_wait)
     json.dump(asdict(response), sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
-    return 0 if response.state in (AttemptState.PREPARED, AttemptState.SUCCEEDED) else 1
+    return 0 if response.state in (AttemptState.PREPARED, AttemptState.SUBMITTED, AttemptState.SUCCEEDED) else 1
 
 
 if __name__ == "__main__":

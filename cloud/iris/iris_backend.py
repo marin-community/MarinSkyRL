@@ -239,7 +239,7 @@ def _resolved_data_path(locator: DataLocator) -> str:
     return os.path.join(locator.local_path, *relative.parts)
 
 
-def job_launch_argv(spec: SkyRLJobSpec, config_path: str) -> list[str]:
+def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> list[str]:
     """Adapt the typed job request to the legacy Iris launcher CLI."""
     request = spec.request
     execution = spec.execution
@@ -318,6 +318,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str) -> list[str]:
         argv.extend(["--parent-cluster-config", execution.parent_cluster_config])
     if execution.wandb_entity:
         argv.extend(["--wandb-entity", execution.wandb_entity])
+    if no_wait:
+        argv.append("--no-wait")
     for override in request.overrides:
         argv.extend(["--skyrl-override", override])
     return argv
@@ -329,8 +331,8 @@ class IrisBackend:
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
         resolved_launch_args(job_launch_argv(spec, config_path))
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str) -> IrisLaunchOutcome:
-        args = resolved_launch_args(job_launch_argv(spec, config_path))
+    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome:
+        args = resolved_launch_args(job_launch_argv(spec, config_path, no_wait=no_wait))
         with contextlib.redirect_stdout(sys.stderr):
             return launch(args, spec.request.runtime.commit)
 
