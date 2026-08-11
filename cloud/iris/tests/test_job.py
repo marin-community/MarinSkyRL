@@ -20,13 +20,14 @@ from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
     DataLocator,
     IrisLaunchOptions,
+    LaunchMode,
     ModelLocator,
     RuntimeIdentity,
+    SkyRLLaunchResponse,
     SkyRLLaunchRequest,
     SkyRLJobSpec,
     SkyRLOutputPaths,
     SkyRLRolePlan,
-    SkyRLTerminalResponse,
     SkyRLTopology,
 )
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
@@ -40,15 +41,21 @@ from iris.rpc import job_pb2  # noqa: E402
 @dataclass(frozen=True)
 class FakeLaunchBackend(JobBackend):
     outcome: IrisLaunchOutcome
-    expected_no_wait: bool = False
+    expected_mode: LaunchMode = LaunchMode.WAIT
 
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
         assert spec.request.config_yaml
         assert Path(config_path).is_file()
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome:
+    def launch(
+        self,
+        spec: SkyRLJobSpec,
+        config_path: str,
+        *,
+        mode: LaunchMode = LaunchMode.WAIT,
+    ) -> IrisLaunchOutcome:
         self.validate(spec, config_path)
-        assert no_wait is self.expected_no_wait
+        assert mode is self.expected_mode
         return self.outcome
 
 
@@ -60,9 +67,15 @@ class FailedLaunchBackend(JobBackend):
         assert spec.request.config_yaml
         assert Path(config_path).is_file()
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome:
+    def launch(
+        self,
+        spec: SkyRLJobSpec,
+        config_path: str,
+        *,
+        mode: LaunchMode = LaunchMode.WAIT,
+    ) -> IrisLaunchOutcome:
         self.validate(spec, config_path)
-        assert not no_wait
+        assert mode is LaunchMode.WAIT
         raise self.error
 
 
@@ -249,10 +262,10 @@ def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Pa
             job_state="submitted",
             exit_code=0,
         ),
-        expected_no_wait=True,
+        expected_mode=LaunchMode.DETACH,
     )
 
-    response = execute_job(envelope, backend=backend, no_wait=True)
+    response = execute_job(envelope, backend=backend, mode=LaunchMode.DETACH)
 
     assert response.state == AttemptState.SUBMITTED
     assert response.iris_job_id == "/power/iceball-test"
@@ -291,7 +304,7 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
 
 
 def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:
-    args = create_parser().parse_args(job_launch_argv(_spec(tmp_path), "config.yaml", no_wait=True))
+    args = create_parser().parse_args(job_launch_argv(_spec(tmp_path), "config.yaml", mode=LaunchMode.DETACH))
 
     assert args.no_wait
 
@@ -354,7 +367,7 @@ def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path) -> No
     terminal.write_text("{}")
 
     with pytest.raises(ValueError, match="immutable and already exists"):
-        execute_job(envelope, dry_run=True)
+        execute_job(envelope, mode=LaunchMode.PREPARE)
 
 
 def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Path) -> None:
@@ -491,11 +504,10 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(asdict(envelope)))
 
-    def fake_launch(_spec: SkyRLJobSpec, *, dry_run: bool, no_wait: bool) -> SkyRLTerminalResponse:
-        assert dry_run
-        assert not no_wait
+    def fake_launch(_spec: SkyRLJobSpec, *, mode: LaunchMode) -> SkyRLLaunchResponse:
+        assert mode is LaunchMode.PREPARE
         print("human launcher log")
-        return SkyRLTerminalResponse(
+        return SkyRLLaunchResponse(
             run_id=envelope.request.run_id,
             attempt_id=envelope.request.attempt_id,
             state=AttemptState.PREPARED,
@@ -521,10 +533,9 @@ def test_cli_no_wait_returns_submitted_json(tmp_path: Path, monkeypatch, capsys)
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(asdict(envelope)))
 
-    def fake_launch(_spec: SkyRLJobSpec, *, dry_run: bool, no_wait: bool) -> SkyRLTerminalResponse:
-        assert not dry_run
-        assert no_wait
-        return SkyRLTerminalResponse(
+    def fake_launch(_spec: SkyRLJobSpec, *, mode: LaunchMode) -> SkyRLLaunchResponse:
+        assert mode is LaunchMode.DETACH
+        return SkyRLLaunchResponse(
             run_id=envelope.request.run_id,
             attempt_id=envelope.request.attempt_id,
             state=AttemptState.SUBMITTED,

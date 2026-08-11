@@ -91,7 +91,7 @@ from marinskyrl.resource_locator import ModelLocatorError, is_cloud_uri, is_hugg
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.protocol import DataLocator, SkyRLJobSpec
+from cloud.iris.protocol import DataLocator, LaunchMode, SkyRLJobSpec
 from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
 from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
@@ -239,7 +239,7 @@ def _resolved_data_path(locator: DataLocator) -> str:
     return os.path.join(locator.local_path, *relative.parts)
 
 
-def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> list[str]:
+def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = LaunchMode.WAIT) -> list[str]:
     """Adapt the typed job request to the legacy Iris launcher CLI."""
     request = spec.request
     execution = spec.execution
@@ -318,7 +318,7 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = Fal
         argv.extend(["--parent-cluster-config", execution.parent_cluster_config])
     if execution.wandb_entity:
         argv.extend(["--wandb-entity", execution.wandb_entity])
-    if no_wait:
+    if mode is LaunchMode.DETACH:
         argv.append("--no-wait")
     for override in request.overrides:
         argv.extend(["--skyrl-override", override])
@@ -331,8 +331,10 @@ class IrisBackend:
     def validate(self, spec: SkyRLJobSpec, config_path: str) -> None:
         resolved_launch_args(job_launch_argv(spec, config_path))
 
-    def launch(self, spec: SkyRLJobSpec, config_path: str, *, no_wait: bool = False) -> IrisLaunchOutcome:
-        args = resolved_launch_args(job_launch_argv(spec, config_path, no_wait=no_wait))
+    def launch(self, spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = LaunchMode.WAIT) -> IrisLaunchOutcome:
+        if mode is LaunchMode.PREPARE:
+            raise ValueError("Prepare mode validates a launch without submitting it")
+        args = resolved_launch_args(job_launch_argv(spec, config_path, mode=mode))
         with contextlib.redirect_stdout(sys.stderr):
             return launch(args, spec.request.runtime.commit)
 

@@ -16,6 +16,12 @@ class AttemptState(StrEnum):
     FAILED = "failed"
 
 
+class LaunchMode(StrEnum):
+    PREPARE = "prepare"
+    DETACH = "detach"
+    WAIT = "wait"
+
+
 @dataclass(frozen=True)
 class RuntimeIdentity:
     commit: str
@@ -116,7 +122,7 @@ class SkyRLModel:
 
 
 @dataclass(frozen=True)
-class SkyRLTerminalResponse:
+class SkyRLLaunchResponse:
     run_id: str
     attempt_id: str
     state: AttemptState
