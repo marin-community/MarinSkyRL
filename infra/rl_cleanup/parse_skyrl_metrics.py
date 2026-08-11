@@ -1290,6 +1290,8 @@ def _find_pass_at_key(metrics_list: list[dict[str, Any]]) -> str | None:
 
 def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path: Path) -> None:
     """Plot reward and available stability, TIS, and rollout-failure metrics."""
+    chain_metrics = [metric for metrics in all_data.values() for metric in metrics]
+    reward_ema = _trailing_five_ema(_checkpoint_rewards(chain_metrics))
     has_logratio = any(any("policy/log_ratio_abs" in k for k in m) for metrics in all_data.values() for m in metrics)
     has_failure_fraction = any(
         any(ROLLOUT_FAILURE_FRACTION_METRIC in m for m in metrics) for metrics in all_data.values()
@@ -1314,13 +1316,16 @@ def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path:
         marker = "o" if single else None
         ms = 8 if single else None
 
-        # Reward panel: EMA solid + raw faint
-        raw_series = pd.Series(rewards, index=steps)
-        ema_series = raw_series.ewm(span=5).mean()
-        color = ax_reward.plot(steps, ema_series.values, label=log_name, linewidth=2, marker=marker, markersize=ms)[
-            0
-        ].get_color()
-        ax_reward.plot(steps, rewards, color=color, alpha=0.2, linewidth=1)
+        # Raw rewards retain their source-log colors; the EMA spans the full restart chain below.
+        color = ax_reward.plot(
+            steps,
+            rewards,
+            label=f"{log_name} raw",
+            linewidth=1,
+            alpha=0.2,
+            marker=marker,
+            markersize=ms,
+        )[0].get_color()
 
         # Collapse panel: entropy (left axis) + grad_norm (right axis, dashed)
         ax_collapse.plot(
@@ -1350,6 +1355,16 @@ def generate_reward_plot(all_data: dict[str, list[dict[str, Any]]], output_path:
         if ax_failures is not None:
             failure_fraction = [m.get(ROLLOUT_FAILURE_FRACTION_METRIC, float("nan")) for m in metrics]
             ax_failures.plot(steps, failure_fraction, color=color, linewidth=2, label=log_name)
+
+    if reward_ema:
+        ema_steps = sorted(reward_ema)
+        ax_reward.plot(
+            ema_steps,
+            [reward_ema[step] for step in ema_steps],
+            color="black",
+            label="trailing-5 EMA",
+            linewidth=2,
+        )
 
     ax_reward.set_ylabel("Avg Raw Reward")
     ax_reward.set_title("Average Reward vs Training Step (EMA solid, raw faint)")

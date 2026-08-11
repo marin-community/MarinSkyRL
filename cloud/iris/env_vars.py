@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import sys
+from contextlib import contextmanager
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -51,6 +52,7 @@ PYTHONPATH_ENV = "PYTHONPATH"
 VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
+HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -86,6 +88,12 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.DRIVER}),
     ),
     EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
+    EnvVarSpec(
+        HF_HUB_OFFLINE_ENV,
+        "checkpoint_export.hf_hub_publish",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.DRIVER}),
+    ),
 )
 
 _SPECS_BY_NAME = {spec.name: spec for spec in ENV_VAR_SPECS}
@@ -188,6 +196,26 @@ class EnvVarManager:
         if values:
             ensure_debug_artifact_directories(values[DEBUG_ARTIFACT_DIR_ENV])
         return values
+
+
+@contextmanager
+def temporarily_unset_managed_environment(
+    name: str,
+    scope: EnvVarScope,
+    *,
+    environ: MutableMapping[str, str] | None = None,
+):
+    """Temporarily remove one registered variable and restore its exact prior state."""
+    spec = _SPECS_BY_NAME.get(name)
+    if spec is None or scope not in spec.scopes:
+        raise ValueError(f"{name!r} is not registered for the {scope.value} environment scope")
+    target = os.environ if environ is None else environ
+    previous = target.pop(name, None)
+    try:
+        yield
+    finally:
+        if previous is not None:
+            target[name] = previous
 
 
 def ensure_debug_artifact_directories(artifact_root: str) -> None:

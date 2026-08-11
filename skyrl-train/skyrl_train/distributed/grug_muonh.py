@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Literal, Protocol
 
 import torch
+import torch.distributed as dist
 from torch import Tensor
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Replicate, Shard
@@ -89,34 +90,54 @@ def newton_schulz_quintic(
     return x.to(original_dtype)
 
 
+def _muon_shape_scale(matrix: Tensor) -> float:
+    """Return Marin's Muon scale for a PyTorch matrix layout."""
+    # Marin stores matrices as (fan_in, fan_out). PyTorch stores Linear weights
+    # transposed as (fan_out, fan_in), so the equivalent scale is rows / columns.
+    rows, columns = matrix.shape[-2:]
+    return max(1.0, rows / columns) ** 0.5
+
+
 def _muon_direction(direction: Tensor, *, steps: int, eps: float) -> Tensor:
     """Orthogonalize a matrix or an expert stack and apply Marin's shape scale."""
     if direction.ndim not in (2, 3):
         raise ValueError(f"MuonH parameters must have rank 2 or 3, got shape {tuple(direction.shape)}")
     orthogonal = newton_schulz_quintic(direction, steps=steps, eps=eps)
-
-    # Marin stores matrices as (fan_in, fan_out). PyTorch stores Linear weights
-    # transposed as (fan_out, fan_in), so the equivalent scale is rows / columns.
-    rows, columns = orthogonal.shape[-2:]
-    return orthogonal * max(1.0, rows / columns) ** 0.5
+    return orthogonal.mul_(_muon_shape_scale(orthogonal))
 
 
-def _hyperball_delta(
+def _matrix_norm(
+    value: Tensor,
+    reference: DTensor | None,
+) -> Tensor:
+    """Return the global norm of each trailing matrix in ``value``."""
+    axes = (-2, -1)
+    squared_norm = torch.linalg.vector_norm(value, dim=axes, keepdim=True, dtype=torch.float32).square_()
+    if reference is not None:
+        reduced_axes = {reference.ndim - 2, reference.ndim - 1}
+        for mesh_dim, placement in enumerate(reference.placements):
+            if isinstance(placement, Shard) and placement.dim % reference.ndim in reduced_axes:
+                dist.all_reduce(squared_norm, group=reference.device_mesh.get_group(mesh_dim))
+    return squared_norm.sqrt_()
+
+
+def _hyperball_step_(
     parameter: Tensor,
     direction: Tensor,
     *,
+    reference: DTensor | None,
     lr: float,
     clamp_final_norm: bool,
-) -> Tensor:
-    """Return the norm-preserving HyperBall delta over trailing matrix axes."""
-    axes = (-2, -1)
-    parameter_norm = torch.linalg.vector_norm(parameter, dim=axes, keepdim=True)
-    direction_norm = torch.linalg.vector_norm(direction, dim=axes, keepdim=True)
-    candidate = parameter - lr * direction * parameter_norm / direction_norm.clamp_min(_HYPERBALL_EPS)
-    candidate_norm = torch.linalg.vector_norm(candidate, dim=axes, keepdim=True)
+) -> None:
+    """Apply HyperBall in place, reusing ``direction`` for the candidate."""
+    parameter_norm = _matrix_norm(parameter, reference)
+    direction_norm = _matrix_norm(direction, reference).clamp_min_(_HYPERBALL_EPS)
+    direction.mul_(parameter_norm / direction_norm).mul_(-lr).add_(parameter)
+    candidate_norm = _matrix_norm(direction, reference)
     if clamp_final_norm:
-        candidate_norm = candidate_norm.clamp_min(_HYPERBALL_EPS)
-    return candidate / candidate_norm * parameter_norm - parameter
+        candidate_norm.clamp_min_(_HYPERBALL_EPS)
+    direction.mul_(parameter_norm / candidate_norm)
+    parameter.copy_(direction)
 
 
 def _is_expert_batch_sharded(tensor: DTensor) -> bool:
@@ -129,45 +150,32 @@ def _is_expert_batch_sharded(tensor: DTensor) -> bool:
     )
 
 
-def _materialize_for_matrix_math(tensor: Tensor) -> tuple[Tensor, bool]:
-    """Return a regular tensor and whether it is a local expert-stack shard."""
+def _move_to_mesh_device(tensor: Tensor) -> Tensor:
+    """Move an offloaded DTensor shard to its mesh device without gathering it."""
     if not isinstance(tensor, DTensor):
-        return tensor, False
+        return tensor
     # Native FSDP2 CPU offload leaves local shards on CPU while retaining a
     # CUDA/NCCL mesh. Move the shard to that mesh before any collective.
     if tensor.device_mesh.device_type == "cuda" and tensor.to_local().device.type == "cpu":
-        tensor = tensor.to(torch.device("cuda", torch.cuda.current_device()))
-    if _is_expert_batch_sharded(tensor):
-        return tensor.to_local(), True
-    return tensor.full_tensor(), False
+        return tensor.to(torch.device("cuda", torch.cuda.current_device()))
+    return tensor
 
 
-def _redistribute_like(value: Tensor, reference: Tensor, *, local_expert_shard: bool) -> Tensor:
-    """Restore ``value`` to the DTensor layout of ``reference`` when needed."""
-    if not isinstance(reference, DTensor):
-        return value
-    if local_expert_shard:
-        restored = DTensor.from_local(
-            value,
-            reference.device_mesh,
-            reference.placements,
-            run_check=False,
-            shape=reference.shape,
-            stride=reference.stride(),
-        )
-    else:
-        # Every rank already reconstructed the same full value. ``src_data_rank=None``
-        # avoids a redundant broadcast and selects each rank's local shard.
-        restored = distribute_tensor(
-            value,
-            reference.device_mesh,
-            reference.placements,
-            src_data_rank=None,
-        )
-    return restored.to(reference.to_local().device)
+def _gathered_muon_direction_shard(direction: DTensor, *, steps: int, eps: float) -> Tensor:
+    """Gather a BF16 Muon direction and return only this rank's result shard."""
+    full_direction = direction.to(torch.bfloat16).full_tensor()
+    orthogonal = newton_schulz_quintic(full_direction, steps=steps, eps=eps)
+    sharded = distribute_tensor(
+        orthogonal,
+        direction.device_mesh,
+        direction.placements,
+        src_data_rank=None,
+    )
+    local_direction = sharded.to_local().to(direction.dtype, copy=True)
+    return local_direction.mul_(_muon_shape_scale(direction))
 
 
-def _matrix_delta(
+def _matrix_step_(
     parameter: Tensor,
     direction: Tensor,
     *,
@@ -175,21 +183,46 @@ def _matrix_delta(
     ns_steps: int | None = None,
     muon_eps: float = _DEFAULT_EPS,
     clamp_final_norm: bool,
-) -> Tensor:
-    """Compute a HyperBall delta with global dense or local expert semantics."""
-    parameter_value, parameter_is_local_experts = _materialize_for_matrix_math(parameter)
-    direction_value, direction_is_local_experts = _materialize_for_matrix_math(direction)
-    if parameter_is_local_experts != direction_is_local_experts:
-        raise RuntimeError("parameter and optimizer direction have incompatible DTensor layouts")
-    if ns_steps is not None:
-        direction_value = _muon_direction(direction_value, steps=ns_steps, eps=muon_eps)
-    delta = _hyperball_delta(
-        parameter_value,
-        direction_value,
+) -> None:
+    """Update ``parameter`` in place, consuming ``direction`` as scratch storage."""
+    parameter_value = _move_to_mesh_device(parameter)
+    direction_value = _move_to_mesh_device(direction)
+    parameter_is_dtensor = isinstance(parameter_value, DTensor)
+    if parameter_is_dtensor != isinstance(direction_value, DTensor):
+        raise RuntimeError("parameter and optimizer direction have incompatible tensor layouts")
+    needs_local_muon_direction = ns_steps is not None
+    if parameter_is_dtensor:
+        assert isinstance(parameter_value, DTensor)
+        assert isinstance(direction_value, DTensor)
+        if (
+            parameter_value.device_mesh != direction_value.device_mesh
+            or parameter_value.placements != direction_value.placements
+        ):
+            raise RuntimeError("parameter and optimizer direction have incompatible DTensor layouts")
+        local_parameter = parameter_value.to_local()
+        if ns_steps is not None and not _is_expert_batch_sharded(direction_value):
+            local_direction = _gathered_muon_direction_shard(direction_value, steps=ns_steps, eps=muon_eps)
+            needs_local_muon_direction = False
+        else:
+            local_direction = direction_value.to_local()
+        reference = parameter_value
+    else:
+        local_parameter = parameter_value
+        local_direction = direction_value
+        reference = None
+    if needs_local_muon_direction:
+        assert ns_steps is not None
+        local_direction = _muon_direction(local_direction, steps=ns_steps, eps=muon_eps)
+
+    _hyperball_step_(
+        local_parameter,
+        local_direction,
+        reference=reference,
         lr=lr,
         clamp_final_norm=clamp_final_norm,
     )
-    return _redistribute_like(delta, parameter, local_expert_shard=parameter_is_local_experts)
+    if isinstance(parameter, DTensor):
+        parameter.to_local().copy_(local_parameter.to(parameter.to_local().device))
 
 
 class MuonH(Optimizer):
@@ -240,7 +273,7 @@ class MuonH(Optimizer):
                 direction = (
                     gradient.add(momentum_buffer, alpha=group["momentum"]) if group["nesterov"] else momentum_buffer
                 )
-                delta = _matrix_delta(
+                _matrix_step_(
                     parameter,
                     direction,
                     lr=group["lr"],
@@ -248,7 +281,6 @@ class MuonH(Optimizer):
                     muon_eps=group["eps"],
                     clamp_final_norm=True,
                 )
-                parameter.add_(delta)
         return loss
 
 
@@ -300,13 +332,12 @@ class AdamH(Optimizer):
                 bias_corrected_mean = exp_avg / (1 - beta1**step)
                 bias_corrected_variance = exp_avg_sq / (1 - beta2**step)
                 direction = bias_corrected_mean / (bias_corrected_variance.sqrt() + group["eps"])
-                delta = _matrix_delta(
+                _matrix_step_(
                     parameter,
                     direction,
                     lr=group["lr"],
                     clamp_final_norm=False,
                 )
-                parameter.add_(delta)
         return loss
 
 

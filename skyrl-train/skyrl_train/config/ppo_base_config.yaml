@@ -10,6 +10,15 @@ data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
+checkpoint_export:
+  step: null
+  checkpoint_path: null
+  export_root: null
+  hf_hub_repo_id: null
+  hf_hub_private: false
+  hf_hub_revision: main
+  hf_upload_mode: latest
+
 trainer:
   debug_mode: "off"
   placement:
@@ -30,6 +39,8 @@ trainer:
     grug_query_bias_update_mode: "frozen"
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      source_uri: null
+      source_identity: null
       lora:
           rank: 0
           alpha: 16
@@ -40,6 +51,7 @@ trainer:
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       optimizer: "AdamW"
+      fsdp_parameter_storage_dtype: null
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
@@ -100,6 +112,7 @@ trainer:
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       optimizer: "AdamW"
+      fsdp_parameter_storage_dtype: null
       lr: 5.0e-6
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
@@ -212,9 +225,9 @@ trainer:
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5
-  hf_save_interval: 5
+  hf_save_interval: ${trainer.ckpt_interval}
   hf_upload_mode: latest
-  export_path: "${oc.env:HOME}/exports/"
+  export_path: "${oc.env:HOME}/exports"
   bf16: true
   epochs: 1
   max_steps: null
@@ -326,7 +339,43 @@ generator:
 
   eval_n_samples_per_prompt: 1
 
-  zero_reward_on_non_stop: false
+  trajectory_reward_shaping:
+    schema_version: 1
+    enabled: false
+    loop:
+      window_tokens: 16
+      minimum_occurrences: 3
+      penalty_per_occurrence: 0.0
+      max_penalty: 0.2
+    non_termination:
+      penalty: 0.0
+      accepted_stop_reasons: [stop, complete, eos, end_turn]
+    successful_length:
+      free_tokens: 0
+      penalty_per_token: 0.0
+      max_penalty: 0.2
+
+  trajectory_retention:
+    enabled: true
+    output_path: ${trainer.export_path}/training_trajectories
+    run_id: ${trainer.run_name}
+    phases: [train]
+    sample_count_per_step: 1
+    sample_fraction: 0.0
+    always_retain_failures: true
+    always_retain_non_terminating: true
+    always_retain_loops: true
+    accepted_stop_reasons: ${generator.trajectory_reward_shaping.non_termination.accepted_stop_reasons}
+    reward_below: null
+    reward_above: null
+    max_bytes_per_step: 8388608
+    max_bytes_per_run: 268435456
+    required: false
+    redact_fields: []
+    model_path: ${trainer.policy.model.path}
+    model_source_identity: ${trainer.policy.model.source_identity}
+    resume_path: ${trainer.resume_path}
+    inference_backend: ${generator.backend}
 
   apply_overlong_filtering: false
 

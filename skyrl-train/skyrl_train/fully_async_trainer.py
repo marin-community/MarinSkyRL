@@ -17,7 +17,7 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
-from skyrl_train.utils.ppo_utils import normalize_advantages_dict
+from skyrl_train.utils.policy_math import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
@@ -379,7 +379,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # them even when an exception skips the per-epoch epilogue.
         self._active_generator_tasks: List[asyncio.Task] = []
 
-    def _build_train_dataloader_and_compute_training_steps(self):
+    def _configure_training_schedule(self):
         """
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """
@@ -393,24 +393,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
 
-    def _create_trainer_state(self, epoch: int) -> TrainerState:
-        """
-        Override to use num_steps_per_epoch for fully async training.
-
-        In fully async training, the dataloader has batch size of 1 and we
-        accumulate mini_batch_size samples before training, so the number
-        of steps per epoch is different from len(train_dataloader).
-        """
-        return TrainerState(
-            global_step=self.global_step,
-            epoch=epoch,
-            total_steps=self.total_training_steps,
-            num_steps_per_epoch=self.num_steps_per_epoch,
-            is_last_step=(self.global_step == self.total_training_steps),
-            is_epoch_end=(self.global_step % self.num_steps_per_epoch == 0) if self.num_steps_per_epoch > 0 else False,
-            metrics=dict(self.all_metrics),
-            timings=dict(self.all_timings),
-        )
+    def _num_steps_per_epoch(self) -> int:
+        """Account for fully async mini-batch accumulation."""
+        return self.num_steps_per_epoch
 
     def _cancel_generator_tasks(self) -> None:
         """Cancel any active generator tasks left over from an abnormal exit.
@@ -506,16 +491,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # dispatcher (gated; default OFF => no-op, self.generator unchanged).
         self._maybe_enable_rollout_fanout()
 
-        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
-        # This must happen before any generate() calls. When fan-out is enabled,
-        # self.generator is now the RolloutDispatcher, whose startup() builds the
-        # PlacementGroup + K coordinators and starts each coordinator's generator.
-        try:
-            await self.generator.startup()
-            logger.info("Generator startup complete")
-        except Exception as e:
-            logger.opt(depth=0).error("Generator startup failed: " + str(e))
-            raise
+        await self._startup_generator()
 
         try:
             await self._train_loop()
@@ -540,6 +516,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("load_checkpoints"):
                 self.global_step, checkpoint_path = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
+
                 if self.global_step > 0:
                     # Load data consumption state into the tracker
                     loaded = DataTrackingCallback.load_from_checkpoint(checkpoint_path, self.data_tracker)
@@ -776,8 +753,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # Handle HF model saving
                 if self._control.should_save_hf_model:
-                    with Timer("save_hf_model", self.all_timings):
-                        await asyncio.to_thread(self.save_models)
+                    await asyncio.to_thread(self.handle_hf_export)
                     self._control.should_save_hf_model = False
 
                 # Handle evaluation

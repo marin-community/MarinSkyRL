@@ -117,7 +117,6 @@ async def run_generator_end_to_end(
             "max_input_length": max_input_length,
             "batched": batched,
             "max_turns": max_turns,
-            "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
             "backend": "vllm",

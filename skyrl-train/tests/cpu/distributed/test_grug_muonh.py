@@ -10,7 +10,8 @@ import pytest
 import torch
 from torch import nn
 
-from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, resolve_fsdp_parameter_storage_dtype
 from skyrl_train.distributed.grug_muonh import GrugMuonH
 from skyrl_train.distributed.grug_muonh import build_grug_muonh, grug_muonh_route
 
@@ -168,6 +169,26 @@ def test_routes_and_three_step_jax_oracle():
             expert_norm = torch.linalg.vector_norm(parameters[PARAMETER_NAMES["expert"]], dim=(-2, -1))
             _assert_close(expert_norm, fixture[f"expert_norm_{step}"], muon_bf16=True)
             torch.testing.assert_close(expert_norm, initial_expert_norm, rtol=2e-5, atol=2e-6)
+
+
+def test_fsdp_parameter_storage_dtype_defaults_and_overrides_optimizer():
+    cfg = get_default_config()
+    policy = cfg.trainer.policy.optimizer_config
+    critic = cfg.trainer.critic.optimizer_config
+
+    assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.bfloat16
+    assert resolve_fsdp_parameter_storage_dtype(critic.optimizer, critic.fsdp_parameter_storage_dtype) == torch.bfloat16
+
+    policy.optimizer = "MuonH"
+    assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.float32
+    policy.fsdp_parameter_storage_dtype = "bfloat16"
+    assert resolve_fsdp_parameter_storage_dtype(policy.optimizer, policy.fsdp_parameter_storage_dtype) == torch.bfloat16
+
+    critic.fsdp_parameter_storage_dtype = "float32"
+    assert resolve_fsdp_parameter_storage_dtype(critic.optimizer, critic.fsdp_parameter_storage_dtype) == torch.float32
+
+    with pytest.raises(ValueError, match="must be float32 or bfloat16"):
+        resolve_fsdp_parameter_storage_dtype("AdamW", "float16")
 
 
 def test_fsdp_strategy_selects_only_explicit_muonh(monkeypatch):

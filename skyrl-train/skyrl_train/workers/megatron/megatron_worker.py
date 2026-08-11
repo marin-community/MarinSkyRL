@@ -7,6 +7,7 @@ from huggingface_hub import snapshot_download
 
 import asyncio
 import os
+from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from skyrl_train.utils.progress import tqdm
@@ -31,7 +32,6 @@ from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.models.grug_moe import validate_grug_training_strategy
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.utils.ppo_utils import TIS_DIAG_KEYS
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -41,6 +41,11 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+class _MegatronInitMode(StrEnum):
+    TRAINING = "training"
+    CHECKPOINT_EXPORT = "checkpoint-export"
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -371,11 +376,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
         )
 
-    def init_model(self, model_path, num_training_steps: int = 1e9):
-        """
-        Initialize the model, optimizer, and scheduler for the policy worker.
-        """
-        # initialize the bridge and provider objects
+    def _initialize_policy_modules(self, model_path: str, *, mode: _MegatronInitMode) -> None:
+        """Construct the shared Megatron model graph at the checkpoint geometry."""
+        for_training = mode is _MegatronInitMode.TRAINING
         self.init_configs(
             model_path,
             self.cfg.trainer.policy.megatron_config,
@@ -385,10 +388,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
         )
 
-        # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=True,
-            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
+            wrap_with_ddp=for_training,
+            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None,
             bf16=self.cfg.trainer.bf16,
         )
 
@@ -404,6 +406,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
+
+    def init_model(self, model_path, num_training_steps: int = 1e9):
+        """Initialize the model, optimizer, and scheduler for the policy worker."""
+        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING)
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
@@ -448,6 +454,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
+
+    def init_model_for_export(self, model_path: str) -> None:
+        """Initialize Megatron model structure without optimizer or training state."""
+        self._initialize_policy_modules(model_path, mode=_MegatronInitMode.CHECKPOINT_EXPORT)
+        self.model = MegatronModelWrapper(
+            config=self.cfg,
+            actor_module=self.actor_module,
+            logprob_chunk_size=OmegaConf.select(
+                self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
+            ),
+        )
 
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
@@ -525,23 +542,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
-                        status = {
-                            "final_loss": metrics["final_loss"],
-                            "policy_loss": metrics["policy_loss"],
-                            "policy_lr": self.optimizer.param_groups[0]["lr"],
-                            "ppo_clip_ratio": metrics["ppo_clip_ratio"],
-                            "policy_entropy": metrics["policy_entropy"],
-                        }
-                        if self.cfg.trainer.algorithm.use_kl_loss:
-                            status["policy_kl"] = metrics["policy_kl"]
-
-                        # TIS importance-ratio diagnostics, computed per micro-batch in
-                        # MegatronModelWrapper.forward_backward_mini_batch with the same
-                        # shared helper as the FSDP path. use_tis is uniform across ranks,
-                        # so every rank contributes the same key set to all_reduce(status).
-                        if self.cfg.trainer.algorithm.use_tis:
-                            for key in TIS_DIAG_KEYS:
-                                status[key] = metrics[key]
+                        status = metrics.copy()
+                        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+                        if not self.cfg.trainer.algorithm.use_kl_loss:
+                            status.pop("policy_kl")
 
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1 and grad_norm is not None:

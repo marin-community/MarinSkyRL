@@ -6,6 +6,7 @@ from cloud.iris.env_vars import (
     DEFAULT_NCCL_TRACE_BUFFER_SIZE as DEFAULT_NCCL_TRACE_BUFFER_SIZE,
     ENV_VAR_SPECS as ENV_VAR_SPECS,
     FR_DUMP_TEMP_FILE_ENV as FR_DUMP_TEMP_FILE_ENV,
+    HF_HUB_OFFLINE_ENV as HF_HUB_OFFLINE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV as NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     DistributedDebugMode as DistributedDebugMode,
     EnvVarManager as EnvVarManager,
@@ -14,5 +15,6 @@ from cloud.iris.env_vars import (
     ensure_debug_artifact_directories as ensure_debug_artifact_directories,
     managed_environment_names as managed_environment_names,
     nccl_diagnostics_environment as nccl_diagnostics_environment,
+    temporarily_unset_managed_environment as temporarily_unset_managed_environment,
     write_process_manifest as write_process_manifest,
 )

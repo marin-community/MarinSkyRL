@@ -6,7 +6,7 @@ Run the tools under `scripts/iris/` from the repository root.
 |---|---|
 | `iris_ops.py` | poll authoritative lifecycle state and wait for a terminal verdict |
 | `list_iris_jobs.py` | list jobs across configured clusters |
-| `watch_coreweave_rl.py` | capture a durable local evidence bundle |
+| `watch_coreweave_rl.py` | capture and summarize durable local RL evidence; see `watch-coreweave-rl.md` |
 | `analyze_coreweave_rl_job.py` | analyze a captured bundle; `--local-only` makes no remote calls |
 | `analyze_coreweave_rl_job_live.sh` | capture and analyze one live job |
 

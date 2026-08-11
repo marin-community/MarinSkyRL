@@ -1,28 +1,30 @@
 """
 Run with:
-uv run --isolated --group dev --extra cpu pytest tests/cpu/utils/test_ppo_utils.py
+uv run --isolated --group dev --extra cpu pytest tests/cpu/utils/test_policy_optimization.py
 """
 
 import torch
 import math
 import pytest
-from skyrl_train.utils.ppo_utils import (
-    reduce_loss,
-    compute_approx_kl,
+from omegaconf import OmegaConf
+from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs, reduce_loss
+from skyrl_train.utils.policy_math import compute_approx_kl
+from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_advantages_and_returns,
-    AdaptiveKLController,
-    FixedKLController,
+    compute_reinforce_plus_plus_outcome_advantage,
+    compute_rloo_outcome_advantage,
+)
+from skyrl_train.utils.kl_controllers import AdaptiveKLController, FixedKLController
+from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimatorRegistry,
     register_advantage_estimator,
     PolicyLossRegistry,
     register_policy_loss,
-    compute_reinforce_plus_plus_outcome_advantage,
-    compute_rloo_outcome_advantage,
-    compute_tis_diagnostics,
-    TIS_DIAG_KEYS,
 )
+from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics, TIS_DIAG_KEYS
+from skyrl_train.utils.utils import validate_cfg
 import numpy as np
 
 
@@ -313,8 +315,6 @@ def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
     that the *loss_reduction allow-list* never fires for a supported value.
     """
     pytest.importorskip("hydra")
-    from omegaconf import OmegaConf
-    from skyrl_train.utils.utils import validate_cfg
 
     cfg = _validatable_dummy_config()
     OmegaConf.update(cfg, "trainer.algorithm.loss_reduction", loss_reduction)
@@ -334,8 +334,6 @@ def test_global_loss_denom_driver_matches_allreduce_sum():
     the fix moves the collective off the async ppo_train hot path to a driver precompute
     and MUST NOT change Z.
     """
-    from skyrl_train.utils.ppo_utils import compute_global_loss_denom, count_nonzero_advantage_seqs
-
     torch.manual_seed(0)
     max_seq_len = 4096
     # A range of (world_size, dp_size) mesh geometries, including the 80B
@@ -536,7 +534,7 @@ def test_policy_loss_registry_specific():
 
     @register_policy_loss("test_policy_decorator")
     def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
-        return torch.tensor(1.5), 0.3
+        return torch.tensor(1.5), {"ppo_clip_ratio": 0.3}
 
     # Test decorator worked
     assert "test_policy_decorator" in PolicyLossRegistry.list_available()
@@ -545,14 +543,14 @@ def test_policy_loss_registry_specific():
 
     # Test function execution
     config = DictConfig({"policy_loss_type": "test_policy_decorator"})
-    loss, clip_ratio = retrieved(
+    loss, metrics = retrieved(
         log_probs=torch.tensor([[0.1]]),
         old_log_probs=torch.tensor([[0.2]]),
         advantages=torch.tensor([[1.0]]),
         config=config,
     )
     assert loss.item() == 1.5
-    assert clip_ratio == 0.3
+    assert metrics["ppo_clip_ratio"] == 0.3
 
     # Test error message includes "Policy loss"
     with pytest.raises(ValueError, match="Unknown policy loss"):
@@ -560,6 +558,51 @@ def test_policy_loss_registry_specific():
 
     # Clean up
     PolicyLossRegistry.unregister("test_policy_decorator")
+
+
+def test_package_initialization_registers_complete_builtin_algorithm_sets():
+    assert set(PolicyLossRegistry.list_available()) >= {
+        "regular",
+        "dual_clip",
+        "gspo",
+        "cispo",
+        "clip_cov",
+        "kl_cov",
+        "sapo",
+    }
+    assert set(AdvantageEstimatorRegistry.list_available()) >= {
+        "gae",
+        "grpo",
+        "rloo",
+        "rloo_n",
+        "rloo_n_pbs",
+        "reinforce++",
+    }
+
+
+def test_validate_cfg_preserves_custom_policy_loss():
+    def custom_policy_loss(*args, **kwargs):
+        return torch.tensor(0.0), {}
+
+    PolicyLossRegistry.register("custom_policy", custom_policy_loss)
+    cfg = _validatable_dummy_config()
+    OmegaConf.update(cfg, "trainer.algorithm.policy_loss_type", "custom_policy")
+    OmegaConf.update(cfg, "generator.num_inference_engines", 1)
+    OmegaConf.update(cfg, "generator.inference_engine_tensor_parallel_size", 1)
+    OmegaConf.update(cfg, "generator.inference_engine_pipeline_parallel_size", 1)
+    OmegaConf.update(cfg, "generator.inference_engine_data_parallel_size", 1)
+    try:
+        validate_cfg(cfg)
+        assert PolicyLossRegistry.get("custom_policy") is custom_policy_loss
+    finally:
+        PolicyLossRegistry.unregister("custom_policy")
+
+
+def _remove_registry_entries(registry, *names: str) -> None:
+    for name in names:
+        if name in registry.list_available():
+            registry.unregister(name)
+    registry.shutdown_actor()
 
 
 @pytest.mark.usefixtures("ray_module")
@@ -571,10 +614,10 @@ def test_registry_cross_ray_process():
 
         # Create test functions
         def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(2.0), 0.5
+            return torch.tensor(2.0), {"ppo_clip_ratio": 0.5}
 
         def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(3.0), 0.6
+            return torch.tensor(3.0), {"ppo_clip_ratio": 0.6}
 
         def test_advantage_estimator(**kwargs):
             rewards = kwargs["token_level_rewards"]
@@ -590,7 +633,7 @@ def test_registry_cross_ray_process():
             policy_loss = PolicyLossRegistry.get("cross_process_test")
             adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
 
-            loss, clip_ratio = policy_loss(
+            loss, metrics = policy_loss(
                 log_probs=torch.tensor([[0.1]]),
                 old_log_probs=torch.tensor([[0.2]]),
                 advantages=torch.tensor([[1.0]]),
@@ -602,28 +645,28 @@ def test_registry_cross_ray_process():
                 response_mask=torch.tensor([[1.0, 1.0]]),
                 index=np.array(["0", "0"]),
             )
-            return loss, clip_ratio, adv, ret
+            return loss, metrics, adv, ret
 
         # Run Ray task
-        loss, clip_ratio, adv, ret = ray.get(test_ray_registry_access.remote())
+        loss, metrics, adv, ret = ray.get(test_ray_registry_access.remote())
         assert loss.item() == 2.0
-        assert clip_ratio == 0.5
+        assert metrics["ppo_clip_ratio"] == 0.5
         assert adv.shape == torch.Size([1, 2])
         assert ret.shape == torch.Size([1, 2])
 
         # test that registration works after ray init as well
         PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
-        loss_2, clip_ratio_2 = PolicyLossRegistry.get("cross_process_test_2")(
+        loss_2, metrics_2 = PolicyLossRegistry.get("cross_process_test_2")(
             log_probs=torch.tensor([[0.1]]),
             old_log_probs=torch.tensor([[0.2]]),
             advantages=torch.tensor([[1.0]]),
             config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
         )
         assert loss_2.item() == 3.0
-        assert clip_ratio_2 == 0.6
+        assert metrics_2["ppo_clip_ratio"] == 0.6
     finally:
-        PolicyLossRegistry.reset()
-        AdvantageEstimatorRegistry.reset()
+        _remove_registry_entries(PolicyLossRegistry, "cross_process_test", "cross_process_test_2")
+        _remove_registry_entries(AdvantageEstimatorRegistry, "cross_process_adv_test")
 
 
 @pytest.mark.usefixtures("ray_module")
@@ -670,13 +713,13 @@ def test_registry_named_actor_creation():
         assert torch.allclose(result[1], test_rewards * 3)
 
     finally:
-        AdvantageEstimatorRegistry.reset()
+        _remove_registry_entries(AdvantageEstimatorRegistry, "named_actor_test")
 
 
 @pytest.mark.usefixtures("ray_module")
-def test_registry_reset_after_ray_shutdown():
+def test_registry_reconnects_after_ray_shutdown():
     """
-    Test that the registry resets properly after ray is shutdown.
+    Test that the registry reconnects properly after Ray is shut down.
 
     This mimics when we run multiple unit tests in a row with ray inits and shutdowns.
     """
@@ -705,13 +748,15 @@ def test_registry_reset_after_ray_shutdown():
         ray.kill(ray.get_actor(AdvantageEstimatorRegistry._actor_name))
         ray.shutdown()
 
-        # 3. Initialize ray, reset registry, and register function
+        AdvantageEstimatorRegistry.unregister("named_actor_test")
+        AdvantageEstimatorRegistry.shutdown_actor()
+
+        # 3. Initialize Ray and register the function against a fresh actor.
         ray.init()
-        AdvantageEstimatorRegistry.reset()
         _register_func_and_verify()
 
     finally:
-        AdvantageEstimatorRegistry.reset()
+        _remove_registry_entries(AdvantageEstimatorRegistry, "named_actor_test")
         ray.shutdown()
 
 

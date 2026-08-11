@@ -10,20 +10,37 @@ MARINSKYRL_REPOSITORY = "https://github.com/marin-community/MarinSkyRL.git"
 MARINSKYRL_TASK_ROOT = "/app/marinskyrl"
 MARINSKYRL_ACTIVATION_FILE = f"{MARINSKYRL_TASK_ROOT}/.iris-runtime-env"
 MARINSKYRL_BOOTSTRAP_SCRIPT = "cloud/iris/bootstrap_runtime.sh"
+CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
 
 
 class RuntimeProfile(StrEnum):
-    """Locked dependency set installed for one training strategy."""
+    """Locked dependency set installed for training or checkpoint conversion."""
 
     FSDP = "fsdp"
+    FSDP_EXPORT = "fsdp-export"
+    DEEPSPEED = "deepspeed"
+    DEEPSPEED_EXPORT = "deepspeed-export"
     MEGATRON = "megatron"
+    MEGATRON_EXPORT = "megatron-export"
 
 
-def runtime_profile_for_strategy(strategy: str | None) -> RuntimeProfile:
+class RuntimeMode(StrEnum):
+    TRAINING = "training"
+    CHECKPOINT_EXPORT = "checkpoint-export"
+
+
+def runtime_profile_for_strategy(
+    strategy: str | None,
+    *,
+    mode: RuntimeMode = RuntimeMode.TRAINING,
+) -> RuntimeProfile:
     """Return the locked dependency profile for a trainer strategy."""
+    checkpoint_export = mode is RuntimeMode.CHECKPOINT_EXPORT
     if strategy == "megatron":
-        return RuntimeProfile.MEGATRON
-    return RuntimeProfile.FSDP
+        return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON
+    if strategy == "deepspeed":
+        return RuntimeProfile.DEEPSPEED_EXPORT if checkpoint_export else RuntimeProfile.DEEPSPEED
+    return RuntimeProfile.FSDP_EXPORT if checkpoint_export else RuntimeProfile.FSDP
 
 
 def task_setup_script(commit: str, profile: RuntimeProfile) -> str:

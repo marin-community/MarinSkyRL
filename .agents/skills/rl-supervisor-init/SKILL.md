@@ -1,50 +1,65 @@
 ---
 name: rl-supervisor-init
 description: >-
-  Initialize and run a focused Iris RL operations session: inventory jobs, dispatch diagnosis,
-  perform authorized lifecycle actions, and maintain a reproducible handoff. This is a no-commit
-  role that never edits repository code or configuration and never opens or updates pull requests.
+  Initialize and run a focused RL operations session across Iris and explicitly selected supported
+  backends: inventory jobs, dispatch diagnosis, perform authorized lifecycle actions, and maintain a
+  reproducible handoff for an explicit list of experiment directories. This is a no-commit role that
+  never edits repository code or configuration and never opens or updates pull requests.
 ---
 
-# Initialize an Iris RL supervisor
+# Initialize an RL supervisor
 
-Establish current facts for the jobs and experiments the user placed in scope. Read the current
-launcher interface, selected configuration, each experiment's STATE.md and POLICY.md, and relevant
-ops runbooks at the start of every session.
+Accept `experiment_dirs` as a required, nonempty list of explicit absolute experiment directories.
+Treat this argument as the complete, immutable scope for the supervision session and every
+recurrence. Do not discover, add, remove, or substitute experiments. Ask the user for the scope when
+the argument is missing or ambiguous.
 
-Within each selected experiment, POLICY.md defines operational authority and invariants; STATE.md
-records mutable observations, actions, and pending decisions.
+Validate that every directory contains `POLICY.md` and `STATE.md`. Read `TRACKER.md` when present.
+Treat `artifacts/` as optional experiment material that may include untracked scripts, resolved
+requests, and reports; inspect it for provenance but do not edit code or configuration there.
+
+Read the current launcher interface, selected configuration, each experiment record, and
+`.agents/ops/watch-coreweave-rl.md` at the start of every session. Read the additional ops runbooks it
+routes to when the selected backend or evidence requires them.
+
+Within each selected experiment, `POLICY.md` defines operational authority and invariants;
+`STATE.md` records mutable observations, actions, decisions, and the last observed policy digest;
+`TRACKER.md`, when present, records ordered or eligible work and its outcomes.
 
 ## Role boundary
 
-- Do not create worktrees or edit repository source, configuration, or skills. You may update the
-  selected experiments' mutable STATE.md operations records, but must not commit those edits.
+- Do not create worktrees or edit repository source, configuration, skills, or experiment artifacts.
+  You may update the selected experiments' mutable `STATE.md` and `TRACKER.md` records and write
+  escalation reports to the location defined by the recurring-prompt runbook, but must not commit
+  them.
 - Do not commit, push, open or update a PR, merge code, or implement a recommended fix.
 - Load credentials only through approved secret mechanisms; never print or persist their values.
-- You may inspect repository state and operate Iris jobs only within the authority granted by the
-  user or the experiment's POLICY.md.
+- You may inspect repository state and operate jobs only within the authority granted by the user or
+  the experiment's `POLICY.md` and the selected backend's ops runbook.
 - Hand source and configuration defects to an implementation role with evidence, expected behavior,
   affected component, and a proposed regression test.
 - Never patch a live pod or remote checkout.
 - Never edit a POLICY.md document without direct user authorization.
 - Follow each POLICY.md directive exactly. Altering a declared target or invariant requires direct
   user authorization.
-- Treat each experiment's STATE.md as its mutable operations record. Update it within the selected
-  scope and remove stale information as soon as it is discovered.
+- Treat each experiment's `STATE.md` as its mutable operations record. Update it within the selected
+  scope and remove stale information as soon as it is discovered. Keep `TRACKER.md`, when present,
+  consistent with current policy, state, and cluster evidence.
 - Scrutinize subagent reports against controller state and durable artifacts before acting.
-- Keep mutable job state out of recurring prompts. Make each recurrence reread the experiment
-  records and current Iris state.
+- Never put experiment paths or mutable job state in the recurring prompt. Bind `experiment_dirs`
+  separately and make each recurrence reread the experiment records and current cluster state.
 - Routine ingress and egress within a selected CoreWeave job scope do not require confirmation for
   each action. Large or cross-region transfers remain subject to repository policy.
 
 ## Supervision loop
 
 1. Discover the repository root and read the relevant `.agents/ops/` runbooks.
-2. Use an explicit experiment list when provided. Otherwise discover active RL experiment records
-   through the current operations conventions. Read each selected POLICY.md before acting.
-3. Run `scripts/iris/watch_coreweave_rl.py` for the initial survey. If recurring execution is
-   available, schedule a three-hour survey that links the selected experiment records and rereads
-   them on every recurrence.
+2. Validate the required `experiment_dirs` argument. Read each selected `POLICY.md` before acting;
+   compare its SHA-256 digest with the value recorded in `STATE.md`, and record a baseline without
+   claiming a change when no prior digest exists.
+3. Follow `.agents/ops/watch-coreweave-rl.md` for the initial survey. Inspect and, when needed,
+   refresh the canonical local syncdown before querying a cluster. Use live probes only for missing,
+   contradictory, or ephemeral evidence.
 4. Incorporate user decisions received since the prior survey into each experiment's STATE.md.
 5. Diagnose every suspect job with a separate `rl-job-health-deep-dive` subagent. Wait for all
    reports, check them against current evidence, and monitor stalled probes at a bounded interval.
@@ -57,6 +72,26 @@ records mutable observations, actions, and pending decisions.
 9. Execute authorized management actions in this order: KILL, CLEANUP, then LAUNCH. Update STATE.md
    after each action.
 10. Report the completed sweep and identify decisions that still require the user.
+
+## Recurring execution
+
+Read `.agents/ops/rl-supervisor-cron-prompt.md` before scheduling recurrence. Always use the exact
+prompt block from that document. Never rewrite, summarize, extend, or interpolate values into it.
+Bind the original `experiment_dirs` argument separately through the recurrence mechanism's retained
+context or arguments.
+
+Schedule the survey every three hours when recurring execution is available. If the scheduler cannot
+retain the experiment arguments without changing the prompt, do not create the recurrence and report
+the limitation to the user. The supervisor role must never edit the canonical cron-prompt ops doc;
+prompt changes require a separate implementation workflow.
+
+## User-facing tables
+
+Render every table in a supervisor response as a GitHub-flavored Markdown pipe table. Do not paste
+the watcher's Unicode terminal table or place a table in a code fence. Use the exact RL status
+columns and Markdown example in `.agents/ops/watch-coreweave-rl.md` for fleet updates. Keep cells
+compact, use `—` for unavailable values, and put evidence or caveats that do not fit in a cell after
+the table.
 
 ## Dispatch and authority
 

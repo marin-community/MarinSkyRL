@@ -18,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -122,3 +124,37 @@ def test_direct_ingress_never_clobbers_a_real_openai_api_key(monkeypatch):
     runner = LocalRLRunner(cfg)
     with runner._ingress_context():
         assert os.environ["OPENAI_API_KEY"] == "sk-real-host-key"
+
+
+def test_checkpoint_export_entrypoint_bypasses_rollout_environment(monkeypatch):
+    config_path = _REPO_ROOT / "cloud" / "iris" / "configs" / "delphi_math_rl.yaml"
+    cfg = LocalRLConfig(
+        rl_config_path=str(config_path),
+        job_name="checkpoint-export",
+        model_path="Qwen/Qwen3-8B",
+        entrypoint="skyrl_train.entrypoints.checkpoint_export",
+        gpus=4,
+    )
+    runner = LocalRLRunner(cfg)
+    invocation = {}
+
+    monkeypatch.setattr(
+        runner,
+        "_setup_environment",
+        lambda _args: pytest.fail("checkpoint export must not configure the rollout runtime"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_skyrl",
+        lambda entrypoint, hydra_args: invocation.update(entrypoint=entrypoint, hydra_args=hydra_args) or 0,
+    )
+
+    assert runner.run() == 0
+    assert invocation["entrypoint"] == "skyrl_train.entrypoints.checkpoint_export"
+    assert invocation["hydra_args"]
+    assert "trainer.placement.policy_num_gpus_per_node=4" in invocation["hydra_args"]
+    assert not any(
+        argument.startswith(("data.", "generator.", "environment.")) for argument in invocation["hydra_args"]
+    )
+    assert not any("trainer.ckpt_path=" in argument for argument in invocation["hydra_args"])
+    assert not any("trainer.export_path=" in argument for argument in invocation["hydra_args"])

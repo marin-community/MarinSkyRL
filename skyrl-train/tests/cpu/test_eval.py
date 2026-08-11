@@ -33,7 +33,7 @@ class DummyGenerator(GeneratorInterface):
         self.output = output
         self.seen_inputs = []
 
-    async def generate(self, input_batch):
+    async def _generate(self, input_batch, disable_tqdm: bool = False):
         self.seen_inputs.append(input_batch)
         return self.output
 

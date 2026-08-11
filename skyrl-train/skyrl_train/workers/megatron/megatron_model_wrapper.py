@@ -14,7 +14,9 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.utils.ppo_utils import compute_approx_kl, compute_tis_diagnostics, masked_mean
+from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean
+from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
+from skyrl_train.utils.policy_losses import complete_clip_metrics
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -259,7 +261,7 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
 
             # policy loss should be calculated based on the selected token logprobs
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, policy_loss_metrics = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -296,9 +298,9 @@ class MegatronModelWrapper:
                 "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
-                "ppo_clip_ratio": clip_ratio,
                 "policy_kl": kl_loss.detach().item(),
             }
+            metrics.update(complete_clip_metrics(policy_loss_metrics))
             # TIS importance-ratio diagnostics — same helper as the FSDP path
             # (PolicyWorkerBase.training_step), so both backends emit identical
             # keys with identical semantics. The helper's fallback branch keeps

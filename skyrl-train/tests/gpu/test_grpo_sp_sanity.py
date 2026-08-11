@@ -21,7 +21,7 @@ from skyrl_train.trainer import RayPPOTrainer
 import ray
 from tqdm import tqdm
 from skyrl_train.utils import Timer
-from skyrl_train.utils.ppo_utils import normalize_advantages_dict
+from skyrl_train.utils.policy_math import normalize_advantages_dict
 
 
 import asyncio

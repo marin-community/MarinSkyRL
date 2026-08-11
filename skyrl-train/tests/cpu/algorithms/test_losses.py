@@ -8,7 +8,76 @@ import pytest
 import torch
 from omegaconf import DictConfig
 
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean, reduce_loss
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
+from skyrl_train.utils.policy_math import masked_mean
+from skyrl_train.utils.loss_reduction import reduce_loss
+
+
+def _clipping_config(loss_name: str, *, eps_clip_low: float, eps_clip_high: float) -> DictConfig:
+    return DictConfig(
+        {
+            "eps_clip_low": eps_clip_low,
+            "eps_clip_high": eps_clip_high,
+            "clip_ratio_c": 3.0,
+            "policy_loss_type": loss_name,
+            "loss_reduction": "sequence_mean",
+            "max_seq_len": 2,
+            "use_tis": False,
+            "cispo": {
+                "cispo_eps_clip_low": eps_clip_low,
+                "cispo_eps_clip_high": eps_clip_high,
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("loss_name", ["regular", "gspo", "cispo"])
+def test_clip_bounds_control_only_their_ratio_side(loss_name: str):
+    loss_fn = PolicyLossRegistry.get(loss_name)
+    old_log_probs = torch.zeros((2, 1))
+    log_probs = torch.log(torch.tensor([[0.75], [1.10]]))
+    advantages = torch.tensor([[-1.0], [1.0]])
+    low_token = torch.tensor([[1.0], [0.0]])
+    high_token = torch.tensor([[0.0], [1.0]])
+
+    base = _clipping_config(loss_name, eps_clip_low=0.2, eps_clip_high=0.05)
+    wider_low = _clipping_config(loss_name, eps_clip_low=0.3, eps_clip_high=0.05)
+    wider_high = _clipping_config(loss_name, eps_clip_low=0.2, eps_clip_high=0.2)
+
+    base_low_loss, _ = loss_fn(log_probs, old_log_probs, advantages, base, low_token)
+    base_high_loss, _ = loss_fn(log_probs, old_log_probs, advantages, base, high_token)
+    wider_low_low_loss, _ = loss_fn(log_probs, old_log_probs, advantages, wider_low, low_token)
+    wider_low_high_loss, _ = loss_fn(log_probs, old_log_probs, advantages, wider_low, high_token)
+    wider_high_low_loss, _ = loss_fn(log_probs, old_log_probs, advantages, wider_high, low_token)
+    wider_high_high_loss, _ = loss_fn(log_probs, old_log_probs, advantages, wider_high, high_token)
+
+    assert wider_low_low_loss.item() != pytest.approx(base_low_loss.item())
+    assert wider_low_high_loss.item() == pytest.approx(base_high_loss.item())
+    assert wider_high_low_loss.item() == pytest.approx(base_low_loss.item())
+    assert wider_high_high_loss.item() != pytest.approx(base_high_loss.item())
+
+
+@pytest.mark.parametrize("loss_name", ["regular", "gspo", "cispo"])
+def test_policy_loss_reports_clip_decisions_and_pressure_by_ratio_side(loss_name: str):
+    loss_fn = PolicyLossRegistry.get(loss_name)
+    old_log_probs = torch.zeros((4, 1))
+    log_probs = torch.log(torch.tensor([[0.75], [0.85], [1.10], [1.02]]))
+    advantages = torch.tensor([[-1.0], [-1.0], [1.0], [1.0]])
+
+    _, metrics = loss_fn(
+        log_probs,
+        old_log_probs,
+        advantages,
+        _clipping_config(loss_name, eps_clip_low=0.2, eps_clip_high=0.05),
+    )
+
+    assert metrics == {
+        "ppo_clip_ratio": pytest.approx(0.5),
+        "ppo_clip_ratio_low": pytest.approx(0.25),
+        "ppo_clip_ratio_high": pytest.approx(0.25),
+        "ppo_clip_pressure_low": pytest.approx(0.25),
+        "ppo_clip_pressure_high": pytest.approx(0.25),
+    }
 
 
 # Adapted a good test from NeMO-RL
@@ -475,11 +544,11 @@ def test_clip_cov_policy_loss():
     clip_cov_fn = PolicyLossRegistry.get("clip_cov")
 
     # Calculate loss
-    loss, clip_frac = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, metrics = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert 0 <= clip_frac <= 1, f"Clip fraction should be between 0 and 1, got {clip_frac}"
+    assert 0 <= metrics["ppo_clip_ratio"] <= 1
 
     # Compare with regular PPO (should be different due to covariance correction)
     regular_config = DictConfig(
@@ -494,7 +563,7 @@ def test_clip_cov_policy_loss():
     )
 
     regular_fn = PolicyLossRegistry.get("regular")
-    regular_loss, regular_clip_frac = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
+    regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # Clip-Cov should give different results due to covariance-based correction
     assert not torch.allclose(loss, regular_loss, rtol=1e-3), (
@@ -537,11 +606,11 @@ def test_kl_cov_policy_loss():
     kl_cov_fn = PolicyLossRegistry.get("kl_cov")
 
     # Calculate loss
-    loss, clip_frac = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, metrics = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert clip_frac == 0.0, "KL-Cov should return 0.0 for clipfrac value"
+    assert metrics == {}
 
     # Compare with regular PPO (should be different due to KL regularization)
     regular_config = DictConfig(
@@ -590,7 +659,7 @@ def test_sapo_policy_loss_basic():
     loss_fn = PolicyLossRegistry.get("sapo")
 
     # Actual SAPO loss
-    actual_loss, actual_clip_ratio = loss_fn(
+    actual_loss, metrics = loss_fn(
         log_probs=log_probs,
         old_log_probs=old_log_probs,
         advantages=advantages,
@@ -618,8 +687,7 @@ def test_sapo_policy_loss_basic():
 
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)
 
-    # SAPO should always report clip_ratio = 0.0
-    assert actual_clip_ratio == 0.0
+    assert metrics == {}
 
 
 def test_reduce_loss_seq_mean_token_sum_norm_global():

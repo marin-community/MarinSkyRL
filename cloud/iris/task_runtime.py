@@ -42,7 +42,8 @@ from cloud.iris.env_vars import (
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     ensure_debug_artifact_directories,
 )
-from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
+from cloud.iris.model_paths import unsupported_model_path_message
+from marinskyrl.resource_locator import is_cloud_uri
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
@@ -288,7 +289,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     huggingface_hub caches HF_HUB_OFFLINE into a module constant at import). The
     ranks' env is untouched.
     """
-    if is_object_store_model_path(model_path):
+    if is_cloud_uri(model_path):
         raise ValueError(unsupported_model_path_message(model_path))
     if not model_path or os.path.isdir(model_path):
         _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")
@@ -410,7 +411,8 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
     before Ray bootstrap.
 
     Args:
-        model_path: HF repo-id already staged into the node-local cache (see ``stage_model``).
+        model_path: HF repo ID staged in the node-local cache or an object-store model's
+            materialized local directory.
         template_repo_rel: chat-template jinja path, resolved against the in-pod repo root.
 
     Raises:
@@ -475,6 +477,17 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
         f"apply_policy_chat_template: delphi_v0 applied + verified for {model_path} "
         f"(chat_template len={len(ct)}, tokens OK) on rank {_rank()}/{_num_tasks()} (snapshot={snap})"
     )
+
+
+def policy_chat_template_model(prestage_model: str, model_local_path: str) -> str:
+    """Return the model directory or Hub ID whose tokenizer should be rewritten."""
+    model_path = prestage_model or model_local_path
+    if not model_path:
+        raise ValueError(
+            "--policy-chat-template requires --prestage-model or --model-local-path "
+            "(the template override rewrites the materialized model tokenizer)"
+        )
+    return model_path
 
 
 def _rank() -> int:
@@ -1493,7 +1506,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--model-local-path",
         default="",
-        help="Deterministic node-local directory for --model-source-uri.",
+        help="Task-local model directory, either pre-existing or populated from --model-source-uri.",
     )
     parser.add_argument(
         "--model-source-identity",
@@ -1506,7 +1519,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Repo-relative path to a chat-template jinja to FORCE onto the policy "
         "tokenizer's cached tokenizer_config.json + chat_template.jinja on EVERY node "
         "before Ray (delphi single-turn RLVR: the SFT repo ships no template). Requires "
-        "--prestage-model. Empty = no override (byte-identical to today).",
+        "--prestage-model or --model-local-path. Empty disables the override.",
     )
     args, train_argv = parser.parse_known_args()
     # argparse leaves the `--` separator out of train_argv; strip a leading one
@@ -1569,15 +1582,11 @@ def main() -> None:
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
         stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
-    # Force the policy chat template onto the (now warm) node-local tokenizer cache on
-    # EVERY node, before Ray — the training driver's tokenizer may load on any node.
+    # Force the policy chat template onto the staged Hub snapshot or materialized local
+    # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
-        if not args.prestage_model:
-            raise ValueError(
-                "--policy-chat-template requires --prestage-model (the template override "
-                "rewrites the node-local HF cache the prestage populated)."
-            )
-        apply_policy_chat_template(args.prestage_model, args.policy_chat_template)
+        model_path = policy_chat_template_model(args.prestage_model, args.model_local_path)
+        apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
     if rank == 0:
         exit_code = run_head(args, train_argv, derived_gloo_ifname)

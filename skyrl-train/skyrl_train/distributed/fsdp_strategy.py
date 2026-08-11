@@ -46,6 +46,25 @@ from transformers.trainer import get_scheduler
 
 from packaging import version
 
+
+_DEFAULT_OPTIMIZER_NAME = "AdamW"
+_MUONH_OPTIMIZER_NAME = "MuonH"
+
+
+def resolve_fsdp_parameter_storage_dtype(optimizer_name: str, configured_dtype: str | None) -> torch.dtype:
+    """Return the FSDP parameter storage dtype.
+
+    An unset dtype preserves MuonH parameters in FP32 and stores parameters for every other optimizer in BF16.
+    """
+    if configured_dtype is None:
+        return torch.float32 if optimizer_name == _MUONH_OPTIMIZER_NAME else torch.bfloat16
+    if PrecisionType.is_fp32(configured_dtype):
+        return torch.float32
+    if PrecisionType.is_bf16(configured_dtype):
+        return torch.bfloat16
+    raise ValueError(f"fsdp_parameter_storage_dtype must be float32 or bfloat16, got {configured_dtype!r}")
+
+
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy
 elif version.parse(torch.__version__) >= version.parse("2.4"):
@@ -80,8 +99,17 @@ class FSDPStrategy(DistributedStrategy):
         self.seed = seed
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
-        self.optimizer_name = optimizer_config.get("optimizer", "AdamW") if optimizer_config is not None else None
-        self.is_muonh_optimizer = self.optimizer_name == "MuonH"
+        self.optimizer_name = (
+            optimizer_config.get("optimizer", _DEFAULT_OPTIMIZER_NAME)
+            if optimizer_config is not None
+            else _DEFAULT_OPTIMIZER_NAME
+        )
+        configured_storage_dtype = (
+            optimizer_config.get("fsdp_parameter_storage_dtype", None) if optimizer_config is not None else None
+        )
+        self.parameter_storage_dtype = resolve_fsdp_parameter_storage_dtype(
+            self.optimizer_name, configured_storage_dtype
+        )
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
@@ -474,7 +502,6 @@ class FSDPStrategy(DistributedStrategy):
         optim_config = self.optimizer_config
         if optim_config is not None:
             optimizer_name = self.optimizer_name
-            assert optimizer_name is not None
             if optimizer_name == "Muon":
                 # Hybrid Muon recipe: Muon on the 2-D hidden matmul weights,
                 # AdamW on embeddings / final head / norms / biases / 1-D params.
@@ -495,7 +522,7 @@ class FSDPStrategy(DistributedStrategy):
                     f"(lr={optim_config.lr}). Muon params (first 6): "
                     f"{new_optimizer._muon_param_names[:6]}"
                 )
-            elif optimizer_name == "MuonH":
+            elif optimizer_name == _MUONH_OPTIMIZER_NAME:
                 # Exact Grug production recipe. This is deliberately separate
                 # from the generic "Muon" ablation above.
                 ep_size = int(self.fsdp_config.get("expert_model_parallel_size", 1))
@@ -747,8 +774,7 @@ class FSDPStrategy(DistributedStrategy):
         scheduler=None,
         tag=None,
         load_module_strict=True,
-        load_optimizer_states=True,
-        load_lr_scheduler_states=True,
+        load_training_state=True,
     ):
         """Load model checkpoint for FSDP"""
         import warnings
@@ -768,34 +794,39 @@ class FSDPStrategy(DistributedStrategy):
         rank = self.get_rank()
         world_size = self.world_size
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-            # Check if checkpoint files exist
-            if not io.exists(model_path):
-                raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-            if not io.exists(extra_path):
-                raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        if not io.exists(model_path):
+            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+        if load_training_state and not io.exists(extra_path):
+            raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        optim_exists = load_training_state and io.exists(optim_path)
 
-            # Optimizer path is optional since we may not save optimizer states initially
-            optim_exists = io.exists(optim_path)
-
-            self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        if load_training_state:
             self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
-            if optim_exists:
-                self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
+        if optim_exists:
+            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
-            # Load state dictionaries from disk
-            with io.open_file(model_path, "rb") as f:
+        checkpoint_paths = [model_path]
+        if optim_exists:
+            checkpoint_paths.append(optim_path)
+        if load_training_state:
+            checkpoint_paths.append(extra_path)
+        with io.local_read_files(checkpoint_paths) as local_paths:
+            staged_paths = dict(zip(checkpoint_paths, local_paths, strict=True))
+            with io.open_file(staged_paths[model_path], "rb") as f:
                 model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
-            with io.open_file(extra_path, "rb") as f:
-                extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            extra_state_dict = {}
+            if load_training_state:
+                with io.open_file(staged_paths[extra_path], "rb") as f:
+                    extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
             optimizer_state_dict = {}
-            if optim_exists and load_optimizer_states:
-                with io.open_file(optim_path, "rb") as f:
+            if optim_exists:
+                with io.open_file(staged_paths[optim_path], "rb") as f:
                     optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
@@ -814,17 +845,17 @@ class FSDPStrategy(DistributedStrategy):
                 self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
                 # Load optimizer state dict if optimizer object is provided and loading is requested
-                if optimizer is not None and load_optimizer_states and optimizer_state_dict:
+                if optimizer is not None and optimizer_state_dict:
                     optimizer.load_state_dict(optimizer_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
 
                 # Load scheduler state dict if scheduler object is provided and loading is requested
-                if scheduler is not None and load_lr_scheduler_states:
+                if scheduler is not None and load_training_state:
                     scheduler.load_state_dict(lr_scheduler_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
 
         # Load RNG state for reproducibility
-        if "rng" in extra_state_dict:
+        if load_training_state and "rng" in extra_state_dict:
             self.load_rng_state(extra_state_dict["rng"])
 
         # Wait for all ranks to finish loading
@@ -904,7 +935,8 @@ class FSDPStrategy(DistributedStrategy):
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
-        dist.barrier()
+        # The Ray caller waits for every rank result. A trailing process-group
+        # barrier would only make idle ranks inherit rank 0's serialization timeout.
 
     # GroupedMoEShim ``.mlp.moe.`` segment + FSDP ``_fsdp_wrapped_module`` segment that
     # sit between the HF ``...mlp.`` prefix and the grouped ``experts.w1/...`` / ``router.gate``

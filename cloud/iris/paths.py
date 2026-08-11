@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from cloud.iris.hf_datasets import is_hf_dataset_path
+from marinskyrl.resource_locator import is_hugging_face_repo_id
 
 # cloud/iris/paths.py -> cloud/iris -> cloud -> repo root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -60,8 +60,7 @@ def looks_like_file_path(value: str) -> bool:
     if not isinstance(value, str) or not value:
         return False
 
-    # If it matches HF dataset pattern, it's not a file path.
-    if is_hf_dataset_path(value):
+    if is_hugging_face_repo_id(value):
         return False
 
     if value.startswith("/") or value.startswith("~"):

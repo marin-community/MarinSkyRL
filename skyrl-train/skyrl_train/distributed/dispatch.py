@@ -224,6 +224,45 @@ class ActorInfo:
     rank: MeshRank
 
 
+class WorkerGroupTaskError(RuntimeError):
+    """A distributed actor task failed and its peer group was terminated."""
+
+    def __init__(self, operation: str, actor_index: int, mesh_rank: MeshRank) -> None:
+        self.operation = operation
+        self.actor_index = actor_index
+        self.mesh_rank = mesh_rank
+        super().__init__(operation, actor_index, mesh_rank)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.operation} failed on actor index {self.actor_index} ({self.mesh_rank}); "
+            "terminated the worker group so an outer retry can rebuild the communicator"
+        )
+
+
+def collect_actor_results(actor_infos: List[ActorInfo], object_refs: List[ObjectRef], *, operation: str) -> List[Any]:
+    """Collect a distributed actor gang and terminate every peer on one task error."""
+    if len(actor_infos) != len(object_refs):
+        raise ValueError("actor_infos and object_refs must have the same length")
+
+    pending = {object_ref: index for index, object_ref in enumerate(object_refs)}
+    results: List[Any] = [None] * len(object_refs)
+    while pending:
+        ready, _ = ray.wait(list(pending), num_returns=1, fetch_local=False)
+        object_ref = ready[0]
+        actor_index = pending.pop(object_ref)
+        try:
+            results[actor_index] = ray.get(object_ref)
+        except Exception as error:
+            for actor_info in actor_infos:
+                try:
+                    ray.kill(actor_info.handle, no_restart=True)
+                except Exception:
+                    logger.exception("Failed to terminate a peer after a distributed actor task error")
+            raise WorkerGroupTaskError(operation, actor_index, actor_infos[actor_index].rank) from error
+    return results
+
+
 class Dispatch(ABC):
     """Base class for dispatch types
 
@@ -427,7 +466,7 @@ class MeshDispatch(Dispatch):
     @classmethod
     def sync_collect(cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]) -> Optional[TrainingOutputBatch]:
         assert len(actor_infos) == len(object_refs), "`actor_infos` and `object_refs` must have the same length"
-        all_objects = ray.get(object_refs)
+        all_objects = collect_actor_results(actor_infos, object_refs, operation=f"{cls.__name__} dispatch")
         if len(all_objects) and all_objects[0] is not None:
             return concatenate_outputs_after_mesh_dispatch(actor_infos, all_objects)
         # all should be none

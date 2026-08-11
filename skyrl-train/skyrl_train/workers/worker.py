@@ -26,7 +26,7 @@ from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_t
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
-from skyrl_train.utils.ppo_utils import masked_mean
+from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
@@ -34,13 +34,18 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
-from skyrl_train.utils.ppo_utils import (
-    PolicyLossRegistry,
-    ppo_critic_loss,
-    compute_approx_kl,
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
+from skyrl_train.utils.policy_math import ppo_critic_loss, compute_approx_kl
+from skyrl_train.utils.importance_ratio_diagnostics import (
+    _empty_log_ratio_accumulator,
+    _log_ratio_diag_zero_metrics,
+    compute_log_ratio_partial,
     compute_tis_diagnostics,
-    build_think_weighted_loss_mask,
+    finalize_log_ratio_metrics,
+    merge_log_ratio_partial,
 )
+from skyrl_train.utils.loss_reduction import build_think_weighted_loss_mask
+from skyrl_train.utils.policy_losses import complete_clip_metrics
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -1251,7 +1256,7 @@ class PolicyWorkerBase(Worker):
                 grug_query_bias_window.observe_microbatch()
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, policy_loss_metrics = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -1339,14 +1344,6 @@ class PolicyWorkerBase(Worker):
         # micro-batches makes that signal more representative). The final scalar
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.
-        from skyrl_train.utils.ppo_utils import (
-            _empty_log_ratio_accumulator,
-            compute_log_ratio_partial,
-            merge_log_ratio_partial,
-            finalize_log_ratio_metrics,
-            _log_ratio_diag_zero_metrics,
-        )
-
         if local_step % accumulation_steps == 0 or getattr(self, "_ratio_diag_acc", None) is None:
             self._ratio_diag_acc = _empty_log_ratio_accumulator(device=action_log_probs.device)
         try:
@@ -1435,9 +1432,9 @@ class PolicyWorkerBase(Worker):
             "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
-            "ppo_clip_ratio": clip_ratio,
             "policy_entropy": entropy.item(),
         }
+        status.update(complete_clip_metrics(policy_loss_metrics))
         # Per-token log-ratio diagnostics — visibility into which tokens
         # carry the gradient signal (heaviest-hit token, fraction of tokens
         # with large probability changes, per-position aggregations).
@@ -1490,15 +1487,16 @@ class PolicyWorkerBase(Worker):
         )
 
     def load_checkpoint(
-        self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
+        self,
+        ckpt_dir: Path,
+        load_training_state: bool = True,
     ):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
-            optimizer=self.optimizer if load_optimizer_states else None,
-            scheduler=self.scheduler if load_lr_scheduler_states else None,
+            optimizer=self.optimizer if load_training_state else None,
+            scheduler=self.scheduler if load_training_state else None,
             ckpt_dir=ckpt_dir,
-            load_optimizer_states=load_optimizer_states,
-            load_lr_scheduler_states=load_lr_scheduler_states,
+            load_training_state=load_training_state,
         )
         # Restore ZClip / StaleClip state if present. The actual ZClip/StaleClip
         # objects are lazy-instantiated on the first ppo_train() call, so we
@@ -1715,14 +1713,17 @@ class CriticWorkerBase(Worker):
             tokenizer=tokenizer,
         )
 
-    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
+    def load_checkpoint(
+        self,
+        ckpt_dir=None,
+        load_training_state=True,
+    ):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
-            optimizer=self.optimizer if load_optimizer_states else None,
-            scheduler=self.scheduler if load_lr_scheduler_states else None,
+            optimizer=self.optimizer if load_training_state else None,
+            scheduler=self.scheduler if load_training_state else None,
             ckpt_dir=ckpt_dir,
-            load_optimizer_states=load_optimizer_states,
-            load_lr_scheduler_states=load_lr_scheduler_states,
+            load_training_state=load_training_state,
         )
         return states
 

@@ -1,12 +1,14 @@
-"""Model-path contracts shared by the Iris RL launcher and controller."""
+"""Iris-specific model-path helpers."""
 
-from urllib.parse import urlparse
-
-OBJECT_STORE_MODEL_SCHEMES = frozenset({"s3", "gs", "gcs"})
+from marinskyrl.resource_locator import ModelSource
 
 
-def is_object_store_model_path(model_path: str) -> bool:
-    return urlparse(model_path).scheme.lower() in OBJECT_STORE_MODEL_SCHEMES
+def model_source_cli_args(model_source_uri: str | None, model_source_identity: str | None) -> list[str]:
+    """Render a validated model source for Iris command-line boundaries."""
+    source = ModelSource.optional(model_source_uri, model_source_identity)
+    if source is None:
+        return []
+    return ["--model-source-uri", source.uri, "--model-source-identity", source.identity]
 
 
 def unsupported_model_path_message(model_path: str) -> str:

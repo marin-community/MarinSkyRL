@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from cloud.iris.hf_datasets import is_hf_dataset_path
+from marinskyrl.resource_locator import is_hugging_face_repo_id
 
 
 def resolve_rl_train_data(
@@ -86,7 +86,7 @@ def resolve_rl_train_data(
     resolved_paths = []
 
     for data_path in train_data:
-        if is_hf_dataset_path(data_path):
+        if is_hugging_face_repo_id(data_path):
             repo_name = data_path.split("/")[-1]
             output_dir = tasks_base / repo_name
 

@@ -250,8 +250,7 @@ class DeepspeedStrategy(DistributedStrategy):
         scheduler=None,
         tag=None,
         load_module_strict=True,
-        load_optimizer_states=True,
-        load_lr_scheduler_states=True,
+        load_training_state=True,
     ):
         if isinstance(model, HFModelWrapper):
             model = model.model
@@ -264,15 +263,15 @@ class DeepspeedStrategy(DistributedStrategy):
                 read_dir,
                 tag,
                 load_module_strict=load_module_strict,
-                load_optimizer_states=load_optimizer_states,
-                load_lr_scheduler_states=load_lr_scheduler_states,  # DeepSpeed handles this automatically
+                load_optimizer_states=load_training_state,
+                load_lr_scheduler_states=load_training_state,  # DeepSpeed handles this automatically
             )
 
         if load_path is None:
             raise Exception(f"[deepspeed] failed to resume from checkpoint {ckpt_dir}")
 
         # Load RNG state for reproducibility (if present)
-        if "rng" in states:
+        if load_training_state and "rng" in states:
             self.load_rng_state(states["rng"])
             if self.is_rank_0():
                 self.print(f"[rank-{self.get_rank()}]: Loaded RNG state from checkpoint")
@@ -327,9 +326,7 @@ class DeepspeedStrategy(DistributedStrategy):
                 if tokenizer is not None:
                     tokenizer.save_pretrained(work_dir)
 
-        # Final barrier so others wait for upload to complete
-        if is_dist:
-            dist.barrier()
+        # The Ray caller waits for every rank result; no collective needs to span rank 0's upload.
 
     def _set_bf16_config(self, ds_config):
         # torch_autocast.enabled should be set in the config file

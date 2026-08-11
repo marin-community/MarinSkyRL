@@ -47,6 +47,10 @@ class TestCloudPathDetection:
         assert not is_cloud_path("relative/path/file.pt")
         assert not is_cloud_path("C:\\Windows\\path\\file.pt")
 
+    def test_cloud_schemes_require_the_canonical_uri_prefix(self):
+        assert not is_cloud_path("s3:bucket/path/file.pt")
+        assert not is_cloud_path("S3://bucket/path/file.pt")
+
 
 class TestLocalFileOperations:
     """Test file operations for local paths."""

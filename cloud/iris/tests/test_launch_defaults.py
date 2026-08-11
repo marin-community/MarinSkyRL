@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -245,6 +247,21 @@ def _args(tmp_path: Path, harness: str, extra: list[str] | None = None):
     return create_parser().parse_args(args + (extra or []))
 
 
+def _shell_options(shell: str) -> dict[str, list[str]]:
+    options: dict[str, list[str]] = {}
+    tokens = shlex.split(shell)
+    for index, token in enumerate(tokens):
+        if token == "--" or not token.startswith("--"):
+            continue
+        if "=" in token:
+            name, value = token.split("=", 1)
+        else:
+            name = token
+            value = tokens[index + 1] if index + 1 < len(tokens) else ""
+        options.setdefault(name, []).append(value)
+    return options
+
+
 def test_resolve_launch_defaults_uses_cluster_storage_and_harness(tmp_path):
     args = _args(tmp_path, "opencode")
 
@@ -326,6 +343,16 @@ def test_distributed_debug_cli_off_overrides_config(tmp_path):
     args.rl_config = str(config)
 
     assert build_debug_launch_env(args) == {}
+
+
+def test_distributed_debug_rejects_invalid_config_value(tmp_path):
+    args = _args(tmp_path, "opencode", ["--job-name", "invalid-debug-canary"])
+    config = tmp_path / "debug.yaml"
+    config.write_text("trainer:\n  debug_mode: unexpected\n")
+    args.rl_config = str(config)
+
+    with pytest.raises(ValueError, match="trainer.debug_mode must be one of"):
+        build_debug_launch_env(args)
 
 
 def test_rl_config_is_materialized_for_the_task(tmp_path):
@@ -432,6 +459,67 @@ def test_controller_rejects_object_store_model_path_before_staging():
         stage_model("s3://models/policy")
 
 
+def test_task_local_model_source_is_materialized_without_hf_prestage(tmp_path):
+    args = _args(
+        tmp_path,
+        "opencode",
+        [
+            "--model_path",
+            "/tmp/materialized-model",
+            "--model-source-uri",
+            "s3://models/policy",
+            "--model-source-identity",
+            "policy@abc123",
+        ],
+    )
+    Path(args.rl_config).write_text(
+        "extra_env:\n  HF_HUB_OFFLINE: '1'\npolicy_chat_template: chat_templates/test.jinja2\n"
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert set(options["--model-source-uri"]) == {"s3://models/policy"}
+    assert set(options["--model-source-identity"]) == {"policy@abc123"}
+    assert "--prestage-model" not in options
+    assert set(options["--policy-chat-template"]) == {"chat_templates/test.jinja2"}
+    assert "s3://marin-us-east-02a/models/--tmp--materialized-model" not in {
+        value for values in options.values() for value in values
+    }
+
+
+def test_task_local_model_without_source_supports_chat_template_override(tmp_path):
+    args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
+    Path(args.rl_config).write_text("policy_chat_template: chat_templates/test.jinja2\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert set(options["--model-local-path"]) == {"/models/preloaded-policy"}
+    assert set(options["--policy-chat-template"]) == {"chat_templates/test.jinja2"}
+    assert "--prestage-model" not in options
+
+
+def test_hugging_face_model_rejects_ambiguous_object_store_source(tmp_path):
+    args = _args(
+        tmp_path,
+        "opencode",
+        [
+            "--model_path",
+            "org/model",
+            "--model-source-uri",
+            "s3://models/policy",
+            "--model-source-identity",
+            "policy@abc123",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="requires a task-local model_path"):
+        normalize(args)
+
+
 def test_derived_job_names_are_valid_and_unique_for_distinct_nonces(tmp_path):
     args = _args(tmp_path, "opencode", ["--num-nodes", "1"])
 
@@ -451,6 +539,51 @@ def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries
     assert args.max_retries == 6
     assert args.memory == "auto"
     assert args.disk == "auto"
+
+
+def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypatch):
+    args = _args(
+        tmp_path,
+        "opencode",
+        [
+            "--job-name",
+            "retry-budget",
+            "--memory",
+            "64Gi",
+            "--disk",
+            "100Gi",
+            "--cpu",
+            "4",
+            "--max-retries",
+            "3",
+            "--no-wait",
+        ],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+    submitted = {}
+
+    class RecordingClient:
+        def submit(self, **kwargs):
+            submitted.update(kwargs)
+            return SimpleNamespace(job_id="retry-budget-job")
+
+    @contextmanager
+    def client_context():
+        yield RecordingClient()
+
+    monkeypatch.setattr(iris_backend, "build_runtime_bundle", lambda commit: tmp_path)
+    monkeypatch.setattr(iris_backend, "prepare_federated_parent_credentials", lambda args: None)
+    monkeypatch.setattr(iris_backend, "load_secrets_env_into_os_environ", lambda path: {})
+    monkeypatch.setattr(iris_backend, "_rl_config_is_agentic", lambda path: False)
+    monkeypatch.setattr(iris_backend, "build_task_command", lambda args: ["true"])
+    monkeypatch.setattr(iris_backend, "_ambient_in_cluster_client", lambda workspace: client_context())
+
+    outcome = iris_backend.launch(args, expected_launcher_commit=args.runtime_commit)
+
+    assert outcome.job_id == "retry-budget-job"
+    assert submitted["max_retries_failure"] == 3
+    assert submitted["max_task_failures"] == 3
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:
@@ -490,6 +623,26 @@ def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     resolve_launch_defaults(args)
 
     assert args.runtime_profile is RuntimeProfile.FSDP
+
+
+@pytest.mark.parametrize(
+    "strategy, expected_profile",
+    [
+        ("fsdp2", RuntimeProfile.FSDP_EXPORT),
+        ("deepspeed", RuntimeProfile.DEEPSPEED_EXPORT),
+        ("megatron", RuntimeProfile.MEGATRON_EXPORT),
+    ],
+)
+def test_checkpoint_export_entrypoint_selects_a_conversion_only_profile(tmp_path, strategy, expected_profile):
+    args = _strategy_args(
+        tmp_path,
+        strategy,
+        ["--entrypoint", "skyrl_train.entrypoints.checkpoint_export"],
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.runtime_profile is expected_profile
 
 
 def test_config_without_a_declared_strategy_selects_the_fsdp_profile(tmp_path):
@@ -554,4 +707,37 @@ trainer:
     )
 
     with pytest.raises(SystemExit, match=r"policy_num_nodes \+ ref_num_nodes = 4"):
+        resolve_launch_defaults(args)
+
+
+def test_checkpoint_export_rejects_including_reference_nodes_in_its_gang(tmp_path):
+    rl_config = tmp_path / "placed.yaml"
+    rl_config.write_text(
+        """\
+trainer:
+  strategy: fsdp2
+  placement:
+    colocate_all: false
+    policy_num_nodes: 2
+    ref_num_nodes: 2
+    policy_num_gpus_per_node: 8
+    ref_num_gpus_per_node: 8
+"""
+    )
+    args = create_parser().parse_args(
+        [
+            "--rl_config",
+            str(rl_config),
+            "--model_path",
+            "model",
+            "--cluster-config",
+            str(_cluster_config(tmp_path)),
+            "--num-nodes",
+            "4",
+            "--entrypoint",
+            "skyrl_train.entrypoints.checkpoint_export",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match=r"policy_num_nodes = 2"):
         resolve_launch_defaults(args)

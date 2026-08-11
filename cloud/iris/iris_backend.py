@@ -86,15 +86,18 @@ from cloud.iris.ray_storage import (
     resolve_ray_spill_target,
     validate_ray_spill_dir,
 )
-from cloud.iris.model_paths import is_object_store_model_path, unsupported_model_path_message
+from cloud.iris.model_paths import model_source_cli_args, unsupported_model_path_message
+from marinskyrl.resource_locator import ModelLocatorError, is_cloud_uri, is_hugging_face_repo_id, model_source_for_path
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import DataLocator, SkyRLJobSpec
 from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
 from cloud.iris.runtime_environment import (
+    CHECKPOINT_EXPORT_ENTRYPOINT,
     MARINSKYRL_ACTIVATION_FILE,
     MARINSKYRL_TASK_ROOT,
+    RuntimeMode,
     RuntimeProfile,
     runtime_profile_for_strategy,
     task_setup_script,
@@ -126,6 +129,10 @@ DISK_RESOURCE = "ephemeral-storage"
 NODE_RESOURCE_FRACTION = 0.80
 DEFAULT_PRIORITY = "interactive"
 PRIORITY_NAMES = ("production", "interactive", "batch")
+
+
+def _is_checkpoint_export(args: argparse.Namespace) -> bool:
+    return getattr(args, "entrypoint", None) == CHECKPOINT_EXPORT_ENTRYPOINT
 
 
 def _parse_quantity_to_gib(q: str) -> float:
@@ -770,11 +777,17 @@ def _validate_rl_config_topology(args: argparse.Namespace) -> None:
     ref_gpus = placement.get("ref_num_gpus_per_node")
     if not all(isinstance(value, int) and value > 0 for value in (policy_nodes, ref_nodes)):
         return
-    expected_nodes = policy_nodes + ref_nodes
+    checkpoint_export = _is_checkpoint_export(args)
+    expected_nodes = policy_nodes if checkpoint_export else policy_nodes + ref_nodes
     if args.num_nodes != expected_nodes:
+        topology_description = (
+            f"policy_num_nodes = {expected_nodes}"
+            if checkpoint_export
+            else f"policy_num_nodes + ref_num_nodes = {expected_nodes}"
+        )
         raise SystemExit(
             f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s disaggregated placement "
-            f"(policy_num_nodes + ref_num_nodes = {expected_nodes})."
+            f"({topology_description})."
         )
     declared_gpus = {value for value in (policy_gpus, ref_gpus) if isinstance(value, int) and value > 0}
     if declared_gpus and (len(declared_gpus) != 1 or args.gpus_per_node not in declared_gpus):
@@ -876,12 +889,17 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
         storage_root = _cluster_storage_root(cluster_config)
         args.rendezvous_dir = f"{storage_root}/rendezvous/{args.job_name}"
 
-    if args.record_literal is None:
+    if _is_checkpoint_export(args):
+        args.record_literal = False
+    elif args.record_literal is None:
         harness = _rl_config_harness_name(args.rl_config)
         args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
 
     strategy = _rl_training_strategy(args)
-    expected_profile = runtime_profile_for_strategy(strategy)
+    expected_profile = runtime_profile_for_strategy(
+        strategy,
+        mode=RuntimeMode.CHECKPOINT_EXPORT if _is_checkpoint_export(args) else RuntimeMode.TRAINING,
+    )
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile
     elif args.runtime_profile != expected_profile:
@@ -960,6 +978,11 @@ def autoconfigure_ingress(args: argparse.Namespace) -> None:
     breaks non-streaming terminus-2). So we auto-enable controller ONLY for opencode; for
     that case the ingress host is cluster-determined (``iris.oa.dev``), removing the
     ``--ingress-host`` mismatch error class. Prefer default > flag > env var."""
+    if _is_checkpoint_export(args):
+        args.ingress_mode = "direct"
+        args.ingress_host = None
+        return
+
     target = str(getattr(args, "target_cluster", "") or "")
     cluster = str(getattr(args, "cluster", "") or "")
     is_cw = target.startswith("cw-") or cluster.startswith("cw-")
@@ -1162,6 +1185,11 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--rl-config", dest="rl_config", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--entrypoint",
+        default=None,
+        help="Override the config entrypoint for a dedicated non-training execution path.",
+    )
 
     parser.add_argument(
         "--model_path",
@@ -1838,8 +1866,12 @@ def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
 
 def normalize(args: argparse.Namespace) -> None:
     """Resolve the RL config and validate the requested worker topology."""
-    if is_object_store_model_path(args.model_path):
+    if is_cloud_uri(args.model_path):
         raise SystemExit(unsupported_model_path_message(args.model_path))
+    try:
+        model_source_for_path(args.model_path, args.model_source_uri, args.model_source_identity)
+    except ModelLocatorError as error:
+        raise SystemExit(str(error)) from error
 
     try:
         source = resolve_rl_config_path(args.rl_config)
@@ -1927,6 +1959,34 @@ def _build_task_shell(
     return ["bash", "-c", bash]
 
 
+def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
+    """Resolve per-node model materialization, prestaging, and tokenizer flags.
+
+    Offline or tokenizer-overridden Hub models are staged once per node before Ray;
+    task-local models are used directly after optional object-store materialization.
+    """
+    model_args = model_source_cli_args(args.model_source_uri, args.model_source_identity)
+    is_hub_model = is_hugging_face_repo_id(args.model_path)
+    if args.model_source_uri or not is_hub_model:
+        model_args.extend(["--model-local-path", args.model_path])
+
+    config_env = load_config_extra_env(args.rl_config)
+    policy_chat_template = load_config_policy_chat_template(args.rl_config)
+    offline = str(config_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
+    if (offline or policy_chat_template) and is_hub_model:
+        model_args.extend(["--prestage-model", args.model_path])
+        warm_source = args.model_warm_source
+        if warm_source is None:
+            warm_source = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
+        elif warm_source.strip().lower() in ("none", "off", ""):
+            warm_source = None
+        if warm_source:
+            model_args.extend(["--model-warm-source", warm_source])
+    if policy_chat_template:
+        model_args.extend(["--policy-chat-template", policy_chat_template])
+    return model_args
+
+
 def build_task_command(args: argparse.Namespace) -> List[str]:
     """Build the per-replica command for a resolved RL launch.
 
@@ -1963,6 +2023,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    if args.entrypoint:
+        train_cmd.extend(["--entrypoint", args.entrypoint])
+    train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
     if args.resolved_config_uri:
         train_cmd.extend(["--resolved-config-uri", args.resolved_config_uri])
     if args.train_data and args.train_data != "[]":
@@ -1998,9 +2061,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # terminal_bench_config.trials_dir at the durable shared store (s3://, creds auto-injected)
     # so rollouts persist + are inspectable post-hoc. Skip if the user opted out
     # (--trials-dir local) or already set it explicitly.
+    checkpoint_export = _is_checkpoint_export(args)
     trials_dir = (args.trials_dir or "auto").strip()
     user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
-    if trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
+    if not checkpoint_export and trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
         if trials_dir.lower() == "auto":
             trials_dir = f"s3://marin-us-east-02a/iris/{args.job_name}/trace_jobs"
         train_cmd.extend(["--skyrl_override", f"++terminal_bench_config.trials_dir={trials_dir}"])
@@ -2021,24 +2085,16 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # explicit ckpt_path from the YAML or a --skyrl_override (either wins).
     user_set_ckpt = any("trainer.ckpt_path=" in o for o in (args.skyrl_override or []))
     yaml_ckpt = load_config_trainer_ckpt_path(args.rl_config)
-    if not user_set_ckpt and not yaml_ckpt:
+    if not checkpoint_export and not user_set_ckpt and not yaml_ckpt:
         ckpt_path = f"s3://marin-us-east-02a/iris/{args.job_name}/checkpoints"
         train_cmd.extend(["--skyrl_override", f"++trainer.ckpt_path={ckpt_path}"])
         print(f"[rl-iris] Durable resumable ckpt_path: {ckpt_path}")
 
-    # export_path needs the SAME durable treatment as ckpt_path, and for a sharper reason.
-    # Left unset it is auto-derived to a node-local <experiments_dir>/<job>/exports
-    # (rl_config_translation.py). save_hf_model then writes the HF export on a POLICY WORKER
-    # while HFHubUploadCallback runs on the DRIVER, so the callback finds nothing, every
-    # upload fails, and the run ends with an empty repo — after which both nodes are reclaimed
-    # and the export is gone for good. Every completed run in the 2026-07 sweep lost its
-    # published model exactly this way; the training checkpoints survived only because
-    # ckpt_path was already durable. The callback reads through skyrl's fsspec io layer, so an
-    # s3:// export_path is visible from any node. Respect an explicit value from the YAML or a
-    # --skyrl_override (either wins).
+    # Export requests must name durable storage because conversion runs later in a separate gang.
+    # Respect an explicit value from the YAML or a --skyrl_override (either wins).
     user_set_export = any("trainer.export_path=" in o for o in (args.skyrl_override or []))
     yaml_export = load_config_trainer_export_path(args.rl_config)
-    if not user_set_export and not yaml_export:
+    if not checkpoint_export and not user_set_export and not yaml_export:
         export_path = f"s3://marin-us-east-02a/iris/{args.job_name}/exports"
         train_cmd.extend(["--skyrl_override", f"++trainer.export_path={export_path}"])
         print(f"[rl-iris] Durable export_path: {export_path}")
@@ -2074,50 +2130,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--train-data", args.train_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
-    if args.model_source_uri:
-        controller_cmd.extend(
-            [
-                "--model-source-uri",
-                args.model_source_uri,
-                "--model-local-path",
-                args.model_path,
-                "--model-source-identity",
-                args.model_source_identity,
-            ]
-        )
-    # Per-NODE model pre-staging, coupled to HF_HUB_OFFLINE. A config that runs the
-    # FSDP ranks offline (extra_env HF_HUB_OFFLINE=1) has NO warm cache unless the
-    # weights are pulled first; without pre-staging each of the N*8 ranks would race
-    # HF Hub online inside init_model and a slow straggler blows the 20-min c10d store
-    # barrier (the 80B init-straggle kill, 2026-07-10). When the config is offline,
-    # forward the model repo-id so the controller pre-downloads it ONCE PER NODE into
-    # the node-local HF cache before Ray — off the collective critical path. Online
-    # configs are byte-identical (no flag forwarded).
-    _cfg_env = load_config_extra_env(args.rl_config)
-    _policy_chat_template = load_config_policy_chat_template(args.rl_config)
-    _offline = str(_cfg_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
-    # A policy_chat_template override rewrites the node-local tokenizer cache, so it REQUIRES
-    # a prestage even when the config is not offline (nothing to rewrite otherwise).
-    if _offline or _policy_chat_template:
-        if args.model_path:
-            controller_cmd.extend(["--prestage-model", args.model_path])
-            # In-region warm source. Default = auto-derive the CW-S3 convention path from
-            # the repo id; a seed job (mirror_hf_to_s3.py) populates it once and every node
-            # then S3-syncs from there instead of cold-pulling from HF Hub. When the source
-            # is un-seeded the controller falls back to the HF prestage (byte-identical to
-            # pre-warm-path). 'none'/'off' disables the warm path entirely (pure HF prestage).
-            warm = args.model_warm_source
-            if warm is None:
-                warm = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
-            elif warm.strip().lower() in ("none", "off", ""):
-                warm = None
-            if warm:
-                controller_cmd.extend(["--model-warm-source", warm])
-    # Force the delphi chat template onto every node's tokenizer cache (single-turn RLVR).
-    # Repo-relative path (resolved in-pod against /app by the controller). No-op for configs
-    # without policy_chat_template.
-    if _policy_chat_template:
-        controller_cmd.extend(["--policy-chat-template", _policy_chat_template])
+    controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
@@ -2165,7 +2178,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     # (file overrides shell; same semantics as the iris launchers).
     load_secrets_env_into_os_environ(args.secrets_env)
 
-    if _rl_config_is_agentic(args.rl_config):
+    if not _is_checkpoint_export(args) and _rl_config_is_agentic(args.rl_config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
         # The purge deletes stale snapshots across the shared RL org, so skip it on a
@@ -2513,6 +2526,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             coscheduling=coscheduling,
             replicas=replicas,
             max_retries_failure=args.max_retries,
+            max_task_failures=args.max_retries,
             priority_band=priority_band,
             timeout=None if args.timeout == 0 else _seconds_to_duration(args.timeout),
         )

@@ -1,0 +1,2 @@
+CHECKPOINT_CALLBACK_TYPE = "checkpoint"
+HF_MODEL_SAVE_CALLBACK_TYPE = "hf_model_save"

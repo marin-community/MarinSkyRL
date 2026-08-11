@@ -13,6 +13,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
+from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
 
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
@@ -22,6 +23,31 @@ from skyrl_train.distributed.utils import get_free_port
 
 class _Config(dict):
     __getattr__ = dict.__getitem__
+
+
+def _tensor_leaves(value):
+    if isinstance(value, torch.Tensor):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _tensor_leaves(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _tensor_leaves(item)
+
+
+class _AllGatherPayloads(TorchDispatchMode):
+    """Capture actual all-gather payloads without pinning helper calls or counts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.payloads: list[torch.Tensor] = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if "all_gather" in func.name():
+            self.payloads.extend(tensor.detach().clone() for tensor in _tensor_leaves((args, kwargs)))
+        return func(*args, **kwargs)
 
 
 class _Weight(nn.Module):
@@ -166,7 +192,17 @@ def _worker(rank: int, world_size: int, port: int, checkpoint_dir: str) -> None:
 
         _set_gradients(sharded_model, gradients[0])
         _set_gradients(reference_model, gradients[0])
-        sharded_optimizer.step()
+        dense_gradient = sharded_parameters["dense.weight"].grad
+        assert isinstance(dense_gradient, DTensor)
+        expected_gather = dense_gradient.to_local().add(dense_gradient.to_local(), alpha=0.95).to(torch.bfloat16)
+        all_gather_payloads = _AllGatherPayloads()
+        with all_gather_payloads:
+            sharded_optimizer.step()
+        assert all_gather_payloads.payloads, "rank-2 MuonH must gather its direction"
+        for payload in all_gather_payloads.payloads:
+            # A parameter gather or an AdamH gather is FP32 and differs from this
+            # BF16 Muon direction in dtype, shape, or value.
+            torch.testing.assert_close(payload, expected_gather, rtol=0, atol=0)
         reference_optimizer.step()
         sharded_scheduler.step()
         reference_scheduler.step()

@@ -28,7 +28,7 @@ from skyrl_train.config.utils import get_default_config
 from tests.cpu.fsdp_config_assertions import TRAINER_MODEL_ROLES, assert_role_fsdp_defaults
 
 # The baseline snapshots `get_default_config()` without the intentionally additive
-# CP, grouped-mm, debug-mode, attention-backend, and DCP fields. Keeping the remaining defaults
+# CP, grouped-mm, debug-mode, attention-backend, model-source, and DCP fields. Keeping the remaining defaults
 # current makes this a CP no-op regression test rather than a stale whole-config lock.
 # `resolve=False` preserves interpolations, so the comparison is HOME-/env-independent.
 GOLDEN = Path(__file__).parent.parent / "data" / "ppo_base_pre_cp.yaml"
@@ -63,12 +63,19 @@ ADDITIVE_GENERATOR_FIELDS = {
     "inference_engine_decode_context_parallel_size": 1,
     "vllm_attention_backend": None,
 }
+ADDITIVE_POLICY_MODEL_FIELDS = {
+    "source_uri": None,
+    "source_identity": None,
+}
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was
 # snapshotted, so — like the CP fields — it must be stripped from each role's
 # fsdp_config before the structural-identity comparison against the golden.
 MOE_FSDP_FIELDS = {
     "use_grouped_mm": False,
+}
+ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
+    "fsdp_parameter_storage_dtype": None,
 }
 
 
@@ -103,10 +110,16 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         fsdp = container["trainer"][role]["fsdp_config"]
         for k in (*CP_FIELDS, *MOE_FSDP_FIELDS):  # strip the additive keys -> should reproduce pre-CP shape
             fsdp.pop(k, None)
+    for role in ("policy", "critic"):
+        optimizer = container["trainer"][role]["optimizer_config"]
+        for k in ADDITIVE_TRAINING_OPTIMIZER_FIELDS:
+            optimizer.pop(k, None)
     for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS):
         container["trainer"].pop(k, None)
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
+    for k in ADDITIVE_POLICY_MODEL_FIELDS:
+        container["trainer"]["policy"]["model"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the no-CP baseline"
 
