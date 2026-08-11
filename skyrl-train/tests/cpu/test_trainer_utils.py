@@ -645,6 +645,13 @@ def test_filter_generator_output():
         "stop_reasons": ["length", "length", "stop"],
         "rollout_metrics": {"metric": "value"},
         "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
+        "reward_shaping_components": [
+            {"loop": -0.1, "non_termination": 0.0, "successful_length": 0.0},
+            {"loop": 0.0, "non_termination": 0.0, "successful_length": 0.0},
+            {"loop": -0.2, "non_termination": 0.0, "successful_length": 0.0},
+        ],
+        "reward_shaping_loop_spans": [[{"start": 0, "end": 2}], [], [{"start": 1, "end": 2}]],
+        "reward_shaping_versions": [1, 1, 1],
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
@@ -656,8 +663,18 @@ def test_filter_generator_output():
     assert filtered["unshaped_rewards"] == [0.0, 0.0]
     assert filtered["loss_masks"] == [[1, 1]] * 2
     assert filtered["stop_reasons"] == ["length", "stop"]
-    assert filtered["rollout_metrics"] == {"metric": "value"}
+    assert filtered["rollout_metrics"]["metric"] == "value"
+    assert filtered["rollout_metrics"]["generate/reward_shaping/loop_penalty_mean"] == pytest.approx(-0.15)
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
+    assert filtered["reward_shaping_components"] == [
+        {"loop": -0.1, "non_termination": 0.0, "successful_length": 0.0},
+        {"loop": -0.2, "non_termination": 0.0, "successful_length": 0.0},
+    ]
+    assert filtered["reward_shaping_loop_spans"] == [
+        [{"start": 0, "end": 2}],
+        [{"start": 1, "end": 2}],
+    ]
+    assert filtered["reward_shaping_versions"] == [1, 1]
 
 
 def test_validate_generator_output_valid_case():

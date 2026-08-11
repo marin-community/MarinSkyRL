@@ -593,7 +593,21 @@ Generator Configuration
     # number of samples per prompt for evaluation
     eval_n_samples_per_prompt: 1
 
-    zero_reward_on_non_stop: false
+    trajectory_reward_shaping:
+      schema_version: 1
+      enabled: false
+      loop:
+        window_tokens: 16
+        minimum_occurrences: 3
+        penalty_per_occurrence: 0.0
+        max_penalty: 0.2
+      non_termination:
+        penalty: 0.0
+        accepted_stop_reasons: [stop, complete, eos, end_turn]
+      successful_length:
+        free_tokens: 0
+        penalty_per_token: 0.0
+        max_penalty: 0.2
 
     apply_overlong_filtering: false
 
@@ -659,6 +673,6 @@ Generation Parameters
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
-- ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
+- ``generator.trajectory_reward_shaping``: Generator-independent additive penalties applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set. ``loop`` detects repeated trainable token windows without crossing tool-observation boundaries. ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
 - ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

@@ -24,6 +24,7 @@ from skyrl_train.callbacks.types import (
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
 from skyrl_train.distributed_debug import apply_distributed_debug_mode
+from skyrl_train.generators.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 
@@ -691,6 +692,8 @@ def validate_generator_cfg(cfg: DictConfig):
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
         ValueError: when cfg.generator.sampling_params.logprobs > 0
     """
+
+    parse_trajectory_reward_shaping_config(cfg.generator.get("trajectory_reward_shaping"))
 
     if cfg.generator.max_turns == 1:
         assert cfg.generator.max_input_length == cfg.trainer.max_prompt_length, (

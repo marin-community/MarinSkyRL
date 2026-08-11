@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
 from omegaconf import OmegaConf, DictConfig
 from enum import Enum
@@ -12,6 +13,7 @@ import numpy as np
 from collections import defaultdict
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
 from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.generators.trajectory_reward_shaping import refresh_trajectory_reward_shaping_metrics
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
@@ -420,6 +422,9 @@ def handle_replace_sampling(
 
             if generator_output["rollout_logprobs"]:
                 generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
+            for key in ("reward_shaping_components", "reward_shaping_loop_spans", "reward_shaping_versions"):
+                if generator_output.get(key) is not None:
+                    generator_output[key][bad_idx] = deepcopy(generator_output[key][replacement_idx])
 
         # Update UIDs accordingly
         replaced_uids = uids.copy()
@@ -428,6 +433,7 @@ def handle_replace_sampling(
 
         logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
         logger.info("==================================================")
+        refresh_trajectory_reward_shaping_metrics(generator_output)
 
         return generator_output, replaced_uids, False
     else:
@@ -567,6 +573,10 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
 
     if output.get("stop_reasons"):
         filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
+    for key in ("reward_shaping_components", "reward_shaping_loop_spans", "reward_shaping_versions"):
+        if output.get(key) is not None:
+            filtered[key] = [deepcopy(output[key][i]) for i in kept_indices]
+    refresh_trajectory_reward_shaping_metrics(filtered)
 
     return filtered
 

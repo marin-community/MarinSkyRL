@@ -337,7 +337,21 @@ generator:
 
   eval_n_samples_per_prompt: 1
 
-  zero_reward_on_non_stop: false
+  trajectory_reward_shaping:
+    schema_version: 1
+    enabled: false
+    loop:
+      window_tokens: 16
+      minimum_occurrences: 3
+      penalty_per_occurrence: 0.0
+      max_penalty: 0.2
+    non_termination:
+      penalty: 0.0
+      accepted_stop_reasons: [stop, complete, eos, end_turn]
+    successful_length:
+      free_tokens: 0
+      penalty_per_token: 0.0
+      max_penalty: 0.2
 
   apply_overlong_filtering: false
 

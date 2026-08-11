@@ -1285,7 +1285,6 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     cfg.max_input_length = 512
     cfg.batched = False
     cfg.max_turns = 10
-    cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
     cfg.chat_template = {"source": "name", "name_or_path": None}
 
@@ -1372,7 +1371,6 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     cfg.max_input_length = 512
     cfg.batched = False
     cfg.max_turns = 10
-    cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
     cfg.chat_template = {"source": "name", "name_or_path": None}
 
@@ -1461,7 +1459,6 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     cfg.max_input_length = 512
     cfg.batched = False
     cfg.max_turns = 10
-    cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
     cfg.chat_template = {
         "source": "name",
@@ -1550,7 +1547,6 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     cfg.max_input_length = 1000  # prevent earlier length break
     cfg.batched = False
     cfg.max_turns = 1
-    cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
     cfg.chat_template = {"source": "name", "name_or_path": None}
 

@@ -2,6 +2,7 @@ from typing import List, Dict, Any, TypedDict, Optional, Union, Literal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.generators.trajectory_reward_shaping import shape_trajectory_rewards
 
 TrainingPhase = Literal["train", "eval"]
 
@@ -38,6 +39,9 @@ class GeneratorOutput(TypedDict):
     # pass@k use this channel so changing a shaper cannot change task success.
     # Generators without a distinct shaping stage may omit it.
     unshaped_rewards: Optional[List[float]]
+    reward_shaping_components: Optional[List[Dict[str, float]]]
+    reward_shaping_loop_spans: Optional[List[List[Dict[str, int]]]]
+    reward_shaping_versions: Optional[List[int]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
@@ -97,6 +101,8 @@ class GeneratorInterface(ABC):
             GeneratorOutput: Generated trajectories
         """
         output = await self._generate(input_batch, disable_tqdm=disable_tqdm)
+        generator_cfg = getattr(self, "generator_cfg", {})
+        shape_trajectory_rewards(output, generator_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         return output
 

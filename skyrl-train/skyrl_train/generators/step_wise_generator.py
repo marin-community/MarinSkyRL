@@ -334,10 +334,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
         rollout_metrics = get_rollout_metrics(responses, rewards)
 
-        if self.generator_cfg.zero_reward_on_non_stop:
-            # set reward to 0 if the stop reason is not "stop"
-            rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
-
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 

@@ -586,10 +586,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
-        if self.generator_cfg.zero_reward_on_non_stop:
-            # set reward to 0 if the stop reason is not "stop"
-            rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
-
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
@@ -613,21 +609,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         }
 
         return generator_output
-
-    def _zero_reward_if_not_stop(self, rewards: List[float], stop_reasons: List[str]):
-        """Sets the reward to 0 if the stop reason is not "stop".
-
-        This can be useful in cases where the LLM generation was truncated or aborted, but the environment still assigns non-zero reward.
-        Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response,
-        we typically don't want to reward it. This is a general setting for all environments.
-        """
-        for i, stop_reason in enumerate(stop_reasons):
-            if stop_reason != "stop":
-                if isinstance(rewards[i], list):
-                    rewards[i] = [0.0] * len(rewards[i])
-                else:
-                    rewards[i] = 0.0
-        return rewards
 
     # ----------------------------------------------------------------------------
     # Three methods of managing chat history and input ids in `agent_loop()`
