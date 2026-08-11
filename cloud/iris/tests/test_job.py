@@ -499,20 +499,36 @@ def test_runtime_bundle_rejects_uncommitted_runtime_bytes(runtime_checkout: tupl
         runtime_bundle.build_runtime_bundle(commit)
 
 
-def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize(
+    ("launch_flag", "expected_mode", "state", "iris_job_id", "iris_job_state"),
+    [
+        ("--dry-run", LaunchMode.PREPARE, AttemptState.PREPARED, None, None),
+        ("--no-wait", LaunchMode.DETACH, AttemptState.SUBMITTED, "/power/iceball-test", "submitted"),
+    ],
+)
+def test_cli_reports_launch_state_as_json(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    launch_flag: str,
+    expected_mode: LaunchMode,
+    state: AttemptState,
+    iris_job_id: str | None,
+    iris_job_state: str | None,
+) -> None:
     envelope = _spec(tmp_path)
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(asdict(envelope)))
 
     def fake_launch(_spec: SkyRLJobSpec, *, mode: LaunchMode) -> SkyRLLaunchResponse:
-        assert mode is LaunchMode.PREPARE
+        assert mode is expected_mode
         print("human launcher log")
         return SkyRLLaunchResponse(
             run_id=envelope.request.run_id,
             attempt_id=envelope.request.attempt_id,
-            state=AttemptState.PREPARED,
-            iris_job_id=None,
-            iris_job_state=None,
+            state=state,
+            iris_job_id=iris_job_id,
+            iris_job_state=iris_job_state,
             runtime=envelope.request.runtime,
             model=None,
             failure=None,
@@ -520,48 +536,21 @@ def test_cli_reserves_stdout_for_terminal_json(tmp_path: Path, monkeypatch, caps
 
     monkeypatch.setattr(job, "execute_job", fake_launch)
 
-    exit_code = job.main(["iris", "launch", "--request", str(request_path), "--dry-run"])
-
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert json.loads(captured.out)["state"] == "prepared"
-    assert "human launcher log" in captured.err
-
-
-def test_cli_no_wait_returns_submitted_json(tmp_path: Path, monkeypatch, capsys) -> None:
-    envelope = _spec(tmp_path)
-    request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(asdict(envelope)))
-
-    def fake_launch(_spec: SkyRLJobSpec, *, mode: LaunchMode) -> SkyRLLaunchResponse:
-        assert mode is LaunchMode.DETACH
-        return SkyRLLaunchResponse(
-            run_id=envelope.request.run_id,
-            attempt_id=envelope.request.attempt_id,
-            state=AttemptState.SUBMITTED,
-            iris_job_id="/power/iceball-test",
-            iris_job_state="submitted",
-            runtime=envelope.request.runtime,
-            model=None,
-            failure=None,
-        )
-
-    monkeypatch.setattr(job, "execute_job", fake_launch)
-
-    exit_code = job.main(["iris", "launch", "--request", str(request_path), "--no-wait"])
+    exit_code = job.main(["iris", "launch", "--request", str(request_path), launch_flag])
 
     captured = capsys.readouterr()
     assert exit_code == 0
     assert json.loads(captured.out) == {
         "attempt_id": "attempt-1",
         "failure": None,
-        "iris_job_id": "/power/iceball-test",
-        "iris_job_state": "submitted",
+        "iris_job_id": iris_job_id,
+        "iris_job_state": iris_job_state,
         "model": None,
         "run_id": "iceball-test",
         "runtime": {"commit": envelope.request.runtime.commit, "profile": "fsdp"},
-        "state": "submitted",
+        "state": state,
     }
+    assert "human launcher log" in captured.err
 
 
 def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeypatch) -> None:

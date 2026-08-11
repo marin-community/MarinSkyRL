@@ -138,7 +138,7 @@ def execute_job(
     mode: LaunchMode = LaunchMode.WAIT,
     backend: JobBackend | None = None,
 ) -> SkyRLLaunchResponse:
-    """Submit one job, optionally detach, or monitor and commit its terminal result."""
+    """Validate, detach from, or monitor one job according to ``mode``."""
     request = spec.request
     runtime_bundle_inputs(request.runtime.commit)
     if _path_exists(request.output.terminal_manifest_uri):
