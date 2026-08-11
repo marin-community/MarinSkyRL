@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from types import MappingProxyType
 from skyrl_train.generators.generator_types import (
     BatchMetadata,
+    ConversationType,
     GeneratorInput,
     GeneratorOutput,
     TrajectoryID,
@@ -10,7 +11,15 @@ from skyrl_train.generators.generator_types import (
 from skyrl_train.generators.trajectory_reward_shaping import shape_trajectory_rewards
 
 
-__all__ = ["BatchMetadata", "GeneratorInput", "GeneratorInterface", "GeneratorOutput", "TrajectoryID", "TrainingPhase"]
+__all__ = [
+    "BatchMetadata",
+    "ConversationType",
+    "GeneratorInput",
+    "GeneratorInterface",
+    "GeneratorOutput",
+    "TrajectoryID",
+    "TrainingPhase",
+]
 
 
 class GeneratorInterface(ABC):
