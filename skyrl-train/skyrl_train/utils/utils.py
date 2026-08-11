@@ -1004,7 +1004,8 @@ def _validate_dcp_cfg(cfg: DictConfig):
         )
     # (e) vLLM rejects DCP together with R3 router capture (enable_return_routed_experts).
     # R3 capture is configured at the generator level (direct flag or engine_init_kwargs),
-    # and the training-side replay is gated by trainer.policy.fsdp_config.moe_router_replay.
+    # Training-side replay also requires an FSDP/FSDP2 strategy; unsupported strategies
+    # reject the flag during top-level config validation.
     #
     # Opt-in bypass: VLLM_ALLOW_ROUTED_EXPERTS_DCP=1 lifts this guard, mirroring the
     # identical env-var-gated bypass in the patched vLLM fork
