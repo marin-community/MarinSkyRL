@@ -8,6 +8,11 @@ import numpy as np
 
 SHAPING_METRIC_PREFIX = "generate/reward_shaping"
 SHAPING_SCHEMA_VERSION = 1
+REWARD_SHAPING_ROW_KEYS = (
+    "reward_shaping_components",
+    "reward_shaping_loop_spans",
+    "reward_shaping_versions",
+)
 _HASH_BASE = 1_000_003
 _HASH_MASK = (1 << 64) - 1
 _DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
@@ -68,27 +73,30 @@ def parse_trajectory_reward_shaping_config(config: Mapping[str, Any] | None) -> 
     loop = _section(config, "loop")
     non_termination = _section(config, "non_termination")
     successful_length = _section(config, "successful_length")
-    raw_stop_reasons = non_termination.get("accepted_stop_reasons", _DEFAULT_ACCEPTED_STOP_REASONS)
+    defaults = TrajectoryRewardShapingConfig()
+    raw_stop_reasons = non_termination.get("accepted_stop_reasons", defaults.non_termination.accepted_stop_reasons)
     if not isinstance(raw_stop_reasons, Sequence) or isinstance(raw_stop_reasons, (str, bytes)):
         raise ValueError("non_termination.accepted_stop_reasons must be a sequence of strings")
     accepted_stop_reasons = tuple(str(reason).strip().lower() for reason in raw_stop_reasons)
     parsed = TrajectoryRewardShapingConfig(
-        schema_version=int(config.get("schema_version", SHAPING_SCHEMA_VERSION)),
-        enabled=bool(config.get("enabled", False)),
+        schema_version=int(config.get("schema_version", defaults.schema_version)),
+        enabled=bool(config.get("enabled", defaults.enabled)),
         loop=LoopPenaltyConfig(
-            window_tokens=int(loop.get("window_tokens", 16)),
-            minimum_occurrences=int(loop.get("minimum_occurrences", 3)),
-            penalty_per_occurrence=float(loop.get("penalty_per_occurrence", 0.0)),
-            max_penalty=float(loop.get("max_penalty", 0.2)),
+            window_tokens=int(loop.get("window_tokens", defaults.loop.window_tokens)),
+            minimum_occurrences=int(loop.get("minimum_occurrences", defaults.loop.minimum_occurrences)),
+            penalty_per_occurrence=float(loop.get("penalty_per_occurrence", defaults.loop.penalty_per_occurrence)),
+            max_penalty=float(loop.get("max_penalty", defaults.loop.max_penalty)),
         ),
         non_termination=NonTerminationPenaltyConfig(
-            penalty=float(non_termination.get("penalty", 0.0)),
+            penalty=float(non_termination.get("penalty", defaults.non_termination.penalty)),
             accepted_stop_reasons=accepted_stop_reasons,
         ),
         successful_length=SuccessfulLengthPenaltyConfig(
-            free_tokens=int(successful_length.get("free_tokens", 0)),
-            penalty_per_token=float(successful_length.get("penalty_per_token", 0.0)),
-            max_penalty=float(successful_length.get("max_penalty", 0.2)),
+            free_tokens=int(successful_length.get("free_tokens", defaults.successful_length.free_tokens)),
+            penalty_per_token=float(
+                successful_length.get("penalty_per_token", defaults.successful_length.penalty_per_token)
+            ),
+            max_penalty=float(successful_length.get("max_penalty", defaults.successful_length.max_penalty)),
         ),
     )
     _validate_config(parsed)
@@ -180,9 +188,8 @@ def _repeated_spans(
     penalized_occurrences = 0
     window = config.window_tokens
 
-    # Reset at every non-trainable region. Tool observations therefore separate
-    # assistant turns, so identical commands after changed observations are not
-    # collapsed into one textual loop.
+    # Tool observations split active regions, so repeated commands after changed
+    # observations are not collapsed into one textual loop.
     for segment_tokens, segment_positions in _active_segments(response_ids, loss_mask):
         states: dict[int, list[_RepeatedWindow]] = {}
         for start, window_hash in enumerate(_window_hashes(segment_tokens, window)):

@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, TypedDict, Optional, Union, Literal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from types import MappingProxyType
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.generators.trajectory_reward_shaping import shape_trajectory_rewards
 
@@ -90,6 +91,8 @@ class GeneratorInterface(ABC):
     training job. Use restart logic for recoverable failures.
     """
 
+    generator_cfg = MappingProxyType({})
+
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """Generate trajectories and apply generator-independent output finalization.
 
@@ -101,8 +104,7 @@ class GeneratorInterface(ABC):
             GeneratorOutput: Generated trajectories
         """
         output = await self._generate(input_batch, disable_tqdm=disable_tqdm)
-        generator_cfg = getattr(self, "generator_cfg", {})
-        shape_trajectory_rewards(output, generator_cfg.get("trajectory_reward_shaping"))
+        shape_trajectory_rewards(output, self.generator_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         return output
 
