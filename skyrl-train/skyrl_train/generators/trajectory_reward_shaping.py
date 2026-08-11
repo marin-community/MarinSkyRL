@@ -1,9 +1,11 @@
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import re
 from typing import Any
 
 import numpy as np
+
+from skyrl_train.generators.generator_types import GeneratorOutput
 
 
 SHAPING_METRIC_PREFIX = "generate/reward_shaping"
@@ -256,7 +258,7 @@ def infer_stop_reason(response_ids: Sequence[int], eos_token_id: int | None, max
     return "stop"
 
 
-def _trajectory_groups(output: Mapping[str, Any], batch_size: int) -> list[list[int]]:
+def _trajectory_groups(output: GeneratorOutput, batch_size: int) -> list[list[int]]:
     is_last_step = output.get("is_last_step")
     if is_last_step is None:
         return [[index] for index in range(batch_size)]
@@ -275,7 +277,7 @@ def _trajectory_groups(output: Mapping[str, Any], batch_size: int) -> list[list[
     return groups
 
 
-def refresh_trajectory_reward_shaping_metrics(output: MutableMapping[str, Any]) -> None:
+def refresh_trajectory_reward_shaping_metrics(output: GeneratorOutput) -> None:
     """Recompute shaping metrics after concatenation, filtering, or replacement."""
     components = output.get("reward_shaping_components")
     if components is None:
@@ -340,7 +342,7 @@ def refresh_trajectory_reward_shaping_metrics(output: MutableMapping[str, Any]) 
     output["rollout_metrics"] = metrics
 
 
-def shape_trajectory_rewards(output: MutableMapping[str, Any], raw_config: Mapping[str, Any] | None) -> None:
+def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, Any] | None) -> None:
     """Apply generator-independent additive penalties to normalized trajectories.
 
     Raw task outcomes are copied to ``unshaped_rewards`` before any shared
