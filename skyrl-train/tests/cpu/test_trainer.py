@@ -335,7 +335,7 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
     exists.assert_called_once_with(resume_path.rstrip("/"))
 
 
-def test_calculate_kl_create_experience_batched(dummy_config):
+def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
         tracker=None,
@@ -354,7 +354,7 @@ def test_calculate_kl_create_experience_batched(dummy_config):
 
 
 @patch("skyrl_train.trainer.compute_advantages_and_returns", new_callable=MagicMock)
-def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
+def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dummy_generator):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
         tracker=None,

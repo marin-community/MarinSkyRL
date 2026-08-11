@@ -9,6 +9,7 @@ from skyrl_train.generators.generator_types import (
     TrainingPhase,
 )
 from skyrl_train.generators.trajectory_reward_shaping import shape_trajectory_rewards
+from skyrl_train.generators.trajectory_retention import TrajectorySink, retain_trajectories
 
 
 __all__ = [
@@ -36,6 +37,7 @@ class GeneratorInterface(ABC):
     """
 
     generator_cfg = MappingProxyType({})
+    trajectory_sink: TrajectorySink | None = None
 
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """Generate trajectories and apply generator-independent output finalization.
@@ -50,7 +52,18 @@ class GeneratorInterface(ABC):
         output = await self._generate(input_batch, disable_tqdm=disable_tqdm)
         shape_trajectory_rewards(output, self.generator_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
+        if self.trajectory_sink is not None:
+            await retain_trajectories(
+                self.trajectory_sink,
+                input_batch,
+                output,
+                generator_name=type(self).__name__,
+            )
         return output
+
+    def set_trajectory_sink(self, sink: TrajectorySink) -> None:
+        """Attach the trainer-owned sink used by shared output finalization."""
+        self.trajectory_sink = sink
 
     @abstractmethod
     async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:

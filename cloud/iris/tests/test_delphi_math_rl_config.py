@@ -70,6 +70,20 @@ def test_delphi_config_flattens_environment_and_caps_into_hydra_args():
     assert not any("model_num_attention_heads" in a for a in args)
 
 
+def test_iris_derives_durable_training_trajectory_path():
+    parsed = parse_rl_config(_CONFIG)
+    args = build_skyrl_hydra_args(
+        parsed,
+        {"job_name": "retained-run", "experiments_dir": "s3://bucket/iris", "num_nodes": 4},
+        _HPCStub(),
+    )
+
+    assert (
+        "generator.trajectory_retention.output_path='s3://bucket/iris/retained-run/trace_jobs/training_trajectories'"
+        in args
+    )
+
+
 def test_model_source_locator_reaches_trainer_config():
     parsed = parse_rl_config(_CONFIG)
     exp_args = {

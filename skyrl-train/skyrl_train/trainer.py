@@ -29,6 +29,7 @@ from skyrl_train.generators.base import (
 )
 import copy
 from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
+from skyrl_train.generators.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
@@ -123,6 +124,8 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
+        self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
+        self.generator.set_trajectory_sink(self.trajectory_sink)
         self.train_dataloader = None
         self.total_training_steps = None
         self._configure_training_schedule()
@@ -220,6 +223,7 @@ class RayPPOTrainer:
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
+                trajectory_sink=self.trajectory_sink,
             )
         else:
             eval_metrics = await evaluate(
@@ -228,6 +232,7 @@ class RayPPOTrainer:
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
+                trajectory_sink=self.trajectory_sink,
             )
         return eval_metrics
 
@@ -1201,7 +1206,6 @@ class RayPPOTrainer:
         """
         # NOTE: we assume that .generate returns samples in the same order as passed in
         generator_output: GeneratorOutput = await self.generator.generate(input_batch)
-
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])

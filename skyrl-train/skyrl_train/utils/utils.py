@@ -693,7 +693,11 @@ def validate_generator_cfg(cfg: DictConfig):
         ValueError: when cfg.generator.sampling_params.logprobs > 0
     """
 
+    # Local import breaks the utils-package initialization cycle: trajectory retention uses utils.io.
+    from skyrl_train.generators.trajectory_retention import parse_trajectory_retention_config
+
     parse_trajectory_reward_shaping_config(cfg.generator.get("trajectory_reward_shaping"))
+    parse_trajectory_retention_config(cfg.generator.get("trajectory_retention"))
 
     if cfg.generator.max_turns == 1:
         assert cfg.generator.max_input_length == cfg.trainer.max_prompt_length, (

@@ -13,6 +13,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Sequence
+from pathlib import Path
 
 import fsspec
 from loguru import logger
@@ -48,6 +49,27 @@ def open_file(path: str, mode: str = "rb"):
     if path.startswith("s3://"):
         return call_with_s3_retry(fs, fs.open, norm, mode)
     return fs.open(norm, mode)
+
+
+def write_bytes_atomic(path: str, payload: bytes) -> None:
+    """Write one object; local paths use fsync plus atomic replacement."""
+    if is_cloud_path(path):
+        with open_file(path, "wb") as destination:
+            destination.write(payload)
+        return
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    try:
+        with os.fdopen(file_descriptor, "wb") as temporary:
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 def makedirs(path: str, exist_ok: bool = True) -> None:

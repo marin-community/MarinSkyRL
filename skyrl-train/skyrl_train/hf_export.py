@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import asdict
-from pathlib import Path
 
 from loguru import logger
 
@@ -31,24 +29,7 @@ def write_hf_export_request(request: HFExportRequest) -> str:
     payload = asdict(request)
     payload["status"] = request.status.value
 
-    if io.is_cloud_path(path):
-        with io.open_file(path, "w") as output:
-            json.dump(payload, output, sort_keys=True)
-        return path
-
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile("w", dir=destination.parent, delete=False) as output:
-            temporary_path = output.name
-            json.dump(payload, output, sort_keys=True)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary_path, destination)
-    finally:
-        if temporary_path is not None and os.path.exists(temporary_path):
-            os.remove(temporary_path)
+    io.write_bytes_atomic(path, json.dumps(payload, sort_keys=True).encode("utf-8"))
     return path
 
 

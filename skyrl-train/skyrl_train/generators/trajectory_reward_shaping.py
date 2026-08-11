@@ -17,7 +17,7 @@ REWARD_SHAPING_ROW_KEYS = (
 )
 _HASH_BASE = 1_000_003
 _HASH_MASK = (1 << 64) - 1
-_DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
+DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class LoopPenaltyConfig:
 @dataclass(frozen=True)
 class NonTerminationPenaltyConfig:
     penalty: float = 0.0
-    accepted_stop_reasons: tuple[str, ...] = _DEFAULT_ACCEPTED_STOP_REASONS
+    accepted_stop_reasons: tuple[str, ...] = DEFAULT_ACCEPTED_STOP_REASONS
 
 
 @dataclass(frozen=True)
@@ -57,12 +57,12 @@ class _RepeatedWindow:
 
 
 @dataclass(frozen=True)
-class _NormalizedReward:
+class NormalizedReward:
     values: tuple[float, ...]
     scalar: bool
 
     @classmethod
-    def from_output(cls, reward: float | Sequence[float]) -> "_NormalizedReward":
+    def from_output(cls, reward: float | Sequence[float]) -> "NormalizedReward":
         if isinstance(reward, Sequence) and not isinstance(reward, (str, bytes)):
             return cls(tuple(float(value) for value in reward), scalar=False)
         return cls((float(reward),), scalar=True)
@@ -307,7 +307,7 @@ def refresh_trajectory_reward_shaping_metrics(output: GeneratorOutput) -> None:
     groups = _trajectory_groups(output, batch_size)
     response_lengths = [sum(bool(value) for value in loss_mask) for loss_mask in output["loss_masks"]]
     trajectory_components = [components[group[-1]] for group in groups]
-    shaped_totals = [_NormalizedReward.from_output(output["rewards"][group[-1]]).total for group in groups]
+    shaped_totals = [NormalizedReward.from_output(output["rewards"][group[-1]]).total for group in groups]
     penalties = [sum(values.values()) for values in trajectory_components]
     trajectory_lengths = [sum(response_lengths[index] for index in group) for group in groups]
     trajectory_stops = [stop_reasons[group[-1]] for group in groups]
@@ -377,7 +377,7 @@ def shape_trajectory_rewards(output: GeneratorOutput, raw_config: Mapping[str, A
     if len(stop_reasons) != batch_size:
         raise ValueError("stop reasons must have one entry per trajectory")
 
-    normalized_rewards = [_NormalizedReward.from_output(reward) for reward in rewards]
+    normalized_rewards = [NormalizedReward.from_output(reward) for reward in rewards]
     existing_outcomes = output.get("unshaped_rewards")
     if existing_outcomes is not None and len(existing_outcomes) != batch_size:
         raise ValueError("unshaped rewards must have one entry per trajectory")

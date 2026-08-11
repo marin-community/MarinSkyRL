@@ -739,6 +739,15 @@ def build_checkpoint_export_hydra_args(
     return args
 
 
+def _apply_trajectory_retention_path(generator: Dict[str, Any], experiments_dir: str, job_name: str) -> None:
+    retention = dict(generator.get("trajectory_retention", {}))
+    configured_path = retention.get("output_path")
+    if not configured_path and experiments_dir and job_name:
+        retention["output_path"] = f"{experiments_dir}/{job_name}/trace_jobs/training_trajectories"
+    if retention:
+        generator["trajectory_retention"] = retention
+
+
 def build_skyrl_hydra_args(
     parsed: ParsedRLConfig,
     exp_args: Dict[str, Any],
@@ -774,6 +783,7 @@ def build_skyrl_hydra_args(
     if not trainer.get("ckpt_path") and experiments_dir and job_name:
         trainer["ckpt_path"] = f"{experiments_dir}/{job_name}/checkpoints"
         print(f"Auto-set trainer.ckpt_path: {trainer['ckpt_path']}")
+    _apply_trajectory_retention_path(generator, experiments_dir, job_name)
 
     # Derive placement from num_nodes.
     num_nodes = int(exp_args.get("num_nodes", 1))
