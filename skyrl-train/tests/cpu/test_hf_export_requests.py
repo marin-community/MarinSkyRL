@@ -362,13 +362,9 @@ def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
         timeout=7200,
         no_wait=False,
     )
-    exit_code = export_hf_checkpoint.submit_export(
-        spec,
-        request,
-        ["ignored"],
-    )
+    with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
+        export_hf_checkpoint.submit_export(spec, request, ["ignored"])
 
-    assert exit_code != 0
     updated = read_hf_export_request(str(checkpoint))
     assert updated is not None
     assert updated.status is HFExportStatus.PENDING

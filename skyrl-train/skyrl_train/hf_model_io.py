@@ -92,9 +92,12 @@ def local_hf_model_dir(output_path: str):
     try:
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
-    except BaseException:
+    except BaseException as export_error:
         try:
             _remove_weight_index_if_present(index_path)
         except Exception as cleanup_error:
-            logger.error(f"Could not remove incomplete HF weight index {index_path}: {cleanup_error}")
+            raise ExceptionGroup(
+                f"HF export failed and its incomplete index could not be removed: {index_path}",
+                [export_error, cleanup_error],
+            ) from export_error
         raise

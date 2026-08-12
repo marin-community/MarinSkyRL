@@ -240,16 +240,19 @@ def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command:
         f"the training geometry or the sharded load will not resolve"
     )
     exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
+    verification_error: RuntimeError | None = None
     if exit_code == 0 and not spec.no_wait:
         export_path = policy_export_path(spec.request.export_path, spec.request.step)
         try:
             hf_model_io.verify_hf_model_export(export_path)
         except RuntimeError as error:
-            print(f"[export-hf] export completeness check failed: {error}", file=sys.stderr)
+            verification_error = error
             exit_code = 1
     if request is not None:
         status = HFExportStatus.COMPLETE if exit_code == 0 else HFExportStatus.PENDING
         write_hf_export_request(request.with_status(status, last_exit_code=exit_code))
+    if verification_error is not None:
+        raise verification_error
     return exit_code
 
 
