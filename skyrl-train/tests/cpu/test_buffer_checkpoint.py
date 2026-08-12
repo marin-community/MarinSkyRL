@@ -79,6 +79,7 @@ async def test_roundtrip_empty_buffer():
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
         cb = BufferCheckpointCallback()
+        cb.bind_queues(trainer._generation_queues)
         await cb.on_save_async(_FakeState(10), _FakeControl(), trainer=trainer)
         assert not os.path.exists(os.path.join(step_dir, cb.ARTIFACT_NAME))
 
@@ -96,6 +97,7 @@ async def test_roundtrip_with_items():
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
         cb = BufferCheckpointCallback()
+        cb.bind_queues(trainer._generation_queues)
         await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
 
         # Buffer should still have all 3 items (non-destructive)
@@ -106,10 +108,10 @@ async def test_roundtrip_with_items():
         assert os.path.exists(artifact_path)
 
         # Load and verify
-        loaded, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
-        assert len(loaded) == 3
-        assert retry_prompts == []
-        for i, item in enumerate(loaded):
+        buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
+        assert len(buffer_state.completed_groups) == 3
+        assert buffer_state.retry_prompts == []
+        for i, item in enumerate(buffer_state.completed_groups):
             assert item.uid == f"uid_{i}"
             assert item.global_step_when_scheduled == 5
             assert item.source_prompts == [{"uid": f"uid_{i}"}]
@@ -128,12 +130,13 @@ async def test_roundtrip_with_pending_retry():
         trainer = _FakeTrainer(tmpdir, buf)
         trainer._generation_queues.retries.put_nowait([{"uid": "retry-me"}])
         cb = BufferCheckpointCallback()
+        cb.bind_queues(trainer._generation_queues)
 
         await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
-        completed, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
+        buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
 
-        assert completed == []
-        assert retry_prompts == [[{"uid": "retry-me"}]]
+        assert buffer_state.completed_groups == []
+        assert buffer_state.retry_prompts == [[{"uid": "retry-me"}]]
         assert trainer._generation_queues.retries.get_nowait() == [{"uid": "retry-me"}]
 
 
@@ -144,6 +147,8 @@ async def test_save_failure_is_not_downgraded(monkeypatch, tmp_path):
     buffer = asyncio.Queue(maxsize=1)
     buffer.put_nowait(_make_item("uid", step=5))
     trainer = _FakeTrainer(str(tmp_path), buffer)
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(trainer._generation_queues)
 
     def fail_open(*args, **kwargs):
         raise OSError("storage unavailable")
@@ -151,13 +156,15 @@ async def test_save_failure_is_not_downgraded(monkeypatch, tmp_path):
     monkeypatch.setattr(io, "open_file", fail_open)
 
     with pytest.raises(OSError, match="storage unavailable"):
-        await BufferCheckpointCallback().on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+        await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
 
 
 def test_load_missing_file():
     """Missing artifacts return empty completed and retry collections."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        assert BufferCheckpointCallback.load_buffer_state(tmpdir) == ([], [])
+        buffer_state = BufferCheckpointCallback.load_buffer_state(tmpdir)
+        assert buffer_state.completed_groups == []
+        assert buffer_state.retry_prompts == []
 
 
 def test_load_malformed_state_fails_instead_of_dropping_retries():
@@ -182,20 +189,21 @@ async def test_restore_into_queue():
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
         cb = BufferCheckpointCallback()
+        cb.bind_queues(trainer._generation_queues)
         await cb.on_save_async(_FakeState(3), _FakeControl(), trainer=trainer)
 
         # Simulate resume: load into a fresh queue
         new_buf = asyncio.Queue(maxsize=8)
-        loaded, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
-        for item in loaded:
+        buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
+        for item in buffer_state.completed_groups:
             new_buf.put_nowait(item)
         assert new_buf.qsize() == 4
-        assert retry_prompts == []
+        assert buffer_state.retry_prompts == []
 
 
 @pytest.mark.asyncio
 async def test_no_trainer_in_kwargs():
-    """on_save gracefully returns control when no trainer is provided."""
+    """on_save_async gracefully returns control when no trainer is provided."""
     cb = BufferCheckpointCallback()
     ctrl = _FakeControl()
     result = await cb.on_save_async(_FakeState(1), ctrl)

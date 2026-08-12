@@ -21,7 +21,8 @@ Supports two configuration styles:
 import asyncio
 import dataclasses
 import os
-from typing import Any, Dict, List, Optional, Type
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
 from loguru import logger
 from omegaconf import DictConfig
@@ -35,6 +36,9 @@ from .types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
+
+if TYPE_CHECKING:
+    from skyrl_train.fully_async_trainer import GeneratedOutputGroup, _GenerationQueues
 
 
 # Registry mapping callback type names to classes
@@ -1165,6 +1169,12 @@ class DataTrackingCallback(TrainerCallback):
         return False
 
 
+@dataclass
+class GenerationBufferState:
+    completed_groups: List["GeneratedOutputGroup"]
+    retry_prompts: List[List[dict]]
+
+
 class BufferCheckpointCallback(TrainerCallback):
     """Persist async completed groups and retry prompts with each checkpoint.
 
@@ -1174,6 +1184,13 @@ class BufferCheckpointCallback(TrainerCallback):
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
     error_behavior = "raise"
+
+    def __init__(self) -> None:
+        self._queues = None
+
+    def bind_queues(self, queues: "_GenerationQueues") -> None:
+        """Select the current epoch's queues for checkpoint persistence."""
+        self._queues = queues
 
     async def on_save_async(
         self,
@@ -1187,15 +1204,14 @@ class BufferCheckpointCallback(TrainerCallback):
 
         trainer = kwargs.get("trainer")
         if trainer is None:
-            logger.warning("BufferCheckpointCallback.on_save: no trainer in kwargs, skipping")
+            logger.warning("BufferCheckpointCallback.on_save_async: no trainer in kwargs, skipping")
             return control
 
-        queues = getattr(trainer, "_generation_queues", None)
-        if queues is None:
+        if self._queues is None:
             return control
         # This method does not yield before snapshotting, so generation tasks cannot
         # interleave with the drain-and-restore operation.
-        items, retry_prompts = queues.snapshot()
+        items, retry_prompts = self._queues.snapshot()
         if not items and not retry_prompts:
             return control
 
@@ -1227,7 +1243,7 @@ class BufferCheckpointCallback(TrainerCallback):
         return control
 
     @staticmethod
-    def load_buffer_state(ckpt_path: str):
+    def load_buffer_state(ckpt_path: str) -> GenerationBufferState:
         """Load completed output groups and retry prompts from a checkpoint."""
 
         import torch
@@ -1238,7 +1254,7 @@ class BufferCheckpointCallback(TrainerCallback):
 
         artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
         if not io.exists(artifact_path):
-            return [], []
+            return GenerationBufferState(completed_groups=[], retry_prompts=[])
 
         with io.open_file(artifact_path, "rb") as f:
             state = torch.load(f, map_location="cpu", weights_only=False)
@@ -1254,4 +1270,4 @@ class BufferCheckpointCallback(TrainerCallback):
                     source_prompts=entry["source_prompts"],
                 )
             )
-        return items, state["retry_prompts"]
+        return GenerationBufferState(completed_groups=items, retry_prompts=state["retry_prompts"])

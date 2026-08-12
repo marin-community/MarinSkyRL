@@ -28,14 +28,17 @@ from dataclasses import dataclass
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Tuple
+from typing import List, Optional, Tuple, TypeVar
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 
 
-def _drain_queue(queue: asyncio.Queue) -> list:
+_QueueItem = TypeVar("_QueueItem")
+
+
+def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
     """Remove and return every item currently available without yielding."""
     items = []
     while True:
@@ -388,7 +391,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Register the data tracking callback for checkpoint persistence and epoch transitions
         self.callback_handler.add_callback(DataTrackingCallback(self.data_tracker))
         # Register buffer checkpoint callback for saving/restoring generation buffer on resume
-        self.callback_handler.add_callback(BufferCheckpointCallback())
+        self._buffer_checkpoint_callback = BufferCheckpointCallback()
+        self.callback_handler.add_callback(self._buffer_checkpoint_callback)
         self._generation_queues = None
         self._pending_buffer_restore_path = None
         self._staleness_manager = _AsyncStalenessManager(
@@ -436,20 +440,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
         """Restore completed outputs and pending retries from a checkpoint."""
-        items, retry_prompts = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
-        if len(items) > queues.completed.maxsize:
+        buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
+        if len(buffer_state.completed_groups) > queues.completed.maxsize:
             raise ValueError(
-                f"Checkpoint contains {len(items)} completed groups, exceeding buffer capacity "
+                f"Checkpoint contains {len(buffer_state.completed_groups)} completed groups, exceeding buffer capacity "
                 f"{queues.completed.maxsize}"
             )
-        for item in items:
+        for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
-        for prompts in retry_prompts:
+        for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
-        self._staleness_manager._stat.accepted += len(items)
-        self._staleness_manager._stat.submitted += len(items)
+        self._staleness_manager._stat.accepted += len(buffer_state.completed_groups)
+        self._staleness_manager._stat.submitted += len(buffer_state.completed_groups)
         logger.info(
-            f"Restored {len(items)} completed generation groups and {len(retry_prompts)} pending retries "
+            f"Restored {len(buffer_state.completed_groups)} completed generation groups and "
+            f"{len(buffer_state.retry_prompts)} pending retries "
             "from checkpoint"
         )
 
@@ -628,6 +633,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # Store buffer ref for checkpoint callback access
             self._generation_queues = generation_queues
+            self._buffer_checkpoint_callback.bind_queues(generation_queues)
 
             # Restore buffer from checkpoint if resuming
             if self._pending_buffer_restore_path is not None:
@@ -968,10 +974,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     global_step_when_scheduled=staleness_step,
                     source_prompts=rand_prompts,
                 )
-                if await self._route_completed_group(queues, completed_group):
+                stale_group = await self._enqueue_if_fresh(queues, completed_group)
+                if stale_group is not None:
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
-                    self._record_stale_groups(1, inspected_count=1)
+                    self._record_group_inspections(discarded_count=1, inspected_count=1)
                     continue
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
@@ -983,13 +990,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # submitted == accepted.  We adjust the counters synchronously
             # because we cannot reliably `await` inside a CancelledError
             # handler (the next await would re-raise CancelledError).
-            if "slot_acquired" in locals() and slot_acquired:
+            if slot_acquired:
                 self._staleness_manager._stat.submitted -= 1
                 self._staleness_manager._stat.running -= 1
             return
         except Exception as e:
             log_exception_as_text("Generator worker failed", e)
-            if "slot_acquired" in locals() and slot_acquired:
+            if slot_acquired:
                 self._staleness_manager._stat.submitted -= 1
                 self._staleness_manager._stat.running -= 1
             sys.exit(1)
@@ -1011,18 +1018,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self._staleness_manager.acquire_submission_slot()
         return prompts
 
-    async def _route_completed_group(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> bool:
-        """Retry a stale completion or enqueue a fresh completion. Return whether it was stale."""
+    async def _enqueue_if_fresh(
+        self, queues: _GenerationQueues, group: GeneratedOutputGroup
+    ) -> Optional[GeneratedOutputGroup]:
+        """Enqueue a fresh group, or queue its prompt for retry and return the stale group."""
         async with queues.condition:
             while queues.completed.full():
                 await queues.condition.wait()
-            is_stale = self._is_stale_group(group)
-            if is_stale:
+            if self._is_stale_group(group):
                 queues.retries.put_nowait(group.source_prompts)
-            else:
-                queues.completed.put_nowait(group)
-                queues.condition.notify_all()
-            return is_stale
+                return group
+            queues.completed.put_nowait(group)
+            queues.condition.notify_all()
+            return None
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1072,8 +1080,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _is_stale_group(self, group: GeneratedOutputGroup) -> bool:
         return self.global_step - group.global_step_when_scheduled > self.max_staleness_steps
 
-    def _record_stale_groups(self, count: int, inspected_count: int) -> None:
-        self._stale_groups_discarded_since_step = getattr(self, "_stale_groups_discarded_since_step", 0) + count
+    def _record_group_inspections(self, discarded_count: int, inspected_count: int) -> None:
+        self._stale_groups_discarded_since_step = (
+            getattr(self, "_stale_groups_discarded_since_step", 0) + discarded_count
+        )
         self._groups_inspected_since_step = getattr(self, "_groups_inspected_since_step", 0) + inspected_count
 
     def _partition_completed_groups(
@@ -1132,11 +1142,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 queues.condition.notify_all()
 
             if stale_groups:
-                self._record_stale_groups(len(stale_groups), inspected_count=len(completed_groups))
+                self._record_group_inspections(len(stale_groups), inspected_count=len(completed_groups))
                 await self._staleness_manager.on_rollouts_discarded(len(stale_groups))
                 continue
 
-            self._record_stale_groups(0, inspected_count=len(completed_groups))
+            self._record_group_inspections(0, inspected_count=len(completed_groups))
 
             if batch is not None:
                 break

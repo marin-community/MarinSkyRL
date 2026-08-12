@@ -65,6 +65,8 @@ cluster out of the trainer, but those methods deliberately coordinate trainer-ow
 telemetry, and `_AsyncStalenessManager` accounting; moving them would add a stateful facade without reducing coupling.
 Submission-slot cleanup remains explicit because completion, stale rejection, cancellation, and worker failure have
 different accounting transitions; an async context manager would still need the same outcome-specific branches.
+The follow-up review led to directly binding each epoch's queues to the checkpoint callback, a named checkpoint-state
+return type, typed queue draining, and outcome-specific routing and inspection names.
 
 ## Future work
 
