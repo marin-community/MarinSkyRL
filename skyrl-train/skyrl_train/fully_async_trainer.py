@@ -28,8 +28,9 @@ from dataclasses import dataclass
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Optional, Tuple, TypeVar
+from typing import List, Tuple, TypeVar
 import inspect
+from enum import Enum, auto
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
@@ -87,6 +88,11 @@ class _RolloutStat:
     submitted: int = 0
     accepted: int = 0
     running: int = 0
+
+
+class _GroupFreshness(Enum):
+    FRESH = auto()
+    STALE = auto()
 
 
 class _AsyncStalenessManager:
@@ -937,8 +943,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     global_step_when_scheduled=staleness_step,
                     source_prompts=rand_prompts,
                 )
-                stale_group = await self._enqueue_if_fresh(queues, completed_group)
-                if stale_group is not None:
+                freshness = await self._enqueue_if_fresh(queues, completed_group)
+                if freshness is _GroupFreshness.STALE:
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
                     self._record_group_inspections(discarded_count=1, inspected_count=1)
@@ -974,19 +980,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return await queues.retries.get()
 
-    async def _enqueue_if_fresh(
-        self, queues: _GenerationQueues, group: GeneratedOutputGroup
-    ) -> Optional[GeneratedOutputGroup]:
-        """Enqueue a fresh group, or queue its prompt for retry and return the stale group."""
+    async def _enqueue_if_fresh(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
+        """Enqueue a fresh group or route a stale group to retry."""
         async with queues.condition:
             while queues.completed.full():
                 await queues.condition.wait()
-            if self._is_stale_group(group):
-                queues.retries.put_nowait(group.source_prompts)
-                return group
+            freshness = self._route_stale_group_to_retry(queues, group)
+            if freshness is _GroupFreshness.STALE:
+                return freshness
             queues.completed.put_nowait(group)
             queues.condition.notify_all()
-            return None
+            return freshness
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1036,6 +1040,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _is_stale_group(self, group: GeneratedOutputGroup) -> bool:
         return self.global_step - group.global_step_when_scheduled > self.max_staleness_steps
 
+    def _route_stale_group_to_retry(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
+        if self._is_stale_group(group):
+            queues.retries.put_nowait(group.source_prompts)
+            return _GroupFreshness.STALE
+        return _GroupFreshness.FRESH
+
     def _record_group_inspections(self, discarded_count: int, inspected_count: int) -> None:
         self._stale_groups_discarded_since_step += discarded_count
         self._groups_inspected_since_step += inspected_count
@@ -1049,9 +1059,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         stale_groups = []
         fresh_groups = []
         for group in completed_groups:
-            if self._is_stale_group(group):
+            if self._route_stale_group_to_retry(queues, group) is _GroupFreshness.STALE:
                 stale_groups.append(group)
-                queues.retries.put_nowait(group.source_prompts)
             else:
                 fresh_groups.append(group)
         return stale_groups, fresh_groups

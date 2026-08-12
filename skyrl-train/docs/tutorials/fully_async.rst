@@ -152,7 +152,8 @@ There are 5 core components:
 2. ``TrainingWorker``: simply a single thread that runs the training loop.
 3. ``GenerationOutputGroupBuffer``: a buffer that stores the generated groups of output.
 4. ``AsyncDataloader``: a thin wrapper of the dataloader, polled by the generation workers to get data.
-5. ``AsyncStalenessManager``: a controller that manages the staleness control to ensure no trajectory is dropped for being too stale.
+5. ``AsyncStalenessManager``: a controller that limits generation lead; a completed-buffer sweep regenerates any group
+   that still exceeds the hard staleness cap.
 
 Note that all the control logics pertain to a single epoch. We do not do any cross-epoch asynchrony.
 
@@ -168,10 +169,11 @@ physical ``InferenceEngineClient`` in the back serving the actual LLM inference.
 
 Each generation worker runs the following steps in a while loop:
 
-1. Get a single data from the ``AsyncDataloader``. Might await on staleness control based on ``AsyncStalenessManager`` (i.e. too many data accumulated in the buffer and a new generation will result in staleness violation).
+1. Prefer a stale-group retry row, otherwise get one row from the ``AsyncDataloader``. After the dataloader is exhausted,
+   wait for retries. Acquire generation capacity through ``AsyncStalenessManager`` before generating.
 2. Generate one group of trajectories. Can be single-turn or multi-turn, ``SkyRLGymGenerator`` or your own generator.
 3. Enqueue the generated group to the ``GenerationOutputGroupBuffer``.
-4. Repeat from step 1 until the ``AsyncDataloader`` is exhausted for this epoch.
+4. Repeat from step 1 until the training worker finishes the epoch and cancels the generation tasks.
 
 2. Training Worker (i.e. the training loop)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -180,8 +182,8 @@ While we call it a "training worker", it is simply the single thread that runs t
 
 It follows the following steps in a for-loop over the number of steps per epoch:
 
-1. Get precisely ``trainer.policy_mini_batch_size`` groups from the ``GenerationOutputGroupBuffer``.
-   The staleness controller enforces a global capacity bound that aims to keep batches within ``trainer.fully_async.max_staleness_steps`` steps stale. However, it does not strictly guarantee it. See :ref:`async-staleness-manager` for more details.
+1. Sweep all completed groups, requeue every over-cap group's original row, and wait until precisely
+   ``trainer.policy_mini_batch_size`` fresh groups are available. See :ref:`async-staleness-manager` for details.
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the ``AsyncDataloader``, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
@@ -269,7 +271,8 @@ After each training step, the trainer increments the version and calls
 Per-sample staleness vs capacity bound
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The capacity inequality keeps generation from outpacing training by more than ``S`` steps in **aggregate**. It does **NOT** strictly guarantee that every trajectory group will be trained within ``S`` steps of when it was scheduled. In rare cases (e.g., very long rollouts), a trajectory group may complete after more than ``S`` steps have elapsed while the system as a whole still satisfies the capacity constraint. However, in **steady state**, staleness remains within the configured budget of ``max_staleness_steps``.
+The capacity inequality limits how far generation can lead training in **aggregate**. A long rollout can still finish
+outside that aggregate budget, so the completed-buffer sweep below enforces the hard per-group limit.
 
 The trainer sweeps every completed group before assembling a batch. It discards each group older than ``S``, requeues
 that group's original dataset row, and waits for a regenerated replacement. Training starts only after the configured

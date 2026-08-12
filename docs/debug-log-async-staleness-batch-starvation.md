@@ -87,6 +87,8 @@ atomic sweep requirement.
 Workers now select or wait for a prompt before acquiring a submission slot. A worker blocked on the retry queue therefore
 owns no slot, eliminating the cancellation double-decrement race. The shared queue-provider protocol moved beside the
 shared async state records, and tutorial counter definitions now account for discarded attempts.
+All older tutorial descriptions now match the sweep, retry, and wait policy. Producer and consumer paths share one
+stale-routing helper with an explicit freshness outcome, preventing their retry behavior from drifting.
 
 ## Future work
 
