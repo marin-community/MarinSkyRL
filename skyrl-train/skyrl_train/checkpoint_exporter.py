@@ -12,14 +12,13 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from transformers import PreTrainedTokenizerBase
 
+from marinskyrl.hf_model import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
     HFUploadMode,
-    POLICY_CHECKPOINT_SUBDIRECTORY,
     TRAINER_STATE_FILENAME,
-    policy_export_path,
 )
 from skyrl_train.hf_publisher import HuggingFacePublisher
 from skyrl_train.tokenizer import create_tokenizer

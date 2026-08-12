@@ -87,15 +87,14 @@ from skyrl_train.hf_export import (
     read_hf_export_request,
     write_hf_export_request,
 )
+from marinskyrl.hf_model import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
     HFExportRequest,
     HFExportStatus,
     HFUploadMode,
-    POLICY_CHECKPOINT_SUBDIRECTORY,
     TRAINER_STATE_FILENAME,
-    policy_export_path,
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
