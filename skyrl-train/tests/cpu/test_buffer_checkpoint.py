@@ -6,13 +6,11 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_buffer
 import asyncio
 import os
 import tempfile
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
-from skyrl_train.fully_async_trainer import GeneratedOutputGroup
+from skyrl_train.fully_async_trainer import GeneratedOutputGroup, _GenerationQueues
 from skyrl_train.generators.base import TrajectoryID
 
 
@@ -51,7 +49,11 @@ class _FakeTrainer:
 
         self.cfg = _Cfg()
         self.cfg.trainer.ckpt_path = ckpt_path
-        self._generation_queues = SimpleNamespace(completed=buffer, retries=asyncio.Queue())
+        self._generation_queues = _GenerationQueues(
+            completed=buffer,
+            retries=asyncio.Queue(),
+            condition=asyncio.Condition(),
+        )
 
 
 class _FakeState:
@@ -68,7 +70,8 @@ class _FakeControl:
 # ---------------------------------------------------------------------------
 
 
-def test_roundtrip_empty_buffer():
+@pytest.mark.asyncio
+async def test_roundtrip_empty_buffer():
     """Empty buffer produces no artifact file."""
     buf = asyncio.Queue(maxsize=4)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,11 +79,12 @@ def test_roundtrip_empty_buffer():
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
         cb = BufferCheckpointCallback()
-        cb.on_save(_FakeState(10), _FakeControl(), trainer=trainer)
+        await cb.on_save_async(_FakeState(10), _FakeControl(), trainer=trainer)
         assert not os.path.exists(os.path.join(step_dir, cb.ARTIFACT_NAME))
 
 
-def test_roundtrip_with_items():
+@pytest.mark.asyncio
+async def test_roundtrip_with_items():
     """Items survive save -> load roundtrip and queue is non-destructively snapshotted."""
     buf = asyncio.Queue(maxsize=8)
     items = [_make_item(f"uid_{i}", step=5) for i in range(3)]
@@ -92,7 +96,7 @@ def test_roundtrip_with_items():
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
         cb = BufferCheckpointCallback()
-        cb.on_save(_FakeState(5), _FakeControl(), trainer=trainer)
+        await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
 
         # Buffer should still have all 3 items (non-destructive)
         assert buf.qsize() == 3
@@ -115,7 +119,8 @@ def test_roundtrip_with_items():
             assert tid.instance_id == f"uid_{i}"
 
 
-def test_roundtrip_with_pending_retry():
+@pytest.mark.asyncio
+async def test_roundtrip_with_pending_retry():
     buf = asyncio.Queue(maxsize=1)
     with tempfile.TemporaryDirectory() as tmpdir:
         step_dir = os.path.join(tmpdir, "global_step_5")
@@ -124,12 +129,29 @@ def test_roundtrip_with_pending_retry():
         trainer._generation_queues.retries.put_nowait([{"uid": "retry-me"}])
         cb = BufferCheckpointCallback()
 
-        cb.on_save(_FakeState(5), _FakeControl(), trainer=trainer)
+        await cb.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
         completed, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
 
         assert completed == []
         assert retry_prompts == [[{"uid": "retry-me"}]]
         assert trainer._generation_queues.retries.get_nowait() == [{"uid": "retry-me"}]
+
+
+@pytest.mark.asyncio
+async def test_save_failure_is_not_downgraded(monkeypatch, tmp_path):
+    from skyrl_train.utils.io import io
+
+    buffer = asyncio.Queue(maxsize=1)
+    buffer.put_nowait(_make_item("uid", step=5))
+    trainer = _FakeTrainer(str(tmp_path), buffer)
+
+    def fail_open(*args, **kwargs):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(io, "open_file", fail_open)
+
+    with pytest.raises(OSError, match="storage unavailable"):
+        await BufferCheckpointCallback().on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
 
 
 def test_load_missing_file():
@@ -147,7 +169,8 @@ def test_load_malformed_state_fails_instead_of_dropping_retries():
             BufferCheckpointCallback.load_buffer_state(tmpdir)
 
 
-def test_restore_into_queue():
+@pytest.mark.asyncio
+async def test_restore_into_queue():
     """Loaded items can be put back into a fresh queue."""
     buf = asyncio.Queue(maxsize=8)
     items = [_make_item(f"uid_{i}", step=3) for i in range(4)]
@@ -159,7 +182,7 @@ def test_restore_into_queue():
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
         cb = BufferCheckpointCallback()
-        cb.on_save(_FakeState(3), _FakeControl(), trainer=trainer)
+        await cb.on_save_async(_FakeState(3), _FakeControl(), trainer=trainer)
 
         # Simulate resume: load into a fresh queue
         new_buf = asyncio.Queue(maxsize=8)
@@ -170,9 +193,10 @@ def test_restore_into_queue():
         assert retry_prompts == []
 
 
-def test_no_trainer_in_kwargs():
+@pytest.mark.asyncio
+async def test_no_trainer_in_kwargs():
     """on_save gracefully returns control when no trainer is provided."""
     cb = BufferCheckpointCallback()
     ctrl = _FakeControl()
-    result = cb.on_save(_FakeState(1), ctrl)
+    result = await cb.on_save_async(_FakeState(1), ctrl)
     assert result is ctrl

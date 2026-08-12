@@ -18,6 +18,8 @@ Supports two configuration styles:
    ```
 """
 
+import asyncio
+import dataclasses
 import os
 from typing import Any, Dict, List, Optional, Type
 
@@ -1074,8 +1076,6 @@ class DataTrackingCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        import dataclasses
-
         import torch
 
         from skyrl_train.utils.io import io
@@ -1166,16 +1166,16 @@ class DataTrackingCallback(TrainerCallback):
 
 
 class BufferCheckpointCallback(TrainerCallback):
-    """Best-effort save/restore of the async generation buffer at checkpoint time.
+    """Persist async completed groups and retry prompts with each checkpoint.
 
     Saves completed output groups and stale-group retry prompts so resume preserves
     every dataset row still needed by the current epoch.
     """
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
-    error_behavior = "warn"
+    error_behavior = "raise"
 
-    def on_save(
+    async def on_save_async(
         self,
         state: TrainerState,
         control: TrainerControl,
@@ -1193,56 +1193,36 @@ class BufferCheckpointCallback(TrainerCallback):
         queues = getattr(trainer, "_generation_queues", None)
         if queues is None:
             return control
-        buf = queues.completed
-        retry_queue = queues.retries
+        # This method does not yield before snapshotting, so generation tasks cannot
+        # interleave with the drain-and-restore operation.
+        items, retry_prompts = queues.snapshot()
+        if not items and not retry_prompts:
+            return control
 
-        try:
-            # Drain-and-restore: non-destructive snapshot of the queue.
-            # Safe because on_save runs synchronously within the event loop —
-            # no generation worker can interleave between drain and restore.
-            items = []
-            while not buf.empty():
-                try:
-                    items.append(buf.get_nowait())
-                except Exception:
-                    break
-            # Put them all back
-            for item in items:
-                buf.put_nowait(item)
+        serialized = [
+            {
+                "generator_output": dict(item.generator_output),
+                "uid": item.uid,
+                "global_step_when_scheduled": item.global_step_when_scheduled,
+                "source_prompts": item.source_prompts,
+            }
+            for item in items
+        ]
+        ckpt_path = os.path.join(
+            trainer.cfg.trainer.ckpt_path,
+            f"global_step_{state.global_step}",
+        )
+        artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
 
-            retry_prompts = []
-            while not retry_queue.empty():
-                retry_prompts.append(retry_queue.get_nowait())
-            for prompts in retry_prompts:
-                retry_queue.put_nowait(prompts)
-
-            if not items and not retry_prompts:
-                return control
-
-            serialized = []
-            for item in items:
-                serialized.append(
-                    {
-                        "generator_output": dict(item.generator_output),
-                        "uid": item.uid,
-                        "global_step_when_scheduled": item.global_step_when_scheduled,
-                        "source_prompts": item.source_prompts,
-                    }
-                )
-
-            ckpt_path = os.path.join(
-                trainer.cfg.trainer.ckpt_path,
-                f"global_step_{state.global_step}",
-            )
-            artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
+        def save_state() -> None:
             with io.open_file(artifact_path, "wb") as f:
                 torch.save({"completed_groups": serialized, "retry_prompts": retry_prompts}, f)
-            logger.info(
-                f"Saved {len(serialized)} completed generation groups and {len(retry_prompts)} pending retries "
-                f"to {artifact_path}"
-            )
-        except Exception as e:
-            logger.warning(f"BufferCheckpointCallback.on_save failed (best-effort): {e}")
+
+        await asyncio.to_thread(save_state)
+        logger.info(
+            f"Saved {len(serialized)} completed generation groups and {len(retry_prompts)} pending retries "
+            f"to {artifact_path}"
+        )
 
         return control
 

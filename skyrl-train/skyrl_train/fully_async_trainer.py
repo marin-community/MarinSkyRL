@@ -65,6 +65,26 @@ class _GenerationQueues:
     retries: asyncio.Queue[List[dict]]
     condition: asyncio.Condition
 
+    def snapshot(self) -> Tuple[List[GeneratedOutputGroup], List[List[dict]]]:
+        """Copy both queues without yielding to another event-loop task."""
+        completed = []
+        retries = []
+        while True:
+            try:
+                completed.append(self.completed.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        while True:
+            try:
+                retries.append(self.retries.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for group in completed:
+            self.completed.put_nowait(group)
+        for prompts in retries:
+            self.retries.put_nowait(prompts)
+        return completed, retries
+
 
 @dataclass
 class _RolloutStat:
@@ -369,7 +389,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.callback_handler.add_callback(DataTrackingCallback(self.data_tracker))
         # Register buffer checkpoint callback for saving/restoring generation buffer on resume
         self.callback_handler.add_callback(BufferCheckpointCallback())
-        self._generation_output_group_buffer = None
+        self._generation_queues = None
         self._pending_buffer_restore_path = None
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
@@ -608,7 +628,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # Store buffer ref for checkpoint callback access
             self._generation_queues = generation_queues
-            self._generation_output_group_buffer = generation_queues.completed
 
             # Restore buffer from checkpoint if resuming
             if self._pending_buffer_restore_path is not None:
@@ -909,30 +928,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return status
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
-        """
-        Generator worker: repeatedly pulls the next prompt (possibly blocked by staleness control),
-        generates one single generation group, respecting a pause/resume event, and enqueues the result.
-        """
+        """Generate dataset rows or retries and route only fresh groups to the completed queue."""
         try:
             while True:
-                # 0. Reserve capacity before choosing work so retries already queued at
-                # the step boundary take priority over new dataset rows.
                 slot_acquired = False
                 await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
-
-                try:
-                    rand_prompts = queues.retries.get_nowait()
-                except asyncio.QueueEmpty:
-                    rand_prompts = await self.async_train_dataloader.get_next_non_consumed_data()
-                    if rand_prompts is None:
-                        await self._staleness_manager.cancel_submission_slot()
-                        slot_acquired = False
-                        rand_prompts = await queues.retries.get()
-                        await self._staleness_manager.acquire_submission_slot()
-                        slot_acquired = True
-
-                # 1. Prepare generator input
+                rand_prompts, slot_acquired = await self._next_generation_prompts(queues, slot_acquired)
                 assert len(rand_prompts) == 1
                 generator_input, uids = prepare_generator_input(
                     rand_prompts,
@@ -949,8 +951,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # replace this value with actual_global_step below.
                 global_step_at_start = self.global_step
 
-                # 2. Generate one rollout group
-
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
                     # blast the console with each worker's progress bar.
@@ -964,7 +964,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_generator_output.get("is_last_step"),
                 )
 
-                # 3. Enqueue the completed group and mark accepted to free capacity slot.
                 # Prefer the actual global_step captured at first vLLM inference (more accurate
                 # staleness) over the pessimistic capture at task pickup time.
                 actual_step = cur_generator_output.get("actual_global_step")
@@ -975,16 +974,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     global_step_when_scheduled=staleness_step,
                     source_prompts=rand_prompts,
                 )
-                async with queues.condition:
-                    while queues.completed.full():
-                        await queues.condition.wait()
-                    if self._is_stale_group(completed_group):
-                        queues.retries.put_nowait(rand_prompts)
-                    else:
-                        queues.completed.put_nowait(completed_group)
-                        queues.condition.notify_all()
-
-                if self._is_stale_group(completed_group):
+                if await self._route_completed_group(queues, completed_group):
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
                     self._record_stale_groups(1, inspected_count=1)
@@ -1009,6 +999,37 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self._staleness_manager._stat.submitted -= 1
                 self._staleness_manager._stat.running -= 1
             sys.exit(1)
+
+    async def _next_generation_prompts(
+        self,
+        queues: _GenerationQueues,
+        slot_acquired: bool,
+    ) -> Tuple[List[dict], bool]:
+        """Prefer retries, waiting for one after the epoch's dataset rows are scheduled."""
+        try:
+            return queues.retries.get_nowait(), slot_acquired
+        except asyncio.QueueEmpty:
+            prompts = await self.async_train_dataloader.get_next_non_consumed_data()
+            if prompts is not None:
+                return prompts, slot_acquired
+
+        await self._staleness_manager.cancel_submission_slot()
+        prompts = await queues.retries.get()
+        await self._staleness_manager.acquire_submission_slot()
+        return prompts, True
+
+    async def _route_completed_group(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> bool:
+        """Retry a stale completion or enqueue a fresh completion. Return whether it was stale."""
+        async with queues.condition:
+            while queues.completed.full():
+                await queues.condition.wait()
+            is_stale = self._is_stale_group(group)
+            if is_stale:
+                queues.retries.put_nowait(group.source_prompts)
+            else:
+                queues.completed.put_nowait(group)
+                queues.condition.notify_all()
+            return is_stale
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1062,6 +1083,39 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._stale_groups_discarded_since_step = getattr(self, "_stale_groups_discarded_since_step", 0) + count
         self._groups_inspected_since_step = getattr(self, "_groups_inspected_since_step", 0) + inspected_count
 
+    def _partition_completed_groups(
+        self,
+        queues: _GenerationQueues,
+        completed_groups: List[GeneratedOutputGroup],
+    ) -> Tuple[List[GeneratedOutputGroup], List[GeneratedOutputGroup]]:
+        """Queue retries for every stale group and return stale and fresh partitions."""
+        stale_groups = []
+        fresh_groups = []
+        for group in completed_groups:
+            if self._is_stale_group(group):
+                stale_groups.append(group)
+                queues.retries.put_nowait(group.source_prompts)
+            else:
+                fresh_groups.append(group)
+        return stale_groups, fresh_groups
+
+    def _publish_staleness_metrics(self) -> None:
+        discarded = getattr(self, "_stale_groups_discarded_since_step", 0)
+        inspected = getattr(self, "_groups_inspected_since_step", 0)
+        self._stale_groups_discarded_since_step = 0
+        self._groups_inspected_since_step = 0
+        self.all_metrics.update(
+            {
+                "async/discarded_count": discarded,
+                "async/discard_rate": discarded / inspected,
+            }
+        )
+        if discarded:
+            logger.warning(
+                f"Discarded {discarded} completed stale groups before step "
+                f"{self.global_step}; waiting produced a full {self.mini_batch_size}-group replacement batch."
+            )
+
     async def _get_fresh_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
         """Discard completed stale attempts and wait for a full fresh mini-batch."""
         fresh_groups = []
@@ -1078,13 +1132,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     except asyncio.QueueEmpty:
                         break
 
-                stale_groups = []
-                for group in completed_groups:
-                    if self._is_stale_group(group):
-                        stale_groups.append(group)
-                        queues.retries.put_nowait(group.source_prompts)
-                    else:
-                        fresh_groups.append(group)
+                stale_groups, newly_fresh_groups = self._partition_completed_groups(queues, completed_groups)
+                fresh_groups.extend(newly_fresh_groups)
 
                 if not stale_groups and len(fresh_groups) >= self.mini_batch_size:
                     batch = fresh_groups[: self.mini_batch_size]
@@ -1109,21 +1158,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 queues.completed.maxsize,
             )
 
-        discarded_since_step = getattr(self, "_stale_groups_discarded_since_step", 0)
-        inspected_since_step = getattr(self, "_groups_inspected_since_step", 0)
-        self._stale_groups_discarded_since_step = 0
-        self._groups_inspected_since_step = 0
-        self.all_metrics.update(
-            {
-                "async/discarded_count": discarded_since_step,
-                "async/discard_rate": discarded_since_step / inspected_since_step,
-            }
-        )
-        if discarded_since_step:
-            logger.warning(
-                f"Discarded {discarded_since_step} completed stale groups before step "
-                f"{self.global_step}; waiting produced a full {self.mini_batch_size}-group replacement batch."
-            )
+        self._publish_staleness_metrics()
         return batch
 
     def convert_generation_group_mini_batch_to_training_input(
