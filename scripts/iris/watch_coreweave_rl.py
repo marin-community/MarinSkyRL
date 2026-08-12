@@ -140,6 +140,8 @@ ERROR_PATTERNS = (
     re.compile(r"Traceback \(most recent call last\)"),
     re.compile(r"Train loop failed", re.IGNORECASE),
 )
+IRIS_ATTEMPT_BOUNDARY_PATTERN = re.compile(r"task=\S+/0 \| \[iris setup\] step 1/2")
+NON_ERROR_LOG_LEVEL_PATTERN = re.compile(r"\b(?:TRACE|DEBUG|INFO|WARNING)\b")
 MISSING_OBJECT_ERROR_CODES = {"404", "NoSuchKey", "NoSuchObject", "NotFound"}
 
 
@@ -1097,10 +1099,14 @@ def terminal_signal(finelog: Path) -> str | None:
         tail = finelog.read_text(errors="replace")[-2_000_000:]
     except OSError:
         return None
-    for pattern in ERROR_PATTERNS:
-        match = pattern.search(tail)
-        if match:
-            return match.group(0)
+    attempt_boundaries = list(IRIS_ATTEMPT_BOUNDARY_PATTERN.finditer(tail))
+    if attempt_boundaries:
+        tail = tail[attempt_boundaries[-1].start() :]
+    for line in tail.splitlines():
+        if NON_ERROR_LOG_LEVEL_PATTERN.search(line):
+            continue
+        if any(pattern.search(line) for pattern in ERROR_PATTERNS):
+            return line
     return None
 
 

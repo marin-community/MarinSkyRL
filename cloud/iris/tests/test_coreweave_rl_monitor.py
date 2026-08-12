@@ -583,6 +583,40 @@ def test_rl_report_row_replaces_traceback_signal_with_error_report_pointer(tmp_p
     assert row[-1].value == "workload error detected; see error report"
 
 
+def test_workload_signal_ignores_warning_traceback(tmp_path):
+    finelog = tmp_path / "finelog.log"
+    finelog.write_text(
+        "[17:01:44] task=/user/job/0 | (Worker_TP0_EP0) WARNING 08-11 17:01:44 "
+        "[import_utils.py:408] Traceback (most recent call last):\n"
+        "[17:01:44] task=/user/job/0 | (Worker_TP0_EP0) WARNING 08-11 17:01:44 "
+        "[import_utils.py:408] AssertionError\n"
+    )
+
+    assert watch_coreweave_rl.terminal_signal(finelog) is None
+
+
+def test_workload_signal_reports_driver_exception_with_context(tmp_path):
+    finelog = tmp_path / "finelog.log"
+    line = (
+        "[15:09:16] task=/user/job/0 | (skyrl_entrypoint pid=14143) "
+        "ray.exceptions.RayTaskError(AssertionError): ray::MegatronPolicyWorkerBase.ppo_train()"
+    )
+    finelog.write_text(f"{line}\n")
+
+    assert watch_coreweave_rl.terminal_signal(finelog) == line
+
+
+def test_workload_signal_ignores_prior_attempt(tmp_path):
+    finelog = tmp_path / "finelog.log"
+    finelog.write_text(
+        "[15:09:16] task=/user/job/0 | ray.exceptions.RayTaskError(AssertionError)\n"
+        "[17:06:08] task=/user/job/0 | [iris setup] step 1/2\n"
+        "[17:07:00] task=/user/job/0 | healthy startup\n"
+    )
+
+    assert watch_coreweave_rl.terminal_signal(finelog) is None
+
+
 def test_rl_main_degrades_unexpected_job_sync_failure_into_error_report(monkeypatch, tmp_path, capsys):
     cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
     job = watch_coreweave_rl.IrisRlJob(
