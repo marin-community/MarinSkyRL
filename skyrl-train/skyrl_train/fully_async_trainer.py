@@ -33,7 +33,7 @@ import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
-from skyrl_train.async_rollout_state import GeneratedOutputGroup
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 
 
 _QueueItem = TypeVar("_QueueItem")
@@ -55,7 +55,7 @@ class _GenerationQueues:
     retries: asyncio.Queue[List[dict]]
     condition: asyncio.Condition
 
-    def snapshot(self) -> Tuple[List[GeneratedOutputGroup], List[List[dict]]]:
+    def snapshot(self) -> GenerationBufferState:
         """Copy both queues without yielding to another event-loop task."""
         completed = _drain_queue(self.completed)
         retries = _drain_queue(self.retries)
@@ -63,7 +63,7 @@ class _GenerationQueues:
             self.completed.put_nowait(group)
         for prompts in retries:
             self.retries.put_nowait(prompts)
-        return completed, retries
+        return GenerationBufferState(completed_groups=completed, retry_prompts=retries)
 
 
 @dataclass

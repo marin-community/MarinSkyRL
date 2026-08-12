@@ -21,7 +21,7 @@ Supports two configuration styles:
 import asyncio
 import dataclasses
 import os
-from typing import Any, Dict, List, Optional, Protocol, Tuple, Type
+from typing import Any, Dict, List, Optional, Protocol, Type
 
 from loguru import logger
 from omegaconf import DictConfig
@@ -1165,8 +1165,8 @@ class DataTrackingCallback(TrainerCallback):
         return False
 
 
-class _GenerationQueuesSnapshot(Protocol):
-    def snapshot(self) -> Tuple[List[GeneratedOutputGroup], List[List[dict]]]: ...
+class _GenerationQueuesProvider(Protocol):
+    def snapshot(self) -> GenerationBufferState: ...
 
 
 class BufferCheckpointCallback(TrainerCallback):
@@ -1182,7 +1182,7 @@ class BufferCheckpointCallback(TrainerCallback):
     def __init__(self) -> None:
         self._queues = None
 
-    def bind_queues(self, queues: _GenerationQueuesSnapshot) -> None:
+    def bind_queues(self, queues: _GenerationQueuesProvider) -> None:
         """Select the current epoch's queues for checkpoint persistence."""
         self._queues = queues
 
@@ -1205,7 +1205,9 @@ class BufferCheckpointCallback(TrainerCallback):
             return control
         # This method does not yield before snapshotting, so generation tasks cannot
         # interleave with the drain-and-restore operation.
-        items, retry_prompts = self._queues.snapshot()
+        buffer_state = self._queues.snapshot()
+        items = buffer_state.completed_groups
+        retry_prompts = buffer_state.retry_prompts
         if not items and not retry_prompts:
             return control
 

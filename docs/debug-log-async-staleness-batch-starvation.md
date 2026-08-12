@@ -69,6 +69,10 @@ The follow-up review led to directly binding each epoch's queues to the checkpoi
 return type, typed queue draining, and outcome-specific routing and inspection names.
 The shared generated-group and checkpoint-state records live in `async_rollout_state.py`, which keeps callback typing
 independent of the trainer module. The obsolete trainer queue attribute and redundant queue-count test were removed.
+Queue snapshots now return that named checkpoint-state record directly. The generation worker retains its explicit
+outcome-specific slot transitions because accepted, stale, cancelled, and failed attempts require different accounting.
+`HasCapturedGlobalStep` remains structural to keep the generator utility module from importing `AgentLoopOutput` back
+from `skyrl_gym_generator`, which already depends on the utility module.
 
 ## Future work
 
