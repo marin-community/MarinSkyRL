@@ -28,7 +28,7 @@ def verify_hf_model_export(export_path: str) -> None:
     try:
         with io.open_file(index_path, "r") as source:
             index = json.load(source)
-    except (OSError, TypeError, ValueError) as error:
+    except (OSError, ValueError) as error:
         raise RuntimeError(f"HF export has an unreadable safetensors index at {index_path}: {error}") from error
 
     weight_map = index.get("weight_map") if isinstance(index, dict) else None
@@ -85,7 +85,7 @@ def _remove_weight_index_if_present(index_path: str) -> None:
 
 @contextmanager
 def local_hf_model_dir(output_path: str):
-    """Remove stale indexes, then stage and publish weights before a new index."""
+    """Yield a local HF model directory whose completed contents replace ``output_path``."""
     index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
     _remove_weight_index_if_present(index_path)
 
