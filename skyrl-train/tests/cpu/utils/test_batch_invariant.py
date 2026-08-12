@@ -13,6 +13,7 @@ from tests.cpu.util import example_dummy_config
 
 def test_batch_invariant_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv(VLLM_BATCH_INVARIANT_ENV, raising=False)
+    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **kwargs: True)
     cfg = example_dummy_config()
 
     assert cfg.trainer.algorithm.batch_invariant is False
@@ -20,6 +21,7 @@ def test_batch_invariant_is_disabled_by_default(monkeypatch):
 
 
 def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
+    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **kwargs: True)
     cfg = example_dummy_config()
     cfg.trainer.algorithm.batch_invariant = True
 

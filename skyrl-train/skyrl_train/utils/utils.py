@@ -556,8 +556,6 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
-    # Validate generation config separately
-    validate_generator_cfg(cfg)
     if cfg.trainer.algorithm.batch_invariant:
         if cfg.generator.backend != "vllm":
             raise ValueError("trainer.algorithm.batch_invariant=true requires generator.backend='vllm'")
@@ -566,6 +564,8 @@ def validate_cfg(cfg: DictConfig):
                 "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
                 "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
             )
+    # Validate generation config separately
+    validate_generator_cfg(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)

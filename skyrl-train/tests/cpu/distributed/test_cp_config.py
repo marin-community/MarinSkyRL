@@ -57,11 +57,18 @@ STAGE2_TRAINER_FIELDS = {
 DEBUG_MODE_TRAINER_FIELDS = {
     "debug_mode": "off",
 }
+ADDITIVE_ALGORITHM_FIELDS = {
+    "batch_invariant": False,
+}
 # Additive generator keys with behavior-preserving disabled defaults. Like the CP
 # fields, they are stripped before comparison with the pre-CP golden.
 ADDITIVE_GENERATOR_FIELDS = {
     "inference_engine_decode_context_parallel_size": 1,
     "vllm_attention_backend": None,
+    "engine_init_timeout_seconds": 1800,
+}
+ADDITIVE_TEACHER_FIELDS = {
+    "engine_init_timeout_seconds": "${generator.engine_init_timeout_seconds}",
 }
 ADDITIVE_POLICY_MODEL_FIELDS = {
     "source_uri": None,
@@ -116,8 +123,12 @@ def test_all_defaults_is_structurally_identical_to_baseline():
             optimizer.pop(k, None)
     for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS):
         container["trainer"].pop(k, None)
+    for k in ADDITIVE_ALGORITHM_FIELDS:
+        container["trainer"]["algorithm"].pop(k, None)
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
+    for k in ADDITIVE_TEACHER_FIELDS:
+        container["teacher"].pop(k, None)
     for k in ADDITIVE_POLICY_MODEL_FIELDS:
         container["trainer"]["policy"]["model"].pop(k, None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
