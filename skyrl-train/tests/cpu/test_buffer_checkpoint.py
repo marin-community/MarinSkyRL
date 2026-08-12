@@ -6,6 +6,10 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_buffer
 import asyncio
 import os
 import tempfile
+from types import SimpleNamespace
+
+import pytest
+import torch
 
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.fully_async_trainer import GeneratedOutputGroup
@@ -47,8 +51,7 @@ class _FakeTrainer:
 
         self.cfg = _Cfg()
         self.cfg.trainer.ckpt_path = ckpt_path
-        self._generation_output_group_buffer = buffer
-        self._generation_retry_queue = asyncio.Queue()
+        self._generation_queues = SimpleNamespace(completed=buffer, retries=asyncio.Queue())
 
 
 class _FakeState:
@@ -118,7 +121,7 @@ def test_roundtrip_with_pending_retry():
         step_dir = os.path.join(tmpdir, "global_step_5")
         os.makedirs(step_dir)
         trainer = _FakeTrainer(tmpdir, buf)
-        trainer._generation_retry_queue.put_nowait([{"uid": "retry-me"}])
+        trainer._generation_queues.retries.put_nowait([{"uid": "retry-me"}])
         cb = BufferCheckpointCallback()
 
         cb.on_save(_FakeState(5), _FakeControl(), trainer=trainer)
@@ -126,13 +129,22 @@ def test_roundtrip_with_pending_retry():
 
         assert completed == []
         assert retry_prompts == [[{"uid": "retry-me"}]]
-        assert trainer._generation_retry_queue.get_nowait() == [{"uid": "retry-me"}]
+        assert trainer._generation_queues.retries.get_nowait() == [{"uid": "retry-me"}]
 
 
 def test_load_missing_file():
-    """Missing artifact returns empty list."""
+    """Missing artifacts return empty completed and retry collections."""
     with tempfile.TemporaryDirectory() as tmpdir:
         assert BufferCheckpointCallback.load_buffer_state(tmpdir) == ([], [])
+
+
+def test_load_malformed_state_fails_instead_of_dropping_retries():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        artifact_path = os.path.join(tmpdir, BufferCheckpointCallback.ARTIFACT_NAME)
+        torch.save({"retry_prompts": [[{"uid": "retry-me"}]]}, artifact_path)
+
+        with pytest.raises(KeyError, match="completed_groups"):
+            BufferCheckpointCallback.load_buffer_state(tmpdir)
 
 
 def test_restore_into_queue():

@@ -1190,10 +1190,11 @@ class BufferCheckpointCallback(TrainerCallback):
             logger.warning("BufferCheckpointCallback.on_save: no trainer in kwargs, skipping")
             return control
 
-        buf = getattr(trainer, "_generation_output_group_buffer", None)
-        retry_queue = getattr(trainer, "_generation_retry_queue", None)
-        if buf is None or retry_queue is None:
+        queues = getattr(trainer, "_generation_queues", None)
+        if queues is None:
             return control
+        buf = queues.completed
+        retry_queue = queues.retries
 
         try:
             # Drain-and-restore: non-destructive snapshot of the queue.
@@ -1259,22 +1260,18 @@ class BufferCheckpointCallback(TrainerCallback):
         if not io.exists(artifact_path):
             return [], []
 
-        try:
-            with io.open_file(artifact_path, "rb") as f:
-                state = torch.load(f, map_location="cpu", weights_only=False)
+        with io.open_file(artifact_path, "rb") as f:
+            state = torch.load(f, map_location="cpu", weights_only=False)
 
-            items = []
-            for entry in state["completed_groups"]:
-                gen_out: GeneratorOutput = entry["generator_output"]
-                items.append(
-                    GeneratedOutputGroup(
-                        generator_output=gen_out,
-                        uid=entry["uid"],
-                        global_step_when_scheduled=entry["global_step_when_scheduled"],
-                        source_prompts=entry["source_prompts"],
-                    )
+        items = []
+        for entry in state["completed_groups"]:
+            gen_out: GeneratorOutput = entry["generator_output"]
+            items.append(
+                GeneratedOutputGroup(
+                    generator_output=gen_out,
+                    uid=entry["uid"],
+                    global_step_when_scheduled=entry["global_step_when_scheduled"],
+                    source_prompts=entry["source_prompts"],
                 )
-            return items, state["retry_prompts"]
-        except Exception as e:
-            logger.warning(f"BufferCheckpointCallback.load_buffer_state failed: {e}")
-            return [], []
+            )
+        return items, state["retry_prompts"]

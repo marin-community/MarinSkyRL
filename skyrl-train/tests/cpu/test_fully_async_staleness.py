@@ -6,6 +6,7 @@ from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GeneratedOutputGroup,
     _AsyncStalenessManager,
+    _GenerationQueues,
 )
 from skyrl_train.generators.base import TrajectoryID
 
@@ -68,22 +69,23 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
     )
     trainer._staleness_manager._stat.submitted = 4
     trainer._staleness_manager._stat.accepted = 4
-    output_buffer = asyncio.Queue()
-    retry_queue = asyncio.Queue()
-    buffer_condition = asyncio.Condition()
+    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
     for group in [
         _generated_group("stale-in-batch", scheduled_step=7),
         _generated_group("fresh-1", scheduled_step=10),
         _generated_group("fresh-2", scheduled_step=9),
         _generated_group("stale-beyond-batch", scheduled_step=6),
     ]:
-        output_buffer.put_nowait(group)
+        queues.completed.put_nowait(group)
 
-    batch = await trainer._get_fresh_generation_group_mini_batch(output_buffer, retry_queue, buffer_condition)
+    batch = await trainer._get_fresh_generation_group_mini_batch(queues)
 
     assert [group.uid for group in batch] == ["fresh-1", "fresh-2"]
-    assert output_buffer.empty()
-    assert [retry_queue.get_nowait()[0]["uid"] for _ in range(2)] == ["stale-in-batch", "stale-beyond-batch"]
+    assert queues.completed.empty()
+    assert [queues.retries.get_nowait()[0]["uid"] for _ in range(2)] == [
+        "stale-in-batch",
+        "stale-beyond-batch",
+    ]
     assert trainer.all_metrics["async/discarded_count"] == 2
     assert trainer.all_metrics["async/discard_rate"] == 0.5
     assert trainer._staleness_manager._stat.accepted == 2
@@ -103,21 +105,17 @@ async def test_batch_assembly_waits_for_fresh_replacement():
     )
     trainer._staleness_manager._stat.submitted = 1
     trainer._staleness_manager._stat.accepted = 1
-    output_buffer = asyncio.Queue()
-    retry_queue = asyncio.Queue()
-    buffer_condition = asyncio.Condition()
-    output_buffer.put_nowait(_generated_group("retry-me", scheduled_step=7))
+    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
+    queues.completed.put_nowait(_generated_group("retry-me", scheduled_step=7))
 
-    pending_batch = asyncio.create_task(
-        trainer._get_fresh_generation_group_mini_batch(output_buffer, retry_queue, buffer_condition)
-    )
+    pending_batch = asyncio.create_task(trainer._get_fresh_generation_group_mini_batch(queues))
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
-    assert retry_queue.get_nowait()[0]["uid"] == "retry-me"
+    assert queues.retries.get_nowait()[0]["uid"] == "retry-me"
 
-    async with buffer_condition:
-        output_buffer.put_nowait(_generated_group("retry-me", scheduled_step=10))
-        buffer_condition.notify_all()
+    async with queues.condition:
+        queues.completed.put_nowait(_generated_group("retry-me", scheduled_step=10))
+        queues.condition.notify_all()
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
     assert [group.uid for group in batch] == ["retry-me"]
