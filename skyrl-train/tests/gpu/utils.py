@@ -382,7 +382,6 @@ def init_inference_engines(
         enable_prefix_caching=True,
         enforce_eager=True,
         shared_pg=pg,
-        colocated_num_gpus_per_node=tp_size if colocate_all else None,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,

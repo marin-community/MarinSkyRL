@@ -19,12 +19,13 @@ from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, managed_environment_names
 from skyrl_train.utils import (
+    bundles_per_node,
     get_all_env_variables,
     get_ray_pg_ready_with_timeout,
     get_reordered_bundle_indices,
     ray_noset_visible_devices,
 )
-from skyrl_train.utils.constants import DEFAULT_INFERENCE_ENGINE_INIT_TIMEOUT_SECONDS, SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.utils import colocated_engine_bundle_indices, use_per_engine_strict_pack_pg
 
 
@@ -233,13 +234,12 @@ def create_ray_wrapped_inference_engines(
     vllm_v1_disable_multiproc: bool,
     enable_prefix_caching: bool,
     enforce_eager: bool,
+    engine_init_timeout_seconds: float,
     expert_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
     decode_context_parallel_size: int = 1,
     shared_pg=None,
-    colocated_num_gpus_per_node: int | None = None,
-    engine_init_timeout_seconds: float = DEFAULT_INFERENCE_ENGINE_INIT_TIMEOUT_SECONDS,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
     async_engine=False,
@@ -305,10 +305,9 @@ def create_ray_wrapped_inference_engines(
     inference_engine_runtime_env = _build_inference_engine_runtime_env()
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
-    if use_hybrid_engine and colocated_num_gpus_per_node is None:
-        raise ValueError("Colocated inference engines require colocated_num_gpus_per_node")
     colocated_bundle_indices = get_reordered_bundle_indices(shared_pg) if use_hybrid_engine else []
     tp_pp_size = tensor_parallel_size * pipeline_parallel_size
+    colocated_num_gpus_per_node = bundles_per_node(shared_pg) if use_hybrid_engine else 0
     colocated_engine_bundles = (
         [
             colocated_engine_bundle_indices(
@@ -516,7 +515,7 @@ def create_ray_wrapped_inference_engines(
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
-                # Contiguous TP*PP slice reserved for a single DP rank.
+                # TP*PP slice reserved for a single DP rank.
                 base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
                 dp_rank_bundles = (
                     list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
@@ -743,7 +742,9 @@ def create_ray_wrapped_inference_engines(
     return engines
 
 
-def wait_for_inference_engine_startup(startup_refs, actor_handles, *, timeout_seconds: float) -> None:
+def wait_for_inference_engine_startup(
+    startup_refs: list[ray.ObjectRef], actor_handles: list[ActorHandle], *, timeout_seconds: float
+) -> None:
     """Wait for every engine readiness reference or terminate the actor gang."""
 
     _, pending = ray.wait(startup_refs, num_returns=len(startup_refs), timeout=timeout_seconds, fetch_local=False)

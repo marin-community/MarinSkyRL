@@ -93,6 +93,7 @@ async def run_generator_end_to_end(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
+        engine_init_timeout_seconds=1800,
         shared_pg=None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=True,

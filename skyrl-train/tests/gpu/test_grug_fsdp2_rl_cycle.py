@@ -209,6 +209,7 @@ def _engine_client(cfg, model_path: str) -> InferenceEngineClient:
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
         enforce_eager=True,
+        engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=None,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
         inference_engine_enable_sleep=False,

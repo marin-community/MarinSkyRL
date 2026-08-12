@@ -392,6 +392,7 @@ teacher:
   gpu_memory_utilization: 0.9
   enforce_eager: false
   backend: vllm
+  engine_init_timeout_seconds: ${generator.engine_init_timeout_seconds}
   engine_init_kwargs: {}
 
 environment:

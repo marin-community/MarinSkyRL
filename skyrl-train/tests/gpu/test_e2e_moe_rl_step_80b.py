@@ -127,7 +127,6 @@ def init_ray_inference_engines(backend, tp_size, shared_pg, config) -> Inference
         enable_prefix_caching=True,
         enforce_eager=True,
         shared_pg=shared_pg,
-        colocated_num_gpus_per_node=GPUS_PER_NODE if config.trainer.placement.colocate_all else None,
         engine_init_timeout_seconds=config.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=config.generator.gpu_memory_utilization,
         inference_engine_enable_sleep=config.trainer.placement.colocate_all,

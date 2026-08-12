@@ -69,7 +69,6 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
         "decode_context_parallel_size": cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         "shared_pg": colocate_pg,
-        "colocated_num_gpus_per_node": cfg.trainer.placement.policy_num_gpus_per_node,
         "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
@@ -147,6 +146,7 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
         "vllm_v1_disable_multiproc": False,
         "enable_prefix_caching": False,
         "enforce_eager": teacher_cfg.enforce_eager,
+        "engine_init_timeout_seconds": teacher_cfg.engine_init_timeout_seconds,
         "expert_parallel_size": 1,
         "data_parallel_size": 1,
         "shared_pg": None,  # teacher gets its own placement group

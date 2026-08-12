@@ -5,6 +5,7 @@ import sys
 import logging
 import math
 import socket
+from collections import Counter
 
 import ray
 import torch
@@ -1496,6 +1497,16 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
         bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
     ]  # sort by node_id, then gpu_id
     return pg_reordered_bundle_indices
+
+
+def bundles_per_node(pg: PlacementGroup) -> int:
+    """Return the uniform number of placement-group bundles assigned per node."""
+
+    bundle_to_node_ids = placement_group_table(pg)["bundles_to_node_id"]
+    node_counts = Counter(bundle_to_node_ids.values())
+    if not node_counts or len(set(node_counts.values())) != 1:
+        raise ValueError(f"Colocated placement bundles must be uniform across nodes; got {dict(node_counts)}")
+    return next(iter(node_counts.values()))
 
 
 # NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
