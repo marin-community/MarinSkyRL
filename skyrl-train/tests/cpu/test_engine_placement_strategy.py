@@ -130,7 +130,7 @@ def test_colocated_tp_groups_use_ray_node_order_not_original_bundle_order():
 
 
 def test_colocated_tp_group_larger_than_a_node_is_rejected():
-    with pytest.raises(ValueError, match="cannot fit on one 8-GPU node"):
+    with pytest.raises(ValueError, match="cannot fit on one 8-GPU policy node"):
         colocated_engine_bundle_indices(
             reordered_bundle_indices=list(range(8)),
             engine_index=0,
@@ -142,7 +142,7 @@ def test_colocated_tp_group_larger_than_a_node_is_rejected():
 
 
 def test_colocated_tp_group_must_divide_the_node():
-    with pytest.raises(ValueError, match="does not divide a 8-GPU node"):
+    with pytest.raises(ValueError, match="does not divide a 8-GPU policy node"):
         colocated_engine_bundle_indices(
             reordered_bundle_indices=list(range(8)),
             engine_index=0,

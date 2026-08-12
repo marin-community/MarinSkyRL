@@ -18,6 +18,14 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, managed_environment_names
+from skyrl_train.utils import (
+    get_all_env_variables,
+    get_ray_pg_ready_with_timeout,
+    get_reordered_bundle_indices,
+    ray_noset_visible_devices,
+)
+from skyrl_train.utils.constants import DEFAULT_INFERENCE_ENGINE_INIT_TIMEOUT_SECONDS, SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.utils import colocated_engine_bundle_indices, use_per_engine_strict_pack_pg
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +239,7 @@ def create_ray_wrapped_inference_engines(
     decode_context_parallel_size: int = 1,
     shared_pg=None,
     colocated_num_gpus_per_node: int | None = None,
-    engine_init_timeout_seconds: float = 1800,
+    engine_init_timeout_seconds: float = DEFAULT_INFERENCE_ENGINE_INIT_TIMEOUT_SECONDS,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
     async_engine=False,
@@ -266,15 +274,6 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
-    from skyrl_train.utils import (
-        get_all_env_variables,
-        get_ray_pg_ready_with_timeout,
-        get_reordered_bundle_indices,
-        ray_noset_visible_devices,
-    )
-    from skyrl_train.utils.utils import colocated_engine_bundle_indices, use_per_engine_strict_pack_pg
-    from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
@@ -306,8 +305,26 @@ def create_ray_wrapped_inference_engines(
     inference_engine_runtime_env = _build_inference_engine_runtime_env()
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
+    if use_hybrid_engine and colocated_num_gpus_per_node is None:
+        raise ValueError("Colocated inference engines require colocated_num_gpus_per_node")
     colocated_bundle_indices = get_reordered_bundle_indices(shared_pg) if use_hybrid_engine else []
     tp_pp_size = tensor_parallel_size * pipeline_parallel_size
+    colocated_engine_bundles = (
+        [
+            colocated_engine_bundle_indices(
+                reordered_bundle_indices=colocated_bundle_indices,
+                engine_index=engine_index,
+                data_parallel_rank=data_parallel_rank,
+                tensor_pipeline_size=tp_pp_size,
+                data_parallel_size=data_parallel_size,
+                gpus_per_node=colocated_num_gpus_per_node,
+            )
+            for engine_index in range(num_inference_engines)
+            for data_parallel_rank in range(data_parallel_size)
+        ]
+        if use_hybrid_engine
+        else []
+    )
     # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
     # mp_backend (opt-in) lets a NON-colocated multi-GPU engine use vLLM's `mp` executor
     # instead, which avoids the Ray Compiled-DAG deadlock on the Qwen3-Next R3 capture path.
@@ -462,16 +479,7 @@ def create_ray_wrapped_inference_engines(
         # rendezvous bundle for engine i's DP-rank-0 is at i*data_parallel_size (not the
         # per-GPU base_pg_index, which would index past the smaller mp bundle list).
         if use_hybrid_engine:
-            if colocated_num_gpus_per_node is None:
-                raise ValueError("Colocated inference engines require colocated_num_gpus_per_node")
-            rendezvous_pg_index = colocated_engine_bundle_indices(
-                reordered_bundle_indices=colocated_bundle_indices,
-                engine_index=i,
-                data_parallel_rank=0,
-                tensor_pipeline_size=tp_pp_size,
-                data_parallel_size=data_parallel_size,
-                gpus_per_node=colocated_num_gpus_per_node,
-            )[0]
+            rendezvous_pg_index = colocated_engine_bundles[i * data_parallel_size][0]
         else:
             rendezvous_pg_index = (i * data_parallel_size) if use_mp_backend else base_pg_index
         data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(
@@ -529,16 +537,7 @@ def create_ray_wrapped_inference_engines(
                     )
                 else:
                     if use_hybrid_engine:
-                        if colocated_num_gpus_per_node is None:
-                            raise ValueError("Colocated inference engines require colocated_num_gpus_per_node")
-                        dp_rank_bundles = colocated_engine_bundle_indices(
-                            reordered_bundle_indices=colocated_bundle_indices,
-                            engine_index=i,
-                            data_parallel_rank=dp_rank,
-                            tensor_pipeline_size=tp_pp_size,
-                            data_parallel_size=data_parallel_size,
-                            gpus_per_node=colocated_num_gpus_per_node,
-                        )
+                        dp_rank_bundles = colocated_engine_bundles[i * data_parallel_size + dp_rank]
                         base_dp_pg_index = dp_rank_bundles[0]
                     dp_rank_sched = PlacementGroupSchedulingStrategy(
                         placement_group=engine_pg,
@@ -641,16 +640,7 @@ def create_ray_wrapped_inference_engines(
             bundle_indices = None
             if per_engine_gpu_count > 1:
                 if use_hybrid_engine:
-                    if colocated_num_gpus_per_node is None:
-                        raise ValueError("Colocated inference engines require colocated_num_gpus_per_node")
-                    bundle_indices = colocated_engine_bundle_indices(
-                        reordered_bundle_indices=colocated_bundle_indices,
-                        engine_index=i,
-                        data_parallel_rank=0,
-                        tensor_pipeline_size=tp_pp_size,
-                        data_parallel_size=data_parallel_size,
-                        gpus_per_node=colocated_num_gpus_per_node,
-                    )
+                    bundle_indices = colocated_engine_bundles[i * data_parallel_size]
                     sglang_base_index = bundle_indices[0]
                 else:
                     bundle_indices = list(range(sglang_base_index, sglang_base_index + per_engine_gpu_count))
@@ -717,7 +707,7 @@ def create_ray_wrapped_inference_engines(
     # Readiness gate (DISAGGREGATED-mode init-deadlock fix): block until every engine
     # actor has finished loading its model (weights + CUDA-graph capture) BEFORE the
     # trainer opens the weight-sync NCCL group in init_weight_sync_state. In COLOCATED
-    # mode the sleep barrier below (ray.get(sleep_refs)) already forces this wait; in
+    # mode the bounded sleep barrier below already forces this wait; in
     # DISAGGREGATED mode (inference_engine_enable_sleep=False) nothing otherwise waits,
     # so a slow-loading engine (e.g. Qwen3.6-35B-A3B MoE) is still inside __init__ when
     # the policy ranks post the default-group barrier (worker.py) -> the barrier ALLREDUCE

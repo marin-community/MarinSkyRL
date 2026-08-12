@@ -109,6 +109,8 @@ def init_ray_inference_engines(
         enable_prefix_caching=True,
         enforce_eager=True,
         shared_pg=shared_pg,
+        colocated_num_gpus_per_node=config.trainer.placement.policy_num_gpus_per_node,
+        engine_init_timeout_seconds=config.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=config.generator.gpu_memory_utilization,
         # Colocated runs sleep the engine to free GPU for the trainer (prod derives
         # this from colocate_all in main_base.py); the weight-sync test calls

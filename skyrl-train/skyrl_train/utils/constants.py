@@ -1,11 +1,8 @@
 import os
 
 
-#
+DEFAULT_INFERENCE_ENGINE_INIT_TIMEOUT_SECONDS = 1800
 SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180))
-"""
-Timeout for allocating the placement group for different actors in SkyRL
-"""
 
 # Canonical worker-NCCL-collective timeout. ONE source of truth for the default
 # and the accessor (was previously divergent: constants default 600 vs utils.py

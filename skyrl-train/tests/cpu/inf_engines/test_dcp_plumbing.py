@@ -137,14 +137,11 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
     monkeypatch.setattr(
         rwie, "placement_group", lambda bundles, strategy=None: ("PG", tuple(len(bundles) for _ in [0]))
     )
-    # Stub the helpers pulled from skyrl_train.utils inside the function body.
-    import skyrl_train.utils as skutils
-
-    monkeypatch.setattr(skutils, "ray_noset_visible_devices", lambda *a, **k: False, raising=False)
+    monkeypatch.setattr(rwie, "ray_noset_visible_devices", lambda *a, **k: False)
 
     fake_get_all = types.SimpleNamespace(remote=lambda: None)
-    monkeypatch.setattr(skutils, "get_all_env_variables", fake_get_all, raising=False)
-    monkeypatch.setattr(skutils, "get_ray_pg_ready_with_timeout", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(rwie, "get_all_env_variables", fake_get_all)
+    monkeypatch.setattr(rwie, "get_ray_pg_ready_with_timeout", lambda *a, **k: None)
 
     # ray.get(...) is called on get_all_env_variables.remote() — return a dummy env dict.
     monkeypatch.setattr(rwie.ray, "get", lambda *a, **k: {})
@@ -177,6 +174,7 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
         async_engine=False,
         backend="vllm",
         vllm_attention_backend=attention_backend,
+        engine_init_timeout_seconds=60,
     )
     return capture
 

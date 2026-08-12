@@ -255,6 +255,21 @@ def use_per_engine_strict_pack_pg(
     return (tensor_parallel_size * pipeline_parallel_size) > 1
 
 
+def validate_colocated_engine_geometry(*, tensor_pipeline_size: int, gpus_per_node: int) -> None:
+    """Reject colocated engine shapes that cannot tile one policy node."""
+
+    if tensor_pipeline_size > gpus_per_node:
+        raise ValueError(
+            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs cannot fit on one "
+            f"{gpus_per_node}-GPU policy node"
+        )
+    if gpus_per_node % tensor_pipeline_size != 0:
+        raise ValueError(
+            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs does not divide a "
+            f"{gpus_per_node}-GPU policy node into node-atomic engine slices"
+        )
+
+
 def colocated_engine_bundle_indices(
     *,
     reordered_bundle_indices: list[int],
@@ -266,16 +281,7 @@ def colocated_engine_bundle_indices(
 ) -> list[int]:
     """Select a node-atomic TP/PP slice from node-ordered one-GPU bundles."""
 
-    if tensor_pipeline_size > gpus_per_node:
-        raise ValueError(
-            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs cannot fit on one "
-            f"{gpus_per_node}-GPU node"
-        )
-    if gpus_per_node % tensor_pipeline_size != 0:
-        raise ValueError(
-            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs does not divide a "
-            f"{gpus_per_node}-GPU node into node-atomic engine slices"
-        )
+    validate_colocated_engine_geometry(tensor_pipeline_size=tensor_pipeline_size, gpus_per_node=gpus_per_node)
     engines_per_node = gpus_per_node // tensor_pipeline_size
     replica_index = engine_index * data_parallel_size + data_parallel_rank
     node_index = replica_index // engines_per_node
@@ -727,14 +733,10 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
         )
         gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
-        assert tp_pp_size <= gpus_per_node, (
-            f"A colocated inference engine requiring {tp_pp_size} GPUs cannot fit on one "
-            f"{gpus_per_node}-GPU policy node"
-        )
-        assert gpus_per_node % tp_pp_size == 0, (
-            f"A colocated inference engine requiring {tp_pp_size} GPUs does not divide a "
-            f"{gpus_per_node}-GPU policy node into node-atomic engine slices"
-        )
+        try:
+            validate_colocated_engine_geometry(tensor_pipeline_size=tp_pp_size, gpus_per_node=gpus_per_node)
+        except ValueError as error:
+            raise AssertionError(str(error)) from error
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         num_rollout_gpus = (
             cfg.generator.num_inference_engines
