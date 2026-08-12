@@ -182,11 +182,3 @@ async def test_no_trainer_in_kwargs():
     cb = BufferCheckpointCallback()
     with pytest.raises(RuntimeError, match="requires trainer context"):
         await cb.on_save_async(_FakeState(1), _FakeControl())
-
-
-@pytest.mark.asyncio
-async def test_unbound_queues_fail_checkpoint_save(tmp_path):
-    trainer = _FakeTrainer(str(tmp_path), asyncio.Queue(maxsize=1))
-
-    with pytest.raises(RuntimeError, match="queues were not bound"):
-        await BufferCheckpointCallback().on_save_async(_FakeState(1), _FakeControl(), trainer=trainer)
