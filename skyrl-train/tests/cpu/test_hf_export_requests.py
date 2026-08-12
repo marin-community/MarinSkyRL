@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from omegaconf import OmegaConf
@@ -380,5 +381,9 @@ def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
 def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp_path, monkeypatch):
     _, spec = _export_job_spec(tmp_path, no_wait=True)
     monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
+    verify = Mock(side_effect=AssertionError("detached submission must not verify an unfinished artifact"))
+    monkeypatch.setattr(export_hf_checkpoint.hf_model_io, "verify_hf_model_export", verify)
 
     export_hf_checkpoint.submit_export(spec, None, ["ignored"])
+
+    verify.assert_not_called()
