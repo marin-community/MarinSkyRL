@@ -692,10 +692,7 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
         )
         gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
-        try:
-            validate_colocated_engine_geometry(tensor_pipeline_size=tp_pp_size, gpus_per_node=gpus_per_node)
-        except ValueError as error:
-            raise AssertionError(str(error)) from error
+        validate_colocated_engine_geometry(tensor_pipeline_size=tp_pp_size, gpus_per_node=gpus_per_node)
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         num_rollout_gpus = (
             cfg.generator.num_inference_engines

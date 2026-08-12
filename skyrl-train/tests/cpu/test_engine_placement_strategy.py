@@ -92,39 +92,27 @@ def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
     )
 
 
-def test_colocated_tp_groups_cannot_span_node_bundles():
-    reordered = list(range(32))
+@pytest.mark.parametrize(
+    "reordered,tensor_pipeline_size,gpus_per_node,expected",
+    [
+        (list(range(32)), 4, 8, [list(range(start, start + 4)) for start in range(0, 32, 4)]),
+        ([5, 2, 7, 0, 6, 3, 4, 1], 2, 4, [[5, 2], [7, 0], [6, 3], [4, 1]]),
+    ],
+)
+def test_colocated_tp_groups_follow_node_order(reordered, tensor_pipeline_size, gpus_per_node, expected):
     layouts = [
         colocated_engine_bundle_indices(
             reordered_bundle_indices=reordered,
             engine_index=engine_index,
             data_parallel_rank=0,
-            tensor_pipeline_size=4,
+            tensor_pipeline_size=tensor_pipeline_size,
             data_parallel_size=1,
-            gpus_per_node=8,
+            gpus_per_node=gpus_per_node,
         )
-        for engine_index in range(8)
+        for engine_index in range(len(reordered) // tensor_pipeline_size)
     ]
 
-    assert layouts == [list(range(start, start + 4)) for start in range(0, 32, 4)]
-
-
-def test_colocated_tp_groups_use_ray_node_order_not_original_bundle_order():
-    reordered = [5, 2, 7, 0, 6, 3, 4, 1]
-
-    layouts = [
-        colocated_engine_bundle_indices(
-            reordered_bundle_indices=reordered,
-            engine_index=engine_index,
-            data_parallel_rank=0,
-            tensor_pipeline_size=2,
-            data_parallel_size=1,
-            gpus_per_node=4,
-        )
-        for engine_index in range(4)
-    ]
-
-    assert layouts == [[5, 2], [7, 0], [6, 3], [4, 1]]
+    assert layouts == expected
 
 
 @pytest.mark.parametrize(
@@ -157,7 +145,7 @@ def test_colocated_config_rejects_non_node_atomic_tp_geometry():
     cfg.generator.num_inference_engines = 8
     cfg.generator.inference_engine_tensor_parallel_size = 3
 
-    with pytest.raises(AssertionError, match="does not divide a 8-GPU policy node"):
+    with pytest.raises(ValueError, match="does not divide a 8-GPU policy node"):
         validate_cfg(cfg)
 
 

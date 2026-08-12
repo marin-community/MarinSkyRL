@@ -321,7 +321,7 @@ def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
     OmegaConf.update(cfg, "trainer.algorithm.loss_reduction", loss_reduction)
     try:
         validate_cfg(cfg)
-    except AssertionError as e:
+    except (AssertionError, ValueError) as e:
         assert "invalid loss_reduction" not in str(e), (
             f"supported loss_reduction {loss_reduction!r} was rejected by the allow-list: {e}"
         )
