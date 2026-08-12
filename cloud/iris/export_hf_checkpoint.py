@@ -225,7 +225,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
     return operational_spec(args, request, no_wait=args.no_wait)
 
 
-def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command: list[str]) -> int:
+def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command: list[str]) -> None:
     """Submit one export job, verify synchronous output, and persist request state."""
     if request is not None:
         request = request.with_status(
@@ -253,7 +253,8 @@ def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command:
         write_hf_export_request(request.with_status(status, last_exit_code=exit_code))
     if verification_error is not None:
         raise verification_error
-    return exit_code
+    if exit_code != 0:
+        raise subprocess.CalledProcessError(exit_code, command)
 
 
 def main() -> None:
@@ -278,7 +279,7 @@ def main() -> None:
     print("[export-hf]", " ".join(cmd))
     if args.dry_run:
         return
-    raise SystemExit(submit_export(spec, request, cmd))
+    submit_export(spec, request, cmd)
 
 
 if __name__ == "__main__":

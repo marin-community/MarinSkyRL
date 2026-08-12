@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -322,10 +323,12 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
         ],
     )
 
-    with pytest.raises(SystemExit) as result:
+    if exit_code == 0:
         export_hf_checkpoint.main()
-
-    assert result.value.code == exit_code
+    else:
+        with pytest.raises(subprocess.CalledProcessError) as result:
+            export_hf_checkpoint.main()
+        assert result.value.returncode == exit_code
     updated = read_hf_export_request(str(checkpoint))
     assert updated is not None
     assert updated.status is expected_status
@@ -334,43 +337,7 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
     assert updated.last_exit_code == exit_code
 
 
-def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
-    checkpoint = tmp_path / "checkpoints" / "global_step_10"
-    checkpoint.mkdir(parents=True)
-    request = HFExportRequest(
-        step=10,
-        checkpoint_base_path=str(tmp_path / "checkpoints"),
-        checkpoint_path=str(checkpoint),
-        export_path=str(tmp_path / "exports"),
-        model_path="org/model",
-        num_nodes=2,
-        gpus_per_node=4,
-    )
-    write_hf_export_request(request)
-    export = Path(request.export_path) / "global_step_10" / "policy"
-    export.mkdir(parents=True)
-    (export / "config.json").write_text("{}")
-    (export / "model.safetensors.index.json").write_text('{"weight_map": {"x": "model-00001-of-00001.safetensors"}}')
-    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
-
-    spec = ExportJobSpec(
-        request=request,
-        rl_config="config.yaml",
-        cluster="cw-rno2a",
-        priority="batch",
-        job_name=None,
-        timeout=7200,
-        no_wait=False,
-    )
-    with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
-        export_hf_checkpoint.submit_export(spec, request, ["ignored"])
-
-    updated = read_hf_export_request(str(checkpoint))
-    assert updated is not None
-    assert updated.status is HFExportStatus.PENDING
-
-
-def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp_path, monkeypatch):
+def _export_job_spec(tmp_path, *, no_wait: bool) -> tuple[HFExportRequest, ExportJobSpec]:
     request = HFExportRequest(
         step=10,
         checkpoint_base_path=str(tmp_path / "checkpoints"),
@@ -380,15 +347,38 @@ def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp
         num_nodes=2,
         gpus_per_node=4,
     )
-    spec = ExportJobSpec(
+    return request, ExportJobSpec(
         request=request,
         rl_config="config.yaml",
         cluster="cw-rno2a",
         priority="batch",
         job_name=None,
         timeout=7200,
-        no_wait=True,
+        no_wait=no_wait,
     )
+
+
+def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
+    request, spec = _export_job_spec(tmp_path, no_wait=False)
+    checkpoint = Path(request.checkpoint_path)
+    checkpoint.mkdir(parents=True)
+    write_hf_export_request(request)
+    export = Path(request.export_path) / "global_step_10" / "policy"
+    export.mkdir(parents=True)
+    (export / "config.json").write_text("{}")
+    (export / "model.safetensors.index.json").write_text('{"weight_map": {"x": "model-00001-of-00001.safetensors"}}')
     monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
 
-    assert export_hf_checkpoint.submit_export(spec, None, ["ignored"]) == 0
+    with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
+        export_hf_checkpoint.submit_export(spec, request, ["ignored"])
+
+    updated = read_hf_export_request(str(checkpoint))
+    assert updated is not None
+    assert updated.status is HFExportStatus.PENDING
+
+
+def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp_path, monkeypatch):
+    _, spec = _export_job_spec(tmp_path, no_wait=True)
+    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
+
+    export_hf_checkpoint.submit_export(spec, None, ["ignored"])
