@@ -255,6 +255,42 @@ def use_per_engine_strict_pack_pg(
     return (tensor_parallel_size * pipeline_parallel_size) > 1
 
 
+def colocated_engine_bundle_indices(
+    *,
+    reordered_bundle_indices: list[int],
+    engine_index: int,
+    data_parallel_rank: int,
+    tensor_pipeline_size: int,
+    data_parallel_size: int,
+    gpus_per_node: int,
+) -> list[int]:
+    """Select a node-atomic TP/PP slice from node-ordered one-GPU bundles."""
+
+    if tensor_pipeline_size > gpus_per_node:
+        raise ValueError(
+            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs cannot fit on one "
+            f"{gpus_per_node}-GPU node"
+        )
+    if gpus_per_node % tensor_pipeline_size != 0:
+        raise ValueError(
+            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs does not divide a "
+            f"{gpus_per_node}-GPU node into node-atomic engine slices"
+        )
+    engines_per_node = gpus_per_node // tensor_pipeline_size
+    replica_index = engine_index * data_parallel_size + data_parallel_rank
+    node_index = replica_index // engines_per_node
+    replica_within_node = replica_index % engines_per_node
+    start = node_index * gpus_per_node + replica_within_node * tensor_pipeline_size
+    stop = start + tensor_pipeline_size
+    selected = reordered_bundle_indices[start:stop]
+    if len(selected) != tensor_pipeline_size:
+        raise ValueError(
+            f"Colocated engine replica {replica_index} requires bundle offsets [{start}, {stop}), "
+            f"but only {len(reordered_bundle_indices)} bundles are available"
+        )
+    return selected
+
+
 class Timer:
     def __init__(self, message, update_dict=None):
         self.message = message
@@ -687,6 +723,18 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
+        tp_pp_size = (
+            cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
+        )
+        gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+        assert tp_pp_size <= gpus_per_node, (
+            f"A colocated inference engine requiring {tp_pp_size} GPUs cannot fit on one "
+            f"{gpus_per_node}-GPU policy node"
+        )
+        assert gpus_per_node % tp_pp_size == 0, (
+            f"A colocated inference engine requiring {tp_pp_size} GPUs does not divide a "
+            f"{gpus_per_node}-GPU policy node into node-atomic engine slices"
+        )
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         num_rollout_gpus = (
             cfg.generator.num_inference_engines
@@ -697,6 +745,7 @@ def validate_cfg(cfg: DictConfig):
         assert num_policy_gpus == num_rollout_gpus, (
             f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
         )
+
     else:
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
@@ -706,6 +755,9 @@ def validate_cfg(cfg: DictConfig):
             assert cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node, (
                 f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
             )
+
+    if cfg.generator.engine_init_timeout_seconds <= 0:
+        raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
 
 
 def validate_generator_cfg(cfg: DictConfig):

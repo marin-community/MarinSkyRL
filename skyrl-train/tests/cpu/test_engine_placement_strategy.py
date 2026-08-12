@@ -16,7 +16,12 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement
 
 import pytest
 
-from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
+from skyrl_train.utils.utils import validate_cfg
+from skyrl_train.utils.utils import (
+    colocated_engine_bundle_indices,
+    use_per_engine_strict_pack_pg,
+)
+from tests.cpu.util import example_dummy_config
 
 
 @pytest.mark.parametrize(
@@ -87,3 +92,88 @@ def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
     )
+
+
+def test_colocated_tp_groups_cannot_span_node_bundles():
+    reordered = list(range(32))
+    layouts = [
+        colocated_engine_bundle_indices(
+            reordered_bundle_indices=reordered,
+            engine_index=engine_index,
+            data_parallel_rank=0,
+            tensor_pipeline_size=4,
+            data_parallel_size=1,
+            gpus_per_node=8,
+        )
+        for engine_index in range(8)
+    ]
+
+    assert layouts == [list(range(start, start + 4)) for start in range(0, 32, 4)]
+
+
+def test_colocated_tp_groups_use_ray_node_order_not_original_bundle_order():
+    reordered = [5, 2, 7, 0, 6, 3, 4, 1]
+
+    layouts = [
+        colocated_engine_bundle_indices(
+            reordered_bundle_indices=reordered,
+            engine_index=engine_index,
+            data_parallel_rank=0,
+            tensor_pipeline_size=2,
+            data_parallel_size=1,
+            gpus_per_node=4,
+        )
+        for engine_index in range(4)
+    ]
+
+    assert layouts == [[5, 2], [7, 0], [6, 3], [4, 1]]
+
+
+def test_colocated_tp_group_larger_than_a_node_is_rejected():
+    with pytest.raises(ValueError, match="cannot fit on one 8-GPU node"):
+        colocated_engine_bundle_indices(
+            reordered_bundle_indices=list(range(8)),
+            engine_index=0,
+            data_parallel_rank=0,
+            tensor_pipeline_size=16,
+            data_parallel_size=1,
+            gpus_per_node=8,
+        )
+
+
+def test_colocated_tp_group_must_divide_the_node():
+    with pytest.raises(ValueError, match="does not divide a 8-GPU node"):
+        colocated_engine_bundle_indices(
+            reordered_bundle_indices=list(range(8)),
+            engine_index=0,
+            data_parallel_rank=0,
+            tensor_pipeline_size=3,
+            data_parallel_size=1,
+            gpus_per_node=8,
+        )
+
+
+def test_colocated_config_rejects_non_node_atomic_tp_geometry():
+    cfg = example_dummy_config()
+    cfg.trainer.train_batch_size = 24
+    cfg.trainer.policy_mini_batch_size = 24
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.placement.policy_num_nodes = 3
+    cfg.trainer.placement.policy_num_gpus_per_node = 8
+    cfg.generator.num_inference_engines = 8
+    cfg.generator.inference_engine_tensor_parallel_size = 3
+
+    with pytest.raises(AssertionError, match="does not divide a 8-GPU policy node"):
+        validate_cfg(cfg)
+
+
+def test_config_rejects_nonpositive_engine_startup_timeout():
+    cfg = example_dummy_config()
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.generator.engine_init_timeout_seconds = 0
+
+    with pytest.raises(ValueError, match="engine_init_timeout_seconds must be greater than zero"):
+        validate_cfg(cfg)

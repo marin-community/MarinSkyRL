@@ -148,6 +148,7 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
 
     # ray.get(...) is called on get_all_env_variables.remote() — return a dummy env dict.
     monkeypatch.setattr(rwie.ray, "get", lambda *a, **k: {})
+    monkeypatch.setattr(rwie, "wait_for_inference_engine_startup", lambda *a, **k: None)
     # get_rendezvous_addr_port is only used for data_parallel_size>1; stub anyway.
     monkeypatch.setattr(
         rwie,

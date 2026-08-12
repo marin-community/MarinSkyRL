@@ -271,6 +271,7 @@ generator:
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0
+  engine_init_timeout_seconds: 1800
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"

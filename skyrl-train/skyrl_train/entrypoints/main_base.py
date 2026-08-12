@@ -69,6 +69,8 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
         "decode_context_parallel_size": cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         "shared_pg": colocate_pg,
+        "colocated_num_gpus_per_node": cfg.trainer.placement.policy_num_gpus_per_node,
+        "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
         "async_engine": cfg.generator.async_engine,
@@ -432,9 +434,12 @@ class BasePPOExp:
 
         tokenizer = self.tokenizer
         if self.cfg.generator.run_engines_locally:
+            logger.info("Creating local inference engines")
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
         else:
+            logger.info("Connecting to remote inference engines")
             inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+        logger.info("Inference engines ready")
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
@@ -454,7 +459,9 @@ class BasePPOExp:
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an
         # eligible disaggregated no-ref run).
+        logger.info("Creating policy workers")
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
+        logger.info("Policy workers ready")
         return trainer
 
     def run(self):
