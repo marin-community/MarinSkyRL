@@ -1168,8 +1168,8 @@ class DataTrackingCallback(TrainerCallback):
 class BufferCheckpointCallback(TrainerCallback):
     """Best-effort save/restore of the async generation buffer at checkpoint time.
 
-    Saves all pending GeneratedOutputGroup items from the asyncio.Queue so that
-    on resume the buffer can be restored without re-generating from scratch.
+    Saves completed output groups and stale-group retry prompts so resume preserves
+    every dataset row still needed by the current epoch.
     """
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
@@ -1191,7 +1191,8 @@ class BufferCheckpointCallback(TrainerCallback):
             return control
 
         buf = getattr(trainer, "_generation_output_group_buffer", None)
-        if buf is None:
+        retry_queue = getattr(trainer, "_generation_retry_queue", None)
+        if buf is None or retry_queue is None:
             return control
 
         try:
@@ -1208,7 +1209,13 @@ class BufferCheckpointCallback(TrainerCallback):
             for item in items:
                 buf.put_nowait(item)
 
-            if not items:
+            retry_prompts = []
+            while not retry_queue.empty():
+                retry_prompts.append(retry_queue.get_nowait())
+            for prompts in retry_prompts:
+                retry_queue.put_nowait(prompts)
+
+            if not items and not retry_prompts:
                 return control
 
             serialized = []
@@ -1218,6 +1225,7 @@ class BufferCheckpointCallback(TrainerCallback):
                         "generator_output": dict(item.generator_output),
                         "uid": item.uid,
                         "global_step_when_scheduled": item.global_step_when_scheduled,
+                        "source_prompts": item.source_prompts,
                     }
                 )
 
@@ -1227,19 +1235,19 @@ class BufferCheckpointCallback(TrainerCallback):
             )
             artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
             with io.open_file(artifact_path, "wb") as f:
-                torch.save(serialized, f)
-            logger.info(f"Saved {len(serialized)} generation buffer items to {artifact_path}")
+                torch.save({"completed_groups": serialized, "retry_prompts": retry_prompts}, f)
+            logger.info(
+                f"Saved {len(serialized)} completed generation groups and {len(retry_prompts)} pending retries "
+                f"to {artifact_path}"
+            )
         except Exception as e:
             logger.warning(f"BufferCheckpointCallback.on_save failed (best-effort): {e}")
 
         return control
 
     @staticmethod
-    def load_buffer_items(ckpt_path: str):
-        """Load buffer items from a checkpoint directory.
-
-        Returns a list of GeneratedOutputGroup, or empty list if no file found.
-        """
+    def load_buffer_state(ckpt_path: str):
+        """Load completed output groups and retry prompts from a checkpoint."""
 
         import torch
 
@@ -1249,23 +1257,24 @@ class BufferCheckpointCallback(TrainerCallback):
 
         artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
         if not io.exists(artifact_path):
-            return []
+            return [], []
 
         try:
             with io.open_file(artifact_path, "rb") as f:
-                serialized = torch.load(f, map_location="cpu", weights_only=False)
+                state = torch.load(f, map_location="cpu", weights_only=False)
 
             items = []
-            for entry in serialized:
+            for entry in state["completed_groups"]:
                 gen_out: GeneratorOutput = entry["generator_output"]
                 items.append(
                     GeneratedOutputGroup(
                         generator_output=gen_out,
                         uid=entry["uid"],
                         global_step_when_scheduled=entry["global_step_when_scheduled"],
+                        source_prompts=entry["source_prompts"],
                     )
                 )
-            return items
+            return items, state["retry_prompts"]
         except Exception as e:
-            logger.warning(f"BufferCheckpointCallback.load_buffer_items failed: {e}")
-            return []
+            logger.warning(f"BufferCheckpointCallback.load_buffer_state failed: {e}")
+            return [], []

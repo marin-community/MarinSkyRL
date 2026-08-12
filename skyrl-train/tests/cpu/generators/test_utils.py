@@ -3,15 +3,28 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/generators/test_utils
 """
 
 import pytest
+from types import SimpleNamespace
+
 from skyrl_train.generators.utils import (
     apply_overlong_filtering,
     concatenate_generator_outputs,
+    earliest_captured_global_step,
     encode_messages_subset,
     get_batch_failure_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
 )
 from transformers import AutoTokenizer
+
+
+def test_earliest_captured_global_step_uses_oldest_sample_in_group():
+    outputs = [
+        SimpleNamespace(captured_global_step=9),
+        SimpleNamespace(captured_global_step=None),
+        SimpleNamespace(captured_global_step=6),
+    ]
+
+    assert earliest_captured_global_step(outputs) == 6
 
 
 @pytest.mark.parametrize(

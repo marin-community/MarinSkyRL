@@ -1,7 +1,7 @@
 import os
 import torch
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any
+from typing import List, Tuple, Union, Optional, Dict, Any, Iterable
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
@@ -873,6 +873,14 @@ def prepare_generator_input(
     }
 
     return generator_input, uids
+
+
+def earliest_captured_global_step(outputs: Iterable[Any]) -> Optional[int]:
+    """Return the earliest model step recorded across a rollout group."""
+    return min(
+        (output.captured_global_step for output in outputs if output.captured_global_step is not None),
+        default=None,
+    )
 
 
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):

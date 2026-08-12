@@ -35,6 +35,7 @@ def _make_item(uid: str, step: int) -> GeneratedOutputGroup:
         generator_output=gen_out,
         uid=uid,
         global_step_when_scheduled=step,
+        source_prompts=[{"uid": uid}],
     )
 
 
@@ -47,6 +48,7 @@ class _FakeTrainer:
         self.cfg = _Cfg()
         self.cfg.trainer.ckpt_path = ckpt_path
         self._generation_output_group_buffer = buffer
+        self._generation_retry_queue = asyncio.Queue()
 
 
 class _FakeState:
@@ -97,22 +99,40 @@ def test_roundtrip_with_items():
         assert os.path.exists(artifact_path)
 
         # Load and verify
-        loaded = BufferCheckpointCallback.load_buffer_items(step_dir)
+        loaded, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
         assert len(loaded) == 3
+        assert retry_prompts == []
         for i, item in enumerate(loaded):
             assert item.uid == f"uid_{i}"
             assert item.global_step_when_scheduled == 5
+            assert item.source_prompts == [{"uid": f"uid_{i}"}]
             assert item.generator_output["prompt_token_ids"] == [[1, 2, 3]]
             assert item.generator_output["rewards"] == [1.0]
             tid = item.generator_output["trajectory_ids"][0]
             assert tid.instance_id == f"uid_{i}"
 
 
+def test_roundtrip_with_pending_retry():
+    buf = asyncio.Queue(maxsize=1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        step_dir = os.path.join(tmpdir, "global_step_5")
+        os.makedirs(step_dir)
+        trainer = _FakeTrainer(tmpdir, buf)
+        trainer._generation_retry_queue.put_nowait([{"uid": "retry-me"}])
+        cb = BufferCheckpointCallback()
+
+        cb.on_save(_FakeState(5), _FakeControl(), trainer=trainer)
+        completed, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
+
+        assert completed == []
+        assert retry_prompts == [[{"uid": "retry-me"}]]
+        assert trainer._generation_retry_queue.get_nowait() == [{"uid": "retry-me"}]
+
+
 def test_load_missing_file():
     """Missing artifact returns empty list."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        loaded = BufferCheckpointCallback.load_buffer_items(tmpdir)
-        assert loaded == []
+        assert BufferCheckpointCallback.load_buffer_state(tmpdir) == ([], [])
 
 
 def test_restore_into_queue():
@@ -131,10 +151,11 @@ def test_restore_into_queue():
 
         # Simulate resume: load into a fresh queue
         new_buf = asyncio.Queue(maxsize=8)
-        loaded = BufferCheckpointCallback.load_buffer_items(step_dir)
+        loaded, retry_prompts = BufferCheckpointCallback.load_buffer_state(step_dir)
         for item in loaded:
             new_buf.put_nowait(item)
         assert new_buf.qsize() == 4
+        assert retry_prompts == []
 
 
 def test_no_trainer_in_kwargs():

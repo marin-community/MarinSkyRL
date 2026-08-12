@@ -48,11 +48,15 @@ class GeneratedOutputGroup:
 
         global_step_when_scheduled (int): The global step when the group was scheduled for generation,
             used for validating the staleness control.
+
+        source_prompts: The original dataloader row used to regenerate this group if the
+            completed attempt exceeds the staleness cap.
     """
 
     generator_output: GeneratorOutput
     uid: str
     global_step_when_scheduled: int
+    source_prompts: List[dict]
 
 
 @dataclass
@@ -158,7 +162,7 @@ class _AsyncStalenessManager:
         """Block until generation capacity is available, then reserve a slot.
 
         Individual long-running generations can still exceed the aggregate staleness
-        budget; those completed groups remain trainable.
+        budget; those attempts are regenerated before training.
         """
         async with self._cond:
             while self._compute_capacity_unlocked() <= 0:
@@ -169,6 +173,20 @@ class _AsyncStalenessManager:
     async def on_rollout_accepted(self) -> None:
         async with self._cond:
             self._stat.accepted += 1
+            self._stat.running -= 1
+            self._cond.notify_all()
+
+    async def on_rollouts_discarded(self, count: int) -> None:
+        """Remove completed stale attempts from capacity accounting."""
+        async with self._cond:
+            self._stat.accepted -= count
+            self._stat.submitted -= count
+            self._cond.notify_all()
+
+    async def cancel_submission_slot(self) -> None:
+        """Release a reserved slot when no generation request is available."""
+        async with self._cond:
+            self._stat.submitted -= 1
             self._stat.running -= 1
             self._cond.notify_all()
 
@@ -389,11 +407,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 t.cancel()
         self._active_generator_tasks = []
 
-    def _restore_buffer_from_checkpoint(self, buffer, checkpoint_path: str) -> None:
-        """Restore generation buffer items from a checkpoint (best-effort)."""
+    def _restore_buffer_from_checkpoint(self, buffer, retry_queue, checkpoint_path: str) -> None:
+        """Restore completed outputs and pending retries from a checkpoint."""
         try:
-            items = BufferCheckpointCallback.load_buffer_items(checkpoint_path)
-            if not items:
+            items, retry_prompts = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
+            if not items and not retry_prompts:
                 return
 
             restored = 0
@@ -409,8 +427,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                     break
 
-            if restored > 0:
-                logger.info(f"Restored {restored} generation buffer items from checkpoint")
+            for prompts in retry_prompts:
+                retry_queue.put_nowait(prompts)
+
+            logger.info(
+                f"Restored {restored} completed generation groups and {len(retry_prompts)} pending retries "
+                "from checkpoint"
+            )
         except Exception as e:
             logger.warning(f"Failed to restore generation buffer from checkpoint (best-effort): {e}")
 
@@ -582,13 +605,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # trainer.fully_async.max_buffered_groups to cap head-node memory — see
             # self.max_buffered_groups in __init__.
             generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self.max_buffered_groups)
+            generation_retry_queue = asyncio.Queue[List[dict]]()
+            generation_buffer_condition = asyncio.Condition()
 
             # Store buffer ref for checkpoint callback access
             self._generation_output_group_buffer = generation_output_group_buffer
+            self._generation_retry_queue = generation_retry_queue
 
             # Restore buffer from checkpoint if resuming
             if self._pending_buffer_restore_path is not None:
-                self._restore_buffer_from_checkpoint(generation_output_group_buffer, self._pending_buffer_restore_path)
+                self._restore_buffer_from_checkpoint(
+                    generation_output_group_buffer,
+                    generation_retry_queue,
+                    self._pending_buffer_restore_path,
+                )
                 self._pending_buffer_restore_path = None
 
             # Provide the generator with a live reference to global_step so it can
@@ -598,39 +628,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers.
             # Stored on self so the finally block in train() can cancel them on abnormal exit.
             self._active_generator_tasks = [
-                asyncio.create_task(self._run_generate_for_a_group_loop(generation_output_group_buffer))
+                asyncio.create_task(
+                    self._run_generate_for_a_group_loop(
+                        generation_output_group_buffer,
+                        generation_retry_queue,
+                        generation_buffer_condition,
+                    )
+                )
                 for _ in range(self.num_parallel_generation_workers)
             ]
             generator_tasks = self._active_generator_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
-                    # 1. Wait until we have enough groups buffered.
-                    cur_generation_group_mini_batch: List[GeneratedOutputGroup] = []
+                    # 1. Discard every completed stale attempt and wait for a full fresh batch.
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings),
                         critical_phase("rollout_or_inference_wait"),
                     ):
-                        buffer_pbar = tqdm(
-                            total=self.mini_batch_size,
-                            initial=0,
-                            desc="Generation Buffer Progress",
-                            position=1,
+                        cur_generation_group_mini_batch = await self._get_fresh_generation_group_mini_batch(
+                            generation_output_group_buffer,
+                            generation_retry_queue,
+                            generation_buffer_condition,
                         )
-                        # NOTE(Charlie): we currently trim the train_dataloader to make it perfectly divisible by
-                        # self.mini_batch_size, and assume that all trajectories succeed (just like sync training),
-                        # so we always get a full mini-batch. Otherwise (e.g. want to drop stale trajectories), we
-                        # should handle the case where the dataloader is exhausted and the buffer is empty, or
-                        # else this loop will never exit.
-                        while len(cur_generation_group_mini_batch) < self.mini_batch_size:
-                            # We do finish-time FIFO here (not schedule-time FIFO)
-                            cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
-                            record_rollout_buffer(
-                                generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize
-                            )
-                            buffer_pbar.update(1)
-                            buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
-                        buffer_pbar.close()
 
                     # 2. Post-process the complete generated mini-batch and convert it to training format.
                     with Timer("convert_to_training_input", self.all_timings):
@@ -899,17 +919,34 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return status
 
-    async def _run_generate_for_a_group_loop(self, generation_output_group_buffer: asyncio.Queue):
+    async def _run_generate_for_a_group_loop(
+        self,
+        generation_output_group_buffer: asyncio.Queue,
+        generation_retry_queue: asyncio.Queue[List[dict]],
+        generation_buffer_condition: asyncio.Condition,
+    ):
         """
         Generator worker: repeatedly pulls the next prompt (possibly blocked by staleness control),
         generates one single generation group, respecting a pause/resume event, and enqueues the result.
         """
         try:
             while True:
-                # 0. Pull next batch from dataloader. If returns None, then dataloader is exhausted.
-                rand_prompts = await self.async_train_dataloader.get_next_non_consumed_data()
-                if rand_prompts is None:
-                    return
+                # 0. Reserve capacity before choosing work so retries already queued at
+                # the step boundary take priority over new dataset rows.
+                slot_acquired = False
+                await self._staleness_manager.acquire_submission_slot()
+                slot_acquired = True
+
+                try:
+                    rand_prompts = generation_retry_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    rand_prompts = await self.async_train_dataloader.get_next_non_consumed_data()
+                    if rand_prompts is None:
+                        await self._staleness_manager.cancel_submission_slot()
+                        slot_acquired = False
+                        rand_prompts = await generation_retry_queue.get()
+                        await self._staleness_manager.acquire_submission_slot()
+                        slot_acquired = True
 
                 # 1. Prepare generator input
                 assert len(rand_prompts) == 1
@@ -923,16 +960,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
-                # 2. Acquire capacity slot.
                 # Capture global_step pessimistically at submission time (before
-                # generation starts) so the staleness value for the whole group
-                # reflects the earliest possible step, not a later one.
-                slot_acquired = False
+                # generation starts). Generators that record the first sampled token
+                # replace this value with actual_global_step below.
                 global_step_at_start = self.global_step  # pessimistic: capture BEFORE slot acquisition
-                await self._staleness_manager.acquire_submission_slot()
-                slot_acquired = True
 
-                # 3. Generate one rollout group
+                # 2. Generate one rollout group
 
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
@@ -947,11 +980,33 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_generator_output.get("is_last_step"),
                 )
 
-                # 4. Enqueue the completed group and mark accepted to free capacity slot.
+                # 3. Enqueue the completed group and mark accepted to free capacity slot.
                 # Prefer the actual global_step captured at first vLLM inference (more accurate
                 # staleness) over the pessimistic capture at task pickup time.
                 actual_step = cur_generator_output.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
+                completed_group = GeneratedOutputGroup(
+                    generator_output=cur_generator_output,
+                    uid=uids[0],
+                    global_step_when_scheduled=staleness_step,
+                    source_prompts=rand_prompts,
+                )
+                async with generation_buffer_condition:
+                    while generation_output_group_buffer.full():
+                        await generation_buffer_condition.wait()
+                    is_stale = self.global_step - staleness_step > self.max_staleness_steps
+                    if is_stale:
+                        generation_retry_queue.put_nowait(rand_prompts)
+                    else:
+                        generation_output_group_buffer.put_nowait(completed_group)
+                        generation_buffer_condition.notify_all()
+
+                if is_stale:
+                    await self._staleness_manager.cancel_submission_slot()
+                    slot_acquired = False
+                    self._stale_groups_discarded_since_step = getattr(self, "_stale_groups_discarded_since_step", 0) + 1
+                    self._groups_inspected_since_step = getattr(self, "_groups_inspected_since_step", 0) + 1
+                    continue
                 # Backpressure: BLOCK on a full buffer instead of crashing.
                 #
                 # The buffer is sized maxsize=num_parallel_generation_workers (== the
@@ -979,13 +1034,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # the group is actually buffered, which is exactly correct. If the worker
                 # is cancelled while blocked in put(), slot_acquired is still True so the
                 # CancelledError handler below reconciles submitted/running.
-                await generation_output_group_buffer.put(
-                    GeneratedOutputGroup(
-                        generator_output=cur_generator_output,
-                        uid=uids[0],
-                        global_step_when_scheduled=staleness_step,
-                    ),
-                )
                 record_rollout_buffer(generation_output_group_buffer.qsize(), generation_output_group_buffer.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
@@ -1052,6 +1100,78 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
 
+    async def _get_fresh_generation_group_mini_batch(
+        self,
+        generation_output_group_buffer: asyncio.Queue[GeneratedOutputGroup],
+        generation_retry_queue: asyncio.Queue[List[dict]],
+        generation_buffer_condition: asyncio.Condition,
+    ) -> List[GeneratedOutputGroup]:
+        """Discard completed stale attempts and wait for a full fresh mini-batch."""
+        fresh_groups = []
+
+        while True:
+            async with generation_buffer_condition:
+                while len(fresh_groups) < self.mini_batch_size and generation_output_group_buffer.empty():
+                    await generation_buffer_condition.wait()
+
+                completed_groups = []
+                while True:
+                    try:
+                        completed_groups.append(generation_output_group_buffer.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+
+                stale_groups = []
+                self._groups_inspected_since_step = getattr(self, "_groups_inspected_since_step", 0) + len(
+                    completed_groups
+                )
+                for group in completed_groups:
+                    if self.global_step - group.global_step_when_scheduled > self.max_staleness_steps:
+                        stale_groups.append(group)
+                        generation_retry_queue.put_nowait(group.source_prompts)
+                    else:
+                        fresh_groups.append(group)
+
+                if not stale_groups and len(fresh_groups) >= self.mini_batch_size:
+                    batch = fresh_groups[: self.mini_batch_size]
+                    for group in fresh_groups[self.mini_batch_size :]:
+                        generation_output_group_buffer.put_nowait(group)
+                else:
+                    batch = None
+                generation_buffer_condition.notify_all()
+
+            if stale_groups:
+                self._stale_groups_discarded_since_step = getattr(self, "_stale_groups_discarded_since_step", 0) + len(
+                    stale_groups
+                )
+                await self._staleness_manager.on_rollouts_discarded(len(stale_groups))
+                continue
+
+            if batch is not None:
+                break
+
+            record_rollout_buffer(
+                generation_output_group_buffer.qsize(),
+                generation_output_group_buffer.maxsize,
+            )
+
+        discarded_since_step = getattr(self, "_stale_groups_discarded_since_step", 0)
+        inspected_since_step = getattr(self, "_groups_inspected_since_step", 0)
+        self._stale_groups_discarded_since_step = 0
+        self._groups_inspected_since_step = 0
+        self.all_metrics.update(
+            {
+                "async/discarded_count": discarded_since_step,
+                "async/discard_rate": discarded_since_step / inspected_since_step,
+            }
+        )
+        if discarded_since_step:
+            logger.warning(
+                f"Discarded {discarded_since_step} completed stale groups before step "
+                f"{self.global_step}; waiting produced a full {self.mini_batch_size}-group replacement batch."
+            )
+        return batch
+
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
     ) -> TrainingInputBatch:
@@ -1070,13 +1190,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
 
-        staleness_violation_count = sum(staleness > self.max_staleness_steps for staleness in stalenesses)
-        if staleness_violation_count:
-            logger.warning(
-                f"Staleness control exceeded for {staleness_violation_count}/{len(stalenesses)} groups at "
-                f"step {self.global_step}: max observed staleness={max(stalenesses)}, "
-                f"max_staleness_steps={self.max_staleness_steps}. The complete batch will be trained."
-            )
+        assert max(stalenesses) <= self.max_staleness_steps, (
+            f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
+        )
 
         generator_output = concatenate_generator_outputs(generator_outputs)
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
@@ -1089,8 +1205,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "async/staleness_max": max(stalenesses),
                 "async/staleness_min": min(stalenesses),
                 "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
-                "async/staleness_violation_count": staleness_violation_count,
-                "async/staleness_violation_rate": staleness_violation_count / len(stalenesses),
             }
         )
 

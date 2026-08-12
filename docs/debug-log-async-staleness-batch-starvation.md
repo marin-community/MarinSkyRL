@@ -33,6 +33,29 @@ the shared reward log no longer reads the deleted effective-sample metric.
 The focused async test set passed after the fix: 31 tests across staleness, buffer checkpoints, checkpoint-resume
 boundaries, and training-batch replay. `uv run infra/pre-commit.py --changed-files --fix` also passed.
 
+## Hypothesis 2
+
+Preserving every completed group keeps batch cardinality stable but trains on rollouts outside the configured
+staleness cap. A stale attempt must be replaced by a new attempt for the same dataset row. Replacing it with the
+next row would exhaust the epoch early and leave the stale row unconsumed.
+
+## Changes to make
+
+Retain the source prompt with each completed group. Sweep the entire completed-output queue at each batch boundary,
+send every stale prompt to a retry queue, and wait until `policy_mini_batch_size` fresh groups are available. Keep
+generation workers alive after the dataset iterator is exhausted so they can service retries.
+
+## Results
+
+The new regressions failed against `65f53029`: no full-buffer sweep or replacement wait existed. The final path
+drains all completed groups under a shared buffer condition, retries every stale group with its original prompt,
+and blocks the optimizer until a full fresh batch is available. Producers re-check staleness after waiting for
+buffer space, so a completed group blocked outside the queue cannot bypass the sweep.
+
+The checkpoint artifact now preserves pending retries. Native SkyRL Gym and step-wise generators use the minimum
+captured sample step as the group's age; Terminal Bench already used the earliest trial start. The focused CPU set
+passed 94 tests after the change.
+
 ## Future work
 
 - None.

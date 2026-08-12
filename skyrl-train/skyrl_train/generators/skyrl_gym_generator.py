@@ -24,6 +24,7 @@ from skyrl_train.generators.utils import (
     get_custom_chat_template,
     get_generation_prompt_ids,
     apply_overlong_filtering,
+    earliest_captured_global_step,
     get_rollout_metrics,
     normalize_token_ids,
 )
@@ -589,13 +590,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
-        # Extract the actual global_step captured at first inference (for accurate staleness).
-        # All agent_loops in a group share the same vLLM engines, so take the first non-None.
-        actual_global_step = None
-        for output in all_outputs:
-            if output.captured_global_step is not None:
-                actual_global_step = output.captured_global_step
-                break
+        # The group is as old as its earliest sampled trajectory.
+        actual_global_step = earliest_captured_global_step(all_outputs)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
