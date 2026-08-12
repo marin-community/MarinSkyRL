@@ -496,6 +496,16 @@ def test_nonpublishing_hf_rank_uses_scratch_directory_without_upload(monkeypatch
     assert filesystem.uploads == []
 
 
+def test_nonpublishing_hf_rank_uses_disposable_staging_for_local_output(tmp_path):
+    output_path = tmp_path / "export" / "policy"
+
+    with local_hf_model_dir(str(output_path), publish=False) as work_dir:
+        assert Path(work_dir) != output_path
+        Path(work_dir, "rank-local-state").write_text("consumed collectives")
+
+    assert not output_path.exists()
+
+
 class TestUploadDownload:
     """Test upload and download directory functions."""
 

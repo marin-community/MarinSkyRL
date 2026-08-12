@@ -211,11 +211,21 @@ def local_output_dir(
     *,
     publish: bool = True,
 ):
+    """Yield local staging and optionally publish it to ``output_path``.
+
+    Cloud outputs are staged in a temporary directory and passed to ``publisher`` on
+    successful exit. Local outputs are written in place. When publication is disabled,
+    the yielded directory is always temporary and its contents are discarded.
+    """
+    if not publish:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            yield temp_dir
+        return
+
     if is_cloud_path(output_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             yield temp_dir
-            if publish:
-                publisher(temp_dir, output_path)
+            publisher(temp_dir, output_path)
         return
 
     makedirs(output_path, exist_ok=True)
