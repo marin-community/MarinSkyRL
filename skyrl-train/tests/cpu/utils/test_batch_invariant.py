@@ -30,19 +30,14 @@ def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     assert _build_inference_engine_runtime_env()["env_vars"][VLLM_BATCH_INVARIANT_ENV] == "1"
 
 
-def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch):
-    activation = {"initialized": False}
+def test_trainer_requires_registered_kernels_after_vllm_activation(monkeypatch):
     batch_invariant_module = types.ModuleType("vllm.model_executor.layers.batch_invariant")
-    batch_invariant_module.init_batch_invariance = lambda: activation.update(initialized=True)
-    batch_invariant_module._batch_invariant_LIB = types.SimpleNamespace(
-        _op_impls={"aten/mm/CUDA", "aten/addmm/CUDA", "aten/bmm/CUDA"}
-    )
+    batch_invariant_module.init_batch_invariance = lambda: None
     monkeypatch.setitem(sys.modules, batch_invariant_module.__name__, batch_invariant_module)
     monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, "1")
 
-    enable_trainer_batch_invariance(True)
-
-    assert activation["initialized"] is True
+    with pytest.raises(RuntimeError, match="without exposing registered CUDA overrides"):
+        enable_trainer_batch_invariance(True)
 
 
 @pytest.mark.parametrize(
