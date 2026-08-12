@@ -83,6 +83,7 @@ async def run_generator_end_to_end(
     End to end generator test - requires minimum 2 GPUs
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
+    default_cfg = get_default_config()
 
     inference_engines = create_ray_wrapped_inference_engines(
         num_inference_engines=num_inference_engines,
@@ -93,7 +94,7 @@ async def run_generator_end_to_end(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        engine_init_timeout_seconds=1800,
+        engine_init_timeout_seconds=default_cfg.generator.engine_init_timeout_seconds,
         shared_pg=None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=True,
@@ -105,7 +106,6 @@ async def run_generator_end_to_end(
     )
 
     # Create a mock generator config
-    default_cfg = get_default_config()
     OmegaConf.update(
         default_cfg,
         "generator",

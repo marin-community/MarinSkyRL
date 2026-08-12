@@ -1,8 +1,6 @@
-"""
-Unit tests for the inference-engine placement-group strategy gate
-(``use_per_engine_strict_pack_pg``).
+"""Unit tests for inference-engine placement and startup configuration.
 
-Pure (Ray-free) checks that the ray/uni backend chooses:
+The placement strategy checks verify that the ray/uni backend chooses:
   - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP > 1), to keep each
     engine's TP/PP workers on one node (#232 cross-node all-reduce fix), and
   - the flat PACK fallback for single-GPU engines (TP==PP==1), so single-GPU
@@ -129,25 +127,20 @@ def test_colocated_tp_groups_use_ray_node_order_not_original_bundle_order():
     assert layouts == [[5, 2], [7, 0], [6, 3], [4, 1]]
 
 
-def test_colocated_tp_group_larger_than_a_node_is_rejected():
-    with pytest.raises(ValueError, match="cannot fit on one 8-GPU policy node"):
+@pytest.mark.parametrize(
+    "tensor_pipeline_size,error",
+    [
+        (16, "cannot fit on one 8-GPU policy node"),
+        (3, "does not divide a 8-GPU policy node"),
+    ],
+)
+def test_colocated_tp_group_invalid_node_geometry_is_rejected(tensor_pipeline_size, error):
+    with pytest.raises(ValueError, match=error):
         colocated_engine_bundle_indices(
             reordered_bundle_indices=list(range(8)),
             engine_index=0,
             data_parallel_rank=0,
-            tensor_pipeline_size=16,
-            data_parallel_size=1,
-            gpus_per_node=8,
-        )
-
-
-def test_colocated_tp_group_must_divide_the_node():
-    with pytest.raises(ValueError, match="does not divide a 8-GPU policy node"):
-        colocated_engine_bundle_indices(
-            reordered_bundle_indices=list(range(8)),
-            engine_index=0,
-            data_parallel_rank=0,
-            tensor_pipeline_size=3,
+            tensor_pipeline_size=tensor_pipeline_size,
             data_parallel_size=1,
             gpus_per_node=8,
         )

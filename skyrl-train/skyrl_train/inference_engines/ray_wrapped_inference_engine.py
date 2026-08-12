@@ -305,24 +305,12 @@ def create_ray_wrapped_inference_engines(
     inference_engine_runtime_env = _build_inference_engine_runtime_env()
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
-    colocated_bundle_indices = get_reordered_bundle_indices(shared_pg) if use_hybrid_engine else []
     tp_pp_size = tensor_parallel_size * pipeline_parallel_size
-    colocated_num_gpus_per_node = bundles_per_node(shared_pg) if use_hybrid_engine else 0
-    colocated_engine_bundles = (
-        [
-            colocated_engine_bundle_indices(
-                reordered_bundle_indices=colocated_bundle_indices,
-                engine_index=engine_index,
-                data_parallel_rank=data_parallel_rank,
-                tensor_pipeline_size=tp_pp_size,
-                data_parallel_size=data_parallel_size,
-                gpus_per_node=colocated_num_gpus_per_node,
-            )
-            for engine_index in range(num_inference_engines)
-            for data_parallel_rank in range(data_parallel_size)
-        ]
-        if use_hybrid_engine
-        else []
+    colocated_engine_bundles = colocated_engine_bundle_layout(
+        shared_pg,
+        num_inference_engines=num_inference_engines,
+        data_parallel_size=data_parallel_size,
+        tensor_pipeline_size=tp_pp_size,
     )
     # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
     # mp_backend (opt-in) lets a NON-colocated multi-GPU engine use vLLM's `mp` executor
@@ -740,6 +728,29 @@ def create_ray_wrapped_inference_engines(
         )
 
     return engines
+
+
+def colocated_engine_bundle_layout(
+    shared_pg, *, num_inference_engines: int, data_parallel_size: int, tensor_pipeline_size: int
+) -> list[list[int]]:
+    """Resolve node-atomic TP/PP bundle slices for a colocated engine gang."""
+
+    if shared_pg is None:
+        return []
+    reordered_bundle_indices = get_reordered_bundle_indices(shared_pg)
+    gpus_per_node = bundles_per_node(shared_pg)
+    return [
+        colocated_engine_bundle_indices(
+            reordered_bundle_indices=reordered_bundle_indices,
+            engine_index=engine_index,
+            data_parallel_rank=data_parallel_rank,
+            tensor_pipeline_size=tensor_pipeline_size,
+            data_parallel_size=data_parallel_size,
+            gpus_per_node=gpus_per_node,
+        )
+        for engine_index in range(num_inference_engines)
+        for data_parallel_rank in range(data_parallel_size)
+    ]
 
 
 def wait_for_inference_engine_startup(
