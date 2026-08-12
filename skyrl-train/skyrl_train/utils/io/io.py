@@ -117,12 +117,7 @@ def remove(path: str) -> None:
         fs.rm(path)
 
 
-def upload_path(
-    local_path: str,
-    cloud_path: str,
-    *,
-    recursive: bool,
-) -> None:
+def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
     filesystem = _get_filesystem(cloud_path)
@@ -134,9 +129,14 @@ def upload_path(
         filesystem.put(local_path, destination, recursive=recursive)
 
 
+def upload_file(local_path: str, cloud_path: str) -> None:
+    """Upload one local file to cloud storage."""
+    _upload(local_path, cloud_path, recursive=False)
+
+
 def upload_directory(local_path: str, cloud_path: str) -> None:
     """Upload a local directory to cloud storage."""
-    upload_path(local_path.rstrip("/") + "/", cloud_path, recursive=True)
+    _upload(local_path.rstrip("/") + "/", cloud_path, recursive=True)
     logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 

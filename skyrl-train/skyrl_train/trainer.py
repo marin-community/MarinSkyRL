@@ -53,7 +53,7 @@ from skyrl_train.distributed.dispatch import (
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.utils.constants import GLOBAL_STEP_PREFIX
+from marinskyrl.hf_model import GLOBAL_STEP_PREFIX
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,

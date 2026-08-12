@@ -35,7 +35,7 @@ from pathlib import Path
 
 from cloud.iris.model_paths import model_source_cli_args
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
-from marinskyrl.hf_model import policy_export_path
+from marinskyrl.hf_model import GLOBAL_STEP_PREFIX, policy_export_path
 from marinskyrl.resource_locator import ModelLocatorError
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export import read_hf_export_request, write_hf_export_request
@@ -47,7 +47,6 @@ from skyrl_train.hf_export_schema import (
     HFExportStatus,
     HFUploadMode,
 )
-from skyrl_train.utils.constants import GLOBAL_STEP_PREFIX
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

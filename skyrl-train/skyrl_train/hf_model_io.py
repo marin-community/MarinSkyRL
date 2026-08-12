@@ -59,7 +59,7 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     def publish_file(path: Path) -> None:
         relative_path = path.relative_to(source_root).as_posix()
         destination_uri = join_resource_path(cloud_path, relative_path)
-        io.upload_path(str(path), destination_uri, recursive=False)
+        io.upload_file(str(path), destination_uri)
 
     for shard_index, path in enumerate(weight_files, start=1):
         relative_path = path.relative_to(source_root).as_posix()

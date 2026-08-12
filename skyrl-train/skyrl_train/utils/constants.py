@@ -1,6 +1,5 @@
 import os
 
-GLOBAL_STEP_PREFIX = "global_step_"
 
 #
 SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180))
