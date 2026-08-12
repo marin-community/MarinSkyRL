@@ -112,6 +112,8 @@ would make that leaf own `asyncio.Condition` synchronization behavior rather tha
 Discard/inspection accumulation is named `_record_discard_scan`. The bounded `asyncio.Queue` remains intentional:
 producer capacity uses its standard `full`, `maxsize`, `qsize`, and nonblocking mutation APIs, while the shared condition
 coordinates the atomic all-buffer sweep; a deque would require duplicating that bounded-queue behavior manually.
+The tutorial's cap definition now uses the earliest captured model step. The named freshness partition remains an
+intentional response to the review's earlier finding that a same-typed two-list tuple was positionally swappable.
 
 ## Future work
 
