@@ -26,6 +26,9 @@ Both regressions failed against commit `803e082c`: the capacity manager admitted
 change restores capacity blocking and converts all dequeued groups while reporting violations as metrics and one
 warning per affected batch.
 
+The lint review found a stale buffer-rationale comment and constant effective-batch metrics left behind by the
+refactor. The comment now describes the bounded completed-output backlog, and the constant metrics were removed.
+
 The focused async test set passed after the fix: 31 tests across staleness, buffer checkpoints, checkpoint-resume
 boundaries, and training-batch replay. `uv run infra/pre-commit.py --changed-files --fix` also passed.
 

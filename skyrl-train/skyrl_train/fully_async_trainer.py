@@ -290,9 +290,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # depth is NOT a throughput lever here: generation concurrency is capped by the
         # inference engines' working set (num_inference_engines · max_num_seqs /
         # n_samples_per_prompt), NOT by the worker count, so a deep buffer only lets a
-        # stale rollout BACKLOG accumulate (most of which ages past max_staleness_steps
-        # and is discarded at consumption anyway). This knob lets us bound that backlog
-        # WITHOUT reducing worker concurrency.
+        # rollout backlog accumulate. This knob bounds the completed-output backlog
+        # without reducing the number of worker loops available for generation.
         #
         # Default None => maxsize == num_parallel_generation_workers, i.e. BYTE-IDENTICAL
         # to today's behavior (no config change => no behavior change). Set it to a small
@@ -1093,8 +1092,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
                 "async/staleness_violation_count": staleness_violation_count,
                 "async/staleness_violation_rate": staleness_violation_count / len(stalenesses),
-                "async/effective_batch_groups": len(generator_outputs),
-                "async/effective_batch_samples": len(generator_outputs) * group_size,
             }
         )
 

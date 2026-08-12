@@ -69,7 +69,5 @@ def test_stale_groups_do_not_reduce_training_batch_size():
     training_input = trainer.convert_generation_group_mini_batch_to_training_input(stale_groups + fresh_groups)
 
     assert len(training_input["response_ids"]) == 64 * 2
-    assert trainer.all_metrics["async/effective_batch_groups"] == 64
-    assert trainer.all_metrics["async/effective_batch_samples"] == 128
     assert trainer.all_metrics["async/staleness_violation_count"] == 61
     assert trainer.all_metrics["async/staleness_violation_rate"] == 61 / 64
