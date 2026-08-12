@@ -564,7 +564,7 @@ def validate_cfg(cfg: DictConfig):
                 "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
                 "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
             )
-    # Validate generation config separately
+    # Report batch-invariant incompatibilities before generic backend constraints.
     validate_generator_cfg(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
