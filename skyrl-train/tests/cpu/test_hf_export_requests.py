@@ -372,3 +372,27 @@ def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
     updated = read_hf_export_request(str(checkpoint))
     assert updated is not None
     assert updated.status is HFExportStatus.PENDING
+
+
+def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp_path, monkeypatch):
+    request = HFExportRequest(
+        step=10,
+        checkpoint_base_path=str(tmp_path / "checkpoints"),
+        checkpoint_path=str(tmp_path / "checkpoints" / "global_step_10"),
+        export_path=str(tmp_path / "exports"),
+        model_path="org/model",
+        num_nodes=2,
+        gpus_per_node=4,
+    )
+    spec = ExportJobSpec(
+        request=request,
+        rl_config="config.yaml",
+        cluster="cw-rno2a",
+        priority="batch",
+        job_name=None,
+        timeout=7200,
+        no_wait=True,
+    )
+    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
+
+    assert export_hf_checkpoint.submit_export(spec, None, ["ignored"]) == 0

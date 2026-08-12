@@ -240,7 +240,7 @@ def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command:
         f"the training geometry or the sharded load will not resolve"
     )
     exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
-    if exit_code == 0:
+    if exit_code == 0 and not spec.no_wait:
         export_path = policy_export_path(spec.request.export_path, spec.request.step)
         try:
             io.verify_hf_model_export(export_path)
