@@ -22,6 +22,8 @@ from loguru import logger
 from marinskyrl.resource_locator import is_cloud_uri
 from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
+_HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
+
 
 def is_cloud_path(path: str) -> bool:
     """Check if the given path is a cloud storage path."""
@@ -90,7 +92,7 @@ def exists(path: str) -> bool:
 
 def verify_hf_model_export(export_path: str) -> None:
     """Reject an HF export unless its safetensors weights are all present."""
-    index_path = os.path.join(export_path, "model.safetensors.index.json")
+    index_path = os.path.join(export_path, _HF_WEIGHT_INDEX_FILENAME)
     if not exists(index_path):
         unsharded_path = os.path.join(export_path, "model.safetensors")
         if exists(unsharded_path):
@@ -164,7 +166,7 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
     logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 
-def upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
+def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     """Publish an HF model with weight progress and its safetensors index last."""
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
@@ -172,15 +174,9 @@ def upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
 
     source_root = Path(local_path)
     files = sorted(path for path in source_root.rglob("*") if path.is_file())
-    index_name = "model.safetensors.index.json"
-    index_files = [path for path in files if path.relative_to(source_root).as_posix() == index_name]
+    index_files = [path for path in files if path.relative_to(source_root).as_posix() == _HF_WEIGHT_INDEX_FILENAME]
     weight_files = [path for path in files if path.suffix == ".safetensors"]
     other_files = [path for path in files if path not in weight_files and path not in index_files]
-
-    remote_index = os.path.join(cloud_path, index_name)
-    if exists(remote_index):
-        remove(remote_index)
-        logger.info(f"Removed stale HF weight index before publication: {remote_index}")
 
     filesystem = _get_filesystem(cloud_path)
     destination_root = filesystem._strip_protocol(cloud_path).rstrip("/")
@@ -310,24 +306,25 @@ def local_work_dir(output_path: str):
 
 
 @contextmanager
-def local_hf_model_dir(output_path: str):
-    """Stage an HF model locally and publish weights before the index."""
-    index_path = os.path.join(output_path, "model.safetensors.index.json")
-    if exists(index_path):
+def local_hf_model_dir(output_path: str, *, publish: bool = True):
+    """Stage an HF model and let one distributed writer publish weights before the index."""
+    index_path = os.path.join(output_path, _HF_WEIGHT_INDEX_FILENAME)
+    if publish and exists(index_path):
         remove(index_path)
         logger.info(f"Removed stale HF weight index before serialization: {index_path}")
 
     if is_cloud_path(output_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             yield temp_dir
-            upload_hf_model_directory(temp_dir, output_path)
+            if publish:
+                _upload_hf_model_directory(temp_dir, output_path)
         return
 
     makedirs(output_path, exist_ok=True)
     try:
         yield output_path
     except BaseException:
-        if exists(index_path):
+        if publish and exists(index_path):
             remove(index_path)
         raise
 

@@ -31,6 +31,10 @@ order. Targeted tests now publish referenced safetensors shards first, emit star
 elapsed-time fields for every shard, and publish the index last. An interrupted retry removes any stale destination
 index before work begins and does not restore it.
 
+Megatron Bridge 0.5 writes HF weights on rank 0 by default while every other rank exhausts the conversion generator
+to participate in collectives. The Megatron path now gives rank 0 the ordered publisher and gives other ranks
+unpublished scratch directories, preserving Bridge's collective contract without racing multiple uploads.
+
 ## Hypothesis 2
 
 Prefix existence cannot distinguish a complete model from the five metadata objects left by the failed export.
@@ -46,8 +50,8 @@ exit code zero mean that every referenced shard exists.
 ## Results
 
 The metadata-only reproduction now fails with the missing shard named in the error. A complete unsharded export and
-a two-shard indexed export pass. The targeted checkpoint exporter, Iris lifecycle, object-store ordering, and FSDP
-staging tests pass: 53 tests total.
+a two-shard indexed export pass. The targeted checkpoint exporter, Iris lifecycle, object-store ordering,
+non-publishing Megatron rank, and FSDP staging tests pass: 54 tests total.
 
 ## Future work
 

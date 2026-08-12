@@ -480,6 +480,27 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
     assert index_key not in filesystem.objects
 
 
+def test_nonpublishing_hf_rank_uses_scratch_directory_without_upload(monkeypatch):
+    uploads = []
+
+    class RecordingFilesystem:
+        def _strip_protocol(self, path):
+            return path.removeprefix("s3://")
+
+        def exists(self, path):
+            return Path(path).exists() if not is_cloud_path(path) else False
+
+        def put(self, source, destination, recursive):
+            uploads.append(destination)
+
+    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: RecordingFilesystem())
+
+    with local_hf_model_dir("s3://bucket/export/policy", publish=False) as work_dir:
+        Path(work_dir, "rank-local-state").write_text("consumed collectives")
+
+    assert uploads == []
+
+
 class TestUploadDownload:
     """Test upload and download directory functions."""
 

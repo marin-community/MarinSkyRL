@@ -50,11 +50,6 @@ def read_hf_export_request(checkpoint_path: str) -> HFExportRequest | None:
     return request
 
 
-def verify_hf_model_export(export_path: str) -> None:
-    """Reject an HF export unless its safetensors weights are all present."""
-    io.verify_hf_model_export(export_path)
-
-
 def protected_hf_export_steps(checkpoint_base_path: str) -> set[int]:
     """Return steps whose incomplete or unreadable requests prevent cleanup."""
     protected: set[int] = set()

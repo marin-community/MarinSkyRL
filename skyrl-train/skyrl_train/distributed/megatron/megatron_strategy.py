@@ -320,7 +320,7 @@ class MegatronStrategy(DistributedStrategy):
         dist.barrier()
 
         # All ranks call into bridge.
-        with io.local_work_dir(output_dir) as work_dir:
+        with io.local_hf_model_dir(output_dir, publish=self.is_rank_0()) as work_dir:
             bridge.save_hf_weights(model.actor_module, work_dir)
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 

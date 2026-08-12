@@ -19,7 +19,6 @@ from skyrl_train.hf_export_schema import (
     POLICY_CHECKPOINT_SUBDIRECTORY,
     TRAINER_STATE_FILENAME,
 )
-from skyrl_train.hf_export import verify_hf_model_export
 from skyrl_train.hf_publisher import HuggingFacePublisher
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
@@ -145,7 +144,7 @@ class CheckpointExporter:
             self._workers.initialize(self._plan.model_path)
             self._workers.load_model_checkpoint(self._plan.policy_checkpoint_path)
             self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
-            verify_hf_model_export(self._plan.policy_export_path)
+            io.verify_hf_model_export(self._plan.policy_export_path)
             if self._publisher is not None:
                 self._publisher.publish(self._plan.policy_export_path, self._plan.step)
             return CheckpointExportResult(step=self._plan.step, export_path=self._plan.policy_export_path)

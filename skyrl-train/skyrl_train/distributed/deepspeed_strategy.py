@@ -319,7 +319,7 @@ class DeepspeedStrategy(DistributedStrategy):
             if getattr(unwrapped_model.config, "tie_word_embeddings", False) and "lm_head.weight" in full_state_dict:
                 full_state_dict.pop("lm_head.weight", None)
 
-            # Only rank 0 writes; use io.local_work_dir for local→remote sync
+            # Only rank 0 writes and publishes the staged model.
             with io.local_hf_model_dir(output_dir) as work_dir:
                 save_file(full_state_dict, os.path.join(work_dir, "model.safetensors"))
                 unwrapped_model.config.save_pretrained(work_dir)

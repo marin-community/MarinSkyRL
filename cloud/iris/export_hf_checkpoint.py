@@ -36,7 +36,7 @@ from pathlib import Path
 from cloud.iris.model_paths import model_source_cli_args
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from marinskyrl.resource_locator import ModelLocatorError
-from skyrl_train.hf_export import read_hf_export_request, verify_hf_model_export, write_hf_export_request
+from skyrl_train.hf_export import read_hf_export_request, write_hf_export_request
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
     DEFAULT_HF_HUB_REVISION,
@@ -44,7 +44,9 @@ from skyrl_train.hf_export_schema import (
     HFExportRequest,
     HFExportStatus,
     HFUploadMode,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
 )
+from skyrl_train.utils.io import io
 from skyrl_train.utils.trainer_utils import GLOBAL_STEP_PREFIX
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -242,10 +244,10 @@ def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command:
         policy_export_path = os.path.join(
             spec.request.export_path,
             f"{GLOBAL_STEP_PREFIX}{spec.request.step}",
-            "policy",
+            POLICY_CHECKPOINT_SUBDIRECTORY,
         )
         try:
-            verify_hf_model_export(policy_export_path)
+            io.verify_hf_model_export(policy_export_path)
         except RuntimeError as error:
             print(f"[export-hf] export completeness check failed: {error}", file=sys.stderr)
             exit_code = 1
