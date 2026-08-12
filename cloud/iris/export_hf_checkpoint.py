@@ -226,7 +226,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
 
 
 def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command: list[str]) -> int:
-    """Submit one export job, verify its artifact when attached, and persist request state."""
+    """Submit one export job, verify synchronous output, and persist request state."""
     if request is not None:
         request = request.with_status(
             HFExportStatus.IN_PROGRESS,

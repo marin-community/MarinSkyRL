@@ -40,11 +40,6 @@ def _get_filesystem(path: str):
     return fsspec.filesystem(proto)
 
 
-def get_filesystem(path: str) -> AbstractFileSystem:
-    """Return the configured filesystem for a local or cloud path."""
-    return _get_filesystem(path)
-
-
 def open_file(path: str, mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
     if not is_cloud_path(path):
@@ -215,11 +210,7 @@ def local_output_dir(
     output_path: str,
     publisher: Callable[[str, str], None],
 ):
-    """Yield local staging and publish it to ``output_path`` on successful exit.
-
-    Cloud outputs are staged in a temporary directory and passed to ``publisher`` on
-    successful exit. Local outputs are written in place.
-    """
+    """Yield local staging and publish cloud output after successful work."""
     if is_cloud_path(output_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             yield temp_dir

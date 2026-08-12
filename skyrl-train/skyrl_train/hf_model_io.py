@@ -55,12 +55,11 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     index_files = [path for path in files if path.relative_to(source_root).as_posix() == HF_WEIGHT_INDEX_FILENAME]
     weight_files = [path for path in files if path.suffix == ".safetensors"]
     other_files = [path for path in files if path not in weight_files and path not in index_files]
-    filesystem = io.get_filesystem(cloud_path)
 
     def publish_file(path: Path) -> None:
         relative_path = path.relative_to(source_root).as_posix()
         destination_uri = join_resource_path(cloud_path, relative_path)
-        io.upload_path(str(path), destination_uri, recursive=False, filesystem=filesystem)
+        io.upload_path(str(path), destination_uri, recursive=False)
 
     for shard_index, path in enumerate(weight_files, start=1):
         relative_path = path.relative_to(source_root).as_posix()
