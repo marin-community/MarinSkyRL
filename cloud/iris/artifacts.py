@@ -161,13 +161,3 @@ def materialize(
         if backup is not None and backup.exists():
             shutil.rmtree(backup)
     return MaterializedArtifact(source=source, files=inventory)
-
-
-def validate_hf_export(names: set[str], source: str) -> None:
-    """Validate the minimum portable Hugging Face model export contract."""
-    if "config.json" not in names:
-        raise ValueError(f"Model export is missing config.json: {source}")
-    if not any(name.endswith((".safetensors", ".bin")) for name in names):
-        raise ValueError(f"Model export has no weight shards: {source}")
-    if not any(name.startswith("tokenizer") or name.endswith(".model") for name in names):
-        raise ValueError(f"Model export has no tokenizer files: {source}")

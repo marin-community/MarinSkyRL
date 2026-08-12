@@ -35,7 +35,8 @@ import sys
 import tempfile
 import threading
 import time
-from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize, validate_hf_export
+from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
+from skyrl_train.hf_model_io import validate_portable_hf_model_files
 from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
@@ -374,7 +375,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
 def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
     """Copy and validate an object-store HF export on this allocated node."""
     source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
-    artifact = materialize(source, validate=validate_hf_export)
+    artifact = materialize(source, validate=validate_portable_hf_model_files)
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
         f"({len(artifact.files)} files, identity={source.identity})"

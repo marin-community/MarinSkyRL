@@ -913,7 +913,7 @@ class FSDPStrategy(DistributedStrategy):
             raise ValueError(f"Unsupported FSDP version: {fsdp_ver}")
 
         if self.is_rank_0():
-            self.print(f"[rank-0]: Gathered {len(output_state_dict)} tensors for HF export")
+            self.print(f"Gathered {len(output_state_dict)} tensors for HF export")
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():

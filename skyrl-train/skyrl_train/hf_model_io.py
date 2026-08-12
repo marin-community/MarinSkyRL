@@ -16,6 +16,16 @@ HF_WEIGHT_FILENAME = "model.safetensors"
 HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
+def validate_portable_hf_model_files(names: set[str], source: str) -> None:
+    """Validate the minimum portable Hugging Face model export contract."""
+    if "config.json" not in names:
+        raise ValueError(f"Model export is missing config.json: {source}")
+    if not any(name.endswith((".safetensors", ".bin")) for name in names):
+        raise ValueError(f"Model export has no weight shards: {source}")
+    if not any(name.startswith("tokenizer") or name.endswith(".model") for name in names):
+        raise ValueError(f"Model export has no tokenizer files: {source}")
+
+
 def verify_hf_model_export(export_path: str) -> None:
     """Reject an HF export unless its safetensors weights are all present."""
     index_path = join_resource_path(export_path, HF_WEIGHT_INDEX_FILENAME)

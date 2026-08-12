@@ -18,8 +18,8 @@ from cloud.iris.artifacts import (
     CHECKPOINT_MARKER_FILENAME,
     fs_and_path,
     relative_object_key,
-    validate_hf_export,
 )
+from skyrl_train.hf_model_io import validate_portable_hf_model_files
 from skyrl_train.hf_export_schema import policy_export_path
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
@@ -78,7 +78,7 @@ def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
     filesystem, policy_path = fs_and_path(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
     names = {relative_object_key(policy_path, path) for path in files}
-    validate_hf_export(names, policy_uri)
+    validate_portable_hf_model_files(names, policy_uri)
     return SkyRLModel(
         policy_export_uri=policy_uri,
         global_step=global_step,
