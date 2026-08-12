@@ -154,24 +154,25 @@ def remove(path: str) -> None:
         fs.rm(path)
 
 
-def upload_directory(local_path: str, cloud_path: str) -> None:
-    """Upload a local directory to cloud storage."""
+def _upload_path(local_path: str, cloud_path: str, *, recursive: bool, filesystem=None) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
-
-    fs = _get_filesystem(cloud_path)
-    source_path = local_path.rstrip("/") + "/"
+    filesystem = filesystem or _get_filesystem(cloud_path)
+    destination = filesystem._strip_protocol(cloud_path) if cloud_path.startswith("s3://") else cloud_path
     if cloud_path.startswith("s3://"):
-        call_with_s3_retry(fs, fs.put, source_path, fs._strip_protocol(cloud_path), recursive=True)
+        call_with_s3_retry(filesystem, filesystem.put, local_path, destination, recursive=recursive)
     else:
-        fs.put(source_path, cloud_path, recursive=True)
+        filesystem.put(local_path, destination, recursive=recursive)
+
+
+def upload_directory(local_path: str, cloud_path: str) -> None:
+    """Upload a local directory to cloud storage."""
+    _upload_path(local_path.rstrip("/") + "/", cloud_path, recursive=True)
     logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 
 def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     """Publish an HF model with weight progress and its safetensors index last."""
-    if not is_cloud_path(cloud_path):
-        raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
     verify_hf_model_export(local_path)
 
     source_root = Path(local_path)
@@ -185,17 +186,13 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     def publish_file(path: Path, shard_index: int | None = None) -> None:
         relative_path = path.relative_to(source_root).as_posix()
         destination_uri = posixpath.join(cloud_path.rstrip("/"), relative_path)
-        destination = filesystem._strip_protocol(destination_uri) if cloud_path.startswith("s3://") else destination_uri
         started = time.monotonic()
         if shard_index is not None:
             logger.info(
                 f"Publishing HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
                 f"({path.stat().st_size} bytes)"
             )
-        if cloud_path.startswith("s3://"):
-            call_with_s3_retry(filesystem, filesystem.put, str(path), destination, recursive=False)
-        else:
-            filesystem.put(str(path), destination, recursive=False)
+        _upload_path(str(path), destination_uri, recursive=False, filesystem=filesystem)
         if shard_index is not None:
             logger.info(
                 f"Published HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
@@ -274,6 +271,19 @@ def local_read_files(input_paths: Sequence[str]):
 
 
 @contextmanager
+def _local_output_dir(output_path: str, publisher, *, publish: bool = True):
+    if is_cloud_path(output_path):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            yield temp_dir
+            if publish:
+                publisher(temp_dir, output_path)
+        return
+
+    makedirs(output_path, exist_ok=True)
+    yield output_path
+
+
+@contextmanager
 def local_work_dir(output_path: str):
     """
     Context manager that provides a local working directory.
@@ -293,18 +303,8 @@ def local_work_dir(output_path: str):
             model.save_pretrained(work_dir)
             # Files are automatically uploaded to s3://bucket/model at context exit
     """
-    if is_cloud_path(output_path):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            try:
-                yield temp_dir
-            finally:
-                # Upload everything from temp_dir to cloud path
-                upload_directory(temp_dir, output_path)
-                logger.info(f"Uploaded directory contents to {output_path}")
-    else:
-        # For local paths, ensure directory exists and use it directly
-        makedirs(output_path, exist_ok=True)
-        yield output_path
+    with _local_output_dir(output_path, upload_directory) as work_dir:
+        yield work_dir
 
 
 @contextmanager
@@ -315,16 +315,9 @@ def local_hf_model_dir(output_path: str, *, publish: bool = True):
         remove(index_path)
         logger.info(f"Removed stale HF weight index before serialization: {index_path}")
 
-    if is_cloud_path(output_path):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            yield temp_dir
-            if publish:
-                _upload_hf_model_directory(temp_dir, output_path)
-        return
-
-    makedirs(output_path, exist_ok=True)
     try:
-        yield output_path
+        with _local_output_dir(output_path, _upload_hf_model_directory, publish=publish) as work_dir:
+            yield work_dir
     except BaseException:
         if publish and exists(index_path):
             remove(index_path)

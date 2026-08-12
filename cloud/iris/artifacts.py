@@ -13,6 +13,9 @@ from typing import Callable
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
+from skyrl_train.hf_export_schema import policy_export_path
+
+policy_export_uri = policy_export_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
@@ -46,11 +49,6 @@ def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
         storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
     filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
     return filesystem, paths[0]
-
-
-def policy_export_uri(export_root: str, global_step: int) -> str:
-    """Return the trainer-owned Hugging Face policy export location."""
-    return f"{export_root.rstrip('/')}/global_step_{global_step}/policy"
 
 
 def relative_object_key(root: str, path: str) -> str:

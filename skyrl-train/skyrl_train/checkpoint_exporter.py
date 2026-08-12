@@ -12,13 +12,13 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.hf_export import hf_policy_export_path
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
     HFUploadMode,
     POLICY_CHECKPOINT_SUBDIRECTORY,
     TRAINER_STATE_FILENAME,
+    policy_export_path,
 )
 from skyrl_train.hf_publisher import HuggingFacePublisher
 from skyrl_train.tokenizer import create_tokenizer
@@ -48,7 +48,7 @@ class CheckpointExportPlan:
 
     @property
     def policy_export_path(self) -> str:
-        return hf_policy_export_path(self.export_root, self.step)
+        return policy_export_path(self.export_root, self.step)
 
 
 @dataclass(frozen=True)

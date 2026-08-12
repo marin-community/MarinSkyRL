@@ -11,6 +11,10 @@ DEFAULT_HF_EXPORT_TIMEOUT = 7200
 DEFAULT_HF_HUB_REVISION = "main"
 
 
+def policy_export_path(export_root: str, global_step: int) -> str:
+    return f"{export_root.rstrip('/')}/global_step_{global_step}/{POLICY_CHECKPOINT_SUBDIRECTORY}"
+
+
 class HFUploadMode(StrEnum):
     LATEST = "latest"
     ALL = "all"
