@@ -730,7 +730,17 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
     never touched. See ``DAYTONA_RL_SNAPSHOT_QUOTA`` above for why this runs before every
     launch.
     """
-    d = _daytona_client(api_key)
+    try:
+        d = _daytona_client(api_key)
+    except ImportError:
+        # The daytona SDK is Linux-only (sys_platform == 'linux' in pyproject.toml).
+        # On a macOS launch host it is absent; skip the purge rather than crashing.
+        print(
+            "[rl-iris] Daytona snapshot purge skipped: daytona SDK is not installed "
+            "on this platform (expected on macOS launch hosts).",
+            flush=True,
+        )
+        return
     now = datetime.datetime.now(datetime.timezone.utc)
     total = 0
     harbor_count = 0

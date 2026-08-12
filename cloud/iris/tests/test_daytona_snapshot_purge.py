@@ -144,3 +144,17 @@ def test_purge_finds_stale_candidates_on_a_later_page(monkeypatch):
 
     assert fake.snapshot.deleted == ["harbor__stale-on-page-two"]
     assert len(fake.snapshot.snapshots) == 100
+
+
+def test_purge_skips_gracefully_when_daytona_sdk_is_unavailable(monkeypatch, capsys):
+    """On a macOS launch host the daytona SDK is not installed (pyproject.toml gates it
+    to ``sys_platform == 'linux'``). The purge must return without raising."""
+
+    def _raise_import_error(_api_key):
+        raise ImportError("No module named 'daytona'")
+
+    monkeypatch.setattr(launcher, "_daytona_client", _raise_import_error)
+
+    launcher._purge_stale_daytona_snapshots("fake-key")  # must not raise
+
+    assert capsys.readouterr().out, "expected a warning when the purge is skipped"
