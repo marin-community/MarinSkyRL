@@ -11,6 +11,7 @@ Uses fsspec for cloud storage abstraction.
 
 import json
 import os
+import posixpath
 import tempfile
 import time
 from contextlib import contextmanager
@@ -22,7 +23,8 @@ from loguru import logger
 from marinskyrl.resource_locator import is_cloud_uri
 from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
-_HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
+HF_WEIGHT_FILENAME = "model.safetensors"
+HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
 def is_cloud_path(path: str) -> bool:
@@ -92,9 +94,9 @@ def exists(path: str) -> bool:
 
 def verify_hf_model_export(export_path: str) -> None:
     """Reject an HF export unless its safetensors weights are all present."""
-    index_path = os.path.join(export_path, _HF_WEIGHT_INDEX_FILENAME)
+    index_path = os.path.join(export_path, HF_WEIGHT_INDEX_FILENAME)
     if not exists(index_path):
-        unsharded_path = os.path.join(export_path, "model.safetensors")
+        unsharded_path = os.path.join(export_path, HF_WEIGHT_FILENAME)
         if exists(unsharded_path):
             return
         raise RuntimeError(f"HF export has no safetensors weights at {export_path}")
@@ -174,16 +176,16 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
 
     source_root = Path(local_path)
     files = sorted(path for path in source_root.rglob("*") if path.is_file())
-    index_files = [path for path in files if path.relative_to(source_root).as_posix() == _HF_WEIGHT_INDEX_FILENAME]
+    index_files = [path for path in files if path.relative_to(source_root).as_posix() == HF_WEIGHT_INDEX_FILENAME]
     weight_files = [path for path in files if path.suffix == ".safetensors"]
     other_files = [path for path in files if path not in weight_files and path not in index_files]
 
     filesystem = _get_filesystem(cloud_path)
-    destination_root = filesystem._strip_protocol(cloud_path).rstrip("/")
 
     def publish_file(path: Path, shard_index: int | None = None) -> None:
         relative_path = path.relative_to(source_root).as_posix()
-        destination = f"{destination_root}/{relative_path}"
+        destination_uri = posixpath.join(cloud_path.rstrip("/"), relative_path)
+        destination = filesystem._strip_protocol(destination_uri) if cloud_path.startswith("s3://") else destination_uri
         started = time.monotonic()
         if shard_index is not None:
             logger.info(
@@ -308,7 +310,7 @@ def local_work_dir(output_path: str):
 @contextmanager
 def local_hf_model_dir(output_path: str, *, publish: bool = True):
     """Stage an HF model and let one distributed writer publish weights before the index."""
-    index_path = os.path.join(output_path, _HF_WEIGHT_INDEX_FILENAME)
+    index_path = os.path.join(output_path, HF_WEIGHT_INDEX_FILENAME)
     if publish and exists(index_path):
         remove(index_path)
         logger.info(f"Removed stale HF weight index before serialization: {index_path}")

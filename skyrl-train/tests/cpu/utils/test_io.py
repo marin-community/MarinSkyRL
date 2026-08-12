@@ -406,21 +406,36 @@ class TestContextManagers:
             assert (Path(read_dir) / ".metadata").is_file()
 
 
+class FakeHFCloudFilesystem:
+    def __init__(self, *, objects=None, upload_error=None):
+        self.objects = objects or {}
+        self.upload_error = upload_error
+        self.uploads = []
+
+    def _strip_protocol(self, path):
+        return path.removeprefix("s3://")
+
+    def exists(self, path):
+        if not is_cloud_path(path):
+            return Path(path).exists()
+        return self._strip_protocol(path) in self.objects
+
+    def isdir(self, path):
+        return False
+
+    def rm(self, path):
+        self.objects.pop(self._strip_protocol(path))
+
+    def put(self, source, destination, recursive):
+        if self.upload_error is not None:
+            raise self.upload_error
+        assert not recursive
+        self.uploads.append(destination)
+
+
 def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch):
-    published = []
-
-    class RecordingFilesystem:
-        def _strip_protocol(self, path):
-            return path.removeprefix("s3://")
-
-        def exists(self, path):
-            return Path(path).exists() if not is_cloud_path(path) else False
-
-        def put(self, source, destination, recursive):
-            assert not recursive
-            published.append(destination)
-
-    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: RecordingFilesystem())
+    filesystem = FakeHFCloudFilesystem()
+    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
         Path(work_dir, "config.json").write_text("{}")
@@ -437,7 +452,7 @@ def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch
             )
         )
 
-    assert published == [
+    assert filesystem.uploads == [
         "bucket/export/policy/model-00001-of-00002.safetensors",
         "bucket/export/policy/model-00002-of-00002.safetensors",
         "bucket/export/policy/config.json",
@@ -445,31 +460,22 @@ def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch
     ]
 
 
+def test_non_s3_hf_model_publication_preserves_destination_scheme(monkeypatch):
+    filesystem = FakeHFCloudFilesystem()
+    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
+
+    with local_hf_model_dir("gs://bucket/export/policy") as work_dir:
+        Path(work_dir, "model.safetensors").write_bytes(b"weights")
+
+    assert filesystem.uploads == ["gs://bucket/export/policy/model.safetensors"]
+
+
 def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch):
     index_key = "bucket/export/policy/model.safetensors.index.json"
-
-    class FailingFilesystem:
-        def __init__(self):
-            self.objects = {index_key: b"stale index"}
-
-        def _strip_protocol(self, path):
-            return path.removeprefix("s3://")
-
-        def exists(self, path):
-            if not is_cloud_path(path):
-                return Path(path).exists()
-            return self._strip_protocol(path) in self.objects
-
-        def isdir(self, path):
-            return False
-
-        def rm(self, path):
-            self.objects.pop(self._strip_protocol(path))
-
-        def put(self, source, destination, recursive):
-            raise OSError("interrupted upload")
-
-    filesystem = FailingFilesystem()
+    filesystem = FakeHFCloudFilesystem(
+        objects={index_key: b"stale index"},
+        upload_error=OSError("interrupted upload"),
+    )
     monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
 
     with pytest.raises(OSError, match="interrupted upload"):
@@ -481,24 +487,13 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
 
 
 def test_nonpublishing_hf_rank_uses_scratch_directory_without_upload(monkeypatch):
-    uploads = []
-
-    class RecordingFilesystem:
-        def _strip_protocol(self, path):
-            return path.removeprefix("s3://")
-
-        def exists(self, path):
-            return Path(path).exists() if not is_cloud_path(path) else False
-
-        def put(self, source, destination, recursive):
-            uploads.append(destination)
-
-    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: RecordingFilesystem())
+    filesystem = FakeHFCloudFilesystem()
+    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("s3://bucket/export/policy", publish=False) as work_dir:
         Path(work_dir, "rank-local-state").write_text("consumed collectives")
 
-    assert uploads == []
+    assert filesystem.uploads == []
 
 
 class TestUploadDownload:

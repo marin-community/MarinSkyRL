@@ -83,6 +83,7 @@ from skyrl_train.callbacks import (
 )
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
 from skyrl_train.hf_export import (
+    hf_policy_export_path,
     protected_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
@@ -2131,11 +2132,7 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # TODO(tgriggs): Make policy-to-ref sync faster.
-        policy_export_dir = os.path.join(
-            self.cfg.trainer.export_path,
-            f"{GLOBAL_STEP_PREFIX}{self.global_step}",
-            POLICY_CHECKPOINT_SUBDIRECTORY,
-        )
+        policy_export_dir = hf_policy_export_path(self.cfg.trainer.export_path, self.global_step)
         ray.get(
             self.policy_model.async_run_ray_method("pass_through", "save_hf_model", policy_export_dir, self.tokenizer)
         )

@@ -321,7 +321,7 @@ class DeepspeedStrategy(DistributedStrategy):
 
             # Only rank 0 writes and publishes the staged model.
             with io.local_hf_model_dir(output_dir) as work_dir:
-                save_file(full_state_dict, os.path.join(work_dir, "model.safetensors"))
+                save_file(full_state_dict, os.path.join(work_dir, io.HF_WEIGHT_FILENAME))
                 unwrapped_model.config.save_pretrained(work_dir)
                 if tokenizer is not None:
                     tokenizer.save_pretrained(work_dir)

@@ -50,8 +50,8 @@ exit code zero mean that every referenced shard exists.
 ## Results
 
 The metadata-only reproduction now fails with the missing shard named in the error. A complete unsharded export and
-a two-shard indexed export pass. The targeted checkpoint exporter, Iris lifecycle, object-store ordering,
-non-publishing Megatron rank, and FSDP staging tests pass: 54 tests total.
+a two-shard indexed export pass. The targeted checkpoint exporter, Iris lifecycle, S3/GCS object-store ordering,
+non-publishing Megatron rank, and FSDP staging tests pass: 55 tests total.
 
 ## Future work
 

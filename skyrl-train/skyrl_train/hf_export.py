@@ -9,18 +9,23 @@ from dataclasses import asdict
 from loguru import logger
 
 from skyrl_train.utils.io import io
-from skyrl_train.utils.trainer_utils import extract_step_from_path, list_checkpoint_dirs
+from skyrl_train.utils.trainer_utils import GLOBAL_STEP_PREFIX, extract_step_from_path, list_checkpoint_dirs
 from skyrl_train.hf_export_schema import (
     HF_EXPORT_REQUEST_FILENAME,
     HF_EXPORT_REQUEST_SCHEMA_VERSION,
     HFExportRequest,
     HFExportStatus,
     HFUploadMode,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
 )
 
 
 def hf_export_request_path(checkpoint_path: str) -> str:
     return os.path.join(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
+
+
+def hf_policy_export_path(export_root: str, step: int) -> str:
+    return os.path.join(export_root, f"{GLOBAL_STEP_PREFIX}{step}", POLICY_CHECKPOINT_SUBDIRECTORY)
 
 
 def write_hf_export_request(request: HFExportRequest) -> str:
