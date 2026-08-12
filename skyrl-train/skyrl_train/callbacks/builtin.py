@@ -21,13 +21,13 @@ Supports two configuration styles:
 import asyncio
 import dataclasses
 import os
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Protocol, Tuple, Type
 
 from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.config.callbacks import has_explicit_callbacks
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
@@ -36,10 +36,6 @@ from .types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
-
-if TYPE_CHECKING:
-    from skyrl_train.fully_async_trainer import GeneratedOutputGroup, _GenerationQueues
-
 
 # Registry mapping callback type names to classes
 # This enables YAML-based callback configuration
@@ -1169,10 +1165,8 @@ class DataTrackingCallback(TrainerCallback):
         return False
 
 
-@dataclass
-class GenerationBufferState:
-    completed_groups: List["GeneratedOutputGroup"]
-    retry_prompts: List[List[dict]]
+class _GenerationQueuesSnapshot(Protocol):
+    def snapshot(self) -> Tuple[List[GeneratedOutputGroup], List[List[dict]]]: ...
 
 
 class BufferCheckpointCallback(TrainerCallback):
@@ -1188,7 +1182,7 @@ class BufferCheckpointCallback(TrainerCallback):
     def __init__(self) -> None:
         self._queues = None
 
-    def bind_queues(self, queues: "_GenerationQueues") -> None:
+    def bind_queues(self, queues: _GenerationQueuesSnapshot) -> None:
         """Select the current epoch's queues for checkpoint persistence."""
         self._queues = queues
 
@@ -1248,7 +1242,6 @@ class BufferCheckpointCallback(TrainerCallback):
 
         import torch
 
-        from skyrl_train.fully_async_trainer import GeneratedOutputGroup
         from skyrl_train.generators.base import GeneratorOutput
         from skyrl_train.utils.io import io
 

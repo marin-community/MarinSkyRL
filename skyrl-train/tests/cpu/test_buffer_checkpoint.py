@@ -10,8 +10,10 @@ import pytest
 import torch
 
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
-from skyrl_train.fully_async_trainer import GeneratedOutputGroup, _GenerationQueues
+from skyrl_train.async_rollout_state import GeneratedOutputGroup
+from skyrl_train.fully_async_trainer import _GenerationQueues
 from skyrl_train.generators.base import TrajectoryID
+from skyrl_train.utils.io import io
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +144,6 @@ async def test_roundtrip_with_pending_retry():
 
 @pytest.mark.asyncio
 async def test_save_failure_is_not_downgraded(monkeypatch, tmp_path):
-    from skyrl_train.utils.io import io
-
     buffer = asyncio.Queue(maxsize=1)
     buffer.put_nowait(_make_item("uid", step=5))
     trainer = _FakeTrainer(str(tmp_path), buffer)
@@ -174,31 +174,6 @@ def test_load_malformed_state_fails_instead_of_dropping_retries():
 
         with pytest.raises(KeyError, match="completed_groups"):
             BufferCheckpointCallback.load_buffer_state(tmpdir)
-
-
-@pytest.mark.asyncio
-async def test_restore_into_queue():
-    """Loaded items can be put back into a fresh queue."""
-    buf = asyncio.Queue(maxsize=8)
-    items = [_make_item(f"uid_{i}", step=3) for i in range(4)]
-    for item in items:
-        buf.put_nowait(item)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        step_dir = os.path.join(tmpdir, "global_step_3")
-        os.makedirs(step_dir)
-        trainer = _FakeTrainer(tmpdir, buf)
-        cb = BufferCheckpointCallback()
-        cb.bind_queues(trainer._generation_queues)
-        await cb.on_save_async(_FakeState(3), _FakeControl(), trainer=trainer)
-
-        # Simulate resume: load into a fresh queue
-        new_buf = asyncio.Queue(maxsize=8)
-        buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
-        for item in buffer_state.completed_groups:
-            new_buf.put_nowait(item)
-        assert new_buf.qsize() == 4
-        assert buffer_state.retry_prompts == []
 
 
 @pytest.mark.asyncio

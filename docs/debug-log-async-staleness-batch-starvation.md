@@ -67,6 +67,8 @@ Submission-slot cleanup remains explicit because completion, stale rejection, ca
 different accounting transitions; an async context manager would still need the same outcome-specific branches.
 The follow-up review led to directly binding each epoch's queues to the checkpoint callback, a named checkpoint-state
 return type, typed queue draining, and outcome-specific routing and inspection names.
+The shared generated-group and checkpoint-state records live in `async_rollout_state.py`, which keeps callback typing
+independent of the trainer module. The obsolete trainer queue attribute and redundant queue-count test were removed.
 
 ## Future work
 

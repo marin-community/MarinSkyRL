@@ -33,6 +33,7 @@ import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
+from skyrl_train.async_rollout_state import GeneratedOutputGroup
 
 
 _QueueItem = TypeVar("_QueueItem")
@@ -46,30 +47,6 @@ def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
             items.append(queue.get_nowait())
         except asyncio.QueueEmpty:
             return items
-
-
-@dataclass
-class GeneratedOutputGroup:
-    """
-    The GeneratorOutput for a single group of rollouts, along with the metadata.
-
-    Attributes:
-        generator_output (GeneratorOutput): The GeneratorOutput for a single group of rollouts.
-            That is, the output to the same prompt, but `n_samples_per_prompt` of it.
-
-        uid (str): The uid of the group. Underlyingly, it is the index of the data in train_dataloader.dataset.
-
-        global_step_when_scheduled (int): The global step when the group was scheduled for generation,
-            used for validating the staleness control.
-
-        source_prompts: The original dataloader row used to regenerate this group if the
-            completed attempt exceeds the staleness cap.
-    """
-
-    generator_output: GeneratorOutput
-    uid: str
-    global_step_when_scheduled: int
-    source_prompts: List[dict]
 
 
 @dataclass
@@ -393,7 +370,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Register buffer checkpoint callback for saving/restoring generation buffer on resume
         self._buffer_checkpoint_callback = BufferCheckpointCallback()
         self.callback_handler.add_callback(self._buffer_checkpoint_callback)
-        self._generation_queues = None
         self._pending_buffer_restore_path = None
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
@@ -631,8 +607,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 condition=asyncio.Condition(),
             )
 
-            # Store buffer ref for checkpoint callback access
-            self._generation_queues = generation_queues
             self._buffer_checkpoint_callback.bind_queues(generation_queues)
 
             # Restore buffer from checkpoint if resuming
@@ -946,9 +920,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
-                # Capture global_step pessimistically at submission time (before
-                # generation starts). Generators that record the first sampled token
-                # replace this value with actual_global_step below.
+                # Capture a fallback global step before generation. Generators that
+                # record sampled-token steps replace it with actual_global_step below.
                 global_step_at_start = self.global_step
 
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
