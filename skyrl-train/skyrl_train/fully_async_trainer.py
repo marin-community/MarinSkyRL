@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 import inspect
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
@@ -155,18 +155,15 @@ class _AsyncStalenessManager:
         return min(producer_concurrency_capacity, producer_staleness_capacity)
 
     async def acquire_submission_slot(self) -> None:
-        """Reserve a slot for generation (increments submitted and running).
+        """Block until generation capacity is available, then reserve a slot.
 
-        This method no longer blocks on staleness capacity. Concurrency is managed by
-        the number of workers (num_parallel_generation_workers), and stale groups are
-        discarded at consumption time in convert_generation_group_mini_batch_to_training_input().
-
-        This approach maximizes vLLM utilization by allowing all workers to submit work
-        immediately, rather than blocking when the staleness budget is exceeded.
+        The capacity bound prevents generation from getting far enough ahead of training
+        to require destructive dequeue-time filtering. Individual long-running
+        generations can still exceed the budget; those completed groups remain trainable.
         """
         async with self._cond:
-            # No blocking - just increment counters
-            # Concurrency is naturally bounded by num_parallel_generation_workers
+            while self._compute_capacity_unlocked() <= 0:
+                await self._cond.wait()
             self._stat.submitted += 1
             self._stat.running += 1
 
@@ -317,20 +314,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "Invalid num_parallel_generation_workers, must be >= mini_batch_size. Got: "
             f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}"
         )
-        # NOTE: Upper-bound guard (workers <= mini_batch_size * (max_staleness_steps + 1))
-        # commented out to allow scaling num_parallel_generation_workers independently of
-        # max_staleness_steps. Stale groups are discarded at consumption time in
-        # convert_generation_group_mini_batch_to_training_input(), so exceeding the
-        # capacity formula is safe — it just means some groups may be discarded.
-        #
-        # assert (
-        #     self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
-        # ), (
-        #     "Invalid num_parallel_generation_workers, the following must hold: "
-        #     "num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
-        #     f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
-        # )
-
         # Initialize base trainer
         super().__init__(*args, **kwargs)
 
@@ -651,20 +634,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                         buffer_pbar.close()
 
-                    # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                    #    If all groups are stale, wait for more fresh data instead of crashing.
-                    training_input = None
-                    while training_input is None:
-                        with Timer("convert_to_training_input", self.all_timings):
-                            training_input = await asyncio.to_thread(
-                                self.convert_generation_group_mini_batch_to_training_input,
-                                cur_generation_group_mini_batch,
-                            )
-                        if training_input is None:
-                            logger.info("Waiting for fresh generation data (refilling mini-batch)...")
-                            cur_generation_group_mini_batch = []
-                            while len(cur_generation_group_mini_batch) < self.mini_batch_size:
-                                cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
+                    # 2. Post-process the complete generated mini-batch and convert it to training format.
+                    with Timer("convert_to_training_input", self.all_timings):
+                        training_input = await asyncio.to_thread(
+                            self.convert_generation_group_mini_batch_to_training_input,
+                            cur_generation_group_mini_batch,
+                        )
 
                     # TIS graceful-degrade observability (Fix A): record whether THIS
                     # training batch was missing all rollout logprobs (-> TIS skipped,
@@ -997,9 +972,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # not-full case (put returns immediately, identical to put_nowait), so the
                 # fast-consumer arms (8B TIS) are byte-for-byte unchanged. It structurally
                 # bounds buffered-but-unconsumed groups to exactly `maxsize` — without
-                # enlarging the buffer. Per-group staleness is still enforced downstream in
-                # convert_generation_group_mini_batch_to_training_input(), which discards
-                # any group staler than max_staleness_steps.
+                # enlarging the buffer. Scheduling capacity bounds aggregate staleness;
+                # individual long-running groups are reported when consumed.
                 #
                 # Counter accounting is preserved: the submission slot (`running`) stays
                 # held across the (possibly blocking) put, and on_rollout_accepted() —
@@ -1082,73 +1056,43 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
-    ) -> Optional[TrainingInputBatch]:
-        """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch.
-
-        Stale groups (staleness > max_staleness_steps) are discarded rather than trained on.
-        This is the deadline-based staleness control approach: instead of blocking workers
-        at submission time, we allow all workers to submit freely and discard stale results
-        at consumption time. This maximizes vLLM utilization.
-
-        Returns None if all groups in the mini-batch were stale, signaling the caller to
-        wait for fresh data rather than crash.
-        """
+    ) -> TrainingInputBatch:
+        """Convert one complete generated mini-batch to a training batch."""
+        assert len(cur_generation_group_mini_batch) == self.mini_batch_size, (
+            f"Expected {self.mini_batch_size} generated groups, got {len(cur_generation_group_mini_batch)}"
+        )
         generator_outputs = []
         uids = []
         stalenesses = []
-        discarded_count = 0
-        discarded_uids = []
         group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
 
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
-
-            # Discard stale groups instead of training on them
-            if cur_staleness > self.max_staleness_steps:
-                logger.info(
-                    f"Discarding stale group uid={cur_generated_output_group.uid} "
-                    f"staleness={cur_staleness} > max={self.max_staleness_steps}"
-                )
-                discarded_count += 1
-                discarded_uids.append(cur_generated_output_group.uid)
-                continue  # Skip this group
-
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
 
-        # Handle edge case: all groups were discarded — signal caller to wait and retry
-        if len(generator_outputs) == 0:
+        staleness_violation_count = sum(staleness > self.max_staleness_steps for staleness in stalenesses)
+        if staleness_violation_count:
             logger.warning(
-                f"All {len(cur_generation_group_mini_batch)} groups in mini-batch were stale and discarded "
-                f"(max_staleness_steps={self.max_staleness_steps}). "
-                f"Training will wait for fresh generation data."
+                f"Staleness control exceeded for {staleness_violation_count}/{len(stalenesses)} groups at "
+                f"step {self.global_step}: max observed staleness={max(stalenesses)}, "
+                f"max_staleness_steps={self.max_staleness_steps}. The complete batch will be trained."
             )
-            return None
-
-        # Log discard and effective batch statistics (always, not just when discarding)
-        total_groups = len(cur_generation_group_mini_batch)
-        kept_groups = len(generator_outputs)
-        discard_rate = discarded_count / total_groups if total_groups > 0 else 0.0
-        logger.info(
-            f"Step {self.global_step}: effective_batch={kept_groups * group_size} samples "
-            f"({kept_groups}/{total_groups} groups), discard_rate={discard_rate:.1%}"
-        )
 
         generator_output = concatenate_generator_outputs(generator_outputs)
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
 
         # Log staleness statistics for this step
-        total_groups = len(cur_generation_group_mini_batch)
         self.all_metrics.update(
             {
                 "async/staleness_mean": sum(stalenesses) / len(stalenesses),
                 "async/staleness_max": max(stalenesses),
                 "async/staleness_min": min(stalenesses),
                 "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
-                "async/discarded_count": discarded_count,
-                "async/discard_rate": discarded_count / total_groups if total_groups > 0 else 0.0,
+                "async/staleness_violation_count": staleness_violation_count,
+                "async/staleness_violation_rate": staleness_violation_count / len(stalenesses),
                 "async/effective_batch_groups": len(generator_outputs),
                 "async/effective_batch_samples": len(generator_outputs) * group_size,
             }
