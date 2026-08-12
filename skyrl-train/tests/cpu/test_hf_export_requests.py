@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
@@ -303,6 +304,10 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
         gpus_per_node=4,
     )
     write_hf_export_request(request)
+    if exit_code == 0:
+        export = Path(request.export_path) / "global_step_10" / "policy"
+        export.mkdir(parents=True)
+        (export / "model.safetensors").write_bytes(b"weights")
     monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: exit_code)
     monkeypatch.setattr(
         "sys.argv",
@@ -327,3 +332,43 @@ def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_cod
     assert updated.attempts == 1
     assert updated.timeout == 7200
     assert updated.last_exit_code == exit_code
+
+
+def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "checkpoints" / "global_step_10"
+    checkpoint.mkdir(parents=True)
+    request = HFExportRequest(
+        step=10,
+        checkpoint_base_path=str(tmp_path / "checkpoints"),
+        checkpoint_path=str(checkpoint),
+        export_path=str(tmp_path / "exports"),
+        model_path="org/model",
+        num_nodes=2,
+        gpus_per_node=4,
+    )
+    write_hf_export_request(request)
+    export = Path(request.export_path) / "global_step_10" / "policy"
+    export.mkdir(parents=True)
+    (export / "config.json").write_text("{}")
+    (export / "model.safetensors.index.json").write_text('{"weight_map": {"x": "model-00001-of-00001.safetensors"}}')
+    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
+
+    spec = ExportJobSpec(
+        request=request,
+        rl_config="config.yaml",
+        cluster="cw-rno2a",
+        priority="batch",
+        job_name=None,
+        timeout=7200,
+        no_wait=False,
+    )
+    exit_code = export_hf_checkpoint.submit_export(
+        spec,
+        request,
+        ["ignored"],
+    )
+
+    assert exit_code != 0
+    updated = read_hf_export_request(str(checkpoint))
+    assert updated is not None
+    assert updated.status is HFExportStatus.PENDING

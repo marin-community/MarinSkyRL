@@ -36,7 +36,7 @@ from pathlib import Path
 from cloud.iris.model_paths import model_source_cli_args
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from marinskyrl.resource_locator import ModelLocatorError
-from skyrl_train.hf_export import read_hf_export_request, write_hf_export_request
+from skyrl_train.hf_export import read_hf_export_request, verify_hf_model_export, write_hf_export_request
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
     DEFAULT_HF_HUB_REVISION,
@@ -238,6 +238,17 @@ def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command:
         f"the training geometry or the sharded load will not resolve"
     )
     exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
+    if exit_code == 0:
+        policy_export_path = os.path.join(
+            spec.request.export_path,
+            f"{GLOBAL_STEP_PREFIX}{spec.request.step}",
+            "policy",
+        )
+        try:
+            verify_hf_model_export(policy_export_path)
+        except RuntimeError as error:
+            print(f"[export-hf] export completeness check failed: {error}", file=sys.stderr)
+            exit_code = 1
     if request is not None:
         status = HFExportStatus.COMPLETE if exit_code == 0 else HFExportStatus.PENDING
         write_hf_export_request(request.with_status(status, last_exit_code=exit_code))

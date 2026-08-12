@@ -895,6 +895,7 @@ class FSDPStrategy(DistributedStrategy):
         # Step 3: Determine FSDP version and collect full state dict
         fsdp_ver = fsdp_version(fsdp_model)
         self.print(f"[rank-{self.get_rank()}]: Detected FSDP version: {fsdp_ver}")
+        self.print(f"[rank-{self.get_rank()}]: Gathering full state dict for HF export")
 
         if fsdp_ver == 2:
             # Use FSDP2 API - collects on rank 0 only
@@ -909,6 +910,9 @@ class FSDPStrategy(DistributedStrategy):
         else:
             raise ValueError(f"Unsupported FSDP version: {fsdp_ver}")
 
+        if self.is_rank_0():
+            self.print(f"[rank-0]: Gathered {len(output_state_dict)} tensors for HF export")
+
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
             # Grouped-MoE export fix: the FSDP2 full state dict of a grouped-swapped
@@ -921,9 +925,11 @@ class FSDPStrategy(DistributedStrategy):
             # present, so a dense / non-grouped / non-MoE save stays BYTE-IDENTICAL.
             output_state_dict = self._maybe_remap_grouped_moe_state_dict(output_state_dict)
 
-            with io.local_work_dir(output_dir) as work_dir:
+            with io.local_hf_model_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
+                self.print(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
+                self.print("[rank-0]: Finished serializing HF safetensors")
 
                 # Fix and save the config
                 config_to_save = self._fix_fsdp_config(model_to_save.config)

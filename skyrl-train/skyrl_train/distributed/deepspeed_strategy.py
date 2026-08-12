@@ -320,7 +320,7 @@ class DeepspeedStrategy(DistributedStrategy):
                 full_state_dict.pop("lm_head.weight", None)
 
             # Only rank 0 writes; use io.local_work_dir for local→remote sync
-            with io.local_work_dir(output_dir) as work_dir:
+            with io.local_hf_model_dir(output_dir) as work_dir:
                 save_file(full_state_dict, os.path.join(work_dir, "model.safetensors"))
                 unwrapped_model.config.save_pretrained(work_dir)
                 if tokenizer is not None:

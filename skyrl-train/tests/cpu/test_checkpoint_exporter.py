@@ -27,6 +27,7 @@ class FakePolicyExportWorkers:
         self.export_path = export_path
         self.tokenizer = tokenizer
         Path(export_path).mkdir(parents=True)
+        Path(export_path, "model.safetensors").write_bytes(b"weights")
 
     def close(self) -> None:
         self.closed = True
@@ -35,6 +36,16 @@ class FakePolicyExportWorkers:
 class MissingExportWorkers(FakePolicyExportWorkers):
     def save_hf_model(self, export_path: str, tokenizer: object) -> None:
         self.export_path = export_path
+
+
+class MetadataOnlyExportWorkers(FakePolicyExportWorkers):
+    def save_hf_model(self, export_path: str, tokenizer: object) -> None:
+        self.export_path = export_path
+        Path(export_path).mkdir(parents=True)
+        Path(export_path, "config.json").write_text("{}")
+        Path(export_path, "model.safetensors.index.json").write_text(
+            '{"weight_map": {"model.layers.0.weight": "model-00001-of-00001.safetensors"}}'
+        )
 
 
 class FakeRayActorGroup:
@@ -114,7 +125,18 @@ def test_checkpoint_exporter_rejects_a_missing_conversion_result(tmp_path):
     workers = MissingExportWorkers()
     publisher = FakePublisher()
 
-    with pytest.raises(RuntimeError, match="conversion produced no model"):
+    with pytest.raises(RuntimeError, match="no safetensors weights"):
+        CheckpointExporter(_plan(tmp_path), workers, object(), publisher).run()
+
+    assert workers.closed
+    assert publisher.calls == []
+
+
+def test_checkpoint_exporter_rejects_an_index_with_missing_weight_shards(tmp_path):
+    workers = MetadataOnlyExportWorkers()
+    publisher = FakePublisher()
+
+    with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
         CheckpointExporter(_plan(tmp_path), workers, object(), publisher).run()
 
     assert workers.closed
