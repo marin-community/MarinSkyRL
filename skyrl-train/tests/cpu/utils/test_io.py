@@ -10,7 +10,7 @@ import pytest
 from unittest.mock import patch, Mock
 import torch
 
-from skyrl_train.hf_model_io import local_hf_model_dir
+from skyrl_train.hf_model_io import local_hf_model_dir, temporary_hf_model_dir
 from skyrl_train.utils.io.io import (
     is_cloud_path,
     makedirs,
@@ -486,24 +486,12 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
     assert index_key not in filesystem.objects
 
 
-def test_nonpublishing_hf_rank_uses_scratch_directory_without_upload(monkeypatch):
-    filesystem = FakeHFCloudFilesystem()
-    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
+def test_temporary_hf_model_dir_is_disposable():
+    with temporary_hf_model_dir() as work_dir:
+        work_path = Path(work_dir)
+        Path(work_path, "rank-local-state").write_text("consumed collectives")
 
-    with local_hf_model_dir("s3://bucket/export/policy", publish=False) as work_dir:
-        Path(work_dir, "rank-local-state").write_text("consumed collectives")
-
-    assert filesystem.uploads == []
-
-
-def test_nonpublishing_hf_rank_uses_disposable_staging_for_local_output(tmp_path):
-    output_path = tmp_path / "export" / "policy"
-
-    with local_hf_model_dir(str(output_path), publish=False) as work_dir:
-        assert Path(work_dir) != output_path
-        Path(work_dir, "rank-local-state").write_text("consumed collectives")
-
-    assert not output_path.exists()
+    assert not work_path.exists()
 
 
 class TestUploadDownload:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,9 +37,7 @@ def verify_hf_model_export(export_path: str) -> None:
         raise RuntimeError(f"HF export has an empty safetensors weight map at {index_path}")
 
     shard_values = list(weight_map.values())
-    invalid_shards = [
-        shard for shard in shard_values if not isinstance(shard, str) or Path(shard).name != shard
-    ]
+    invalid_shards = [shard for shard in shard_values if not isinstance(shard, str) or Path(shard).name != shard]
     if invalid_shards:
         raise RuntimeError(f"HF export index contains invalid safetensors shard paths: {invalid_shards}")
     shards = sorted(set(shard_values))
@@ -83,18 +82,30 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     logger.info(f"Published HF model directory to {cloud_path}")
 
 
+def _remove_weight_index(index_path: str) -> bool:
+    if not io.exists(index_path):
+        return False
+    io.remove(index_path)
+    return True
+
+
 @contextmanager
-def local_hf_model_dir(output_path: str, *, publish: bool = True):
-    """Stage an HF model and let one distributed writer publish weights before the index."""
+def local_hf_model_dir(output_path: str):
+    """Stage and publish an HF model with the weights before its index."""
     index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
-    if publish and io.exists(index_path):
-        io.remove(index_path)
+    if _remove_weight_index(index_path):
         logger.info(f"Removed stale HF weight index before serialization: {index_path}")
 
     try:
-        with io.local_output_dir(output_path, _upload_hf_model_directory, publish=publish) as work_dir:
+        with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
     except BaseException:
-        if publish and io.exists(index_path):
-            io.remove(index_path)
+        _remove_weight_index(index_path)
         raise
+
+
+@contextmanager
+def temporary_hf_model_dir():
+    """Yield disposable rank-local storage for collective HF conversion work."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        yield temp_dir
