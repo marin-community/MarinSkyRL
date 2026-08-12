@@ -157,9 +157,8 @@ class _AsyncStalenessManager:
     async def acquire_submission_slot(self) -> None:
         """Block until generation capacity is available, then reserve a slot.
 
-        The capacity bound prevents generation from getting far enough ahead of training
-        to require destructive dequeue-time filtering. Individual long-running
-        generations can still exceed the budget; those completed groups remain trainable.
+        Individual long-running generations can still exceed the aggregate staleness
+        budget; those completed groups remain trainable.
         """
         async with self._cond:
             while self._compute_capacity_unlocked() <= 0:
