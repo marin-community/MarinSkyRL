@@ -7,6 +7,8 @@ Gates (scope §3b):
          via the NATIVE router routed_experts arg (Stage-2 RouterReplay singleton
          transport).
   G3b-4  moe_grouped_gemm=False → unswapped → torch.equal to today's HF eager.
+  G3b-5  eval-vs-train logits identical under torch.equal (pytorch#186365:
+         ``torch._grouped_mm`` leaves ALIGN_SIZE_M-padded tail rows uninitialized).
 
 Run on a Qwen3-MoE tiny config AND a Qwen3-Next tiny config (the latter
 exercises the shared-expert sigmoid-gate adaptation).
@@ -274,15 +276,59 @@ def test_g3b_2_qwen3_next():
     _g3b_2(_build_qwen3_next, "Qwen3-Next", "cuda")
 
 
+# --------------------------------------------------------------------------- #
+# G3b-5 — eval-vs-train parity (pytorch#186365 regression)                    #
+# --------------------------------------------------------------------------- #
+
+
+def _g3b_5(build, name, device):
+    """The grouped-MoE forward must produce identical logits under no_grad and grad.
+
+    pytorch#186365: ``torch._grouped_mm`` writes only rows covered by ``offs`` and
+    leaves the rest uninitialized (``empty_strided``).  The ``@expert_parallel``
+    ALIGN_SIZE_M pad creates rows beyond ``offs[-1]``, so the output carried
+    allocator-dependent garbage that differed between eval (no activations saved)
+    and train (activations saved).  This produced log_ratio_abs_max ≈ 7.6 nats on
+    unchanged weights.  The fix zeroes those tail rows, mirroring the for-loop path.
+    """
+    model, cfg = build(device, seed=0)
+    if model is None:
+        print(f"[G3b-5/{name}] config unavailable — SKIP")
+        return
+    w = _wrap(model, moe_grouped_gemm=True, moe_router_replay=False, device=device)
+    input_ids, attn, num_actions = _inputs(device)
+
+    w.model.eval()
+    with torch.no_grad():
+        eval_logits = _forward_logits(w, input_ids, attn, num_actions).clone()
+
+    w.model.train()
+    train_logits = _forward_logits(w, input_ids, attn, num_actions)
+
+    assert torch.equal(eval_logits, train_logits.detach()), (
+        f"[{name}] eval-vs-train logits differ: max abs diff {(eval_logits - train_logits.detach()).abs().max().item()}"
+    )
+    print(f"[G3b-5/{name}] eval == train logits (exact): PASS")
+
+
+def test_g3b_5_eval_train_parity_qwen3_moe():
+    _g3b_5(_build_qwen3_moe, "Qwen3-MoE", "cuda")
+
+
+def test_g3b_5_eval_train_parity_qwen3_next():
+    _g3b_5(_build_qwen3_next, "Qwen3-Next", "cuda")
+
+
 if __name__ == "__main__":
     import sys
 
     if not torch.cuda.is_available():
-        print("CUDA not available — Stage 3b GPU gates (G3b-1/2/4) DEFERRED.")
+        print("CUDA not available — Stage 3b GPU gates (G3b-1/2/4/5) DEFERRED.")
         sys.exit(0)
 
     for build, name in ((_build_qwen3_moe, "Qwen3-MoE"), (_build_qwen3_next, "Qwen3-Next")):
         _g3b_4(build, name, "cuda")
         _g3b_1(build, name, "cuda")
         _g3b_2(build, name, "cuda")
+        _g3b_5(build, name, "cuda")
     print("ALL PASS")
