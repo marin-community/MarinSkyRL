@@ -1,4 +1,5 @@
 from collections.abc import Collection
+import os
 from typing import Any, Dict, List
 
 import ray
@@ -110,12 +111,9 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str) -> Dict[str, Any]:
 def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
     """Forward managed inference settings into each vLLM engine actor.
 
-    This covers NCCL diagnostics and batch invariance. Child TP workers inherit
-    the actor runtime environment through placement-group child capture. Returns
-    ``None`` when no managed variables are set.
+    This covers NCCL diagnostics and batch invariance. Returns ``None`` when no
+    managed variables are set.
     """
-    import os
-
     passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
     if not env_vars:
