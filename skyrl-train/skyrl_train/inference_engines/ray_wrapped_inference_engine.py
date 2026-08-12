@@ -17,6 +17,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, managed_environment_names
+from skyrl_train.batch_invariant import BATCH_INVARIANT_ENV
 
 
 # ---------------------------------------------------------------------------
@@ -114,11 +115,15 @@ def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
     (byte-identical actor creation for every run that does not set them)."""
     import os
 
-    passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
+    passthrough = (
+        set(_NCCL_FR_ENV_PASSTHROUGH)
+        | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
+        | {BATCH_INVARIANT_ENV}
+    )
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
     if not env_vars:
         return None
-    logger.info(f"#232 FIX B: forwarding NCCL FR env to vLLM engine actors via runtime_env: {sorted(env_vars)}")
+    logger.info(f"Forwarding managed environment to vLLM engine actors via runtime_env: {sorted(env_vars)}")
     return {"env_vars": env_vars}
 
 

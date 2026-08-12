@@ -557,6 +557,14 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 def validate_cfg(cfg: DictConfig):
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    if cfg.trainer.algorithm.batch_invariant:
+        if cfg.generator.backend != "vllm":
+            raise ValueError("trainer.algorithm.batch_invariant=true requires generator.backend='vllm'")
+        if not cfg.generator.run_engines_locally:
+            raise ValueError(
+                "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
+                "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
+            )
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
@@ -1149,6 +1157,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # worker_process_setup_hook also re-exports it into os.environ at worker
     # boot in case import ordering races the runtime-env injection.
     env_vars["UV_USE_IO_URING"] = "0"
+
+    if cfg.trainer.algorithm.batch_invariant:
+        # The pinned vLLM reads this in every GPU worker. Trainer actors receive
+        # the same gate and explicitly initialize those kernels before building
+        # their models, so the two log-probability paths cannot be half-enabled.
+        env_vars["VLLM_BATCH_INVARIANT"] = "1"
 
     env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
     # Resolve the actual collective deadline last so the debug preset's heartbeat

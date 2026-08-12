@@ -57,6 +57,7 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasWindow,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
+from skyrl_train.batch_invariant import enable_trainer_batch_invariance
 from skyrl_train.utils.utils import (
     configure_ray_worker_logging,
     get_tcp_url,
@@ -328,6 +329,7 @@ class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        self.batch_invariant_ops = enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
