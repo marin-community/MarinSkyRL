@@ -1044,7 +1044,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._stale_groups_discarded_since_step += discarded_count
         self._groups_inspected_since_step += inspected_count
 
-    def _partition_completed_groups(
+    def _partition_and_retry_stale_groups(
         self,
         queues: _GenerationQueues,
         completed_groups: List[GeneratedOutputGroup],
@@ -1088,7 +1088,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 completed_groups = _drain_queue(queues.completed)
 
-                stale_groups, newly_fresh_groups = self._partition_completed_groups(queues, completed_groups)
+                stale_groups, newly_fresh_groups = self._partition_and_retry_stale_groups(queues, completed_groups)
                 fresh_groups.extend(newly_fresh_groups)
 
                 if not stale_groups and len(fresh_groups) >= self.mini_batch_size:
@@ -1108,11 +1108,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             if batch is not None:
                 break
-
-            record_rollout_buffer(
-                queues.completed.qsize(),
-                queues.completed.maxsize,
-            )
 
         self._publish_staleness_metrics()
         return batch

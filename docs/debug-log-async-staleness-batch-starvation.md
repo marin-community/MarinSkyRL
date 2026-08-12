@@ -79,6 +79,11 @@ removed. Batch assembly stays together because the condition lock must cover the
 fresh-overflow restoration as one atomic queue transition; capacity reconciliation then occurs immediately afterward.
 The fully async tutorial now documents replacement-and-wait rather than the obsolete accept-and-train policy. Missing
 trainer context also fails checkpoint persistence, and worker cancellation uses the manager's locked slot release.
+The tutorial's checkpoint section now covers completed groups and pending retries. The stale partition helper was renamed
+to expose its retry side effect, and post-drain buffer telemetry that could only report zero was removed. The completed
+buffer remains a bounded `asyncio.Queue`: producers use its capacity API and condition notifications together, and a
+deque conversion would replace a standard bounded primitive with hand-maintained capacity state without changing the
+atomic sweep requirement.
 
 ## Future work
 

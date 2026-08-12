@@ -278,11 +278,16 @@ its samples, so a late sample cannot hide earlier work from the staleness check.
 Checkpointing semantics
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-When saving a checkpoint, only trainer-consumed state is recorded. On resume, we set ``accepted := consumed`` (and do not restore those that were running or about-to-be-consumed in the buffer), which preserves the capacity invariant without reintroducing stale or partially generated work.
+Checkpoint artifacts record consumed dataset state, every completed group in the generation buffer, and every source
+row waiting for stale-group regeneration. Resume restores completed groups and pending retries before generation
+workers start. Partially generated groups are not checkpointed and are scheduled again through the restored dataset
+state. Buffer persistence fails the checkpoint operation if it cannot save a complete artifact.
 
 .. note::
 
-    ``AsyncStalenessManager`` is a deliberate design choice. One could instead over-generate and drop groups that are too stale at training time. We prefer proactive admission control to avoid wasted compute and simplify buffer management. With very small ``S``, the system may stall more often; increasing ``S`` trades off stricter on-policy-ness for higher throughput.
+    ``AsyncStalenessManager`` uses proactive admission control to limit wasted work, while the completed-buffer sweep
+    enforces the hard per-group cap. With very small ``S``, replacement may stall training more often; increasing ``S``
+    trades stricter on-policy behavior for higher throughput.
 
 .. note::
 
