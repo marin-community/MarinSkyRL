@@ -8,6 +8,7 @@ from cloud.iris.env_vars import (
     FR_DUMP_TEMP_FILE_ENV as FR_DUMP_TEMP_FILE_ENV,
     HF_HUB_OFFLINE_ENV as HF_HUB_OFFLINE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV as NCCL_DEBUG_INFO_TEMP_FILE_ENV,
+    VLLM_BATCH_INVARIANT_ENV as VLLM_BATCH_INVARIANT_ENV,
     DistributedDebugMode as DistributedDebugMode,
     EnvVarManager as EnvVarManager,
     EnvVarScope as EnvVarScope,

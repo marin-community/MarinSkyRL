@@ -4,19 +4,16 @@ import importlib
 import logging
 import os
 
+from skyrl_train.env_vars import VLLM_BATCH_INVARIANT_ENV
+
 
 logger = logging.getLogger(__name__)
 
-BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
+BATCH_INVARIANT_ENV = VLLM_BATCH_INVARIANT_ENV
 
 
 def enable_trainer_batch_invariance(enabled: bool) -> bool:
-    """Enable the pinned vLLM overrides in a trainer worker.
-
-    vLLM owns the kernel implementations used by the rollout workers. Reusing
-    that module here keeps both halves of the RL comparison on the same kernels.
-    Returns whether activation was requested and completed.
-    """
+    """Enable trainer CUDA overrides when configured and report activation."""
 
     if not enabled:
         return False
@@ -28,6 +25,8 @@ def enable_trainer_batch_invariance(enabled: bool) -> bool:
         )
 
     try:
+        # Use the same installed kernels as rollout workers so the two
+        # log-probability paths share reduction order.
         batch_invariant = importlib.import_module("vllm.model_executor.layers.batch_invariant")
     except ImportError as error:
         raise RuntimeError(

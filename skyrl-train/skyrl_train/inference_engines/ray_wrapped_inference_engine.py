@@ -17,7 +17,6 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, managed_environment_names
-from skyrl_train.batch_invariant import BATCH_INVARIANT_ENV
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +116,7 @@ def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
     """
     import os
 
-    passthrough = (
-        set(_NCCL_FR_ENV_PASSTHROUGH)
-        | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
-        | {BATCH_INVARIANT_ENV}
-    )
+    passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
     if not env_vars:
         return None

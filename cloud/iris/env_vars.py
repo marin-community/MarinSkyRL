@@ -53,6 +53,7 @@ NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 PYTHONPATH_ENV = "PYTHONPATH"
 VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
+VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
@@ -90,6 +91,12 @@ ENV_VAR_SPECS = (
         "ci.marin_nightly.grug",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.DRIVER}),
+    ),
+    EnvVarSpec(
+        VLLM_BATCH_INVARIANT_ENV,
+        "trainer.algorithm.batch_invariant",
+        EnvVarSource.CONFIG,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
     EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
     EnvVarSpec(
@@ -155,6 +162,8 @@ class EnvVarManager:
             values[LD_LIBRARY_PATH_ENV] = library_path
         if nvrtc_home := ambient.get(NVRTC_HOME_ENV):
             values[NVRTC_HOME_ENV] = nvrtc_home
+        if _config_value(config, "trainer.algorithm.batch_invariant", False):
+            values[VLLM_BATCH_INVARIANT_ENV] = "1"
         raw_mode = ambient.get(DEBUG_MODE_ENV, _config_value(config, "trainer.debug_mode", "off"))
         try:
             mode = DistributedDebugMode(str(raw_mode))

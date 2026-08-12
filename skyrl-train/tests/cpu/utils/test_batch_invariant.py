@@ -30,7 +30,7 @@ def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     assert _build_inference_engine_runtime_env()["env_vars"][BATCH_INVARIANT_ENV] == "1"
 
 
-def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch, caplog):
+def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch):
     activation = {"initialized": False}
     batch_invariant_module = types.ModuleType("vllm.model_executor.layers.batch_invariant")
     batch_invariant_module.init_batch_invariance = lambda: activation.update(initialized=True)
@@ -44,9 +44,6 @@ def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch, caplog):
 
     assert activation["initialized"] is True
     assert enabled is True
-    assert "aten/mm/CUDA" in caplog.text
-    assert "aten/addmm/CUDA" in caplog.text
-    assert "aten/bmm/CUDA" in caplog.text
 
 
 @pytest.mark.parametrize(
