@@ -9,18 +9,16 @@ from skyrl_train.env_vars import VLLM_BATCH_INVARIANT_ENV
 
 logger = logging.getLogger(__name__)
 
-BATCH_INVARIANT_ENV = VLLM_BATCH_INVARIANT_ENV
 
-
-def enable_trainer_batch_invariance(enabled: bool) -> bool:
-    """Enable trainer CUDA overrides when configured and report activation."""
+def enable_trainer_batch_invariance(enabled: bool) -> None:
+    """Enable trainer CUDA overrides when configured."""
 
     if not enabled:
-        return False
+        return
 
-    if os.environ.get(BATCH_INVARIANT_ENV) != "1":
+    if os.environ.get(VLLM_BATCH_INVARIANT_ENV) != "1":
         raise RuntimeError(
-            f"trainer.algorithm.batch_invariant=true, but {BATCH_INVARIANT_ENV}=1 "
+            f"trainer.algorithm.batch_invariant=true, but {VLLM_BATCH_INVARIANT_ENV}=1 "
             "was not propagated to the trainer worker"
         )
 
@@ -35,10 +33,13 @@ def enable_trainer_batch_invariance(enabled: bool) -> bool:
         ) from error
 
     batch_invariant.init_batch_invariance()
-    library = getattr(batch_invariant, "_batch_invariant_LIB", None)
-    registered_ops = sorted(getattr(library, "_op_impls", ()))
+    try:
+        registered_ops = sorted(batch_invariant._batch_invariant_LIB._op_impls)
+    except AttributeError as error:
+        raise RuntimeError(
+            "The pinned vLLM batch-invariant initializer completed without exposing registered CUDA overrides"
+        ) from error
     logger.info(
         "Batch-invariant trainer kernels enabled from the pinned vLLM runtime; registered CUDA overrides: %s",
         ", ".join(registered_ops),
     )
-    return True

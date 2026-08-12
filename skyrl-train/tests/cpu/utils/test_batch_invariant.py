@@ -4,19 +4,19 @@ import types
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.batch_invariant import BATCH_INVARIANT_ENV, enable_trainer_batch_invariance
+from skyrl_train.batch_invariant import enable_trainer_batch_invariance
+from skyrl_train.env_vars import VLLM_BATCH_INVARIANT_ENV
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import _build_inference_engine_runtime_env
 from skyrl_train.utils.utils import prepare_runtime_environment, validate_cfg
 from tests.cpu.util import example_dummy_config
 
 
 def test_batch_invariant_is_disabled_by_default(monkeypatch):
-    monkeypatch.delenv(BATCH_INVARIANT_ENV, raising=False)
+    monkeypatch.delenv(VLLM_BATCH_INVARIANT_ENV, raising=False)
     cfg = example_dummy_config()
 
     assert cfg.trainer.algorithm.batch_invariant is False
-    assert BATCH_INVARIANT_ENV not in prepare_runtime_environment(cfg)
-    assert enable_trainer_batch_invariance(False) is False
+    assert VLLM_BATCH_INVARIANT_ENV not in prepare_runtime_environment(cfg)
 
 
 def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
@@ -24,10 +24,10 @@ def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     cfg.trainer.algorithm.batch_invariant = True
 
     ray_environment = prepare_runtime_environment(cfg)
-    monkeypatch.setenv(BATCH_INVARIANT_ENV, ray_environment[BATCH_INVARIANT_ENV])
+    monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, ray_environment[VLLM_BATCH_INVARIANT_ENV])
 
-    assert ray_environment[BATCH_INVARIANT_ENV] == "1"
-    assert _build_inference_engine_runtime_env()["env_vars"][BATCH_INVARIANT_ENV] == "1"
+    assert ray_environment[VLLM_BATCH_INVARIANT_ENV] == "1"
+    assert _build_inference_engine_runtime_env()["env_vars"][VLLM_BATCH_INVARIANT_ENV] == "1"
 
 
 def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch):
@@ -38,12 +38,11 @@ def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch):
         _op_impls={"aten/mm/CUDA", "aten/addmm/CUDA", "aten/bmm/CUDA"}
     )
     monkeypatch.setitem(sys.modules, batch_invariant_module.__name__, batch_invariant_module)
-    monkeypatch.setenv(BATCH_INVARIANT_ENV, "1")
+    monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, "1")
 
-    enabled = enable_trainer_batch_invariance(True)
+    enable_trainer_batch_invariance(True)
 
     assert activation["initialized"] is True
-    assert enabled is True
 
 
 @pytest.mark.parametrize(
