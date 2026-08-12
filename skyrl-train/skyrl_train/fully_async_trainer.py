@@ -993,7 +993,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         async with queues.condition:
             while queues.completed.full():
                 await queues.condition.wait()
-            freshness = self._route_stale_group_to_retry(queues, group)
+            freshness = self._classify_and_route_group(queues, group)
             if freshness is _GroupFreshness.STALE:
                 return freshness
             queues.completed.put_nowait(group)
@@ -1045,7 +1045,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
 
-    def _route_stale_group_to_retry(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
+    def _classify_and_route_group(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
         if self.global_step - group.earliest_model_step > self.max_staleness_steps:
             queues.retries.put_nowait(group.source_prompts)
             return _GroupFreshness.STALE
@@ -1064,7 +1064,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         stale_groups = []
         fresh_groups = []
         for group in completed_groups:
-            if self._route_stale_group_to_retry(queues, group) is _GroupFreshness.STALE:
+            if self._classify_and_route_group(queues, group) is _GroupFreshness.STALE:
                 stale_groups.append(group)
             else:
                 fresh_groups.append(group)
@@ -1073,6 +1073,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _publish_discard_metrics(self) -> None:
         discarded = self._stale_groups_discarded_since_step
         inspected = self._groups_inspected_since_step
+        assert inspected > 0, "A fresh training batch requires at least one inspected completed group"
         self._stale_groups_discarded_since_step = 0
         self._groups_inspected_since_step = 0
         self.all_metrics.update(

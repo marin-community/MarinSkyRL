@@ -71,6 +71,8 @@ unavailable.
 
 The group timestamp is `earliest_model_step`; scheduling time is its fallback when sampled-token capture is unavailable.
 `minimum_captured_global_step` selects the oldest model version represented by any sample in the group.
+Group routing is named `_classify_and_route_group`, making its freshness result explicit. Discard metrics assert the
+invariant that returning a fresh batch must have inspected at least one completed group before calculating the rate.
 
 ## Future work
 
