@@ -24,7 +24,7 @@ from skyrl_train.generators.utils import (
     get_custom_chat_template,
     get_generation_prompt_ids,
     apply_overlong_filtering,
-    earliest_captured_global_step,
+    minimum_captured_global_step,
     get_rollout_metrics,
     normalize_token_ids,
 )
@@ -591,7 +591,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
         # The group is as old as its earliest sampled trajectory.
-        actual_global_step = earliest_captured_global_step(all_outputs)
+        actual_global_step = minimum_captured_global_step(all_outputs)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,

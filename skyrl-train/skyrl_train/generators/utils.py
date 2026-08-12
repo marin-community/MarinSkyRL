@@ -879,8 +879,8 @@ class HasCapturedGlobalStep(Protocol):
     captured_global_step: Optional[int]
 
 
-def earliest_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
-    """Return the earliest model step recorded across a rollout group."""
+def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Optional[int]:
+    """Return the minimum model-step value recorded across a rollout group."""
     return min(
         (output.captured_global_step for output in outputs if output.captured_global_step is not None),
         default=None,

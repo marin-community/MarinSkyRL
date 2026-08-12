@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import (
     apply_overlong_filtering,
-    earliest_captured_global_step,
+    minimum_captured_global_step,
     get_rollout_metrics,
     normalize_token_ids,
 )
@@ -339,7 +339,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
         # Each element in all_outputs is a List[AgentLoopOutput] (one per step in the trajectory).
-        actual_global_step = earliest_captured_global_step(
+        actual_global_step = minimum_captured_global_step(
             output for step_outputs in all_outputs for output in step_outputs
         )
 
