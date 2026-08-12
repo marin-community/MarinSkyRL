@@ -20,7 +20,7 @@ from skyrl_train.generators.trajectory_reward_shaping import (
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
-from skyrl_train.utils.constants import GLOBAL_STEP_PREFIX as _GLOBAL_STEP_PREFIX
+from skyrl_train.utils import constants
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -90,8 +90,8 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
 
 def extract_step_from_path(path: str) -> int:
     basename = os.path.basename(path)
-    if basename.startswith(_GLOBAL_STEP_PREFIX):
-        return int(basename.split(_GLOBAL_STEP_PREFIX)[1])
+    if basename.startswith(constants.GLOBAL_STEP_PREFIX):
+        return int(basename.split(constants.GLOBAL_STEP_PREFIX)[1])
     return -1
 
 
@@ -187,7 +187,7 @@ def validate_consistency_for_latest_checkpoint(
             # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
             if max_global_step_in_folder - ckpt_iteration > save_interval:
                 max_global_step_in_folder_path = os.path.join(
-                    root_ckpt_folder, f"{_GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
+                    root_ckpt_folder, f"{constants.GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
                 )
                 raise ValueError(
                     f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to {ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps {max_global_step_in_folder_path}. This is likely because checkpoint {max_global_step_in_folder_path} was created in a previous run while the latest run is at {checkpoint_path}. Please delete/move checkpoints from older runs and try again."

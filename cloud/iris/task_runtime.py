@@ -36,7 +36,7 @@ import tempfile
 import threading
 import time
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
-from skyrl_train.hf_model_io import validate_portable_hf_model_files
+from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,

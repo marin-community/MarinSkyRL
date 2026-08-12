@@ -19,7 +19,7 @@ from cloud.iris.artifacts import (
     fs_and_path,
     relative_object_key,
 )
-from skyrl_train.hf_model_io import validate_portable_hf_model_files
+from marinskyrl.hf_model import validate_portable_hf_model_files
 from skyrl_train.hf_export_schema import policy_export_path
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name

@@ -16,16 +16,6 @@ HF_WEIGHT_FILENAME = "model.safetensors"
 HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 
-def validate_portable_hf_model_files(names: set[str], source: str) -> None:
-    """Validate the minimum portable Hugging Face model export contract."""
-    if "config.json" not in names:
-        raise ValueError(f"Model export is missing config.json: {source}")
-    if not any(name.endswith((".safetensors", ".bin")) for name in names):
-        raise ValueError(f"Model export has no weight shards: {source}")
-    if not any(name.startswith("tokenizer") or name.endswith(".model") for name in names):
-        raise ValueError(f"Model export has no tokenizer files: {source}")
-
-
 def verify_hf_model_export(export_path: str) -> None:
     """Reject an HF export unless its safetensors weights are all present."""
     index_path = join_resource_path(export_path, HF_WEIGHT_INDEX_FILENAME)
@@ -90,15 +80,14 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
 def _remove_weight_index_if_present(index_path: str) -> None:
     if io.exists(index_path):
         io.remove(index_path)
+        logger.info(f"Removed HF weight index: {index_path}")
 
 
 @contextmanager
 def local_hf_model_dir(output_path: str):
     """Stage and publish an HF model with the weights before its index."""
     index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
-    if io.exists(index_path):
-        _remove_weight_index_if_present(index_path)
-        logger.info(f"Removed stale HF weight index before serialization: {index_path}")
+    _remove_weight_index_if_present(index_path)
 
     try:
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
