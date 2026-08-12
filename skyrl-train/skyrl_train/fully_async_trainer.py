@@ -1068,7 +1068,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 fresh_groups.append(group)
         return _FreshnessPartition(stale_groups=stale_groups, fresh_groups=fresh_groups)
 
-    def _publish_staleness_metrics(self) -> None:
+    def _publish_discard_metrics(self) -> None:
         discarded = self._stale_groups_discarded_since_step
         inspected = self._groups_inspected_since_step
         self._stale_groups_discarded_since_step = 0
@@ -1118,7 +1118,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if batch is not None:
                 break
 
-        self._publish_staleness_metrics()
+        self._publish_discard_metrics()
         return batch
 
     def convert_generation_group_mini_batch_to_training_input(

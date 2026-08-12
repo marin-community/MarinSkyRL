@@ -1170,7 +1170,7 @@ class BufferCheckpointCallback(TrainerCallback):
     error_behavior = "raise"
 
     def __init__(self) -> None:
-        self._queues = None
+        self._queues: Optional[GenerationQueuesProvider] = None
 
     def bind_queues(self, queues: GenerationQueuesProvider) -> None:
         """Select the current epoch's queues for checkpoint persistence."""

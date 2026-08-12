@@ -96,6 +96,11 @@ snapshot. Regression-test setup is shared through one factory so the two batch-p
 The stale/fresh split now returns a named partition, and its one-use staleness comparison is inlined. Epoch queues stay
 explicitly threaded through the trainer methods: this preserves epoch scope and avoids ambient mutable trainer state,
 while ensuring tasks, restore, checkpoint binding, and batch assembly share the same object.
+The callback's queue provider is now explicitly typed and discard-only metrics are named accordingly. The provider
+protocol remains necessary to keep callbacks independent from the concrete trainer module. The named freshness
+partition remains because positional same-type lists were a prior review finding. Batch assembly keeps queue mutation
+under the condition and reconciles the exact discarded count immediately outside it; separating those phases would
+require another state carrier without reducing the synchronization surface.
 
 ## Future work
 
