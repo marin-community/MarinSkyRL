@@ -20,12 +20,11 @@ from skyrl_train.generators.trajectory_reward_shaping import (
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
+from skyrl_train.utils.constants import GLOBAL_STEP_PREFIX
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 BasicType = Union[int, float, str, bool, type(None)]
-
-GLOBAL_STEP_PREFIX = "global_step_"
 
 
 class ResumeMode(Enum):

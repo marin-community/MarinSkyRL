@@ -17,10 +17,10 @@ from iris.client import JobFailedError
 from cloud.iris.artifacts import (
     CHECKPOINT_MARKER_FILENAME,
     fs_and_path,
-    policy_export_uri,
     relative_object_key,
     validate_hf_export,
 )
+from skyrl_train.hf_export_schema import policy_export_path
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
@@ -74,7 +74,7 @@ def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
     if not _path_exists(checkpoint_marker):
         raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {checkpoint_marker}")
     global_step = int(_read_text(checkpoint_marker).strip())
-    policy_uri = policy_export_uri(request.output.export_root, global_step)
+    policy_uri = policy_export_path(request.output.export_root, global_step)
     filesystem, policy_path = fs_and_path(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
     names = {relative_object_key(policy_path, path) for path in files}

@@ -13,9 +13,6 @@ from typing import Callable
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
-from skyrl_train.hf_export_schema import policy_export_path
-
-policy_export_uri = policy_export_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
