@@ -77,6 +77,7 @@ def test_policy_loss_reports_clip_decisions_and_pressure_by_ratio_side(loss_name
         "ppo_clip_ratio_high": pytest.approx(0.25),
         "ppo_clip_pressure_low": pytest.approx(0.25),
         "ppo_clip_pressure_high": pytest.approx(0.25),
+        "ppo_ratio_exact_unit_fraction": pytest.approx(0.0),
     }
 
 
