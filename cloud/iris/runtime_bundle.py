@@ -123,13 +123,18 @@ def _bundle_relative_path(value: str) -> Path:
     return path
 
 
+def read_manifest_paths(root: Path) -> tuple[str, ...]:
+    """Return the path strings listed in the bundle manifest (no validation)."""
+    manifest = root / BUNDLE_FILE_MANIFEST
+    return tuple(
+        value for line in manifest.read_text().splitlines() if (value := line.strip()) and not value.startswith("#")
+    )
+
+
 def _bundle_paths(source: LauncherSource) -> tuple[Path, ...]:
     manifest = source.root / BUNDLE_FILE_MANIFEST
     paths: list[Path] = []
-    for line in manifest.read_text().splitlines():
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
+    for value in read_manifest_paths(source.root):
         path = _bundle_relative_path(value)
         if path in paths:
             raise ValueError(f"Runtime bundle manifest contains a duplicate path: {value}")
