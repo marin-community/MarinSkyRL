@@ -128,8 +128,9 @@ def upload_path(
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
     filesystem = filesystem or _get_filesystem(cloud_path)
-    destination = filesystem._strip_protocol(cloud_path) if cloud_path.startswith("s3://") else cloud_path
-    if cloud_path.startswith("s3://"):
+    is_s3_path = cloud_path.startswith("s3://")
+    destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
+    if is_s3_path:
         call_with_s3_retry(filesystem, filesystem.put, local_path, destination, recursive=recursive)
     else:
         filesystem.put(local_path, destination, recursive=recursive)
@@ -242,7 +243,7 @@ def local_work_dir(output_path: str):
         with local_work_dir("s3://bucket/model") as work_dir:
             # Save files to work_dir
             model.save_pretrained(work_dir)
-            # Files are automatically uploaded to s3://bucket/model at context exit
+            # Files are uploaded to s3://bucket/model after a successful context exit
     """
     with local_output_dir(output_path, upload_directory) as work_dir:
         yield work_dir

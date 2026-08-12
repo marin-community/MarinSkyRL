@@ -1,5 +1,6 @@
 import os
 import random
+import tempfile
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
@@ -322,9 +323,7 @@ class MegatronStrategy(DistributedStrategy):
         dist.barrier()
 
         # All ranks call into bridge.
-        model_dir = (
-            hf_model_io.local_hf_model_dir(output_dir) if self.is_rank_0() else hf_model_io.temporary_hf_model_dir()
-        )
+        model_dir = hf_model_io.local_hf_model_dir(output_dir) if self.is_rank_0() else tempfile.TemporaryDirectory()
         with model_dir as work_dir:
             bridge.save_hf_weights(model.actor_module, work_dir)
             self.print(f"Successfully saved HF safetensors model to {output_dir}")

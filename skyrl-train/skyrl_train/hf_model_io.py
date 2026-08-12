@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,54 +57,43 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     other_files = [path for path in files if path not in weight_files and path not in index_files]
     filesystem = io._get_filesystem(cloud_path)
 
-    def publish_file(path: Path, shard_index: int | None = None) -> None:
+    def publish_file(path: Path) -> None:
         relative_path = path.relative_to(source_root).as_posix()
         destination_uri = join_resource_path(cloud_path, relative_path)
-        started = time.monotonic()
-        if shard_index is not None:
-            logger.info(
-                f"Publishing HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
-                f"({path.stat().st_size} bytes)"
-            )
         io.upload_path(str(path), destination_uri, recursive=False, filesystem=filesystem)
-        if shard_index is not None:
-            logger.info(
-                f"Published HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
-                f"({path.stat().st_size} bytes in {time.monotonic() - started:.1f}s)"
-            )
 
     for shard_index, path in enumerate(weight_files, start=1):
-        publish_file(path, shard_index)
+        relative_path = path.relative_to(source_root).as_posix()
+        size = path.stat().st_size
+        logger.info(f"Publishing HF weight shard {shard_index}/{len(weight_files)}: {relative_path} ({size} bytes)")
+        started = time.monotonic()
+        publish_file(path)
+        logger.info(
+            f"Published HF weight shard {shard_index}/{len(weight_files)}: {relative_path} "
+            f"({size} bytes in {time.monotonic() - started:.1f}s)"
+        )
     for path in [*other_files, *index_files]:
         publish_file(path)
 
     logger.info(f"Published HF model directory to {cloud_path}")
 
 
-def _remove_weight_index(index_path: str) -> bool:
-    if not io.exists(index_path):
-        return False
-    io.remove(index_path)
-    return True
+def _remove_weight_index_if_present(index_path: str) -> None:
+    if io.exists(index_path):
+        io.remove(index_path)
 
 
 @contextmanager
 def local_hf_model_dir(output_path: str):
     """Stage and publish an HF model with the weights before its index."""
     index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
-    if _remove_weight_index(index_path):
+    if io.exists(index_path):
+        _remove_weight_index_if_present(index_path)
         logger.info(f"Removed stale HF weight index before serialization: {index_path}")
 
     try:
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
     except BaseException:
-        _remove_weight_index(index_path)
+        _remove_weight_index_if_present(index_path)
         raise
-
-
-@contextmanager
-def temporary_hf_model_dir():
-    """Yield disposable rank-local storage for collective HF conversion work."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        yield temp_dir

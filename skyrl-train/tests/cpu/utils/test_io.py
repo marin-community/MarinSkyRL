@@ -10,7 +10,7 @@ import pytest
 from unittest.mock import patch, Mock
 import torch
 
-from skyrl_train.hf_model_io import local_hf_model_dir, temporary_hf_model_dir
+from skyrl_train.hf_model_io import local_hf_model_dir
 from skyrl_train.utils.io.io import (
     is_cloud_path,
     makedirs,
@@ -484,14 +484,6 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
             Path(work_dir, "model.safetensors.index.json").write_text('{"weight_map": {"x": "model.safetensors"}}')
 
     assert index_key not in filesystem.objects
-
-
-def test_temporary_hf_model_dir_is_disposable():
-    with temporary_hf_model_dir() as work_dir:
-        work_path = Path(work_dir)
-        Path(work_path, "rank-local-state").write_text("consumed collectives")
-
-    assert not work_path.exists()
 
 
 class TestUploadDownload:
