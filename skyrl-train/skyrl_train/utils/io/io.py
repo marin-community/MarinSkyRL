@@ -16,7 +16,6 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import fsspec
-from fsspec.spec import AbstractFileSystem
 from loguru import logger
 from marinskyrl.resource_locator import is_cloud_uri
 from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
@@ -123,11 +122,10 @@ def upload_path(
     cloud_path: str,
     *,
     recursive: bool,
-    filesystem: AbstractFileSystem | None = None,
 ) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
-    filesystem = filesystem or _get_filesystem(cloud_path)
+    filesystem = _get_filesystem(cloud_path)
     is_s3_path = cloud_path.startswith("s3://")
     destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
     if is_s3_path:
