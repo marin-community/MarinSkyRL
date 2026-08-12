@@ -12,6 +12,7 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
@@ -144,7 +145,7 @@ class CheckpointExporter:
             self._workers.initialize(self._plan.model_path)
             self._workers.load_model_checkpoint(self._plan.policy_checkpoint_path)
             self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
-            io.verify_hf_model_export(self._plan.policy_export_path)
+            hf_model_io.verify_hf_model_export(self._plan.policy_export_path)
             if self._publisher is not None:
                 self._publisher.publish(self._plan.policy_export_path, self._plan.step)
             return CheckpointExportResult(step=self._plan.step, export_path=self._plan.policy_export_path)

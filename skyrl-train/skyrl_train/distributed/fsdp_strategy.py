@@ -46,6 +46,8 @@ from transformers.trainer import get_scheduler
 
 from packaging import version
 
+from skyrl_train import hf_model_io
+
 
 _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
@@ -925,7 +927,7 @@ class FSDPStrategy(DistributedStrategy):
             # present, so a dense / non-grouped / non-MoE save stays BYTE-IDENTICAL.
             output_state_dict = self._maybe_remap_grouped_moe_state_dict(output_state_dict)
 
-            with io.local_hf_model_dir(output_dir) as work_dir:
+            with hf_model_io.local_hf_model_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
                 self.print(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)

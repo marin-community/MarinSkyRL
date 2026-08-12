@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import patch, Mock
 import torch
 
+from skyrl_train.hf_model_io import local_hf_model_dir
 from skyrl_train.utils.io.io import (
     is_cloud_path,
     makedirs,
@@ -18,7 +19,6 @@ from skyrl_train.utils.io.io import (
     upload_directory,
     download_directory,
     local_work_dir,
-    local_hf_model_dir,
     local_read_dir,
     list_dir,
 )

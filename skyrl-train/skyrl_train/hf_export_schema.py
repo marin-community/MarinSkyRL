@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
-from marinskyrl.resource_locator import validate_replayable_model_reference
+from marinskyrl.resource_locator import join_resource_path, validate_replayable_model_reference
 from skyrl_train.utils.constants import GLOBAL_STEP_PREFIX
 
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
@@ -13,7 +13,7 @@ DEFAULT_HF_HUB_REVISION = "main"
 
 
 def policy_export_path(export_root: str, global_step: int) -> str:
-    return f"{export_root.rstrip('/')}/{GLOBAL_STEP_PREFIX}{global_step}/{POLICY_CHECKPOINT_SUBDIRECTORY}"
+    return join_resource_path(export_root, f"{GLOBAL_STEP_PREFIX}{global_step}", POLICY_CHECKPOINT_SUBDIRECTORY)
 
 
 class HFUploadMode(StrEnum):

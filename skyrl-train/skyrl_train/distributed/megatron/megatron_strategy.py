@@ -39,6 +39,8 @@ from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from skyrl_train import hf_model_io
+
 
 # Optimizer checkpoint format and gather transport.
 #
@@ -320,7 +322,7 @@ class MegatronStrategy(DistributedStrategy):
         dist.barrier()
 
         # All ranks call into bridge.
-        with io.local_hf_model_dir(output_dir, publish=self.is_rank_0()) as work_dir:
+        with hf_model_io.local_hf_model_dir(output_dir, publish=self.is_rank_0()) as work_dir:
             bridge.save_hf_weights(model.actor_module, work_dir)
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 

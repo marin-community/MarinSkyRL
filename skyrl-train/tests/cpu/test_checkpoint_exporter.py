@@ -121,22 +121,18 @@ def test_checkpoint_exporter_rejects_a_mismatched_checkpoint_marker(tmp_path):
     assert workers.closed
 
 
-def test_checkpoint_exporter_rejects_a_missing_conversion_result(tmp_path):
-    workers = MissingExportWorkers()
+@pytest.mark.parametrize(
+    ("worker_type", "error"),
+    [
+        (MissingExportWorkers, "no safetensors weights"),
+        (MetadataOnlyExportWorkers, "missing 1 referenced safetensors shard"),
+    ],
+)
+def test_checkpoint_exporter_rejects_incomplete_conversion_result(tmp_path, worker_type, error):
+    workers = worker_type()
     publisher = FakePublisher()
 
-    with pytest.raises(RuntimeError, match="no safetensors weights"):
-        CheckpointExporter(_plan(tmp_path), workers, object(), publisher).run()
-
-    assert workers.closed
-    assert publisher.calls == []
-
-
-def test_checkpoint_exporter_rejects_an_index_with_missing_weight_shards(tmp_path):
-    workers = MetadataOnlyExportWorkers()
-    publisher = FakePublisher()
-
-    with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
+    with pytest.raises(RuntimeError, match=error):
         CheckpointExporter(_plan(tmp_path), workers, object(), publisher).run()
 
     assert workers.closed
