@@ -62,6 +62,8 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
     trainer.max_staleness_steps = 2
     trainer.mini_batch_size = 2
     trainer.all_metrics = {}
+    trainer._stale_groups_discarded_since_step = 0
+    trainer._groups_inspected_since_step = 0
     trainer._staleness_manager = _AsyncStalenessManager(
         max_concurrent_generation_groups=4,
         mini_batch_size=2,
@@ -98,6 +100,8 @@ async def test_batch_assembly_waits_for_fresh_replacement():
     trainer.max_staleness_steps = 2
     trainer.mini_batch_size = 1
     trainer.all_metrics = {}
+    trainer._stale_groups_discarded_since_step = 0
+    trainer._groups_inspected_since_step = 0
     trainer._staleness_manager = _AsyncStalenessManager(
         max_concurrent_generation_groups=1,
         mini_batch_size=1,

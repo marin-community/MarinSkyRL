@@ -73,6 +73,10 @@ Queue snapshots now return that named checkpoint-state record directly. The gene
 outcome-specific slot transitions because accepted, stale, cancelled, and failed attempts require different accounting.
 `HasCapturedGlobalStep` remains structural to keep the generator utility module from importing `AgentLoopOutput` back
 from `skyrl_gym_generator`, which already depends on the utility module.
+An unbound checkpoint callback now raises instead of silently omitting the buffer artifact. The staleness counters are
+initialized with the trainer, stale-acceptance documentation was corrected, and the obsolete rejection method was
+removed. Batch assembly stays together because the condition lock must cover the all-buffer sweep, retry enqueue, and
+fresh-overflow restoration as one atomic queue transition; capacity reconciliation then occurs immediately afterward.
 
 ## Future work
 

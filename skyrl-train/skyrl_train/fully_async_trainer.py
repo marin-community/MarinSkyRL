@@ -100,8 +100,8 @@ class _AsyncStalenessManager:
     staleness remains within the configured budget of `max_staleness_steps`.
 
     In pathological cases (e.g., very long-running trajectories), an individual group may take
-    more than `max_staleness_steps` of training steps of time to finish generation. For such rare
-    cases, we still accept the trajectory and log the staleness metrics with a warning.
+    more than `max_staleness_steps` of training steps to finish. Such attempts are discarded and
+    regenerated from the same source prompt before training proceeds.
 
     The key capacity formula is implemented in `_compute_capacity_unlocked`. For details and caveats,
     see https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager.
@@ -194,17 +194,6 @@ class _AsyncStalenessManager:
         """Release a reserved slot without accepting a completed group."""
         async with self._cond:
             self._stat.submitted -= 1
-            self._stat.running -= 1
-            self._cond.notify_all()
-
-    async def on_rollout_rejected(self) -> None:
-        """
-        Called when a generation is not accepted, or generation worker runs into error while generating a trajectory.
-
-        Currently, we do not call this method but instead raise errors. We might need to use this when we want to
-        filter out trajectories.
-        """
-        async with self._cond:
             self._stat.running -= 1
             self._cond.notify_all()
 
@@ -379,6 +368,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
         self._active_generator_tasks: List[asyncio.Task] = []
+        self._stale_groups_discarded_since_step = 0
+        self._groups_inspected_since_step = 0
 
     def _configure_training_schedule(self):
         """
@@ -1054,10 +1045,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return self.global_step - group.global_step_when_scheduled > self.max_staleness_steps
 
     def _record_group_inspections(self, discarded_count: int, inspected_count: int) -> None:
-        self._stale_groups_discarded_since_step = (
-            getattr(self, "_stale_groups_discarded_since_step", 0) + discarded_count
-        )
-        self._groups_inspected_since_step = getattr(self, "_groups_inspected_since_step", 0) + inspected_count
+        self._stale_groups_discarded_since_step += discarded_count
+        self._groups_inspected_since_step += inspected_count
 
     def _partition_completed_groups(
         self,
@@ -1076,8 +1065,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return stale_groups, fresh_groups
 
     def _publish_staleness_metrics(self) -> None:
-        discarded = getattr(self, "_stale_groups_discarded_since_step", 0)
-        inspected = getattr(self, "_groups_inspected_since_step", 0)
+        discarded = self._stale_groups_discarded_since_step
+        inspected = self._groups_inspected_since_step
         self._stale_groups_discarded_since_step = 0
         self._groups_inspected_since_step = 0
         self.all_metrics.update(

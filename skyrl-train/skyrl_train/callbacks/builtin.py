@@ -25,11 +25,14 @@ from typing import Any, Dict, List, Optional, Protocol, Type
 
 from loguru import logger
 from omegaconf import DictConfig
+import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.utils.io import io
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
@@ -1076,10 +1079,6 @@ class DataTrackingCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        import torch
-
-        from skyrl_train.utils.io import io
-
         trainer = kwargs.get("trainer")
         if trainer is None:
             logger.warning("DataTrackingCallback.on_save: no trainer in kwargs, skipping")
@@ -1123,10 +1122,7 @@ class DataTrackingCallback(TrainerCallback):
         Returns True if state was loaded, False if no artifact found.
         """
 
-        import torch
-
         from skyrl_train.utils.data_tracker import DataConsumptionState
-        from skyrl_train.utils.io import io
 
         # Try new format first
         artifact_path = os.path.join(ckpt_path, DataTrackingCallback.ARTIFACT_NAME)
@@ -1192,17 +1188,13 @@ class BufferCheckpointCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        import torch
-
-        from skyrl_train.utils.io import io
-
         trainer = kwargs.get("trainer")
         if trainer is None:
             logger.warning("BufferCheckpointCallback.on_save_async: no trainer in kwargs, skipping")
             return control
 
         if self._queues is None:
-            return control
+            raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
         # This method does not yield before snapshotting, so generation tasks cannot
         # interleave with the drain-and-restore operation.
         buffer_state = self._queues.snapshot()
@@ -1241,11 +1233,6 @@ class BufferCheckpointCallback(TrainerCallback):
     @staticmethod
     def load_buffer_state(ckpt_path: str) -> GenerationBufferState:
         """Load completed output groups and retry prompts from a checkpoint."""
-
-        import torch
-
-        from skyrl_train.generators.base import GeneratorOutput
-        from skyrl_train.utils.io import io
 
         artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
         if not io.exists(artifact_path):
