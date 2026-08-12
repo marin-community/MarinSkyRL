@@ -1,19 +1,13 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
-from marinskyrl.resource_locator import join_resource_path, validate_replayable_model_reference
-from skyrl_train.utils.constants import GLOBAL_STEP_PREFIX
+from marinskyrl.resource_locator import validate_replayable_model_reference
 
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 HF_EXPORT_REQUEST_SCHEMA_VERSION = 1
 TRAINER_STATE_FILENAME = "trainer_state.pt"
-POLICY_CHECKPOINT_SUBDIRECTORY = "policy"
 DEFAULT_HF_EXPORT_TIMEOUT = 7200
 DEFAULT_HF_HUB_REVISION = "main"
-
-
-def policy_export_path(export_root: str, global_step: int) -> str:
-    return join_resource_path(export_root, f"{GLOBAL_STEP_PREFIX}{global_step}", POLICY_CHECKPOINT_SUBDIRECTORY)
 
 
 class HFUploadMode(StrEnum):
