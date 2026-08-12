@@ -1,7 +1,7 @@
 """Shared state records for fully asynchronous rollout generation."""
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Protocol
 
 from skyrl_train.generators.base import GeneratorOutput
 
@@ -22,3 +22,9 @@ class GenerationBufferState:
 
     completed_groups: List[GeneratedOutputGroup]
     retry_prompts: List[List[dict]]
+
+
+class GenerationQueuesProvider(Protocol):
+    """Live generation queues that can provide checkpoint state."""
+
+    def snapshot(self) -> GenerationBufferState: ...

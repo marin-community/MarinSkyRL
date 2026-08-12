@@ -21,14 +21,14 @@ Supports two configuration styles:
 import asyncio
 import dataclasses
 import os
-from typing import Any, Dict, List, Optional, Protocol, Type
+from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
 from omegaconf import DictConfig
 import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
@@ -1159,10 +1159,6 @@ class DataTrackingCallback(TrainerCallback):
         return False
 
 
-class _GenerationQueuesProvider(Protocol):
-    def snapshot(self) -> GenerationBufferState: ...
-
-
 class BufferCheckpointCallback(TrainerCallback):
     """Persist async completed groups and retry prompts with each checkpoint.
 
@@ -1176,7 +1172,7 @@ class BufferCheckpointCallback(TrainerCallback):
     def __init__(self) -> None:
         self._queues = None
 
-    def bind_queues(self, queues: _GenerationQueuesProvider) -> None:
+    def bind_queues(self, queues: GenerationQueuesProvider) -> None:
         """Select the current epoch's queues for checkpoint persistence."""
         self._queues = queues
 

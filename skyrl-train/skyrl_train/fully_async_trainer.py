@@ -897,9 +897,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             while True:
                 slot_acquired = False
+                rand_prompts = await self._next_generation_prompts(queues)
                 await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
-                rand_prompts = await self._next_generation_prompts(queues)
                 assert len(rand_prompts) == 1
                 generator_input, uids = prepare_generator_input(
                     rand_prompts,
@@ -928,8 +928,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_generator_output.get("is_last_step"),
                 )
 
-                # Prefer the actual global_step captured at first vLLM inference (more accurate
-                # staleness) over the pessimistic capture at task pickup time.
+                # Prefer the earliest global step captured during inference over the fallback.
                 actual_step = cur_generator_output.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
                 completed_group = GeneratedOutputGroup(
@@ -965,7 +964,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self,
         queues: _GenerationQueues,
     ) -> List[dict]:
-        """Prefer retries; release generation capacity while waiting after dataset exhaustion."""
+        """Prefer retries and wait for one after the epoch's dataset rows are scheduled."""
         try:
             return queues.retries.get_nowait()
         except asyncio.QueueEmpty:
@@ -973,10 +972,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if prompts is not None:
                 return prompts
 
-        await self._staleness_manager.cancel_submission_slot()
-        prompts = await queues.retries.get()
-        await self._staleness_manager.acquire_submission_slot()
-        return prompts
+        return await queues.retries.get()
 
     async def _enqueue_if_fresh(
         self, queues: _GenerationQueues, group: GeneratedOutputGroup

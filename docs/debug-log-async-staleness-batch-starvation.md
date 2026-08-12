@@ -84,6 +84,9 @@ to expose its retry side effect, and post-drain buffer telemetry that could only
 buffer remains a bounded `asyncio.Queue`: producers use its capacity API and condition notifications together, and a
 deque conversion would replace a standard bounded primitive with hand-maintained capacity state without changing the
 atomic sweep requirement.
+Workers now select or wait for a prompt before acquiring a submission slot. A worker blocked on the retry queue therefore
+owns no slot, eliminating the cancellation double-decrement race. The shared queue-provider protocol moved beside the
+shared async state records, and tutorial counter definitions now account for discarded attempts.
 
 ## Future work
 
