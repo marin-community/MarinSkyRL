@@ -19,14 +19,13 @@ from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, managed_environment_names
 from skyrl_train.utils import (
-    bundles_per_node,
     get_all_env_variables,
     get_ray_pg_ready_with_timeout,
-    get_reordered_bundle_indices,
     ray_noset_visible_devices,
 )
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils.utils import colocated_engine_bundle_indices, use_per_engine_strict_pack_pg
+from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
+from skyrl_train.inference_engines.placement import colocated_engine_bundle_layout
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +450,8 @@ def create_ray_wrapped_inference_engines(
     for i in range(num_inference_engines):
         # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
         # has its own bundle index space 0..per_engine_gpu_count-1, so base_pg_index
-        # resets to 0. The mp PACK PG, the TP==PP==1 flat PACK PG, and the hybrid/sglang
-        # flat PG remain GLOBAL, so they keep the i*per_engine_gpu_count offset.
+        # resets to 0. The mp PACK PG and TP==PP==1 flat PACK PG remain global.
+        # Hybrid engines use the resolved node-ordered indices above.
         use_per_engine_pg = bool(per_engine_pgs)
         if use_per_engine_pg:
             engine_pg = per_engine_pgs[i]
@@ -728,34 +727,6 @@ def create_ray_wrapped_inference_engines(
         )
 
     return engines
-
-
-def colocated_engine_bundle_layout(
-    shared_pg, *, num_inference_engines: int, data_parallel_size: int, tensor_pipeline_size: int
-) -> list[list[int]]:
-    """Resolve node-atomic TP/PP bundle slices for a colocated engine gang.
-
-    Returns:
-        One bundle-index list per engine data-parallel rank, or an empty list
-        when ``shared_pg`` is ``None`` and the engines are disaggregated.
-    """
-
-    if shared_pg is None:
-        return []
-    reordered_bundle_indices = get_reordered_bundle_indices(shared_pg)
-    gpus_per_node = bundles_per_node(shared_pg)
-    return [
-        colocated_engine_bundle_indices(
-            reordered_bundle_indices=reordered_bundle_indices,
-            engine_index=engine_index,
-            data_parallel_rank=data_parallel_rank,
-            tensor_pipeline_size=tensor_pipeline_size,
-            data_parallel_size=data_parallel_size,
-            gpus_per_node=gpus_per_node,
-        )
-        for engine_index in range(num_inference_engines)
-        for data_parallel_rank in range(data_parallel_size)
-    ]
 
 
 def wait_for_inference_engine_startup(

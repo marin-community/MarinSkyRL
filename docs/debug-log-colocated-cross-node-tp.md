@@ -1,23 +1,25 @@
-# Debugging log for colocated cross-node TP
+# Colocated inference-engine placement
 
-Prevent colocated multi-GPU inference engines from spanning nodes and bound engine startup.
+Colocated multi-GPU inference engines use the policy placement group's one-GPU bundles. Each engine's tensor-
+and pipeline-parallel ranks must remain on one node because vLLM's cross-node FlashInfer symmetric-memory
+rendezvous cannot pass file descriptors between hosts.
 
-## Initial status
+## Layout
 
-The colocated placement group contains one `{GPU: 1}` bundle per rank under soft `PACK`. Inference engines take contiguous bundle indices without checking their assigned nodes, so one TP group can span nodes. Engine readiness waits have no timeout.
+Ray's `PACK` strategy does not guarantee that adjacent bundle indices are on the same node. After Ray assigns the
+placement group, MarinSkyRL resolves every bundle's node and GPU, sorts the indices by `(node_id, gpu_id)`, and
+slices that ordering into TP×PP groups. The TP×PP size must divide the number of GPUs assigned per node.
 
-## Hypothesis 1
+The one-GPU bundle shape is retained because colocated inference actors request fractional GPUs. Replacing it
+with whole-node bundles would allow several actors to share one physical GPU and lose the one-rank-per-GPU
+mapping.
 
-Sorting the existing one-GPU placement bundles by their resolved node and GPU assignments before slicing them into engines preserves per-GPU identity and makes every valid TP/PP slice node-local.
+## Startup failure
 
-## Changes to make
+Engine readiness and the initial sleep transition share `generator.engine_init_timeout_seconds`. A timeout kills
+the full engine actor gang and reports the pending actor indices. This prevents a live-but-hung vLLM rank from
+leaving the training job in `running` indefinitely.
 
-Add behavioral layout tests before changing placement construction and engine indexing. Add a bounded startup-wait regression using Ray as the external boundary.
-
-## Results
-
-The original tests failed at collection because neither the node-atomic layout API nor bounded startup wait existed. An initial whole-node-bundle design was rejected during self-review because Ray packs fractional GPU actors within a bundle and would lose rank-to-GPU identity. The final design retains one-GPU bundles and uses their resolved node/GPU ordering, matching the existing policy-worker path. Focused tests pass. Geometry validation rejects TP×PP sizes that cannot tile one node, and startup waits propagate actor errors as well as timeouts.
-
-## Future work
-
-- [ ] Change the pinned vLLM FlashInfer fallback so a workspace failure is agreed across every collective rank.
+The vLLM FlashInfer fallback still handles workspace failures per rank. Collective agreement on disabling the
+fusion remains dependency work; node-atomic placement prevents MarinSkyRL's supported colocated geometry from
+entering that cross-node failure path.

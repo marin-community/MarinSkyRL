@@ -5,7 +5,6 @@ import sys
 import logging
 import math
 import socket
-from collections import Counter
 
 import ray
 import torch
@@ -254,48 +253,6 @@ def use_per_engine_strict_pack_pg(
     if use_hybrid_engine or use_mp_backend:
         return False
     return (tensor_parallel_size * pipeline_parallel_size) > 1
-
-
-def validate_colocated_engine_geometry(*, tensor_pipeline_size: int, gpus_per_node: int) -> None:
-    """Reject colocated engine shapes that cannot tile one policy node."""
-
-    if tensor_pipeline_size > gpus_per_node:
-        raise ValueError(
-            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs cannot fit on one "
-            f"{gpus_per_node}-GPU policy node"
-        )
-    if gpus_per_node % tensor_pipeline_size != 0:
-        raise ValueError(
-            f"A colocated inference engine requiring {tensor_pipeline_size} GPUs does not divide a "
-            f"{gpus_per_node}-GPU policy node into node-atomic engine slices"
-        )
-
-
-def colocated_engine_bundle_indices(
-    *,
-    reordered_bundle_indices: list[int],
-    engine_index: int,
-    data_parallel_rank: int,
-    tensor_pipeline_size: int,
-    data_parallel_size: int,
-    gpus_per_node: int,
-) -> list[int]:
-    """Select a node-atomic TP/PP slice from node-ordered one-GPU bundles."""
-
-    validate_colocated_engine_geometry(tensor_pipeline_size=tensor_pipeline_size, gpus_per_node=gpus_per_node)
-    engines_per_node = gpus_per_node // tensor_pipeline_size
-    replica_index = engine_index * data_parallel_size + data_parallel_rank
-    node_index = replica_index // engines_per_node
-    replica_within_node = replica_index % engines_per_node
-    start = node_index * gpus_per_node + replica_within_node * tensor_pipeline_size
-    stop = start + tensor_pipeline_size
-    selected = reordered_bundle_indices[start:stop]
-    if len(selected) != tensor_pipeline_size:
-        raise ValueError(
-            f"Colocated engine replica {replica_index} requires bundle offsets [{start}, {stop}), "
-            f"but only {len(reordered_bundle_indices)} bundles are available"
-        )
-    return selected
 
 
 class Timer:
@@ -734,6 +691,8 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
         )
         gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+        from skyrl_train.inference_engines.placement import validate_colocated_engine_geometry
+
         try:
             validate_colocated_engine_geometry(tensor_pipeline_size=tp_pp_size, gpus_per_node=gpus_per_node)
         except ValueError as error:
@@ -1497,16 +1456,6 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
         bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
     ]  # sort by node_id, then gpu_id
     return pg_reordered_bundle_indices
-
-
-def bundles_per_node(pg: PlacementGroup) -> int:
-    """Return the uniform number of placement-group bundles assigned per node."""
-
-    bundle_to_node_ids = placement_group_table(pg)["bundles_to_node_id"]
-    node_counts = Counter(bundle_to_node_ids.values())
-    if not node_counts or len(set(node_counts.values())) != 1:
-        raise ValueError(f"Colocated placement bundles must be uniform across nodes; got {dict(node_counts)}")
-    return next(iter(node_counts.values()))
 
 
 # NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
