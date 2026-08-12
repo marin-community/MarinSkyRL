@@ -270,15 +270,10 @@ Per-sample staleness vs capacity bound
 
 The capacity inequality keeps generation from outpacing training by more than ``S`` steps in **aggregate**. It does **NOT** strictly guarantee that every trajectory group will be trained within ``S`` steps of when it was scheduled. In rare cases (e.g., very long rollouts), a trajectory group may complete after more than ``S`` steps have elapsed while the system as a whole still satisfies the capacity constraint. However, in **steady state**, staleness remains within the configured budget of ``max_staleness_steps``.
 
-Possible ways for handling such rare groups that violate the ``S`` bound:
-
-- **Current behavior**: Still accept the trajectory group for training, but log the staleness metrics with a warning.
-  
-  - Matches `PipelineRL's behavior <https://github.com/ServiceNow/PipelineRL/blob/67654d7905816f7526ab7ba6d064d996094879ce/pipelinerl/finetune_loop.py#L583-L588>`_ and `AReal's default behavior <https://github.com/inclusionAI/AReaL/blob/1e7cf19f6206acc65de83c96dac27666895e30e0/areal/core/workflow_executor.py#L569-L577>`_.
-- Drop the trajectory group using ``AsyncStalenessManager.on_rollout_rejected()`` **(not supported yet but should be hackable)**
-
-  - Matches AReal's behavior if the ``should_accept_fn`` is based on per-sample staleness.
-- Drop the trajectory group and resample. Would require logics to ``AsyncDataloader`` to requeue the data. **(not supported yet but should be hackable)**
+The trainer sweeps every completed group before assembling a batch. It discards each group older than ``S``, requeues
+that group's original dataset row, and waits for a regenerated replacement. Training starts only after the configured
+full mini-batch consists entirely of fresh groups. A group's age starts at the earliest model step captured by any of
+its samples, so a late sample cannot hide earlier work from the staleness check.
 
 Checkpointing semantics
 ^^^^^^^^^^^^^^^^^^^^^^^

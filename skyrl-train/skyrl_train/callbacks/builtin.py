@@ -31,7 +31,7 @@ from skyrl_train.config.callbacks import has_explicit_callbacks
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.json_serialization import to_jsonable
-from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
 from skyrl_train.utils.io import io
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
@@ -1122,8 +1122,6 @@ class DataTrackingCallback(TrainerCallback):
         Returns True if state was loaded, False if no artifact found.
         """
 
-        from skyrl_train.utils.data_tracker import DataConsumptionState
-
         # Try new format first
         artifact_path = os.path.join(ckpt_path, DataTrackingCallback.ARTIFACT_NAME)
         if io.exists(artifact_path):
@@ -1190,8 +1188,7 @@ class BufferCheckpointCallback(TrainerCallback):
     ) -> Optional[TrainerControl]:
         trainer = kwargs.get("trainer")
         if trainer is None:
-            logger.warning("BufferCheckpointCallback.on_save_async: no trainer in kwargs, skipping")
-            return control
+            raise RuntimeError("BufferCheckpointCallback requires trainer context during checkpoint save")
 
         if self._queues is None:
             raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")

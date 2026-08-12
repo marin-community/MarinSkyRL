@@ -178,11 +178,10 @@ def test_load_malformed_state_fails_instead_of_dropping_retries():
 
 @pytest.mark.asyncio
 async def test_no_trainer_in_kwargs():
-    """on_save_async gracefully returns control when no trainer is provided."""
+    """on_save_async fails closed when trainer context is missing."""
     cb = BufferCheckpointCallback()
-    ctrl = _FakeControl()
-    result = await cb.on_save_async(_FakeState(1), ctrl)
-    assert result is ctrl
+    with pytest.raises(RuntimeError, match="requires trainer context"):
+        await cb.on_save_async(_FakeState(1), _FakeControl())
 
 
 @pytest.mark.asyncio

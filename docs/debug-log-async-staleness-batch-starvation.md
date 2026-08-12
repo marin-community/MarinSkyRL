@@ -77,6 +77,8 @@ An unbound checkpoint callback now raises instead of silently omitting the buffe
 initialized with the trainer, stale-acceptance documentation was corrected, and the obsolete rejection method was
 removed. Batch assembly stays together because the condition lock must cover the all-buffer sweep, retry enqueue, and
 fresh-overflow restoration as one atomic queue transition; capacity reconciliation then occurs immediately afterward.
+The fully async tutorial now documents replacement-and-wait rather than the obsolete accept-and-train policy. Missing
+trainer context also fails checkpoint persistence, and worker cancellation uses the manager's locked slot release.
 
 ## Future work
 
