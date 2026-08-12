@@ -106,6 +106,9 @@ so an unconsumed source row cannot be silently dropped when queues are retired.
 The group timestamp is now named `earliest_model_step`, matching its primary inference-derived meaning; the schedule
 step remains only its fallback when a generator cannot report sampled-token steps.
 The submission counter documentation now describes capacity accounting rather than the obsolete failure-ratio metric.
+All rollout counters now consistently use groups, and the regression helper names its timestamp `earliest_model_step`.
+The queue-provider protocol remains a deliberate dependency boundary: moving the concrete queue into the state module
+would make that leaf own `asyncio.Condition` synchronization behavior rather than just shared state records.
 
 ## Future work
 

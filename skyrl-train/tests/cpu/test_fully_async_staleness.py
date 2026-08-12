@@ -11,7 +11,7 @@ from skyrl_train.fully_async_trainer import (
 from skyrl_train.generators.base import TrajectoryID
 
 
-def _generated_group(uid: str, scheduled_step: int) -> GeneratedOutputGroup:
+def _generated_group(uid: str, earliest_model_step: int) -> GeneratedOutputGroup:
     generator_output = {
         "prompt_token_ids": [[1], [1]],
         "response_ids": [[2], [3]],
@@ -30,7 +30,7 @@ def _generated_group(uid: str, scheduled_step: int) -> GeneratedOutputGroup:
     return GeneratedOutputGroup(
         generator_output=generator_output,
         uid=uid,
-        earliest_model_step=scheduled_step,
+        earliest_model_step=earliest_model_step,
         source_prompts=[{"uid": uid}],
     )
 
@@ -78,10 +78,10 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
 async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
     trainer, queues = _batch_assembly_state(mini_batch_size=2, accepted=4)
     for group in [
-        _generated_group("stale-in-batch", scheduled_step=7),
-        _generated_group("fresh-1", scheduled_step=10),
-        _generated_group("fresh-2", scheduled_step=9),
-        _generated_group("stale-beyond-batch", scheduled_step=6),
+        _generated_group("stale-in-batch", earliest_model_step=7),
+        _generated_group("fresh-1", earliest_model_step=10),
+        _generated_group("fresh-2", earliest_model_step=9),
+        _generated_group("stale-beyond-batch", earliest_model_step=6),
     ]:
         queues.completed.put_nowait(group)
 
@@ -101,7 +101,7 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
 @pytest.mark.asyncio
 async def test_batch_assembly_waits_for_fresh_replacement():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
-    queues.completed.put_nowait(_generated_group("retry-me", scheduled_step=7))
+    queues.completed.put_nowait(_generated_group("retry-me", earliest_model_step=7))
 
     pending_batch = asyncio.create_task(trainer._get_fresh_generation_group_mini_batch(queues))
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
@@ -109,7 +109,7 @@ async def test_batch_assembly_waits_for_fresh_replacement():
     assert queues.retries.get_nowait()[0]["uid"] == "retry-me"
 
     async with queues.condition:
-        queues.completed.put_nowait(_generated_group("retry-me", scheduled_step=10))
+        queues.completed.put_nowait(_generated_group("retry-me", earliest_model_step=10))
         queues.condition.notify_all()
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
