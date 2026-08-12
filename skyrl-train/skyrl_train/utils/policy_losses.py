@@ -36,6 +36,7 @@ class PolicyClipMetrics:
     ppo_clip_ratio_high: float = 0.0
     ppo_clip_pressure_low: float = 0.0
     ppo_clip_pressure_high: float = 0.0
+    ppo_ratio_exact_unit_fraction: float = 0.0
 
     def as_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -118,6 +119,7 @@ def clipping_metrics(
         ppo_clip_ratio_high=_masked_fraction(high_selected, loss_mask),
         ppo_clip_pressure_low=_masked_fraction(low_pressure, loss_mask),
         ppo_clip_pressure_high=_masked_fraction(high_pressure, loss_mask),
+        ppo_ratio_exact_unit_fraction=_masked_fraction(ratio == 1, loss_mask),
     ).as_dict()
 
 

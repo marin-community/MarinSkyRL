@@ -10,6 +10,7 @@ import os
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
+from loguru import logger
 from skyrl_train.utils.progress import tqdm
 from omegaconf import OmegaConf
 
@@ -329,6 +330,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
+        self._warned_exact_unit_policy_ratio = False
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -577,6 +579,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.stop_trace()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
+        if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
+            logger.warning(
+                "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
+                "token. PPO clip bounds cannot activate until the mini-batch contains a forward after an optimizer "
+                "update; clip-bound sweeps are inert with the current update geometry."
+            )
+            self._warned_exact_unit_policy_ratio = True
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}

@@ -19,7 +19,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
     compute_tis_diagnostics,
 )
-from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
+from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS, ppo_policy_loss
 from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
@@ -49,6 +49,10 @@ def _algorithm_cfg(use_tis: bool) -> OmegaConf:
                     "kl_loss_coef": 0.0,
                     "loss_reduction": "token_mean",
                     "think_token_weight": 1.0,
+                    "policy_loss_type": "regular",
+                    "eps_clip_low": 0.2,
+                    "eps_clip_high": 0.05,
+                    "max_seq_len": SEQ_LEN,
                 },
             },
             "generator": {"sampling_params": {"temperature": 1.0}},
@@ -361,6 +365,30 @@ def test_megatron_mini_batch_emits_accumulated_log_ratio_metrics(single_rank_gro
     assert metrics_list[-1]["log_ratio_abs_max"] == pytest.approx(0.3)
     assert metrics_list[-1]["n_tokens_dp_gt_10pct"] == 7.0
     assert metrics_list[-1]["log_ratio_diagnostics_failed"] == 0.0
+
+
+def test_megatron_mini_batch_reports_nonunit_policy_ratio(single_rank_group, monkeypatch):
+    metrics_list = _megatron_mini_batch_metrics(
+        use_tis=False,
+        rollout_lp=None,
+        monkeypatch=monkeypatch,
+        policy_loss_fn=ppo_policy_loss,
+        log_ratio_offsets=(0.05, 0.3),
+    )
+
+    assert metrics_list[0]["ppo_ratio_exact_unit_fraction"] == 0.0
+    assert metrics_list[1]["ppo_clip_pressure_high"] == pytest.approx(1.0)
+
+
+def test_megatron_mini_batch_reports_unit_policy_ratio(single_rank_group, monkeypatch):
+    metrics_list = _megatron_mini_batch_metrics(
+        use_tis=False,
+        rollout_lp=None,
+        monkeypatch=monkeypatch,
+        policy_loss_fn=ppo_policy_loss,
+    )
+
+    assert [metrics["ppo_ratio_exact_unit_fraction"] for metrics in metrics_list] == [1.0, 1.0]
 
 
 def test_log_ratio_monitor_marks_failed_diagnostics():
