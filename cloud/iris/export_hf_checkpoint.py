@@ -237,11 +237,6 @@ def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
         hf_model_io.verify_hf_model_export(export_path)
 
 
-def submit_detached_export(spec: ExportJobSpec, command: list[str]) -> None:
-    """Submit a detached export without inspecting its unfinished artifact."""
-    _run_export(spec, command)
-
-
 def submit_requested_export(spec: ExportJobSpec, command: list[str]) -> None:
     """Submit one export job, verify synchronous output, and persist request state."""
     request = spec.request.with_status(HFExportStatus.IN_PROGRESS, timeout=spec.timeout, increment_attempts=True)
@@ -278,7 +273,7 @@ def main() -> None:
     if args.dry_run:
         return
     if request is None:
-        submit_detached_export(spec, cmd)
+        _run_export(spec, cmd)
     else:
         submit_requested_export(spec, cmd)
 

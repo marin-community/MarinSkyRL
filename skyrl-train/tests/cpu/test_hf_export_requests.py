@@ -384,6 +384,6 @@ def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp
     verify = Mock()
     monkeypatch.setattr(export_hf_checkpoint.hf_model_io, "verify_hf_model_export", verify)
 
-    export_hf_checkpoint.submit_detached_export(spec, ["ignored"])
+    export_hf_checkpoint._run_export(spec, ["ignored"])
 
     verify.assert_not_called()
