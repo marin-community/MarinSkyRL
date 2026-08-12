@@ -1093,6 +1093,12 @@ def token_probability_shift_summary(metrics: dict[str, Any]) -> str:
 
 
 def terminal_signal(finelog: Path) -> str | None:
+    """Return the first actionable error line from the latest Iris attempt.
+
+    Explicit TRACE, DEBUG, INFO, and WARNING lines are non-terminal even when
+    their message embeds a traceback. When the retained finelog contains an Iris
+    setup boundary, failures before the latest rank-zero boundary are stale.
+    """
     if not finelog.exists():
         return None
     try:
