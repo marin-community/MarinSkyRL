@@ -20,7 +20,7 @@ from skyrl_train.generators.trajectory_reward_shaping import (
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
-from marinskyrl.hf_model import GLOBAL_STEP_PREFIX
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 

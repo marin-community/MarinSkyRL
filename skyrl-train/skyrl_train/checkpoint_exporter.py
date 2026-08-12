@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from transformers import PreTrainedTokenizerBase
 
-from marinskyrl.hf_model import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
+from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,

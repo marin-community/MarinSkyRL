@@ -23,7 +23,7 @@ from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
 
 
 class DirectoryPublisher(Protocol):
-    def __call__(self, local_path: str, output_path: str) -> None: ...
+    def __call__(self, local_path: str, cloud_path: str) -> None: ...
 
 
 def is_cloud_path(path: str) -> bool:

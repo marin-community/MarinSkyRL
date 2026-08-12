@@ -19,7 +19,8 @@ from cloud.iris.artifacts import (
     fs_and_path,
     relative_object_key,
 )
-from marinskyrl.hf_model import policy_export_path, validate_portable_hf_model_files
+from marinskyrl.checkpoint_paths import policy_export_path
+from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
 from cloud.iris.protocol import (
