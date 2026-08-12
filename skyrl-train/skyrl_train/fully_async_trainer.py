@@ -949,7 +949,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 completed_group = GeneratedOutputGroup(
                     generator_output=cur_generator_output,
                     uid=uids[0],
-                    global_step_when_scheduled=staleness_step,
+                    earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
                 )
                 freshness = await self._enqueue_if_fresh(queues, completed_group)
@@ -1047,7 +1047,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await asyncio.gather(*refs)
 
     def _route_stale_group_to_retry(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
-        if self.global_step - group.global_step_when_scheduled > self.max_staleness_steps:
+        if self.global_step - group.earliest_model_step > self.max_staleness_steps:
             queues.retries.put_nowait(group.source_prompts)
             return _GroupFreshness.STALE
         return _GroupFreshness.FRESH
@@ -1137,7 +1137,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
 
         for cur_generated_output_group in cur_generation_group_mini_batch:
-            cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
+            cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)

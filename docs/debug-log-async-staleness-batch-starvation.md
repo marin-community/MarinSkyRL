@@ -103,6 +103,8 @@ under the condition and reconciles the exact discarded count immediately outside
 require another state carrier without reducing the synchronization surface.
 The bounded-buffer comment now names the condition wait. Epoch validation asserts that no stale-group retries remain,
 so an unconsumed source row cannot be silently dropped when queues are retired.
+The group timestamp is now named `earliest_model_step`, matching its primary inference-derived meaning; the schedule
+step remains only its fallback when a generator cannot report sampled-token steps.
 
 ## Future work
 

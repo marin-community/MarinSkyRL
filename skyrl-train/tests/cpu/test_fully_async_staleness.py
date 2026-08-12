@@ -30,7 +30,7 @@ def _generated_group(uid: str, scheduled_step: int) -> GeneratedOutputGroup:
     return GeneratedOutputGroup(
         generator_output=generator_output,
         uid=uid,
-        global_step_when_scheduled=scheduled_step,
+        earliest_model_step=scheduled_step,
         source_prompts=[{"uid": uid}],
     )
 

@@ -12,7 +12,7 @@ class GeneratedOutputGroup:
 
     generator_output: GeneratorOutput
     uid: str
-    global_step_when_scheduled: int
+    earliest_model_step: int
     source_prompts: List[dict]
 
 

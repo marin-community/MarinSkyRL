@@ -1200,7 +1200,7 @@ class BufferCheckpointCallback(TrainerCallback):
             {
                 "generator_output": dict(item.generator_output),
                 "uid": item.uid,
-                "global_step_when_scheduled": item.global_step_when_scheduled,
+                "earliest_model_step": item.earliest_model_step,
                 "source_prompts": item.source_prompts,
             }
             for item in items
@@ -1241,7 +1241,7 @@ class BufferCheckpointCallback(TrainerCallback):
                 GeneratedOutputGroup(
                     generator_output=gen_out,
                     uid=entry["uid"],
-                    global_step_when_scheduled=entry["global_step_when_scheduled"],
+                    earliest_model_step=entry["earliest_model_step"],
                     source_prompts=entry["source_prompts"],
                 )
             )

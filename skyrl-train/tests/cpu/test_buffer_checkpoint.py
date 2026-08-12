@@ -38,7 +38,7 @@ def _make_item(uid: str, step: int) -> GeneratedOutputGroup:
     return GeneratedOutputGroup(
         generator_output=gen_out,
         uid=uid,
-        global_step_when_scheduled=step,
+        earliest_model_step=step,
         source_prompts=[{"uid": uid}],
     )
 
@@ -115,7 +115,7 @@ async def test_roundtrip_with_items():
         assert buffer_state.retry_prompts == []
         for i, item in enumerate(buffer_state.completed_groups):
             assert item.uid == f"uid_{i}"
-            assert item.global_step_when_scheduled == 5
+            assert item.earliest_model_step == 5
             assert item.source_prompts == [{"uid": f"uid_{i}"}]
             assert item.generator_output["prompt_token_ids"] == [[1, 2, 3]]
             assert item.generator_output["rewards"] == [1.0]
