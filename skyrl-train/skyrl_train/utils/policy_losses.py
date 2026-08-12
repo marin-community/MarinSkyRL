@@ -100,12 +100,13 @@ def clipping_metrics(
     eps_clip_high: float,
     pooled_clip_ratio: Optional[float] = None,
 ) -> dict[str, float]:
-    """Partition clipping decisions and pre-clamp pressure by ratio side.
+    """Report clipping decisions, pre-clamp pressure, and exact-unit ratios.
 
     The low/high clip ratios count selected tokens beyond the matching bound;
     pressure counts every token beyond each bound before objective selection.
     The pooled ratio counts all selected tokens unless the caller supplies its
-    own loss-specific ``pooled_clip_ratio``.
+    own loss-specific ``pooled_clip_ratio``. The exact-unit fraction distinguishes
+    a genuinely inert clipping geometry from missing diagnostics.
     """
     low_pressure = ratio < 1 - eps_clip_low
     high_pressure = ratio > 1 + eps_clip_high
