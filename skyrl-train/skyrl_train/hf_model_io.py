@@ -89,7 +89,7 @@ def _remove_weight_index_if_present(index_path: str) -> None:
 
 @contextmanager
 def local_hf_model_dir(output_path: str):
-    """Invalidate the prior index, then yield local staging that publishes on success."""
+    """Invalidate the prior index and yield a local directory for the completed export."""
     index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
     _remove_weight_index_if_present(index_path)
 

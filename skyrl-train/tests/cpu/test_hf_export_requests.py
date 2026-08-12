@@ -294,17 +294,9 @@ def test_manual_export_requires_explicit_checkpoint_geometry():
     [(0, HFExportStatus.COMPLETE), (17, HFExportStatus.PENDING)],
 )
 def test_export_request_records_lifecycle_result(tmp_path, monkeypatch, exit_code, expected_status):
-    checkpoint = tmp_path / "checkpoints" / "global_step_10"
+    request, _ = _export_job_spec(tmp_path, no_wait=False)
+    checkpoint = Path(request.checkpoint_path)
     checkpoint.mkdir(parents=True)
-    request = HFExportRequest(
-        step=10,
-        checkpoint_base_path=str(tmp_path / "checkpoints"),
-        checkpoint_path=str(checkpoint),
-        export_path=str(tmp_path / "exports"),
-        model_path="org/model",
-        num_nodes=2,
-        gpus_per_node=4,
-    )
     write_hf_export_request(request)
     if exit_code == 0:
         export = Path(request.export_path) / "global_step_10" / "policy"
