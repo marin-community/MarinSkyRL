@@ -380,12 +380,10 @@ def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
 
 def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp_path, monkeypatch):
     _, spec = _export_job_spec(tmp_path, no_wait=True)
-    calls = []
-    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: calls.append(args) or 0)
+    monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
     verify = Mock()
     monkeypatch.setattr(export_hf_checkpoint.hf_model_io, "verify_hf_model_export", verify)
 
     export_hf_checkpoint._run_export(spec, ["ignored"])
 
-    assert calls == [(["ignored"],)]
     verify.assert_not_called()

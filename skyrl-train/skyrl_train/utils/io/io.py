@@ -226,24 +226,7 @@ def local_output_dir(
 
 @contextmanager
 def local_work_dir(output_path: str):
-    """
-    Context manager that provides a local working directory.
-
-    For local paths, returns the path directly.
-    For cloud paths, creates a temporary directory and uploads content after successful work.
-
-    Args:
-        output_path: The final destination path (local or cloud)
-
-    Yields:
-        str: Local directory path to work with
-
-    Example:
-        with local_work_dir("s3://bucket/model") as work_dir:
-            # Save files to work_dir
-            model.save_pretrained(work_dir)
-            # Files are uploaded to s3://bucket/model after a successful context exit
-    """
+    """Yield direct local output or cloud staging that uploads on success."""
     with local_output_dir(output_path, upload_directory) as work_dir:
         yield work_dir
 

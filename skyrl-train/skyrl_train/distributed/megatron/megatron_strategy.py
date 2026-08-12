@@ -322,7 +322,7 @@ class MegatronStrategy(DistributedStrategy):
             io.makedirs(output_dir, exist_ok=True)
         dist.barrier()
 
-        # All ranks call into bridge.
+        # Every rank exhausts Bridge's collective conversion; only cloud non-writers discard their local files.
         rank_writes_output = self.is_rank_0() or not io.is_cloud_path(output_dir)
         model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
         with model_dir as work_dir:
