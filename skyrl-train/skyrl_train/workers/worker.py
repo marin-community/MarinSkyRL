@@ -329,7 +329,7 @@ class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
-        self.batch_invariant_ops = enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
+        enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""

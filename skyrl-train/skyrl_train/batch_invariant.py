@@ -1,5 +1,6 @@
 """Shared activation for vLLM's batch-invariant CUDA kernels."""
 
+import importlib
 import logging
 import os
 
@@ -7,30 +8,18 @@ import os
 logger = logging.getLogger(__name__)
 
 BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
-_COMMON_OVERRIDDEN_OPS = (
-    "aten::_log_softmax",
-    "aten::_softmax",
-    "aten::bmm",
-    "aten::mean.dim",
-    "aten::softmax",
-)
-_AMPERE_OVERRIDDEN_OPS = (
-    "aten::addmm",
-    "aten::linear",
-    "aten::matmul",
-    "aten::mm",
-)
 
 
-def enable_trainer_batch_invariance(enabled: bool) -> tuple[str, ...]:
+def enable_trainer_batch_invariance(enabled: bool) -> bool:
     """Enable the pinned vLLM overrides in a trainer worker.
 
     vLLM owns the kernel implementations used by the rollout workers. Reusing
     that module here keeps both halves of the RL comparison on the same kernels.
+    Returns whether activation was requested and completed.
     """
 
     if not enabled:
-        return ()
+        return False
 
     if os.environ.get(BATCH_INVARIANT_ENV) != "1":
         raise RuntimeError(
@@ -39,21 +28,18 @@ def enable_trainer_batch_invariance(enabled: bool) -> tuple[str, ...]:
         )
 
     try:
-        from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-        from vllm.platforms import current_platform
+        batch_invariant = importlib.import_module("vllm.model_executor.layers.batch_invariant")
     except ImportError as error:
         raise RuntimeError(
             "trainer.algorithm.batch_invariant=true requires the pinned Marin vLLM runtime; "
             "launch training with the vllm extra"
         ) from error
 
-    init_batch_invariance()
-    overridden_ops = _COMMON_OVERRIDDEN_OPS
-    if current_platform.is_device_capability_family(80):
-        overridden_ops += _AMPERE_OVERRIDDEN_OPS
-
+    batch_invariant.init_batch_invariance()
+    library = getattr(batch_invariant, "_batch_invariant_LIB", None)
+    registered_ops = sorted(getattr(library, "_op_impls", ()))
     logger.info(
-        "Batch-invariant trainer kernels enabled from pinned vLLM; overridden CUDA ops: %s",
-        ", ".join(overridden_ops),
+        "Batch-invariant trainer kernels enabled from the pinned vLLM runtime; registered CUDA overrides: %s",
+        ", ".join(registered_ops),
     )
-    return overridden_ops
+    return True

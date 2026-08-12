@@ -16,7 +16,7 @@ def test_batch_invariant_is_disabled_by_default(monkeypatch):
 
     assert cfg.trainer.algorithm.batch_invariant is False
     assert BATCH_INVARIANT_ENV not in prepare_runtime_environment(cfg)
-    assert enable_trainer_batch_invariance(False) == ()
+    assert enable_trainer_batch_invariance(False) is False
 
 
 def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
@@ -30,22 +30,23 @@ def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     assert _build_inference_engine_runtime_env()["env_vars"][BATCH_INVARIANT_ENV] == "1"
 
 
-def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch):
+def test_trainer_enables_the_pinned_vllm_kernels(monkeypatch, caplog):
     activation = {"initialized": False}
     batch_invariant_module = types.ModuleType("vllm.model_executor.layers.batch_invariant")
     batch_invariant_module.init_batch_invariance = lambda: activation.update(initialized=True)
-    platforms_module = types.ModuleType("vllm.platforms")
-    platforms_module.current_platform = types.SimpleNamespace(
-        is_device_capability_family=lambda capability: capability == 80
+    batch_invariant_module._batch_invariant_LIB = types.SimpleNamespace(
+        _op_impls={"aten/mm/CUDA", "aten/addmm/CUDA", "aten/bmm/CUDA"}
     )
     monkeypatch.setitem(sys.modules, batch_invariant_module.__name__, batch_invariant_module)
-    monkeypatch.setitem(sys.modules, platforms_module.__name__, platforms_module)
     monkeypatch.setenv(BATCH_INVARIANT_ENV, "1")
 
-    enabled_ops = enable_trainer_batch_invariance(True)
+    enabled = enable_trainer_batch_invariance(True)
 
     assert activation["initialized"] is True
-    assert set(enabled_ops) >= {"aten::mm", "aten::addmm", "aten::bmm"}
+    assert enabled is True
+    assert "aten/mm/CUDA" in caplog.text
+    assert "aten/addmm/CUDA" in caplog.text
+    assert "aten/bmm/CUDA" in caplog.text
 
 
 @pytest.mark.parametrize(

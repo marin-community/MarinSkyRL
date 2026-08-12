@@ -109,10 +109,12 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str) -> Dict[str, Any]:
 
 
 def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
-    """Forward NCCL flight-recorder/watchdog vars (#232 FIX B) from the launch
-    process env into the vLLM engine actor's Ray runtime_env, so they reach the
-    actual collective-running worker process. Returns None when none are set
-    (byte-identical actor creation for every run that does not set them)."""
+    """Forward managed inference settings into each vLLM engine actor.
+
+    This covers NCCL diagnostics and batch invariance. Child TP workers inherit
+    the actor runtime environment through placement-group child capture. Returns
+    ``None`` when no managed variables are set.
+    """
     import os
 
     passthrough = (

@@ -1159,10 +1159,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     env_vars["UV_USE_IO_URING"] = "0"
 
     if cfg.trainer.algorithm.batch_invariant:
+        from skyrl_train.batch_invariant import BATCH_INVARIANT_ENV
+
         # The pinned vLLM reads this in every GPU worker. Trainer actors receive
         # the same gate and explicitly initialize those kernels before building
         # their models, so the two log-probability paths cannot be half-enabled.
-        env_vars["VLLM_BATCH_INVARIANT"] = "1"
+        env_vars[BATCH_INVARIANT_ENV] = "1"
 
     env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
     # Resolve the actual collective deadline last so the debug preset's heartbeat
