@@ -109,6 +109,9 @@ The submission counter documentation now describes capacity accounting rather th
 All rollout counters now consistently use groups, and the regression helper names its timestamp `earliest_model_step`.
 The queue-provider protocol remains a deliberate dependency boundary: moving the concrete queue into the state module
 would make that leaf own `asyncio.Condition` synchronization behavior rather than just shared state records.
+Discard/inspection accumulation is named `_record_discard_scan`. The bounded `asyncio.Queue` remains intentional:
+producer capacity uses its standard `full`, `maxsize`, `qsize`, and nonblocking mutation APIs, while the shared condition
+coordinates the atomic all-buffer sweep; a deque would require duplicating that bounded-queue behavior manually.
 
 ## Future work
 

@@ -955,7 +955,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if freshness is _GroupFreshness.STALE:
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
-                    self._record_group_inspections(discarded_count=1, inspected_count=1)
+                    self._record_discard_scan(discarded_count=1, inspected_count=1)
                     continue
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
@@ -1051,7 +1051,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return _GroupFreshness.STALE
         return _GroupFreshness.FRESH
 
-    def _record_group_inspections(self, discarded_count: int, inspected_count: int) -> None:
+    def _record_discard_scan(self, discarded_count: int, inspected_count: int) -> None:
         self._stale_groups_discarded_since_step += discarded_count
         self._groups_inspected_since_step += inspected_count
 
@@ -1111,11 +1111,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 queues.condition.notify_all()
 
             if stale_groups:
-                self._record_group_inspections(len(stale_groups), inspected_count=len(completed_groups))
+                self._record_discard_scan(len(stale_groups), inspected_count=len(completed_groups))
                 await self._staleness_manager.on_rollouts_discarded(len(stale_groups))
                 continue
 
-            self._record_group_inspections(0, inspected_count=len(completed_groups))
+            self._record_discard_scan(0, inspected_count=len(completed_groups))
 
             if batch is not None:
                 break
