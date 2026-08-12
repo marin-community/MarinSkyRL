@@ -928,7 +928,6 @@ class FSDPStrategy(DistributedStrategy):
             output_state_dict = self._maybe_remap_grouped_moe_state_dict(output_state_dict)
 
             with hf_model_io.local_hf_model_dir(output_dir) as work_dir:
-                # Save the model in HuggingFace format using safetensors
                 self.print(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
                 self.print("[rank-0]: Finished serializing HF safetensors")

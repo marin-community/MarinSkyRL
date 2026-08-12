@@ -12,13 +12,18 @@ Uses fsspec for cloud storage abstraction.
 import os
 import tempfile
 from contextlib import contextmanager
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Protocol
 
 import fsspec
 from loguru import logger
 from marinskyrl.resource_locator import is_cloud_uri
 from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry
+
+
+class DirectoryPublisher(Protocol):
+    def __call__(self, local_path: str, output_path: str) -> None: ...
 
 
 def is_cloud_path(path: str) -> bool:
@@ -206,7 +211,7 @@ def local_read_files(input_paths: Sequence[str]):
 @contextmanager
 def local_output_dir(
     output_path: str,
-    publisher: Callable[[str, str], None],
+    publisher: DirectoryPublisher,
 ):
     """Yield local staging and publish cloud output after successful work."""
     if is_cloud_path(output_path):
