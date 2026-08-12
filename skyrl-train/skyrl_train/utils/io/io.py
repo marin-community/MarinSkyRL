@@ -213,7 +213,7 @@ def local_output_dir(
     output_path: str,
     publisher: DirectoryPublisher,
 ):
-    """Yield local staging and publish cloud output after successful work."""
+    """Yield ``output_path`` locally, or temporary staging that publishes cloud output on success."""
     if is_cloud_path(output_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             yield temp_dir

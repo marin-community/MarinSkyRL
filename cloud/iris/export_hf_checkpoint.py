@@ -237,13 +237,14 @@ def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
         hf_model_io.verify_hf_model_export(export_path)
 
 
-def submit_export(spec: ExportJobSpec, request: HFExportRequest | None, command: list[str]) -> None:
-    """Submit one export job, verify synchronous output, and persist request state."""
-    if request is None:
-        _run_export(spec, command)
-        return
+def submit_detached_export(spec: ExportJobSpec, command: list[str]) -> None:
+    """Submit a detached export without inspecting its unfinished artifact."""
+    _run_export(spec, command)
 
-    request = request.with_status(HFExportStatus.IN_PROGRESS, timeout=spec.timeout, increment_attempts=True)
+
+def submit_requested_export(spec: ExportJobSpec, command: list[str]) -> None:
+    """Submit one export job, verify synchronous output, and persist request state."""
+    request = spec.request.with_status(HFExportStatus.IN_PROGRESS, timeout=spec.timeout, increment_attempts=True)
     write_hf_export_request(request)
     try:
         _run_export(spec, command)
@@ -276,7 +277,10 @@ def main() -> None:
     print("[export-hf]", " ".join(cmd))
     if args.dry_run:
         return
-    submit_export(spec, request, cmd)
+    if request is None:
+        submit_detached_export(spec, cmd)
+    else:
+        submit_requested_export(spec, cmd)
 
 
 if __name__ == "__main__":

@@ -31,8 +31,12 @@ def verify_hf_model_export(export_path: str) -> None:
     except (OSError, ValueError) as error:
         raise RuntimeError(f"HF export has an unreadable safetensors index at {index_path}: {error}") from error
 
-    weight_map = index.get("weight_map") if isinstance(index, dict) else None
-    if not isinstance(weight_map, dict) or not weight_map:
+    if not isinstance(index, dict):
+        raise RuntimeError(f"HF export safetensors index must be a JSON object at {index_path}")
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict):
+        raise RuntimeError(f"HF export safetensors weight_map must be a JSON object at {index_path}")
+    if not weight_map:
         raise RuntimeError(f"HF export has an empty safetensors weight map at {index_path}")
 
     shard_values = list(weight_map.values())

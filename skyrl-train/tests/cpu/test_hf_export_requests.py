@@ -371,7 +371,7 @@ def test_export_request_rejects_metadata_only_success(tmp_path, monkeypatch):
     monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
 
     with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
-        export_hf_checkpoint.submit_export(spec, request, ["ignored"])
+        export_hf_checkpoint.submit_requested_export(spec, ["ignored"])
 
     updated = read_hf_export_request(str(checkpoint))
     assert updated is not None
@@ -384,6 +384,6 @@ def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp
     verify = Mock()
     monkeypatch.setattr(export_hf_checkpoint.hf_model_io, "verify_hf_model_export", verify)
 
-    export_hf_checkpoint.submit_export(spec, None, ["ignored"])
+    export_hf_checkpoint.submit_detached_export(spec, ["ignored"])
 
     verify.assert_not_called()
