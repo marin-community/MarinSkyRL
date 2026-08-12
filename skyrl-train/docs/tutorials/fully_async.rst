@@ -197,8 +197,11 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 3. Generation Output Group Buffer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The generation output group buffer is simply a ``asyncio.Queue`` that stores the generated groups of output.
-It is enqueued by the generation workers, and dequeued by the training worker.
+The generation state has a bounded completed-group ``asyncio.Queue``, an unbounded source-row retry queue, and a shared
+condition. Generation workers re-check freshness after any completed-buffer backpressure. Fresh groups enter the
+completed queue; stale groups place their original row in the retry queue. Before each step, the training worker drains
+and checks the entire completed queue atomically, restores fresh overflow, and wakes blocked producers. Checkpoints
+snapshot both queues.
 
 4. Async Dataloader
 ~~~~~~~~~~~~~~~~~~~

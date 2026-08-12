@@ -35,6 +35,25 @@ def _generated_group(uid: str, scheduled_step: int) -> GeneratedOutputGroup:
     )
 
 
+def _batch_assembly_state(mini_batch_size: int, accepted: int):
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.global_step = 10
+    trainer.max_staleness_steps = 2
+    trainer.mini_batch_size = mini_batch_size
+    trainer.all_metrics = {}
+    trainer._stale_groups_discarded_since_step = 0
+    trainer._groups_inspected_since_step = 0
+    trainer._staleness_manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=accepted,
+        mini_batch_size=mini_batch_size,
+        max_staleness_steps=2,
+    )
+    trainer._staleness_manager._stat.submitted = accepted
+    trainer._staleness_manager._stat.accepted = accepted
+    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
+    return trainer, queues
+
+
 @pytest.mark.asyncio
 async def test_staleness_manager_blocks_work_beyond_capacity_until_training_advances():
     manager = _AsyncStalenessManager(
@@ -57,21 +76,7 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
 
 @pytest.mark.asyncio
 async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.global_step = 10
-    trainer.max_staleness_steps = 2
-    trainer.mini_batch_size = 2
-    trainer.all_metrics = {}
-    trainer._stale_groups_discarded_since_step = 0
-    trainer._groups_inspected_since_step = 0
-    trainer._staleness_manager = _AsyncStalenessManager(
-        max_concurrent_generation_groups=4,
-        mini_batch_size=2,
-        max_staleness_steps=2,
-    )
-    trainer._staleness_manager._stat.submitted = 4
-    trainer._staleness_manager._stat.accepted = 4
-    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
+    trainer, queues = _batch_assembly_state(mini_batch_size=2, accepted=4)
     for group in [
         _generated_group("stale-in-batch", scheduled_step=7),
         _generated_group("fresh-1", scheduled_step=10),
@@ -95,21 +100,7 @@ async def test_batch_assembly_retries_stale_groups_from_entire_buffer():
 
 @pytest.mark.asyncio
 async def test_batch_assembly_waits_for_fresh_replacement():
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.global_step = 10
-    trainer.max_staleness_steps = 2
-    trainer.mini_batch_size = 1
-    trainer.all_metrics = {}
-    trainer._stale_groups_discarded_since_step = 0
-    trainer._groups_inspected_since_step = 0
-    trainer._staleness_manager = _AsyncStalenessManager(
-        max_concurrent_generation_groups=1,
-        mini_batch_size=1,
-        max_staleness_steps=2,
-    )
-    trainer._staleness_manager._stat.submitted = 1
-    trainer._staleness_manager._stat.accepted = 1
-    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     queues.completed.put_nowait(_generated_group("retry-me", scheduled_step=7))
 
     pending_batch = asyncio.create_task(trainer._get_fresh_generation_group_mini_batch(queues))

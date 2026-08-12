@@ -91,6 +91,8 @@ All older tutorial descriptions now match the sweep, retry, and wait policy. Pro
 stale-routing helper with an explicit freshness outcome, preventing their retry behavior from drifting.
 The worker tutorial now states that completion is rechecked and routed, and a comment that only restated the
 earliest-step helper call was removed.
+The buffer tutorial now describes both queues, the shared condition, the atomic sweep, producer re-check, and checkpoint
+snapshot. Regression-test setup is shared through one factory so the two batch-policy tests cannot drift.
 
 ## Future work
 
