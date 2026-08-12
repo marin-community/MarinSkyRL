@@ -1,4 +1,4 @@
-"""Artifact storage, materialization, and model validation."""
+"""Artifact storage and materialization."""
 
 from __future__ import annotations
 
