@@ -338,7 +338,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
-        # Use the earliest model step captured by any sample in the group.
         # Each element in all_outputs is a List[AgentLoopOutput] (one per step in the trajectory).
         actual_global_step = earliest_captured_global_step(
             output for step_outputs in all_outputs for output in step_outputs

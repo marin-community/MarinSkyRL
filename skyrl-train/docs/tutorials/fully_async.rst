@@ -172,7 +172,8 @@ Each generation worker runs the following steps in a while loop:
 1. Prefer a stale-group retry row, otherwise get one row from the ``AsyncDataloader``. After the dataloader is exhausted,
    wait for retries. Acquire generation capacity through ``AsyncStalenessManager`` before generating.
 2. Generate one group of trajectories. Can be single-turn or multi-turn, ``SkyRLGymGenerator`` or your own generator.
-3. Enqueue the generated group to the ``GenerationOutputGroupBuffer``.
+3. Re-check the completed group's age. Enqueue it to ``GenerationOutputGroupBuffer`` if fresh, or enqueue its original
+   row for regeneration if stale.
 4. Repeat from step 1 until the training worker finishes the epoch and cancels the generation tasks.
 
 2. Training Worker (i.e. the training loop)

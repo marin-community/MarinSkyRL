@@ -89,6 +89,8 @@ owns no slot, eliminating the cancellation double-decrement race. The shared que
 shared async state records, and tutorial counter definitions now account for discarded attempts.
 All older tutorial descriptions now match the sweep, retry, and wait policy. Producer and consumer paths share one
 stale-routing helper with an explicit freshness outcome, preventing their retry behavior from drifting.
+The worker tutorial now states that completion is rechecked and routed, and a comment that only restated the
+earliest-step helper call was removed.
 
 ## Future work
 
