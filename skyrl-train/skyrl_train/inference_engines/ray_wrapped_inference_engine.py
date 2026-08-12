@@ -451,7 +451,7 @@ def create_ray_wrapped_inference_engines(
         # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
         # has its own bundle index space 0..per_engine_gpu_count-1, so base_pg_index
         # resets to 0. The mp PACK PG and TP==PP==1 flat PACK PG remain global.
-        # Hybrid engines use the resolved node-ordered indices above.
+        # Hybrid engines use colocated_engine_bundles for node-ordered indices.
         use_per_engine_pg = bool(per_engine_pgs)
         if use_per_engine_pg:
             engine_pg = per_engine_pgs[i]

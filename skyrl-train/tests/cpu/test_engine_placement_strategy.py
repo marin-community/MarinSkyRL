@@ -14,7 +14,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement
 
 import pytest
 
-from skyrl_train.inference_engines.placement import colocated_engine_bundle_indices
+from skyrl_train.utils.placement_geometry import colocated_engine_bundle_indices
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils.utils import (
     use_per_engine_strict_pack_pg,

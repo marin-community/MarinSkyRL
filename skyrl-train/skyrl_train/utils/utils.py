@@ -37,6 +37,7 @@ from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, 
 from .logging_utils import format_exception_text
 from .loss_reduction import SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
+from .placement_geometry import validate_colocated_engine_geometry
 
 MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2"})
 
@@ -691,8 +692,6 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
         )
         gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
-        from skyrl_train.inference_engines.placement import validate_colocated_engine_geometry
-
         try:
             validate_colocated_engine_geometry(tensor_pipeline_size=tp_pp_size, gpus_per_node=gpus_per_node)
         except ValueError as error:
