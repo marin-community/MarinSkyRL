@@ -95,6 +95,12 @@ class _GroupFreshness(Enum):
     STALE = auto()
 
 
+@dataclass
+class _FreshnessPartition:
+    stale_groups: List[GeneratedOutputGroup]
+    fresh_groups: List[GeneratedOutputGroup]
+
+
 class _AsyncStalenessManager:
     """
     A controller that manages the capacity of the generation workers based on staleness control.
@@ -1037,11 +1043,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
 
-    def _is_stale_group(self, group: GeneratedOutputGroup) -> bool:
-        return self.global_step - group.global_step_when_scheduled > self.max_staleness_steps
-
     def _route_stale_group_to_retry(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
-        if self._is_stale_group(group):
+        if self.global_step - group.global_step_when_scheduled > self.max_staleness_steps:
             queues.retries.put_nowait(group.source_prompts)
             return _GroupFreshness.STALE
         return _GroupFreshness.FRESH
@@ -1054,7 +1057,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self,
         queues: _GenerationQueues,
         completed_groups: List[GeneratedOutputGroup],
-    ) -> Tuple[List[GeneratedOutputGroup], List[GeneratedOutputGroup]]:
+    ) -> _FreshnessPartition:
         """Queue retries for every stale group and return stale and fresh partitions."""
         stale_groups = []
         fresh_groups = []
@@ -1063,7 +1066,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 stale_groups.append(group)
             else:
                 fresh_groups.append(group)
-        return stale_groups, fresh_groups
+        return _FreshnessPartition(stale_groups=stale_groups, fresh_groups=fresh_groups)
 
     def _publish_staleness_metrics(self) -> None:
         discarded = self._stale_groups_discarded_since_step
@@ -1093,8 +1096,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 completed_groups = _drain_queue(queues.completed)
 
-                stale_groups, newly_fresh_groups = self._partition_and_retry_stale_groups(queues, completed_groups)
-                fresh_groups.extend(newly_fresh_groups)
+                partition = self._partition_and_retry_stale_groups(queues, completed_groups)
+                stale_groups = partition.stale_groups
+                fresh_groups.extend(partition.fresh_groups)
 
                 if not stale_groups and len(fresh_groups) >= self.mini_batch_size:
                     batch = fresh_groups[: self.mini_batch_size]
