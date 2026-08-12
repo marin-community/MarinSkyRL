@@ -85,7 +85,7 @@ def _remove_weight_index_if_present(index_path: str) -> None:
 
 @contextmanager
 def local_hf_model_dir(output_path: str):
-    """Stage and publish an HF model with the weights before its index."""
+    """Remove stale indexes, then stage and publish weights before a new index."""
     index_path = join_resource_path(output_path, HF_WEIGHT_INDEX_FILENAME)
     _remove_weight_index_if_present(index_path)
 
