@@ -139,9 +139,6 @@ trainer:
       cp_rotate_method: "allgather"
     sequence_parallel_size: 1
   algorithm:
-    # Use fixed-reduction CUDA kernels in both rollout and trainer workers so
-    # log-probability comparisons do not depend on the surrounding batch shape.
-    # This costs throughput and does not cover grouped GEMM kernels.
     batch_invariant: false
     advantage_estimator: "grpo"
     kl_ctrl:
