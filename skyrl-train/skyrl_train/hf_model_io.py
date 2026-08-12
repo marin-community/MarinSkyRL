@@ -93,5 +93,8 @@ def local_hf_model_dir(output_path: str):
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
     except BaseException:
-        _remove_weight_index_if_present(index_path)
+        try:
+            _remove_weight_index_if_present(index_path)
+        except Exception as cleanup_error:
+            logger.error(f"Could not remove incomplete HF weight index {index_path}: {cleanup_error}")
         raise
