@@ -733,7 +733,12 @@ def create_ray_wrapped_inference_engines(
 def colocated_engine_bundle_layout(
     shared_pg, *, num_inference_engines: int, data_parallel_size: int, tensor_pipeline_size: int
 ) -> list[list[int]]:
-    """Resolve node-atomic TP/PP bundle slices for a colocated engine gang."""
+    """Resolve node-atomic TP/PP bundle slices for a colocated engine gang.
+
+    Returns:
+        One bundle-index list per engine data-parallel rank, or an empty list
+        when ``shared_pg`` is ``None`` and the engines are disaggregated.
+    """
 
     if shared_pg is None:
         return []
