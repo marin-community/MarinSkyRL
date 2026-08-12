@@ -556,16 +556,8 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
-    if cfg.trainer.algorithm.batch_invariant:
-        if cfg.generator.backend != "vllm":
-            raise ValueError("trainer.algorithm.batch_invariant=true requires generator.backend='vllm'")
-        if not cfg.generator.run_engines_locally:
-            raise ValueError(
-                "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
-                "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
-            )
-    # Report batch-invariant incompatibilities before generic backend constraints.
     validate_generator_cfg(cfg)
+    validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)
@@ -716,6 +708,20 @@ def validate_cfg(cfg: DictConfig):
 
     if cfg.generator.engine_init_timeout_seconds <= 0:
         raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
+
+
+def validate_batch_invariant_config(cfg: DictConfig) -> None:
+    """Validate that trainer and rollout kernels are controlled together."""
+
+    if not cfg.trainer.algorithm.batch_invariant:
+        return
+    if cfg.generator.backend != "vllm":
+        raise ValueError("trainer.algorithm.batch_invariant=true requires generator.backend='vllm'")
+    if not cfg.generator.run_engines_locally:
+        raise ValueError(
+            "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
+            "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
+        )
 
 
 def validate_generator_cfg(cfg: DictConfig):
