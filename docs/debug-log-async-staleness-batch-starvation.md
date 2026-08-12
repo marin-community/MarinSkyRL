@@ -57,6 +57,15 @@ captured sample step as the group's age; Terminal Bench already used the earlies
 passed 96 tests after the change. Buffer checkpoint persistence also fails closed: retry state is snapshotted on the
 event loop, and a storage error now stops checkpoint handling instead of logging a warning and continuing.
 
+## Lint-review disposition
+
+The repeated queue-drain loops now use one helper, the constant submission-slot return value was removed, and the
+step-wise generator comment now describes the earliest-sample timestamp. The review suggested moving the stale-batch
+cluster out of the trainer, but those methods deliberately coordinate trainer-owned `global_step`, metrics, queue
+telemetry, and `_AsyncStalenessManager` accounting; moving them would add a stateful facade without reducing coupling.
+Submission-slot cleanup remains explicit because completion, stale rejection, cancellation, and worker failure have
+different accounting transitions; an async context manager would still need the same outcome-specific branches.
+
 ## Future work
 
 - None.

@@ -35,6 +35,16 @@ from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 
 
+def _drain_queue(queue: asyncio.Queue) -> list:
+    """Remove and return every item currently available without yielding."""
+    items = []
+    while True:
+        try:
+            items.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            return items
+
+
 @dataclass
 class GeneratedOutputGroup:
     """
@@ -67,18 +77,8 @@ class _GenerationQueues:
 
     def snapshot(self) -> Tuple[List[GeneratedOutputGroup], List[List[dict]]]:
         """Copy both queues without yielding to another event-loop task."""
-        completed = []
-        retries = []
-        while True:
-            try:
-                completed.append(self.completed.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        while True:
-            try:
-                retries.append(self.retries.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+        completed = _drain_queue(self.completed)
+        retries = _drain_queue(self.retries)
         for group in completed:
             self.completed.put_nowait(group)
         for prompts in retries:
@@ -827,13 +827,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = 0
-            while not generation_queues.completed.empty():
-                try:
-                    generation_queues.completed.get_nowait()
-                    n_drained += 1
-                except asyncio.QueueEmpty:
-                    break
+            n_drained = len(_drain_queue(generation_queues.completed))
             if n_drained > 0:
                 logger.warning(
                     f"Drained {n_drained} unconsumed generation output(s) at epoch boundary "
@@ -934,7 +928,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 slot_acquired = False
                 await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
-                rand_prompts, slot_acquired = await self._next_generation_prompts(queues, slot_acquired)
+                rand_prompts = await self._next_generation_prompts(queues)
                 assert len(rand_prompts) == 1
                 generator_input, uids = prepare_generator_input(
                     rand_prompts,
@@ -1003,20 +997,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _next_generation_prompts(
         self,
         queues: _GenerationQueues,
-        slot_acquired: bool,
-    ) -> Tuple[List[dict], bool]:
+    ) -> List[dict]:
         """Prefer retries, waiting for one after the epoch's dataset rows are scheduled."""
         try:
-            return queues.retries.get_nowait(), slot_acquired
+            return queues.retries.get_nowait()
         except asyncio.QueueEmpty:
             prompts = await self.async_train_dataloader.get_next_non_consumed_data()
             if prompts is not None:
-                return prompts, slot_acquired
+                return prompts
 
         await self._staleness_manager.cancel_submission_slot()
         prompts = await queues.retries.get()
         await self._staleness_manager.acquire_submission_slot()
-        return prompts, True
+        return prompts
 
     async def _route_completed_group(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> bool:
         """Retry a stale completion or enqueue a fresh completion. Return whether it was stale."""
@@ -1125,12 +1118,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 while len(fresh_groups) < self.mini_batch_size and queues.completed.empty():
                     await queues.condition.wait()
 
-                completed_groups = []
-                while True:
-                    try:
-                        completed_groups.append(queues.completed.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
+                completed_groups = _drain_queue(queues.completed)
 
                 stale_groups, newly_fresh_groups = self._partition_completed_groups(queues, completed_groups)
                 fresh_groups.extend(newly_fresh_groups)
