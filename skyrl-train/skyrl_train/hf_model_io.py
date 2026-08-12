@@ -55,7 +55,7 @@ def _upload_hf_model_directory(local_path: str, cloud_path: str) -> None:
     index_files = [path for path in files if path.relative_to(source_root).as_posix() == HF_WEIGHT_INDEX_FILENAME]
     weight_files = [path for path in files if path.suffix == ".safetensors"]
     other_files = [path for path in files if path not in weight_files and path not in index_files]
-    filesystem = io._get_filesystem(cloud_path)
+    filesystem = io.get_filesystem(cloud_path)
 
     def publish_file(path: Path) -> None:
         relative_path = path.relative_to(source_root).as_posix()

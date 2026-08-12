@@ -40,6 +40,11 @@ def _get_filesystem(path: str):
     return fsspec.filesystem(proto)
 
 
+def get_filesystem(path: str) -> AbstractFileSystem:
+    """Return the configured filesystem for a local or cloud path."""
+    return _get_filesystem(path)
+
+
 def open_file(path: str, mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
     if not is_cloud_path(path):
@@ -231,7 +236,7 @@ def local_work_dir(output_path: str):
     Context manager that provides a local working directory.
 
     For local paths, returns the path directly.
-    For cloud paths, creates a temporary directory and uploads content at the end.
+    For cloud paths, creates a temporary directory and uploads content after successful work.
 
     Args:
         output_path: The final destination path (local or cloud)
