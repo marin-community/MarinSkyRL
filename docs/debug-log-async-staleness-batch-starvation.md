@@ -101,6 +101,8 @@ protocol remains necessary to keep callbacks independent from the concrete train
 partition remains because positional same-type lists were a prior review finding. Batch assembly keeps queue mutation
 under the condition and reconciles the exact discarded count immediately outside it; separating those phases would
 require another state carrier without reducing the synchronization surface.
+The bounded-buffer comment now names the condition wait. Epoch validation asserts that no stale-group retries remain,
+so an unconsumed source row cannot be silently dropped when queues are retired.
 
 ## Future work
 

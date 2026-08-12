@@ -323,8 +323,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # multiple of the mini-batch (e.g. mini_batch_size · (max_staleness_steps + 1), or
         # a fixed 128) to cap the footprint to O(1) in async depth. NOTE: when this is set
         # below num_parallel_generation_workers, up to (num_parallel_generation_workers -
-        # cap) workers may block in `buffer.put(...)` each still holding ONE completed
-        # group, so to fully bound the head-node footprint you should ALSO lower
+        # cap) workers may wait on the shared queue condition while each still holds ONE
+        # completed group, so to fully bound the head-node footprint you should ALSO lower
         # num_parallel_generation_workers toward the engine working set.
         self.max_buffered_groups = (
             OmegaConf.select(cfg, "trainer.fully_async.max_buffered_groups", default=None)
@@ -811,6 +811,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
             n_drained = len(_drain_queue(generation_queues.completed))
+            assert generation_queues.retries.empty(), (
+                f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
+            )
             if n_drained > 0:
                 logger.warning(
                     f"Drained {n_drained} unconsumed generation output(s) at epoch boundary "
