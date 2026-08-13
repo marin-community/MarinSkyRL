@@ -18,6 +18,7 @@ from .statistics import (
 from .traces import load_trace_records
 
 TEMPORAL_SUMMARY_PATH = Path("Q2_temporal/temporal_summary.json")
+COMPARISON_PATH = Path("Q1_behavioral_delta/comparison.json")
 OVERLAY_PATH = Path("Q3_temporal_overlay/overlay.json")
 ROLLOUT_CONTEXT_PATH = Path("Q4_solve_rate_by_context/rollout_context_summary.json")
 EVALUATION_CONTEXT_PATH = Path("Q4_solve_rate_by_context/evaluation_context_summary.json")
@@ -97,7 +98,7 @@ def analyze_local_run(
         comparison = matched_reward_statistics(baseline, post)
         comparison_payload = asdict(comparison)
         _write_json(
-            output_dir / "Q1_behavioral_delta" / "validity.json",
+            output_dir / COMPARISON_PATH,
             comparison_payload,
         )
         _write_json(
@@ -106,7 +107,7 @@ def analyze_local_run(
                 "rollout_bins": temporal["bins"],
                 "baseline": {"mean_reward": mean_reward(baseline)},
                 "post": {"mean_reward": mean_reward(post)},
-                "validity": comparison_payload,
+                "comparison": comparison_payload,
             },
         )
         _write_json(

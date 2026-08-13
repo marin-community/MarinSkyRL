@@ -11,6 +11,7 @@ from typing import Sequence
 from .traces import TraceRecord
 
 CONTEXT_BOUNDS = (0, 16_384, 32_768, 65_536, 131_072)
+UNKNOWN_CONTEXT_BUCKET = "unknown"
 
 
 def _optional_mean(values: Sequence[float | int]) -> float | None:
@@ -129,9 +130,11 @@ def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | i
     """Summarize reward and error rate by peak request prompt-token bucket."""
     buckets: dict[str, list[TraceRecord]] = defaultdict(list)
     for record in records:
-        tokens = record.peak_prompt_tokens or 0
-        lower = max(bound for bound in CONTEXT_BOUNDS if bound <= tokens)
-        buckets[f"{lower}+"].append(record)
+        if record.peak_prompt_tokens is None:
+            buckets[UNKNOWN_CONTEXT_BUCKET].append(record)
+        else:
+            lower = max(bound for bound in CONTEXT_BOUNDS if bound <= record.peak_prompt_tokens)
+            buckets[f"{lower}+"].append(record)
     result: dict[str, dict[str, float | int | None]] = {}
     for label, members in sorted(buckets.items()):
         result[label] = asdict(

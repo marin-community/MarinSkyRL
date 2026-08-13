@@ -180,13 +180,13 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
     )
 
     index = index_path.read_text(encoding="utf-8")
-    validity = json.loads((output_dir / "Q1_behavioral_delta" / "validity.json").read_text())
+    comparison = json.loads((output_dir / "Q1_behavioral_delta" / "comparison.json").read_text())
     temporal = json.loads((output_dir / "Q2_temporal" / "temporal_summary.json").read_text())
     overlay = json.loads((output_dir / "Q3_temporal_overlay" / "overlay.json").read_text())
     evaluation_context = json.loads(
         (output_dir / "Q4_solve_rate_by_context" / "evaluation_context_summary.json").read_text()
     )
-    assert validity == {
+    assert comparison == {
         "baseline_trial_count": 0,
         "common_task_count": 0,
         "invalid_for_comparison": True,
@@ -196,7 +196,7 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
     }
     assert temporal["bins"]["2026-07-30T00:00:00+00:00"]["mean_reward"] == 0.5
     assert temporal["bins"]["2026-07-30T04:00:00+00:00"]["mean_turns"] == 4.0
-    assert overlay["validity"] == {
+    assert overlay["comparison"] == {
         "baseline_trial_count": 0,
         "common_task_count": 0,
         "invalid_for_comparison": True,
@@ -204,7 +204,7 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
         "task_weighted_mean_reward_delta": None,
         "trial_weighted_mean_reward_delta": None,
     }
-    assert evaluation_context["baseline"]["0+"]["mean_reward"] == 1.0
+    assert evaluation_context["baseline"]["unknown"]["mean_reward"] == 1.0
     assert "invalid for before/after conclusions" in index
 
 
@@ -226,8 +226,8 @@ def test_analyze_local_run_reports_delta_for_matched_evaluations(tmp_path: Path)
         bin_hours=4,
     )
 
-    validity = json.loads((output_dir / "Q1_behavioral_delta" / "validity.json").read_text())
-    assert validity == {
+    comparison = json.loads((output_dir / "Q1_behavioral_delta" / "comparison.json").read_text())
+    assert comparison == {
         "baseline_trial_count": 1,
         "common_task_count": 1,
         "invalid_for_comparison": False,
