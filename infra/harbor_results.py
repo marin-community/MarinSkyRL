@@ -1,4 +1,4 @@
-"""Typed access to fields in Harbor ``result.json`` artifacts."""
+"""Typed access to Harbor result and ATIF trajectory artifacts."""
 
 from __future__ import annotations
 

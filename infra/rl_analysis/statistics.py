@@ -130,7 +130,7 @@ def temporal_summary(
     return TemporalSummary(bin_hours=bin_hours, bins=result)
 
 
-def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | int | None]]:
+def context_summary(records: list[TraceRecord]) -> dict[str, ContextBin]:
     """Summarize reward and error rate by peak request prompt-token bucket."""
     buckets: dict[str, list[TraceRecord]] = defaultdict(list)
     for record in records:
@@ -139,13 +139,11 @@ def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | i
         else:
             lower = max(bound for bound in CONTEXT_BOUNDS if bound <= record.peak_prompt_tokens)
             buckets[f"{lower}+"].append(record)
-    result: dict[str, dict[str, float | int | None]] = {}
+    result: dict[str, ContextBin] = {}
     for label, members in sorted(buckets.items()):
-        result[label] = asdict(
-            ContextBin(
-                count=len(members),
-                mean_reward=mean_reward(members),
-                error_rate=sum(member.error_type is not None for member in members) / len(members),
-            )
+        result[label] = ContextBin(
+            count=len(members),
+            mean_reward=mean_reward(members),
+            error_rate=sum(member.error_type is not None for member in members) / len(members),
         )
     return result

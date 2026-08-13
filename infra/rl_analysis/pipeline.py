@@ -15,7 +15,7 @@ from .statistics import (
     mean_reward,
     temporal_summary,
 )
-from .traces import load_trace_records
+from .traces import TraceRecord, load_trace_records
 
 TEMPORAL_SUMMARY_PATH = Path("Q2_temporal/temporal_summary.json")
 COMPARISON_PATH = Path("Q1_behavioral_delta/comparison.json")
@@ -28,6 +28,10 @@ TRAINING_METRICS_PATH = Path("Q2_skyrl_metrics")
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _context_payload(records: list[TraceRecord]) -> dict[str, dict[str, float | int | None]]:
+    return {label: asdict(summary) for label, summary in context_summary(records).items()}
 
 
 def _run_training_metrics(training_log_dir: Path, output_dir: Path) -> None:
@@ -89,7 +93,7 @@ def analyze_local_run(
     rollouts = load_trace_records(rollout_dir)
     temporal = temporal_summary(rollouts, bin_hours)
     _write_json(output_dir / TEMPORAL_SUMMARY_PATH, asdict(temporal))
-    _write_json(output_dir / ROLLOUT_CONTEXT_PATH, context_summary(rollouts))
+    _write_json(output_dir / ROLLOUT_CONTEXT_PATH, _context_payload(rollouts))
 
     comparison = None
     if baseline_dir is not None and post_dir is not None:
@@ -112,7 +116,7 @@ def analyze_local_run(
         )
         _write_json(
             output_dir / EVALUATION_CONTEXT_PATH,
-            {"baseline": context_summary(baseline), "post": context_summary(post)},
+            {"baseline": _context_payload(baseline), "post": _context_payload(post)},
         )
     if training_log_dir is not None:
         _run_training_metrics(training_log_dir, output_dir / TRAINING_METRICS_PATH)
