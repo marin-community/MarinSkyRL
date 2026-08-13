@@ -21,6 +21,7 @@ TEMPORAL_SUMMARY_PATH = Path("Q2_temporal/temporal_summary.json")
 OVERLAY_PATH = Path("Q3_temporal_overlay/overlay.json")
 ROLLOUT_CONTEXT_PATH = Path("Q4_solve_rate_by_context/rollout_context_summary.json")
 EVALUATION_CONTEXT_PATH = Path("Q4_solve_rate_by_context/evaluation_context_summary.json")
+TRAINING_METRICS_PATH = Path("Q2_skyrl_metrics")
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -53,7 +54,7 @@ def _write_index(
         lines.append(f"Matched evaluation tasks: {comparison.common_task_count}.")
     lines += ["", "## Q2", "", f"- [Temporal rollout summary]({TEMPORAL_SUMMARY_PATH})"]
     if include_training_metrics:
-        lines.append("- [Training metrics](Q2_skyrl_metrics/)")
+        lines.append(f"- [Training metrics]({TRAINING_METRICS_PATH}/)")
     lines += ["", "## Q3", ""]
     if comparison is None:
         lines.append("No baseline/post evaluation pair was provided.")
@@ -113,7 +114,7 @@ def analyze_local_run(
             {"baseline": context_summary(baseline), "post": context_summary(post)},
         )
     if training_log_dir is not None:
-        _run_training_metrics(training_log_dir, output_dir / "Q2_skyrl_metrics")
+        _run_training_metrics(training_log_dir, output_dir / TRAINING_METRICS_PATH)
 
     plan = {
         "rollout_dir": str(rollout_dir),

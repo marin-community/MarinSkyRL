@@ -42,6 +42,13 @@ class TemporalBin:
     error_count: int
 
 
+@dataclass(frozen=True)
+class ContextBin:
+    count: int
+    mean_reward: float | None
+    error_rate: float
+
+
 def matched_reward_statistics(before: list[TraceRecord], after: list[TraceRecord]) -> MatchedRewardStatistics:
     """Return replicate-preserving task- and trial-weighted reward deltas."""
 
@@ -95,7 +102,6 @@ def temporal_summary(
         bins[datetime.fromtimestamp(seconds, tz=timezone.utc)].append(record)
     result: dict[str, dict[str, float | int | None]] = {}
     for start, members in sorted(bins.items()):
-        rewards = [member.reward for member in members if member.reward is not None]
         cumulative_input_tokens = [
             member.cumulative_input_tokens for member in members if member.cumulative_input_tokens is not None
         ]
@@ -124,9 +130,11 @@ def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | i
         buckets[f"{lower}+"].append(record)
     result: dict[str, dict[str, float | int | None]] = {}
     for label, members in sorted(buckets.items()):
-        result[label] = {
-            "count": len(members),
-            "mean_reward": mean_reward(members),
-            "error_rate": sum(member.error_type is not None for member in members) / len(members),
-        }
+        result[label] = asdict(
+            ContextBin(
+                count=len(members),
+                mean_reward=mean_reward(members),
+                error_rate=sum(member.error_type is not None for member in members) / len(members),
+            )
+        )
     return result

@@ -35,6 +35,8 @@ from typing import Any, Iterable, Optional, Sequence
 
 from upath import UPath
 
+from infra.harbor_results import trajectory_count_sequence
+
 # A record's messages is considered part of the SAME trial as a longer record
 # when it is an exact element-wise prefix of the longer messages list.
 Messages = list[dict[str, Any]]
@@ -156,24 +158,6 @@ def reconstruct_chains(records: list[LiteralRecord]) -> list[Chain]:
 # --------------------------------------------------------------------------- #
 # Trajectory <-> chain binding
 # --------------------------------------------------------------------------- #
-def trajectory_count_sequence(trajectory: dict[str, Any]) -> list[tuple[int, int]]:
-    """Per-agent-step ``(prompt_tokens, completion_tokens)`` from a trajectory.
-
-    Mirrors the agent-step selection the exporter uses: source=="agent" and not
-    ``is_copied_context``. A step missing either count contributes ``-1`` so it can
-    never spuriously equal a real record length.
-    """
-    seq: list[tuple[int, int]] = []
-    for step in trajectory.get("steps", []):
-        if step.get("source") != "agent" or step.get("is_copied_context"):
-            continue
-        metrics = step.get("metrics") or {}
-        p = metrics.get("prompt_tokens")
-        c = metrics.get("completion_tokens")
-        seq.append((p if isinstance(p, int) else -1, c if isinstance(c, int) else -1))
-    return seq
-
-
 def parse_iso(ts: Any) -> Optional[float]:
     """Parse an ISO-8601 timestamp to a unix float, or None."""
     if not isinstance(ts, str) or not ts:
