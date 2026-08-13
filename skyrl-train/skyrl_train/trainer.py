@@ -408,7 +408,7 @@ class RayPPOTrainer:
             await asyncio.to_thread(self.handle_hf_export)
 
     async def _save_checkpoints_with_residency(self) -> None:
-        """Save a periodic checkpoint while preserving colocated rollout residency."""
+        """Save a checkpoint, swapping colocated training and inference residency when needed."""
         if not self.colocate_all:
             await asyncio.to_thread(self.save_checkpoints)
             return

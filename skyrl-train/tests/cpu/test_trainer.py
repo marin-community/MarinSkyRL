@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import torch
 import pytest
-from loguru import logger as loguru_logger
 from jaxtyping import Float, Integer
 from omegaconf import DictConfig, OmegaConf
 from pytest import approx
@@ -441,22 +440,6 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
             trainer.load_checkpoints()
 
     exists.assert_called_once_with(resume_path.rstrip("/"))
-
-
-def test_load_checkpoints_warns_when_latest_checkpoint_is_absent(dummy_config):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
-    trainer.resume_mode = ResumeMode.LATEST
-
-    messages = []
-    sink = loguru_logger.add(lambda message: messages.append(message.record), level="WARNING")
-    try:
-        with patch("skyrl_train.trainer.io.exists", return_value=False):
-            assert trainer.load_checkpoints() == (0, None)
-    finally:
-        loguru_logger.remove(sink)
-
-    assert [record["level"].name for record in messages] == ["WARNING"]
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):

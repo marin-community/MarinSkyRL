@@ -266,14 +266,16 @@ class Timer:
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def _finish(self, exc_type) -> None:
         duration = time.monotonic() - self.start_time
-        if exc_type is None:
-            logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
-        else:
-            logger.opt(depth=1).error(f"Failed: '{self.message}', time cost: {duration:.2f}s")
+        log = logger.opt(depth=2).info if exc_type is None else logger.opt(depth=2).error
+        outcome = "Finished" if exc_type is None else "Failed"
+        log(f"{outcome}: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._finish(exc_type)
 
     async def __aenter__(self):
         self.start_time = time.monotonic()
@@ -281,13 +283,7 @@ class Timer:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        duration = time.monotonic() - self.start_time
-        if exc_type is None:
-            logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
-        else:
-            logger.opt(depth=1).error(f"Failed: '{self.message}', time cost: {duration:.2f}s")
-        if self.update_dict is not None:
-            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
+        self._finish(exc_type)
 
 
 def get_system_memory_metrics() -> dict:
