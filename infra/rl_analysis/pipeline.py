@@ -11,6 +11,7 @@ from .statistics import (
     comparison_validity,
     context_summary,
     matched_reward_delta,
+    matched_reward_statistics,
     temporal_summary,
 )
 from .traces import TraceRecord, load_trace_records
@@ -56,7 +57,11 @@ def analyze_local_run(
         validity = comparison_validity(baseline, post)
         _write_json(
             output_dir / "Q1_behavioral_delta" / "validity.json",
-            {**validity, "mean_reward_delta": matched_reward_delta(baseline, post)},
+            {
+                **validity,
+                "mean_reward_delta": matched_reward_delta(baseline, post),
+                **matched_reward_statistics(baseline, post),
+            },
         )
         _write_json(
             output_dir / "Q3_temporal_overlay" / "overlay.json",
