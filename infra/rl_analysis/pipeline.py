@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .statistics import (
@@ -15,7 +15,7 @@ from .statistics import (
     mean_reward,
     temporal_summary,
 )
-from .traces import TraceRecord, load_trace_records
+from .traces import load_trace_records
 
 TEMPORAL_SUMMARY_PATH = Path("Q2_temporal/temporal_summary.json")
 COMPARISON_PATH = Path("Q1_behavioral_delta/comparison.json")
@@ -23,6 +23,19 @@ OVERLAY_PATH = Path("Q3_temporal_overlay/overlay.json")
 ROLLOUT_CONTEXT_PATH = Path("Q4_solve_rate_by_context/rollout_context_summary.json")
 EVALUATION_CONTEXT_PATH = Path("Q4_solve_rate_by_context/evaluation_context_summary.json")
 TRAINING_METRICS_PATH = Path("Q2_skyrl_metrics")
+
+
+@dataclass(frozen=True)
+class EvaluationReward:
+    mean_reward: float | None
+
+
+@dataclass(frozen=True)
+class TemporalOverlay:
+    rollout_bins: dict
+    baseline: EvaluationReward
+    post: EvaluationReward
+    comparison: MatchedRewardStatistics
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -102,12 +115,12 @@ def analyze_local_run(
         )
         _write_json(
             output_dir / OVERLAY_PATH,
-            {
-                "rollout_bins": temporal.bins,
-                "baseline": {"mean_reward": mean_reward(baseline)},
-                "post": {"mean_reward": mean_reward(post)},
-                "comparison": comparison,
-            },
+            TemporalOverlay(
+                rollout_bins=temporal.bins,
+                baseline=EvaluationReward(mean_reward(baseline)),
+                post=EvaluationReward(mean_reward(post)),
+                comparison=comparison,
+            ),
         )
         _write_json(
             output_dir / EVALUATION_CONTEXT_PATH,

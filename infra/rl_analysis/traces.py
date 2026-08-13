@@ -139,7 +139,7 @@ def _result_mappings(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def load_trace_records(source: Path) -> list[TraceRecord]:
-    """Load JSON/JSONL traces, joining Harbor trajectories and skipping job aggregates.
+    """Load JSON/JSONL traces, joining Harbor trajectories and skipping aggregate-only results.
 
     A non-empty source with no scored records is rejected so a schema mismatch cannot silently
     produce an empty analysis.
