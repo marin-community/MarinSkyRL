@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .statistics import (
     MatchedRewardStatistics,
+    TemporalBin,
     context_summary,
     matched_reward_statistics,
     mean_reward,
@@ -32,7 +33,7 @@ class EvaluationReward:
 
 @dataclass(frozen=True)
 class TemporalOverlay:
-    rollout_bins: dict
+    rollout_bins: dict[str, TemporalBin]
     baseline: EvaluationReward
     post: EvaluationReward
     comparison: MatchedRewardStatistics

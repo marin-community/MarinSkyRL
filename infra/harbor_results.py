@@ -11,7 +11,7 @@ HARBOR_TRAJECTORY_PATH = "agent/trajectory.json"
 
 @dataclass(frozen=True)
 class HarborResult:
-    """Fields shared by Harbor reporting and behavioral analysis."""
+    """Normalized metrics and identity fields from one Harbor trial result."""
 
     task_name: str | None
     trial_name: str | None
