@@ -418,10 +418,7 @@ class RayPPOTrainer:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
             await asyncio.to_thread(self.save_checkpoints)
         finally:
-            try:
-                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            finally:
-                await self._sync_weights_and_restore_rollout_residency()
+            await self._sync_policy_for_rollouts()
 
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])
@@ -433,8 +430,10 @@ class RayPPOTrainer:
 
     async def _sync_policy_for_rollouts(self) -> None:
         if self.colocate_all:
-            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            await self._sync_weights_and_restore_rollout_residency()
+            try:
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            finally:
+                await self._sync_weights_and_restore_rollout_residency()
         else:
             with Timer("sync_weights", self.all_timings):
                 ray.get(self.sync_policy_weights_to_inference_engines())
