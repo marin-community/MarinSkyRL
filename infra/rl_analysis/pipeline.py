@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .statistics import (
     MatchedRewardStatistics,
+    ContextBin,
     TemporalBin,
     context_summary,
     matched_reward_statistics,
@@ -27,16 +28,17 @@ TRAINING_METRICS_PATH = Path("Q2_skyrl_metrics")
 
 
 @dataclass(frozen=True)
-class EvaluationReward:
-    mean_reward: float | None
+class TemporalOverlay:
+    rollout_bins: dict[str, TemporalBin]
+    baseline_mean_reward: float | None
+    post_mean_reward: float | None
+    comparison: MatchedRewardStatistics
 
 
 @dataclass(frozen=True)
-class TemporalOverlay:
-    rollout_bins: dict[str, TemporalBin]
-    baseline: EvaluationReward
-    post: EvaluationReward
-    comparison: MatchedRewardStatistics
+class EvaluationContextSummary:
+    baseline: dict[str, ContextBin]
+    post: dict[str, ContextBin]
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -118,14 +120,14 @@ def analyze_local_run(
             output_dir / OVERLAY_PATH,
             TemporalOverlay(
                 rollout_bins=temporal.bins,
-                baseline=EvaluationReward(mean_reward(baseline)),
-                post=EvaluationReward(mean_reward(post)),
+                baseline_mean_reward=mean_reward(baseline),
+                post_mean_reward=mean_reward(post),
                 comparison=comparison,
             ),
         )
         _write_json(
             output_dir / EVALUATION_CONTEXT_PATH,
-            {"baseline": context_summary(baseline), "post": context_summary(post)},
+            EvaluationContextSummary(baseline=context_summary(baseline), post=context_summary(post)),
         )
     if training_log_dir is not None:
         _run_training_metrics(training_log_dir, output_dir / TRAINING_METRICS_PATH)

@@ -32,7 +32,7 @@ def _string(value: Any) -> str | None:
 
 
 def trajectory_count_sequence(trajectory: dict[str, Any]) -> list[tuple[int, int]]:
-    """Return token counts for non-copied agent steps, using ``-1`` for missing counts."""
+    """Return ``(prompt, completion)`` counts for agent steps, using ``-1`` when missing."""
     sequence = []
     for step in trajectory.get("steps", []):
         if not isinstance(step, dict) or step.get("source") != "agent" or step.get("is_copied_context"):
