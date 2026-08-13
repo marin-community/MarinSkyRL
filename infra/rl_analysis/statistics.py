@@ -31,6 +31,19 @@ class MatchedRewardStatistics:
     def invalid_for_comparison(self) -> bool:
         return self.common_task_count == 0
 
+    def payload(self) -> ComparisonPayload:
+        return ComparisonPayload(**asdict(self), invalid_for_comparison=self.invalid_for_comparison)
+
+
+@dataclass(frozen=True)
+class ComparisonPayload:
+    common_task_count: int
+    baseline_trial_count: int
+    post_trial_count: int
+    task_weighted_mean_reward_delta: float | None
+    trial_weighted_mean_reward_delta: float | None
+    invalid_for_comparison: bool
+
 
 @dataclass(frozen=True)
 class TemporalBin:
@@ -52,21 +65,25 @@ class ContextBin:
 def matched_reward_statistics(before: list[TraceRecord], after: list[TraceRecord]) -> MatchedRewardStatistics:
     """Return replicate-preserving task- and trial-weighted reward deltas."""
 
-    before_by_task: dict[str, list[float]] = defaultdict(list)
-    after_by_task: dict[str, list[float]] = defaultdict(list)
-    for record in before:
-        if record.reward is not None:
-            before_by_task[record.task_id].append(record.reward)
-    for record in after:
-        if record.reward is not None:
-            after_by_task[record.task_id].append(record.reward)
+    def rewards_by_task(records: list[TraceRecord]) -> dict[str, list[float]]:
+        grouped: dict[str, list[float]] = defaultdict(list)
+        for record in records:
+            if record.reward is not None:
+                grouped[record.task_id].append(record.reward)
+        return grouped
+
+    before_by_task = rewards_by_task(before)
+    after_by_task = rewards_by_task(after)
     common_tasks = sorted(before_by_task.keys() & after_by_task.keys())
     deltas = [
         fmean(after_by_task[task_id]) - fmean(before_by_task[task_id])
         for task_id in common_tasks
     ]
-    before_trials = [reward for task_id in common_tasks for reward in before_by_task[task_id]]
-    after_trials = [reward for task_id in common_tasks for reward in after_by_task[task_id]]
+    def common_trials(grouped: dict[str, list[float]]) -> list[float]:
+        return [reward for task_id in common_tasks for reward in grouped[task_id]]
+
+    before_trials = common_trials(before_by_task)
+    after_trials = common_trials(after_by_task)
     return MatchedRewardStatistics(
         common_task_count=len(common_tasks),
         baseline_trial_count=len(before_trials),

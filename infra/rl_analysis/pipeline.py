@@ -95,7 +95,7 @@ def analyze_local_run(
         baseline = load_trace_records(baseline_dir)
         post = load_trace_records(post_dir)
         comparison = matched_reward_statistics(baseline, post)
-        comparison_payload = {**asdict(comparison), "invalid_for_comparison": comparison.invalid_for_comparison}
+        comparison_payload = asdict(comparison.payload())
         _write_json(
             output_dir / "Q1_behavioral_delta" / "validity.json",
             comparison_payload,

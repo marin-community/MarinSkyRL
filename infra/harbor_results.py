@@ -17,7 +17,7 @@ class HarborResult:
     n_output_tokens: int | None
     summarization_count: int | None
     exception_type: str | None
-    reward: int | float | None
+    reward: float | None
 
 
 def _integer(value: Any) -> int | None:
@@ -29,7 +29,7 @@ def _string(value: Any) -> str | None:
 
 
 def trajectory_count_sequence(trajectory: dict[str, Any]) -> list[tuple[int, int]]:
-    """Return token counts for non-copied agent steps in an ATIF trajectory."""
+    """Return token counts for non-copied agent steps, using ``-1`` for missing counts."""
     sequence = []
     for step in trajectory.get("steps", []):
         if not isinstance(step, dict) or step.get("source") != "agent" or step.get("is_copied_context"):
@@ -64,5 +64,5 @@ def parse_harbor_result(data: dict[str, Any]) -> HarborResult:
         n_output_tokens=_integer(agent_result.get("n_output_tokens")),
         summarization_count=_integer(metadata.get("summarization_count")),
         exception_type=_string(exception_info.get("exception_type")),
-        reward=reward if isinstance(reward, (int, float)) and not isinstance(reward, bool) else None,
+        reward=float(reward) if isinstance(reward, (int, float)) and not isinstance(reward, bool) else None,
     )

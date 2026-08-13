@@ -98,10 +98,6 @@ def _turn_count(record: dict[str, Any], harbor: HarborResult, trajectory: Trajec
     return harbor.n_episodes or int(_number(record.get("turns")) or 0)
 
 
-def _legacy_reward(record: dict[str, Any]) -> float | None:
-    return _number(_nested_value(record, "reward"))
-
-
 def trace_record(
     record: dict[str, Any],
     fallback_task_id: str,
@@ -115,7 +111,7 @@ def trace_record(
     error = harbor.exception_type or _nested_value(record, "error_type") or record.get("error")
     return TraceRecord(
         task_id=task_id,
-        reward=float(harbor.reward) if harbor.reward is not None else _legacy_reward(record),
+        reward=harbor.reward if harbor.reward is not None else _number(_nested_value(record, "reward")),
         timestamp=timestamp,
         turns=_turn_count(record, harbor, parsed_trajectory),
         peak_prompt_tokens=parsed_trajectory.peak_prompt_tokens,
