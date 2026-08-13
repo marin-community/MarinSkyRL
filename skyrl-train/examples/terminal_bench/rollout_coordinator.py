@@ -213,6 +213,14 @@ class RolloutCoordinator:
         self._inflight_zero = asyncio.Event()
         self._inflight_zero.set()
 
+        # Shard-level timeout: a backstop for trials that neither complete nor
+        # trigger Harbor's own per-trial deadline.  Derived from the configured
+        # ``override_timeout_sec`` so it scales with the task budget; generous
+        # enough (2x) to never fire during normal operation.
+        _DEFAULT_TRIAL_TIMEOUT = 1800
+        harbor_timeout = int(scaled_tb_cfg.get("harbor", {}).get("override_timeout_sec", _DEFAULT_TRIAL_TIMEOUT))
+        self._shard_timeout = harbor_timeout * 2
+
         _log().info(
             f"[RolloutCoordinator {shard_idx}/{num_coordinators}] constructed "
             f"(http={generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port})"
@@ -267,7 +275,10 @@ class RolloutCoordinator:
         self._inflight += 1
         self._inflight_zero.clear()
         try:
-            return await self._generator.generate(sub_batch)
+            return await asyncio.wait_for(
+                self._generator.generate(sub_batch),
+                timeout=self._shard_timeout,
+            )
         finally:
             self._inflight -= 1
             if self._inflight == 0:

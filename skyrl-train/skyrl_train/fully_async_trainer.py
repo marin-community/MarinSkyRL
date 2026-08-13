@@ -12,6 +12,7 @@ High-level notes:
 """
 
 import asyncio
+import collections
 import sys
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
@@ -38,6 +39,10 @@ from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBuff
 
 
 _QueueItem = TypeVar("_QueueItem")
+
+
+class GenerationStalledError(RuntimeError):
+    """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
 
 
 def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
@@ -381,6 +386,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._active_generator_tasks: List[asyncio.Task] = []
         self._stale_groups_discarded_since_step = 0
         self._groups_inspected_since_step = 0
+        self._step_time_history: collections.deque[float] = collections.deque(maxlen=5)
 
     def _configure_training_schedule(self):
         """
@@ -760,6 +766,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
 
                 self.all_metrics = {}
+                step_duration = self.all_timings.get("step")
+                if step_duration is not None:
+                    self._step_time_history.append(step_duration)
                 self.all_timings = {}
                 pbar.update(1)
 
@@ -968,6 +977,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if slot_acquired:
                 await self._staleness_manager.cancel_submission_slot()
             return
+        except GenerationStalledError:
+            # The dataset is exhausted and no retries are arriving — this
+            # worker has no more work to do for the epoch. Exit gracefully.
+            if slot_acquired:
+                await self._staleness_manager.cancel_submission_slot()
+            logger.info("Generator worker exiting: generation stalled (dataset exhausted, no retries)")
+            return
+        except asyncio.TimeoutError as e:
+            # A shard-level timeout fired (hung trial).  The run_shard timeout
+            # is generous enough that this only fires on genuine hangs; kill the
+            # worker so the job manager can retry rather than blocking forever.
+            log_exception_as_text("Generator worker timed out (hung trial)", e)
+            if slot_acquired:
+                await self._staleness_manager.cancel_submission_slot()
+            sys.exit(1)
         except Exception as e:
             log_exception_as_text("Generator worker failed", e)
             if slot_acquired:
@@ -978,7 +1002,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self,
         queues: _GenerationQueues,
     ) -> List[dict]:
-        """Prefer retries and wait for one after the epoch's dataset rows are scheduled."""
+        """Prefer retries and wait for one after the epoch's dataset rows are scheduled.
+
+        Raises ``GenerationStalledError`` when the dataset is exhausted and no
+        retries arrive within the stall deadline, so the caller can end the
+        epoch instead of blocking forever.
+        """
         try:
             return queues.retries.get_nowait()
         except asyncio.QueueEmpty:
@@ -986,7 +1015,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if prompts is not None:
                 return prompts
 
-        return await queues.retries.get()
+        try:
+            return await asyncio.wait_for(
+                queues.retries.get(),
+                timeout=self._generation_stall_timeout(),
+            )
+        except asyncio.TimeoutError:
+            raise GenerationStalledError("Dataset exhausted and no retries arrived within the stall deadline")
 
     async def _enqueue_if_fresh(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
         """Enqueue a fresh group or route a stale group to retry."""
@@ -1088,20 +1123,72 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 f"{self.global_step}; waiting produced a full {self.mini_batch_size}-group replacement batch."
             )
 
+    def _generation_stall_timeout(self) -> float:
+        """Adaptive deadline for receiving new groups during a generation wait.
+
+        Returns a multiple of the recent median step time (at least 10 minutes)
+        so the stall fires long before a human would notice, but never during
+        normal cadence.  When no step history exists (first step), defaults to
+        30 minutes.
+        """
+        if not self._step_time_history:
+            return 1800.0
+        sorted_times = sorted(self._step_time_history)
+        median = sorted_times[len(sorted_times) // 2]
+        return max(median * 5.0, 600.0)
+
+    def _any_generators_alive(self) -> bool:
+        return any(not t.done() for t in self._active_generator_tasks)
+
+    def _check_generation_stall(self, elapsed: float) -> float:
+        """Raise ``GenerationStalledError`` if no producers remain, else extend the deadline.
+
+        Returns the new stall timeout for the next wait cycle.
+        """
+        if not self._any_generators_alive():
+            raise GenerationStalledError(f"Generation stalled: waited {elapsed:.0f}s, no active generators")
+        logger.warning(
+            f"Generation stall watchdog: {elapsed:.0f}s since last progress, "
+            f"generators still alive — extending deadline"
+        )
+        return self._generation_stall_timeout()
+
     async def _get_fresh_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
-        """Discard completed stale attempts and wait for a full fresh mini-batch."""
+        """Discard completed stale attempts and wait for a full fresh mini-batch.
+
+        Raises ``GenerationStalledError`` when no new groups arrive within the
+        adaptive stall deadline and no generator tasks remain to produce them.
+        """
         fresh_groups = []
+        loop = asyncio.get_event_loop()
+        last_progress = loop.time()
+        stall_timeout = self._generation_stall_timeout()
 
         while True:
             async with queues.condition:
                 while len(fresh_groups) < self.mini_batch_size and queues.completed.empty():
-                    await queues.condition.wait()
+                    elapsed = loop.time() - last_progress
+                    remaining = stall_timeout - elapsed
+                    if remaining <= 0:
+                        stall_timeout = self._check_generation_stall(elapsed)
+                        last_progress = loop.time()
+                        continue
+                    try:
+                        await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        stall_timeout = self._check_generation_stall(loop.time() - last_progress)
+                        last_progress = loop.time()
 
                 completed_groups = _drain_queue(queues.completed)
 
                 partition = self._partition_and_retry_stale_groups(queues, completed_groups)
                 stale_groups = partition.stale_groups
                 fresh_groups.extend(partition.fresh_groups)
+
+                # Reset the stall timer whenever new groups arrive.
+                if completed_groups:
+                    last_progress = asyncio.get_event_loop().time()
+                    stall_timeout = self._generation_stall_timeout()
 
                 if not stale_groups and len(fresh_groups) >= self.mini_batch_size:
                     batch = fresh_groups[: self.mini_batch_size]

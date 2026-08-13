@@ -2207,6 +2207,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def resume_generation(self) -> None:
         """Release the EngineCore scheduler after the weight reload completes."""
         await self._get_engine().resume_generation()
+        logger.info("resume_generation() finished, EngineCore scheduler released")
 
 
 class _MinimalRequest:

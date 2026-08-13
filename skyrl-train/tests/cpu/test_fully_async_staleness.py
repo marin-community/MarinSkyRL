@@ -1,4 +1,5 @@
 import asyncio
+import collections
 
 import pytest
 
@@ -43,6 +44,8 @@ def _batch_assembly_state(mini_batch_size: int, accepted: int):
     trainer.all_metrics = {}
     trainer._stale_groups_discarded_since_step = 0
     trainer._groups_inspected_since_step = 0
+    trainer._step_time_history = collections.deque([1000.0], maxlen=5)
+    trainer._active_generator_tasks = []
     trainer._staleness_manager = _AsyncStalenessManager(
         max_concurrent_generation_groups=accepted,
         mini_batch_size=mini_batch_size,
