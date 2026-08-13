@@ -27,11 +27,7 @@ TRAINING_METRICS_PATH = Path("Q2_skyrl_metrics")
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _context_payload(records: list[TraceRecord]) -> dict[str, dict[str, float | int | None]]:
-    return {label: asdict(summary) for label, summary in context_summary(records).items()}
+    path.write_text(json.dumps(value, default=asdict, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _run_training_metrics(training_log_dir: Path, output_dir: Path) -> None:
@@ -48,7 +44,7 @@ def _run_training_metrics(training_log_dir: Path, output_dir: Path) -> None:
 def _write_index(
     output_dir: Path,
     comparison: MatchedRewardStatistics | None,
-    include_training_metrics: bool,
+    training_log_dir: Path | None,
 ) -> Path:
     lines = ["# RL Behavioral Analysis", "", "## Q1", ""]
     if comparison is None:
@@ -58,7 +54,7 @@ def _write_index(
     else:
         lines.append(f"Matched evaluation tasks: {comparison.common_task_count}.")
     lines += ["", "## Q2", "", f"- [Temporal rollout summary]({TEMPORAL_SUMMARY_PATH})"]
-    if include_training_metrics:
+    if training_log_dir is not None:
         lines.append(f"- [Training metrics]({TRAINING_METRICS_PATH}/)")
     lines += ["", "## Q3", ""]
     if comparison is None:
@@ -92,31 +88,30 @@ def analyze_local_run(
     output_dir.mkdir(parents=True, exist_ok=True)
     rollouts = load_trace_records(rollout_dir)
     temporal = temporal_summary(rollouts, bin_hours)
-    _write_json(output_dir / TEMPORAL_SUMMARY_PATH, asdict(temporal))
-    _write_json(output_dir / ROLLOUT_CONTEXT_PATH, _context_payload(rollouts))
+    _write_json(output_dir / TEMPORAL_SUMMARY_PATH, temporal)
+    _write_json(output_dir / ROLLOUT_CONTEXT_PATH, context_summary(rollouts))
 
     comparison = None
     if baseline_dir is not None and post_dir is not None:
         baseline = load_trace_records(baseline_dir)
         post = load_trace_records(post_dir)
         comparison = matched_reward_statistics(baseline, post)
-        comparison_payload = asdict(comparison)
         _write_json(
             output_dir / COMPARISON_PATH,
-            comparison_payload,
+            comparison,
         )
         _write_json(
             output_dir / OVERLAY_PATH,
             {
-                "rollout_bins": {start: asdict(bin_summary) for start, bin_summary in temporal.bins.items()},
+                "rollout_bins": temporal.bins,
                 "baseline": {"mean_reward": mean_reward(baseline)},
                 "post": {"mean_reward": mean_reward(post)},
-                "comparison": comparison_payload,
+                "comparison": comparison,
             },
         )
         _write_json(
             output_dir / EVALUATION_CONTEXT_PATH,
-            {"baseline": _context_payload(baseline), "post": _context_payload(post)},
+            {"baseline": context_summary(baseline), "post": context_summary(post)},
         )
     if training_log_dir is not None:
         _run_training_metrics(training_log_dir, output_dir / TRAINING_METRICS_PATH)
@@ -129,4 +124,4 @@ def analyze_local_run(
         "bin_hours": bin_hours,
     }
     _write_json(output_dir / "pipeline_plan.json", plan)
-    return _write_index(output_dir, comparison, training_log_dir is not None)
+    return _write_index(output_dir, comparison, training_log_dir)

@@ -20,8 +20,8 @@ and aggregate matched replicates by task instead of overwriting them.
 
 ## Results
 
-The new regression tests fail because Harbor rewards, trajectories, structured task IDs, and replicate-aware
-statistics are not implemented. After normalization, the reported live corpus loads 208/208 scored trials with
+The regression tests initially failed because Harbor rewards, trajectories, structured task IDs, and
+replicate-aware statistics were not implemented. After normalization, the reported live corpus loads 208/208 scored trials with
 reward sum 110, mean reward 0.528846, and non-empty turn, peak-context, and cumulative-usage fields for every
 trial. The 139-test infra suite passes.
 

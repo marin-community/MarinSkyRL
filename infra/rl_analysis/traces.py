@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from infra.harbor_results import (
+from ..harbor_results import (
     HARBOR_TRAJECTORY_PATH,
     MISSING_TOKEN_COUNT,
     HarborResult,
