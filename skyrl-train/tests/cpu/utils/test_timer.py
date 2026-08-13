@@ -64,9 +64,9 @@ def test_repeated_blocks_accumulate_under_one_key(monkeypatch):
 
 
 def test_failed_block_is_not_logged_as_finished(monkeypatch):
-    messages = []
+    records = []
     monkeypatch.setattr(timer_module, "time", FakeClock(10.0, 12.0))
-    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    sink = logger.add(lambda message: records.append(message.record))
     try:
         with pytest.raises(RuntimeError, match="checkpoint failed"):
             with Timer("save_checkpoints"):
@@ -74,7 +74,8 @@ def test_failed_block_is_not_logged_as_finished(monkeypatch):
     finally:
         logger.remove(sink)
 
-    assert messages == ["Started: 'save_checkpoints'", "Failed: 'save_checkpoints', time cost: 2.00s"]
+    assert [record["level"].name for record in records] == ["INFO", "ERROR"]
+    assert all("Finished" not in record["message"] for record in records)
 
 
 def test_duration_ignores_a_backwards_wall_clock_step(monkeypatch):

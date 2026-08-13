@@ -14,7 +14,8 @@ model and optimizer, save, then restore rollout residency in a `finally` block.
 
 ## Changes to make
 
-Add a trainer checkpoint boundary that manages colocated residency and use it for periodic and final saves. Add
+Add a trainer checkpoint boundary that manages colocated residency for periodic saves. Final saves already run after
+the inference engines sleep and the policy is backloaded. Add
 regression coverage for successful and failed saves, failed timer reporting, and an empty latest-resume prefix.
 
 ## Results

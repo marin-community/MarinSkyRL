@@ -419,11 +419,17 @@ class RayPPOTrainer:
             await asyncio.to_thread(self.save_checkpoints)
         finally:
             try:
-                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=True)
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
             finally:
-                await self.inference_engine_client.wake_up(tags=["weights"])
-                ray.get(self.sync_policy_weights_to_inference_engines())
-                await self.inference_engine_client.wake_up(tags=["kv_cache"])
+                await self._sync_weights_and_restore_rollout_residency()
+
+    async def _sync_weights_and_restore_rollout_residency(self) -> None:
+        await self.inference_engine_client.wake_up(tags=["weights"])
+        with Timer("sync_weights", self.all_timings):
+            ray.get(self.sync_policy_weights_to_inference_engines())
+        with Timer("offload_policy_model_to_cpu"):
+            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+        await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
     async def _train_loop(self):
         """
@@ -460,13 +466,10 @@ class RayPPOTrainer:
 
         if self.colocate_all:
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            await self.inference_engine_client.wake_up(tags=["weights"])
-        with Timer("sync_weights"):
-            ray.get(self.sync_policy_weights_to_inference_engines())
-        if self.colocate_all:
-            with Timer("offload_policy_model_to_cpu"):
-                self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-            await self.inference_engine_client.wake_up(tags=["kv_cache"])
+            await self._sync_weights_and_restore_rollout_residency()
+        else:
+            with Timer("sync_weights"):
+                ray.get(self.sync_policy_weights_to_inference_engines())
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -595,13 +598,10 @@ class RayPPOTrainer:
                     # 5. sync weights to inference engines (must happen before callbacks)
                     if self.colocate_all:
                         self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                        await self.inference_engine_client.wake_up(tags=["weights"])
-                    with Timer("sync_weights", self.all_timings):
-                        ray.get(self.sync_policy_weights_to_inference_engines())
-                    if self.colocate_all:
-                        with Timer("offload_policy_model_to_cpu"):
-                            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-                        await self.inference_engine_client.wake_up(tags=["kv_cache"])
+                        await self._sync_weights_and_restore_rollout_residency()
+                    else:
+                        with Timer("sync_weights", self.all_timings):
+                            ray.get(self.sync_policy_weights_to_inference_engines())
 
                 # 6. Log status and update metrics
                 logger.info(status)

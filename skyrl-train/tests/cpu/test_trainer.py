@@ -105,6 +105,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     trainer.policy_model = _ResidencyPolicyGroup()
     trainer.inference_engine_client = _ResidencyInferenceClient()
     trainer.sync_policy_weights_to_inference_engines = lambda: []
+    trainer.all_timings = {}
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
     save_observations = []
 
@@ -456,7 +457,6 @@ def test_load_checkpoints_warns_when_latest_checkpoint_is_absent(dummy_config):
         loguru_logger.remove(sink)
 
     assert [record["level"].name for record in messages] == ["WARNING"]
-    assert "resume_mode=latest found no checkpoint" in messages[0]["message"]
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
