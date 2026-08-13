@@ -26,10 +26,6 @@ backloads both model and optimizer around periodic colocated saves and restores 
 Because the inference sleep releases both weights and KV cache, restoration also re-synchronizes policy weights before
 waking the KV cache.
 
-The focused trainer regressions and the complete timer test file pass on the CPU profile. The full `test_trainer.py`
-file still has the existing `test_ppo_train_batch_calculations` fixture failure because its inline algorithm config
-omits the required `batch_invariant` key; this change does not touch that worker initialization path.
-
 ## Future work
 
 - [ ] Run an on-GPU Megatron checkpoint smoke test when an idle allocation is available.

@@ -431,6 +431,14 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
+    async def _sync_policy_for_rollouts(self) -> None:
+        if self.colocate_all:
+            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            await self._sync_weights_and_restore_rollout_residency()
+        else:
+            with Timer("sync_weights", self.all_timings):
+                ray.get(self.sync_policy_weights_to_inference_engines())
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper generator lifecycle management.
@@ -464,12 +472,7 @@ class RayPPOTrainer:
                 await self._handle_resume_at_max_steps()
                 return
 
-        if self.colocate_all:
-            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            await self._sync_weights_and_restore_rollout_residency()
-        else:
-            with Timer("sync_weights"):
-                ray.get(self.sync_policy_weights_to_inference_engines())
+        await self._sync_policy_for_rollouts()
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -596,12 +599,7 @@ class RayPPOTrainer:
                         status = self.train_critic_and_policy(training_input)
 
                     # 5. sync weights to inference engines (must happen before callbacks)
-                    if self.colocate_all:
-                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                        await self._sync_weights_and_restore_rollout_residency()
-                    else:
-                        with Timer("sync_weights", self.all_timings):
-                            ray.get(self.sync_policy_weights_to_inference_engines())
+                    await self._sync_policy_for_rollouts()
 
                 # 6. Log status and update metrics
                 logger.info(status)
