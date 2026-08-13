@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .statistics import (
-    comparison_validity,
     context_summary,
-    matched_reward_delta,
     matched_reward_statistics,
     temporal_summary,
 )
@@ -54,13 +53,19 @@ def analyze_local_run(
     if baseline_dir is not None and post_dir is not None:
         baseline = load_trace_records(baseline_dir)
         post = load_trace_records(post_dir)
-        validity = comparison_validity(baseline, post)
+        comparison = matched_reward_statistics(baseline, post)
+        validity = {
+            "common_task_count": comparison.common_task_count,
+            "baseline_trial_count": comparison.baseline_trial_count,
+            "post_trial_count": comparison.post_trial_count,
+            "invalid_for_comparison": comparison.invalid_for_comparison,
+        }
         _write_json(
             output_dir / "Q1_behavioral_delta" / "validity.json",
             {
                 **validity,
-                "mean_reward_delta": matched_reward_delta(baseline, post),
-                **matched_reward_statistics(baseline, post),
+                "mean_reward_delta": comparison.task_weighted_mean_reward_delta,
+                **asdict(comparison),
             },
         )
         _write_json(

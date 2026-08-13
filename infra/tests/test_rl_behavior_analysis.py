@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from infra.rl_analysis.pipeline import analyze_local_run
-from infra.rl_analysis.statistics import matched_reward_statistics
+from infra.rl_analysis.statistics import MatchedRewardStatistics, matched_reward_statistics
 from infra.rl_analysis.traces import TraceRecord, load_trace_records
 
 
@@ -85,11 +85,10 @@ def test_load_trace_records_joins_current_harbor_trial_artifacts(tmp_path: Path)
     assert record.task_id == "terminal-bench/sanitize-git-repo"
     assert record.reward == 0.0
     assert record.turns == 3
-    assert record.input_tokens == 65_000
-    assert record.total_input_tokens == 98_024
+    assert record.peak_prompt_tokens == 65_000
+    assert record.cumulative_input_tokens == 98_024
     assert record.summarization_count == 2
     assert record.error_type == "AgentTimeoutError"
-    assert record.source_path and record.source_path.endswith("trial-1/result.json")
 
 
 def test_load_trace_records_normalizes_structured_harbor_task_id(tmp_path: Path) -> None:
@@ -128,13 +127,7 @@ def test_matched_reward_statistics_preserves_replicates() -> None:
         _record("task-b", 0.0),
     ]
 
-    assert matched_reward_statistics(before, after) == {
-        "common_task_count": 2,
-        "baseline_trial_count": 3,
-        "post_trial_count": 3,
-        "task_weighted_mean_reward_delta": 0.25,
-        "trial_weighted_mean_reward_delta": 1 / 3,
-    }
+    assert matched_reward_statistics(before, after) == MatchedRewardStatistics(2, 3, 3, 0.25, 1 / 3)
 
 
 def _record(task_id: str, reward: float) -> TraceRecord:

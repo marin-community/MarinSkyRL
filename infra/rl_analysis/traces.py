@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+HARBOR_AGGREGATE_TRIAL_COUNT_KEY = "n_total_trials"
+
 
 @dataclass(frozen=True)
 class TraceRecord:
@@ -17,11 +19,18 @@ class TraceRecord:
     reward: float | None
     timestamp: datetime | None
     turns: int
-    input_tokens: int | None
+    peak_prompt_tokens: int | None
     error_type: str | None
-    total_input_tokens: int | None = None
+    cumulative_input_tokens: int | None = None
     summarization_count: int | None = None
-    source_path: str | None = None
+
+
+@dataclass(frozen=True)
+class TrajectoryFields:
+    """Analysis fields derived from one ATIF trajectory."""
+
+    agent_turns: int
+    peak_prompt_tokens: int | None
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -70,20 +79,20 @@ def _task_id(record: dict[str, Any], fallback_task_id: str) -> str:
     return str(task_id or fallback_task_id)
 
 
-def _harbor_reward(record: dict[str, Any]) -> Any:
+def _reward(record: dict[str, Any]) -> Any:
     verifier_result = record.get("verifier_result")
-    if not isinstance(verifier_result, dict):
-        return None
-    rewards = verifier_result.get("rewards")
-    return rewards.get("reward") if isinstance(rewards, dict) else None
+    if isinstance(verifier_result, dict):
+        rewards = verifier_result.get("rewards")
+        return rewards.get("reward") if isinstance(rewards, dict) else None
+    return _nested_value(record, "reward")
 
 
-def _trajectory_fields(trajectory: dict[str, Any] | None) -> tuple[int, int | None]:
+def _trajectory_fields(trajectory: dict[str, Any] | None) -> TrajectoryFields:
     if trajectory is None:
-        return 0, None
+        return TrajectoryFields(0, None)
     steps = trajectory.get("steps")
     if not isinstance(steps, list):
-        return 0, None
+        return TrajectoryFields(0, None)
     agent_steps = [step for step in steps if isinstance(step, dict) and step.get("source") == "agent"]
     prompt_tokens = []
     for step in agent_steps:
@@ -91,14 +100,13 @@ def _trajectory_fields(trajectory: dict[str, Any] | None) -> tuple[int, int | No
         value = _number(metrics.get("prompt_tokens")) if isinstance(metrics, dict) else None
         if value is not None:
             prompt_tokens.append(int(value))
-    return len(agent_steps), max(prompt_tokens, default=None)
+    return TrajectoryFields(len(agent_steps), max(prompt_tokens, default=None))
 
 
 def trace_record(
     record: dict[str, Any],
     fallback_task_id: str,
     trajectory: dict[str, Any] | None = None,
-    source_path: str | None = None,
 ) -> TraceRecord:
     """Normalize one Harbor/SkyRL result mapping into analysis fields."""
     task_id = _task_id(record, fallback_task_id)
@@ -108,31 +116,32 @@ def trace_record(
         turns = turns or len(steps)
     else:
         turns = int(_number(record.get("turns")) or 0)
-    trajectory_turns, peak_prompt_tokens = _trajectory_fields(trajectory)
-    if trajectory_turns:
-        turns = trajectory_turns
+    trajectory_fields = _trajectory_fields(trajectory)
+    if trajectory_fields.agent_turns:
+        turns = trajectory_fields.agent_turns
     timestamp = _parse_timestamp(record.get("started_at") or record.get("timestamp") or record.get("date"))
     exception_info = record.get("exception_info")
     harbor_error = exception_info.get("exception_type") if isinstance(exception_info, dict) else None
     error = harbor_error or _nested_value(record, "error_type") or record.get("error")
     agent_result = record.get("agent_result")
-    total_input_tokens = None
+    cumulative_input_tokens = None
     summarization_count = None
     if isinstance(agent_result, dict):
-        total_input_tokens = int(_number(agent_result.get("n_input_tokens")) or 0) or None
+        cumulative_input_tokens = int(_number(agent_result.get("n_input_tokens")) or 0) or None
         metadata = agent_result.get("metadata")
         if isinstance(metadata, dict):
             summarization_count = int(_number(metadata.get("summarization_count")) or 0)
     return TraceRecord(
         task_id=task_id,
-        reward=_number(_harbor_reward(record) if "verifier_result" in record else _nested_value(record, "reward")),
+        reward=_number(_reward(record)),
         timestamp=timestamp,
         turns=turns,
-        input_tokens=peak_prompt_tokens or int(_number(record.get("input_tokens")) or 0) or None,
+        peak_prompt_tokens=(
+            trajectory_fields.peak_prompt_tokens or int(_number(record.get("input_tokens")) or 0) or None
+        ),
         error_type=str(error) if error else None,
-        total_input_tokens=total_input_tokens,
+        cumulative_input_tokens=cumulative_input_tokens,
         summarization_count=summarization_count,
-        source_path=source_path,
     )
 
 
@@ -163,9 +172,9 @@ def load_trace_records(source: Path) -> list[TraceRecord]:
             if trajectory_path.is_file():
                 payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
                 trajectory = payload if isinstance(payload, dict) else None
-            if "n_total_trials" in mapping and not trajectory_path.is_file():
+            if HARBOR_AGGREGATE_TRIAL_COUNT_KEY in mapping and not trajectory_path.is_file():
                 continue
-            records.append(trace_record(mapping, path.parent.name, trajectory, str(path)))
+            records.append(trace_record(mapping, path.parent.name, trajectory))
     if paths and not any(record.reward is not None for record in records):
         raise ValueError(f"No scored trace records found in non-empty source {source}")
     return records
