@@ -138,6 +138,31 @@ def _result_mappings(path: Path) -> Iterator[dict[str, Any]]:
         yield from (item for item in payload if isinstance(item, dict))
 
 
+def _source_paths(source: Path) -> list[Path]:
+    if source.is_file():
+        return [source]
+    result_paths = sorted(source.rglob("result.json"))
+    return result_paths or sorted(source.rglob("*.jsonl"))
+
+
+def _trajectory_fields_for_result(path: Path) -> tuple[Path, TrajectoryFields]:
+    trajectory_path = path.parent / HARBOR_TRAJECTORY_PATH
+    if not trajectory_path.is_file():
+        return trajectory_path, TrajectoryFields(0, None)
+    payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in Harbor trajectory {trajectory_path}")
+    return trajectory_path, _trajectory_fields(payload)
+
+
+def _records_from_path(path: Path) -> Iterator[TraceRecord]:
+    trajectory_path, trajectory_fields = _trajectory_fields_for_result(path)
+    for mapping in _result_mappings(path):
+        if HARBOR_AGGREGATE_TRIAL_COUNT_KEY in mapping and not trajectory_path.is_file():
+            continue
+        yield trace_record(mapping, path.parent.name, trajectory_fields)
+
+
 def load_trace_records(source: Path) -> list[TraceRecord]:
     """Load JSON/JSONL traces, joining Harbor trajectories and skipping aggregate-only results.
 
@@ -145,22 +170,8 @@ def load_trace_records(source: Path) -> list[TraceRecord]:
     produce an empty analysis.
     """
     source = source.expanduser().resolve()
-    paths = [source] if source.is_file() else sorted(source.rglob("result.json"))
-    if not paths and source.is_dir():
-        paths = sorted(source.rglob("*.jsonl"))
-    records: list[TraceRecord] = []
-    for path in paths:
-        for mapping in _result_mappings(path):
-            trajectory_path = path.parent / HARBOR_TRAJECTORY_PATH
-            trajectory_fields = TrajectoryFields(0, None)
-            if trajectory_path.is_file():
-                payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
-                if not isinstance(payload, dict):
-                    raise ValueError(f"Expected a JSON object in Harbor trajectory {trajectory_path}")
-                trajectory_fields = _trajectory_fields(payload)
-            if HARBOR_AGGREGATE_TRIAL_COUNT_KEY in mapping and not trajectory_path.is_file():
-                continue
-            records.append(trace_record(mapping, path.parent.name, trajectory_fields))
+    paths = _source_paths(source)
+    records = [record for path in paths for record in _records_from_path(path)]
     if paths and not any(record.reward is not None for record in records):
         raise ValueError(f"No scored trace records found in non-empty source {source}")
     return records

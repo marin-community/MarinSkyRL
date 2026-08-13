@@ -196,14 +196,7 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
     }
     assert temporal["bins"]["2026-07-30T00:00:00+00:00"]["mean_reward"] == 0.5
     assert temporal["bins"]["2026-07-30T04:00:00+00:00"]["mean_turns"] == 4.0
-    assert overlay["comparison"] == {
-        "matched_baseline_trial_count": 0,
-        "common_task_count": 0,
-        "invalid_for_comparison": True,
-        "matched_post_trial_count": 0,
-        "task_weighted_mean_reward_delta": None,
-        "trial_weighted_mean_reward_delta": None,
-    }
+    assert overlay["comparison"] == comparison
     assert evaluation_context["baseline"]["unknown"]["mean_reward"] == 1.0
     assert "invalid for before/after conclusions" in index
 
