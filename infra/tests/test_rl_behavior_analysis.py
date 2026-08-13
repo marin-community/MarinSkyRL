@@ -91,6 +91,32 @@ def test_load_trace_records_joins_current_harbor_trial_artifacts(tmp_path: Path)
     assert record.error_type == "AgentTimeoutError"
 
 
+def test_load_trace_records_excludes_copied_context_steps(tmp_path: Path) -> None:
+    _write_harbor_trial(
+        tmp_path,
+        "trial-1",
+        task_name="task",
+        task_id={"org": "org", "name": "task", "ref": "main"},
+        reward=1.0,
+        prompt_tokens=[100],
+    )
+    trajectory_path = tmp_path / "harbor_jobs" / "job" / "trial-1" / "agent" / "trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["steps"].append(
+        {
+            "source": "agent",
+            "is_copied_context": True,
+            "metrics": {"prompt_tokens": 10_000, "completion_tokens": 1},
+        }
+    )
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+
+    [record] = load_trace_records(tmp_path)
+
+    assert record.turns == 1
+    assert record.peak_prompt_tokens == 100
+
+
 def test_load_trace_records_normalizes_structured_harbor_task_id(tmp_path: Path) -> None:
     _write_harbor_trial(
         tmp_path,
@@ -164,7 +190,6 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
         "baseline_trial_count": 0,
         "common_task_count": 0,
         "invalid_for_comparison": True,
-        "mean_reward_delta": None,
         "post_trial_count": 0,
         "task_weighted_mean_reward_delta": None,
         "trial_weighted_mean_reward_delta": None,
@@ -176,6 +201,8 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
         "common_task_count": 0,
         "invalid_for_comparison": True,
         "post_trial_count": 0,
+        "task_weighted_mean_reward_delta": None,
+        "trial_weighted_mean_reward_delta": None,
     }
     assert evaluation_context["baseline"]["0+"]["mean_reward"] == 1.0
     assert "invalid for before/after conclusions" in index
@@ -204,7 +231,6 @@ def test_analyze_local_run_reports_delta_for_matched_evaluations(tmp_path: Path)
         "baseline_trial_count": 1,
         "common_task_count": 1,
         "invalid_for_comparison": False,
-        "mean_reward_delta": 0.5,
         "post_trial_count": 1,
         "task_weighted_mean_reward_delta": 0.5,
         "trial_weighted_mean_reward_delta": 0.5,

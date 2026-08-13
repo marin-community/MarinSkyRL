@@ -9,11 +9,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .statistics import (
+    MatchedRewardStatistics,
     context_summary,
     matched_reward_statistics,
+    mean_reward,
     temporal_summary,
 )
-from .traces import TraceRecord, load_trace_records
+from .traces import load_trace_records
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -30,6 +32,39 @@ def _run_training_metrics(training_log_dir: Path, output_dir: Path) -> None:
         str(output_dir),
     ]
     subprocess.run(command, check=True)
+
+
+def _write_index(
+    output_dir: Path,
+    comparison: MatchedRewardStatistics | None,
+    include_training_metrics: bool,
+) -> Path:
+    lines = ["# RL Behavioral Analysis", "", "## Q1", ""]
+    if comparison is None:
+        lines.append("No baseline/post evaluation pair was provided.")
+    elif comparison.invalid_for_comparison:
+        lines.append("The evaluation task sets are invalid for before/after conclusions: zero common tasks.")
+    else:
+        lines.append(f"Matched evaluation tasks: {comparison.common_task_count}.")
+    lines += ["", "## Q2", "", "- [Temporal rollout summary](Q2_temporal/temporal_summary.json)"]
+    if include_training_metrics:
+        lines.append("- [Training metrics](Q2_skyrl_metrics/)")
+    lines += ["", "## Q3", ""]
+    if comparison is None:
+        lines.append("No baseline/post evaluation pair was provided.")
+    else:
+        lines.append("- [Evaluation overlay](Q3_temporal_overlay/overlay.json)")
+    lines += [
+        "",
+        "## Q4",
+        "",
+        "- [Rollout context summary](Q4_solve_rate_by_context/rollout_context_summary.json)",
+    ]
+    if comparison is not None:
+        lines.append("- [Evaluation context summary](Q4_solve_rate_by_context/evaluation_context_summary.json)")
+    index_path = output_dir / "INDEX.md"
+    index_path.write_text("\n".join([*lines, ""]), encoding="utf-8")
+    return index_path
 
 
 def analyze_local_run(
@@ -49,32 +84,23 @@ def analyze_local_run(
     _write_json(output_dir / "Q2_temporal" / "temporal_summary.json", temporal)
     _write_json(output_dir / "Q4_solve_rate_by_context" / "rollout_context_summary.json", context_summary(rollouts))
 
-    validity: dict[str, int | bool] | None = None
+    comparison = None
     if baseline_dir is not None and post_dir is not None:
         baseline = load_trace_records(baseline_dir)
         post = load_trace_records(post_dir)
         comparison = matched_reward_statistics(baseline, post)
-        validity = {
-            "common_task_count": comparison.common_task_count,
-            "baseline_trial_count": comparison.baseline_trial_count,
-            "post_trial_count": comparison.post_trial_count,
-            "invalid_for_comparison": comparison.invalid_for_comparison,
-        }
+        comparison_payload = {**asdict(comparison), "invalid_for_comparison": comparison.invalid_for_comparison}
         _write_json(
             output_dir / "Q1_behavioral_delta" / "validity.json",
-            {
-                **validity,
-                "mean_reward_delta": comparison.task_weighted_mean_reward_delta,
-                **asdict(comparison),
-            },
+            comparison_payload,
         )
         _write_json(
             output_dir / "Q3_temporal_overlay" / "overlay.json",
             {
                 "rollout_bins": temporal["bins"],
-                "baseline": {"mean_reward": _mean_reward(baseline)},
-                "post": {"mean_reward": _mean_reward(post)},
-                "validity": validity,
+                "baseline": {"mean_reward": mean_reward(baseline)},
+                "post": {"mean_reward": mean_reward(post)},
+                "validity": comparison_payload,
             },
         )
         _write_json(
@@ -92,40 +118,4 @@ def analyze_local_run(
         "bin_hours": bin_hours,
     }
     _write_json(output_dir / "pipeline_plan.json", plan)
-    index_lines = ["# RL Behavioral Analysis", "", "## Q1", ""]
-    if validity is None:
-        index_lines.append("No baseline/post evaluation pair was provided.")
-    elif validity["invalid_for_comparison"]:
-        index_lines.append("The evaluation task sets are invalid for before/after conclusions: zero common tasks.")
-    else:
-        index_lines.append(f"Matched evaluation tasks: {validity['common_task_count']}.")
-    index_lines += [
-        "",
-        "## Q2",
-        "",
-        "- [Temporal rollout summary](Q2_temporal/temporal_summary.json)",
-    ]
-    if training_log_dir is not None:
-        index_lines.append("- [Training metrics](Q2_skyrl_metrics/)")
-    index_lines += ["", "## Q3", ""]
-    if validity is None:
-        index_lines.append("No baseline/post evaluation pair was provided.")
-    else:
-        index_lines.append("- [Evaluation overlay](Q3_temporal_overlay/overlay.json)")
-    index_lines += [
-        "",
-        "## Q4",
-        "",
-        "- [Rollout context summary](Q4_solve_rate_by_context/rollout_context_summary.json)",
-    ]
-    if validity is not None:
-        index_lines.append("- [Evaluation context summary](Q4_solve_rate_by_context/evaluation_context_summary.json)")
-    index_lines.append("")
-    index_path = output_dir / "INDEX.md"
-    index_path.write_text("\n".join(index_lines), encoding="utf-8")
-    return index_path
-
-
-def _mean_reward(records: list[TraceRecord]) -> float | None:
-    rewards = [record.reward for record in records if record.reward is not None]
-    return sum(rewards) / len(rewards) if rewards else None
+    return _write_index(output_dir, comparison, training_log_dir is not None)

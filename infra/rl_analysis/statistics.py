@@ -5,10 +5,16 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from statistics import fmean
+from typing import Sequence
 
 from .traces import TraceRecord
 
 CONTEXT_BOUNDS = (0, 16_384, 32_768, 65_536, 131_072)
+
+
+def _optional_mean(values: Sequence[float | int]) -> float | None:
+    return fmean(values) if values else None
 
 
 @dataclass(frozen=True)
@@ -39,8 +45,7 @@ def matched_reward_statistics(before: list[TraceRecord], after: list[TraceRecord
             after_by_task[record.task_id].append(record.reward)
     common_tasks = sorted(before_by_task.keys() & after_by_task.keys())
     deltas = [
-        sum(after_by_task[task_id]) / len(after_by_task[task_id])
-        - sum(before_by_task[task_id]) / len(before_by_task[task_id])
+        fmean(after_by_task[task_id]) - fmean(before_by_task[task_id])
         for task_id in common_tasks
     ]
     before_trials = [reward for task_id in common_tasks for reward in before_by_task[task_id]]
@@ -49,13 +54,19 @@ def matched_reward_statistics(before: list[TraceRecord], after: list[TraceRecord
         common_task_count=len(common_tasks),
         baseline_trial_count=len(before_trials),
         post_trial_count=len(after_trials),
-        task_weighted_mean_reward_delta=sum(deltas) / len(deltas) if deltas else None,
+        task_weighted_mean_reward_delta=fmean(deltas) if deltas else None,
         trial_weighted_mean_reward_delta=(
-            sum(after_trials) / len(after_trials) - sum(before_trials) / len(before_trials)
+            fmean(after_trials) - fmean(before_trials)
             if before_trials and after_trials
             else None
         ),
     )
+
+
+def mean_reward(records: list[TraceRecord]) -> float | None:
+    """Return the mean over scored records, or ``None`` when none are scored."""
+    rewards = [record.reward for record in records if record.reward is not None]
+    return _optional_mean(rewards)
 
 
 def temporal_summary(
@@ -83,13 +94,13 @@ def temporal_summary(
         ]
         result[start.isoformat()] = {
             "count": len(members),
-            "mean_reward": sum(rewards) / len(rewards) if rewards else None,
-            "mean_turns": sum(member.turns for member in members) / len(members),
+            "mean_reward": _optional_mean(rewards),
+            "mean_turns": fmean(member.turns for member in members),
             "mean_cumulative_input_tokens": (
-                sum(cumulative_input_tokens) / len(cumulative_input_tokens) if cumulative_input_tokens else None
+                _optional_mean(cumulative_input_tokens)
             ),
             "mean_summarization_count": (
-                sum(summarization_counts) / len(summarization_counts) if summarization_counts else None
+                _optional_mean(summarization_counts)
             ),
             "error_count": sum(member.error_type is not None for member in members),
         }
@@ -108,7 +119,7 @@ def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | i
         rewards = [member.reward for member in members if member.reward is not None]
         result[label] = {
             "count": len(members),
-            "mean_reward": sum(rewards) / len(rewards) if rewards else None,
+            "mean_reward": _optional_mean(rewards),
             "error_rate": sum(member.error_type is not None for member in members) / len(members),
         }
     return result

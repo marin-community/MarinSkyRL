@@ -8,7 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from infra.rl_cleanup.literal_correlator import trajectory_count_sequence
+
 HARBOR_AGGREGATE_TRIAL_COUNT_KEY = "n_total_trials"
+HARBOR_TRAJECTORY_PATH = Path("agent/trajectory.json")
 
 
 @dataclass(frozen=True)
@@ -79,34 +82,28 @@ def _task_id(record: dict[str, Any], fallback_task_id: str) -> str:
     return str(task_id or fallback_task_id)
 
 
-def _reward(record: dict[str, Any]) -> Any:
+def _reward(record: dict[str, Any]) -> float | str | None:
     verifier_result = record.get("verifier_result")
     if isinstance(verifier_result, dict):
         rewards = verifier_result.get("rewards")
-        return rewards.get("reward") if isinstance(rewards, dict) else None
-    return _nested_value(record, "reward")
+        value = rewards.get("reward") if isinstance(rewards, dict) else None
+    else:
+        value = _nested_value(record, "reward")
+    return value if isinstance(value, (float, int, str)) and not isinstance(value, bool) else None
 
 
 def _trajectory_fields(trajectory: dict[str, Any] | None) -> TrajectoryFields:
     if trajectory is None:
         return TrajectoryFields(0, None)
-    steps = trajectory.get("steps")
-    if not isinstance(steps, list):
-        return TrajectoryFields(0, None)
-    agent_steps = [step for step in steps if isinstance(step, dict) and step.get("source") == "agent"]
-    prompt_tokens = []
-    for step in agent_steps:
-        metrics = step.get("metrics")
-        value = _number(metrics.get("prompt_tokens")) if isinstance(metrics, dict) else None
-        if value is not None:
-            prompt_tokens.append(int(value))
-    return TrajectoryFields(len(agent_steps), max(prompt_tokens, default=None))
+    token_counts = trajectory_count_sequence(trajectory)
+    prompt_tokens = [prompt_tokens for prompt_tokens, _ in token_counts if prompt_tokens >= 0]
+    return TrajectoryFields(len(token_counts), max(prompt_tokens, default=None))
 
 
 def trace_record(
     record: dict[str, Any],
     fallback_task_id: str,
-    trajectory: dict[str, Any] | None = None,
+    trajectory_fields: TrajectoryFields | None = None,
 ) -> TraceRecord:
     """Normalize one Harbor/SkyRL result mapping into analysis fields."""
     task_id = _task_id(record, fallback_task_id)
@@ -116,9 +113,9 @@ def trace_record(
         turns = turns or len(steps)
     else:
         turns = int(_number(record.get("turns")) or 0)
-    trajectory_fields = _trajectory_fields(trajectory)
-    if trajectory_fields.agent_turns:
-        turns = trajectory_fields.agent_turns
+    parsed_trajectory = trajectory_fields or TrajectoryFields(0, None)
+    if parsed_trajectory.agent_turns:
+        turns = parsed_trajectory.agent_turns
     timestamp = _parse_timestamp(record.get("started_at") or record.get("timestamp") or record.get("date"))
     exception_info = record.get("exception_info")
     harbor_error = exception_info.get("exception_type") if isinstance(exception_info, dict) else None
@@ -137,7 +134,7 @@ def trace_record(
         timestamp=timestamp,
         turns=turns,
         peak_prompt_tokens=(
-            trajectory_fields.peak_prompt_tokens or int(_number(record.get("input_tokens")) or 0) or None
+            parsed_trajectory.peak_prompt_tokens or int(_number(record.get("input_tokens")) or 0) or None
         ),
         error_type=str(error) if error else None,
         cumulative_input_tokens=cumulative_input_tokens,
@@ -159,7 +156,11 @@ def _result_mappings(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def load_trace_records(source: Path) -> list[TraceRecord]:
-    """Load JSON/JSONL trace results from a local file or artifact directory."""
+    """Load scored JSON/JSONL traces, joining Harbor trajectories and skipping job aggregates.
+
+    A non-empty source with no scored records is rejected so a schema mismatch cannot silently
+    produce an empty analysis.
+    """
     source = source.expanduser().resolve()
     paths = [source] if source.is_file() else sorted(source.rglob("result.json"))
     if not paths and source.is_dir():
@@ -167,14 +168,16 @@ def load_trace_records(source: Path) -> list[TraceRecord]:
     records: list[TraceRecord] = []
     for path in paths:
         for mapping in _result_mappings(path):
-            trajectory_path = path.parent / "agent" / "trajectory.json"
-            trajectory = None
+            trajectory_path = path.parent / HARBOR_TRAJECTORY_PATH
+            trajectory_fields = None
             if trajectory_path.is_file():
                 payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
-                trajectory = payload if isinstance(payload, dict) else None
+                if not isinstance(payload, dict):
+                    raise ValueError(f"Expected a JSON object in Harbor trajectory {trajectory_path}")
+                trajectory_fields = _trajectory_fields(payload)
             if HARBOR_AGGREGATE_TRIAL_COUNT_KEY in mapping and not trajectory_path.is_file():
                 continue
-            records.append(trace_record(mapping, path.parent.name, trajectory))
+            records.append(trace_record(mapping, path.parent.name, trajectory_fields))
     if paths and not any(record.reward is not None for record in records):
         raise ValueError(f"No scored trace records found in non-empty source {source}")
     return records
