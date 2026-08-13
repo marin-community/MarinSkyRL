@@ -106,20 +106,19 @@ def _turn_count(record: dict[str, Any], harbor: HarborResult, trajectory: Trajec
 def trace_record(
     record: dict[str, Any],
     fallback_task_id: str,
-    trajectory_fields: TrajectoryFields | None = None,
+    trajectory_fields: TrajectoryFields,
 ) -> TraceRecord:
     """Normalize one Harbor/SkyRL result mapping into analysis fields."""
     task_id = _task_id(record, fallback_task_id)
     harbor = parse_harbor_result(record)
-    parsed_trajectory = trajectory_fields or TrajectoryFields(0, None)
     timestamp = _parse_timestamp(record.get("started_at") or record.get("timestamp") or record.get("date"))
     error = harbor.exception_type or _nested_value(record, "error_type") or record.get("error")
     return TraceRecord(
         task_id=task_id,
         reward=harbor.reward if harbor.reward is not None else _number(_nested_value(record, "reward")),
         timestamp=timestamp,
-        turns=_turn_count(record, harbor, parsed_trajectory),
-        peak_prompt_tokens=parsed_trajectory.peak_prompt_tokens,
+        turns=_turn_count(record, harbor, trajectory_fields),
+        peak_prompt_tokens=trajectory_fields.peak_prompt_tokens,
         error_type=str(error) if error else None,
         cumulative_input_tokens=harbor.n_input_tokens,
         summarization_count=harbor.summarization_count,
@@ -153,7 +152,7 @@ def load_trace_records(source: Path) -> list[TraceRecord]:
     for path in paths:
         for mapping in _result_mappings(path):
             trajectory_path = path.parent / HARBOR_TRAJECTORY_PATH
-            trajectory_fields = None
+            trajectory_fields = TrajectoryFields(0, None)
             if trajectory_path.is_file():
                 payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):

@@ -19,8 +19,8 @@ JSONL file with equivalent result mappings. The output includes:
 
 - `Q1_behavioral_delta/comparison.json`: common task and matched-trial counts,
   task- and trial-weighted reward deltas, and comparison validity;
-- `Q2_temporal/temporal_summary.json`: time-binned rollout reward, turns, and
-  errors;
+- `Q2_temporal/temporal_summary.json`: time-binned rollout reward, turns,
+  errors, cumulative input tokens, and summarization counts;
 - `Q2_skyrl_metrics/`: output from the existing SkyRL metric parser when
   `--training-log-dir` is supplied;
 - `Q3_temporal_overlay/overlay.json`: rollout reward bins, baseline/post reward

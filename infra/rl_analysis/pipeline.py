@@ -88,7 +88,7 @@ def analyze_local_run(
     output_dir.mkdir(parents=True, exist_ok=True)
     rollouts = load_trace_records(rollout_dir)
     temporal = temporal_summary(rollouts, bin_hours)
-    _write_json(output_dir / TEMPORAL_SUMMARY_PATH, temporal)
+    _write_json(output_dir / TEMPORAL_SUMMARY_PATH, asdict(temporal))
     _write_json(output_dir / ROLLOUT_CONTEXT_PATH, context_summary(rollouts))
 
     comparison = None
@@ -104,7 +104,7 @@ def analyze_local_run(
         _write_json(
             output_dir / OVERLAY_PATH,
             {
-                "rollout_bins": temporal["bins"],
+                "rollout_bins": {start: asdict(bin_summary) for start, bin_summary in temporal.bins.items()},
                 "baseline": {"mean_reward": mean_reward(baseline)},
                 "post": {"mean_reward": mean_reward(post)},
                 "comparison": comparison_payload,

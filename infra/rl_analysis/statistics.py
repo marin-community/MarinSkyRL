@@ -44,6 +44,12 @@ class TemporalBin:
 
 
 @dataclass(frozen=True)
+class TemporalSummary:
+    bin_hours: float
+    bins: dict[str, TemporalBin]
+
+
+@dataclass(frozen=True)
 class ContextBin:
     count: int
     mean_reward: float | None
@@ -93,7 +99,7 @@ def mean_reward(records: list[TraceRecord]) -> float | None:
 
 def temporal_summary(
     records: list[TraceRecord], bin_hours: float
-) -> dict[str, dict[str, dict[str, float | int | None]]]:
+) -> TemporalSummary:
     """Aggregate rollout reward, turns, errors, and token usage into UTC time bins."""
     if bin_hours <= 0:
         raise ValueError("bin_hours must be positive")
@@ -105,7 +111,7 @@ def temporal_summary(
         stamp = record.timestamp.astimezone(timezone.utc)
         seconds = int(stamp.timestamp() // width.total_seconds()) * width.total_seconds()
         bins[datetime.fromtimestamp(seconds, tz=timezone.utc)].append(record)
-    result: dict[str, dict[str, float | int | None]] = {}
+    result: dict[str, TemporalBin] = {}
     for start, members in sorted(bins.items()):
         cumulative_input_tokens = [
             member.cumulative_input_tokens for member in members if member.cumulative_input_tokens is not None
@@ -113,17 +119,15 @@ def temporal_summary(
         summarization_counts = [
             member.summarization_count for member in members if member.summarization_count is not None
         ]
-        result[start.isoformat()] = asdict(
-            TemporalBin(
-                count=len(members),
-                mean_reward=mean_reward(members),
-                mean_turns=fmean(member.turns for member in members),
-                mean_cumulative_input_tokens=_optional_mean(cumulative_input_tokens),
-                mean_summarization_count=_optional_mean(summarization_counts),
-                error_count=sum(member.error_type is not None for member in members),
-            )
+        result[start.isoformat()] = TemporalBin(
+            count=len(members),
+            mean_reward=mean_reward(members),
+            mean_turns=fmean(member.turns for member in members),
+            mean_cumulative_input_tokens=_optional_mean(cumulative_input_tokens),
+            mean_summarization_count=_optional_mean(summarization_counts),
+            error_count=sum(member.error_type is not None for member in members),
         )
-    return {"bin_hours": bin_hours, "bins": result}
+    return TemporalSummary(bin_hours=bin_hours, bins=result)
 
 
 def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | int | None]]:
