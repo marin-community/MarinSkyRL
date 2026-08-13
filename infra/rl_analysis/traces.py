@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from infra.harbor_results import HarborResult, parse_harbor_result
 from infra.rl_cleanup.literal_correlator import trajectory_count_sequence
 
 HARBOR_AGGREGATE_TRIAL_COUNT_KEY = "n_total_trials"
@@ -82,22 +83,26 @@ def _task_id(record: dict[str, Any], fallback_task_id: str) -> str:
     return str(task_id or fallback_task_id)
 
 
-def _reward(record: dict[str, Any]) -> float | str | None:
-    verifier_result = record.get("verifier_result")
-    if isinstance(verifier_result, dict):
-        rewards = verifier_result.get("rewards")
-        value = rewards.get("reward") if isinstance(rewards, dict) else None
-    else:
-        value = _nested_value(record, "reward")
-    return value if isinstance(value, (float, int, str)) and not isinstance(value, bool) else None
-
-
 def _trajectory_fields(trajectory: dict[str, Any] | None) -> TrajectoryFields:
     if trajectory is None:
         return TrajectoryFields(0, None)
     token_counts = trajectory_count_sequence(trajectory)
     prompt_tokens = [prompt_tokens for prompt_tokens, _ in token_counts if prompt_tokens >= 0]
     return TrajectoryFields(len(token_counts), max(prompt_tokens, default=None))
+
+
+def _turn_count(record: dict[str, Any], harbor: HarborResult, trajectory: TrajectoryFields) -> int:
+    if trajectory.agent_turns:
+        return trajectory.agent_turns
+    steps = record.get("steps")
+    if isinstance(steps, list):
+        assistant_turns = sum(1 for step in steps if isinstance(step, dict) and step.get("type") == "assistant")
+        return assistant_turns or len(steps)
+    return harbor.n_episodes or int(_number(record.get("turns")) or 0)
+
+
+def _legacy_reward(record: dict[str, Any]) -> float | None:
+    return _number(_nested_value(record, "reward"))
 
 
 def trace_record(
@@ -107,38 +112,19 @@ def trace_record(
 ) -> TraceRecord:
     """Normalize one Harbor/SkyRL result mapping into analysis fields."""
     task_id = _task_id(record, fallback_task_id)
-    steps = record.get("steps")
-    if isinstance(steps, list):
-        turns = sum(1 for step in steps if isinstance(step, dict) and step.get("type") == "assistant")
-        turns = turns or len(steps)
-    else:
-        turns = int(_number(record.get("turns")) or 0)
+    harbor = parse_harbor_result(record)
     parsed_trajectory = trajectory_fields or TrajectoryFields(0, None)
-    if parsed_trajectory.agent_turns:
-        turns = parsed_trajectory.agent_turns
     timestamp = _parse_timestamp(record.get("started_at") or record.get("timestamp") or record.get("date"))
-    exception_info = record.get("exception_info")
-    harbor_error = exception_info.get("exception_type") if isinstance(exception_info, dict) else None
-    error = harbor_error or _nested_value(record, "error_type") or record.get("error")
-    agent_result = record.get("agent_result")
-    cumulative_input_tokens = None
-    summarization_count = None
-    if isinstance(agent_result, dict):
-        cumulative_input_tokens = int(_number(agent_result.get("n_input_tokens")) or 0) or None
-        metadata = agent_result.get("metadata")
-        if isinstance(metadata, dict):
-            summarization_count = int(_number(metadata.get("summarization_count")) or 0)
+    error = harbor.exception_type or _nested_value(record, "error_type") or record.get("error")
     return TraceRecord(
         task_id=task_id,
-        reward=_number(_reward(record)),
+        reward=float(harbor.reward) if harbor.reward is not None else _legacy_reward(record),
         timestamp=timestamp,
-        turns=turns,
-        peak_prompt_tokens=(
-            parsed_trajectory.peak_prompt_tokens or int(_number(record.get("input_tokens")) or 0) or None
-        ),
+        turns=_turn_count(record, harbor, parsed_trajectory),
+        peak_prompt_tokens=parsed_trajectory.peak_prompt_tokens,
         error_type=str(error) if error else None,
-        cumulative_input_tokens=cumulative_input_tokens,
-        summarization_count=summarization_count,
+        cumulative_input_tokens=harbor.n_input_tokens,
+        summarization_count=harbor.summarization_count,
     )
 
 

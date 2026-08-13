@@ -17,6 +17,11 @@ from .statistics import (
 )
 from .traces import load_trace_records
 
+TEMPORAL_SUMMARY_PATH = Path("Q2_temporal/temporal_summary.json")
+OVERLAY_PATH = Path("Q3_temporal_overlay/overlay.json")
+ROLLOUT_CONTEXT_PATH = Path("Q4_solve_rate_by_context/rollout_context_summary.json")
+EVALUATION_CONTEXT_PATH = Path("Q4_solve_rate_by_context/evaluation_context_summary.json")
+
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,22 +51,22 @@ def _write_index(
         lines.append("The evaluation task sets are invalid for before/after conclusions: zero common tasks.")
     else:
         lines.append(f"Matched evaluation tasks: {comparison.common_task_count}.")
-    lines += ["", "## Q2", "", "- [Temporal rollout summary](Q2_temporal/temporal_summary.json)"]
+    lines += ["", "## Q2", "", f"- [Temporal rollout summary]({TEMPORAL_SUMMARY_PATH})"]
     if include_training_metrics:
         lines.append("- [Training metrics](Q2_skyrl_metrics/)")
     lines += ["", "## Q3", ""]
     if comparison is None:
         lines.append("No baseline/post evaluation pair was provided.")
     else:
-        lines.append("- [Evaluation overlay](Q3_temporal_overlay/overlay.json)")
+        lines.append(f"- [Evaluation overlay]({OVERLAY_PATH})")
     lines += [
         "",
         "## Q4",
         "",
-        "- [Rollout context summary](Q4_solve_rate_by_context/rollout_context_summary.json)",
+        f"- [Rollout context summary]({ROLLOUT_CONTEXT_PATH})",
     ]
     if comparison is not None:
-        lines.append("- [Evaluation context summary](Q4_solve_rate_by_context/evaluation_context_summary.json)")
+        lines.append(f"- [Evaluation context summary]({EVALUATION_CONTEXT_PATH})")
     index_path = output_dir / "INDEX.md"
     index_path.write_text("\n".join([*lines, ""]), encoding="utf-8")
     return index_path
@@ -81,8 +86,8 @@ def analyze_local_run(
     output_dir.mkdir(parents=True, exist_ok=True)
     rollouts = load_trace_records(rollout_dir)
     temporal = temporal_summary(rollouts, bin_hours)
-    _write_json(output_dir / "Q2_temporal" / "temporal_summary.json", temporal)
-    _write_json(output_dir / "Q4_solve_rate_by_context" / "rollout_context_summary.json", context_summary(rollouts))
+    _write_json(output_dir / TEMPORAL_SUMMARY_PATH, temporal)
+    _write_json(output_dir / ROLLOUT_CONTEXT_PATH, context_summary(rollouts))
 
     comparison = None
     if baseline_dir is not None and post_dir is not None:
@@ -95,7 +100,7 @@ def analyze_local_run(
             comparison_payload,
         )
         _write_json(
-            output_dir / "Q3_temporal_overlay" / "overlay.json",
+            output_dir / OVERLAY_PATH,
             {
                 "rollout_bins": temporal["bins"],
                 "baseline": {"mean_reward": mean_reward(baseline)},
@@ -104,7 +109,7 @@ def analyze_local_run(
             },
         )
         _write_json(
-            output_dir / "Q4_solve_rate_by_context" / "evaluation_context_summary.json",
+            output_dir / EVALUATION_CONTEXT_PATH,
             {"baseline": context_summary(baseline), "post": context_summary(post)},
         )
     if training_log_dir is not None:

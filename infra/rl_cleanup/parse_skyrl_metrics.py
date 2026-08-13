@@ -40,6 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from infra.harbor_results import parse_harbor_result
 from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 
@@ -509,26 +510,16 @@ def parse_result_files(trace_jobs_dir: Path) -> list[dict[str, Any]]:
             n_skipped += 1
             continue
 
+        harbor_result = parse_harbor_result(data)
         trial = {
-            "task_name": data.get("task_name", ""),
-            "trial_name": data.get("trial_name", ""),
+            "task_name": harbor_result.task_name or "",
+            "trial_name": harbor_result.trial_name or "",
+            "n_episodes": harbor_result.n_episodes,
+            "n_input_tokens": harbor_result.n_input_tokens,
+            "n_output_tokens": harbor_result.n_output_tokens,
+            "exception_type": harbor_result.exception_type,
+            "reward": harbor_result.reward,
         }
-
-        # Turn count from agent metadata
-        agent_result = data.get("agent_result") or {}
-        metadata = agent_result.get("metadata") or {}
-        trial["n_episodes"] = metadata.get("n_episodes")
-        trial["n_input_tokens"] = agent_result.get("n_input_tokens")
-        trial["n_output_tokens"] = agent_result.get("n_output_tokens")
-
-        # Exception info
-        exc_info = data.get("exception_info") or {}
-        trial["exception_type"] = exc_info.get("exception_type")
-
-        # Reward
-        verifier_result = data.get("verifier_result") or {}
-        rewards = verifier_result.get("rewards") or {}
-        trial["reward"] = rewards.get("reward")
 
         # Timing
         trial["trial_duration"] = span_duration(data)

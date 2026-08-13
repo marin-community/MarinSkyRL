@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import fmean
 from typing import Sequence
@@ -30,6 +30,16 @@ class MatchedRewardStatistics:
     @property
     def invalid_for_comparison(self) -> bool:
         return self.common_task_count == 0
+
+
+@dataclass(frozen=True)
+class TemporalBin:
+    count: int
+    mean_reward: float | None
+    mean_turns: float
+    mean_cumulative_input_tokens: float | None
+    mean_summarization_count: float | None
+    error_count: int
 
 
 def matched_reward_statistics(before: list[TraceRecord], after: list[TraceRecord]) -> MatchedRewardStatistics:
@@ -92,18 +102,16 @@ def temporal_summary(
         summarization_counts = [
             member.summarization_count for member in members if member.summarization_count is not None
         ]
-        result[start.isoformat()] = {
-            "count": len(members),
-            "mean_reward": _optional_mean(rewards),
-            "mean_turns": fmean(member.turns for member in members),
-            "mean_cumulative_input_tokens": (
-                _optional_mean(cumulative_input_tokens)
-            ),
-            "mean_summarization_count": (
-                _optional_mean(summarization_counts)
-            ),
-            "error_count": sum(member.error_type is not None for member in members),
-        }
+        result[start.isoformat()] = asdict(
+            TemporalBin(
+                count=len(members),
+                mean_reward=mean_reward(members),
+                mean_turns=fmean(member.turns for member in members),
+                mean_cumulative_input_tokens=_optional_mean(cumulative_input_tokens),
+                mean_summarization_count=_optional_mean(summarization_counts),
+                error_count=sum(member.error_type is not None for member in members),
+            )
+        )
     return {"bin_hours": bin_hours, "bins": result}
 
 
@@ -116,10 +124,9 @@ def context_summary(records: list[TraceRecord]) -> dict[str, dict[str, float | i
         buckets[f"{lower}+"].append(record)
     result: dict[str, dict[str, float | int | None]] = {}
     for label, members in sorted(buckets.items()):
-        rewards = [member.reward for member in members if member.reward is not None]
         result[label] = {
             "count": len(members),
-            "mean_reward": _optional_mean(rewards),
+            "mean_reward": mean_reward(members),
             "error_rate": sum(member.error_type is not None for member in members) / len(members),
         }
     return result
