@@ -268,7 +268,10 @@ class Timer:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         duration = time.monotonic() - self.start_time
-        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
+        if exc_type is None:
+            logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
+        else:
+            logger.opt(depth=1).error(f"Failed: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
@@ -279,7 +282,10 @@ class Timer:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         duration = time.monotonic() - self.start_time
-        logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
+        if exc_type is None:
+            logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {duration:.2f}s")
+        else:
+            logger.opt(depth=1).error(f"Failed: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 

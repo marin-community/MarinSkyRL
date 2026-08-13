@@ -7,6 +7,7 @@ uv run --frozen pytest tests/cpu/utils/test_timer.py
 from collections.abc import Iterable
 
 import pytest
+from loguru import logger
 
 import skyrl_train.utils.utils as timer_module
 from skyrl_train.utils import Timer
@@ -60,6 +61,20 @@ def test_repeated_blocks_accumulate_under_one_key(monkeypatch):
             pass
 
     assert timings == {"generate": 5.0}
+
+
+def test_failed_block_is_not_logged_as_finished(monkeypatch):
+    messages = []
+    monkeypatch.setattr(timer_module, "time", FakeClock(10.0, 12.0))
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        with pytest.raises(RuntimeError, match="checkpoint failed"):
+            with Timer("save_checkpoints"):
+                raise RuntimeError("checkpoint failed")
+    finally:
+        logger.remove(sink)
+
+    assert messages == ["Started: 'save_checkpoints'", "Failed: 'save_checkpoints', time cost: 2.00s"]
 
 
 def test_duration_ignores_a_backwards_wall_clock_step(monkeypatch):

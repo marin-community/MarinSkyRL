@@ -407,6 +407,24 @@ class RayPPOTrainer:
         if self._control.should_save_hf_model:
             await asyncio.to_thread(self.handle_hf_export)
 
+    async def _save_checkpoints_with_residency(self) -> None:
+        """Save a periodic checkpoint while preserving colocated rollout residency."""
+        if not self.colocate_all:
+            await asyncio.to_thread(self.save_checkpoints)
+            return
+
+        await self.inference_engine_client.sleep()
+        try:
+            self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+            await asyncio.to_thread(self.save_checkpoints)
+        finally:
+            try:
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=True)
+            finally:
+                await self.inference_engine_client.wake_up(tags=["weights"])
+                ray.get(self.sync_policy_weights_to_inference_engines())
+                await self.inference_engine_client.wake_up(tags=["kv_cache"])
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper generator lifecycle management.
@@ -613,7 +631,7 @@ class RayPPOTrainer:
                 # Handle checkpoint saving
                 if self._control.should_save:
                     with Timer("save_checkpoints", self.all_timings):
-                        self.save_checkpoints()
+                        await self._save_checkpoints_with_residency()
                     # Call on_save callbacks
                     await self.callback_handler.call_event_async("on_save", step_state, self._control, trainer=self)
                     self._control.should_save = False
@@ -1956,7 +1974,10 @@ class RayPPOTrainer:
         elif self.resume_mode == ResumeMode.LATEST:
             latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
             if not io.exists(latest_checkpoint_file):
-                logger.info("No checkpoint found, starting training from scratch")
+                logger.warning(
+                    f"resume_mode=latest found no checkpoint marker at {latest_checkpoint_file}; "
+                    "starting training from global_step 0"
+                )
                 return 0, None
             with io.open_file(latest_checkpoint_file, "r") as f:
                 ckpt_iteration = int(f.read().strip())

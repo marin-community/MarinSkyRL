@@ -3,12 +3,14 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 """
 
 import contextlib
+import asyncio
 import gc
 import weakref
 from types import SimpleNamespace
 
 import torch
 import pytest
+from loguru import logger as loguru_logger
 from jaxtyping import Float, Integer
 from omegaconf import DictConfig, OmegaConf
 from pytest import approx
@@ -65,6 +67,71 @@ class _CapturingPolicyGroup:
         if method_name == "empty_cache":
             return []
         raise AssertionError(f"Unexpected policy method: {method_name}")
+
+
+class _ResidencyPolicyGroup:
+    def __init__(self):
+        self.model_on_gpu = False
+        self.optimizer_on_gpu = False
+
+    def backload_to_gpu(self, backload_optimizer=True, backload_model=True):
+        self.optimizer_on_gpu |= backload_optimizer
+        self.model_on_gpu |= backload_model
+
+    def offload_to_cpu(self, offload_optimizer=True, offload_model=True):
+        if offload_optimizer:
+            self.optimizer_on_gpu = False
+        if offload_model:
+            self.model_on_gpu = False
+
+
+class _ResidencyInferenceClient:
+    def __init__(self):
+        self.awake = True
+        self.wake_tags = []
+
+    async def sleep(self):
+        self.awake = False
+
+    async def wake_up(self, tags):
+        self.wake_tags.append(tags)
+        self.awake = True
+
+
+@pytest.mark.parametrize("save_error", [None, RuntimeError("storage of size 0")])
+def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_residency(save_error, monkeypatch):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.colocate_all = True
+    trainer.policy_model = _ResidencyPolicyGroup()
+    trainer.inference_engine_client = _ResidencyInferenceClient()
+    trainer.sync_policy_weights_to_inference_engines = lambda: []
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+    save_observations = []
+
+    def save_checkpoints():
+        save_observations.append(
+            (
+                trainer.policy_model.model_on_gpu,
+                trainer.policy_model.optimizer_on_gpu,
+                trainer.inference_engine_client.awake,
+            )
+        )
+        if save_error is not None:
+            raise save_error
+
+    trainer.save_checkpoints = save_checkpoints
+
+    if save_error is None:
+        asyncio.run(trainer._save_checkpoints_with_residency())
+    else:
+        with pytest.raises(RuntimeError, match="storage of size 0"):
+            asyncio.run(trainer._save_checkpoints_with_residency())
+
+    assert save_observations == [(True, True, False)]
+    assert not trainer.policy_model.model_on_gpu
+    assert not trainer.policy_model.optimizer_on_gpu
+    assert trainer.inference_engine_client.awake
+    assert trainer.inference_engine_client.wake_tags == [["weights"], ["kv_cache"]]
 
 
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
@@ -373,6 +440,23 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
             trainer.load_checkpoints()
 
     exists.assert_called_once_with(resume_path.rstrip("/"))
+
+
+def test_load_checkpoints_warns_when_latest_checkpoint_is_absent(dummy_config):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.LATEST
+
+    messages = []
+    sink = loguru_logger.add(lambda message: messages.append(message.record), level="WARNING")
+    try:
+        with patch("skyrl_train.trainer.io.exists", return_value=False):
+            assert trainer.load_checkpoints() == (0, None)
+    finally:
+        loguru_logger.remove(sink)
+
+    assert [record["level"].name for record in messages] == ["WARNING"]
+    assert "resume_mode=latest found no checkpoint" in messages[0]["message"]
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
