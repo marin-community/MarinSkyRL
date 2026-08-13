@@ -17,16 +17,17 @@ uv run --group analysis python -m infra.rl_analysis \
 The input directory may contain Harbor `result.json` files recursively, or a
 JSONL file with equivalent result mappings. The output includes:
 
-- `Q1_behavioral_delta/validity.json`: common task count and whether the
-  baseline/post comparison is invalid;
+- `Q1_behavioral_delta/comparison.json`: common task and matched-trial counts,
+  task- and trial-weighted reward deltas, and comparison validity;
 - `Q2_temporal/temporal_summary.json`: time-binned rollout reward, turns, and
   errors;
 - `Q2_skyrl_metrics/`: output from the existing SkyRL metric parser when
   `--training-log-dir` is supplied;
 - `Q3_temporal_overlay/overlay.json`: rollout reward bins, baseline/post reward
-  markers, and the task-overlap decision;
+  markers, and comparison statistics;
 - `Q4_solve_rate_by_context/`: rollout and evaluation reward/error summaries
-  grouped by input-token context bucket.
+  grouped by peak request prompt-token bucket, with missing context reported as
+  `unknown`.
 
 Training rollouts and evaluation traces often contain different task sets. A
 zero-overlap pair is not a before/after model-quality comparison. The pipeline

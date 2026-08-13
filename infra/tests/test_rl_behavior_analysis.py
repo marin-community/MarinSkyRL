@@ -187,20 +187,20 @@ def test_analyze_local_run_marks_unmatched_evaluations_invalid(tmp_path: Path) -
         (output_dir / "Q4_solve_rate_by_context" / "evaluation_context_summary.json").read_text()
     )
     assert comparison == {
-        "baseline_trial_count": 0,
+        "matched_baseline_trial_count": 0,
         "common_task_count": 0,
         "invalid_for_comparison": True,
-        "post_trial_count": 0,
+        "matched_post_trial_count": 0,
         "task_weighted_mean_reward_delta": None,
         "trial_weighted_mean_reward_delta": None,
     }
     assert temporal["bins"]["2026-07-30T00:00:00+00:00"]["mean_reward"] == 0.5
     assert temporal["bins"]["2026-07-30T04:00:00+00:00"]["mean_turns"] == 4.0
     assert overlay["comparison"] == {
-        "baseline_trial_count": 0,
+        "matched_baseline_trial_count": 0,
         "common_task_count": 0,
         "invalid_for_comparison": True,
-        "post_trial_count": 0,
+        "matched_post_trial_count": 0,
         "task_weighted_mean_reward_delta": None,
         "trial_weighted_mean_reward_delta": None,
     }
@@ -228,10 +228,10 @@ def test_analyze_local_run_reports_delta_for_matched_evaluations(tmp_path: Path)
 
     comparison = json.loads((output_dir / "Q1_behavioral_delta" / "comparison.json").read_text())
     assert comparison == {
-        "baseline_trial_count": 1,
+        "matched_baseline_trial_count": 1,
         "common_task_count": 1,
         "invalid_for_comparison": False,
-        "post_trial_count": 1,
+        "matched_post_trial_count": 1,
         "task_weighted_mean_reward_delta": 0.5,
         "trial_weighted_mean_reward_delta": 0.5,
     }

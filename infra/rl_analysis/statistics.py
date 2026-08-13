@@ -23,8 +23,8 @@ class MatchedRewardStatistics:
     """Replicate-preserving statistics for common scored tasks."""
 
     common_task_count: int
-    baseline_trial_count: int
-    post_trial_count: int
+    matched_baseline_trial_count: int
+    matched_post_trial_count: int
     task_weighted_mean_reward_delta: float | None
     trial_weighted_mean_reward_delta: float | None
     invalid_for_comparison: bool = field(init=False)
@@ -74,8 +74,8 @@ def matched_reward_statistics(before: list[TraceRecord], after: list[TraceRecord
     after_trials = common_trials(after_by_task)
     return MatchedRewardStatistics(
         common_task_count=len(common_tasks),
-        baseline_trial_count=len(before_trials),
-        post_trial_count=len(after_trials),
+        matched_baseline_trial_count=len(before_trials),
+        matched_post_trial_count=len(after_trials),
         task_weighted_mean_reward_delta=fmean(deltas) if deltas else None,
         trial_weighted_mean_reward_delta=(
             fmean(after_trials) - fmean(before_trials)
@@ -94,7 +94,7 @@ def mean_reward(records: list[TraceRecord]) -> float | None:
 def temporal_summary(
     records: list[TraceRecord], bin_hours: float
 ) -> dict[str, dict[str, dict[str, float | int | None]]]:
-    """Aggregate rollout reward and turns into UTC time bins."""
+    """Aggregate rollout reward, turns, errors, and token usage into UTC time bins."""
     if bin_hours <= 0:
         raise ValueError("bin_hours must be positive")
     width = timedelta(hours=bin_hours)

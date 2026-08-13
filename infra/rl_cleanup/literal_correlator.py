@@ -35,7 +35,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 from upath import UPath
 
-from infra.harbor_results import MISSING_TOKEN_COUNT, trajectory_count_sequence
+from infra.harbor_results import HARBOR_TRAJECTORY_PATH, MISSING_TOKEN_COUNT, trajectory_count_sequence
 
 # A record's messages is considered part of the SAME trial as a longer record
 # when it is an exact element-wise prefix of the longer messages list.
@@ -56,8 +56,8 @@ class LiteralRecord:
     @property
     def counts(self) -> tuple[int, int]:
         """(len(prompt_token_ids), len(completion_token_ids)); -1 if absent."""
-        p = len(self.prompt_token_ids) if self.prompt_token_ids is not None else -1
-        c = len(self.completion_token_ids) if self.completion_token_ids is not None else -1
+        p = len(self.prompt_token_ids) if self.prompt_token_ids is not None else MISSING_TOKEN_COUNT
+        c = len(self.completion_token_ids) if self.completion_token_ids is not None else MISSING_TOKEN_COUNT
         return (p, c)
 
 
@@ -329,7 +329,7 @@ def enrich_trajectories_with_literals(
 
     for trial_dir in iter_trial_dirs(job_dir):
         trial_dir = UPath(trial_dir)
-        traj_path = trial_dir / "agent" / "trajectory.json"
+        traj_path = trial_dir / HARBOR_TRAJECTORY_PATH
         try:
             trajectory = json.loads(traj_path.read_text())
         except (FileNotFoundError, json.JSONDecodeError, NotImplementedError):

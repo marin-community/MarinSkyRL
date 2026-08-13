@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 MISSING_TOKEN_COUNT = -1
+HARBOR_TRAJECTORY_PATH = "agent/trajectory.json"
 
 
 @dataclass(frozen=True)

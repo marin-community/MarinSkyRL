@@ -8,10 +8,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from infra.harbor_results import MISSING_TOKEN_COUNT, HarborResult, parse_harbor_result, trajectory_count_sequence
+from infra.harbor_results import (
+    HARBOR_TRAJECTORY_PATH,
+    MISSING_TOKEN_COUNT,
+    HarborResult,
+    parse_harbor_result,
+    trajectory_count_sequence,
+)
 
 HARBOR_AGGREGATE_TRIAL_COUNT_KEY = "n_total_trials"
-HARBOR_TRAJECTORY_PATH = Path("agent/trajectory.json")
 
 
 @dataclass(frozen=True)
