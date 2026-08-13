@@ -40,6 +40,7 @@ from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.tensor.placement_types import Shard, _StridedShard
 from transformers.trainer_pt_utils import get_module_class_from_name
 
+from skyrl_train.models.ep_gradient import ExpertGradientAveraging
 from skyrl_train.models.grug_moe import GrugMoeExperts
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
@@ -244,13 +245,13 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
         return nullcontext()
 
 
-def _refresh_grug_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
+def _refresh_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
     """Attach expert-gradient averaging and return module and parameter counts."""
 
     module_count = 0
     parameter_count = 0
     for experts in model.modules():
-        if not isinstance(experts, GrugMoeExperts):
+        if not isinstance(experts, ExpertGradientAveraging):
             continue
 
         for handle in getattr(experts, "_ep_gradient_scale_handles", ()):
@@ -486,11 +487,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # assign=True: params are meta DTensors, replace storage in-place.
         model.load_state_dict(new_sd, assign=True)
         del new_sd
-        grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
-        if grug_parameters:
+        ep_modules, ep_parameters = _refresh_ep_gradient_scaling(model)
+        if ep_parameters:
             logger.info(
-                "[Grug-EP-GRAD] refreshed gradient averaging after checkpoint assignment "
-                f"(modules={grug_modules}, parameters={grug_parameters})"
+                "[EP-GRAD] refreshed expert gradient averaging after checkpoint assignment "
+                f"(modules={ep_modules}, parameters={ep_parameters})"
             )
 
         # Mirror the non-EP path's CPU<->GPU offload dance to keep reserved memory bounded.
@@ -719,6 +720,11 @@ class _GroupedExpertParallelTarget:
     def finish(self, context: _ExpertParallelContext) -> None:
         self.moe.set_ep_comm_backend(context.comm_backend)
         self.moe._ep_enabled = True
+        # TorchTitan dispatches every EP rank's replica of the logical batch to
+        # the owning expert rank. Its backward therefore sums ``ep_size`` copies
+        # of each expert contribution. Average expert gradients back to the
+        # single-logical-batch magnitude; router and dense grads stay unchanged.
+        self.experts.ep_size = context.mesh.size()
 
     def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]:
         return self.experts.named_parameters(recurse=False)
@@ -817,10 +823,9 @@ def apply_ep(
       * installs ``ExpertParallel._token_dispatch`` / ``_token_combine`` all_to_all
         hooks on the ``experts`` module boundary (the autograd ``_A2A`` carries grads
         symmetrically on the backward).
-      * for Grug, averages expert-only gradients over ``ep_size`` because
-        ``MeshDispatch`` replicates each logical batch across EP ranks. Router and
-        dense gradients stay unscaled because each EP rank already holds one local
-        replica of them.
+      * averages expert-only gradients over ``ep_size`` because dispatch replicates
+        each logical batch across EP ranks. Router and dense gradients stay unscaled
+        because each EP rank already holds one local replica of them.
 
     The router gate + the forced-index override fire BEFORE any token movement, so
     router replay is preserved by construction (scope §3). Returns the number of
@@ -871,11 +876,11 @@ def apply_ep(
         )
         target.finish(ep_context)
         sharded += 1
-    grug_modules, grug_parameters = _refresh_grug_ep_gradient_scaling(model)
-    if grug_parameters:
+    ep_modules, ep_parameters = _refresh_ep_gradient_scaling(model)
+    if ep_parameters:
         logger.info(
-            "[Grug-EP-GRAD] enabled expert gradient averaging "
-            f"(ep_size={ep_mesh.size()}, modules={grug_modules}, parameters={grug_parameters})"
+            "[EP-GRAD] enabled expert gradient averaging "
+            f"(ep_size={ep_mesh.size()}, modules={ep_modules}, parameters={ep_parameters})"
         )
     return sharded
 

@@ -49,6 +49,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+from skyrl_train.models.ep_gradient import ExpertGradientAveraging
 from skyrl_train.models.layers.moe_routing import (
     TokenReorderer,
     grouped_expert_contributions,
@@ -165,7 +166,7 @@ def _run_experts_grouped_mm(
     return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
 
 
-class GroupedExperts(nn.Module):
+class GroupedExperts(nn.Module, ExpertGradientAveraging):
     """Stacked per-expert gated-MLP weights, run grouped over tokens.
 
     Parameter layout matches the prime-rl converter target:
@@ -188,6 +189,7 @@ class GroupedExperts(nn.Module):
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
         self.ep_comm_backend: EPCommBackend = "torch"
+        self.ep_size = 1
 
     def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
         self.ep_comm_backend = backend

@@ -20,6 +20,7 @@ from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel, initialization as init
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
+from skyrl_train.models.ep_gradient import ExpertGradientAveraging
 from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
@@ -337,7 +338,7 @@ class _GrugZeroInitLinear(nn.Linear):
     pass
 
 
-class GrugMoeExperts(nn.Module):
+class GrugMoeExperts(nn.Module, ExpertGradientAveraging):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__()
         num_experts = config.num_local_experts
