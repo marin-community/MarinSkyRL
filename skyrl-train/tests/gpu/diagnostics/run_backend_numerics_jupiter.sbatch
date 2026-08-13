@@ -1,5 +1,5 @@
 #!/bin/bash
-# Jupiter-only GPU test: this manual Slurm job uses the standard Jupiter RL environment.
+# Jupiter-only SIF test: this manual Slurm job uses the standard Jupiter RL environment.
 #SBATCH --account=reformo
 #SBATCH --partition=booster
 #SBATCH --qos=normal
