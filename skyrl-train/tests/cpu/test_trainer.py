@@ -845,6 +845,7 @@ def test_ppo_train_batch_calculations():
                     "optimizer_config": {"max_grad_norm": 1.0},
                 },
                 "algorithm": {
+                    "batch_invariant": False,
                     "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
                 },
