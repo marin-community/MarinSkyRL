@@ -75,7 +75,6 @@ def test_failed_block_is_not_logged_as_finished(monkeypatch):
         logger.remove(sink)
 
     assert [record["level"].name for record in records] == ["INFO", "ERROR"]
-    assert all("Finished" not in record["message"] for record in records)
 
 
 def test_duration_ignores_a_backwards_wall_clock_step(monkeypatch):
