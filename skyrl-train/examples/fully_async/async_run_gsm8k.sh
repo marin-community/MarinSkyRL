@@ -34,6 +34,7 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async 
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.policy_loss_type="behavior_clip" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \

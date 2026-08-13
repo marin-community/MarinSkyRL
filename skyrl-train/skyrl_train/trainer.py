@@ -71,6 +71,7 @@ from skyrl_train.utils.utils import (
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
+from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -1110,6 +1111,10 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
+        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
+        if behavior_logprobs_required and rollout_logprobs_tensor is None:
+            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
+
         # sanity check for tis
         #
         # Graceful TIS degrade (Fix A, 2026-06-07): when use_tis is on but the

@@ -190,7 +190,7 @@ def _policy_objective_metrics(
     config: DictConfig,
 ) -> dict[str, float]:
     metrics = complete_clip_metrics(policy_loss_metrics)
-    if config.use_tis:
+    if config.use_tis or config.get("policy_loss_type") == PolicyLossType.BEHAVIOR_CLIP:
         metrics.update(
             compute_tis_diagnostics(
                 old_action_log_probs,
@@ -326,6 +326,53 @@ def ppo_policy_loss(
         loss,
         loss_mask,
         loss_reduction,
+        config.max_seq_len,
+        global_denom=global_loss_denom,
+    )
+    return loss, clip_metrics
+
+
+@register_policy_loss(PolicyLossType.BEHAVIOR_CLIP)
+def behavior_clipped_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+    global_loss_denom: Optional[float] = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Pessimistic PPO clipping against the policy that generated each token.
+
+    Adapted from AReaL's ``areal.utils.functional.ppo_actor_loss_fn``.
+    """
+    del old_log_probs
+    if rollout_logprobs is None:
+        raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
+    if config.use_tis:
+        raise ValueError("behavior_clip cannot be combined with use_tis; both correct against rollout_logprobs")
+    if config.loss_reduction not in SUPPORTED_LOSS_REDUCTIONS:
+        raise ValueError(f"loss_reduction must be one of {list(SUPPORTED_LOSS_REDUCTIONS)}")
+
+    ratio = safe_exp_delta(log_probs - rollout_logprobs, out_dtype=log_probs.dtype)
+    clipped_ratio = torch.clamp(ratio, 1.0 - config.eps_clip_low, 1.0 + config.eps_clip_high)
+    pg_loss1 = -advantages * ratio
+    pg_loss2 = -advantages * clipped_ratio
+    loss = torch.maximum(pg_loss1, pg_loss2)
+    clip_metrics = clipping_metrics(
+        ratio,
+        pg_loss1.detach() < pg_loss2.detach(),
+        loss_mask,
+        eps_clip_low=config.eps_clip_low,
+        eps_clip_high=config.eps_clip_high,
+    )
+
+    pg_loss3 = torch.sign(advantages) * config.clip_ratio_c * advantages
+    loss = torch.where(advantages < 0, torch.minimum(loss, pg_loss3), loss)
+    loss = reduce_loss(
+        loss,
+        loss_mask,
+        config.loss_reduction,
         config.max_seq_len,
         global_denom=global_loss_denom,
     )

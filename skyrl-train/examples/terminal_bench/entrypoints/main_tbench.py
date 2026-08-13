@@ -19,6 +19,7 @@ from examples.terminal_bench.fd_monitor import start_fd_monitor
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 
 
 class TerminalBenchExp(BasePPOExp):
@@ -32,7 +33,7 @@ class TerminalBenchExp(BasePPOExp):
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-            use_tis=bool(cfg.trainer.algorithm.get("use_tis", False)),
+            rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
         )
 

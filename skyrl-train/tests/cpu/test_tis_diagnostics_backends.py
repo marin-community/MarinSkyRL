@@ -34,7 +34,7 @@ NUM_ACTIONS = 4
 CAP = 2.0
 
 
-def _algorithm_cfg(use_tis: bool) -> OmegaConf:
+def _algorithm_cfg(use_tis: bool, policy_loss_type: str = "regular") -> OmegaConf:
     return OmegaConf.create(
         {
             "trainer": {
@@ -49,7 +49,7 @@ def _algorithm_cfg(use_tis: bool) -> OmegaConf:
                     "kl_loss_coef": 0.0,
                     "loss_reduction": "token_mean",
                     "think_token_weight": 1.0,
-                    "policy_loss_type": "regular",
+                    "policy_loss_type": policy_loss_type,
                     "eps_clip_low": 0.2,
                     "eps_clip_high": 0.05,
                     "max_seq_len": SEQ_LEN,
@@ -136,10 +136,10 @@ class _FakeScheduler:
         return [1e-6]
 
 
-def _fsdp_training_step_status(use_tis: bool, monkeypatch) -> dict:
+def _fsdp_training_step_status(use_tis: bool, monkeypatch, policy_loss_type: str = "regular") -> dict:
     old_lp, rollout_lp, loss_mask = _tis_tensors()
     worker = object.__new__(PolicyWorkerBase)
-    worker.cfg = _algorithm_cfg(use_tis)
+    worker.cfg = _algorithm_cfg(use_tis, policy_loss_type)
     worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01)
     worker.policy_loss_fn = _fake_policy_loss_fn
     worker.strategy = _FakeStrategy()
@@ -180,6 +180,19 @@ def test_fsdp_training_step_emits_tis_diagnostics(monkeypatch):
 def test_fsdp_training_step_no_tis_keys_when_disabled(monkeypatch):
     status = _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
     assert not any(key.startswith("tis/") for key in status)
+
+
+def test_fsdp_behavior_clip_keeps_rollout_divergence_diagnostics(monkeypatch):
+    old_lp, rollout_lp, loss_mask = _tis_tensors()
+    expected = compute_tis_diagnostics(old_lp, rollout_lp, loss_mask, cap=CAP)
+    status = _fsdp_training_step_status(
+        use_tis=False,
+        policy_loss_type="behavior_clip",
+        monkeypatch=monkeypatch,
+    )
+
+    for key in TIS_DIAG_KEYS:
+        assert status[key] == pytest.approx(expected[key])
 
 
 def test_fsdp_training_step_completes_clip_metric_contract(monkeypatch):

@@ -143,28 +143,26 @@ def test_extract_prompt_token_ids():
 def test_tito_full_resolution_precedence(monkeypatch):
     monkeypatch.delenv("SKYRL_TITO_FULL", raising=False)
 
-    # (3) AUTO / unset: default to use_tis.
-    assert _tito_full_enabled() is False  # use_tis defaults False -> OFF (byte-identical)
-    assert _tito_full_enabled(use_tis=True) is True  # TIS on -> TITO auto-ON
-    assert _tito_full_enabled(use_tis=False) is False
+    # (3) AUTO / unset: follow whether the selected objective consumes rollout logprobs.
+    assert _tito_full_enabled() is False
+    assert _tito_full_enabled(rollout_logprobs_required=True) is True
+    assert _tito_full_enabled(rollout_logprobs_required=False) is False
 
-    # (2) explicit config flag overrides use_tis when non-None.
-    assert _tito_full_enabled(use_tis=True, tito_full=False) is False  # explicit OFF wins
-    assert _tito_full_enabled(use_tis=False, tito_full=True) is True  # explicit ON wins
-    assert _tito_full_enabled(use_tis=True, tito_full=None) is True  # None -> falls to use_tis
+    # (2) explicit config flag overrides the objective when non-None.
+    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=False) is False
+    assert _tito_full_enabled(rollout_logprobs_required=False, tito_full=True) is True
+    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=None) is True
 
     # (1) env var wins over everything.
     monkeypatch.setenv("SKYRL_TITO_FULL", "1")
-    assert _tito_full_enabled(use_tis=False, tito_full=False) is True
+    assert _tito_full_enabled(rollout_logprobs_required=False, tito_full=False) is True
     monkeypatch.setenv("SKYRL_TITO_FULL", "0")
-    assert _tito_full_enabled(use_tis=True, tito_full=True) is False
+    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=True) is False
 
 
-def test_tito_full_non_tis_byte_identical_gate(monkeypatch):
-    """The load-bearing non-TIS guarantee: use_tis=False + no explicit flag/env => OFF,
-    so the whole TITO branch is skipped and every existing path is byte-identical."""
+def test_tito_full_without_rollout_logprob_consumer_preserves_existing_assembly(monkeypatch):
     monkeypatch.delenv("SKYRL_TITO_FULL", raising=False)
-    assert _tito_full_enabled(use_tis=False, tito_full=None) is False
+    assert _tito_full_enabled(rollout_logprobs_required=False, tito_full=None) is False
 
 
 def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):

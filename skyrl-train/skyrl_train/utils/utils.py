@@ -646,6 +646,13 @@ def validate_cfg(cfg: DictConfig):
             "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
         )
 
+    behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
+    if behavior_clip and cfg.trainer.algorithm.use_tis:
+        raise ValueError(
+            "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
+            "behavior clipping already uses the full rollout importance ratio"
+        )
+
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
             raise ValueError(
@@ -664,6 +671,16 @@ def validate_cfg(cfg: DictConfig):
             "regular",
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
+
+    if behavior_clip:
+        if cfg.generator.sampling_params.logprobs is None:
+            logger.warning(
+                "`generator.sampling_params.logprobs` is `None` but behavior_clip requires rollout logprobs. "
+                "Setting `logprobs` to 0."
+            )
+            cfg.generator.sampling_params.logprobs = 0
+        if cfg.generator.backend == "sglang":
+            raise NotImplementedError("behavior_clip requires rollout logprobs; use the vLLM generator backend")
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled

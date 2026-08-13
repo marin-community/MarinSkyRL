@@ -22,6 +22,7 @@ from skyrl_train.entrypoints.main_base import (
 from skyrl_train.generators.base import GeneratorInput
 from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 
 
 class TerminalBenchGenerateExp(BasePPOExp):
@@ -35,7 +36,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-            use_tis=bool(cfg.trainer.algorithm.get("use_tis", False)),
+            rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
         )
 

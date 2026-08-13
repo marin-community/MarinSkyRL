@@ -35,6 +35,7 @@ from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
 
 _QueueItem = TypeVar("_QueueItem")
@@ -1146,7 +1147,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
         )
 
-        generator_output = concatenate_generator_outputs(generator_outputs)
+        generator_output = concatenate_generator_outputs(
+            generator_outputs,
+            require_rollout_logprobs=policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type),
+        )
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
 

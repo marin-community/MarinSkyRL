@@ -98,7 +98,8 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.05
     loss_reduction: sequence_mean
-    use_tis: true
+    policy_loss_type: behavior_clip
+    use_tis: false
     tis_imp_ratio_cap: 2.0
     tito_full: true
 

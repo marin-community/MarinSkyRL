@@ -511,7 +511,9 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     return mean_reward, pass_at_n
 
 
-def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
+def concatenate_generator_outputs(
+    generator_outputs: List[GeneratorOutput], *, require_rollout_logprobs: bool = False
+) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches.
 
@@ -521,6 +523,8 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
     any_has_logprobs = any(has_rollout_logprobs)
+    if require_rollout_logprobs and not all(has_rollout_logprobs):
+        raise ValueError("rollout_logprobs are required for every generated group")
 
     # Handle mixed rollout_logprobs: if some batches have logprobs and others don't,
     # fill in placeholder [0.0] values for the batches that don't have them.
@@ -1393,8 +1397,8 @@ def _tis_splice_enabled() -> bool:
     return True
 
 
-def _tito_full_enabled(use_tis: bool = False, tito_full: Optional[bool] = None) -> bool:
-    """Full token-in-token-out assembly policy — AUTO-defaults to ``use_tis``.
+def _tito_full_enabled(rollout_logprobs_required: bool = False, tito_full: Optional[bool] = None) -> bool:
+    """Full token-in-token-out assembly policy for behavior-logprob consumers.
 
     When ON *and* Harbor's per-turn ``prompt_token_ids`` are available, the
     trajectory ``response_ids`` / ``loss_mask`` / ``rollout_logprobs`` are assembled
@@ -1412,19 +1416,18 @@ def _tito_full_enabled(use_tis: bool = False, tito_full: Optional[bool] = None) 
          hatch). Truthy ⇒ ON, else OFF.
       2. else the EXPLICIT config flag ``tito_full`` (``trainer.algorithm.tito_full``)
          — if not ``None`` (an explicit True/False), use it verbatim.
-      3. else (auto / unset) — DEFAULT TO ``use_tis`` (``trainer.algorithm.use_tis``):
-         TITO-full ON whenever TIS is on, OFF otherwise.
+      3. else (auto / unset) — default to whether the selected objective consumes
+         behavior-policy logprobs.
 
-    Non-TIS byte-identical guarantee: ``use_tis=False`` with no explicit flag/env ⇒
-    returns ``False`` ⇒ every existing code path untouched (``torch.equal``). Mirrors
-    the EP/CP/splice flag-off byte-identical scaffold discipline.
+    With no behavior-logprob consumer and no explicit flag/env, every existing
+    assembly path remains untouched.
     """
     val = os.environ.get("SKYRL_TITO_FULL")
     if val is not None:
         return val in ("1", "true", "True")
     if tito_full is not None:
         return bool(tito_full)
-    return bool(use_tis)
+    return rollout_logprobs_required
 
 
 def _normalize_candidate_logprobs(candidate_logprobs):
@@ -1611,7 +1614,7 @@ def get_response_ids_and_loss_mask_from_messages(
     alignment_stats: Optional["AlignmentStats"] = None,
     chat_template_kwargs=None,
     assistant_prompt_token_ids=None,
-    use_tis: bool = False,
+    rollout_logprobs_required: bool = False,
     tito_full: Optional[bool] = None,
 ):
     """
@@ -1677,7 +1680,7 @@ def get_response_ids_and_loss_mask_from_messages(
     # (byte-identical), so a malformed capture never yields a wrong sequence. Default
     # OFF ⇒ this block is skipped entirely (byte-identical to prior behavior).
     if (
-        _tito_full_enabled(use_tis=use_tis, tito_full=tito_full)
+        _tito_full_enabled(rollout_logprobs_required=rollout_logprobs_required, tito_full=tito_full)
         and assistant_prompt_token_ids is not None
         and assistant_token_ids is not None
     ):

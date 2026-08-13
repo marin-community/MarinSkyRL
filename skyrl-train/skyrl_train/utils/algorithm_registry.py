@@ -12,6 +12,7 @@ from typing import Callable, Union
 
 import ray
 from loguru import logger
+from omegaconf import DictConfig
 
 from skyrl_train.utils.function_registry import BaseFunctionRegistry
 
@@ -44,11 +45,22 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
 class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
+    BEHAVIOR_CLIP = "behavior_clip"
     GSPO = "gspo"
     CISPO = "cispo"
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
     SAPO = "sapo"
+
+
+def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:
+    """Return whether a policy objective requires behavior-policy logprobs."""
+    return policy_loss_type == PolicyLossType.BEHAVIOR_CLIP
+
+
+def rollout_logprobs_enabled(algorithm_config: DictConfig) -> bool:
+    """Return whether training consumes rollout logprobs for loss or diagnostics."""
+    return bool(algorithm_config.use_tis) or policy_loss_requires_rollout_logprobs(algorithm_config.policy_loss_type)
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):

@@ -948,3 +948,13 @@ def test_partial_failure_metrics_are_rejected_during_concatenation():
 
     with pytest.raises(ValueError, match="generate/num_masked_trajectories"):
         concatenate_generator_outputs([group])
+
+
+def test_required_rollout_logprobs_reject_partial_generation_batch():
+    with_logprobs = {**_generated_group(2, 0), "rollout_logprobs": [[-0.1, -0.2], [-0.3, -0.4]]}
+
+    with pytest.raises(ValueError, match="rollout_logprobs are required"):
+        concatenate_generator_outputs(
+            [with_logprobs, _generated_group(2, 0)],
+            require_rollout_logprobs=True,
+        )

@@ -4,6 +4,8 @@ Tests for policy loss functions.
 uv run --isolated --group dev --extra cpu -- pytest tests/cpu/algorithms/test_losses.py
 """
 
+import math
+
 import pytest
 import torch
 from omegaconf import DictConfig
@@ -135,6 +137,77 @@ def test_policy_loss_dual_clip():
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
     # close to hand calculated value
     assert actual_loss.item() == pytest.approx(4.1667, abs=1e-4)
+
+
+def test_behavior_clip_matches_regular_loss_on_policy():
+    advantages = torch.tensor([[1.0, -1.0, 2.0]])
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]])
+    log_probs = torch.tensor([[-1.2, -0.9, -2.7]])
+    config = _clipping_config("regular", eps_clip_low=0.2, eps_clip_high=0.2)
+
+    regular_loss, _ = PolicyLossRegistry.get("regular")(
+        log_probs,
+        old_log_probs,
+        advantages,
+        config,
+        rollout_logprobs=old_log_probs,
+    )
+    config.policy_loss_type = "behavior_clip"
+    behavior_loss, _ = PolicyLossRegistry.get("behavior_clip")(
+        log_probs,
+        old_log_probs,
+        advantages,
+        config,
+        rollout_logprobs=old_log_probs,
+    )
+
+    torch.testing.assert_close(behavior_loss, regular_loss)
+
+
+def test_behavior_clip_stops_resuppressing_stale_negative_advantage_token():
+    log_probs = torch.tensor([[math.log(0.5)]], requires_grad=True)
+    rollout_logprobs = torch.zeros_like(log_probs)
+    old_log_probs = log_probs.detach().clone()
+    advantages = torch.tensor([[-1.0]])
+    config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
+
+    loss, metrics = PolicyLossRegistry.get("behavior_clip")(
+        log_probs,
+        old_log_probs,
+        advantages,
+        config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    loss.backward()
+
+    torch.testing.assert_close(log_probs.grad, torch.zeros_like(log_probs))
+    assert metrics["ppo_clip_ratio_low"] == pytest.approx(1.0)
+
+
+def test_behavior_clip_requires_rollout_logprobs():
+    config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
+
+    with pytest.raises(ValueError, match="rollout_logprobs are required"):
+        PolicyLossRegistry.get("behavior_clip")(
+            torch.zeros((1, 1)),
+            torch.zeros((1, 1)),
+            torch.ones((1, 1)),
+            config,
+        )
+
+
+def test_behavior_clip_rejects_tis_multiplication():
+    config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
+    config.use_tis = True
+
+    with pytest.raises(ValueError, match="cannot be combined with use_tis"):
+        PolicyLossRegistry.get("behavior_clip")(
+            torch.zeros((1, 1)),
+            torch.zeros((1, 1)),
+            torch.ones((1, 1)),
+            config,
+            rollout_logprobs=torch.zeros((1, 1)),
+        )
 
 
 def test_policy_loss_cispo():

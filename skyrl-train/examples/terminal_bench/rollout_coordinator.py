@@ -59,6 +59,7 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.worker_setup import configure_worker_process
 
 
@@ -200,7 +201,7 @@ class RolloutCoordinator:
             inference_engine_client=None,
             tokenizer=tokenizer,
             moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-            use_tis=bool(cfg.trainer.algorithm.get("use_tis", False)),
+            rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
         )
 

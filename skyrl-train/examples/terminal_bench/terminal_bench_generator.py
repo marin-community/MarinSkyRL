@@ -259,7 +259,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         moe_router_replay: bool = False,
-        use_tis: bool = False,
+        rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
     ):
         """
@@ -272,11 +272,10 @@ class TerminalBenchGenerator(GeneratorInterface):
                 Harbor rollout_details and plumb them through to the training batch
                 (Stage 1 of the FSDP2 EP/router-replay port). Default False keeps the
                 GeneratorOutput byte-identical to today.
-            use_tis: ``trainer.algorithm.use_tis`` — whether Truncated Importance
-                Sampling is on. Full-TITO rollout assembly AUTO-defaults to this
-                (see ``tito_full`` and generators/utils.py::_tito_full_enabled).
+            rollout_logprobs_required: Whether the selected policy objective consumes
+                behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
             tito_full: ``trainer.algorithm.tito_full`` — explicit full-TITO override.
-                None = auto (default to ``use_tis``); True/False = force. The env var
+                None = auto (default to ``rollout_logprobs_required``); True/False = force. The env var
                 ``SKYRL_TITO_FULL`` still wins over both. Default None.
         """
         self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
@@ -329,8 +328,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.model_name = generator_cfg.model_name
         self._moe_router_replay = moe_router_replay
         # Full-TITO rollout assembly resolution inputs (see _tito_full_enabled):
-        # env SKYRL_TITO_FULL wins; else explicit tito_full; else auto -> use_tis.
-        self._use_tis = bool(use_tis)
+        # env SKYRL_TITO_FULL wins; else explicit tito_full; else follow logprob consumption.
+        self._rollout_logprobs_required = rollout_logprobs_required
         self._tito_full = tito_full
 
         # Core terminal bench config
@@ -1176,10 +1175,10 @@ class TerminalBenchGenerator(GeneratorInterface):
             f"{num_masked_trajectories} masked (excluded from baseline)"
         )
 
-        # Collect rollout_logprobs if any outputs have them (required for TIS training)
+        # Collect rollout_logprobs if any outputs have them.
         # For zeroed/failed trajectories, use [0.0] to match response_ids length.
         #
-        # SKIP LOGPROBS FOR EVAL: TIS is a training technique - during eval we don't
+        # Skip logprobs for eval: policy objectives do not run during evaluation.
         # compute gradients, so logprobs are unnecessary. Skipping them avoids issues
         # where failed trials (e.g., DaytonaRateLimitError) block eval progress.
         #
@@ -1204,23 +1203,27 @@ class TerminalBenchGenerator(GeneratorInterface):
                     if output.rollout_logprobs is not None:
                         rollout_logprobs_list.append(output.rollout_logprobs)
                     else:
-                        # For trajectories missing logprobs, fill with zeros
-                        # This allows partial training on trajectories that have valid logprobs
+                        if self._rollout_logprobs_required and any(output.loss_mask):
+                            raise ValueError("rollout_logprobs are required for every trainable trajectory")
+                        # Failed trajectories are fully masked, so aligned placeholders
+                        # cannot affect the objective.
                         rollout_logprobs_list.append([0.0] * len(output.response_ids))
 
                 if missing_logprobs_count > 0 and self._collect_rollout_details:
                     # Only warn about missing logprobs if TIS is expected (collect_rollout_details=true)
                     logger.warning(
-                        f"TIS mode: {missing_logprobs_count}/{num_trials} trajectories missing logprobs "
+                        f"Rollout-logprob mode: {missing_logprobs_count}/{num_trials} trajectories missing logprobs "
                         f"(likely due to context length errors). Filled with zeros. "
                         f"These trajectories will have no gradient contribution from TIS."
                     )
+            elif self._rollout_logprobs_required and any(any(output.loss_mask) for output in all_outputs):
+                raise ValueError("rollout_logprobs are required for every trainable trajectory")
             elif missing_logprobs_count > 0 and self._collect_rollout_details:
                 # All trajectories missing logprobs - this is a problem for TIS
                 # Only log error if TIS is expected (collect_rollout_details=true)
                 logger.error(
-                    f"TIS mode: ALL {num_trials} trajectories missing logprobs. "
-                    f"This batch cannot be used for TIS training. "
+                    f"Rollout-logprob mode: ALL {num_trials} trajectories missing logprobs. "
+                    f"This batch cannot use a behavior-referenced policy objective. "
                     f"Check if Harbor is collecting rollout_details (collect_rollout_details=true) "
                     f"and if context length errors are preventing logprob collection."
                 )
@@ -1841,7 +1844,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Process response messages (everything after the first message)
         response_messages = conversation[1:]
 
-        # Extract per-turn logprobs from Harbor's rollout_details (required for TIS)
+        # Extract per-turn behavior logprobs from Harbor's rollout details.
         rollout_details = getattr(result.agent_result, "rollout_details", None)
         # opencode is a CLI agent that bypasses harbor Chat, so it returns EMPTY
         # rollout_details even under a co-located RecordProxy (the proxy writes a
@@ -1899,7 +1902,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 alignment_stats=alignment_stats,
                 chat_template_kwargs=self._chat_template_kwargs,
                 assistant_prompt_token_ids=assistant_prompt_token_ids,
-                use_tis=self._use_tis,
+                rollout_logprobs_required=self._rollout_logprobs_required,
                 tito_full=self._tito_full,
             )
         else:
@@ -1912,7 +1915,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 alignment_stats=alignment_stats,
                 chat_template_kwargs=self._chat_template_kwargs,
                 assistant_prompt_token_ids=assistant_prompt_token_ids,
-                use_tis=self._use_tis,
+                rollout_logprobs_required=self._rollout_logprobs_required,
                 tito_full=self._tito_full,
             )
 
@@ -2005,17 +2008,17 @@ class TerminalBenchGenerator(GeneratorInterface):
         if response_span_tags is not None:
             response_span_tags = response_span_tags[:max_response_tokens]
 
-        # AUTHORITATIVE TIS-safety gate for a preserved timeout trajectory: keep it
+        # Authoritative behavior-logprob gate for a preserved timeout trajectory: keep it
         # ONLY if it produced length-matched logprobs (one logprob per response
         # token). Otherwise fall back to the discard stub (current behavior) so a
-        # malformed / length-mismatched artifact is never fed to TIS.
+        # malformed or length-mismatched artifact is never used as a policy reference.
         if preserve_timeout:
             if rollout_logprobs is None or len(rollout_logprobs) != len(response_ids):
                 logger.warning(
                     f"Trajectory {trajectory_id}: {preserve_exception_type} preserve gate FAILED "
                     f"(rollout_logprobs="
                     f"{'None' if rollout_logprobs is None else len(rollout_logprobs)} "
-                    f"!= response_ids={len(response_ids)}); discarding for TIS safety"
+                    f"!= response_ids={len(response_ids)}); discarding for behavior-logprob safety"
                 )
                 return TerminalBenchAgentOutput(
                     response_ids=[0],
