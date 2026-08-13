@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+MISSING_TOKEN_COUNT = -1
+
 
 @dataclass(frozen=True)
 class HarborResult:
@@ -41,8 +43,8 @@ def trajectory_count_sequence(trajectory: dict[str, Any]) -> list[tuple[int, int
         parsed_completion_tokens = _integer(completion_tokens)
         sequence.append(
             (
-                parsed_prompt_tokens if parsed_prompt_tokens is not None else -1,
-                parsed_completion_tokens if parsed_completion_tokens is not None else -1,
+                parsed_prompt_tokens if parsed_prompt_tokens is not None else MISSING_TOKEN_COUNT,
+                parsed_completion_tokens if parsed_completion_tokens is not None else MISSING_TOKEN_COUNT,
             )
         )
     return sequence

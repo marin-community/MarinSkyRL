@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from statistics import fmean
 from typing import Sequence
@@ -26,23 +26,10 @@ class MatchedRewardStatistics:
     post_trial_count: int
     task_weighted_mean_reward_delta: float | None
     trial_weighted_mean_reward_delta: float | None
+    invalid_for_comparison: bool = field(init=False)
 
-    @property
-    def invalid_for_comparison(self) -> bool:
-        return self.common_task_count == 0
-
-    def payload(self) -> ComparisonPayload:
-        return ComparisonPayload(**asdict(self), invalid_for_comparison=self.invalid_for_comparison)
-
-
-@dataclass(frozen=True)
-class ComparisonPayload:
-    common_task_count: int
-    baseline_trial_count: int
-    post_trial_count: int
-    task_weighted_mean_reward_delta: float | None
-    trial_weighted_mean_reward_delta: float | None
-    invalid_for_comparison: bool
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "invalid_for_comparison", self.common_task_count == 0)
 
 
 @dataclass(frozen=True)

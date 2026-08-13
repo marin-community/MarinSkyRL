@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from infra.harbor_results import HarborResult, parse_harbor_result, trajectory_count_sequence
+from infra.harbor_results import MISSING_TOKEN_COUNT, HarborResult, parse_harbor_result, trajectory_count_sequence
 
 HARBOR_AGGREGATE_TRIAL_COUNT_KEY = "n_total_trials"
 HARBOR_TRAJECTORY_PATH = Path("agent/trajectory.json")
@@ -84,7 +84,7 @@ def _task_id(record: dict[str, Any], fallback_task_id: str) -> str:
 
 def _trajectory_fields(trajectory: dict[str, Any]) -> TrajectoryFields:
     token_counts = trajectory_count_sequence(trajectory)
-    prompt_tokens = [prompt_tokens for prompt_tokens, _ in token_counts if prompt_tokens >= 0]
+    prompt_tokens = [count for count, _ in token_counts if count != MISSING_TOKEN_COUNT]
     return TrajectoryFields(len(token_counts), max(prompt_tokens, default=None))
 
 

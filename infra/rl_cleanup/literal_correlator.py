@@ -35,7 +35,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 from upath import UPath
 
-from infra.harbor_results import trajectory_count_sequence
+from infra.harbor_results import MISSING_TOKEN_COUNT, trajectory_count_sequence
 
 # A record's messages is considered part of the SAME trial as a longer record
 # when it is an exact element-wise prefix of the longer messages list.
@@ -189,7 +189,7 @@ def bind_chain(
     the ``agent_execution`` window is used ONLY to break the tie; if still not
     unique, return None (omit rather than mis-join).
     """
-    if not count_sequence or any(-1 in pc for pc in count_sequence):
+    if not count_sequence or any(MISSING_TOKEN_COUNT in pc for pc in count_sequence):
         return None
     matches = [ch for ch in chains if not ch.ambiguous and ch.count_sequence == count_sequence]
     if len(matches) == 1:
