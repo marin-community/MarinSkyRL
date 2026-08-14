@@ -978,14 +978,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.cancel_submission_slot()
             logger.info("Generator worker exiting: generation stalled (dataset exhausted, no retries)")
             return
-        except asyncio.TimeoutError as e:
-            # A shard-level timeout fired (hung trial).  The run_shard timeout
-            # is generous enough that this only fires on genuine hangs; kill the
-            # worker so the job manager can retry rather than blocking forever.
-            log_exception_as_text("Generator worker timed out (hung trial)", e)
-            if slot_acquired:
-                await self._staleness_manager.cancel_submission_slot()
-            sys.exit(1)
         except Exception as e:
             log_exception_as_text("Generator worker failed", e)
             if slot_acquired:

@@ -50,6 +50,7 @@ from examples.terminal_bench._harbor_compat import (
 )
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
+from harbor.models.job.config import RetryConfig
 from harbor.utils.traces_utils import normalize_message
 
 # Schema-driven Harbor config mapping
@@ -820,12 +821,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         self,
         trajectory_ids: List[TrajectoryID],
         exception_type: str = "OrchestratorFailure",
+        *,
+        exclude_from_baseline: bool = True,
     ) -> GeneratorOutput:
-        """Create a GeneratorOutput where all trajectories failed.
-
-        Used when the orchestrator itself fails and cannot process any trials.
-        All outputs are marked as infrastructure failures (excluded from baseline).
-        """
+        """Create a GeneratorOutput where all trajectories share one terminal failure."""
         num_trials = len(trajectory_ids)
         return {
             "prompt_token_ids": [[0] for _ in range(num_trials)],
@@ -838,13 +837,28 @@ class TerminalBenchGenerator(GeneratorInterface):
                     num_trials,
                     num_failed_trajectories=num_trials,
                     num_failed_instances=num_trials,
-                    num_masked_trajectories=num_trials,
+                    num_masked_trajectories=num_trials if exclude_from_baseline else 0,
                 ),
                 f"{BATCH_ERROR_METRIC_PREFIX}{exception_type}": num_trials,
             },
             "rollout_logprobs": None,
-            "exclude_from_baseline": [True for _ in range(num_trials)],  # Infrastructure failure
+            "exclude_from_baseline": [exclude_from_baseline for _ in range(num_trials)],
         }
+
+    @property
+    def retry_config(self) -> RetryConfig:
+        """Return the Harbor retry policy used by this generator."""
+        return self._retry_config
+
+    async def agent_timeout_output(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        """Create the configured terminal result for a shard-level AgentTimeoutError."""
+        treatment, exception_type = self._classify_exception_type("AgentTimeoutError")
+        output = self._create_all_failed_output(
+            input_batch["trajectory_ids"],
+            exception_type,
+            exclude_from_baseline=treatment_excludes_from_baseline(treatment, verifier_available=False),
+        )
+        return await self._finalize_output(input_batch, output)
 
     async def _generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """

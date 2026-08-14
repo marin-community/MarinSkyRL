@@ -50,6 +50,10 @@ class GeneratorInterface(ABC):
             GeneratorOutput: Generated trajectories
         """
         output = await self._generate(input_batch, disable_tqdm=disable_tqdm)
+        return await self._finalize_output(input_batch, output)
+
+    async def _finalize_output(self, input_batch: GeneratorInput, output: GeneratorOutput) -> GeneratorOutput:
+        """Apply generator-independent shaping, metrics, and retention."""
         shape_trajectory_rewards(output, self.generator_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         if self.trajectory_sink is not None:

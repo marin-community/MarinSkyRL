@@ -402,6 +402,7 @@ rollout:
     enabled: true
     num_coordinators: 4
     cpus_per_coordinator: 8
+    shard_timeout_seconds: null
 deepspeed_config:
   train:
     zero_optimization:

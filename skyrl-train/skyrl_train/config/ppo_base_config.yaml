@@ -404,3 +404,5 @@ rollout:
     enabled: true
     num_coordinators: 4
     cpus_per_coordinator: 8
+    # null derives the deadline from the Harbor agent timeout, attempts, and retry backoff.
+    shard_timeout_seconds: null
