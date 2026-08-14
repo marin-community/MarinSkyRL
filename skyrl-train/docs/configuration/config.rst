@@ -594,13 +594,14 @@ Generator Configuration
     eval_n_samples_per_prompt: 1
 
     trajectory_reward_shaping:
-      schema_version: 1
+      schema_version: 2
       enabled: false
       loop:
-        window_tokens: 16
-        minimum_occurrences: 3
-        penalty_per_occurrence: 0.0
-        max_penalty: 0.2
+        max_period_tokens: 64
+        tail_tokens: 256
+        minimum_occurrences: 4
+        advantage_penalty_per_token: 0.0
+        max_advantage_penalty: 0.2
       non_termination:
         penalty: 0.0
         accepted_stop_reasons: [stop, complete, eos, end_turn]
@@ -702,7 +703,7 @@ Generation Parameters
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
-- ``generator.trajectory_reward_shaping``: Generator-independent additive penalties applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set. ``loop`` detects repeated trainable token windows without crossing tool-observation boundaries. ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
+- ``generator.trajectory_reward_shaping``: Generator-independent optimization shaping applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set, and ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. ``loop`` searches the final trainable segment's tail for the smallest repeating period, then emits capped negative per-token advantage credit for the excess repetitions. This loop credit is applied after advantage normalization and never enters the outcome reward or its group statistics. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
 - ``generator.trajectory_retention``: Generator-independent bounded capture of normalized training trajectories. It samples deterministically per step, always retains configured anomalies, and writes content-addressed compressed records plus a resume-safe ledger. ``required=false`` reports storage failures without stopping training; ``required=true`` fails the run.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
 - ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

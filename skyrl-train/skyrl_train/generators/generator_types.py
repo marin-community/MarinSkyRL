@@ -32,7 +32,6 @@ class GeneratorInput(TypedDict):
 
 
 class RewardShapingComponents(TypedDict):
-    loop: float
     non_termination: float
     successful_length: float
 
@@ -55,6 +54,7 @@ class GeneratorOutput(TypedDict):
     unshaped_rewards: Optional[List[float]]
     reward_shaping_components: Optional[List[RewardShapingComponents]]
     reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
+    loop_advantages: Optional[List[List[float]]]
     reward_shaping_versions: Optional[List[int]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]

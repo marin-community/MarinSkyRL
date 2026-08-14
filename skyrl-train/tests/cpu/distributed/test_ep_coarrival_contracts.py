@@ -106,6 +106,9 @@ async def test_fully_async_step_finishes_policy_drain_before_forward():
             events.append("advantages")
             return training_input
 
+        def finalize_advantages_for_training(self, training_input):
+            return training_input
+
         def train_critic_and_policy(self, training_input):
             events.append("train")
             return {"status": "ok"}

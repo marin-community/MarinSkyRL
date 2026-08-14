@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Sequence
 import os
 import numpy as np
 import torch
@@ -163,6 +163,27 @@ def _verify_inputs(
                         field=field_name, idx=idx, bad=bad, tname=type(bad).__name__
                     )
                 )
+
+
+def collate_response_token_channel(
+    rows: Optional[Sequence[Sequence[float]]],
+    response_template: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    expected_lengths: Sequence[int],
+) -> Optional[torch.Tensor]:
+    """Validate and right-pad a scalar channel aligned one-to-one with response tokens."""
+    if rows is None:
+        return None
+    if len(rows) != len(expected_lengths):
+        raise ValueError("response token channel must have one row per response")
+    if any(len(row) != expected for row, expected in zip(rows, expected_lengths)):
+        raise ValueError("response token channel must align one-to-one with response tokens")
+    result = torch.zeros_like(response_template, dtype=dtype)
+    for index, row in enumerate(rows):
+        values = torch.as_tensor(row, dtype=dtype)
+        result[index, : len(values)] = values
+    return result
 
 
 def convert_prompts_responses_to_batch_tensors(
@@ -391,23 +412,18 @@ def convert_prompts_responses_to_batch_tensors(
     # enable_token_reward_channel is on), so when off they stay None and the
     # returned tuple's last two slots are None — the caller attaches the batch keys
     # only when non-None, keeping the flag-off batch byte-identical.
-    token_level_shaping_tensor = None
-    if token_level_shaping is not None:
-        token_level_shaping_tensor = torch.zeros_like(action_mask, dtype=torch.float)
-        for i, sample_shaping in enumerate(token_level_shaping):
-            if isinstance(sample_shaping, list):
-                sample_shaping = torch.tensor(sample_shaping, dtype=torch.float)
-            n = min(len(sample_shaping), token_level_shaping_tensor.size(1))
-            token_level_shaping_tensor[i, :n] = sample_shaping[:n]
-
-    response_span_tags_tensor = None
-    if response_span_tags is not None:
-        response_span_tags_tensor = torch.zeros_like(action_mask, dtype=torch.long)
-        for i, sample_tags in enumerate(response_span_tags):
-            if isinstance(sample_tags, list):
-                sample_tags = torch.tensor(sample_tags, dtype=torch.long)
-            n = min(len(sample_tags), response_span_tags_tensor.size(1))
-            response_span_tags_tensor[i, :n] = sample_tags[:n]
+    token_level_shaping_tensor = collate_response_token_channel(
+        token_level_shaping,
+        action_mask,
+        dtype=torch.float,
+        expected_lengths=response_token_lens,
+    )
+    response_span_tags_tensor = collate_response_token_channel(
+        response_span_tags,
+        action_mask,
+        dtype=torch.long,
+        expected_lengths=response_token_lens,
+    )
 
     return (
         sequences,

@@ -341,13 +341,14 @@ generator:
   eval_n_samples_per_prompt: 1
 
   trajectory_reward_shaping:
-    schema_version: 1
+    schema_version: 2
     enabled: false
     loop:
-      window_tokens: 16
-      minimum_occurrences: 3
-      penalty_per_occurrence: 0.0
-      max_penalty: 0.2
+      max_period_tokens: 64
+      tail_tokens: 256
+      minimum_occurrences: 4
+      advantage_penalty_per_token: 0.0
+      max_advantage_penalty: 0.2
     non_termination:
       penalty: 0.0
       accepted_stop_reasons: [stop, complete, eos, end_turn]

@@ -18,7 +18,6 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
-from skyrl_train.utils.policy_math import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
@@ -897,13 +896,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # calculate advantages and returns / along with tensorboard logging
         with Timer("compute_advantages_and_returns", self.all_timings):
             training_input = self.compute_advantages_and_returns(training_input)
-            # remove some unwanted keys
-            for key in ["rewards"]:
-                training_input.pop(key)
-            training_input.metadata.pop("uids")
-
-            if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                training_input = normalize_advantages_dict(training_input)
+            training_input = self.finalize_advantages_for_training(training_input)
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file

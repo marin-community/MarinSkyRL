@@ -31,6 +31,7 @@ import copy
 from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
 from skyrl_train.generators.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
+    collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.utils import trainer_utils
@@ -580,13 +581,7 @@ class RayPPOTrainer:
                     # 3. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
-                        # remove some unwanted keys
-                        for key in ["rewards"]:
-                            training_input.pop(key)
-                        training_input.metadata.pop("uids")
-
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            training_input = normalize_advantages_dict(training_input)
+                        training_input = self.finalize_advantages_for_training(training_input)
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
@@ -1088,6 +1083,7 @@ class RayPPOTrainer:
         enable_token_reward_channel = bool(self.cfg.trainer.algorithm.get("enable_token_reward_channel", False))
         token_level_shaping = generator_output.get("token_level_shaping", None) if enable_token_reward_channel else None
         response_span_tags = generator_output.get("response_span_tags", None) if enable_token_reward_channel else None
+        loop_advantages = generator_output.get("loop_advantages")
 
         (
             sequences_tensor,
@@ -1177,6 +1173,14 @@ class RayPPOTrainer:
             training_input["token_level_shaping"] = token_level_shaping_tensor
         if response_span_tags_tensor is not None:
             training_input["response_span_tags"] = response_span_tags_tensor
+        loop_advantages_tensor = collate_response_token_channel(
+            loop_advantages,
+            response_masks_tensor,
+            dtype=torch.float,
+            expected_lengths=[len(response) for response in response_ids],
+        )
+        if loop_advantages_tensor is not None:
+            training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if generator_output.get("exclude_from_baseline") is not None:
@@ -1421,6 +1425,31 @@ class RayPPOTrainer:
                 "loss/avg_raw_advantages_abs": avg_advantages_abs,
             }
         )
+        return data
+
+    @staticmethod
+    def apply_loop_advantages(data: TrainingInputBatch) -> TrainingInputBatch:
+        """Add loop credit after normalization, or return unchanged when the channel is absent."""
+        loop_advantages = data.get("loop_advantages")
+        if loop_advantages is None:
+            return data
+        advantages = data["advantages"]
+        loop_advantages = loop_advantages.to(device=advantages.device, dtype=advantages.dtype)
+        data["advantages"] = advantages + loop_advantages * data["response_mask"]
+        return data
+
+    def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
+        """Apply configured normalization before finalizing the advantage tensor."""
+        if self.cfg.trainer.algorithm.advantage_batch_normalize:
+            data = normalize_advantages_dict(data)
+        return self.apply_loop_credit_and_drop_advantage_inputs(data)
+
+    def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
+        """Apply loop credit, then remove rewards, loop_advantages, and uids before worker dispatch."""
+        data = self.apply_loop_advantages(data)
+        data.pop("rewards")
+        data.pop("loop_advantages", None)
+        data.metadata.pop("uids")
         return data
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):

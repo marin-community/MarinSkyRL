@@ -65,12 +65,13 @@ def _output() -> GeneratorOutput:
         "rewards": [1.0, -0.25, 0.0],
         "unshaped_rewards": [1.0, 0.0, 0.0],
         "reward_shaping_components": [
-            {"loop": 0.0, "non_termination": 0.0, "successful_length": 0.0},
-            {"loop": 0.0, "non_termination": -0.25, "successful_length": 0.0},
-            {"loop": -0.2, "non_termination": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "successful_length": 0.0},
+            {"non_termination": -0.25, "successful_length": 0.0},
+            {"non_termination": 0.0, "successful_length": 0.0},
         ],
         "reward_shaping_loop_spans": [[], [], [{"start": 0, "end": 2}]],
-        "reward_shaping_versions": [1, 1, 1],
+        "loop_advantages": [[0.0, 0.0], [0.0, 0.0, 0.0], [-0.1, -0.1]],
+        "reward_shaping_versions": [2, 2, 2],
         "loss_masks": [[1, 1], [1, 1, 1], [1, 1]],
         "stop_reasons": ["stop", "length", "stop"],
         "rollout_metrics": {"environment/score": 1 / 3},
@@ -338,7 +339,7 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
         "resume_path": "/checkpoints/global_step_6",
         "model_version_step": 6,
         "sampling": {"temperature": 0.7, "max_tokens": 16},
-        "reward_shaping_schema_version": 1,
+        "reward_shaping_schema_version": 2,
     }
     assert record["response"]["trainable_spans"] == [{"start": 0, "end": 2}]
 

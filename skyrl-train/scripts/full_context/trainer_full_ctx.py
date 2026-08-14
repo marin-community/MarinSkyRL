@@ -72,10 +72,7 @@ class FullCtxTrainer(RayPPOTrainer):
                 # 3. calculate advantages and returns
                 with Timer("compute_advantages_and_returns", self.all_timings):
                     training_input = self.compute_advantages_and_returns(training_input)
-                    # remove some unwanted keys
-                    for key in ["rewards"]:
-                        training_input.pop(key)
-                    training_input.metadata.pop("uids")
+                    training_input = self.apply_loop_credit_and_drop_advantage_inputs(training_input)
 
                 # 4. train policy/critic model
                 with Timer("train_critic_and_policy", self.all_timings):

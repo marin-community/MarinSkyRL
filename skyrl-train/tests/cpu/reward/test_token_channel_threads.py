@@ -25,8 +25,8 @@ def tokenizer():
 
 
 def test_channel_lands_at_exact_positions(tokenizer):
-    prompts = tokenizer(["abc", "12345"])["input_ids"]
-    responses = tokenizer(["def", "67890"])["input_ids"]
+    prompts = [[101], [102, 103]]
+    responses = [[201, 202, 203], [204, 205, 206, 207, 208]]
     rewards = [torch.tensor([0.0, 0.0, 1.0]), torch.tensor([0.0, 0.0, 0.0, 0.0, 1.0])]
     loss_masks = [[1, 1, 1], [1, 1, 1, 1, 1]]
     # KNOWN per-token shaping: distinct values at distinct positions.

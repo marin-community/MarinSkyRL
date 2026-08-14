@@ -372,6 +372,9 @@ class TrainingInput(TypedDict, total=False):
     # combiner that ADDS this into the advantage is registered in Stage C; Stage B
     # only makes it flow as zeros (no-op).
     token_level_shaping: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    # Negative per-token loop credit, applied after the configured advantage
+    # estimator. It never enters outcome-reward group statistics or returns.
+    loop_advantages: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # Loop-behavior reward shaping (Stage B / F4): per-token span tags
     # {OTHER=0, THINK=1, ACTION=2, EDIT=3}, aligned 1:1 with the response tokens
     # (same exact-token-id layout TIS uses). Present only when the channel is on.

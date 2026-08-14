@@ -20,6 +20,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
+from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.model_wrapper import HFModelWrapper
@@ -493,6 +494,92 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dum
     assert "avg_advantages_abs" in metrics
     assert metrics["avg_advantages"] == approx(
         torch.masked_select(mock_advantages, data["response_mask"].bool()).mean().item(), rel=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    ("loss_reduction", "expected_policy_loss"),
+    [("token_mean", 0.05), ("sequence_mean", 0.04375)],
+)
+def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_outcome(
+    loss_reduction, expected_policy_loss
+):
+    response_length = 48
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": False,
+                "algorithm": {
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
+                    "policy_loss_type": "regular",
+                    "loss_reduction": loss_reduction,
+                    "eps_clip_low": 0.2,
+                    "eps_clip_high": 0.2,
+                    "use_tis": False,
+                    "max_seq_len": response_length,
+                },
+            }
+        }
+    )
+    trainer.all_metrics = {}
+    loop_start = 18
+    response_mask = torch.ones(4, response_length)
+    response_mask[2:, 24:] = 0
+    loop_advantages = torch.zeros(4, response_length)
+    loop_advantages[:, loop_start:] = -0.1
+    loop_advantages *= response_mask
+    data = TrainingInputBatch(
+        {
+            "rewards": torch.zeros(4, response_length),
+            "response_mask": response_mask,
+            "values": None,
+            "loop_advantages": loop_advantages,
+        }
+    )
+    data.metadata = {
+        "uids": ["same-group"] * 4,
+        "avg_response_length": float(response_length),
+    }
+
+    result = trainer.compute_advantages_and_returns(data)
+    result = trainer_module.normalize_advantages_dict(result)
+    result = trainer.apply_loop_advantages(result)
+
+    assert torch.equal(result["advantages"], loop_advantages)
+    assert torch.equal(result["returns"], torch.zeros(4, response_length))
+    policy_loss, _ = ppo_policy_loss(
+        torch.zeros_like(loop_advantages),
+        torch.zeros_like(loop_advantages),
+        result["advantages"],
+        config=trainer.cfg.trainer.algorithm,
+        loss_mask=response_mask,
+    )
+    assert policy_loss.item() == pytest.approx(expected_policy_loss)
+
+
+def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_tokenizer):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [3]],
+        "response_ids": [[4, 5, 6], [7]],
+        "rewards": [[0.0, 0.0, 0.0], [0.0]],
+        "loss_masks": [[1, 1, 1], [1]],
+        "rollout_logprobs": None,
+        "loop_advantages": [[0.0, -0.1, -0.1], [-0.2]],
+    }
+
+    batch = trainer.convert_to_training_input(generator_output, ["a", "b"])
+
+    torch.testing.assert_close(
+        batch["loop_advantages"],
+        torch.tensor([[0.0, -0.1, -0.1], [-0.2, 0.0, 0.0]]),
     )
 
 
