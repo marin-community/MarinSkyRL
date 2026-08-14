@@ -6,6 +6,9 @@ from harbor_config.errors import ErrorCategory, error_category
 from loguru import logger
 
 
+AGENT_TIMEOUT_ERROR = "AgentTimeoutError"
+
+
 class ErrorTreatment(StrEnum):
     """How a persisted Harbor trial failure contributes to RL training."""
 

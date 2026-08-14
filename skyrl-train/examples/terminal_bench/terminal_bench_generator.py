@@ -30,6 +30,7 @@ from skyrl_train.generators.utils import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
 from skyrl_train.utils.harbor_errors import (
+    AGENT_TIMEOUT_ERROR,
     ErrorTreatment,
     classify_exception_type,
     treatment_excludes_from_baseline,
@@ -847,12 +848,11 @@ class TerminalBenchGenerator(GeneratorInterface):
 
     @property
     def retry_config(self) -> RetryConfig:
-        """Return the Harbor retry policy used by this generator."""
         return self._retry_config
 
     async def agent_timeout_output(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Create the configured terminal result for a shard-level AgentTimeoutError."""
-        treatment, exception_type = self._classify_exception_type("AgentTimeoutError")
+        treatment, exception_type = self._classify_exception_type(AGENT_TIMEOUT_ERROR)
         output = self._create_all_failed_output(
             input_batch["trajectory_ids"],
             exception_type,

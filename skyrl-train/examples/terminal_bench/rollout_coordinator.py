@@ -61,10 +61,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.utils.harbor_errors import AGENT_TIMEOUT_ERROR
 from skyrl_train.worker_setup import configure_worker_process
 
 
-AGENT_TIMEOUT_ERROR = "AgentTimeoutError"
+DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 OUTER_AGENT_TIMEOUT_METRIC = "generate/outer_agent_timeouts"
 
 
@@ -81,6 +82,13 @@ class _ShardGenerator(Protocol):
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput: ...
 
     async def agent_timeout_output(self, input_batch: GeneratorInput) -> GeneratorOutput: ...
+
+
+def _retry_backoff_seconds(retry_config: _RetryConfig, attempt: int) -> float:
+    return min(
+        retry_config.min_wait_sec * retry_config.wait_multiplier**attempt,
+        retry_config.max_wait_sec,
+    )
 
 
 @dataclass(frozen=True)
@@ -106,11 +114,7 @@ class ShardTimeoutPolicy:
             return cls(timeout_seconds=float(configured_timeout), retry_config=retry_config)
 
         backoff_budget = sum(
-            min(
-                retry_config.min_wait_sec * retry_config.wait_multiplier**attempt,
-                retry_config.max_wait_sec,
-            )
-            for attempt in range(retry_config.max_retries)
+            _retry_backoff_seconds(retry_config, attempt) for attempt in range(retry_config.max_retries)
         )
         attempt_budget = agent_timeout * (retry_config.max_retries + 1)
         return cls(timeout_seconds=attempt_budget + backoff_budget, retry_config=retry_config)
@@ -123,10 +127,7 @@ class ShardTimeoutPolicy:
         return not included or AGENT_TIMEOUT_ERROR in included
 
     def _backoff_seconds(self, attempt: int) -> float:
-        return min(
-            self.retry_config.min_wait_sec * self.retry_config.wait_multiplier**attempt,
-            self.retry_config.max_wait_sec,
-        )
+        return _retry_backoff_seconds(self.retry_config, attempt)
 
     async def generate(self, generator: _ShardGenerator, input_batch: GeneratorInput) -> GeneratorOutput:
         """Generate one shard, converting the outer deadline to AgentTimeoutError semantics."""
@@ -313,7 +314,7 @@ class RolloutCoordinator:
         self._inflight_zero.set()
 
         harbor_cfg = scaled_tb_cfg.get("harbor", {})
-        harbor_timeout = float(harbor_cfg.get("override_timeout_sec", 1800))
+        harbor_timeout = float(harbor_cfg.get("override_timeout_sec", DEFAULT_AGENT_TIMEOUT_SECONDS))
         configured_timeout = cfg.get("rollout", {}).get("fanout", {}).get("shard_timeout_seconds", None)
         self._shard_timeout_policy = ShardTimeoutPolicy.from_config(
             configured_timeout=configured_timeout,
