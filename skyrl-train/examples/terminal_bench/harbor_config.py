@@ -622,11 +622,14 @@ class HarborConfigBuilder:
         return trial_fields
 
     def build_retry_config(self) -> RetryConfig:
-        """
-        Build RetryConfig for QueueOrchestrator from YAML config.
+        """Build the QueueOrchestrator retry policy.
+
+        Explicit and Harbor-default exclusions are combined with SkyRL's
+        pass-through exception set. Pass-through failures are terminal results that
+        may retain verifier output; retrying would discard that result.
 
         Returns:
-            Configured RetryConfig with exponential backoff and exception filtering.
+            RetryConfig with exponential backoff and resolved terminal exceptions.
         """
         retry_fields = {}
 

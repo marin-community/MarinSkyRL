@@ -126,9 +126,6 @@ class ShardTimeoutPolicy:
         included = self.retry_config.include_exceptions
         return not included or AGENT_TIMEOUT_ERROR in included
 
-    def _backoff_seconds(self, attempt: int) -> float:
-        return _retry_backoff_seconds(self.retry_config, attempt)
-
     async def generate(self, generator: _ShardGenerator, input_batch: GeneratorInput) -> GeneratorOutput:
         """Generate one shard, converting the outer deadline to AgentTimeoutError semantics."""
         timeout_count = 0
@@ -141,7 +138,7 @@ class ShardTimeoutPolicy:
             except asyncio.TimeoutError:
                 timeout_count += 1
                 if attempt < self.retry_config.max_retries and self._should_retry_agent_timeout():
-                    delay = self._backoff_seconds(attempt)
+                    delay = _retry_backoff_seconds(self.retry_config, attempt)
                     _log().warning(
                         f"Shard exceeded its {self.timeout_seconds:g}s outer deadline; "
                         f"refiling as {AGENT_TIMEOUT_ERROR} and retrying after {delay:g}s "
@@ -313,7 +310,7 @@ class RolloutCoordinator:
         self._inflight_zero = asyncio.Event()
         self._inflight_zero.set()
 
-        harbor_cfg = scaled_tb_cfg.get("harbor", {})
+        harbor_cfg = scaled_tb_cfg.get("harbor", scaled_tb_cfg)
         harbor_timeout = float(harbor_cfg.get("override_timeout_sec", DEFAULT_AGENT_TIMEOUT_SECONDS))
         configured_timeout = cfg.get("rollout", {}).get("fanout", {}).get("shard_timeout_seconds", None)
         self._shard_timeout_policy = ShardTimeoutPolicy.from_config(
