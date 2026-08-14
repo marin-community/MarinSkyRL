@@ -79,6 +79,7 @@ from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
 from iris.rpc import job_pb2
 
+from cloud.iris.artifacts import CHECKPOINT_MARKER_FILENAME, fs_and_path
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
@@ -87,7 +88,13 @@ from cloud.iris.ray_storage import (
     validate_ray_spill_dir,
 )
 from cloud.iris.model_paths import model_source_cli_args, unsupported_model_path_message
-from marinskyrl.resource_locator import ModelLocatorError, is_cloud_uri, is_hugging_face_repo_id, model_source_for_path
+from marinskyrl.resource_locator import (
+    ModelLocatorError,
+    is_cloud_uri,
+    is_hugging_face_repo_id,
+    join_resource_path,
+    model_source_for_path,
+)
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
@@ -337,6 +344,37 @@ class IrisBackend:
         args = resolved_launch_args(job_launch_argv(spec, config_path, mode=mode))
         with contextlib.redirect_stdout(sys.stderr):
             return launch(args, spec.request.runtime.commit)
+
+    def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None:
+        """Run and verify the export requested by the terminal checkpoint."""
+        request = spec.request
+        marker_uri = join_resource_path(request.output.checkpoint_root, CHECKPOINT_MARKER_FILENAME)
+        filesystem, marker_path = fs_and_path(marker_uri)
+        if not filesystem.exists(marker_path):
+            raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {marker_uri}")
+        with filesystem.open(marker_path, "r") as source:
+            global_step = int(source.read().strip())
+
+        checkpoint_path = join_resource_path(request.output.checkpoint_root, f"global_step_{global_step}")
+        execution = spec.execution
+        command = [
+            sys.executable,
+            "-m",
+            "cloud.iris.export_hf_checkpoint",
+            "--request",
+            checkpoint_path,
+            "--rl_config",
+            config_path,
+            "--cluster",
+            execution.target_cluster or execution.cluster,
+            "--priority",
+            execution.priority,
+            "--job-name",
+            f"{execution.job_name}-export-{global_step}",
+        ]
+        exit_code = subprocess.call(command, cwd=str(PROJECT_ROOT))
+        if exit_code != 0:
+            raise subprocess.CalledProcessError(exit_code, command)
 
 
 def iris_job_state_name(state: int) -> str:

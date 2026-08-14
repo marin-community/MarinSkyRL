@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import posixpath
+import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
@@ -47,6 +48,8 @@ class JobBackend(Protocol):
         *,
         mode: LaunchMode = LaunchMode.WAIT,
     ) -> IrisLaunchOutcome: ...
+
+    def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
 
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
@@ -157,10 +160,14 @@ def execute_job(
             job_state = iris_job_state_name(error.status.state)
             outcome = IrisLaunchOutcome(job_id=str(error.job_id), job_state=job_state, exit_code=1)
 
-    if outcome.exit_code != 0:
-        return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
-    if mode is LaunchMode.DETACH:
-        return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
+        if outcome.exit_code != 0:
+            return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
+        if mode is LaunchMode.DETACH:
+            return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
+        try:
+            active_backend.export_terminal_policy(spec, config_file.name)
+        except (OSError, subprocess.CalledProcessError, ValueError) as error:
+            return _record_failed_attempt(spec, outcome, f"Terminal policy export failed: {error}")
 
     try:
         model = _policy_export(request)
