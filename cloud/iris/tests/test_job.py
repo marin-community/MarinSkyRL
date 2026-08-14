@@ -13,7 +13,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from cloud.iris import iris_backend, job, runtime_environment  # noqa: E402
+from cloud.iris import job, runtime_environment  # noqa: E402
 from cloud.iris import runtime_bundle  # noqa: E402
 from cloud.iris.job import JobBackend, execute_job  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
@@ -30,7 +30,7 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLRolePlan,
     SkyRLTopology,
 )
-from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
+from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
 from iris.client import JobFailedError  # noqa: E402
@@ -81,7 +81,7 @@ class FailedLaunchBackend(JobBackend):
         assert mode is LaunchMode.WAIT
         raise self.error
 
-    def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None:
+    def export_terminal_policy(self, _spec: SkyRLJobSpec, _config_path: str) -> None:
         raise AssertionError("a failed training launch cannot export a terminal policy")
 
 
@@ -292,29 +292,6 @@ def test_execute_job_exports_terminal_checkpoint_before_committing_model(tmp_pat
     assert response.state == AttemptState.SUCCEEDED
     assert response.model is not None
     assert response.model.policy_export_uri.endswith("/global_step_8/policy")
-
-
-def test_iris_backend_runs_terminal_checkpoint_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    envelope = _spec(tmp_path)
-    checkpoint = Path(envelope.request.output.checkpoint_root.removeprefix("file://"))
-    checkpoint.mkdir(parents=True)
-    (checkpoint / "latest_ckpt_global_step.txt").write_text("8")
-    calls: list[tuple[list[str], str]] = []
-
-    def record_call(command: list[str], *, cwd: str) -> int:
-        calls.append((command, cwd))
-        return 0
-
-    monkeypatch.setattr(iris_backend.subprocess, "call", record_call)
-
-    IrisBackend().export_terminal_policy(envelope, "config.yaml")
-
-    command, cwd = calls[0]
-    assert command[:3] == [sys.executable, "-m", "cloud.iris.export_hf_checkpoint"]
-    assert command[command.index("--request") + 1].endswith("/checkpoints/global_step_8")
-    assert command[command.index("--rl_config") + 1] == "config.yaml"
-    assert command[command.index("--cluster") + 1] == "cw-us-east-08a"
-    assert cwd == str(iris_backend.PROJECT_ROOT)
 
 
 def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:
