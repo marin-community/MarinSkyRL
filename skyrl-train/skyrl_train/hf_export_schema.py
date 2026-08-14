@@ -3,7 +3,6 @@ from enum import StrEnum
 
 from marinskyrl.resource_locator import validate_replayable_model_reference
 
-HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 HF_EXPORT_REQUEST_SCHEMA_VERSION = 1
 TRAINER_STATE_FILENAME = "trainer_state.pt"
 DEFAULT_HF_EXPORT_TIMEOUT = 7200

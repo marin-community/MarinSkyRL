@@ -11,9 +11,8 @@ from cloud.iris.artifacts import fs_and_path, terminal_checkpoint_step
 from cloud.iris.model_paths import model_source_cli_args
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.storage_policy import hydra_override_value
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, HF_EXPORT_REQUEST_FILENAME
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.hf_export_schema import HF_EXPORT_REQUEST_FILENAME
 
 
 @dataclass(frozen=True)
