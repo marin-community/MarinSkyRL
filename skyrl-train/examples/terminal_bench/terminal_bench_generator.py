@@ -340,6 +340,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
+        self.agent_timeout_seconds = self._harbor_config_builder.get_agent_timeout_seconds()
 
         # Configure Harbor log level (default WARNING to reduce noise)
         harbor_log_level = self._harbor_config_builder.get_log_level(default="WARNING")

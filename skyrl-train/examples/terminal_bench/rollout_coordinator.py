@@ -65,7 +65,6 @@ from skyrl_train.utils.harbor_errors import AGENT_TIMEOUT_ERROR
 from skyrl_train.worker_setup import configure_worker_process
 
 
-DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 OUTER_AGENT_TIMEOUT_METRIC = "generate/outer_agent_timeouts"
 
 
@@ -310,12 +309,10 @@ class RolloutCoordinator:
         self._inflight_zero = asyncio.Event()
         self._inflight_zero.set()
 
-        harbor_cfg = scaled_tb_cfg.get("harbor", scaled_tb_cfg)
-        harbor_timeout = float(harbor_cfg.get("override_timeout_sec", DEFAULT_AGENT_TIMEOUT_SECONDS))
         configured_timeout = cfg.get("rollout", {}).get("fanout", {}).get("shard_timeout_seconds", None)
         self._shard_timeout_policy = ShardTimeoutPolicy.from_config(
             configured_timeout=configured_timeout,
-            agent_timeout=harbor_timeout,
+            agent_timeout=self._generator.agent_timeout_seconds,
             retry_config=self._generator.retry_config,
         )
 

@@ -76,3 +76,14 @@ def test_passthrough_exceptions_are_never_retried():
     retry_config = HarborConfigBuilder(cfg).build_retry_config()
 
     assert retry_config.exclude_exceptions == {"AgentTimeoutError", "VerifierTimeoutError"}
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"harbor": {"override_timeout_sec": 123}},
+        {"override_timeout_sec": 123},
+    ],
+)
+def test_agent_timeout_resolution_supports_nested_and_legacy_layouts(cfg):
+    assert HarborConfigBuilder(OmegaConf.create(cfg)).get_agent_timeout_seconds() == 123

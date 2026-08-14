@@ -25,22 +25,28 @@ class LongTailGenerator:
         }
 
 
-def _retry_config(*, max_retries, include_exceptions=None, exclude_exceptions=None):
+def _retry_config(
+    *,
+    max_retries,
+    include_exceptions=None,
+    exclude_exceptions=None,
+    min_wait_sec=0.0,
+    max_wait_sec=0.0,
+    wait_multiplier=2.0,
+):
     return SimpleNamespace(
         max_retries=max_retries,
         include_exceptions=include_exceptions,
         exclude_exceptions=exclude_exceptions,
-        min_wait_sec=0.0,
-        max_wait_sec=0.0,
-        wait_multiplier=2.0,
+        min_wait_sec=min_wait_sec,
+        max_wait_sec=max_wait_sec,
+        wait_multiplier=wait_multiplier,
     )
 
 
 def test_shard_timeout_default_covers_harbor_attempt_and_backoff_budget():
-    retry_config = SimpleNamespace(
+    retry_config = _retry_config(
         max_retries=3,
-        include_exceptions=None,
-        exclude_exceptions=None,
         min_wait_sec=60.0,
         max_wait_sec=600.0,
         wait_multiplier=2.0,

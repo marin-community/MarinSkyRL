@@ -47,6 +47,9 @@ from harbor.models.job.config import RetryConfig
 from harbor.models.environment_type import EnvironmentType
 
 
+DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
+
+
 # =============================================================================
 # Schema Definition: Which Harbor fields are exposed in SkyRL YAML
 # =============================================================================
@@ -668,6 +671,12 @@ class HarborConfigBuilder:
             if value is not None:
                 return int(value)
         return default
+
+    def get_agent_timeout_seconds(self) -> float:
+        """Resolve the Harbor agent deadline across nested and legacy config layouts."""
+        mapping = AGENT_SCHEMA.fields["override_timeout_sec"]
+        value = self._get_field_value("override_timeout_sec", mapping, self._cfg)
+        return float(value) if value is not None else DEFAULT_AGENT_TIMEOUT_SECONDS
 
     def get_reward_shaping_config(self) -> Dict[str, Any]:
         """
