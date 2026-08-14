@@ -85,8 +85,6 @@ trainer:
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
-      # Colocated FSDP2 reference models always enable this during validation to keep
-      # one stable CPU shard instead of moving the complete model between devices.
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
