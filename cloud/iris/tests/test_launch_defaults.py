@@ -345,6 +345,14 @@ def test_resolve_launch_defaults_rejects_durable_iris_run_storage(tmp_path, stor
         resolve_launch_defaults(args)
 
 
+def test_resolve_launch_defaults_rejects_non_path_trace_configuration(tmp_path):
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text("terminal_bench:\n  trials_dir: [not, a, path]\n")
+
+    with pytest.raises(SystemExit, match="terminal_bench.trials_dir must be a string"):
+        resolve_launch_defaults(args)
+
+
 def test_task_command_applies_bounded_storage_policy(tmp_path):
     args = _args(tmp_path, "opencode", ["--job-name", "storage-policy", "--storage-user", "alice"])
     normalize(args)
@@ -680,17 +688,14 @@ def test_direct_launcher_does_not_export_without_completed_training(monkeypatch,
     assert exported == []
 
 
-def test_direct_terminal_export_uses_policy_geometry(tmp_path):
-    config = tmp_path / "disaggregated.yaml"
-    config.write_text("trainer:\n  placement:\n    policy_num_nodes: 2\n    policy_num_gpus_per_node: 8\n")
-    args = SimpleNamespace(
-        skyrl_override=["trainer.placement.policy_num_nodes=3"],
-        rl_config=str(config),
-        num_nodes=5,
-        gpus_per_node=4,
-    )
-
-    assert iris_backend._direct_policy_geometry(args) == (3, 8)
+def test_direct_terminal_export_uses_policy_geometry():
+    config = {"trainer": {"placement": {"policy_num_nodes": 2, "policy_num_gpus_per_node": 8}}}
+    assert iris_backend.policy_export_geometry(
+        config,
+        ["trainer.placement.policy_num_nodes=3"],
+        default_num_nodes=5,
+        default_gpus_per_node=4,
+    ) == (3, 8)
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:

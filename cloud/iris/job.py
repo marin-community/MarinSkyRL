@@ -16,9 +16,9 @@ from typing import Any, Protocol
 from iris.client import JobFailedError
 
 from cloud.iris.artifacts import (
-    CHECKPOINT_MARKER_FILENAME,
     fs_and_path,
     relative_object_key,
+    terminal_checkpoint_step,
 )
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
@@ -61,22 +61,13 @@ def _write_json(uri: str, value: dict[str, Any]) -> None:
         json.dump(value, destination, sort_keys=True)
 
 
-def _read_text(uri: str) -> str:
-    filesystem, path = fs_and_path(uri)
-    with filesystem.open(path, "r") as source:
-        return source.read()
-
-
 def _path_exists(uri: str) -> bool:
     filesystem, path = fs_and_path(uri)
     return filesystem.exists(path)
 
 
 def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
-    checkpoint_marker = posixpath.join(request.output.checkpoint_root, CHECKPOINT_MARKER_FILENAME)
-    if not _path_exists(checkpoint_marker):
-        raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {checkpoint_marker}")
-    global_step = int(_read_text(checkpoint_marker).strip())
+    global_step = terminal_checkpoint_step(request.output.checkpoint_root)
     policy_uri = policy_export_path(request.output.export_root, global_step)
     filesystem, policy_path = fs_and_path(policy_uri)
     files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))

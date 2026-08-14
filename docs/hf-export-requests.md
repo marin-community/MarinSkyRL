@@ -8,11 +8,13 @@ serialization, and optional Hugging Face Hub publication.
 
 ## Launcher storage policy
 
-Both direct `cloud.iris.iris_backend` launches and typed Marin launches use the
-same storage defaults. Resume checkpoints, raw Harbor traces, retained
-trajectories, rendezvous state, and uploaded Ray session material use a
-`tmp/ttl=14d` prefix. The launcher retains two resume checkpoints by default and
-accepts an explicit limit of one or two. Ray object spill uses node-local
+Direct `cloud.iris.iris_backend` launches derive a lifecycle-managed temporary
+root and a user-owned durable root. Typed launches honor the output paths in the
+request; Marin supplies the same split when it builds that request. Resume
+checkpoints, raw Harbor traces, retained trajectories, rendezvous state, and
+uploaded Ray session material therefore use a `tmp/ttl=14d` prefix in both
+workflows. The launcher retains two resume checkpoints by default and accepts an
+explicit limit of one or two. Ray object spill uses node-local
 `/tmp/skyrl-ray-spill` storage unless remote spill is explicitly selected.
 
 The terminal policy export and resolved launch configuration use a durable

@@ -13,6 +13,7 @@ from typing import Callable
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
+from marinskyrl.resource_locator import join_resource_path
 
 CHECKPOINT_MARKER_FILENAME = "latest_ckpt_global_step.txt"
 SOURCE_MANIFEST_FILENAME = ".marinskyrl-source.json"
@@ -46,6 +47,16 @@ def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
         storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
     filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
     return filesystem, paths[0]
+
+
+def terminal_checkpoint_step(checkpoint_root: str) -> int:
+    """Return the latest committed checkpoint step."""
+    marker_uri = join_resource_path(checkpoint_root, CHECKPOINT_MARKER_FILENAME)
+    filesystem, marker_path = fs_and_path(marker_uri)
+    if not filesystem.exists(marker_path):
+        raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {marker_uri}")
+    with filesystem.open(marker_path, "r") as source:
+        return int(source.read().strip())
 
 
 def relative_object_key(root: str, path: str) -> str:

@@ -227,25 +227,25 @@ def _write_terminal_training_outputs(envelope: SkyRLJobSpec) -> None:
     output = Path(envelope.request.output.checkpoint_root.removeprefix("file://"))
     output.mkdir(parents=True)
     (output / "latest_ckpt_global_step.txt").write_text("8")
-    export = Path(envelope.request.output.export_root.removeprefix("file://")) / "global_step_8" / "policy"
+    _write_policy_export(envelope.request.output.export_root)
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+
+
+def _write_policy_export(export_root: str) -> None:
+    export = Path(export_root.removeprefix("file://")) / "global_step_8" / "policy"
     export.mkdir(parents=True)
     (export / "config.json").write_text("{}")
     (export / "model.safetensors").write_bytes(b"weights")
     (export / "tokenizer.json").write_text("{}")
-    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
 
 
 @dataclass(frozen=True)
 class CompletingExportBackend(FakeLaunchBackend):
     def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None:
         self.validate(spec, config_path)
-        export = Path(spec.request.output.export_root.removeprefix("file://")) / "global_step_8" / "policy"
-        export.mkdir(parents=True)
-        (export / "config.json").write_text("{}")
-        (export / "model.safetensors").write_bytes(b"weights")
-        (export / "tokenizer.json").write_text("{}")
+        _write_policy_export(spec.request.output.export_root)
 
 
 def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
@@ -342,9 +342,9 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
     assert args.memory == "800GB"
     assert args.disk == "4TB"
     assert args.wandb_entity == "marin-community"
-    assert args.rendezvous_dir == f"{envelope.request.output.attempts_root}/rendezvous"
-    assert args.ray_spill_dir == "/tmp/skyrl-ray-spill"
-    assert args.ray_spill_backend.value == "local"
+    assert argv[argv.index("--rendezvous-dir") + 1] == f"{envelope.request.output.attempts_root}/rendezvous"
+    assert argv[argv.index("--ray-spill-dir") + 1] == "/tmp/skyrl-ray-spill"
+    assert argv[argv.index("--ray-spill-backend") + 1] == "local"
 
 
 def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:
