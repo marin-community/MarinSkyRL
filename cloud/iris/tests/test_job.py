@@ -331,7 +331,8 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
 
 
 def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> None:
-    argv = job_launch_argv(_spec(tmp_path), "config.yaml")
+    envelope = _spec(tmp_path)
+    argv = job_launch_argv(envelope, "config.yaml")
 
     args = create_parser().parse_args(argv)
 
@@ -341,6 +342,9 @@ def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> 
     assert args.memory == "800GB"
     assert args.disk == "4TB"
     assert args.wandb_entity == "marin-community"
+    assert args.rendezvous_dir == f"{envelope.request.output.attempts_root}/rendezvous"
+    assert args.ray_spill_dir == "/tmp/skyrl-ray-spill"
+    assert args.ray_spill_backend.value == "local"
 
 
 def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:

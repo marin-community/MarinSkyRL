@@ -263,12 +263,26 @@ def _shell_options(shell: str) -> dict[str, list[str]]:
 
 
 def test_resolve_launch_defaults_uses_cluster_storage_and_harness(tmp_path):
-    args = _args(tmp_path, "opencode")
+    args = _args(tmp_path, "opencode", ["--job-name", "storage-policy", "--storage-user", "alice"])
 
     resolve_launch_defaults(args)
 
-    assert re.fullmatch(r"rl-opencode-model-30b-\d{8}-\d{6}-[0-9a-f]{6}", args.job_name)
-    assert args.rendezvous_dir == f"s3://example-bucket/iris/example-cluster/rendezvous/{args.job_name}"
+    assert args.job_name == "storage-policy"
+    assert args.rendezvous_dir == "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/rendezvous"
+    assert args.storage_paths.checkpoint_root == (
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/checkpoints"
+    )
+    assert args.storage_paths.trace_root == (
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trace_jobs"
+    )
+    assert args.storage_paths.trajectory_root == (
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trajectories"
+    )
+    assert args.storage_paths.export_root == "s3://example-bucket/marin/users/alice/skyrl/storage-policy/exports"
+    assert args.storage_paths.resume_checkpoint_count == 2
+    assert args.resolved_config_uri == (
+        "s3://example-bucket/marin/users/alice/skyrl/storage-policy/resolved-skyrl.json"
+    )
     assert args.cpu == 36
     assert args.record_literal is True
 
@@ -291,7 +305,7 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
             "--job-name",
             "chosen-job",
             "--rendezvous-dir",
-            "s3://custom/rendezvous",
+            "s3://custom/tmp/ttl=14d/rendezvous",
             "--cpu",
             "12",
             "--ray-spill-dir",
@@ -303,10 +317,55 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     resolve_launch_defaults(args)
 
     assert args.job_name == "chosen-job"
-    assert args.rendezvous_dir == "s3://custom/rendezvous"
+    assert args.rendezvous_dir == "s3://custom/tmp/ttl=14d/rendezvous"
     assert args.cpu == 12
     assert args.ray_spill_dir == "/local/nvme/ray-spill"
     assert args.record_literal is False
+
+
+@pytest.mark.parametrize(
+    "storage_override",
+    [
+        ["--rendezvous-dir", "s3://example-bucket/iris/run/rendezvous"],
+        ["--trials-dir", "s3://example-bucket/iris/run/trace_jobs"],
+        ["--skyrl_override", "trainer.ckpt_path=s3://example-bucket/iris/run/checkpoints"],
+        ["--skyrl_override", "trainer.export_path=s3://example-bucket/iris/run/exports"],
+        ["--temporary-output-root", "s3://example-bucket/iris/tmp/ttl=14d/run"],
+        ["--resolved-config-uri", "s3://example-bucket/iris/run/resolved-skyrl.json"],
+        [
+            "--skyrl_override",
+            "generator.trajectory_retention.output_path=s3://example-bucket/iris/run/trajectories",
+        ],
+    ],
+)
+def test_resolve_launch_defaults_rejects_durable_iris_run_storage(tmp_path, storage_override):
+    args = _args(tmp_path, "opencode", storage_override)
+
+    with pytest.raises(SystemExit, match="storage policy"):
+        resolve_launch_defaults(args)
+
+
+def test_task_command_applies_bounded_storage_policy(tmp_path):
+    args = _args(tmp_path, "opencode", ["--job-name", "storage-policy", "--storage-user", "alice"])
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+    overrides = set(options["--skyrl_override"])
+
+    assert "++trainer.max_ckpts_to_keep=2" in overrides
+    assert (
+        "++trainer.ckpt_path=s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/checkpoints" in overrides
+    )
+    assert (
+        "++terminal_bench_config.trials_dir="
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trace_jobs" in overrides
+    )
+    assert (
+        "++generator.trajectory_retention.output_path="
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trajectories" in overrides
+    )
+    assert "++trainer.export_path=s3://example-bucket/marin/users/alice/skyrl/storage-policy/exports" in overrides
 
 
 def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):
@@ -584,6 +643,54 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
     assert outcome.job_id == "retry-budget-job"
     assert submitted["max_retries_failure"] == 3
     assert submitted["max_task_failures"] == 3
+
+
+def test_direct_launcher_exports_terminal_policy_after_training(monkeypatch):
+    args = SimpleNamespace(entrypoint=None, no_wait=False, dry_run=False)
+    outcome = iris_backend.IrisLaunchOutcome(job_id="job", job_state="succeeded", exit_code=0)
+    exported = []
+
+    monkeypatch.setattr(iris_backend, "resolved_launch_args", lambda _argv: args)
+    monkeypatch.setattr(iris_backend, "resolve_launcher_source", lambda: SimpleNamespace(commit="a" * 40))
+    monkeypatch.setattr(iris_backend, "launch", lambda _args, _commit: outcome)
+    monkeypatch.setattr(iris_backend, "export_terminal_policy", lambda export_args: exported.append(export_args))
+
+    assert iris_backend.main([]) == 0
+    assert exported == [args]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "no_wait", "dry_run"),
+    [
+        (iris_backend.IrisLaunchOutcome(job_id="job", job_state="failed", exit_code=1), False, False),
+        (iris_backend.IrisLaunchOutcome(job_id="job", job_state="submitted", exit_code=0), True, False),
+        (iris_backend.IrisLaunchOutcome(job_id="", job_state="prepared", exit_code=0), False, True),
+    ],
+)
+def test_direct_launcher_does_not_export_without_completed_training(monkeypatch, outcome, no_wait, dry_run):
+    args = SimpleNamespace(entrypoint=None, no_wait=no_wait, dry_run=dry_run)
+    exported = []
+
+    monkeypatch.setattr(iris_backend, "resolved_launch_args", lambda _argv: args)
+    monkeypatch.setattr(iris_backend, "resolve_launcher_source", lambda: SimpleNamespace(commit="a" * 40))
+    monkeypatch.setattr(iris_backend, "launch", lambda _args, _commit: outcome)
+    monkeypatch.setattr(iris_backend, "export_terminal_policy", lambda export_args: exported.append(export_args))
+
+    assert iris_backend.main([]) == outcome.exit_code
+    assert exported == []
+
+
+def test_direct_terminal_export_uses_policy_geometry(tmp_path):
+    config = tmp_path / "disaggregated.yaml"
+    config.write_text("trainer:\n  placement:\n    policy_num_nodes: 2\n    policy_num_gpus_per_node: 8\n")
+    args = SimpleNamespace(
+        skyrl_override=["trainer.placement.policy_num_nodes=3"],
+        rl_config=str(config),
+        num_nodes=5,
+        gpus_per_node=4,
+    )
+
+    assert iris_backend._direct_policy_geometry(args) == (3, 8)
 
 
 def _strategy_config(tmp_path: Path, strategy: str) -> Path:

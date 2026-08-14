@@ -10,7 +10,6 @@ context_budget:
   max_turns: 30
 
 terminal_bench:
-  trials_dir: s3://marin-us-east-02a/iris/rl-opencode-lit-smoke/trace_jobs
 
   harbor:
     name: opencode

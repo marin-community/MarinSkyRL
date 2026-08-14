@@ -95,6 +95,7 @@ from marinskyrl.resource_locator import (
     join_resource_path,
     model_source_for_path,
 )
+from skyrl_train.hf_export_schema import HF_EXPORT_REQUEST_FILENAME
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
@@ -136,6 +137,9 @@ DISK_RESOURCE = "ephemeral-storage"
 NODE_RESOURCE_FRACTION = 0.80
 DEFAULT_PRIORITY = "interactive"
 PRIORITY_NAMES = ("production", "interactive", "batch")
+DEFAULT_STORAGE_TTL_DAYS = 14
+STORAGE_TTL_DAYS = (1, 2, 3, 4, 5, 6, 7, 14, 30)
+DEFAULT_RESUME_CHECKPOINT_COUNT = 2
 
 
 def _is_checkpoint_export(args: argparse.Namespace) -> bool:
@@ -206,6 +210,18 @@ class IrisLaunchOutcome:
     job_id: str
     job_state: str
     exit_code: int
+
+
+@dataclass(frozen=True)
+class RLStoragePaths:
+    """Resolved storage policy for one RL launch."""
+
+    checkpoint_root: str
+    export_root: str
+    trace_root: str
+    trajectory_root: str
+    rendezvous_root: str
+    resume_checkpoint_count: int
 
 
 def _gpu_resources(gpu_variant: str, gpu_count: int, *, cpu: float, memory: str, disk: str) -> ResourceSpec:
@@ -306,6 +322,12 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         str(execution.max_retries),
         "--job-name",
         execution.job_name,
+        "--rendezvous-dir",
+        join_resource_path(request.output.attempts_root, "rendezvous"),
+        "--ray-spill-backend",
+        RaySpillBackend.LOCAL.value,
+        "--ray-spill-dir",
+        DEFAULT_RAY_SPILL_DIR,
         "--resolved-config-uri",
         request.output.resolved_config_uri,
         "--skyrl-override",
@@ -348,33 +370,82 @@ class IrisBackend:
     def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None:
         """Run and verify the export requested by the terminal checkpoint."""
         request = spec.request
-        marker_uri = join_resource_path(request.output.checkpoint_root, CHECKPOINT_MARKER_FILENAME)
-        filesystem, marker_path = fs_and_path(marker_uri)
-        if not filesystem.exists(marker_path):
-            raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {marker_uri}")
-        with filesystem.open(marker_path, "r") as source:
-            global_step = int(source.read().strip())
-
-        checkpoint_path = join_resource_path(request.output.checkpoint_root, f"global_step_{global_step}")
         execution = spec.execution
-        command = [
-            sys.executable,
-            "-m",
-            "cloud.iris.export_hf_checkpoint",
-            "--request",
-            checkpoint_path,
-            "--rl_config",
-            config_path,
-            "--cluster",
-            execution.target_cluster or execution.cluster,
-            "--priority",
-            execution.priority,
-            "--job-name",
-            f"{execution.job_name}-export-{global_step}",
-        ]
-        exit_code = subprocess.call(command, cwd=str(PROJECT_ROOT))
-        if exit_code != 0:
-            raise subprocess.CalledProcessError(exit_code, command)
+        _export_terminal_checkpoint(
+            checkpoint_root=request.output.checkpoint_root,
+            export_root=request.output.export_root,
+            config_path=config_path,
+            model_path=request.model.local_path,
+            model_source_uri=request.model.uri,
+            model_source_identity=request.model.identity,
+            policy_num_nodes=request.topology.role_plan.policy_num_nodes,
+            policy_num_gpus_per_node=request.topology.role_plan.policy_num_gpus_per_node,
+            cluster=execution.target_cluster or execution.cluster,
+            priority=execution.priority,
+            job_name=execution.job_name,
+        )
+
+
+def _export_terminal_checkpoint(
+    *,
+    checkpoint_root: str,
+    export_root: str,
+    config_path: str,
+    model_path: str,
+    model_source_uri: str | None,
+    model_source_identity: str | None,
+    policy_num_nodes: int,
+    policy_num_gpus_per_node: int,
+    cluster: str,
+    priority: str,
+    job_name: str,
+) -> None:
+    marker_uri = join_resource_path(checkpoint_root, CHECKPOINT_MARKER_FILENAME)
+    filesystem, marker_path = fs_and_path(marker_uri)
+    if not filesystem.exists(marker_path):
+        raise ValueError(f"Successful Iris job did not commit a checkpoint marker: {marker_uri}")
+    with filesystem.open(marker_path, "r") as source:
+        global_step = int(source.read().strip())
+
+    checkpoint_path = join_resource_path(checkpoint_root, f"global_step_{global_step}")
+    command = [
+        sys.executable,
+        "-m",
+        "cloud.iris.export_hf_checkpoint",
+        "--rl_config",
+        config_path,
+        "--cluster",
+        cluster,
+        "--priority",
+        priority,
+        "--job-name",
+        f"{job_name}-export-{global_step}",
+    ]
+    export_request_uri = join_resource_path(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
+    export_filesystem, export_request_path = fs_and_path(export_request_uri)
+    if export_filesystem.exists(export_request_path):
+        command.extend(["--request", checkpoint_path])
+    else:
+        command.extend(
+            [
+                "--ckpt_path",
+                checkpoint_root,
+                "--step",
+                str(global_step),
+                "--model_path",
+                model_path,
+                "--num-nodes",
+                str(policy_num_nodes),
+                "--gpus-per-node",
+                str(policy_num_gpus_per_node),
+                "--export_path",
+                export_root,
+            ]
+        )
+        command.extend(model_source_cli_args(model_source_uri, model_source_identity))
+    exit_code = subprocess.call(command, cwd=str(PROJECT_ROOT))
+    if exit_code != 0:
+        raise subprocess.CalledProcessError(exit_code, command)
 
 
 def iris_job_state_name(state: int) -> str:
@@ -678,6 +749,152 @@ def _cluster_storage_root(cluster_config: dict[str, Any]) -> str:
     return remote_state_dir.rstrip("/").rsplit("/", 1)[0]
 
 
+def _cluster_marin_prefix(cluster_config: dict[str, Any]) -> str:
+    """Return the cluster's durable Marin data prefix."""
+    defaults = cluster_config.get("defaults")
+    task_env = defaults.get("task_env") if isinstance(defaults, dict) else None
+    configured = task_env.get("MARIN_PREFIX") if isinstance(task_env, dict) else None
+    if isinstance(configured, str) and configured.startswith(("s3://", "gs://", "gcs://")):
+        return configured.rstrip("/")
+
+    storage_root = _cluster_storage_root(cluster_config)
+    parsed = urlparse(storage_root)
+    return f"{parsed.scheme}://{parsed.netloc}/marin"
+
+
+def _hydra_override_value(overrides: list[str], key: str) -> str | None:
+    """Return the final value assigned to one Hydra key."""
+    for override in reversed(overrides):
+        assigned_key, separator, value = override.lstrip("+").partition("=")
+        if separator and assigned_key == key:
+            return value.strip().strip("'\"")
+    return None
+
+
+def _rl_config_value(path: str, *keys: str) -> object | None:
+    try:
+        with open(path) as source:
+            value: object = yaml.safe_load(source) or {}
+    except OSError as error:
+        raise SystemExit(f"Could not read RL storage configuration from {path!r}: {error}") from error
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _cloud_path_segments(path: str) -> tuple[str, ...]:
+    parsed = urlparse(path)
+    if parsed.scheme not in {"s3", "gs", "gcs"} or not parsed.netloc:
+        raise SystemExit(f"RL storage policy requires an s3:// or gs:// path, found {path!r}")
+    return tuple(part for part in parsed.path.split("/") if part)
+
+
+def _validate_temporary_path(label: str, path: str) -> None:
+    segments = _cloud_path_segments(path)
+    ttl_index = next((index for index, part in enumerate(segments) if part == "tmp"), None)
+    if (
+        "iris" in segments
+        or ttl_index is None
+        or ttl_index + 1 >= len(segments)
+        or not re.fullmatch(r"ttl=\d+d", segments[ttl_index + 1])
+    ):
+        raise SystemExit(
+            f"RL storage policy requires {label} under a lifecycle-managed tmp/ttl=Nd prefix, found {path!r}"
+        )
+
+
+def _validate_durable_path(label: str, path: str) -> None:
+    segments = _cloud_path_segments(path)
+    if "iris" in segments or "users" not in segments:
+        raise SystemExit(
+            f"RL storage policy requires {label} under a user-owned durable users/<username> prefix, found {path!r}"
+        )
+
+
+def _resolve_storage_paths(args: argparse.Namespace, cluster_config: dict[str, Any]) -> RLStoragePaths:
+    storage_user = _sanitize_job_name_component(
+        args.storage_user or os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+    )
+    args.storage_user = storage_user
+    marin_prefix = _cluster_marin_prefix(cluster_config)
+    parsed_prefix = urlparse(marin_prefix)
+    bucket_root = f"{parsed_prefix.scheme}://{parsed_prefix.netloc}"
+    durable_root = args.durable_output_root or join_resource_path(
+        marin_prefix, "users", storage_user, "skyrl", args.job_name
+    )
+    temporary_root = args.temporary_output_root or join_resource_path(
+        bucket_root,
+        "tmp",
+        f"ttl={args.storage_ttl_days}d",
+        "skyrl",
+        "users",
+        storage_user,
+        args.job_name,
+    )
+
+    checkpoint_root = join_resource_path(temporary_root, "checkpoints")
+    export_root = join_resource_path(durable_root, "exports")
+    trace_root = join_resource_path(temporary_root, "trace_jobs")
+    trajectory_root = join_resource_path(temporary_root, "trajectories")
+    resume_checkpoint_count = args.resume_checkpoints_to_keep
+
+    if not _is_checkpoint_export(args):
+        checkpoint_root = (
+            _hydra_override_value(args.skyrl_override, "trainer.ckpt_path")
+            or load_config_trainer_ckpt_path(args.rl_config)
+            or checkpoint_root
+        )
+        export_root = (
+            _hydra_override_value(args.skyrl_override, "trainer.export_path")
+            or load_config_trainer_export_path(args.rl_config)
+            or export_root
+        )
+        configured_trials = _hydra_override_value(args.skyrl_override, "terminal_bench_config.trials_dir")
+        if args.trials_dir != "auto":
+            configured_trials = args.trials_dir
+        trace_root = (
+            configured_trials
+            or _rl_config_value(args.rl_config, "terminal_bench", "trials_dir")
+            or _rl_config_value(args.rl_config, "terminal_bench_config", "trials_dir")
+            or trace_root
+        )
+        trajectory_root = (
+            _hydra_override_value(args.skyrl_override, "generator.trajectory_retention.output_path")
+            or _rl_config_value(args.rl_config, "generator", "trajectory_retention", "output_path")
+            or trajectory_root
+        )
+        configured_count = _hydra_override_value(args.skyrl_override, "trainer.max_ckpts_to_keep")
+        if configured_count is None:
+            configured_count = _rl_config_value(args.rl_config, "trainer", "max_ckpts_to_keep")
+        if configured_count is not None:
+            resume_checkpoint_count = int(configured_count)
+
+    rendezvous_root = args.rendezvous_dir or join_resource_path(temporary_root, "rendezvous")
+    if resume_checkpoint_count not in (1, 2):
+        raise SystemExit(
+            f"RL storage policy requires trainer.max_ckpts_to_keep to be one or two; found {resume_checkpoint_count}"
+        )
+    _validate_temporary_path("resume checkpoints", str(checkpoint_root))
+    _validate_temporary_path("raw traces", str(trace_root))
+    _validate_temporary_path("retained trajectories", str(trajectory_root))
+    _validate_temporary_path("rendezvous and Ray session data", rendezvous_root)
+    _validate_durable_path("canonical exports", str(export_root))
+    if args.resolved_config_uri is None and not _is_checkpoint_export(args):
+        args.resolved_config_uri = join_resource_path(durable_root, "resolved-skyrl.json")
+    if args.resolved_config_uri is not None:
+        _validate_durable_path("resolved launch configuration", args.resolved_config_uri)
+    return RLStoragePaths(
+        checkpoint_root=str(checkpoint_root),
+        export_root=str(export_root),
+        trace_root=str(trace_root),
+        trajectory_root=str(trajectory_root),
+        rendezvous_root=rendezvous_root,
+        resume_checkpoint_count=resume_checkpoint_count,
+    )
+
+
 def _cluster_gpu_cpu_capacity(cluster_config: dict[str, Any], *, gpu_variant: str, gpus_per_node: int) -> float:
     """Return CPU capacity for the matching GPU scale group in an Iris config."""
     scale_groups = cluster_config.get("scale_groups")
@@ -937,9 +1154,8 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     if args.cpu is None:
         args.cpu = min(capacity, MAX_DEFAULT_CPU_PER_NODE)
 
-    if args.num_nodes > 1 and not args.rendezvous_dir:
-        storage_root = _cluster_storage_root(cluster_config)
-        args.rendezvous_dir = f"{storage_root}/rendezvous/{args.job_name}"
+    args.storage_paths = _resolve_storage_paths(args, cluster_config)
+    args.rendezvous_dir = args.storage_paths.rendezvous_root
 
     if _is_checkpoint_export(args):
         args.record_literal = False
@@ -1315,6 +1531,35 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Durable JSON destination for the exact SkyRL entry point and Hydra arguments.",
     )
+    parser.add_argument(
+        "--storage-user",
+        default=None,
+        help="User namespace for durable outputs and temporary run state (default: launch-host user).",
+    )
+    parser.add_argument(
+        "--durable-output-root",
+        default=None,
+        help="User-owned durable root for the canonical terminal export.",
+    )
+    parser.add_argument(
+        "--temporary-output-root",
+        default=None,
+        help="Lifecycle-managed root for checkpoints, traces, and session state.",
+    )
+    parser.add_argument(
+        "--storage-ttl-days",
+        type=int,
+        choices=STORAGE_TTL_DAYS,
+        default=DEFAULT_STORAGE_TTL_DAYS,
+        help="Lifecycle TTL used when deriving the temporary output root.",
+    )
+    parser.add_argument(
+        "--resume-checkpoints-to-keep",
+        type=int,
+        choices=(1, 2),
+        default=DEFAULT_RESUME_CHECKPOINT_COUNT,
+        help="Rolling full checkpoints retained for resume.",
+    )
 
     # --- Resource / topology args (GPU multi-node) ---
     parser.add_argument(
@@ -1419,11 +1664,8 @@ def create_parser() -> argparse.ArgumentParser:
         dest="trials_dir",
         default="auto",
         help="Where Harbor writes per-trial agentic-RL rollout artifacts "
-        "(terminal_bench_config.trials_dir). 'auto' (default) = the durable shared store at "
-        "s3://marin-us-east-02a/iris/<job_name>/trace_jobs (pods reach it via auto-injected "
-        "creds; inspectable post-hoc). 'local'/'off' = keep the config default (node-local "
-        "/app/experiments/<run>/trace_jobs). Or pass an explicit s3://, gs://, or path URI. "
-        "Ignored if you already set terminal_bench_config.trials_dir via --skyrl_override.",
+        "(terminal_bench_config.trials_dir). 'auto' derives a lifecycle-managed path below "
+        "--temporary-output-root. Explicit paths must use a tmp/ttl=Nd prefix.",
     )
 
     # --- Iris submission args (mirror launch_eval_iris.py / IrisLauncher) ---
@@ -1861,7 +2103,7 @@ def load_config_trainer_ckpt_path(rl_config_path: str) -> Optional[str]:
 
     The iris configs set ``ckpt_path: null`` (auto-derived downstream in
     rl_config_translation). A config that sets it explicitly (non-null, non-empty) should
-    WIN over the launcher's durable-s3 default, so build_task_command consults this
+    win over the launcher's lifecycle-managed default, so build_task_command consults this
     before injecting its override. Returns None when the file is unreadable, has no
     ``trainer.ckpt_path``, or the value is null/empty (byte-identical to today for
     every existing iris config, which all leave it null)."""
@@ -1880,7 +2122,7 @@ def load_config_trainer_export_path(rl_config_path: str) -> Optional[str]:
     """Return an EXPLICIT ``trainer.export_path`` from the RL config YAML, else None.
 
     Same contract as ``load_config_trainer_ckpt_path``: an explicitly set value wins over
-    the launcher's durable default, and ``null``/empty means "derive one"."""
+    the launcher's user-owned durable default, and ``null``/empty means "derive one"."""
     try:
         raw = _load_rl_config_yaml(rl_config_path)
     except Exception as exc:  # noqa: BLE001
@@ -2108,48 +2350,20 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if getattr(args, "record_literal", False):
         train_cmd.append("--record_literal")
 
-    # Durable Harbor rollout artifacts. The config default (trials_dir: null) resolves to a
-    # node-local path on the rank-0 pod (/app/experiments/<run>/trace_jobs); point
-    # terminal_bench_config.trials_dir at the durable shared store (s3://, creds auto-injected)
-    # so rollouts persist + are inspectable post-hoc. Skip if the user opted out
-    # (--trials-dir local) or already set it explicitly.
     checkpoint_export = _is_checkpoint_export(args)
-    trials_dir = (args.trials_dir or "auto").strip()
-    user_set_trials = any("terminal_bench_config.trials_dir=" in o for o in (args.skyrl_override or []))
-    if not checkpoint_export and trials_dir.lower() not in ("local", "off", "none", "") and not user_set_trials:
-        if trials_dir.lower() == "auto":
-            trials_dir = f"s3://marin-us-east-02a/iris/{args.job_name}/trace_jobs"
-        train_cmd.extend(["--skyrl_override", f"++terminal_bench_config.trials_dir={trials_dir}"])
-
-    # Durable RESUMABLE checkpoint (preempt-safe -> makes `--priority batch` safe for
-    # long runs). Without this, trainer.ckpt_path auto-derives (rl_config_translation) to
-    # {experiments_dir}/{job_name}/checkpoints, and on iris experiments_dir defaults to
-    # the in-container /app/experiments — EPHEMERAL pod-local disk. A batch preempt +
-    # re-admit wipes it, so the trainer can't find latest_ckpt_global_step.txt and
-    # restarts from step 0 despite resume_mode: latest. Redirect ckpt_path to a STABLE
-    # per-job path on the durable CW object store — SAME bucket + auto-injected creds
-    # path as trials_dir above, so ckpt co-locates with rollouts and follows any store
-    # migration identically. It MUST be keyed on job_name ONLY (NOT a fresh-per-attempt
-    # sub-path) so a re-admitted SAME --job-name job finds latest_ckpt_global_step.txt
-    # (read path == write path, MarinSkyRL skyrl-train utils/io/io.py is fsspec-s3) and
-    # auto-resumes from the banked step. iris-ONLY: SLURM uses a different launcher where
-    # experiments_dir is durable $WORK, so this path never runs there. Respect an
-    # explicit ckpt_path from the YAML or a --skyrl_override (either wins).
-    user_set_ckpt = any("trainer.ckpt_path=" in o for o in (args.skyrl_override or []))
-    yaml_ckpt = load_config_trainer_ckpt_path(args.rl_config)
-    if not checkpoint_export and not user_set_ckpt and not yaml_ckpt:
-        ckpt_path = f"s3://marin-us-east-02a/iris/{args.job_name}/checkpoints"
-        train_cmd.extend(["--skyrl_override", f"++trainer.ckpt_path={ckpt_path}"])
-        print(f"[rl-iris] Durable resumable ckpt_path: {ckpt_path}")
-
-    # Export requests must name durable storage because conversion runs later in a separate gang.
-    # Respect an explicit value from the YAML or a --skyrl_override (either wins).
-    user_set_export = any("trainer.export_path=" in o for o in (args.skyrl_override or []))
-    yaml_export = load_config_trainer_export_path(args.rl_config)
-    if not checkpoint_export and not user_set_export and not yaml_export:
-        export_path = f"s3://marin-us-east-02a/iris/{args.job_name}/exports"
-        train_cmd.extend(["--skyrl_override", f"++trainer.export_path={export_path}"])
-        print(f"[rl-iris] Durable export_path: {export_path}")
+    storage_paths = args.storage_paths
+    if not isinstance(storage_paths, RLStoragePaths):
+        raise RuntimeError("resolve_launch_defaults() must resolve RL storage before building the task command")
+    if not checkpoint_export:
+        storage_overrides = (
+            f"++trainer.ckpt_path={storage_paths.checkpoint_root}",
+            f"++trainer.export_path={storage_paths.export_root}",
+            f"++trainer.max_ckpts_to_keep={storage_paths.resume_checkpoint_count}",
+            f"++terminal_bench_config.trials_dir={storage_paths.trace_root}",
+            f"++generator.trajectory_retention.output_path={storage_paths.trajectory_root}",
+        )
+        for override in storage_overrides:
+            train_cmd.extend(["--skyrl_override", override])
 
     # The controller wraps the training command for the multi-node Ray bootstrap.
     controller_cmd: List[str] = [
@@ -2270,6 +2484,16 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
     print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
+    storage_paths = args.storage_paths
+    if not _is_checkpoint_export(args):
+        print(
+            f"[rl-iris] Resume:     {storage_paths.checkpoint_root} (keep {storage_paths.resume_checkpoint_count})",
+            flush=True,
+        )
+        print(f"[rl-iris] Canonical:  {storage_paths.export_root}", flush=True)
+        print(f"[rl-iris] Raw traces: {storage_paths.trace_root}", flush=True)
+        print(f"[rl-iris] Trajectory: {storage_paths.trajectory_root}", flush=True)
+        print(f"[rl-iris] Ray spill:  {args.ray_spill_backend.value}:{args.ray_spill_dir}", flush=True)
     # Surface the resolved SKYRL_* runtime-knob flag env here (before the --dry-run
     # return) so a dry-run confirms e.g. --collective-phase-diagnostics actually resolves.
     # This is display-only; main() re-derives it (idempotent, pure fn of args) below.
@@ -2279,13 +2503,12 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             f"[rl-iris] SKYRL flag env: {', '.join(f'{k}={v}' for k, v in sorted(_flag_env_preview.items()))}",
             flush=True,
         )
-    if args.num_nodes > 1:
-        print(f"[rl-iris] Rendezvous: {args.rendezvous_dir}", flush=True)
+    print(f"[rl-iris] Rendezvous: {args.rendezvous_dir}", flush=True)
     print(f"[rl-iris] Command:    {shlex.join(command)}", flush=True)
 
     if args.dry_run:
         print("[rl-iris] --dry-run: not submitting", flush=True)
-        return 0
+        return IrisLaunchOutcome(job_id="", job_state="prepared", exit_code=0)
 
     # Defer heavy iris imports so --dry-run / --help stay snappy.
     #
@@ -2629,8 +2852,45 @@ def _ambient_in_cluster_client(workspace: Path) -> IrisClient | None:
     return IrisClient.in_cluster(controller_url, workspace=workspace)
 
 
+def _direct_policy_geometry(args: argparse.Namespace) -> tuple[int, int]:
+    policy_num_nodes = _hydra_override_value(args.skyrl_override, "trainer.placement.policy_num_nodes")
+    if policy_num_nodes is None:
+        policy_num_nodes = _rl_config_value(args.rl_config, "trainer", "placement", "policy_num_nodes")
+    policy_num_gpus_per_node = _hydra_override_value(args.skyrl_override, "trainer.placement.policy_num_gpus_per_node")
+    if policy_num_gpus_per_node is None:
+        policy_num_gpus_per_node = _rl_config_value(args.rl_config, "trainer", "placement", "policy_num_gpus_per_node")
+    policy_nodes_text = str(policy_num_nodes)
+    policy_gpus_text = str(policy_num_gpus_per_node)
+    return (
+        int(policy_nodes_text) if policy_nodes_text.isdigit() and int(policy_nodes_text) > 0 else args.num_nodes,
+        int(policy_gpus_text) if policy_gpus_text.isdigit() and int(policy_gpus_text) > 0 else args.gpus_per_node,
+    )
+
+
+def export_terminal_policy(args: argparse.Namespace) -> None:
+    """Export the terminal checkpoint from a successful direct launcher run."""
+    policy_num_nodes, policy_num_gpus_per_node = _direct_policy_geometry(args)
+    storage_paths = args.storage_paths
+    _export_terminal_checkpoint(
+        checkpoint_root=storage_paths.checkpoint_root,
+        export_root=storage_paths.export_root,
+        config_path=args.rl_config,
+        model_path=args.model_path,
+        model_source_uri=args.model_source_uri,
+        model_source_identity=args.model_source_identity,
+        policy_num_nodes=policy_num_nodes,
+        policy_num_gpus_per_node=policy_num_gpus_per_node,
+        cluster=args.target_cluster or args.cluster,
+        priority=args.priority,
+        job_name=args.job_name,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    outcome = launch(resolved_launch_args(argv), resolve_launcher_source().commit)
+    args = resolved_launch_args(argv)
+    outcome = launch(args, resolve_launcher_source().commit)
+    if outcome.exit_code == 0 and not args.no_wait and not args.dry_run and not _is_checkpoint_export(args):
+        export_terminal_policy(args)
     return outcome.exit_code
 
 

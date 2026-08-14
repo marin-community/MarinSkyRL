@@ -9,7 +9,6 @@ context_budget:
   max_turns: 999999
 
 terminal_bench:
-  trials_dir: s3://marin-us-east-02a/iris/80b-next-cp1/trace_jobs
 
   harbor:
     name: terminus-2

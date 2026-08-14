@@ -6,6 +6,23 @@ writes `hf_export_request.json` beside the completed `global_step_N`
 checkpoint. A separate Iris job consumes that request and performs conversion,
 serialization, and optional Hugging Face Hub publication.
 
+## Launcher storage policy
+
+Both direct `cloud.iris.iris_backend` launches and typed Marin launches use the
+same storage defaults. Resume checkpoints, raw Harbor traces, retained
+trajectories, rendezvous state, and uploaded Ray session material use a
+`tmp/ttl=14d` prefix. The launcher retains two resume checkpoints by default and
+accepts an explicit limit of one or two. Ray object spill uses node-local
+`/tmp/skyrl-ray-spill` storage unless remote spill is explicitly selected.
+
+The terminal policy export and resolved launch configuration use a durable
+`marin/users/<user>/skyrl/<job>/` prefix. Paths under durable `iris/` storage and
+temporary paths without a lifecycle TTL fail validation before submission.
+
+A successful synchronous launch submits and verifies the terminal export before
+returning. A detached `--no-wait` launch returns after submission, so its caller
+is responsible for terminal export handling.
+
 ## Request lifecycle
 
 The request is written only after the source checkpoint completes. It records
