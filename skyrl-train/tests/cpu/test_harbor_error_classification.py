@@ -4,6 +4,7 @@ from skyrl_train.utils.harbor_errors import (
     ErrorHandlingConfig,
     ErrorTreatment,
     classify_exception_type,
+    retry_excluded_exception_types,
     treatment_excludes_from_baseline,
 )
 
@@ -69,3 +70,19 @@ def test_passthrough_requires_a_verifier_result_to_remain_in_baseline():
     assert treatment_excludes_from_baseline(ErrorTreatment.PASSTHROUGH, verifier_available=True) is False
     assert treatment_excludes_from_baseline(ErrorTreatment.MASK, verifier_available=True) is True
     assert treatment_excludes_from_baseline(ErrorTreatment.ZERO, verifier_available=False) is False
+
+
+def test_passthrough_exceptions_are_added_to_retry_exclusions():
+    error_handling = ErrorHandlingConfig(
+        passthrough_exceptions=frozenset({"AgentTimeoutError", "ContextLengthExceededError"})
+    )
+
+    excluded = retry_excluded_exception_types({"VerifierTimeoutError"}, error_handling)
+
+    assert excluded == frozenset(
+        {
+            "AgentTimeoutError",
+            "ContextLengthExceededError",
+            "VerifierTimeoutError",
+        }
+    )

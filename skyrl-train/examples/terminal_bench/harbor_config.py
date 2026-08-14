@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.utils.harbor_errors import DEFAULT_ERROR_HANDLING_CONFIG, ErrorHandlingConfig
+from skyrl_train.utils.harbor_errors import (
+    DEFAULT_ERROR_HANDLING_CONFIG,
+    ErrorHandlingConfig,
+    retry_excluded_exception_types,
+)
 
 from harbor.models.trial.config import (
     TrialConfig,
@@ -638,7 +642,12 @@ class HarborConfigBuilder:
                         value = {s.strip() for s in value.split(",") if s.strip()}
                 retry_fields[mapping.harbor_field] = value
 
-        return RetryConfig(**retry_fields)
+        retry_config = RetryConfig(**retry_fields)
+        excluded = retry_excluded_exception_types(
+            retry_config.exclude_exceptions,
+            self.get_error_handling_config(),
+        )
+        return retry_config.model_copy(update={"exclude_exceptions": set(excluded)})
 
     def get_n_concurrent_trials(self, default: int = 16) -> int:
         """
@@ -806,27 +815,6 @@ class HarborConfigBuilder:
             if value is not None:
                 return int(value)
         return default
-
-    def get_exclude_exceptions(self) -> List[str]:
-        """
-        Get the list of exclude_exceptions from the retry config.
-
-        These are the exception types that Harbor will NOT retry (i.e., they are
-        considered terminal failures). Used by the generator to pre-populate
-        per-step error counters so they appear as consistent time-series.
-
-        Returns:
-            List of exception type names (e.g. ["AgentTimeoutError", ...]).
-        """
-        mapping = RETRY_SCHEMA.fields.get("exclude_exceptions")
-        if mapping:
-            value = self._get_field_value("exclude_exceptions", mapping, self._cfg)
-            if value is not None:
-                if isinstance(value, (list, tuple)):
-                    return list(value)
-                elif isinstance(value, str):
-                    return [s.strip() for s in value.split(",") if s.strip()]
-        return []
 
     def get_collect_rollout_details(self, default: bool = False) -> bool:
         """

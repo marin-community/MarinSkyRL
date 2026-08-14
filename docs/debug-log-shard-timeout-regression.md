@@ -39,7 +39,9 @@ when retries are disabled or exhausted, and keep the generation worker alive.
 The regression test failed before the fix because no shard-timeout policy existed. After the fix, a retryable
 outer timeout completes on the next attempt and reports `generate/outer_agent_timeouts=1`; an excluded timeout
 returns a terminal `AgentTimeoutError` group with the configured baseline exclusion instead of raising to the
-trainer. The focused asynchronous generation, staleness, retention, and configuration tests pass (57 tests).
+trainer. SkyRL now adds every `passthrough_exceptions` entry to Harbor's resolved `exclude_exceptions`, so inner
+Harbor trials and the outer shard deadline share the invariant that pass-through failures are never retried. The
+focused asynchronous generation, staleness, retention, and configuration tests pass.
 
 ## Future work
 

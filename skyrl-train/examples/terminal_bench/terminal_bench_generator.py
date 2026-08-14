@@ -401,7 +401,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Sourced from the retry config's exclude_exceptions (the terminal failures
         # that Harbor will NOT retry).  These are always emitted as generate/ metrics
         # so that dashboards see a consistent zero-baseline time-series.
-        self._tracked_exceptions = self._harbor_config_builder.get_exclude_exceptions()
+        self._tracked_exceptions = sorted(self._retry_config.exclude_exceptions or ())
 
         logger.info(
             f"TerminalBenchGenerator initialized with HarborConfigBuilder. "
