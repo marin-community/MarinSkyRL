@@ -11,7 +11,7 @@ from marinskyrl.resource_locator import join_resource_path
 
 ALLOWED_STORAGE_TTL_DAYS = (1, 2, 3, 4, 5, 6, 7, 14, 30)
 DEFAULT_STORAGE_TTL_DAYS = 14
-ALLOWED_RESUME_CHECKPOINT_COUNTS = (1, 2)
+ALLOWED_RESUME_CHECKPOINT_COUNTS = (1, 2, 3, 4, 5)
 DEFAULT_RESUME_CHECKPOINT_COUNT = 2
 
 _DURABLE_USER_SEGMENT = "users"
@@ -180,7 +180,8 @@ def resolve_storage_paths(policy: RLStoragePolicy) -> RLStoragePaths:
 
     if resume_checkpoint_count not in ALLOWED_RESUME_CHECKPOINT_COUNTS:
         raise SystemExit(
-            f"RL storage policy requires trainer.max_ckpts_to_keep to be one or two; found {resume_checkpoint_count}"
+            "RL storage policy requires trainer.max_ckpts_to_keep to be between one and five; "
+            f"found {resume_checkpoint_count}"
         )
     _validate_temporary_path("resume checkpoints", checkpoint_root)
     _validate_temporary_path("raw traces", trace_root)

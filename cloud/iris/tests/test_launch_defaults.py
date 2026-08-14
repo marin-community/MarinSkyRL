@@ -310,6 +310,8 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
             "12",
             "--ray-spill-dir",
             "/local/nvme/ray-spill",
+            "--resume-checkpoints-to-keep",
+            "5",
             "--no-record-literal",
         ],
     )
@@ -320,7 +322,15 @@ def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     assert args.rendezvous_dir == "s3://custom/tmp/ttl=14d/rendezvous"
     assert args.cpu == 12
     assert args.ray_spill_dir == "/local/nvme/ray-spill"
+    assert args.storage_paths.resume_checkpoint_count == 5
     assert args.record_literal is False
+
+
+def test_resolve_launch_defaults_rejects_excess_resume_checkpoints(tmp_path):
+    args = _args(tmp_path, "opencode", ["--skyrl_override", "trainer.max_ckpts_to_keep=6"])
+
+    with pytest.raises(SystemExit, match="between one and five"):
+        resolve_launch_defaults(args)
 
 
 @pytest.mark.parametrize(

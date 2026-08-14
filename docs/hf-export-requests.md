@@ -14,7 +14,7 @@ request; Marin supplies the same split when it builds that request. Resume
 checkpoints, raw Harbor traces, retained trajectories, rendezvous state, and
 uploaded Ray session material therefore use a `tmp/ttl=14d` prefix in both
 workflows. The launcher retains two resume checkpoints by default and accepts an
-explicit limit of one or two. Ray object spill uses node-local
+explicit limit from one through five. Ray object spill uses node-local
 `/tmp/skyrl-ray-spill` storage unless remote spill is explicitly selected.
 
 The terminal policy export and resolved launch configuration use a durable
