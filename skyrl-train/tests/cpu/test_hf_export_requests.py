@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec, request_spec
+from skyrl_train.callbacks import DefaultCallbackHandler, TrainerControl, TrainerState
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -157,10 +158,65 @@ def test_corrupt_export_request_protects_its_checkpoint(tmp_path, request_conten
 
 
 def test_hf_export_interval_must_be_checkpoint_aligned():
-    cfg = OmegaConf.create({"trainer": {"ckpt_interval": 3, "hf_save_interval": 5}})
+    cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "ckpt_interval": 3,
+                "hf_save_interval": 5,
+                "hf_hub_repo_id": "org/exported-model",
+            }
+        }
+    )
 
     with pytest.raises(ValueError, match="multiple of trainer.ckpt_interval"):
         validate_hf_export_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("repo_id", "expected_export"),
+    [(None, False), ("org/exported-model", True)],
+)
+def test_hf_export_interval_requires_an_explicit_repository(repo_id, expected_export):
+    cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "ckpt_interval": 5,
+                "eval_interval": -1,
+                "hf_save_interval": 5,
+                "hf_hub_repo_id": repo_id,
+                "enable_db_registration": False,
+            },
+            "generator": {},
+        }
+    )
+    handler = DefaultCallbackHandler(cfg)
+    state = TrainerState(global_step=5, epoch=0, total_steps=10, num_steps_per_epoch=10)
+
+    control = handler.call_event("on_step_end", state, TrainerControl())
+
+    assert control.should_save_hf_model is expected_export
+
+
+def test_disabled_hf_export_does_not_require_checkpoint_alignment():
+    cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "ckpt_interval": 3,
+                "hf_save_interval": 5,
+                "hf_hub_repo_id": None,
+                "enable_db_registration": False,
+            },
+            "generator": {},
+        }
+    )
+
+    validate_hf_export_config(cfg)
+    handler = DefaultCallbackHandler(cfg)
+    state = TrainerState(global_step=5, epoch=0, total_steps=10, num_steps_per_epoch=10)
+
+    control = handler.call_event("on_step_end", state, TrainerControl())
+
+    assert not control.should_save_hf_model
 
 
 def test_default_hf_export_interval_tracks_checkpoint_override():

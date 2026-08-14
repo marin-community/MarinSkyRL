@@ -27,7 +27,7 @@ from loguru import logger
 from omegaconf import DictConfig
 import torch
 
-from skyrl_train.config.callbacks import has_explicit_callbacks
+from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.json_serialization import to_jsonable
@@ -863,9 +863,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
         )
 
     # HF model save callback
-    hf_save_interval = getattr(cfg.trainer, "hf_save_interval", -1)
-    if hf_save_interval > 0:
-        callbacks.append(HFModelSaveCallback(save_steps=hf_save_interval))
+    if interval_hf_export_enabled(cfg):
+        callbacks.append(HFModelSaveCallback(save_steps=int(cfg.trainer.hf_save_interval)))
 
     # Reference model update callback
     update_ref_every_epoch = getattr(cfg.trainer, "update_ref_every_epoch", False)

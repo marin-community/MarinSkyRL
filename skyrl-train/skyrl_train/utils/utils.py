@@ -17,7 +17,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.config.callbacks import has_explicit_callbacks
+from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
@@ -543,9 +543,8 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
         export_intervals = callback_intervals(HF_MODEL_SAVE_CALLBACK_TYPE)
     else:
         checkpoint_interval = int(cfg.trainer.get("ckpt_interval", -1))
-        export_interval = int(cfg.trainer.get("hf_save_interval", -1))
         checkpoint_intervals = [checkpoint_interval] if checkpoint_interval > 0 else []
-        export_intervals = [export_interval] if export_interval > 0 else []
+        export_intervals = [int(cfg.trainer.hf_save_interval)] if interval_hf_export_enabled(cfg) else []
 
     for export_interval in export_intervals:
         if not checkpoint_intervals or not any(
