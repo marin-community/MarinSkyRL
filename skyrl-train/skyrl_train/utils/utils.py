@@ -582,6 +582,20 @@ def validate_cfg(cfg: DictConfig):
         "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     )
 
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    colocate_ref = cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref
+    if (
+        cfg.trainer.strategy == "fsdp2"
+        and use_ref_model
+        and colocate_ref
+        and not cfg.trainer.ref.fsdp_config.cpu_offload
+    ):
+        logger.warning(
+            "Enabling trainer.ref.fsdp_config.cpu_offload for the colocated FSDP2 reference model. "
+            "Persistent FSDP2 CPU offload avoids reallocating the entire reference shard on every training step."
+        )
+        cfg.trainer.ref.fsdp_config.cpu_offload = True
+
     if cfg.trainer.strategy in ("fsdp", "fsdp2"):
         assert not (cfg.trainer.policy.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"), (
             "fwd pass cpu offloading is not supported for FSDP1 policy worker, use FSDP2 instead"
@@ -715,7 +729,6 @@ def validate_cfg(cfg: DictConfig):
         )
 
     else:
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
                 f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
