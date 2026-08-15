@@ -159,7 +159,7 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
-    from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+    from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines  # noqa: PLC0415
 
     # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
@@ -201,7 +201,7 @@ class BasePPOExp:
 
     def create_inference_engine_client(self) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
-        from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+        from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
         if self.cfg.generator.run_engines_locally:
             logger.info("Creating local inference engines")
@@ -237,9 +237,9 @@ class BasePPOExp:
         return OmegaConf.to_yaml(dict_cfg)
 
     def get_tokenizer(self, padding_side="left"):
-        from skyrl_train.tokenizer import create_tokenizer
-
         """Initializes a tokenizer for the given model."""
+        from skyrl_train.tokenizer import create_tokenizer  # noqa: PLC0415
+
         return create_tokenizer(
             model_path=self.cfg.trainer.policy.model.path,
             disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
@@ -252,7 +252,7 @@ class BasePPOExp:
         Returns:
             PromptDataset: The training dataset.
         """
-        from skyrl_train.dataset import PromptDataset
+        from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
         prompts_dataset = PromptDataset(
             datasets=self.cfg.data.train_data,
@@ -273,7 +273,7 @@ class BasePPOExp:
             PromptDataset: The evaluation dataset.
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            from skyrl_train.dataset import PromptDataset
+            from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(
                 datasets=self.cfg.data.val_data,
@@ -295,8 +295,8 @@ class BasePPOExp:
         Returns:
             PlacementGroup: The placement group for colocated training.
         """
-        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-        from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout
+        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S  # noqa: PLC0415
+        from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout  # noqa: PLC0415
 
         timeout = SKYRL_RAY_PG_TIMEOUT_IN_S if timeout is None else timeout
         if self.cfg.trainer.placement.colocate_all:
@@ -327,13 +327,13 @@ class BasePPOExp:
         share a single placement group built inside `build_models`; that path
         is left entirely untouched (eligibility requires use_ref_model=False).
         """
-        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S  # noqa: PLC0415
         from skyrl_train.utils.utils import (
             get_ray_pg_ready_with_timeout,
             policy_per_gpu_bundles_enabled,
             policy_spread_bundles,
             policy_strict_spread_eligible,
-        )
+        )  # noqa: PLC0415
 
         timeout = SKYRL_RAY_PG_TIMEOUT_IN_S if timeout is None else timeout
         if not policy_strict_spread_eligible(self.cfg):
@@ -363,15 +363,18 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
-        from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
-        from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
-
         """Initialize the configured trajectory runner.
 
         Returns:
             TrajectoryRunner: The runner.
         """
+        from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection  # noqa: PLC0415
+        from skyrl_train.trajectory_runners.skyrl_gym import (  # noqa: PLC0415
+            SkyRLGymTrajectoryRunner,
+            TrajectoryPipeline,
+        )
+        from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector  # noqa: PLC0415
+
         pipeline = None
         if cfg.trainer.step_wise_training:
             pipeline = TrajectoryPipeline(
@@ -402,7 +405,7 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
-        from skyrl_train.trainer import RayPPOTrainer
+        from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
 
         return RayPPOTrainer(
             cfg=cfg,
@@ -421,7 +424,7 @@ class BasePPOExp:
         Returns:
             Tracking: The tracker.
         """
-        from skyrl_train.utils.tracking import Tracking
+        from skyrl_train.utils.tracking import Tracking  # noqa: PLC0415
 
         return Tracking(
             project_name=self.cfg.trainer.project_name,
@@ -551,12 +554,12 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 
 def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_message: str = "Training failed") -> None:
-    from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry
-    from skyrl_train.utils import validate_cfg
-    from skyrl_train.utils.logging_utils import log_exception_as_text
-    from skyrl_train.utils.utils import initialize_ray
-
     """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
+    from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
+    from skyrl_train.utils import validate_cfg  # noqa: PLC0415
+    from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
+    from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
+
     validate_cfg(cfg)
 
     # Set FP8 fuse_weights env vars from config (must happen before Ray init

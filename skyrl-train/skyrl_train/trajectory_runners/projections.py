@@ -5,6 +5,7 @@ from typing import Generic, Protocol, Sequence, TypeVar
 
 from omegaconf import DictConfig
 
+from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_train.trajectory_runners.types import (
     AgentLoopOutput,
     TokenProvenance,
@@ -139,4 +140,4 @@ def _loss_masks(outputs, responses, runner_cfg: DictConfig, tokenizer):
 
 def _token_provenance_metrics(outputs: Sequence[AgentLoopOutput]) -> dict[str, float]:
     reconstructed = sum(output.token_provenance == TokenProvenance.RECONSTRUCTED for output in outputs)
-    return {"generate/token_provenance/reconstructed_fraction": reconstructed / len(outputs) if outputs else 0.0}
+    return {TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC: reconstructed / len(outputs) if outputs else 0.0}

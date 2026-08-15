@@ -238,7 +238,7 @@ async def run_trajectory_runner_end_to_end(
         "test_generator_single_turn_gsm8k_async_engine",
     ],
 )
-async def test_generator_single_turn_gsm8k(
+async def test_trajectory_runner_single_turn_gsm8k(
     use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
 ):
     """
@@ -258,7 +258,7 @@ async def test_generator_single_turn_gsm8k(
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_search():
+async def test_trajectory_runner_multi_turn_search():
     """
     Test the trajectory runner with multiple turns of search
     """
@@ -289,7 +289,7 @@ async def test_generator_multi_turn_search():
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
-async def test_generator_formatting_use_conversation_multi_turn(model_name):
+async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_name):
     """
     Test trajectory runner formatting when using conversation formatting for multi-turn
     """
@@ -365,7 +365,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
-async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
+async def test_trajectory_runner_formatting_no_use_conversation_multi_turn(model_name):
     """
     Test trajectory runner formatting when not using conversation formatting for multi-turn
     """

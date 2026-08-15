@@ -11,7 +11,7 @@ import numpy as np
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
-from skyrl_train.trajectory_runners.types import TIS_LCS_FALLBACK_ALERT_METRIC
+from skyrl_train.metric_names import TIS_LCS_FALLBACK_ALERT_METRIC, TIS_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
@@ -1138,7 +1138,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 batch_align.merge(output.alignment_stats)
                 any_align = True
         if any_align:
-            align_metrics = batch_align.as_metrics(prefix="generate/tis/")
+            align_metrics = batch_align.as_metrics(prefix=TIS_METRIC_PREFIX)
             rollout_metrics.update(align_metrics)
             if batch_align.n_lcs_messages > 0 or batch_align.n_failed_messages > 0:
                 # Metered LCS defensive guard: escalate to ERROR when the alert metric

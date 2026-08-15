@@ -11,7 +11,7 @@ from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
     TrainingPhase,
 )
-from skyrl_train.trajectory_runners.types import (
+from skyrl_train.metric_names import (
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_METRIC_PREFIX,
     TIS_EXACT_MATCH_FRACTION_METRIC,

@@ -1,5 +1,14 @@
 from abc import ABC, abstractmethod
 from types import MappingProxyType
+from skyrl_train.metric_names import (
+    TIS_ALIGNED_TOKENS_METRIC,
+    TIS_ALIGNMENT_FAIL_COUNT_METRIC,
+    TIS_EXACT_MATCH_FRACTION_METRIC,
+    TIS_LCS_FALLBACK_ALERT_METRIC,
+    TIS_LCS_FALLBACK_FRACTION_METRIC,
+    TIS_LCS_FALLBACK_MESSAGES_METRIC,
+    TIS_UNALIGNED_FRACTION_METRIC,
+)
 from skyrl_train.trajectory_runners.types import (
     BatchMetadata as BatchMetadata,
     ConversationType as ConversationType,
@@ -7,13 +16,6 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryID as TrajectoryID,
     TrajectoryRequestBatch as TrajectoryRequestBatch,
     TrainingPhase as TrainingPhase,
-    TIS_ALIGNED_TOKENS_METRIC,
-    TIS_EXACT_MATCH_FRACTION_METRIC,
-    TIS_LCS_FALLBACK_FRACTION_METRIC,
-    TIS_UNALIGNED_FRACTION_METRIC,
-    TIS_ALIGNMENT_FAIL_COUNT_METRIC,
-    TIS_LCS_FALLBACK_MESSAGES_METRIC,
-    TIS_LCS_FALLBACK_ALERT_METRIC,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
