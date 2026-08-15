@@ -31,6 +31,7 @@ import copy
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     prepare_trajectory_request,
+    validate_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
@@ -64,7 +65,6 @@ from skyrl_train.utils.trainer_utils import (
     get_node_ids,
     extract_step_from_path,
     validate_consistency_for_latest_checkpoint,
-    validate_trajectory_batch,
     ResumeMode,
     DynamicSamplingState,
     build_dataloader,
@@ -1848,13 +1848,13 @@ class RayPPOTrainer:
             self.dynamic_sampling_state["sample_batch_count"] += 1
 
         # Handle dynamic sampling using utilities
-        processed_output, processed_uids, keep_sampling, updated_state = trainer_utils.handle_dynamic_sampling(
+        result = trainer_utils.handle_dynamic_sampling(
             trajectory_batch, uids, dynamic_sampling_config, self.dynamic_sampling_state
         )
 
         # Check max resample limit, and if we hit it, raise an error
         if (
-            keep_sampling
+            result.keep_sampling
             and max_sample_batches > 0
             and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
         ):
@@ -1865,13 +1865,13 @@ class RayPPOTrainer:
                 f"Please check your data difficulty distribution."
             )
         # Update state
-        self.dynamic_sampling_state = updated_state
+        self.dynamic_sampling_state = result.state
 
-        if not keep_sampling:
+        if not result.keep_sampling:
             # Reset state when sampling is complete
             self.dynamic_sampling_state = None
 
-        return processed_output, processed_uids, keep_sampling
+        return result.trajectory_batch, result.uids, result.keep_sampling
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)

@@ -12,7 +12,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import ray
 
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.utils.trainer_utils import extract_step_from_path, ResumeMode
 from tests.training_batch_replay import (
     BatchReplayProvenance,
@@ -199,14 +199,7 @@ def main(cfg: DictConfig) -> None:
         # before any model worker can be dispatched.
         load_training_batch_artifact(artifact_path, expected=provenance)
 
-    # Reuse the production TerminalBench main scaffold so Ray initialization,
-    # fuse_weights environment, signals, exception logging, and shutdown remain
-    # identical.
-    from skyrl_train.entrypoints.terminal_bench import (  # noqa: PLC0415
-        run_terminal_bench_entrypoint,
-    )
-
-    run_terminal_bench_entrypoint(cfg, diagnostic_entrypoint)
+    run_ray_driver(cfg, diagnostic_entrypoint)
 
 
 if __name__ == "__main__":

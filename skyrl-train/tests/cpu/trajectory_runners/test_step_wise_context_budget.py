@@ -69,9 +69,9 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
     )
-    generator = StepWiseRolloutCollector(runner)
+    collector = StepWiseRolloutCollector(runner)
 
-    outputs = await generator.agent_loop(
+    outputs = await collector.agent_loop(
         [{"role": "user", "content": "task"}],
         "test_env",
         {},

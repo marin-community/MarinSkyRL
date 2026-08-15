@@ -62,7 +62,7 @@ MODEL_TO_GENERATION_PROMPT = {
 }
 
 
-async def run_generator_end_to_end(
+async def run_trajectory_runner_end_to_end(
     use_async_engine,
     batched,
     n_samples_per_prompt,
@@ -80,7 +80,7 @@ async def run_generator_end_to_end(
     max_env_workers=10,
 ):
     """
-    End to end generator test - requires minimum 2 GPUs
+    End-to-end trajectory runner test - requires minimum 2 GPUs
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
     default_cfg = get_default_config()
@@ -105,7 +105,7 @@ async def run_generator_end_to_end(
         sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
     )
 
-    # Create a mock generator config
+    # Create a mock trajectory runner config
     OmegaConf.update(
         default_cfg,
         "generator",
@@ -152,7 +152,7 @@ async def run_generator_end_to_end(
 
     await inference_engine_client.wake_up()
 
-    generator = SkyRLGymTrajectoryRunner(
+    trajectory_runner = SkyRLGymTrajectoryRunner(
         trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=inference_engine_client,
@@ -167,7 +167,7 @@ async def run_generator_end_to_end(
         data_path=data_path,
         env_class=env_class,
     )
-    # Attach request-time sampling params into the generator input
+    # Attach request-time sampling params into the trajectory request
     input_batch["sampling_params"] = get_sampling_params_for_backend(
         "vllm",
         DictConfig(
@@ -184,7 +184,7 @@ async def run_generator_end_to_end(
     )
 
     with Timer(f"generate_responses_async_engine_{use_async_engine}"):
-        trajectory_batch = await generator.run(input_batch)
+        trajectory_batch = await trajectory_runner.run(input_batch)
 
     prompts_out = trajectory_batch["prompt_token_ids"]
     outputs = [
@@ -204,7 +204,7 @@ async def run_generator_end_to_end(
         "rollout_metrics",
     ]
     for key in output_keys:
-        assert key in trajectory_batch, f"Key {key} not found in generator output"
+        assert key in trajectory_batch, f"Key {key} not found in trajectory batch"
     if max_turns == 1:
         # make sure that the max number of tokens is less than the max generate length for single turn generation
         assert "generate/max_num_tokens" in trajectory_batch["rollout_metrics"]
@@ -242,11 +242,11 @@ async def test_generator_single_turn_gsm8k(
     use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
 ):
     """
-    Test the generator with a single turn of GSM8K
+    Test the trajectory runner with a single turn of GSM8K
     """
     initialize_ray(get_test_actor_config())
     try:
-        await run_generator_end_to_end(
+        await run_trajectory_runner_end_to_end(
             use_async_engine=use_async_engine,
             batched=batched,
             n_samples_per_prompt=n_samples_per_prompt,
@@ -260,11 +260,11 @@ async def test_generator_single_turn_gsm8k(
 @pytest.mark.asyncio
 async def test_generator_multi_turn_search():
     """
-    Test the generator with multiple turns of search
+    Test the trajectory runner with multiple turns of search
     """
     initialize_ray(get_test_actor_config())
     try:
-        await run_generator_end_to_end(
+        await run_trajectory_runner_end_to_end(
             use_async_engine=True,
             batched=False,
             n_samples_per_prompt=5,
@@ -291,12 +291,12 @@ async def test_generator_multi_turn_search():
 )
 async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
-    Test generator formatting when using conversation formatting for multi-turn
+    Test trajectory runner formatting when using conversation formatting for multi-turn
     """
     initialize_ray(get_test_actor_config())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-        trajectory_batch = await run_generator_end_to_end(
+        trajectory_batch = await run_trajectory_runner_end_to_end(
             use_async_engine=True,
             batched=False,
             n_samples_per_prompt=1,
@@ -367,12 +367,12 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 )
 async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
-    Test generator formatting when not using conversation formatting for multi-turn
+    Test trajectory runner formatting when not using conversation formatting for multi-turn
     """
     initialize_ray(get_test_actor_config())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-        trajectory_batch = await run_generator_end_to_end(
+        trajectory_batch = await run_trajectory_runner_end_to_end(
             use_async_engine=True,
             batched=False,
             n_samples_per_prompt=1,

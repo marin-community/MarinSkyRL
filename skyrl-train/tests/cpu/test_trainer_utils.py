@@ -13,10 +13,10 @@ from skyrl_train.utils.trainer_utils import (
     handle_replace_sampling,
     handle_filter_sampling,
     filter_trajectory_batch,
-    validate_trajectory_batch,
     build_dataloader,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from typing import Union
 import ray
 import os
@@ -348,12 +348,12 @@ def test_handle_dynamic_sampling_null_strategy():
     uids = ["uid1", "uid2"]
     sampling_config = {"type": None}
 
-    result_output, result_uids, keep_sampling, state = handle_dynamic_sampling(trajectory_batch, uids, sampling_config)
+    result = handle_dynamic_sampling(trajectory_batch, uids, sampling_config)
 
-    assert result_output == trajectory_batch
-    assert result_uids == uids
-    assert keep_sampling is False
-    assert state is None
+    assert result.trajectory_batch == trajectory_batch
+    assert result.uids == uids
+    assert result.keep_sampling is False
+    assert result.state is None
 
 
 def test_handle_dynamic_sampling_invalid_strategy():
@@ -767,7 +767,7 @@ def test_validate_trajectory_batch_all_loss_masked():
     )
 
     # Capture log output to verify warning is issued
-    with patch("skyrl_train.utils.trainer_utils.logger") as mock_logger:
+    with patch("skyrl_train.trajectory_runners.trajectory_processing.logger") as mock_logger:
         validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
         mock_logger.warning.assert_called_once_with(
             "All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
@@ -775,7 +775,7 @@ def test_validate_trajectory_batch_all_loss_masked():
 
 
 def test_validate_trajectory_batch_mismatched_list_lengths():
-    """Test validate_trajectory_batch raises AssertionError when generator output lists have mismatched lengths."""
+    """Test validate_trajectory_batch rejects mismatched trajectory batch lists."""
     input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
     )

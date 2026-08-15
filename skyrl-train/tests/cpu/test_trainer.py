@@ -183,7 +183,7 @@ def dummy_tokenizer():
 
 
 @pytest.fixture
-def dummy_generator():
+def dummy_trajectory_runner():
     return MagicMock()
 
 
@@ -443,7 +443,7 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
     exists.assert_called_once_with(resume_path.rstrip("/"))
 
 
-def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
+def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
         tracker=None,
@@ -451,7 +451,7 @@ def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
         train_dataset=DummyDataset(),
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
-        trajectory_runner=dummy_generator,
+        trajectory_runner=dummy_trajectory_runner,
     )
     data = _get_test_data(trainer)
     # Assertions
@@ -462,7 +462,7 @@ def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
 
 
 @patch("skyrl_train.trainer.compute_advantages_and_returns", new_callable=MagicMock)
-def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dummy_generator):
+def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dummy_trajectory_runner):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
         tracker=None,
@@ -470,7 +470,7 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dum
         train_dataset=DummyDataset(),
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
-        trajectory_runner=dummy_generator,
+        trajectory_runner=dummy_trajectory_runner,
     )
     data = _get_test_data(trainer)
 

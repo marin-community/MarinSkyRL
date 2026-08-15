@@ -22,8 +22,8 @@ from skyrl_train.trajectory_runners.base import (
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
-    validate_trajectory_batch,
 )
+from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.trajectory_runners.trajectory_retention import (
@@ -174,7 +174,7 @@ def _dump_eval_results(
     if not cfg.trainer.dump_eval_results:
         return
     with Timer("dump_eval_results"):
-        # TODO: route eval dumps through skyrl_train.utils.io so schemed export paths remain cloud-compatible.
+        # TODO(Ben): route eval dumps through skyrl_train.utils.io when evaluation exports support cloud paths.
         data_save_dir = (
             Path(cfg.trainer.export_path)
             / "dumped_evals"

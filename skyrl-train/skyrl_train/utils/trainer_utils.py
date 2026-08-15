@@ -1,5 +1,6 @@
 from copy import deepcopy
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
+from dataclasses import dataclass
 from omegaconf import OmegaConf, DictConfig
 from enum import Enum
 import ray
@@ -309,12 +310,20 @@ class DynamicSamplingState(TypedDict, total=False):
     num_prompts_in_batch: Optional[int]
 
 
+@dataclass(frozen=True)
+class DynamicSamplingResult:
+    trajectory_batch: TrajectoryBatch
+    uids: List[str]
+    keep_sampling: bool
+    state: Optional[DynamicSamplingState]
+
+
 def handle_dynamic_sampling(
     trajectory_batch: TrajectoryBatch,
     uids: List[str],
     sampling_config: Dict[str, Any],
     collected_state: Optional[DynamicSamplingState] = None,
-) -> Tuple[TrajectoryBatch, List[str], bool, Optional[DynamicSamplingState]]:
+) -> DynamicSamplingResult:
     """
     Handle dynamic sampling with different strategies (filter, replace).
 
@@ -328,22 +337,25 @@ def handle_dynamic_sampling(
         collected_state: State for accumulating data across batches (for filter strategy)
 
     Returns:
-        Tuple of (processed_trajectory_batch, processed_uids, keep_sampling, updated_state)
+        The processed batch, UIDs, continuation decision, and updated state.
     """
     sampling_type = sampling_config.get("type", None)
 
     if sampling_type is None:
-        return trajectory_batch, uids, False, None
+        return DynamicSamplingResult(trajectory_batch, uids, False, None)
 
     if sampling_type == "replace":
         # For "replace" strategy, the collected state is not used.
         processed_output, processed_uids, keep_sampling = handle_replace_sampling(
             trajectory_batch, uids, sampling_config
         )
-        return processed_output, processed_uids, keep_sampling, collected_state
+        return DynamicSamplingResult(processed_output, processed_uids, keep_sampling, collected_state)
     elif sampling_type == "filter":
         # For filter strategies, accumulate trajectory batches and UIDs across repeated samples.
-        return handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state)
+        processed_output, processed_uids, keep_sampling, updated_state = handle_filter_sampling(
+            trajectory_batch, uids, sampling_config, collected_state
+        )
+        return DynamicSamplingResult(processed_output, processed_uids, keep_sampling, updated_state)
     else:
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
 
@@ -582,69 +594,6 @@ def filter_trajectory_batch(output: TrajectoryBatch, kept_indices: List[int]) ->
     refresh_trajectory_reward_shaping_metrics(filtered)
 
     return filtered
-
-
-def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch):
-    """Validate the trajectory batch.
-
-    Args:
-        num_prompts: Number of input prompts used to produce this output.
-        trajectory_batch: The generated output batch to validate.
-    """
-    if len(trajectory_batch["response_ids"]) <= 0:
-        raise RuntimeError("No outputs generated")
-
-    # check that input prompts, response ids, and prompt token ids are all the same length
-    num_responses = len(trajectory_batch["response_ids"])
-    num_prompt_tokens = len(trajectory_batch["prompt_token_ids"])
-    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
-    assert num_responses == num_prompt_tokens, (
-        f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
-    )
-
-    # make sure all batch elements have the same length as response_ids (which should be non-zero)
-    for key in trajectory_batch:
-        if isinstance(trajectory_batch[key], list) and key in [
-            "response_ids",
-            "loss_masks",
-            "rewards",
-            "rollout_logprobs",
-        ]:
-            assert len(trajectory_batch[key]) == len(trajectory_batch["response_ids"]), (
-                f"Trajectory batch {key} length must equal response_ids length, got {len(trajectory_batch[key])} and {len(trajectory_batch['response_ids'])}"
-            )
-
-    # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
-    for i, (response_ids, loss_masks, rewards) in enumerate(
-        zip(trajectory_batch["response_ids"], trajectory_batch["loss_masks"], trajectory_batch["rewards"])
-    ):
-        assert len(response_ids) == len(loss_masks), (
-            f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
-        )
-        if isinstance(rewards, list):
-            assert len(rewards) == len(response_ids), (
-                f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
-            )
-
-        if trajectory_batch["rollout_logprobs"]:
-            assert len(response_ids) == len(trajectory_batch["rollout_logprobs"][i]), (
-                f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(trajectory_batch['rollout_logprobs'][i])}"
-            )
-
-    # loss masks should be non-zero for at least one element for trainer
-    if np.concatenate(trajectory_batch["loss_masks"]).sum() == 0:
-        logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
-
-    # check that the rewards are either List[float-like] or List[List[float-like]]
-    rewards = trajectory_batch["rewards"]
-    if isinstance(rewards[0], list):
-        assert all(isinstance(reward, list) for reward in rewards), (
-            "rewards must be `List[float]` or `List[List[float]]`"
-        )
-    else:
-        assert all(not isinstance(reward, list) for reward in rewards), (
-            "rewards must be `List[float]` or `List[List[float]]`"
-        )
 
 
 def build_dataloader(

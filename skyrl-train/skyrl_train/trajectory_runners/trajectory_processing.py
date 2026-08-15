@@ -4,9 +4,18 @@ from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
 from collections import defaultdict
 import numpy as np
-from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryBatch,
+    TrajectoryRequestBatch,
+    TrajectoryID,
+    BatchMetadata,
+    TrainingPhase,
+)
 from skyrl_train.trajectory_runners.types import TIS_ALIGNED_TOKENS_METRIC
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward, refresh_trajectory_reward_shaping_metrics
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
+    NormalizedReward,
+    refresh_trajectory_reward_shaping_metrics,
+)
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -686,14 +695,63 @@ def concatenate_trajectory_batches(
     result["rollout_metrics"] = rollout_metrics
     refresh_trajectory_reward_shaping_metrics(result)
 
-    # Validate the trajectory batch using the number of prompts
-    # Import here to avoid circular dependency.
-    from skyrl_train.utils.trainer_utils import validate_trajectory_batch
-
     num_prompts = len(result["prompt_token_ids"])
     validate_trajectory_batch(num_prompts, result)
 
     return result
+
+
+def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch) -> None:
+    """Validate the shape and value categories of a trajectory batch."""
+    if not trajectory_batch["response_ids"]:
+        raise RuntimeError("No outputs generated")
+
+    num_responses = len(trajectory_batch["response_ids"])
+    num_prompt_tokens = len(trajectory_batch["prompt_token_ids"])
+    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
+    assert num_responses == num_prompt_tokens, (
+        f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
+    )
+
+    for key in ("response_ids", "loss_masks", "rewards", "rollout_logprobs"):
+        value = trajectory_batch.get(key)
+        if isinstance(value, list):
+            assert len(value) == num_responses, (
+                f"Trajectory batch {key} length must equal response_ids length, got {len(value)} and {num_responses}"
+            )
+
+    for index, (response_ids, loss_masks, rewards) in enumerate(
+        zip(trajectory_batch["response_ids"], trajectory_batch["loss_masks"], trajectory_batch["rewards"])
+    ):
+        assert len(response_ids) == len(loss_masks), (
+            "Response ids and loss masks must have the same length, "
+            f"for sample {index} got {len(response_ids)} and {len(loss_masks)}"
+        )
+        if isinstance(rewards, list):
+            assert len(rewards) == len(response_ids), (
+                "Token rewards and response ids must have the same length, "
+                f"for sample {index} got {len(rewards)} and {len(response_ids)}"
+            )
+
+        rollout_logprobs = trajectory_batch.get("rollout_logprobs")
+        if rollout_logprobs:
+            assert len(response_ids) == len(rollout_logprobs[index]), (
+                "Response ids and rollout logprobs must have the same length, "
+                f"for sample {index} got {len(response_ids)} and {len(rollout_logprobs[index])}"
+            )
+
+    if np.concatenate(trajectory_batch["loss_masks"]).sum() == 0:
+        logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
+
+    rewards = trajectory_batch["rewards"]
+    if isinstance(rewards[0], list):
+        assert all(isinstance(reward, list) for reward in rewards), (
+            "rewards must be `List[float]` or `List[List[float]]`"
+        )
+    else:
+        assert all(not isinstance(reward, list) for reward in rewards), (
+            "rewards must be `List[float]` or `List[List[float]]`"
+        )
 
 
 def apply_overlong_filtering(
