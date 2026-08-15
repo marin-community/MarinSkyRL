@@ -2037,7 +2037,7 @@ def _build_task_shell(
         f"else exec {ctrl}; fi"
     )
     bash = (
-        f"set -e; {spill_preflight}cd {APP_DIR}; "
+        f"set -e; {spill_preflight}cd {SKYRL_HOME}; "
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
@@ -2194,7 +2194,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
-    pythonpath = f"{APP_DIR}:{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train"
+    # The immutable checkout owns both the launcher modules and trainer source.
+    # Keep the small /app bootstrap bundle last so a stale task image cannot
+    # shadow the requested runtime commit.
+    pythonpath = f"{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train:{APP_DIR}"
     return _build_task_shell(args, controller_cmd, pythonpath)
 
 

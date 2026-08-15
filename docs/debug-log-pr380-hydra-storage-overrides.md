@@ -39,6 +39,20 @@ Lint review then found that the context-budget artifact selector needed to
 decode the quoted trials path; a regression now verifies that the artifact
 still lands beside the lifecycle-managed traces.
 
+## Smoke follow-up
+
+The first follow-up smoke reached the GPU task with the quoted overrides, but
+the task wrapper launched `python -m cloud.iris.training_driver` from `/app`.
+That small bootstrap bundle preceded the immutable checkout at
+`/app/marinskyrl`, so Python loaded an older `training_driver.py` that could not
+import the checkout's `storage_policy` module.
+
+The task shell now changes to the selected runtime checkout and puts that
+checkout ahead of the bootstrap bundle on `PYTHONPATH`. A regression executes
+the shell with a probe controller and verifies both the working directory and
+source-path order. The launcher and runtime-bundle selection passed all 59
+focused tests.
+
 ## Future work
 
 - [ ] Rerun the Qwen3-0.6B GSM8K smoke test through checkpoint creation and

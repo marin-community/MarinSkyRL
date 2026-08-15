@@ -459,6 +459,7 @@ def _spill_preflight_probe(tmp_path: Path, monkeypatch, spill_dir: Path) -> tupl
     runtime_environment = app_dir / ".iris-runtime-env"
     runtime_environment.write_text("true\n")
     monkeypatch.setattr("cloud.iris.iris_backend.APP_DIR", str(app_dir))
+    monkeypatch.setattr("cloud.iris.iris_backend.SKYRL_HOME", str(app_dir))
     monkeypatch.setattr("cloud.iris.iris_backend.MARINSKYRL_ACTIVATION_FILE", str(runtime_environment))
     monkeypatch.setattr("cloud.iris.iris_backend.RL_PYTHON", str(controller))
 
@@ -500,6 +501,43 @@ def test_task_shell_rejects_uncreatable_local_spill_directory_before_controller(
     assert completed.returncode != 0
     assert str(spill_dir) in completed.stderr
     assert not observation.exists()
+
+
+def test_task_shell_prefers_the_selected_runtime_checkout(tmp_path, monkeypatch):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    runtime_checkout = tmp_path / "selected-runtime"
+    runtime_checkout.mkdir()
+    activation_file = runtime_checkout / ".iris-runtime-env"
+    activation_file.write_text("true\n")
+    observation = tmp_path / "controller-environment"
+    controller = tmp_path / "controller-probe"
+    controller.write_text('#!/bin/sh\nprintf "%s\\n%s\\n" "$PWD" "$PYTHONPATH" > "$CONTROLLER_OBSERVATION"\n')
+    controller.chmod(0o755)
+    monkeypatch.setattr("cloud.iris.iris_backend.APP_DIR", str(app_dir))
+    monkeypatch.setattr("cloud.iris.iris_backend.SKYRL_HOME", str(runtime_checkout))
+    monkeypatch.setattr("cloud.iris.iris_backend.MARINSKYRL_ACTIVATION_FILE", str(activation_file))
+    monkeypatch.setattr("cloud.iris.iris_backend.RL_PYTHON", str(controller))
+
+    args = _args(tmp_path, "opencode")
+    normalize(args)
+    resolve_launch_defaults(args)
+    completed = subprocess.run(
+        build_task_command(args),
+        env={**os.environ, "CONTROLLER_OBSERVATION": str(observation), "PYTHONPATH": "/ambient/python"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    working_directory, pythonpath = observation.read_text().splitlines()
+    assert working_directory == str(runtime_checkout)
+    assert pythonpath.split(":") == [
+        str(runtime_checkout),
+        str(runtime_checkout / "skyrl-train"),
+        str(app_dir),
+        "/ambient/python",
+    ]
 
 
 def test_in_tree_rl_config_is_embedded_in_the_runtime_bundle_environment(tmp_path):
