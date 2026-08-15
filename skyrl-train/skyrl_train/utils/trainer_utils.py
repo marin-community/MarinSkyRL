@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
+from typing import List, Dict, Any, Union, Callable, Optional, TypedDict
 from dataclasses import dataclass
 from omegaconf import OmegaConf, DictConfig
 from enum import Enum
@@ -345,24 +345,16 @@ def handle_dynamic_sampling(
         return DynamicSamplingResult(trajectory_batch, uids, False, None)
 
     if sampling_type == "replace":
-        # For "replace" strategy, the collected state is not used.
-        processed_output, processed_uids, keep_sampling = handle_replace_sampling(
-            trajectory_batch, uids, sampling_config
-        )
-        return DynamicSamplingResult(processed_output, processed_uids, keep_sampling, collected_state)
+        return handle_replace_sampling(trajectory_batch, uids, sampling_config)
     elif sampling_type == "filter":
-        # For filter strategies, accumulate trajectory batches and UIDs across repeated samples.
-        processed_output, processed_uids, keep_sampling, updated_state = handle_filter_sampling(
-            trajectory_batch, uids, sampling_config, collected_state
-        )
-        return DynamicSamplingResult(processed_output, processed_uids, keep_sampling, updated_state)
+        return handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state)
     else:
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
 
 
 def handle_replace_sampling(
     trajectory_batch: TrajectoryBatch, uids: List[str], sampling_config: Dict[str, Any]
-) -> Tuple[TrajectoryBatch, List[str], bool]:
+) -> DynamicSamplingResult:
     """
     Handle replace sampling strategy based on POLARIS implementation
 
@@ -373,7 +365,7 @@ def handle_replace_sampling(
         uids: Current batch UIDs
         sampling_config: Configuration dict with sampling parameters
     Returns:
-        Tuple of (processed_trajectory_batch, processed_uids, keep_sampling)
+        The processed batch, UIDs, and continuation decision.
     """
     n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
     min_replace_ratio = sampling_config["min_replace_ratio"]
@@ -450,22 +442,22 @@ def handle_replace_sampling(
         logger.info("==================================================")
         refresh_trajectory_reward_shaping_metrics(trajectory_batch)
 
-        return trajectory_batch, replaced_uids, False
+        return DynamicSamplingResult(trajectory_batch, replaced_uids, False, None)
     else:
         logger.warning("===================== Warning (Dynamic sampling replace) ====================")
         logger.warning("In this mini-batch, most training samples receive low variance rewards.")
         logger.warning("If you continue to see this warning, please check your data difficulty distribution.")
         logger.warning("==================================================")
 
-        return trajectory_batch, uids, True
+        return DynamicSamplingResult(trajectory_batch, uids, True, None)
 
 
 def handle_filter_sampling(
     trajectory_batch: TrajectoryBatch,
     uids: List[str],
     sampling_config: Dict[str, Any],
-    collected_state: DynamicSamplingState,
-) -> Tuple[TrajectoryBatch, List[str], bool, DynamicSamplingState]:
+    collected_state: Optional[DynamicSamplingState],
+) -> DynamicSamplingResult:
     """
     Handle filter-based sampling strategy (like DAPO).
 
@@ -476,7 +468,7 @@ def handle_filter_sampling(
         collected_state: State for accumulating data across batches
 
     Returns:
-        Tuple of (processed_trajectory_batch, processed_uids, keep_sampling, updated_state)
+        The processed batch, UIDs, continuation decision, and updated state.
     """
     target_batch_size = sampling_config["train_batch_size"]
     n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
@@ -533,7 +525,7 @@ def handle_filter_sampling(
         logger.info(f"Dynamic sampling: {collected_state['num_prompts_in_batch']} < {target_batch_size} prompts")
         logger.info(f"Resample batch {collected_state['sample_batch_count']}, continue sampling...")
         logger.info("==================================================")
-        return trajectory_batch, uids, True, collected_state
+        return DynamicSamplingResult(trajectory_batch, uids, True, collected_state)
     else:
         logger.info("============= Dynamic sampling filter =============")
         logger.info(
@@ -550,7 +542,7 @@ def handle_filter_sampling(
             final_output = filter_trajectory_batch(final_output, list(range(max_trajectories)))
             final_uids = final_uids[:max_trajectories]
 
-        return final_output, final_uids, False, None
+        return DynamicSamplingResult(final_output, final_uids, False, None)
 
 
 def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:

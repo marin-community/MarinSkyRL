@@ -36,7 +36,7 @@ class TestExp(BasePPOExp):
         train_dataset,
         eval_dataset,
         inference_engine_client,
-        generator,
+        trajectory_runner,
         colocate_pg,
     ):
         return RayPPOTestTrainer(
@@ -46,7 +46,7 @@ class TestExp(BasePPOExp):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             inference_engine_client=inference_engine_client,
-            generator=generator,
+            trajectory_runner=trajectory_runner,
             colocate_pg=colocate_pg,
         )
 

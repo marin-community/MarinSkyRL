@@ -16,6 +16,7 @@ from skyrl_train.entrypoints.main_base import config_dir, create_teacher_inferen
 from skyrl_train.algorithms.on_policy_distillation import (
     compute_importance_sampling_policy_loss as compute_importance_sampling_policy_loss,
     compute_no_op_advantage as compute_no_op_advantage,
+    compute_reverse_kl_rewards,
 )
 from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distillation_trainer import DistillationTrainer
@@ -37,11 +38,7 @@ class OnPolicyDistillationLogitsTerminalBenchTrainer(DistillationTrainer):
     ) -> TrainingInputBatch:
         """Compute KL-based reward from teacher/ref logprobs."""
         loss_mask = data["loss_mask"]
-        teacher_action_log_probs = data["base_action_log_probs"]
-        action_log_probs = data["action_log_probs"]
-
-        # Reverse KL as reward: -(student_logprobs - teacher_logprobs)
-        rewards = -(action_log_probs - teacher_action_log_probs) * loss_mask
+        rewards = compute_reverse_kl_rewards(data)
         data["rewards"] = rewards
 
         kl_mean = masked_mean(rewards.abs(), loss_mask, dim=-1).mean().item()

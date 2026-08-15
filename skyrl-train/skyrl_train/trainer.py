@@ -532,8 +532,10 @@ class RayPPOTrainer:
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                        trajectory_batch, uids, keep_sampling = self.handle_dynamic_sampling(trajectory_batch, uids)
-                        if keep_sampling:  # continue sampling
+                        dynamic_sampling = self.handle_dynamic_sampling(trajectory_batch, uids)
+                        trajectory_batch = dynamic_sampling.trajectory_batch
+                        uids = dynamic_sampling.uids
+                        if dynamic_sampling.keep_sampling:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
@@ -1813,7 +1815,7 @@ class RayPPOTrainer:
 
     def handle_dynamic_sampling(
         self, trajectory_batch: TrajectoryBatch, uids: List[str]
-    ) -> Tuple[TrajectoryBatch, List[str], bool]:
+    ) -> trainer_utils.DynamicSamplingResult:
         """
         Handle dynamic sampling for the current batch.
 
@@ -1826,9 +1828,7 @@ class RayPPOTrainer:
             uids: Current batch UIDs
 
         Returns:
-            processed_output: Filtered trajectory batch
-            processed_uids: Filtered UIDs
-            keep_sampling: Whether to keep sampling
+            The filtered batch, UIDs, continuation decision, and sampling state.
         """
         # Prepare sampling configuration
         max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
@@ -1871,7 +1871,7 @@ class RayPPOTrainer:
             # Reset state when sampling is complete
             self.dynamic_sampling_state = None
 
-        return result.trajectory_batch, result.uids, result.keep_sampling
+        return result
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)

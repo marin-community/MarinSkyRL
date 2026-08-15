@@ -99,7 +99,7 @@ def _capture_experiment_class():
             train_dataset,
             eval_dataset,
             inference_engine_client,
-            generator,
+            trajectory_runner,
             colocate_pg,
         ):
             if cfg.trainer.placement.colocate_all:
@@ -111,7 +111,7 @@ def _capture_experiment_class():
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 inference_engine_client=inference_engine_client,
-                generator=generator,
+                trajectory_runner=trajectory_runner,
                 colocate_pg=colocate_pg,
                 capture_artifact_path=_artifact_path(cfg),
                 capture_provenance=_provenance(cfg),
@@ -134,7 +134,7 @@ def _replay_experiment_class():
                 train_dataset=self.train_dataset,
                 eval_dataset=self.eval_dataset,
                 inference_engine_client=None,
-                generator=None,
+                trajectory_runner=None,
                 colocate_pg=self.colocate_pg,
             )
             strategy = str(self.cfg.trainer.strategy)

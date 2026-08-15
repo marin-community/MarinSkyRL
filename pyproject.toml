@@ -259,7 +259,6 @@ ignore = [
 "skyrl-train/tests/gpu/test_e2e_moe_rl_step.py" = ["E402"]
 "skyrl-train/tests/gpu/test_e2e_moe_rl_step_80b.py" = ["E402"]
 "skyrl-train/tests/cpu/distributed/test_muon_hybrid.py" = ["E402"]
-"skyrl-train/tests/cpu/trajectory_runners/test_normalize_prompt_token_ids.py" = ["E402"]
 "skyrl-train/tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
 "skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
 "skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]

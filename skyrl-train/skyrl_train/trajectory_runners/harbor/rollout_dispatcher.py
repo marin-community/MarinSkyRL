@@ -300,15 +300,6 @@ class RolloutCoordinator:
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
         )
 
-        # Pause gate. When set (paused), run_shard refuses to admit new shards.
-        # We use an asyncio.Event toggled true=running / false=paused.
-        self._running_event = asyncio.Event()
-        self._running_event.set()
-        # Count of shards currently executing inside this actor (for drain).
-        self._inflight = 0
-        self._inflight_zero = asyncio.Event()
-        self._inflight_zero.set()
-
         configured_timeout = cfg.get("rollout", {}).get("fanout", {}).get("shard_timeout_seconds", None)
         self._shard_timeout_policy = ShardTimeoutPolicy.from_config(
             configured_timeout=configured_timeout,
@@ -362,40 +353,10 @@ class RolloutCoordinator:
         accounting; this only affects the ``actual_global_step`` hint the actor
         returns in the TrajectoryBatch.
         """
-        # Block until resumed if we're paused (weight-sync quiescing).
-        await self._running_event.wait()
-
         if global_step is not None:
             self._runner.global_step_fn = lambda: global_step
 
-        self._inflight += 1
-        self._inflight_zero.clear()
-        try:
-            return await self._shard_timeout_policy.run(self._runner, sub_batch)
-        finally:
-            self._inflight -= 1
-            if self._inflight == 0:
-                self._inflight_zero.set()
-
-    async def pause(self) -> None:
-        """No-op (weight sync no longer drains at the trial level).
-
-        We deliberately do NOT drain in-flight shards for weight sync. The
-        inference engines are a shared HTTP backend; the trainer's stock
-        engine-level ``inference_engine_client.pause/sync/resume`` already
-        propagates fresh weights to every coordinator's subsequent requests,
-        and rollouts straddling the swap are accounted for as STALE by the
-        dispatcher's ``max_staleness_steps`` bookkeeping (exactly like stock
-        fully_async). A coordinator-level hard-drain is unnecessary for
-        correctness and previously stalled the step boundary when long-running
-        trials never drained. Kept as a no-op so the dispatcher's pause()/
-        resume() interface remains valid; returns immediately.
-        """
-        return None
-
-    async def resume(self) -> None:
-        """No-op (symmetric to :meth:`pause`)."""
-        return None
+        return await self._shard_timeout_policy.run(self._runner, sub_batch)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:

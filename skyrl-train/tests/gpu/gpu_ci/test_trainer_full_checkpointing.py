@@ -105,8 +105,7 @@ def create_minimal_trainer(cfg: DictConfig):
     # Create dummy dataset
     train_dataset = DummyDataset(size=4)  # Small dataset for quick testing
 
-    # Create mock generator for testing
-    mock_generator = MagicMock()
+    mock_trajectory_runner = MagicMock()
 
     # Create tracker
     tracker = Tracking(
@@ -124,7 +123,7 @@ def create_minimal_trainer(cfg: DictConfig):
         train_dataset=train_dataset,
         eval_dataset=None,
         inference_engine_client=None,
-        generator=mock_generator,
+        trajectory_runner=mock_trajectory_runner,
     )
 
     return trainer

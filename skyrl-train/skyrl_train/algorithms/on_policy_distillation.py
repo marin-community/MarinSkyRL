@@ -12,11 +12,16 @@ class OnPolicyDistillationTrainer(RayPPOTrainer):
     """Train against a teacher by replacing task rewards with the teacher KL penalty."""
 
     def apply_reward_kl_penalty(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        loss_masks: torch.Tensor = data["loss_mask"]
-        teacher_log_probs: torch.Tensor = data["base_action_log_probs"]
-        action_log_probs: torch.Tensor = data["action_log_probs"]
-        data["rewards"] = -(action_log_probs - teacher_log_probs) * loss_masks
+        data["rewards"] = compute_reverse_kl_rewards(data)
         return data
+
+
+def compute_reverse_kl_rewards(data: TrainingInputBatch) -> torch.Tensor:
+    """Return token rewards for reverse KL from student to teacher."""
+    loss_masks: torch.Tensor = data["loss_mask"]
+    teacher_log_probs: torch.Tensor = data["base_action_log_probs"]
+    action_log_probs: torch.Tensor = data["action_log_probs"]
+    return -(action_log_probs - teacher_log_probs) * loss_masks
 
 
 @register_advantage_estimator("no_op")

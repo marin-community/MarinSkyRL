@@ -73,8 +73,11 @@ Other runners may reuse the client without inheriting SkyRL-Gym behavior.
 ### Sample projection
 
 Introduce a sample-projection protocol with whole-trajectory and step-wise implementations. The SkyRL-Gym runner
-collects one structured step record for each environment transition. A projection converts those records into the
-normalized batch expected by the trainer.
+composes a rollout collector with a projection. The default whole-trajectory collector returns one completed agent
+loop per trajectory; the step-wise collector returns one structured record per environment transition. Their paired
+projections convert those records into the normalized batch expected by the trainer. These reusable pieces live in
+`trajectory_runners/collectors.py` and `trajectory_runners/projections.py`, with runner-specific adapters beside the
+runner that owns them.
 
 Projection is selected when constructing a runner. Step-wise output is no longer represented by a runner subclass.
 Future harnesses can emit step-wise training samples by supplying the same step records to the projection.

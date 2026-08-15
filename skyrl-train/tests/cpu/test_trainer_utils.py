@@ -395,7 +395,10 @@ def test_handle_replace_sampling_sufficient_good_samples():
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should not keep sampling
     assert keep_sampling is False
@@ -429,7 +432,10 @@ def test_handle_replace_sampling_insufficient_good_samples():
     uids = ["uid1", "uid1", "uid2", "uid2"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should keep sampling due to insufficient good samples
     assert keep_sampling is True
@@ -453,7 +459,10 @@ def test_handle_replace_sampling_single_sample_per_prompt():
     uids = ["uid1", "uid2"]
     sampling_config = {"n_samples_per_prompt": 1, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should not keep sampling (single samples are always considered good)
     assert keep_sampling is False
@@ -477,7 +486,10 @@ def test_handle_replace_sampling_token_level_rewards():
     uids = ["uid1", "uid1", "uid2", "uid2"]  # uid1: [3.0, 7.0] (good), uid2: [2.0, 2.0] (bad)
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should not keep sampling (sufficient good samples)
     assert keep_sampling is False
@@ -505,9 +517,11 @@ def test_handle_filter_sampling_sufficient_prompts():
         "max_sample_batches": 20,
     }
 
-    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
-        trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1}
-    )
+    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
+    state = result.state
 
     # Should not keep sampling (sufficient prompts)
     assert keep_sampling is False
@@ -539,9 +553,11 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
 
     collected_state = {"sample_batch_count": 1}
 
-    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
-        trajectory_batch, uids, sampling_config, collected_state=collected_state
-    )
+    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state=collected_state)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
+    state = result.state
 
     # Should keep sampling (insufficient prompts)
     assert keep_sampling is True
@@ -587,17 +603,19 @@ def test_handle_filter_sampling_accumulation():
     collected_state = {"sample_batch_count": 1}
 
     # Process first batch
-    result1_output, result1_uids, keep_sampling1, state1 = handle_filter_sampling(
-        trajectory_batch1, uids1, sampling_config, collected_state=collected_state
-    )
+    result1 = handle_filter_sampling(trajectory_batch1, uids1, sampling_config, collected_state=collected_state)
+    keep_sampling1 = result1.keep_sampling
+    state1 = result1.state
 
     assert keep_sampling1 is True  # Need more prompts
     assert state1["num_prompts_in_batch"] == 1
 
     # Process second batch
-    result2_output, result2_uids, keep_sampling2, state2 = handle_filter_sampling(
-        trajectory_batch2, uids2, sampling_config, collected_state=state1
-    )
+    result2 = handle_filter_sampling(trajectory_batch2, uids2, sampling_config, collected_state=state1)
+    result2_output = result2.trajectory_batch
+    result2_uids = result2.uids
+    keep_sampling2 = result2.keep_sampling
+    state2 = result2.state
 
     assert keep_sampling2 is False  # Now have enough prompts
     assert state2 is None
@@ -623,9 +641,11 @@ def test_handle_filter_sampling_single_sample_per_prompt():
         "max_sample_batches": 20,
     }
 
-    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
-        trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1}
-    )
+    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
+    state = result.state
 
     # Should not keep sampling (single samples are always kept)
     assert keep_sampling is False
