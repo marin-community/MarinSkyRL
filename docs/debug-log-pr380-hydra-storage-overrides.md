@@ -85,8 +85,13 @@ block cluster teardown and terminal export indefinitely.
 The first run with that bound remained inside the SkyRL process rather than
 reaching task-runtime teardown. Loguru's queue-drain helper was waiting on the
 large Ray/NCCL log backlog immediately before the process-only exit. The exit
-path now emits its handoff message, flushes the standard streams directly, and
-exits without the redundant queue drain.
+path was changed to emit its handoff message, flush the standard streams
+directly, and exit without the redundant queue drain.
+
+Ray also replaces the driver standard streams, and their explicit `flush()`
+calls blocked before the process exit in the next smoke. The handoff log was
+already visible remotely, so the external-owner path now invokes `os._exit(0)`
+immediately after it, without touching Ray's wrapped streams.
 
 ## Future work
 

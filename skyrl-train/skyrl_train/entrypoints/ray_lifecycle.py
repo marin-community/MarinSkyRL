@@ -1,6 +1,5 @@
 import atexit
 import os
-import sys
 
 import ray
 from loguru import logger
@@ -22,6 +21,4 @@ def exit_without_ray_destructors() -> None:
         return
 
     logger.info(f"Exiting after handing Ray cluster teardown to {owner}")
-    sys.stdout.flush()
-    sys.stderr.flush()
     os._exit(0)
