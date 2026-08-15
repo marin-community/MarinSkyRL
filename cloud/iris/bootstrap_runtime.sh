@@ -39,8 +39,23 @@ if [[ "$profile" == *-export ]]; then
 else
   runtime_extras=(--extra "$profile" --extra vllm --extra telemetry)
 fi
+
+system_python="$(command -v python3.12 || true)"
+if [[ -z "$system_python" ]]; then
+  echo "required system interpreter python3.12 is unavailable ($(uv --version))" >&2
+  exit 1
+fi
+
+system_python_version="$($system_python -c 'import platform; print(platform.python_version())')"
+if [[ "$system_python_version" != 3.12.* ]]; then
+  echo "required system interpreter Python 3.12, found Python $system_python_version at $system_python ($(uv --version))" >&2
+  exit 1
+fi
+
 UV_PROJECT_ENVIRONMENT="$environment" uv sync \
   --project "$project_root" \
+  --python "$system_python" \
+  --no-python-downloads \
   --frozen \
   --link-mode symlink \
   "${dependency_group[@]}" \

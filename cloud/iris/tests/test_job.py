@@ -596,6 +596,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     environment = tmp_path / "environment"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    system_python = fake_bin / "python3.12"
+    system_python.symlink_to(sys.executable)
     (environment / "bin").mkdir(parents=True)
     cuda_library_path = tmp_path / "cuda" / "lib"
     cuda_library_path.mkdir(parents=True)
@@ -635,6 +637,9 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
         "sync",
         "--project",
         str(checkout),
+        "--python",
+        str(system_python),
+        "--no-python-downloads",
         "--frozen",
         "--link-mode",
         "symlink",
