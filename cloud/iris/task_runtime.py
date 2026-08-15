@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import asdict, dataclass, fields
 import json
 import os
 import signal
@@ -35,7 +36,6 @@ import sys
 import tempfile
 import threading
 import time
-import ray
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.env_vars import (
@@ -72,6 +72,38 @@ except ImportError as error:
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
+
+
+@dataclass(frozen=True)
+class RendezvousPayload:
+    head_ip: str
+    head_node: str
+    port: int
+    num_tasks: int
+    python_version: str
+    ray_version: str
+    written_at: float
+
+    @classmethod
+    def from_dict(cls, value: object) -> "RendezvousPayload":
+        if not isinstance(value, dict):
+            raise RuntimeError("Ray head rendezvous must be a JSON object")
+        required_fields = tuple(field.name for field in fields(cls))
+        missing_fields = [field for field in required_fields if value.get(field) in (None, "")]
+        if missing_fields:
+            raise RuntimeError(f"Ray head rendezvous is missing fields: {', '.join(missing_fields)}")
+        try:
+            return cls(
+                head_ip=str(value["head_ip"]),
+                head_node=str(value["head_node"]),
+                port=int(value["port"]),
+                num_tasks=int(value["num_tasks"]),
+                python_version=str(value["python_version"]),
+                ray_version=str(value["ray_version"]),
+                written_at=float(value["written_at"]),
+            )
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Ray head rendezvous contains invalid field values") from error
 
 
 def _ray_bin() -> str:
@@ -714,37 +746,33 @@ def _done_uri(rendezvous_dir: str) -> str:
 
 
 def _runtime_versions() -> tuple[str, str]:
+    import ray
+
     python_version = ".".join(str(component) for component in sys.version_info[:3])
     return python_version, ray.__version__
 
 
 def validate_rendezvous_runtime(
-    payload: dict[str, object],
+    payload: RendezvousPayload,
     *,
     worker_node: str,
     python_version: str,
     ray_version: str,
 ) -> None:
     """Reject a worker whose Python or Ray version differs from the head."""
-    required_fields = ("python_version", "ray_version")
-    missing_fields = [field for field in required_fields if not payload.get(field)]
-    if missing_fields:
-        raise RuntimeError(f"Ray head rendezvous is missing runtime metadata: {', '.join(missing_fields)}")
-
-    head_python_version = str(payload["python_version"])
-    head_ray_version = str(payload["ray_version"])
+    head_python_version = payload.python_version
+    head_ray_version = payload.ray_version
     if head_python_version == python_version and head_ray_version == ray_version:
         return
 
-    head_node = str(payload.get("head_node") or payload.get("head_ip") or "unknown-head")
     raise RuntimeError(
         "Iris runtime version mismatch before Ray join: "
-        f"head {head_node} uses Python {head_python_version} and Ray {head_ray_version}; "
+        f"head {payload.head_node} uses Python {head_python_version} and Ray {head_ray_version}; "
         f"worker {worker_node} uses Python {python_version} and Ray {ray_version}"
     )
 
 
-def _write_rendezvous_once(fs, path: str, payload: dict) -> None:
+def _write_rendezvous_once(fs, path: str, payload: dict[str, object]) -> None:
     """Single blocking PutObject of the rendezvous payload (the caller runs this
     under a bounded futures timeout so a stalled put cannot wedge the head)."""
     with fs.open(path, "w") as f:
@@ -754,15 +782,16 @@ def _write_rendezvous_once(fs, path: str, payload: dict) -> None:
 def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
     uri = _rendezvous_uri(rendezvous_dir)
     python_version, ray_version = _runtime_versions()
-    payload = {
-        "head_ip": head_ip,
-        "head_node": socket.gethostname(),
-        "port": ray_port,
-        "num_tasks": _num_tasks(),
-        "python_version": python_version,
-        "ray_version": ray_version,
-        "written_at": time.time(),
-    }
+    payload = RendezvousPayload(
+        head_ip=head_ip,
+        head_node=socket.gethostname(),
+        port=ray_port,
+        num_tasks=_num_tasks(),
+        python_version=python_version,
+        ray_version=ray_version,
+        written_at=time.time(),
+    )
+    serialized_payload = asdict(payload)
     fs, path = fs_and_path(uri)
     # Bound the object-store PutObject with a hard per-attempt timeout via a DAEMON
     # thread + join(timeout) + bounded retries/backoff. An unbounded s3fs/fsspec put
@@ -782,7 +811,7 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
 
         def _target() -> None:
             try:
-                _write_rendezvous_once(fs, path, payload)
+                _write_rendezvous_once(fs, path, serialized_payload)
                 result_box["ok"] = True
             except BaseException as exc:  # noqa: BLE001 - surface to the joiner
                 result_box["exc"] = exc
@@ -824,7 +853,11 @@ def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
     ) from last_exc
 
 
-def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | None = None) -> dict:
+def poll_rendezvous(
+    rendezvous_dir: str,
+    timeout: int,
+    min_written_at: float | None = None,
+) -> RendezvousPayload:
     """Poll for the head's rendezvous file. Returns its parsed payload.
 
     Payloads with ``written_at`` older than ``min_written_at`` (minus slack) are
@@ -839,17 +872,17 @@ def poll_rendezvous(rendezvous_dir: str, timeout: int, min_written_at: float | N
         try:
             if fs.exists(path):
                 with fs.open(path, "r") as f:
-                    payload = json.load(f)
-                if payload.get("head_ip"):
-                    written_at = payload.get("written_at", 0)
-                    if threshold is not None and written_at < threshold:
-                        _log(
-                            f"Ignoring stale rendezvous (written_at={written_at:.0f} "
-                            f"< threshold={threshold:.0f}); waiting for rank-0 rewrite."
-                        )
-                    else:
-                        _log(f"Found rendezvous: {payload}")
-                        return payload
+                    payload = RendezvousPayload.from_dict(json.load(f))
+                if threshold is not None and payload.written_at < threshold:
+                    _log(
+                        f"Ignoring stale rendezvous (written_at={payload.written_at:.0f} "
+                        f"< threshold={threshold:.0f}); waiting for rank-0 rewrite."
+                    )
+                else:
+                    _log(f"Found rendezvous: {asdict(payload)}")
+                    return payload
+        except RuntimeError:
+            raise
         except Exception as exc:  # transient object-store hiccup
             _log(f"rendezvous poll error (will retry): {exc}")
         time.sleep(POLL_INTERVAL)
@@ -1418,8 +1451,8 @@ def run_worker(args: argparse.Namespace) -> int:
         python_version=python_version,
         ray_version=ray_version,
     )
-    head_ip = payload["head_ip"]
-    ray_port = int(payload.get("port", args.ray_port))
+    head_ip = payload.head_ip
+    ray_port = payload.port
     ray_address = f"{head_ip}:{ray_port}"
 
     ray_start_worker(

@@ -1,11 +1,28 @@
 import json
+import platform
 import socket
-import sys
 
 import pytest
 import ray
 
-from cloud.iris.task_runtime import RENDEZVOUS_FILENAME, validate_rendezvous_runtime, write_rendezvous
+from cloud.iris.task_runtime import (
+    RENDEZVOUS_FILENAME,
+    RendezvousPayload,
+    validate_rendezvous_runtime,
+    write_rendezvous,
+)
+
+
+def _head_payload() -> RendezvousPayload:
+    return RendezvousPayload(
+        head_ip="10.0.0.1",
+        head_node="head-node",
+        port=6379,
+        num_tasks=2,
+        python_version="3.12.13",
+        ray_version="2.51.1",
+        written_at=1.0,
+    )
 
 
 def test_rendezvous_publishes_head_runtime_identity(tmp_path):
@@ -13,24 +30,20 @@ def test_rendezvous_publishes_head_runtime_identity(tmp_path):
 
     payload = json.loads((tmp_path / RENDEZVOUS_FILENAME).read_text())
     assert payload["head_node"] == socket.gethostname()
-    assert payload["python_version"] == ".".join(str(component) for component in sys.version_info[:3])
+    assert payload["python_version"] == platform.python_version()
     assert payload["ray_version"] == ray.__version__
 
 
 def test_matching_rendezvous_runtime_is_accepted():
-    head = {
-        "head_ip": "10.0.0.1",
-        "head_node": "head-node",
-        "python_version": "3.12.13",
-        "ray_version": "2.51.1",
-    }
-
-    assert validate_rendezvous_runtime(
-        head,
-        worker_node="worker-node",
-        python_version="3.12.13",
-        ray_version="2.51.1",
-    ) is None
+    assert (
+        validate_rendezvous_runtime(
+            _head_payload(),
+            worker_node="worker-node",
+            python_version="3.12.13",
+            ray_version="2.51.1",
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -41,16 +54,9 @@ def test_matching_rendezvous_runtime_is_accepted():
     ],
 )
 def test_runtime_skew_names_both_nodes_and_versions(python_version, ray_version, expected_versions):
-    head = {
-        "head_ip": "10.0.0.1",
-        "head_node": "head-node",
-        "python_version": "3.12.13",
-        "ray_version": "2.51.1",
-    }
-
     with pytest.raises(RuntimeError) as error:
         validate_rendezvous_runtime(
-            head,
+            _head_payload(),
             worker_node="worker-node",
             python_version=python_version,
             ray_version=ray_version,
