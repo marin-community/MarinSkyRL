@@ -24,7 +24,6 @@ class AgentLoopRunner(Protocol, Generic[InteractionT]):
 
     trajectory_runner_cfg: DictConfig
     global_step_fn: Callable[[], int | None]
-    agent_loop: Callable[..., Awaitable[InteractionT]]
 
 
 async def collect_agent_loops(

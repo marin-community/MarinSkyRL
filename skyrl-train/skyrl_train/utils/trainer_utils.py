@@ -500,7 +500,6 @@ def handle_filter_sampling(
         if traj_uid in kept_uids_set:
             kept_traj_idxs.append(idx)
 
-    # Apply filtering to the trajectory batch.
     filtered_output = filter_trajectory_batch(trajectory_batch, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
 

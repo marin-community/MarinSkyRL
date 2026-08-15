@@ -62,6 +62,7 @@ from omegaconf import DictConfig, OmegaConf
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.harbor_errors import AGENT_TIMEOUT_ERROR
+from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
 
 
@@ -257,7 +258,6 @@ class RolloutCoordinator:
         from skyrl_train.trajectory_runners.harbor.runner import (
             HarborTrajectoryRunner,
         )
-        from skyrl_train.utils.fd_monitor import start_fd_monitor
         from transformers import AutoTokenizer
 
         # Each actor process gets its own FD monitor (per-process daemon thread),

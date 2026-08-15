@@ -32,7 +32,6 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
             sampling_params=None,
         )
 
-        # Start generation
         asyncio.run(trajectory_runner.run(input_batch))
 
 
