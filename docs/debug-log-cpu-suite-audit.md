@@ -54,7 +54,9 @@ Jupiter report publication and all backend-specific artifact fields through `lat
 ## Validation
 
 - The focused Iris tests passed: 17 passed, including all three lifecycle storage regression tests.
-- The complete Iris CPU suite passed: 305 passed.
+- The complete Iris CPU suite passed on the current pull request head: 306 passed. Pytest initially loaded the
+  pre-rebase `marinskyrl` package from the virtual environment; rebuilding the local package made the new
+  quoted-lifecycle-path regression use the current source, where it passed without changes.
 - The trainer CPU suite ran without assertion failures until the process was killed with exit 137 at
   `test_build_dataloader_seeding` after cumulative memory growth. That test passed alone, and the remaining 151
   tests passed in a separate run. The split runs preserve every selection and deselection from the CI command.
