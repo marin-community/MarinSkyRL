@@ -1,9 +1,14 @@
 from loguru import logger
+from omegaconf import OmegaConf
+import pytest
 
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.harbor_errors import (
     ErrorHandlingConfig,
     ErrorTreatment,
+    PASSTHROUGH_WITHOUT_LOGPROBS_ERROR,
     classify_exception_type,
+    passthrough_logprob_error_type,
     retry_excluded_exception_types,
     treatment_excludes_from_baseline,
 )
@@ -85,4 +90,45 @@ def test_passthrough_exceptions_are_added_to_retry_exclusions():
             "ContextLengthExceededError",
             "VerifierTimeoutError",
         }
+    )
+
+
+@pytest.mark.parametrize(
+    "algorithm_config",
+    [
+        {"use_tis": True, "policy_loss_type": "regular"},
+        {"use_tis": False, "policy_loss_type": "behavior_clip"},
+    ],
+)
+def test_behavior_referenced_passthrough_without_logprobs_gets_named_error(algorithm_config):
+    required = rollout_logprobs_enabled(OmegaConf.create(algorithm_config))
+
+    error_type = passthrough_logprob_error_type(
+        ErrorTreatment.PASSTHROUGH,
+        has_rollout_logprobs=False,
+        rollout_logprobs_required=required,
+    )
+
+    assert error_type == PASSTHROUGH_WITHOUT_LOGPROBS_ERROR
+
+
+def test_passthrough_without_logprobs_is_unchanged_when_behavior_reference_is_not_required():
+    assert (
+        passthrough_logprob_error_type(
+            ErrorTreatment.PASSTHROUGH,
+            has_rollout_logprobs=False,
+            rollout_logprobs_required=False,
+        )
+        is None
+    )
+
+
+def test_passthrough_with_logprobs_remains_trainable():
+    assert (
+        passthrough_logprob_error_type(
+            ErrorTreatment.PASSTHROUGH,
+            has_rollout_logprobs=True,
+            rollout_logprobs_required=True,
+        )
+        is None
     )

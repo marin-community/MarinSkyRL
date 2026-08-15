@@ -33,6 +33,7 @@ from skyrl_train.utils.harbor_errors import (
     AGENT_TIMEOUT_ERROR,
     ErrorTreatment,
     classify_exception_type,
+    passthrough_logprob_error_type,
     treatment_excludes_from_baseline,
 )
 from skyrl_train.utils.span_tagger import tag_response_spans
@@ -1639,6 +1640,33 @@ class TerminalBenchGenerator(GeneratorInterface):
             # verifier processing. The agent hit a soft limit (timeout, context
             # length) but the verifier still ran and produced a real reward.
             if treatment is ErrorTreatment.PASSTHROUGH:
+                missing_logprobs_error = (
+                    passthrough_logprob_error_type(
+                        treatment,
+                        has_rollout_logprobs=extract_logprobs_from_rollout_details(
+                            getattr(result.agent_result, "rollout_details", None)
+                        )
+                        is not None,
+                        rollout_logprobs_required=self._rollout_logprobs_required,
+                    )
+                    if result.verifier_result
+                    else None
+                )
+                if missing_logprobs_error is not None:
+                    logger.warning(
+                        f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH but has no "
+                        "behavior logprobs; masking it from behavior-referenced training"
+                    )
+                    return TerminalBenchAgentOutput(
+                        response_ids=[0],
+                        reward=0,
+                        stop_reason="error",
+                        loss_mask=[0],
+                        prompt_ids=[0],
+                        trajectory_id=trajectory_id,
+                        exclude_from_baseline=True,
+                        exception_type=missing_logprobs_error,
+                    )
                 if result.verifier_result:
                     logger.info(
                         f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH, using verifier reward"

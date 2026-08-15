@@ -8,6 +8,7 @@ from loguru import logger
 
 
 AGENT_TIMEOUT_ERROR = "AgentTimeoutError"
+PASSTHROUGH_WITHOUT_LOGPROBS_ERROR = "PassthroughWithoutLogprobs"
 
 
 class ErrorTreatment(StrEnum):
@@ -104,3 +105,15 @@ def classify_exception_type(exception_type: str, config: ErrorHandlingConfig) ->
 def treatment_excludes_from_baseline(treatment: ErrorTreatment, *, verifier_available: bool) -> bool:
     """Translate a treatment into the RLOO-N exclusion bit for the available result."""
     return treatment is ErrorTreatment.MASK or (treatment is ErrorTreatment.PASSTHROUGH and not verifier_available)
+
+
+def passthrough_logprob_error_type(
+    treatment: ErrorTreatment,
+    *,
+    has_rollout_logprobs: bool,
+    rollout_logprobs_required: bool,
+) -> str | None:
+    """Return the masking error for a passthrough result without required behavior logprobs."""
+    if treatment is not ErrorTreatment.PASSTHROUGH or not rollout_logprobs_required or has_rollout_logprobs:
+        return None
+    return PASSTHROUGH_WITHOUT_LOGPROBS_ERROR
