@@ -40,15 +40,16 @@ else
   runtime_extras=(--extra "$profile" --extra vllm --extra telemetry)
 fi
 
-system_python="$(command -v python3.12 || true)"
+required_python_minor="3.12"
+system_python="$(command -v "python$required_python_minor" || true)"
 if [[ -z "$system_python" ]]; then
-  echo "required system interpreter python3.12 is unavailable ($(uv --version))" >&2
+  echo "required system interpreter python$required_python_minor is unavailable ($(uv --version))" >&2
   exit 1
 fi
 
 system_python_version="$($system_python -c 'import platform; print(platform.python_version())')"
-if [[ "$system_python_version" != 3.12.* ]]; then
-  echo "required system interpreter Python 3.12, found Python $system_python_version at $system_python ($(uv --version))" >&2
+if [[ "$system_python_version" != "$required_python_minor".* ]]; then
+  echo "required system interpreter Python $required_python_minor, found Python $system_python_version at $system_python ($(uv --version))" >&2
   exit 1
 fi
 

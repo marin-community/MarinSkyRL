@@ -126,15 +126,28 @@ def _fake_frozen_runtime(
     if managed_python_pin_is_unresolvable:
         uv.write_text(
             "#!/bin/sh\n"
-            'case " $* " in\n'
-            "  *' --python '*) exit 0 ;;\n"
-            "  *) echo 'error: No interpreter found for Python 3.12.13' >&2; exit 2 ;;\n"
-            "esac\n"
+            "selected_python=\n"
+            "downloads_disabled=false\n"
+            'while [ "$#" -gt 0 ]; do\n'
+            '  case "$1" in\n'
+            "    --python) selected_python=$2; shift 2 ;;\n"
+            "    --no-python-downloads) downloads_disabled=true; shift ;;\n"
+            "    *) shift ;;\n"
+            "  esac\n"
+            "done\n"
+            'if [ "$selected_python" = "$EXPECTED_SYSTEM_PYTHON" ] && "$downloads_disabled"; then\n'
+            "  exit 0\n"
+            "fi\n"
+            "echo 'error: No interpreter found for Python 3.12.13' >&2\n"
+            "exit 2\n"
         )
     else:
         uv.write_text("#!/bin/sh\nexit 0\n")
     uv.chmod(0o755)
-    return environment, os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    return environment, os.environ | {
+        "EXPECTED_SYSTEM_PYTHON": str(fake_bin / "python3.12"),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
 
 
 def _run_bootstrap(
