@@ -54,11 +54,11 @@ Jupiter report publication and all backend-specific artifact fields through `lat
 ## Validation
 
 - The focused Iris tests passed: 17 passed, including all three lifecycle storage regression tests.
-- The complete Iris CPU suite passed on the current pull request head: 306 passed. Pytest initially loaded the
+- The complete Iris CPU suite passed after the lifecycle-fix rebase: 306 passed. Pytest initially loaded the
   pre-rebase `marinskyrl` package from the virtual environment; rebuilding the local package made the new
   quoted-lifecycle-path regression use the current source, where it passed without changes.
-- The exact launcher-only profile from CI contained no Torch installation, imported
-  `cloud.iris.export_hf_checkpoint`, and passed all 306 Iris tests.
+- After incorporating the concurrent smoke commits, the exact launcher-only profile from CI contained no Torch
+  installation, imported `cloud.iris.export_hf_checkpoint`, and passed all 309 Iris tests.
 - The complete HF export request test file passed: 21 passed.
 - The trainer CPU suite ran without assertion failures until the process was killed with exit 137 at
   `test_build_dataloader_seeding` after cumulative memory growth. That test passed alone, and the remaining 151
