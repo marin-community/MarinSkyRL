@@ -503,7 +503,7 @@ def test_task_shell_rejects_uncreatable_local_spill_directory_before_controller(
     assert not observation.exists()
 
 
-def test_task_shell_prefers_the_selected_runtime_checkout(tmp_path, monkeypatch):
+def test_task_shell_validates_the_bundle_before_preferring_runtime_imports(tmp_path, monkeypatch):
     app_dir = tmp_path / "app"
     app_dir.mkdir()
     runtime_checkout = tmp_path / "selected-runtime"
@@ -531,7 +531,7 @@ def test_task_shell_prefers_the_selected_runtime_checkout(tmp_path, monkeypatch)
 
     assert completed.returncode == 0, completed.stderr
     working_directory, pythonpath = observation.read_text().splitlines()
-    assert working_directory == str(runtime_checkout)
+    assert working_directory == str(app_dir)
     assert pythonpath.split(":") == [
         str(runtime_checkout),
         str(runtime_checkout / "skyrl-train"),

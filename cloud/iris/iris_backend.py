@@ -2037,7 +2037,7 @@ def _build_task_shell(
         f"else exec {ctrl}; fi"
     )
     bash = (
-        f"set -e; {spill_preflight}cd {SKYRL_HOME}; "
+        f"set -e; {spill_preflight}cd {APP_DIR}; "
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "

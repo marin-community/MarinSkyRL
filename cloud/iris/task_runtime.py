@@ -1320,6 +1320,14 @@ def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Ev
     return stop
 
 
+def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
+    """Start the driver from the immutable runtime checkout, not the bootstrap bundle."""
+    runtime_checkout = env.get("SKYRL_HOME")
+    if not runtime_checkout:
+        raise RuntimeError("SKYRL_HOME must identify the immutable MarinSkyRL runtime checkout")
+    return subprocess.Popen(train_argv, env=env, cwd=runtime_checkout, start_new_session=True)
+
+
 def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
     head_ip = _own_ip()
@@ -1411,7 +1419,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
 
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
-        process = subprocess.Popen(train_argv, env=env, start_new_session=True)
+        process = launch_training_driver(train_argv, env)
 
         exit_code = process.wait()
         if exit_code != 0:
