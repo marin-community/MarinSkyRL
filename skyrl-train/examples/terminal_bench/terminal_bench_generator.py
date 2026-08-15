@@ -832,6 +832,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "prompt_token_ids": [[0] for _ in range(num_trials)],
             "response_ids": [[0] for _ in range(num_trials)],
             "rewards": [0.0 for _ in range(num_trials)],
+            "unshaped_rewards": [0.0 for _ in range(num_trials)],
             "loss_masks": [[0] for _ in range(num_trials)],
             "stop_reasons": ["error" for _ in range(num_trials)],
             "rollout_metrics": {

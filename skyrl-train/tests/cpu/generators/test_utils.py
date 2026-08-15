@@ -942,6 +942,17 @@ def test_generators_that_report_no_trials_get_no_failure_series():
     assert "generate/failed_trajectory_fraction" not in merged["rollout_metrics"]
 
 
+@pytest.mark.parametrize("timeout_first", [False, True])
+def test_concatenation_preserves_unshaped_rewards_with_incomplete_timeout_output(timeout_first):
+    normal = {**_generated_group(1, 0), "rewards": [1.0], "unshaped_rewards": [1.0]}
+    timeout = _generated_group(1, 1, error_type="AgentTimeoutError")
+    groups = [timeout, normal] if timeout_first else [normal, timeout]
+
+    merged = concatenate_generator_outputs(groups)
+
+    assert merged["unshaped_rewards"] == ([0.0, 1.0] if timeout_first else [1.0, 0.0])
+
+
 def test_partial_failure_metrics_are_rejected_during_concatenation():
     group = _generated_group(2, 1)
     del group["rollout_metrics"]["generate/num_masked_trajectories"]

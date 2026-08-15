@@ -5,7 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
-from skyrl_train.generators.trajectory_reward_shaping import refresh_trajectory_reward_shaping_metrics
+from skyrl_train.generators.trajectory_reward_shaping import NormalizedReward, refresh_trajectory_reward_shaping_metrics
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -473,12 +473,7 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    unshaped_rewards = generator_output.get("unshaped_rewards")
-    if unshaped_rewards is not None and len(unshaped_rewards) != len(rewards):
-        raise ValueError(
-            "`unshaped_rewards` must have one entry per trajectory: "
-            f"got {len(unshaped_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
-        )
+    outcome_rewards = _outcome_rewards(generator_output)
 
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
@@ -490,17 +485,8 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     # TODO: We should make metrics customizable by the environment.
     # Map from the example's uid to each trajectory's unshaped outcome on that example.
     uid_to_trajectory_rewards = defaultdict(list)
-    if unshaped_rewards is not None:
-        for i, reward in enumerate(unshaped_rewards):
-            uid_to_trajectory_rewards[uids[i]].append(reward)
-    elif isinstance(rewards[0], list):
-        # Without an explicit outcome channel, preserve the existing token-reward behavior.
-        for i, trajectory_rewards in enumerate(rewards):
-            terminal_reward = trajectory_rewards[-1] if trajectory_rewards else 0.0
-            uid_to_trajectory_rewards[uids[i]].append(terminal_reward)
-    else:
-        for i, reward in enumerate(rewards):
-            uid_to_trajectory_rewards[uids[i]].append(reward)
+    for i, reward in enumerate(outcome_rewards):
+        uid_to_trajectory_rewards[uids[i]].append(reward)
 
     # For each example, pass@n = 1 if any trajectory achieves a positive reward.
     # The explicit unshaped channel, when present, makes this invariant to reward shaping.
@@ -509,6 +495,19 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     )
 
     return mean_reward, pass_at_n
+
+
+def _outcome_rewards(generator_output: GeneratorOutput) -> List[float]:
+    rewards = generator_output["rewards"]
+    unshaped_rewards = generator_output.get("unshaped_rewards")
+    if unshaped_rewards is not None:
+        if len(unshaped_rewards) != len(rewards):
+            raise ValueError(
+                "`unshaped_rewards` must have one entry per trajectory: "
+                f"got {len(unshaped_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
+            )
+        return [float(reward) for reward in unshaped_rewards]
+    return [NormalizedReward.from_output(reward).outcome for reward in rewards]
 
 
 def concatenate_generator_outputs(
@@ -540,6 +539,10 @@ def concatenate_generator_outputs(
                 # Each trajectory needs logprobs matching its response_ids length
                 for response_ids in output["response_ids"]:
                     rollout_logprobs_concat.append([0.0] * len(response_ids))
+
+    unshaped_rewards_concat = None
+    if any(output.get("unshaped_rewards") is not None for output in generator_outputs):
+        unshaped_rewards_concat = [reward for output in generator_outputs for reward in _outcome_rewards(output)]
 
     # Handle mixed routed_experts (Stage 1 MoE router-replay capture rail) the same
     # way as rollout_logprobs: if any batch carries routed_experts but others don't,
@@ -628,6 +631,8 @@ def concatenate_generator_outputs(
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:
         result["response_span_tags"] = response_span_tags_concat
+    if unshaped_rewards_concat is not None:
+        result["unshaped_rewards"] = unshaped_rewards_concat
 
     # propagate additional keys with list values as-is
     additional_keys = [
