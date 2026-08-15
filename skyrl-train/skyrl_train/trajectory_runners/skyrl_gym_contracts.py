@@ -28,6 +28,11 @@ def reward_from_env_step(
     optimization_reward: float | None = None,
 ) -> RewardResult:
     """Keep verifier outcome separate from the environment's optimization reward."""
+    native_reward = step_output.get("reward_result")
+    if native_reward is not None:
+        if not isinstance(native_reward, RewardResult):
+            raise TypeError("environment reward_result must be a RewardResult")
+        return native_reward
     if optimization_reward is None:
         optimization_reward = step_output["reward"]
     if optimization_reward is None:
@@ -47,6 +52,7 @@ def publish_rollout_evidence(
     prompt_token_ids: Sequence[int] | None = None,
     behavior_logprobs: Sequence[float] | None = None,
     messages: Sequence[dict[str, Any]] = (),
+    metadata: dict[str, Any] | None = None,
 ) -> RolloutEvidence:
     """Build and publish one model turn's evidence to a gym environment."""
     evidence = RolloutEvidence(
@@ -54,9 +60,10 @@ def publish_rollout_evidence(
         response=response,
         stop_reason=stop_reason,
         generated_token_count=len(response_token_ids),
-        prompt_token_ids=None if prompt_token_ids is None else tuple(prompt_token_ids),
+        prompt_token_ids=() if prompt_token_ids is None else tuple(prompt_token_ids),
         response_token_ids=tuple(response_token_ids),
         behavior_logprobs=None if behavior_logprobs is None else tuple(behavior_logprobs),
+        metadata={} if metadata is None else metadata,
     )
     env.set_rollout_evidence(evidence)
     return evidence

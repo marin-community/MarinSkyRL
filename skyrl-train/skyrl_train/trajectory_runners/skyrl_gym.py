@@ -357,15 +357,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     added_eos = True
 
             # 2. Environment step
-            # Expose generation-time signals to envs that opt in (no-op otherwise).
-            # In the agent loop, response token length for this turn is len(output_ids)
-            # and the generation cap is max_tokens.
-            if hasattr(env, "set_generation_metadata"):
-                env.set_generation_metadata(
-                    response_length=len(output_ids),
-                    stop_reason=stop_reason,
-                    max_gen_length=max_tokens,
-                )
             publish_rollout_evidence(
                 env,
                 response=output,
@@ -373,6 +364,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 prompt_token_ids=input_ids,
                 response_token_ids=output_ids,
                 behavior_logprobs=response_logprobs,
+                metadata={"generation_token_budget": max_tokens},
             )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
@@ -573,22 +565,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         truncated_responses = []
         rewards = []
         unshaped_rewards = []
+        successes = []
         exclude_from_baseline = []
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
-            # Expose generation-time signals (token length + stop_reason + the
-            # generation cap) to envs that opt in via set_generation_metadata().
-            # No-op for envs that don't define it (e.g. all non-aime envs), so
-            # this is backward compatible and zero-blast-radius.
-            if hasattr(env, "set_generation_metadata"):
-                env.set_generation_metadata(
-                    response_length=len(response),
-                    stop_reason=stop_reasons[i],
-                    max_gen_length=max_tokens,
-                )
             publish_rollout_evidence(
                 env,
                 messages=init_prompts[i],
@@ -596,6 +579,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 stop_reason=stop_reasons[i],
                 response_token_ids=response,
                 behavior_logprobs=None if logprobs is None else logprobs[i],
+                metadata={"generation_token_budget": max_tokens},
             )
             # step on environment and compute reward
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
@@ -622,6 +606,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             disposition = TrainingDisposition.train()
             rewards.append(reward_result.optimization_reward)
             unshaped_rewards.append(reward_result.unshaped_reward)
+            successes.append(
+                verification.passed
+                if verification.passed is not None
+                else verification.score is not None and verification.score > 0.0
+            )
             exclude_from_baseline.append(not disposition.baseline_eligible)
 
             # Get environment-specific metrics
@@ -641,7 +630,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             tokenize=True,
         )
         prompt_token_ids = prompt_encodings["input_ids"] if hasattr(prompt_encodings, "keys") else prompt_encodings
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(
+            responses,
+            rewards,
+            env_metrics,
+            env_classes,
+            successes=successes,
+        )
 
         if self.trajectory_runner_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)

@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, NotRequired, Optional, TypedDict
 from skyrl_gym import Env
-from skyrl_gym.verification import RolloutEvidence, VerificationResult
+from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult
 from typing import Tuple
 
 MessageType = Dict[str, str]
@@ -14,6 +14,7 @@ class BaseTextEnvStepOutput(TypedDict):
     metadata: Dict[str, Any]
     postprocessed_action: NotRequired[Optional[str]]
     verification: NotRequired[VerificationResult]
+    reward_result: NotRequired[RewardResult]
 
 
 class BaseTextEnv(Env[ConversationType, str]):

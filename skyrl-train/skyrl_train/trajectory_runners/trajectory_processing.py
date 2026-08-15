@@ -798,6 +798,7 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
+    successes: Optional[List[bool]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -807,6 +808,7 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
+        successes: Optional verifier-defined success predicate for each trajectory
 
     Returns:
         Dictionary of aggregated metrics
@@ -820,8 +822,13 @@ def get_rollout_metrics(
         else:
             flat_rewards.append(float(r))
     flat_rewards_arr = np.array(flat_rewards)
-    non_zero_rewards_arr = flat_rewards_arr > 0.0
-    zero_rewards_arr = flat_rewards_arr == 0.0
+    if successes is not None:
+        if len(successes) != len(responses):
+            raise ValueError("successes must have one value per response")
+        non_zero_rewards_arr = np.array(successes, dtype=bool)
+    else:
+        non_zero_rewards_arr = flat_rewards_arr > 0.0
+    zero_rewards_arr = ~non_zero_rewards_arr
     # average tokens for non zero rewards
     avg_tokens_non_zero_rewards = (
         np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)

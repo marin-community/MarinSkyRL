@@ -15,6 +15,7 @@ from typing import Any
 
 from skyrl_gym import error
 from skyrl_gym.envs.aime import utils as aime_utils
+from skyrl_gym.envs.aime.verifier import AIMEVerifier
 from skyrl_gym.envs.gsm8k import utils as gsm8k_utils
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
 from skyrl_gym.envs.lcb.livecodebench import (
@@ -22,6 +23,7 @@ from skyrl_gym.envs.lcb.livecodebench import (
     normalize_lcb_ground_truth,
 )
 from skyrl_gym.envs.registration import spec
+from skyrl_gym.verification import RolloutEvidence
 
 NormalizeGroundTruth = Callable[[Any], str]
 IsCorrect = Callable[[str, str], bool]
@@ -55,7 +57,7 @@ def _normalize_aime(ground_truth: Any) -> str:
 
 
 def _aime_is_correct(response: str, ground_truth: str) -> bool:
-    return bool(aime_utils.compute_score(response, ground_truth)["acc"])
+    return AIMEVerifier(ground_truth).verify(RolloutEvidence(response=response)).passed is True
 
 
 def _normalize_ifeval(ground_truth: Any) -> str:

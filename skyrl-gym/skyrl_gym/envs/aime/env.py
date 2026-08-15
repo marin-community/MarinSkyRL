@@ -1,6 +1,8 @@
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from skyrl_gym.envs.aime import utils
-from typing import Dict, Any, Optional
+from skyrl_gym.envs.aime.verifier import AIMERewardPolicy, AIMEVerifier
+from skyrl_gym.metrics import default_aggregate_metrics
+from skyrl_gym.verification import RolloutEvidence
+from typing import Dict, Any
 from omegaconf import DictConfig
 
 
@@ -24,63 +26,59 @@ class AIMEEnv(BaseTextEnv):
 
         # ---- Tunable length-penalty config (hydra: environment.skyrl_gym.aime.*) ----
         # weight=0.0 -> legacy reward (backward compatible).
-        self.length_penalty_weight: float = float(env_config.get("length_penalty_weight", 0.0))
-        self.target_length: int = int(env_config.get("target_length", 0))
-        self.truncated_penalty: float = float(env_config.get("truncated_penalty", -2.0))
-        self.min_response_length: int = int(env_config.get("min_response_length", 16))
-        self.end_think_token: str = str(env_config.get("end_think_token", "<|end_think|>"))
-        # max_gen_length: the generation cap (token budget). 0 -> length shaping
-        # of correct answers is skipped (falls back to +1.0). The generator sets
-        # this at step time via set_generation_metadata() so it stays in sync with
-        # generator.sampling_params.max_generate_length, but a config override is
-        # honored if provided.
-        self.max_gen_length: int = int(env_config.get("max_gen_length", 0))
+        self.verifier = AIMEVerifier(
+            ground_truth=self.ground_truth,
+            evaluation_token_budget=int(env_config.get("evaluation_token_budget", 8192)),
+        )
+        self.reward_policy = AIMERewardPolicy(
+            length_penalty_weight=float(env_config.get("length_penalty_weight", 0.0)),
+            target_length=int(env_config.get("target_length", 0)),
+            max_generation_tokens=int(env_config.get("max_gen_length", 0)),
+            truncated_penalty=float(env_config.get("truncated_penalty", -2.0)),
+            min_response_length=int(env_config.get("min_response_length", 16)),
+        )
+        self._evidence: RolloutEvidence | None = None
 
-        # ---- Generation metadata, populated by the generator before step() ----
-        self._response_length: Optional[int] = None
-        self._stop_reason: Optional[str] = None
-
-    def set_generation_metadata(
-        self,
-        response_length: Optional[int] = None,
-        stop_reason: Optional[str] = None,
-        max_gen_length: Optional[int] = None,
-    ) -> None:
-        """Optional hook called by the generator just before `step()` to expose
-        generation-time signals (token length, stop_reason, the generation cap)
-        to the reward function. Safe no-op contract: envs that don't define this
-        are simply not called; this env tolerates None for every field and falls
-        back to the legacy reward path.
-        """
-        self._response_length = response_length
-        self._stop_reason = stop_reason
-        if max_gen_length is not None and max_gen_length > 0:
-            self.max_gen_length = max_gen_length
+    def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
+        self._evidence = evidence
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step
 
-        score_info = utils.compute_score(
-            action,
-            self.ground_truth,
-            response_length=self._response_length,
-            stop_reason=self._stop_reason,
-            length_penalty_weight=self.length_penalty_weight,
-            target_length=self.target_length,
-            max_gen_length=self.max_gen_length,
-            truncated_penalty=self.truncated_penalty,
-            min_response_length=self.min_response_length,
-            end_think_token=self.end_think_token,
-        )
-        reward = score_info["score"]
+        evidence = self._evidence or RolloutEvidence(response=action)
+        verification = self.verifier.verify(evidence)
+        reward_result, reward_diagnostics = self.reward_policy.evaluate(evidence, verification)
         metadata = {
-            "acc": score_info["acc"],
-            "pred": score_info["pred"],
-            "truncated": score_info.get("truncated"),
-            "length_shaped": score_info.get("length_shaped"),
-            "response_length": score_info.get("response_length"),
-            "length_frac": score_info.get("length_frac"),
+            "acc": verification.passed is True,
+            "pred": verification.diagnostics["prediction"],
+            **verification.diagnostics,
+            **reward_diagnostics,
         }
 
         # No observation in aime, and no tool call
-        return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata=metadata)
+        return BaseTextEnvStepOutput(
+            observations=[],
+            reward=reward_result.optimization_reward,
+            done=done,
+            metadata=metadata,
+            verification=verification,
+            reward_result=reward_result,
+        )
+
+    @staticmethod
+    def aggregate_metrics(metrics: list[Dict[str, Any]]) -> Dict[str, float]:
+        def fraction(rows: list[Dict[str, Any]], key: str) -> float:
+            return sum(bool(row.get(key)) for row in rows) / len(rows) if rows else 0.0
+
+        correct = [row for row in metrics if bool(row.get("acc"))]
+        incorrect = [row for row in metrics if not bool(row.get("acc"))]
+        aggregated = default_aggregate_metrics(metrics)
+        aggregated.update(
+            {
+                "over_evaluation_budget_fraction": fraction(metrics, "over_evaluation_budget"),
+                "correct_over_evaluation_budget_fraction": fraction(correct, "over_evaluation_budget"),
+                "incorrect_over_evaluation_budget_fraction": fraction(incorrect, "over_evaluation_budget"),
+                "answered_within_evaluation_budget_fraction": fraction(metrics, "answered_within_evaluation_budget"),
+            }
+        )
+        return aggregated

@@ -12,6 +12,7 @@ from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequ
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
+    get_rollout_metrics,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_train.config.utils import get_default_config
@@ -285,6 +286,9 @@ async def test_agent_loop_single_turn(
         prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
     )
 
+    published_evidence = mock_env.set_rollout_evidence.call_args.args[0]
+    assert published_evidence.generated_token_count == len(MOCK_LLM_OUTPUT_IDS)
+    assert published_evidence.metadata["generation_token_budget"] == 8
     assert list(output.evidence.response_token_ids or ()) == MOCK_LLM_OUTPUT_IDS
     assert output.reward.optimization_reward == 1.0
     assert sum(output.reward.token_rewards or ()) == 1.0
@@ -642,6 +646,17 @@ def test_trajectory_batch_concatenation():
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+
+def test_rollout_metrics_include_negative_reward_failures():
+    metrics = get_rollout_metrics(
+        responses=[[1, 2], list(range(9)), [3, 4, 5], list(range(11))],
+        rewards=[1.0, -1.0, 1.0, -1.0],
+        successes=[True, False, True, False],
+    )
+
+    assert metrics["generate/avg_tokens_non_zero_rewards"] == pytest.approx(2.5)
+    assert metrics["generate/avg_tokens_zero_rewards"] == pytest.approx(10.0)
 
 
 def test_get_metrics_from_trajectory_batch():

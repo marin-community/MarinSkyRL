@@ -74,6 +74,7 @@ class WholeTrajectoryProjection:
             rewards,
             [output.env_metrics for output in outputs],
             request["env_classes"],
+            successes=_verification_successes(outputs),
         )
         rollout_metrics.update(_token_provenance_metrics(outputs))
         batch = TrajectoryBatch(
@@ -131,7 +132,7 @@ class StepWiseTrajectoryProjection:
             else None
         )
 
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+        rollout_metrics = get_rollout_metrics(responses, rewards, successes=_verification_successes(steps))
         rollout_metrics.update(_token_provenance_metrics(steps))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
@@ -194,3 +195,12 @@ def attach_unshaped_rewards(batch: TrajectoryBatch, rewards: Sequence[float | No
 def _token_provenance_metrics(outputs: Sequence[AgentLoopOutput]) -> dict[str, float]:
     reconstructed = sum(output.token_provenance == TokenProvenance.RECONSTRUCTED for output in outputs)
     return {TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC: reconstructed / len(outputs) if outputs else 0.0}
+
+
+def _verification_successes(outputs: Sequence[AgentLoopOutput]) -> list[bool]:
+    return [
+        output.verification.passed
+        if output.verification.passed is not None
+        else output.verification.score is not None and output.verification.score > 0.0
+        for output in outputs
+    ]
