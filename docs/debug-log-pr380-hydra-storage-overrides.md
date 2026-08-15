@@ -82,6 +82,12 @@ now have a 60-second bound and may finish partially; the periodic uploader still
 preserves session material throughout the run, while diagnostics can no longer
 block cluster teardown and terminal export indefinitely.
 
+The first run with that bound remained inside the SkyRL process rather than
+reaching task-runtime teardown. Loguru's queue-drain helper was waiting on the
+large Ray/NCCL log backlog immediately before the process-only exit. The exit
+path now emits its handoff message, flushes the standard streams directly, and
+exits without the redundant queue drain.
+
 ## Future work
 
 - [ ] Rerun the Qwen3-0.6B GSM8K smoke test through checkpoint creation and
