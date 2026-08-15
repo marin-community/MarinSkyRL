@@ -1,5 +1,4 @@
-"""
-Main entrypoint for on-policy distillation with teacher logits on terminal bench tasks.
+"""Main entrypoint for on-policy distillation with teacher logits on terminal bench tasks.
 
 Combines the HarborTrajectoryRunner (Harbor/Daytona agent environment) with the
 DistillationTrainer (vLLM-based teacher scoring for top-K logprobs).
