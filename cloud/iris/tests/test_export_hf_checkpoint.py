@@ -1,6 +1,7 @@
 """Behavior tests for terminal checkpoint export command construction."""
 
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, build_command
+from cloud.iris.terminal_policy import storage_user_from_resource_path
 from skyrl_train.hf_export_schema import HFExportRequest
 
 
@@ -26,6 +27,7 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
         cpu=96,
         memory="1600GB",
         disk="800GB",
+        storage_user="alice",
     )
 
     command = build_command(spec)
@@ -36,6 +38,7 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
     assert command[command.index("--cpu") + 1] == str(spec.cpu)
     assert command[command.index("--memory") + 1] == spec.memory
     assert command[command.index("--disk") + 1] == spec.disk
+    assert command[command.index("--storage-user") + 1] == spec.storage_user
     assert "--target-cluster" not in command
     assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
     assert overrides["checkpoint_export.export_root"] == request.export_path
@@ -69,3 +72,8 @@ def test_export_command_preserves_federated_submission_configs() -> None:
     assert command[command.index("--cluster-config") + 1] == spec.cluster_config
     assert command[command.index("--target-cluster") + 1] == spec.target_cluster
     assert command[command.index("--parent-cluster-config") + 1] == spec.parent_cluster_config
+
+
+def test_storage_user_is_derived_from_policy_paths() -> None:
+    assert storage_user_from_resource_path("s3://bucket/tmp/ttl=14d/skyrl/users/alice/run/checkpoints") == "alice"
+    assert storage_user_from_resource_path("s3://bucket/run/checkpoints") is None

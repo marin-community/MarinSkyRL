@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Mapping
+from urllib.parse import urlparse
 
 from cloud.iris.artifacts import fs_and_path, terminal_checkpoint_step
 from cloud.iris.model_paths import model_source_cli_args
@@ -36,6 +37,16 @@ class TerminalPolicyExport:
     cpu: float | None = None
     memory: str | None = None
     disk: str | None = None
+    storage_user: str | None = None
+
+
+def storage_user_from_resource_path(path: str) -> str | None:
+    """Return the user segment from a canonical storage-policy path."""
+    parts = tuple(part for part in urlparse(path).path.split("/") if part)
+    for index, part in enumerate(parts[:-1]):
+        if part == "users":
+            return parts[index + 1]
+    return None
 
 
 def policy_export_geometry(
@@ -89,6 +100,8 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         command.extend(["--memory", spec.memory])
     if spec.disk:
         command.extend(["--disk", spec.disk])
+    if spec.storage_user:
+        command.extend(["--storage-user", spec.storage_user])
     export_request_uri = join_resource_path(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
     export_filesystem, export_request_path = fs_and_path(export_request_uri)
     if export_filesystem.exists(export_request_path):

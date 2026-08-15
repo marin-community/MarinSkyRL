@@ -97,7 +97,12 @@ from cloud.iris.storage_policy import (
     hydra_override_value,
     resolve_storage_paths,
 )
-from cloud.iris.terminal_policy import TerminalPolicyExport, policy_export_geometry, submit_terminal_policy_export
+from cloud.iris.terminal_policy import (
+    TerminalPolicyExport,
+    policy_export_geometry,
+    storage_user_from_resource_path,
+    submit_terminal_policy_export,
+)
 from marinskyrl.resource_locator import (
     ModelLocatorError,
     is_cloud_uri,
@@ -389,6 +394,7 @@ class IrisBackend:
                 cpu=execution.cpu,
                 memory=execution.memory,
                 disk=execution.disk,
+                storage_user=storage_user_from_resource_path(request.output.checkpoint_root),
             )
         )
 
@@ -2680,6 +2686,7 @@ def export_terminal_policy(args: argparse.Namespace) -> None:
             cpu=args.cpu,
             memory=args.memory,
             disk=args.disk,
+            storage_user=args.storage_user,
         )
     )
 

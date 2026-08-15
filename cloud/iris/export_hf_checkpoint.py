@@ -83,6 +83,7 @@ class ExportJobSpec:
     cpu: float | None = None
     memory: str | None = None
     disk: str | None = None
+    storage_user: str | None = None
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -135,6 +136,8 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         cmd += ["--memory", spec.memory]
     if spec.disk:
         cmd += ["--disk", spec.disk]
+    if spec.storage_user:
+        cmd += ["--storage-user", spec.storage_user]
     cmd.extend(model_source_cli_args(request.model_source_uri, request.model_source_identity))
     if spec.no_wait:
         cmd.append("--no-wait")
@@ -161,6 +164,7 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cpu", type=float)
     ap.add_argument("--memory")
     ap.add_argument("--disk")
+    ap.add_argument("--storage-user")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--priority", default="batch")
@@ -232,6 +236,7 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         cpu=args.cpu,
         memory=args.memory,
         disk=args.disk,
+        storage_user=args.storage_user,
     )
 
 

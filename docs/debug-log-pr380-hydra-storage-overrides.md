@@ -103,6 +103,10 @@ The next exporter submission reached that config, then tried to rediscover
 automatic node capacity because the terminal record had also dropped the
 launcher's resolved CPU, memory, and disk requests. Those resource values now
 travel with the placement configuration into the export-only job.
+The live export then revealed that its temporary rendezvous root fell back to
+the in-pod account name. Terminal export derives and preserves the storage user
+from the already validated checkpoint root, keeping export diagnostics under
+the same user-owned lifecycle prefix.
 
 ## Future work
 
