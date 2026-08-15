@@ -60,7 +60,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
     "wait_for_generation_buffer": "step",
-    "postprocess_generator_output": "step",
+    "postprocess_trajectory_batch": "step",
     "convert_to_training_input": "step",
     "run_training": "step",
     "fwd_logprobs_values_reward": "run_training",

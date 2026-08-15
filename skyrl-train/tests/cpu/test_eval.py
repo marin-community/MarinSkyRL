@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.evaluate import evaluate
-from skyrl_train.generators.base import GeneratorInterface, GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from tests.cpu.util import example_dummy_config
 
 
@@ -28,12 +28,12 @@ class DummyStatefulDataLoader:
         return iter(self._batches)
 
 
-class DummyGenerator(GeneratorInterface):
-    def __init__(self, output: GeneratorOutput):
+class DummyRunner(TrajectoryRunner):
+    def __init__(self, output: TrajectoryBatch):
         self.output = output
         self.seen_inputs = []
 
-    async def _generate(self, input_batch, disable_tqdm: bool = False):
+    async def _run(self, input_batch, disable_tqdm: bool = False):
         self.seen_inputs.append(input_batch)
         return self.output
 
@@ -74,7 +74,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     ]
     eval_dataloader = DummyStatefulDataLoader([prompts_batch])
 
-    generator_output: GeneratorOutput = {
+    trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[101], [102]],
         "response_ids": [[201], [202]],
         "rewards": [1.0, 0.0],
@@ -82,14 +82,14 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": None,
     }
-    generator = DummyGenerator(generator_output)
+    runner = DummyRunner(trajectory_batch)
 
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda tokens: "decoded"
 
     metrics = await evaluate(
         eval_dataloader=eval_dataloader,
-        generator=generator,
+        trajectory_runner=runner,
         cfg=cfg,
         global_step=5,
         tokenizer=tokenizer,
@@ -107,8 +107,8 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     for key, expected_value in expected_metrics.items():
         assert metrics[key] == pytest.approx(expected_value)
 
-    assert len(generator.seen_inputs) == 1
-    seen_batch = generator.seen_inputs[0]
+    assert len(runner.seen_inputs) == 1
+    seen_batch = runner.seen_inputs[0]
     assert seen_batch["prompts"] == [prompt["prompt"] for prompt in prompts_batch]
     assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]

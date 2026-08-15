@@ -6,9 +6,9 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode
-from skyrl_train.generators.utils import prepare_generator_input
+from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
@@ -114,14 +114,14 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, generation_buffer):
         # Get a generation future and await on the object
-        generator_output, uids = await generation_buffer.get()  # GeneratorOutput, List[str]
+        trajectory_batch, uids = await generation_buffer.get()  # TrajectoryBatch, List[str]
 
         # print example just for debugging
-        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+        vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
         with Timer("convert_to_training_input", self.all_timings):
-            training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
+            training_input: TrainingInputBatch = self.convert_to_training_input(trajectory_batch, uids)
 
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -153,7 +153,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             for i, rand_prompts in enumerate(self.train_dataloader):
                 # truncate data to have even shards
                 rand_prompts = self._remove_tail_data(rand_prompts)
-                generator_input, uids = prepare_generator_input(
+                trajectory_request, uids = prepare_trajectory_request(
                     rand_prompts,
                     self.cfg.generator.n_samples_per_prompt,
                     get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
@@ -164,11 +164,11 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
                 # generation phase
                 async with Timer("generate", self.all_timings):
-                    generator_output: GeneratorOutput = await self.generate(generator_input)
-                    generator_output = self.postprocess_generator_output(generator_output, uids)
+                    trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
+                    trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
 
                 # Add to generation buffer
-                await generation_buffer.put((generator_output, uids))
+                await generation_buffer.put((trajectory_batch, uids))
 
                 # If the buffer is full, start weight sync
                 # Don't weight sync in the first step, because we let the generator run one step ahead

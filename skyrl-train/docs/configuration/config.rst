@@ -697,7 +697,7 @@ Generation Parameters
 - ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
 - ``generator.chat_template``: Custom chat template configuration if needed.
     - ``generator.chat_template.source``: Source of the chat template. Can be either ``name`` or ``file``.
-    - ``generator.chat_template.name_or_path``: Name or path of the chat template. If the source is ``name``, then it should be one of the supported templates in :code_link:`skyrl_train/generators/utils.py`. If the source is ``file``, then this field should be a path to a Jinja2 template file.
+    - ``generator.chat_template.name_or_path``: Name or path of the chat template. If the source is ``name``, then it should be one of the supported templates in :code_link:`skyrl_train/trajectory_runners/trajectory_processing.py`. If the source is ``file``, then this field should be a path to a Jinja2 template file.
 - ``generator.chat_template_kwargs``: Chat templating kwargs to pass to ``tokenizer.apply_chat_template``. Applicable only for non-batched generation with ``generator.batched=false``.
 
 Misc Configuration

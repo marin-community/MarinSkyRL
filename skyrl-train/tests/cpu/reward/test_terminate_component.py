@@ -33,7 +33,7 @@ from skyrl_train.utils.reward_shaping import (
 # helper-specific tests if the heavy generator deps are unavailable (the shaper
 # tests below never need it).
 try:
-    from examples.terminal_bench.terminal_bench_generator import (
+    from skyrl_train.trajectory_runners.harbor.runner import (
         detect_termination_signals,
     )
 

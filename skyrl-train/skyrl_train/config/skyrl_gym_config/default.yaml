@@ -15,9 +15,9 @@ search:
   timeout: 30
 
 aime:
+  evaluation_token_budget: 8192
   length_penalty_weight: 0.0
   target_length: 768
   truncated_penalty: -2.0
   min_response_length: 16
-  end_think_token: "<|end_think|>"
   max_gen_length: 0

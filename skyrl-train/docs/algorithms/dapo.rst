@@ -68,7 +68,7 @@ To enable overlong filtering, which sets the loss mask to be all zeros for respo
 Soft Overlong Punishment
 ------------------------
 
-To enable soft overlong punishment, you can create a custom trainer class and override the ``RayPPOTrainer`` ``postprocess_generator_output`` method to additionally apply soft overlong punishment to rewards.
+To enable soft overlong punishment, you can create a custom trainer class and override the ``RayPPOTrainer`` ``postprocess_trajectory_batch`` method to additionally apply soft overlong punishment to rewards.
 We provide an example of this in :code_link:`examples/algorithms/dapo/main_dapo.py`, and show an overview of the implementation below:
 
 .. code-block:: python
@@ -76,13 +76,13 @@ We provide an example of this in :code_link:`examples/algorithms/dapo/main_dapo.
 
   class DAPOTrainer(RayPPOTrainer):
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         # apply soft overlong punishment
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
         ...
         # use base class impl for metrics and per-token reward conversion
-        return super().postprocess_generator_output(generator_output, uids)
+        return super().postprocess_trajectory_batch(trajectory_batch, uids)
 
   class DAPOExp(BasePPOExp):
     def get_trainer(self, *args, **kwargs):

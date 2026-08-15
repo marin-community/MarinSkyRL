@@ -32,7 +32,7 @@ def _bare_trainer(mini_batch_size=2, step_times=None, tasks=None) -> FullyAsyncR
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.mini_batch_size = mini_batch_size
     trainer._step_time_history = collections.deque(step_times or [], maxlen=5)
-    trainer._active_generator_tasks = tasks or []
+    trainer._active_trajectory_tasks = tasks or []
     return trainer
 
 
@@ -121,7 +121,7 @@ async def test_get_fresh_batch_returns_when_groups_arrive(monkeypatch):
         for i in range(2):
             await queues.completed.put(
                 GeneratedOutputGroup(
-                    generator_output={"response_ids": [[1]], "prompt_token_ids": [[1]]},
+                    trajectory_batch={"response_ids": [[1]], "prompt_token_ids": [[1]]},
                     uid=f"u{i}",
                     earliest_model_step=0,
                     source_prompts=[{}],

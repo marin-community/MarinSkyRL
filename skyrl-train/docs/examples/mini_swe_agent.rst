@@ -7,20 +7,20 @@ In this example, we walk through a simple example on how to train a SWE-Agent on
 How does it work?
 ------------------
 
-The Mini-SWE-Agent integration with SkyRL can be found in :code_link:`examples/mini_swe_agent/`. We implement a custom generator ``MiniSweAgentGenerator`` to use Mini-SWE-Agent to generate trajectories for the SWE-Bench task. 
+The maintained runner lives in ``skyrl_train/trajectory_runners/mini_swe/runner.py``. It delegates each task to Mini-SWE-Agent and normalizes the resulting transcript for training.
 
 
 .. code-block:: python
 
-    class MiniSweAgentGenerator(SkyRLGymGenerator):
+    class MiniSweTrajectoryRunner(TrajectoryRunner):
         
-        async def generate_trajectory(self, prompt, ...): 
+        async def minisweagent_agent_loop(self, prompt, ...):
             ...
 
-        async def generate(self, generator_input: GeneratorInput) -> GeneratorOutput:
+        async def _run(self, trajectory_request: TrajectoryRequestBatch) -> TrajectoryBatch:
             ...
-            prompts = generator_input["prompts"]
-            env_extras = generator_input["env_extras"]
+            prompts = trajectory_request["prompts"]
+            env_extras = trajectory_request["env_extras"]
             tasks = []
             for i in range(len(prompts)):
                 tasks.append(
@@ -64,12 +64,13 @@ By running this workflow as a Ray task, we are also able to scale up generation 
             error = str(e)
         return agent.messages, eval_result, error
 
-    class MiniSweAgentGenerator(SkyRLGymGenerator):
-        async def generate_trajectory(self, prompt, env_extras, ...): 
+    class MiniSweTrajectoryRunner(TrajectoryRunner):
+        async def minisweagent_agent_loop(self, prompt, env_extras, ...):
             messages, eval_result, error = init_and_run.remote(env_extras["instance"], ...)
             ...
 
-Note that the full implementation has some additional logic for configuration and error handling, and can be found in :code_link:`examples/mini_swe_agent/mini_swe_generator.py`.
+The maintained implementation, including configuration and error handling, lives in
+``skyrl_train/trajectory_runners/mini_swe/runner.py``.
 
 
 Dataset preparation

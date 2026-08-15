@@ -22,14 +22,18 @@ import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.generators.base import (
-    GeneratorInput,
-    GeneratorOutput,
-    GeneratorInterface,
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryRequestBatch,
+    TrajectoryBatch,
+    TrajectoryRunner,
 )
 import copy
-from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
-from skyrl_train.generators.trajectory_retention import make_trajectory_sink
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    get_metrics_from_trajectory_batch,
+    prepare_trajectory_request,
+    validate_trajectory_batch,
+)
+from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
@@ -61,7 +65,6 @@ from skyrl_train.utils.trainer_utils import (
     get_node_ids,
     extract_step_from_path,
     validate_consistency_for_latest_checkpoint,
-    validate_generator_output,
     ResumeMode,
     DynamicSamplingState,
     build_dataloader,
@@ -110,7 +113,7 @@ class RayPPOTrainer:
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
-        generator: GeneratorInterface,
+        trajectory_runner: TrajectoryRunner,
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
@@ -122,9 +125,9 @@ class RayPPOTrainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
-        self.generator = generator
+        self.trajectory_runner = trajectory_runner
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
-        self.generator.set_trajectory_sink(self.trajectory_sink)
+        self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
         self.train_dataloader = None
         self.total_training_steps = None
         self._configure_training_schedule()
@@ -218,7 +221,7 @@ class RayPPOTrainer:
         if self.cfg.trainer.step_wise_training:
             eval_metrics = await evaluate_step_wise(
                 eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
+                trajectory_runner=self.trajectory_runner,
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
@@ -227,7 +230,7 @@ class RayPPOTrainer:
         else:
             eval_metrics = await evaluate(
                 eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
+                trajectory_runner=self.trajectory_runner,
                 cfg=self.cfg,
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
@@ -309,7 +312,7 @@ class RayPPOTrainer:
         1. HTTP endpoint shutdown – cuts off the request path so in-flight
            Harbor trials get connection-refused instead of retrying against
            dead inference engines indefinitely.
-        2. Generator shutdown – waits for QueueOrchestrator to drain (should
+        2. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
            be fast now that trials can't make new requests).
         3. Inference engine teardown – sends teardown RPC to each engine.
         4. Ray actor cleanup – force-kills remaining actors.
@@ -320,9 +323,9 @@ class RayPPOTrainer:
                 label="HTTP endpoint shutdown",
             )
         await self._guarded_async(
-            self.generator.shutdown(),
+            self.trajectory_runner.shutdown(),
             timeout=60,
-            label="Generator shutdown",
+            label="Trajectory runner shutdown",
         )
         await self._guarded_async(
             self.inference_engine_client.teardown(),
@@ -355,20 +358,20 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
-        await self._startup_generator()
+        await self._startup_trajectory_runner()
 
         try:
             await self._train_loop()
         finally:
             await self._teardown()
 
-    async def _startup_generator(self) -> None:
-        """Initialize generator resources before any rollout can begin."""
+    async def _startup_trajectory_runner(self) -> None:
+        """Initialize trajectory-runner resources before any rollout can begin."""
         try:
-            await self.generator.startup()
-            logger.info("Generator startup complete")
+            await self.trajectory_runner.startup()
+            logger.info("Trajectory runner startup complete")
         except Exception as e:
-            logger.opt(depth=0).error("Generator startup failed: " + str(e))
+            logger.opt(depth=0).error("Trajectory runner startup failed: " + str(e))
             raise
 
     async def _handle_resume_at_max_steps(self) -> None:
@@ -442,7 +445,7 @@ class RayPPOTrainer:
 
     async def _train_loop(self):
         """
-        Internal training loop, separated for proper generator lifecycle management.
+        Internal training loop, separated for proper trajectory-runner lifecycle management.
 
         This method uses the callback system to handle periodic actions like
         checkpointing, evaluation, and logging. Callbacks are invoked at specific
@@ -509,7 +512,7 @@ class RayPPOTrainer:
 
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
-                    generator_input, uids = prepare_generator_input(
+                    trajectory_request, uids = prepare_trajectory_request(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
                         get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
@@ -520,17 +523,19 @@ class RayPPOTrainer:
 
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings), critical_phase("rollout_or_inference_wait"):
-                        generator_output: GeneratorOutput = await self.generate(generator_input)
+                        trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
 
                     if self.cfg.trainer.step_wise_training:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
-                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
+                        # this is because in step-wise training, len(uids) != len(trajectory_batch["response_ids"])
+                        uids = [trajectory_id.instance_id for trajectory_id in trajectory_batch["trajectory_ids"]]
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                        generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
-                        if keep_sampling:  # continue sampling
+                        dynamic_sampling = self.handle_dynamic_sampling(trajectory_batch, uids)
+                        trajectory_batch = dynamic_sampling.trajectory_batch
+                        uids = dynamic_sampling.uids
+                        if dynamic_sampling.keep_sampling:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
@@ -540,20 +545,20 @@ class RayPPOTrainer:
                         await self.inference_engine_client.sleep()
 
                     # 1.2 postprocess rewards
-                    with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                    with Timer("postprocess_trajectory_batch", self.all_timings):
+                        trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
 
                     # 2. print example just for debugging
-                    vis = self.tokenizer.decode(generator_output["response_ids"][0])
+                    vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
                     log_example(
                         logger,
-                        prompt=generator_input["prompts"][0],
+                        prompt=trajectory_request["prompts"][0],
                         response=vis,
-                        reward=generator_output["rewards"][0],
+                        reward=trajectory_batch["rewards"][0],
                     )
 
                     with Timer("convert_to_training_input", self.all_timings):
-                        training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
+                        training_input: TrainingInputBatch = self.convert_to_training_input(trajectory_batch, uids)
                         logger.info(f"Number of sequences: {len(training_input['sequences'])}")
 
                     # TIS graceful-degrade observability (Fix A): see fully_async_trainer
@@ -680,7 +685,7 @@ class RayPPOTrainer:
                 record_policy_step(self.global_step)
                 self.global_step += 1
 
-                del training_input, generator_output
+                del training_input, trajectory_batch
 
                 # 11. Check for max_steps
                 if self.global_step > self.total_training_steps:
@@ -1054,20 +1059,20 @@ class RayPPOTrainer:
         self._num_experts_cache: Optional[int] = num_experts
         return num_experts
 
-    def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
-        prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
-        response_ids: List[List[int]] = generator_output["response_ids"]
-        rewards: List[List[float]] = generator_output["rewards"]
-        loss_masks: List[List[int]] = generator_output["loss_masks"]
+        prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
+        response_ids: List[List[int]] = trajectory_batch["response_ids"]
+        rewards: List[List[float]] = trajectory_batch["rewards"]
+        loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
-        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+        logprobs: Optional[List[List[float]]] = trajectory_batch.get("rollout_logprobs", None)
 
         # MoE router-replay capture rail (Stage 1): only pull routed_experts when
         # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical
         # (the field is never even passed to the collator nor set on the batch).
         moe_router_replay = moe_router_replay_enabled(self.cfg)
-        routed_experts = generator_output.get("rollout_routed_experts", None) if moe_router_replay else None
+        routed_experts = trajectory_batch.get("rollout_routed_experts", None) if moe_router_replay else None
         # Deterministic dtype for the rollout_routed_experts transport tensor:
         # resolve the model's expert count once (memoized) and pass it to the
         # collator so the narrowed dtype is keyed on num_experts (max possible id),
@@ -1081,9 +1086,9 @@ class RayPPOTrainer:
         # flag-off TrainingInputBatch is byte-identical (the fields are never passed
         # to the collator nor set on the batch). Mirrors moe_router_replay above.
         enable_token_reward_channel = bool(self.cfg.trainer.algorithm.get("enable_token_reward_channel", False))
-        token_level_shaping = generator_output.get("token_level_shaping", None) if enable_token_reward_channel else None
-        response_span_tags = generator_output.get("response_span_tags", None) if enable_token_reward_channel else None
-        loop_advantages = generator_output.get("loop_advantages")
+        token_level_shaping = trajectory_batch.get("token_level_shaping", None) if enable_token_reward_channel else None
+        response_span_tags = trajectory_batch.get("response_span_tags", None) if enable_token_reward_channel else None
+        loop_advantages = trajectory_batch.get("loop_advantages")
 
         (
             sequences_tensor,
@@ -1116,7 +1121,7 @@ class RayPPOTrainer:
         # Graceful TIS degrade (Fix A, 2026-06-07): when use_tis is on but the
         # ENTIRE training batch came back with no rollout logprobs
         # (rollout_logprobs_tensor is None), do NOT hard-assert/crash. The
-        # generator already detects + logs the all-None case ("ALL N
+        # runner already detects + logs the all-None case ("ALL N
         # trajectories missing logprobs. This batch cannot be used for TIS
         # training"); the trainer must complete the hardening by degrading to
         # standard (non-TIS) policy loss for THIS batch only. The None tensor
@@ -1156,8 +1161,8 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "is_last_step": (
-                    torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
-                    if generator_output.get("is_last_step", None) is not None
+                    torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
+                    if trajectory_batch.get("is_last_step", None) is not None
                     else None
                 ),
             },
@@ -1183,22 +1188,22 @@ class RayPPOTrainer:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
         # For RLOO-N: pass through exclude_from_baseline flags if present
-        if generator_output.get("exclude_from_baseline") is not None:
+        if trajectory_batch.get("exclude_from_baseline") is not None:
             training_input.metadata["exclude_from_baseline"] = np.array(
-                generator_output["exclude_from_baseline"], dtype=bool
+                trajectory_batch["exclude_from_baseline"], dtype=bool
             )
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self.cfg.trainer.step_wise_training:
-            assert "trajectory_ids" in generator_output, (
-                "Expected `trajectory_ids` in generator output for step wise training"
+            assert "trajectory_ids" in trajectory_batch, (
+                "Expected `trajectory_ids` in trajectory batch for step wise training"
             )
             training_input.metadata["trajectory_ids"] = [
-                trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
+                trajectory_id.to_string() for trajectory_id in trajectory_batch["trajectory_ids"]
             ]
             training_input.metadata["avg_response_length"] = sum(
                 len(sample_response_ids)
-                for sample_response_ids, is_last_step in zip(response_ids, generator_output["is_last_step"])
+                for sample_response_ids, is_last_step in zip(response_ids, trajectory_batch["is_last_step"])
                 if is_last_step
             ) / len(response_ids)
         else:
@@ -1215,8 +1220,8 @@ class RayPPOTrainer:
     @torch.no_grad()
     async def generate(
         self,
-        input_batch: GeneratorInput,
-    ) -> GeneratorOutput:
+        input_batch: TrajectoryRequestBatch,
+    ) -> TrajectoryBatch:
         """
         Generate rollouts.
 
@@ -1225,44 +1230,44 @@ class RayPPOTrainer:
             be awake (i.e. on GPU).
         - after calling this method, the same model placement still holds.
         """
-        # NOTE: we assume that .generate returns samples in the same order as passed in
-        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+        # Runners preserve the input sample order.
+        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
-        if generator_output["rollout_metrics"] is not None:
-            self.all_metrics.update(generator_output["rollout_metrics"])
+        if trajectory_batch["rollout_metrics"] is not None:
+            self.all_metrics.update(trajectory_batch["rollout_metrics"])
 
         if not self.cfg.trainer.step_wise_training:
-            validate_generator_output(len(input_batch["prompts"]), generator_output)
-        record_generated_work(generator_output["response_ids"], generator_output.get("is_last_step"))
+            validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"))
 
-        return generator_output
+        return trajectory_batch
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         """
         Converts to per token rewards and computes pass@N.
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        generator_output_for_metrics = generator_output
+        trajectory_batch_for_metrics = trajectory_batch
         uids_for_metrics = uids
         if self.cfg.trainer.step_wise_training:
-            generator_output_for_metrics = defaultdict(list)
-            for key in generator_output:
-                if isinstance(generator_output[key], list):
-                    generator_output_for_metrics[key] = [
-                        generator_output[key][i]
-                        for i in range(len(generator_output[key]))
-                        if generator_output["is_last_step"][i]
+            trajectory_batch_for_metrics = defaultdict(list)
+            for key in trajectory_batch:
+                if isinstance(trajectory_batch[key], list):
+                    trajectory_batch_for_metrics[key] = [
+                        trajectory_batch[key][i]
+                        for i in range(len(trajectory_batch[key]))
+                        if trajectory_batch["is_last_step"][i]
                     ]
             uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
+                uid for uid, is_last_step in zip(uids, trajectory_batch["is_last_step"]) if is_last_step
             ]
 
-        # only use `generator_output_for_metrics` for metrics calculation
+        # only use `trajectory_batch_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
-        mean_reward, pass_at_n = get_metrics_from_generator_output(
-            generator_output_for_metrics,
+        mean_reward, pass_at_n = get_metrics_from_trajectory_batch(
+            trajectory_batch_for_metrics,
             uids_for_metrics,
         )
 
@@ -1271,14 +1276,14 @@ class RayPPOTrainer:
         # here because rewards are converted to per-token form a few lines below and the
         # scalar form is not recoverable afterwards. Token-level rewards are skipped: the
         # gate is defined on a per-sample scalar.
-        step_rewards = generator_output_for_metrics["rewards"]
+        step_rewards = trajectory_batch_for_metrics["rewards"]
         self._current_step_rewards = (
             [float(r) for r in step_rewards] if step_rewards and not isinstance(step_rewards[0], list) else []
         )
 
-        # these use the full generator output
-        rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
-        responses: List[List[int]] = generator_output["response_ids"]
+        # these use the full trajectory batch
+        rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
+        responses: List[List[int]] = trajectory_batch["response_ids"]
         per_token_rewards: List[List[float]] = []
 
         # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
@@ -1309,8 +1314,8 @@ class RayPPOTrainer:
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
         # re-assign reward but now it's per token rewards
-        generator_output["rewards"] = per_token_rewards
-        return generator_output
+        trajectory_batch["rewards"] = per_token_rewards
+        return trajectory_batch
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:
@@ -1809,23 +1814,21 @@ class RayPPOTrainer:
         return policy_status
 
     def handle_dynamic_sampling(
-        self, generator_output: GeneratorOutput, uids: List[str]
-    ) -> Tuple[GeneratorOutput, List[str], bool]:
+        self, trajectory_batch: TrajectoryBatch, uids: List[str]
+    ) -> trainer_utils.DynamicSamplingResult:
         """
         Handle dynamic sampling for the current batch.
 
-        Accumulates the generator output and UIDs across batches if we are sampling repeatedly
+        Accumulates the trajectory batch and UIDs across batches if we are sampling repeatedly
         and applies the dynamic sampling strategy (i.e. filter, replace) to the current batch.
         If we hit the limit of max sample batches, we raise an error.
 
         Args:
-            generator_output: Current batch generator output
+            trajectory_batch: Current trajectory batch
             uids: Current batch UIDs
 
         Returns:
-            processed_output: Filtered generator output
-            processed_uids: Filtered UIDs
-            keep_sampling: Whether to keep sampling
+            The filtered batch, UIDs, continuation decision, and sampling state.
         """
         # Prepare sampling configuration
         max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
@@ -1845,13 +1848,13 @@ class RayPPOTrainer:
             self.dynamic_sampling_state["sample_batch_count"] += 1
 
         # Handle dynamic sampling using utilities
-        processed_output, processed_uids, keep_sampling, updated_state = trainer_utils.handle_dynamic_sampling(
-            generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
+        result = trainer_utils.handle_dynamic_sampling(
+            trajectory_batch, uids, dynamic_sampling_config, self.dynamic_sampling_state
         )
 
         # Check max resample limit, and if we hit it, raise an error
         if (
-            keep_sampling
+            result.keep_sampling
             and max_sample_batches > 0
             and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
         ):
@@ -1862,13 +1865,13 @@ class RayPPOTrainer:
                 f"Please check your data difficulty distribution."
             )
         # Update state
-        self.dynamic_sampling_state = updated_state
+        self.dynamic_sampling_state = result.state
 
-        if not keep_sampling:
+        if not result.keep_sampling:
             # Reset state when sampling is complete
             self.dynamic_sampling_state = None
 
-        return processed_output, processed_uids, keep_sampling
+        return result
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)

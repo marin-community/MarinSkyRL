@@ -45,10 +45,10 @@ def test_model_initialization_timeout_logs_and_kills_actors(monkeypatch):
 async def test_training_failure_log_record_does_not_contain_exception_object():
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = 12
-    trainer.generator = SimpleNamespace(startup=AsyncMock())
+    trainer.trajectory_runner = SimpleNamespace(startup=AsyncMock())
     trainer._maybe_enable_rollout_fanout = Mock()
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
-    trainer._cancel_generator_tasks = Mock()
+    trainer._cancel_trajectory_tasks = Mock()
     trainer._teardown = AsyncMock()
     messages = []
     sink_id = logger.add(messages.append, level="ERROR")

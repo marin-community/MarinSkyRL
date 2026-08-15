@@ -52,7 +52,7 @@ __all__ = [
 
 
 # Sentinel expert id written by the Stage-1 capture rail for unmatched /
-# non-generated token rows (generators/utils.py:627). Rows whose captured
+# non-generated token rows (trajectory_runners/trajectory_processing.py). Rows whose captured
 # targets are all this value fall through to native routing.
 SENTINEL_EXPERT_ID = 0
 

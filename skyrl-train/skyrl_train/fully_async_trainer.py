@@ -19,17 +19,19 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
 from skyrl_train.utils.logging_utils import log_exception_as_text
-from skyrl_train.generators.utils import prepare_generator_input, concatenate_generator_outputs
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    prepare_trajectory_request,
+    concatenate_trajectory_batches,
+)
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Tuple, TypeVar
-import inspect
 from enum import Enum, auto
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
@@ -309,7 +311,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         #
         # WHY THIS KNOB (2026-07-10, 80B head-plasma/RAM overflow root-cause): the
         # per-epoch buffer below is `asyncio.Queue(maxsize=num_parallel_generation_workers)`.
-        # Each buffered `GeneratedOutputGroup` holds a full `GeneratorOutput` whose
+        # Each buffered `GeneratedOutputGroup` holds a full `TrajectoryBatch` whose
         # `rollout_routed_experts` (R3) capture is O(response_len · num_moe_layers ·
         # top_k) per token — for Qwen3-Next-80B (L=48, K=10) that is ~15 MiB/sequence,
         # ~126 MiB per 8-sample group. With `num_parallel_generation_workers=900` the
@@ -383,7 +385,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
-        self._active_generator_tasks: List[asyncio.Task] = []
+        self._active_trajectory_tasks: List[asyncio.Task] = []
         self._stale_groups_discarded_since_step = 0
         self._groups_inspected_since_step = 0
         self._step_time_history: collections.deque[float] = collections.deque(maxlen=5)
@@ -406,21 +408,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Account for fully async mini-batch accumulation."""
         return self.num_steps_per_epoch
 
-    def _cancel_generator_tasks(self) -> None:
-        """Cancel any active generator tasks left over from an abnormal exit.
+    def _cancel_trajectory_tasks(self) -> None:
+        """Cancel any active generation tasks left over from an abnormal exit.
 
         Normally the per-epoch epilogue cancels these, but if an exception
         breaks out of the inner training loop the epilogue is skipped.
         """
-        tasks = self._active_generator_tasks
+        tasks = self._active_trajectory_tasks
         if not tasks:
             return
         n_running = sum(1 for t in tasks if not t.done())
         if n_running:
-            logger.warning(f"Cancelling {n_running} orphaned generator tasks from abnormal train loop exit")
+            logger.warning(f"Cancelling {n_running} orphaned generation tasks from abnormal train loop exit")
             for t in tasks:
                 t.cancel()
-        self._active_generator_tasks = []
+        self._active_trajectory_tasks = []
 
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
         """Restore completed outputs and pending retries from a checkpoint."""
@@ -443,25 +445,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def _maybe_enable_rollout_fanout(self) -> None:
-        """If ``rollout.fanout.enabled``, replace self.generator with a K-actor
-        RolloutDispatcher. Default OFF => no-op (self.generator unchanged, code
-        path byte-for-byte identical to today).
-
-        The dispatcher is generator-interface-compatible (startup/generate/
-        shutdown + eval-session passthrough + global_step_fn), so the rest of the
-        train loop is untouched. The staleness/async buffer stays single-loop in
-        this trainer (it must NOT be distributed — same code class as the prior
-        all_reduce key-mismatch NCCL deadlocks). The dispatcher owns no staleness
-        state; it only shards generate() and ships back compact GeneratorOutput.
-        """
+        """Enable configured multi-actor rollout collection without distributing staleness state."""
         rollout_cfg = OmegaConf.select(self.cfg, "rollout.fanout")
         self._rollout_fanout_enabled = bool(rollout_cfg is not None and getattr(rollout_cfg, "enabled", False))
         if not self._rollout_fanout_enabled:
             return
 
-        # Import lazily so the non-fanout path never imports the coordinator
-        # module (and its heavy transitive Harbor import on the dispatcher).
-        from examples.terminal_bench.rollout_coordinator import RolloutDispatcher
+        # Harbor is optional and absent from launcher-only CPU environments.
+        from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher  # noqa: PLC0415
 
         terminal_bench_cfg = OmegaConf.select(self.cfg, "terminal_bench_config")
         if terminal_bench_cfg is None:
@@ -473,13 +464,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         num_coordinators = int(getattr(rollout_cfg, "num_coordinators", 4))
         cpus_per_coordinator = int(getattr(rollout_cfg, "cpus_per_coordinator", 8))
         logger.info(
-            f"Rollout fan-out ENABLED: replacing single-process generator with "
+            f"Rollout fan-out ENABLED: replacing single-process runner with "
             f"RolloutDispatcher (K={num_coordinators}, cpus_per_coordinator="
             f"{cpus_per_coordinator})."
         )
-        self.generator = RolloutDispatcher(
+        self.trajectory_runner = RolloutDispatcher(
             cfg=self.cfg,
-            generator_cfg=self.cfg.generator,
+            trajectory_runner_cfg=self.cfg.generator,
             terminal_bench_cfg=terminal_bench_cfg,
             num_coordinators=num_coordinators,
             cpus_per_coordinator=cpus_per_coordinator,
@@ -491,11 +482,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.global_step = 0
 
-        # Optionally swap the single-process generator for a K-actor rollout
-        # dispatcher (gated; default OFF => no-op, self.generator unchanged).
+        # Optionally swap the single-process runner for a K-actor rollout
+        # dispatcher (gated; default OFF => no-op, self.trajectory_runner unchanged).
         self._maybe_enable_rollout_fanout()
 
-        await self._startup_generator()
+        await self._startup_trajectory_runner()
 
         try:
             await self._train_loop()
@@ -503,15 +494,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
             raise
         finally:
-            # Cancel any orphaned generator tasks that survived an early exit
+            # Cancel any orphaned generation tasks that survived an early exit
             # (the per-epoch epilogue only runs on normal loop completion).
-            self._cancel_generator_tasks()
+            self._cancel_trajectory_tasks()
 
             await self._teardown()
 
     async def _train_loop(self):
         """
-        Internal training loop, separated for proper generator lifecycle management.
+        Internal training loop, separated for proper trajectory-runner lifecycle management.
         """
         # Load checkpoint state if resumption is enabled.
         # Data consumption state is loaded via DataTrackingCallback.load_from_checkpoint()
@@ -625,17 +616,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 self._pending_buffer_restore_path = None
 
-            # Provide the generator with a live reference to global_step so it can
+            # Provide the runner with a live reference to global_step so it can
             # capture the step at first vLLM inference (for accurate staleness tracking).
-            self.generator.global_step_fn = lambda: self.global_step
+            self.trajectory_runner.global_step_fn = lambda: self.global_step
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers.
             # Stored on self so the finally block in train() can cancel them on abnormal exit.
-            self._active_generator_tasks = [
+            self._active_trajectory_tasks = [
                 asyncio.create_task(self._run_generate_for_a_group_loop(generation_queues))
                 for _ in range(self.num_parallel_generation_workers)
             ]
-            generator_tasks = self._active_generator_tasks
+            trajectory_tasks = self._active_trajectory_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings):
@@ -803,18 +794,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("update_ref_with_policy", self.all_timings):
                     await asyncio.to_thread(self.update_ref_with_policy)
 
-            # Cancel generator tasks for this epoch
-            for t in generator_tasks:
+            # Cancel generation tasks for this epoch
+            for t in trajectory_tasks:
                 t.cancel()
             try:
-                await asyncio.gather(*generator_tasks, return_exceptions=True)
+                await asyncio.gather(*trajectory_tasks, return_exceptions=True)
             except Exception:
                 pass
-            self._active_generator_tasks = []
+            self._active_trajectory_tasks = []
 
             # Per-epoch reset/validation for data loading and staleness management
-            assert all(t.done() for t in generator_tasks), (
-                "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
+            assert all(t.done() for t in trajectory_tasks), (
+                "Trajectory runner tasks must be done before resetting the dataloader manager and validating the staleness manager."
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
@@ -918,7 +909,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
                 assert len(rand_prompts) == 1
-                generator_input, uids = prepare_generator_input(
+                trajectory_request, uids = prepare_trajectory_request(
                     rand_prompts,
                     self.cfg.generator.n_samples_per_prompt,
                     get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
@@ -928,28 +919,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 assert all(uid == uids[0] for uid in uids), "Expect all uids to be the same"
 
-                # Capture a fallback global step before generation. Generators that
+                # Capture a fallback global step before collection. Runners that
                 # record sampled-token steps replace it with actual_global_step below.
                 global_step_at_start = self.global_step
 
-                if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
-                    # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
-                    # blast the console with each worker's progress bar.
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(
-                        generator_input, disable_tqdm=True
-                    )
-                else:
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                # Disable each runner's progress bar so concurrent workers do not flood the console.
+                cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
+                    trajectory_request, disable_tqdm=True
+                )
                 record_generated_work(
-                    cur_generator_output["response_ids"],
-                    cur_generator_output.get("is_last_step"),
+                    cur_trajectory_batch["response_ids"],
+                    cur_trajectory_batch.get("is_last_step"),
                 )
 
                 # Prefer the earliest global step captured during inference over the fallback.
-                actual_step = cur_generator_output.get("actual_global_step")
+                actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
                 completed_group = GeneratedOutputGroup(
-                    generator_output=cur_generator_output,
+                    trajectory_batch=cur_trajectory_batch,
                     uid=uids[0],
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
@@ -976,10 +963,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # worker has no more work to do for the epoch. Exit gracefully.
             if slot_acquired:
                 await self._staleness_manager.cancel_submission_slot()
-            logger.info("Generator worker exiting: generation stalled (dataset exhausted, no retries)")
+            logger.info("Trajectory worker exiting: collection stalled (dataset exhausted, no retries)")
             return
         except Exception as e:
-            log_exception_as_text("Generator worker failed", e)
+            log_exception_as_text("Trajectory worker failed", e)
             if slot_acquired:
                 await self._staleness_manager.cancel_submission_slot()
             sys.exit(1)
@@ -1123,15 +1110,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         median = sorted_times[len(sorted_times) // 2]
         return max(median * 5.0, 600.0)
 
-    def _any_generators_alive(self) -> bool:
-        return any(not t.done() for t in self._active_generator_tasks)
+    def _any_trajectory_workers_alive(self) -> bool:
+        return any(not t.done() for t in self._active_trajectory_tasks)
 
     def _check_generation_stall(self, elapsed: float) -> float:
         """Raise ``GenerationStalledError`` if no producers remain, else extend the deadline.
 
         Returns the new stall timeout for the next wait cycle.
         """
-        if not self._any_generators_alive():
+        if not self._any_trajectory_workers_alive():
             raise GenerationStalledError(f"Generation stalled: waited {elapsed:.0f}s, no active generators")
         logger.warning(
             f"Generation stall watchdog: {elapsed:.0f}s since last progress, "
@@ -1143,7 +1130,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Discard completed stale attempts and wait for a full fresh mini-batch.
 
         Raises ``GenerationStalledError`` when no new groups arrive within the
-        adaptive stall deadline and no generator tasks remain to produce them.
+        adaptive stall deadline and no generation tasks remain to produce them.
         """
         fresh_groups = []
         loop = asyncio.get_event_loop()
@@ -1204,27 +1191,27 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert len(cur_generation_group_mini_batch) == self.mini_batch_size, (
             f"Expected {self.mini_batch_size} generated groups, got {len(cur_generation_group_mini_batch)}"
         )
-        generator_outputs = []
+        trajectory_batches = []
         uids = []
         stalenesses = []
-        group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
+        group_size = len(cur_generation_group_mini_batch[0].trajectory_batch["response_ids"])
 
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
             stalenesses.append(cur_staleness)
-            generator_outputs.append(cur_generated_output_group.generator_output)
+            trajectory_batches.append(cur_generated_output_group.trajectory_batch)
             uids.extend([cur_generated_output_group.uid] * group_size)
 
         assert max(stalenesses) <= self.max_staleness_steps, (
             f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
         )
 
-        generator_output = concatenate_generator_outputs(
-            generator_outputs,
+        trajectory_batch = concatenate_trajectory_batches(
+            trajectory_batches,
             require_rollout_logprobs=policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type),
         )
-        assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
-        self.all_metrics.update(generator_output["rollout_metrics"])
+        assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
+        self.all_metrics.update(trajectory_batch["rollout_metrics"])
 
         # Log staleness statistics for this step
         self.all_metrics.update(
@@ -1237,13 +1224,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
-        generator_output = self.postprocess_generator_output(generator_output, uids)
+        trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
 
         # print example just for debugging
-        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+        vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
-        return self.convert_to_training_input(generator_output, uids)
+        return self.convert_to_training_input(trajectory_batch, uids)
 
     def save_checkpoints(self):
         """

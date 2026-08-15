@@ -96,11 +96,11 @@ We show the outline of creating a custom trainer below, and you can find a full 
 
     class CustomTrainer(RayPPOTrainer):
         @torch.no_grad()
-        def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+        def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
             # apply custom reward penalties
             ...
             # use base class impl for metrics and per-token reward conversion
-            return super().postprocess_generator_output(generator_output, uids)
+            return super().postprocess_trajectory_batch(trajectory_batch, uids)
 
    class CustomExp(BasePPOExp):
        def get_trainer(self, *args, **kwargs):

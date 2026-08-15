@@ -8,11 +8,11 @@ import ray
 
 from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
 from skyrl_train.utils.utils import initialize_ray
-from tests.gpu.utils import get_test_actor_config, get_test_generator_input
+from tests.gpu.utils import get_test_actor_config, get_test_trajectory_request
 
 
 def create_dataset(tmp_path, model_name: str):
-    input_batch = get_test_generator_input(model=model_name, num_prompts=1, n_samples_per_prompt=1)
+    input_batch = get_test_trajectory_request(model=model_name, num_prompts=1, n_samples_per_prompt=1)
     data = {
         "prompt": input_batch["prompts"][0],
         "env_class": input_batch["env_classes"][0],  # defaults to "gsm8k"

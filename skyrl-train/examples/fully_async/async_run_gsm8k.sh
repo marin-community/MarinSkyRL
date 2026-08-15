@@ -2,7 +2,7 @@ set -x
 
 # Fully async GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 # This bash script is copied from examples/async/async_run_gsm8k.sh, except for:
-# - running examples.fully_async.main_async
+# - running skyrl_train.entrypoints.fully_async
 # - setting the generator.batched=false.
 # - colocate_all=false
 # - the various generator configs at the end (http, chat template, etc.)
@@ -28,7 +28,7 @@ set -x
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
 
-uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async \
+uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \

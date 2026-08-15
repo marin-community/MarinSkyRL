@@ -13,7 +13,7 @@ Run:
 import pytest
 from transformers import AutoTokenizer
 
-from skyrl_train.generators.utils import get_response_ids_and_loss_mask_from_messages
+from skyrl_train.trajectory_runners.trajectory_processing import get_response_ids_and_loss_mask_from_messages
 from skyrl_train.utils.span_tagger import (
     SPAN_ACTION,
     SPAN_EDIT,

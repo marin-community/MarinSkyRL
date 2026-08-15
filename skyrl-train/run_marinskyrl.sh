@@ -9,17 +9,16 @@ TRAIN_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--Ope
 # Got after hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
 EVAL_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-TB-dev/snapshots/c1df0436e2d58c89f67d552c36cab9172280c5ae']"
 
-CHAT_TEMPLATE_PATH="/home/ec2-user/SkyRL/skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2"
+CHAT_TEMPLATE_PATH="${CHAT_TEMPLATE_PATH:-skyrl_train/trajectory_runners/harbor/qwen3_thinking_acc.jinja2}"
 TRIALS_DIR="/home/ec2-user/trials_run"
 CKPTS_DIR="/home/ec2-user/marinskyrl/ckpts"
 EXPORTS_DIR="/home/ec2-user/marinskyrl/exports"
 
 # Run SkyRL command
-python -m examples.terminal_bench.entrypoints.main_tbench \
+python -m skyrl_train.entrypoints.terminal_bench \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=open-thoughts/OpenThinker-Agent-v1-SFT \
-  hydra.searchpath=['file://examples/terminal_bench'] \
   +terminal_bench_config=terminal_bench \
   +terminal_bench_config.agent_name=terminus \
   +terminal_bench_config.max_episodes=32 \

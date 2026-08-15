@@ -12,11 +12,11 @@ from skyrl_train.utils.trainer_utils import (
     handle_dynamic_sampling,
     handle_replace_sampling,
     handle_filter_sampling,
-    filter_generator_output,
-    validate_generator_output,
+    filter_trajectory_batch,
     build_dataloader,
 )
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from typing import Union
 import ray
 import os
@@ -229,7 +229,7 @@ def test_sanitize_data_source_normal_string():
 def test_calculate_per_dataset_metrics_single_source():
     """Test calculate_per_dataset_metrics with single data source."""
     # Create test data
-    generator_outputs = {
+    trajectory_batches = {
         "rewards": [0.5, 0.7, 0.9],
         "prompt_token_ids": [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
         "response_ids": [[10, 11], [12, 13], [14, 15]],
@@ -237,7 +237,7 @@ def test_calculate_per_dataset_metrics_single_source():
     uids = ["uid1", "uid2", "uid3"]
     data_sources = ["dataset1", "dataset1", "dataset1"]
 
-    result = calculate_per_dataset_metrics(generator_outputs, uids, data_sources, 2)
+    result = calculate_per_dataset_metrics(trajectory_batches, uids, data_sources, 2)
 
     # Verify results - actual computed values
     # Mean reward: (0.5 + 0.7 + 0.9) / 3 = 0.7
@@ -251,7 +251,7 @@ def test_calculate_per_dataset_metrics_single_source():
 def test_calculate_per_dataset_metrics_multiple_sources():
     """Test calculate_per_dataset_metrics with multiple data sources including None."""
     # Create test data with mixed sources
-    generator_outputs = {
+    trajectory_batches = {
         "rewards": [0.5, 0.7, 0.9, 0.4],
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
         "response_ids": [[10, 11], [12, 13], [14, 15], [16, 17]],
@@ -259,7 +259,7 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     uids = ["uid1", "uid2", "uid3", "uid4"]
     data_sources = ["dataset1", None, "dataset1", None]
 
-    result = calculate_per_dataset_metrics(generator_outputs, uids, data_sources, 2)
+    result = calculate_per_dataset_metrics(trajectory_batches, uids, data_sources, 2)
 
     # Verify results for both datasets - actual computed values
     # dataset1: indices 0, 2 -> rewards [0.5, 0.9] -> mean = 0.7, pass@n = 2/2 = 1.0
@@ -287,7 +287,7 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
     mock_tokenizer.decode.side_effect = lambda x: f"decoded_{x}"
 
     # Create test data
-    generator_outputs = {
+    trajectory_batches = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[10, 11], [12, 13], [14, 15]],
         "rewards": [0.5, 0.7, 0.9],
@@ -300,7 +300,7 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
 
     # Call the function
     dump_per_dataset_eval_results(
-        mock_dump_dir, mock_tokenizer, generator_outputs, data_sources, all_envs, env_extras, eval_metrics
+        mock_dump_dir, mock_tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
     )
 
     # Verify tokenizer was called for decoding
@@ -336,7 +336,7 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
 
 def test_handle_dynamic_sampling_null_strategy():
     """Test that null strategy returns input unchanged."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2, 3], [4, 5, 6]],
         "response_ids": [[7, 8], [9, 10]],
         "rewards": [[1.0, 2.0], [3.0, 4.0]],
@@ -348,17 +348,17 @@ def test_handle_dynamic_sampling_null_strategy():
     uids = ["uid1", "uid2"]
     sampling_config = {"type": None}
 
-    result_output, result_uids, keep_sampling, state = handle_dynamic_sampling(generator_output, uids, sampling_config)
+    result = handle_dynamic_sampling(trajectory_batch, uids, sampling_config)
 
-    assert result_output == generator_output
-    assert result_uids == uids
-    assert keep_sampling is False
-    assert state is None
+    assert result.trajectory_batch == trajectory_batch
+    assert result.uids == uids
+    assert result.keep_sampling is False
+    assert result.state is None
 
 
 def test_handle_dynamic_sampling_invalid_strategy():
     """Test that invalid strategy raises ValueError."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2, 3]],
         "response_ids": [[7, 8]],
         "rewards": [[1.0, 2.0]],
@@ -369,13 +369,13 @@ def test_handle_dynamic_sampling_invalid_strategy():
     sampling_config = {"type": "invalid_strategy"}
 
     with pytest.raises(ValueError, match="Invalid dynamic sampling type: invalid_strategy"):
-        handle_dynamic_sampling(generator_output, uids, sampling_config)
+        handle_dynamic_sampling(trajectory_batch, uids, sampling_config)
 
 
 def test_handle_replace_sampling_sufficient_good_samples():
     """Test replace sampling when there are sufficient good samples (>0.3)."""
     # Create test data with some good UIDs (high variance) and some bad UIDs (zero variance)
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4], [5, 6], [5, 6]],
         "response_ids": [[13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24]],
         "rewards": [
@@ -395,7 +395,10 @@ def test_handle_replace_sampling_sufficient_good_samples():
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should not keep sampling
     assert keep_sampling is False
@@ -417,7 +420,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
 
 def test_handle_replace_sampling_insufficient_good_samples():
     """Test replace sampling when there are insufficient good samples (<0.3)."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
         "rewards": [1.0, 1.0, 2.0, 2.0],  # uid1: [1.0, 1.0] (bad), uid2: [2.0, 2.0] (bad)
@@ -429,19 +432,22 @@ def test_handle_replace_sampling_insufficient_good_samples():
     uids = ["uid1", "uid1", "uid2", "uid2"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should keep sampling due to insufficient good samples
     assert keep_sampling is True
 
     # Output should be unchanged
-    assert result_output == generator_output
+    assert result_output == trajectory_batch
     assert result_uids == uids
 
 
 def test_handle_replace_sampling_single_sample_per_prompt():
     """Test replace sampling with single sample per prompt (should always be considered good)."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 1.0],
@@ -453,19 +459,22 @@ def test_handle_replace_sampling_single_sample_per_prompt():
     uids = ["uid1", "uid2"]
     sampling_config = {"n_samples_per_prompt": 1, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should not keep sampling (single samples are always considered good)
     assert keep_sampling is False
 
     # Output should be unchanged since all samples are good
-    assert result_output == generator_output
+    assert result_output == trajectory_batch
     assert result_uids == uids
 
 
 def test_handle_replace_sampling_token_level_rewards():
     """Test replace sampling with token-level rewards (should sum to sequence level)."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12, 13], [14, 15], [16]],
         "rewards": [[1.0, 2.0], [3.0, 4.0, 5.0], [1.0, 1.0], [1.0]],  # Token-level rewards
@@ -477,7 +486,10 @@ def test_handle_replace_sampling_token_level_rewards():
     uids = ["uid1", "uid1", "uid2", "uid2"]  # uid1: [3.0, 7.0] (good), uid2: [2.0, 2.0] (bad)
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
-    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
 
     # Should not keep sampling (sufficient good samples)
     assert keep_sampling is False
@@ -489,7 +501,7 @@ def test_handle_replace_sampling_token_level_rewards():
 
 def test_handle_filter_sampling_sufficient_prompts():
     """Test filter sampling when we get sufficient prompts in one batch."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
         "rewards": [1.0, 2.0, 3.0, 3.0],  # uid1: [1.0, 2.0] (good), uid2: [3.0, 3.0] (bad)
@@ -505,9 +517,11 @@ def test_handle_filter_sampling_sufficient_prompts():
         "max_sample_batches": 20,
     }
 
-    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
-        generator_output, uids, sampling_config, collected_state={"sample_batch_count": 1}
-    )
+    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
+    state = result.state
 
     # Should not keep sampling (sufficient prompts)
     assert keep_sampling is False
@@ -521,7 +535,7 @@ def test_handle_filter_sampling_sufficient_prompts():
 
 def test_handle_filter_sampling_insufficient_prompts_continue():
     """Test filter sampling when we need to continue sampling."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 2.0],  # Only 1 good prompt
@@ -539,13 +553,15 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
 
     collected_state = {"sample_batch_count": 1}
 
-    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
-        generator_output, uids, sampling_config, collected_state=collected_state
-    )
+    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state=collected_state)
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
+    state = result.state
 
     # Should keep sampling (insufficient prompts)
     assert keep_sampling is True
-    assert result_output is generator_output
+    assert result_output is trajectory_batch
     assert result_uids is uids
     assert state is not None
     assert state["num_prompts_in_batch"] == 1
@@ -555,7 +571,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
 def test_handle_filter_sampling_accumulation():
     """Test filter sampling accumulation across multiple batches."""
     # First batch
-    generator_output1 = {
+    trajectory_batch1 = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 2.0],  # Good prompt
@@ -567,7 +583,7 @@ def test_handle_filter_sampling_accumulation():
     uids1 = ["uid1", "uid1"]
 
     # Second batch
-    generator_output2 = {
+    trajectory_batch2 = {
         "prompt_token_ids": [[9, 10], [11, 12]],
         "response_ids": [[13, 14], [15, 16]],
         "rewards": [3.0, 4.0],  # Another good prompt
@@ -587,17 +603,19 @@ def test_handle_filter_sampling_accumulation():
     collected_state = {"sample_batch_count": 1}
 
     # Process first batch
-    result1_output, result1_uids, keep_sampling1, state1 = handle_filter_sampling(
-        generator_output1, uids1, sampling_config, collected_state=collected_state
-    )
+    result1 = handle_filter_sampling(trajectory_batch1, uids1, sampling_config, collected_state=collected_state)
+    keep_sampling1 = result1.keep_sampling
+    state1 = result1.state
 
     assert keep_sampling1 is True  # Need more prompts
     assert state1["num_prompts_in_batch"] == 1
 
     # Process second batch
-    result2_output, result2_uids, keep_sampling2, state2 = handle_filter_sampling(
-        generator_output2, uids2, sampling_config, collected_state=state1
-    )
+    result2 = handle_filter_sampling(trajectory_batch2, uids2, sampling_config, collected_state=state1)
+    result2_output = result2.trajectory_batch
+    result2_uids = result2.uids
+    keep_sampling2 = result2.keep_sampling
+    state2 = result2.state
 
     assert keep_sampling2 is False  # Now have enough prompts
     assert state2 is None
@@ -607,7 +625,7 @@ def test_handle_filter_sampling_accumulation():
 
 def test_handle_filter_sampling_single_sample_per_prompt():
     """Test filter sampling with single sample per prompt."""
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 1.0],  # Same rewards but single sample per prompt
@@ -623,9 +641,11 @@ def test_handle_filter_sampling_single_sample_per_prompt():
         "max_sample_batches": 20,
     }
 
-    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
-        generator_output, uids, sampling_config, collected_state={"sample_batch_count": 1}
-    )
+    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
+    result_output = result.trajectory_batch
+    result_uids = result.uids
+    keep_sampling = result.keep_sampling
+    state = result.state
 
     # Should not keep sampling (single samples are always kept)
     assert keep_sampling is False
@@ -634,9 +654,9 @@ def test_handle_filter_sampling_single_sample_per_prompt():
     assert len(result_uids) == 2
 
 
-def test_filter_generator_output():
-    """Test the filter_generator_output utility function."""
-    generator_output = {
+def test_filter_trajectory_batch():
+    """Test the filter_trajectory_batch utility function."""
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[7, 8], [9, 10], [11, 12]],
         "rewards": [1.0, 2.0, 3.0],
@@ -656,7 +676,7 @@ def test_filter_generator_output():
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
-    filtered = filter_generator_output(generator_output, kept_indices)
+    filtered = filter_trajectory_batch(trajectory_batch, kept_indices)
 
     assert filtered["prompt_token_ids"] == [[1, 2], [5, 6]]
     assert filtered["response_ids"] == [[7, 8], [11, 12]]
@@ -679,16 +699,16 @@ def test_filter_generator_output():
     assert filtered["reward_shaping_versions"] == [2, 2]
 
 
-def test_validate_generator_output_valid_case():
-    """Test validate_generator_output with valid case."""
-    input_batch = GeneratorInput(
+def test_validate_trajectory_batch_valid_case():
+    """Test validate_trajectory_batch with valid case."""
+    input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2", "prompt3"],
         env_classes=["env1", "env2", "env3"],
         env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
         sampling_params={"temperature": 0.7},
     )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
         response_ids=[[10, 11, 12], [13, 14], [15]],
         rewards=[[0.5, 0.6, 0.7], [0.8, 0.9], [1.0]],  # Nested list structure
@@ -699,22 +719,24 @@ def test_validate_generator_output_valid_case():
     )
 
     # Should not raise any exceptions
-    validate_generator_output(len(input_batch["prompts"]), generator_output)
+    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
     # per trajectory rewards should work too
-    generator_output["rewards"] = [0.5, 0.6, 0.7]
-    validate_generator_output(len(input_batch["prompts"]), generator_output)
+    trajectory_batch["rewards"] = [0.5, 0.6, 0.7]
+    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
     # valid rollout logprobs
-    generator_output["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
-    validate_generator_output(len(input_batch["prompts"]), generator_output)
+    trajectory_batch["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
+    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
-def test_validate_generator_output_empty_response_ids():
-    """Test validate_generator_output raises RuntimeError when response_ids is empty."""
-    input_batch = GeneratorInput(prompts=["prompt1"], env_classes=["env1"], env_extras=None, sampling_params=None)
+def test_validate_trajectory_batch_empty_response_ids():
+    """Test validate_trajectory_batch raises RuntimeError when response_ids is empty."""
+    input_batch = TrajectoryRequestBatch(
+        prompts=["prompt1"], env_classes=["env1"], env_extras=None, sampling_params=None
+    )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3]],
         response_ids=[],
         rewards=[],
@@ -724,19 +746,19 @@ def test_validate_generator_output_empty_response_ids():
     )
 
     with pytest.raises(RuntimeError, match="No outputs generated"):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
-def test_validate_generator_output_mismatched_prompts_responses():
-    """Test validate_generator_output raises AssertionError when prompts and response_ids lengths don't match."""
-    input_batch = GeneratorInput(
+def test_validate_trajectory_batch_mismatched_prompts_responses():
+    """Test validate_trajectory_batch raises AssertionError when prompts and response_ids lengths don't match."""
+    input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2", "prompt3"],  # 3 prompts
         env_classes=["env1", "env2", "env3"],
         env_extras=None,
         sampling_params=None,
     )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2], [3, 4]],
         response_ids=[[7, 8], [9, 10]],  # Only 2 responses
         rewards=[0.5, 0.7],
@@ -746,16 +768,16 @@ def test_validate_generator_output_mismatched_prompts_responses():
     )
 
     with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
-def test_validate_generator_output_all_loss_masked():
-    """Test validate_generator_output logs warning when all outputs are loss masked."""
-    input_batch = GeneratorInput(
+def test_validate_trajectory_batch_all_loss_masked():
+    """Test validate_trajectory_batch logs warning when all outputs are loss masked."""
+    input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
     )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
         response_ids=[[7, 8], [9, 10]],
         rewards=[0.5, 0.7],
@@ -765,20 +787,20 @@ def test_validate_generator_output_all_loss_masked():
     )
 
     # Capture log output to verify warning is issued
-    with patch("skyrl_train.utils.trainer_utils.logger") as mock_logger:
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+    with patch("skyrl_train.trajectory_runners.trajectory_processing.logger") as mock_logger:
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
         mock_logger.warning.assert_called_once_with(
             "All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
         )
 
 
-def test_validate_generator_output_mismatched_list_lengths():
-    """Test validate_generator_output raises AssertionError when generator output lists have mismatched lengths."""
-    input_batch = GeneratorInput(
+def test_validate_trajectory_batch_mismatched_list_lengths():
+    """Test validate_trajectory_batch rejects mismatched trajectory batch lists."""
+    input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
     )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
         response_ids=[[7, 8], [9, 10]],  # Length 2
         rewards=[0.5, 0.7, 0.9],  # Length 3 - mismatch!
@@ -787,20 +809,20 @@ def test_validate_generator_output_mismatched_list_lengths():
         rollout_logprobs=None,
     )
 
-    with pytest.raises(AssertionError, match="Generator output rewards length must be equal to response_ids length"):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+    with pytest.raises(AssertionError, match="Trajectory batch rewards length must equal response_ids length"):
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
-def test_validate_generator_output_element_length_mismatch():
-    """Test validate_generator_output with element length mismatch."""
-    input_batch = GeneratorInput(
+def test_validate_trajectory_batch_element_length_mismatch():
+    """Test validate_trajectory_batch with element length mismatch."""
+    input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2", "prompt3"],
         env_classes=["env1", "env2", "env3"],
         env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
         sampling_params={"temperature": 0.7},
     )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
         response_ids=[[10, 11, 12], [13, 14], [15]],
         rewards=[[0.5, 0.6, 0.7], [0.8, 0.9], [1.0]],
@@ -811,14 +833,14 @@ def test_validate_generator_output_element_length_mismatch():
     )
 
     with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
-    generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
-    generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
+    trajectory_batch["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
+    trajectory_batch["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
     with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
         response_ids=[[7, 8], [9, 10], [11, 12]],
         rewards=[0.5, 0.7, -0.1],
@@ -828,7 +850,7 @@ def test_validate_generator_output_element_length_mismatch():
     )
 
     with pytest.raises(AssertionError, match="Response ids and rollout logprobs must have the same length"):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
 class MultiItemDataset:
@@ -890,13 +912,13 @@ def test_build_dataloader_seeding(dummy_config):
     )
 
 
-def test_validate_generator_output_invalid_rewards():
-    """Test validate_generator_output raises AssertionError when rewards is neither List[float-like] nor List[List[float-like]]."""
-    input_batch = GeneratorInput(
+def test_validate_trajectory_batch_invalid_rewards():
+    """Test validate_trajectory_batch raises AssertionError when rewards is neither List[float-like] nor List[List[float-like]]."""
+    input_batch = TrajectoryRequestBatch(
         prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
     )
 
-    generator_output = GeneratorOutput(
+    trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
         response_ids=[[7, 8], [9, 10]],
         rewards=[[0.5, 0.6], 0.7],
@@ -909,10 +931,10 @@ def test_validate_generator_output_invalid_rewards():
         AssertionError,
         match=re.escape("rewards must be `List[float]` or `List[List[float]]`"),
     ):
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
-    generator_output["rewards"] = [0.5, 0.7]
-    validate_generator_output(len(input_batch["prompts"]), generator_output)
+    trajectory_batch["rewards"] = [0.5, 0.7]
+    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
-    generator_output["rewards"] = [[0.5, 0.6], [0.7, 0.8]]
-    validate_generator_output(len(input_batch["prompts"]), generator_output)
+    trajectory_batch["rewards"] = [[0.5, 0.6], [0.7, 0.8]]
+    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)

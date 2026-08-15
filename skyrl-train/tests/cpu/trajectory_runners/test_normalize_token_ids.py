@@ -1,0 +1,112 @@
+"""CPU test for `normalize_token_ids` in the Terminal-Bench runner.
+
+Regression test for the 80B Qwen3-Next production RL crash (job 631790): the
+agentic terminal_bench prompt-assembly site fed a non-flat-list shape into the
+training batch, which `dataset/preprocess._verify_inputs` rejected at the first
+training step with:
+
+    ValueError: prompt token-id list at sample index 0 contains a non-int
+    element 'input_ids' (type str); expected a flat list of token ids.
+
+The leaking shape was a `BatchEncoding` / dict (iterating it yields its KEYS,
+so element 0 was the string 'input_ids'). The fix normalizes the
+`apply_chat_template` result to a flat `List[int]` at the assembly site, where
+the ids are still present.
+
+Run:
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/trajectory_runners/test_normalize_token_ids.py
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
+
+
+def test_flat_list_passthrough():
+    """The normal/correct path (flat List[int]) is returned unchanged."""
+    ids = [151644, 872, 198, 14990, 1879]
+    out = normalize_token_ids(ids)
+    assert out == ids
+    assert all(isinstance(t, int) for t in out)
+
+
+def test_batchencoding_dict_extracts_input_ids():
+    """A BatchEncoding/dict yields its 'input_ids' value, not its keys.
+
+    This is the exact shape that crashed job 631790: without the fix, the dict
+    would be passed through and iterate to ['input_ids', 'attention_mask', ...].
+    """
+    enc = {"input_ids": [1, 2, 3, 4], "attention_mask": [1, 1, 1, 1]}
+    out = normalize_token_ids(enc)
+    assert out == [1, 2, 3, 4]
+    assert all(isinstance(t, int) for t in out)
+
+
+def test_batchencoding_extracts_input_ids():
+    """A real `transformers.BatchEncoding` is handled via its mapping interface.
+
+    This is the ACTUAL crash shape from job 631790. Note `BatchEncoding` is a
+    `UserDict`, NOT a `dict` subclass (`isinstance(BatchEncoding(...), dict)` is
+    False on transformers 4.57+), so iterating it yields its KEYS — which is how
+    the literal string 'input_ids' leaked in. The fix detects it by `keys()`,
+    not `isinstance(dict)`.
+    """
+    from transformers import BatchEncoding
+
+    enc = BatchEncoding({"input_ids": [5, 6, 7], "attention_mask": [1, 1, 1]})
+    assert not isinstance(enc, dict)  # the trap: BatchEncoding is not a dict
+    out = normalize_token_ids(enc)
+    assert out == [5, 6, 7]
+
+
+def test_batchencoding_tensor_value():
+    """A BatchEncoding whose input_ids is a tensor/ndarray is flattened to ints."""
+    import torch
+    from transformers import BatchEncoding
+
+    enc = BatchEncoding({"input_ids": torch.tensor([5, 6, 7])})
+    out = normalize_token_ids(enc)
+    assert out == [5, 6, 7]
+    assert all(isinstance(t, int) for t in out)
+
+
+def test_singleton_batched_nesting_unwrapped():
+    """A [[int, ...]] singleton-batched result is unwrapped to [int, ...]."""
+    out = normalize_token_ids([[10, 11, 12]])
+    assert out == [10, 11, 12]
+
+
+def test_alternate_id_keys():
+    for key in ("token_ids", "ids"):
+        out = normalize_token_ids({key: [9, 8, 7]})
+        assert out == [9, 8, 7]
+
+
+def test_dict_without_id_key_raises():
+    with pytest.raises(ValueError):
+        normalize_token_ids({"attention_mask": [1, 1, 1]})
+
+
+def test_normalized_prompt_collates_into_training_batch():
+    """End-to-end: a normalized prompt (was a dict) collates without the
+    `_verify_inputs` crash; the dict shape would have raised."""
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+
+    # Pre-fix: this dict would have leaked into prompts and crashed _verify_inputs.
+    raw_prompt_encoding = {"input_ids": [101, 102, 103], "attention_mask": [1, 1, 1]}
+    prompt_ids = normalize_token_ids(raw_prompt_encoding)
+
+    prompts = [prompt_ids]
+    responses = [[201, 202]]
+    rewards = [[0.0, 1.0]]
+    loss_masks = [[1, 1]]
+
+    seq, attn, action_mask, ret_rewards, ret_loss, lp, re_t, _tls, _rst = convert_prompts_responses_to_batch_tensors(
+        tokenizer, prompts, responses, rewards, loss_masks
+    )
+    # prompt(3) + response(2) = 5 tokens, batch of 1
+    assert seq.shape == (1, 5)

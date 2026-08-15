@@ -29,7 +29,7 @@ import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
 from skyrl_train.utils.io import io
@@ -1197,7 +1197,7 @@ class BufferCheckpointCallback(TrainerCallback):
 
         serialized = [
             {
-                "generator_output": dict(item.generator_output),
+                "trajectory_batch": dict(item.trajectory_batch),
                 "uid": item.uid,
                 "earliest_model_step": item.earliest_model_step,
                 "source_prompts": item.source_prompts,
@@ -1235,10 +1235,10 @@ class BufferCheckpointCallback(TrainerCallback):
 
         items = []
         for entry in state["completed_groups"]:
-            gen_out: GeneratorOutput = entry["generator_output"]
+            trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
             items.append(
                 GeneratedOutputGroup(
-                    generator_output=gen_out,
+                    trajectory_batch=trajectory_batch,
                     uid=entry["uid"],
                     earliest_model_step=entry["earliest_model_step"],
                     source_prompts=entry["source_prompts"],

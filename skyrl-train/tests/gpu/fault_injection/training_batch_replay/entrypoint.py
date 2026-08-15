@@ -12,7 +12,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import ray
 
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.utils.trainer_utils import extract_step_from_path, ResumeMode
 from tests.training_batch_replay import (
     BatchReplayProvenance,
@@ -82,7 +82,7 @@ def _terminal_bench_experiment_class():
     # Harbor is a production-image dependency, not a CPU-test dependency. Keep
     # the TerminalBench import lazy so --help and pre-Ray validation work in the
     # ordinary development environment.
-    from examples.terminal_bench.entrypoints.main_tbench import TerminalBenchExp  # noqa: PLC0415
+    from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp  # noqa: PLC0415
 
     return TerminalBenchExp
 
@@ -99,7 +99,7 @@ def _capture_experiment_class():
             train_dataset,
             eval_dataset,
             inference_engine_client,
-            generator,
+            trajectory_runner,
             colocate_pg,
         ):
             if cfg.trainer.placement.colocate_all:
@@ -111,7 +111,7 @@ def _capture_experiment_class():
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 inference_engine_client=inference_engine_client,
-                generator=generator,
+                trajectory_runner=trajectory_runner,
                 colocate_pg=colocate_pg,
                 capture_artifact_path=_artifact_path(cfg),
                 capture_provenance=_provenance(cfg),
@@ -134,7 +134,7 @@ def _replay_experiment_class():
                 train_dataset=self.train_dataset,
                 eval_dataset=self.eval_dataset,
                 inference_engine_client=None,
-                generator=None,
+                trajectory_runner=None,
                 colocate_pg=self.colocate_pg,
             )
             strategy = str(self.cfg.trainer.strategy)
@@ -199,14 +199,7 @@ def main(cfg: DictConfig) -> None:
         # before any model worker can be dispatched.
         load_training_batch_artifact(artifact_path, expected=provenance)
 
-    # Reuse the production TerminalBench main scaffold so Ray initialization,
-    # fuse_weights environment, signals, exception logging, and shutdown remain
-    # identical.
-    from examples.terminal_bench.entrypoints.main_tbench import (  # noqa: PLC0415
-        run_terminal_bench_entrypoint,
-    )
-
-    run_terminal_bench_entrypoint(cfg, diagnostic_entrypoint)
+    run_ray_driver(cfg, diagnostic_entrypoint)
 
 
 if __name__ == "__main__":
