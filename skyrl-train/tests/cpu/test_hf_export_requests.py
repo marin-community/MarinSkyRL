@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from cloud.iris import export_hf_checkpoint
@@ -75,6 +76,12 @@ def _export_command(request):
 
 def _command_options(command):
     return {command[index]: command[index + 1] for index in range(len(command) - 1) if command[index].startswith("--")}
+
+
+def _hydra_overrides(command):
+    encoded = [value for index, value in enumerate(command) if index > 0 and command[index - 1] == "--skyrl_override"]
+    parsed = OverridesParser.create().parse_overrides(encoded)
+    return {override.key_or_group: override.value() for override in parsed}
 
 
 def test_normal_hf_save_records_rerunnable_request_without_live_export(tmp_path):
@@ -243,20 +250,16 @@ def test_export_job_owns_timeout_and_waits_for_completion():
     )
     command = _export_command(request)
     options = _command_options(command)
-    overrides = {
-        value.split("=", 1)[0]: value.split("=", 1)[1]
-        for index, value in enumerate(command)
-        if index > 0 and command[index - 1] == "--skyrl_override"
-    }
+    overrides = _hydra_overrides(command)
 
     assert options["--entrypoint"] == "skyrl_train.entrypoints.checkpoint_export"
-    assert overrides["++checkpoint_export.step"] == "10"
-    assert overrides["++checkpoint_export.checkpoint_path"] == request.checkpoint_path
-    assert overrides["++checkpoint_export.export_root"] == request.export_path
-    assert not any(key.startswith("++trainer.callbacks") for key in overrides)
+    assert overrides["checkpoint_export.step"] == 10
+    assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
+    assert overrides["checkpoint_export.export_root"] == request.export_path
+    assert not any(key.startswith("trainer.callbacks") for key in overrides)
     assert options["--timeout"] == "7200"
     assert "--no-wait" not in command
-    assert overrides["++checkpoint_export.hf_hub_repo_id"] == "org/exported-model"
+    assert overrides["checkpoint_export.hf_hub_repo_id"] == "org/exported-model"
 
 
 def test_export_job_materializes_request_model_source():
@@ -430,7 +433,7 @@ def test_manual_no_wait_returns_after_submission_without_verifying_artifacts(tmp
     _, spec = _export_job_spec(tmp_path, no_wait=True)
     monkeypatch.setattr(export_hf_checkpoint.subprocess, "call", lambda *args, **kwargs: 0)
     verify = Mock()
-    monkeypatch.setattr(export_hf_checkpoint.hf_model_io, "verify_hf_model_export", verify)
+    monkeypatch.setattr(export_hf_checkpoint, "_verify_hf_model_export", verify)
 
     export_hf_checkpoint._run_export(spec, ["ignored"])
 

@@ -38,8 +38,6 @@ from cloud.iris.rl_config_translation import format_hydra_arg
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
 from marinskyrl.resource_locator import ModelLocatorError
-from skyrl_train import hf_model_io
-from skyrl_train.hf_export import read_hf_export_request, write_hf_export_request
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
     DEFAULT_HF_HUB_REVISION,
@@ -50,6 +48,24 @@ from skyrl_train.hf_export_schema import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _read_hf_export_request(checkpoint_path: str) -> HFExportRequest | None:
+    from skyrl_train.hf_export import read_hf_export_request
+
+    return read_hf_export_request(checkpoint_path)
+
+
+def _write_hf_export_request(request: HFExportRequest) -> None:
+    from skyrl_train.hf_export import write_hf_export_request
+
+    write_hf_export_request(request)
+
+
+def _verify_hf_model_export(export_path: str) -> None:
+    from skyrl_train.hf_model_io import verify_hf_model_export
+
+    verify_hf_model_export(export_path)
 
 
 @dataclass(frozen=True)
@@ -171,7 +187,7 @@ def request_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> E
     if args.no_wait:
         parser.error("--no-wait cannot be used with --request because completion must be recorded")
     try:
-        request = read_hf_export_request(args.request)
+        request = _read_hf_export_request(args.request)
     except ValueError as error:
         parser.error(f"invalid HF export request: {error}")
     if request is None:
@@ -235,20 +251,20 @@ def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
         raise subprocess.CalledProcessError(exit_code, command)
     if not spec.no_wait:
         export_path = policy_export_path(spec.request.export_path, spec.request.step)
-        hf_model_io.verify_hf_model_export(export_path)
+        _verify_hf_model_export(export_path)
 
 
 def submit_requested_export(spec: ExportJobSpec, command: list[str]) -> None:
     """Submit one export job, verify synchronous output, and persist request state."""
     request = spec.request.with_status(HFExportStatus.IN_PROGRESS, timeout=spec.timeout, increment_attempts=True)
-    write_hf_export_request(request)
+    _write_hf_export_request(request)
     try:
         _run_export(spec, command)
     except BaseException as error:
         exit_code = error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
-        write_hf_export_request(request.with_status(HFExportStatus.PENDING, last_exit_code=exit_code))
+        _write_hf_export_request(request.with_status(HFExportStatus.PENDING, last_exit_code=exit_code))
         raise
-    write_hf_export_request(request.with_status(HFExportStatus.COMPLETE, last_exit_code=0))
+    _write_hf_export_request(request.with_status(HFExportStatus.COMPLETE, last_exit_code=0))
 
 
 def main() -> None:

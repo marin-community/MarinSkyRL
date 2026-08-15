@@ -57,10 +57,41 @@ Jupiter report publication and all backend-specific artifact fields through `lat
 - The complete Iris CPU suite passed on the current pull request head: 306 passed. Pytest initially loaded the
   pre-rebase `marinskyrl` package from the virtual environment; rebuilding the local package made the new
   quoted-lifecycle-path regression use the current source, where it passed without changes.
+- The exact launcher-only profile from CI contained no Torch installation, imported
+  `cloud.iris.export_hf_checkpoint`, and passed all 306 Iris tests.
+- The complete HF export request test file passed: 21 passed.
 - The trainer CPU suite ran without assertion failures until the process was killed with exit 137 at
   `test_build_dataloader_seeding` after cumulative memory growth. That test passed alone, and the remaining 151
   tests passed in a separate run. The split runs preserve every selection and deselection from the CI command.
 - `infra/pre-commit.py --changed-files --fix` passed Ruff check and format.
+
+## Hypothesis 4
+
+The launcher-only CI failure is an import-boundary regression, not a reason to add Torch to the launcher.
+
+## Changes to make
+
+Defer the training-only request persistence and model verification imports until those operations execute, while
+keeping export command construction available to the launcher-only test environment.
+
+## Results
+
+Before the change, importing `cloud.iris.export_hf_checkpoint` with Torch blocked failed through
+`skyrl_train.hf_model_io`. After the change, the guarded import and launcher test collection pass without
+loading Torch.
+
+## Hypothesis 5
+
+The trainer failure compares a deliberately Hydra-quoted value with its decoded URI.
+
+## Changes to make
+
+Parse every generated `--skyrl_override` with Hydra and assert on the resulting typed values.
+
+## Results
+
+The test continues to cover the checkpoint path, export root, step, repository, callback exclusion, timeout,
+and synchronous submission behavior while accepting the valid lifecycle-path encoding.
 
 ## Future work
 
