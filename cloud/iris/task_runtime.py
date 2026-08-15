@@ -1288,7 +1288,25 @@ def sync_ray_session_logs(rendezvous_dir: str | None, node_id: str, reason: str)
                     n_bytes += sz
                 except Exception:  # noqa: BLE001 - skip a single unreadable/racing file
                     continue
-    _log(f"[ray-log-sync] uploaded {n_files} file(s) / {n_bytes / 1073741824.0:.2f} GiB -> {dest_base} [{reason}]")
+        _log(f"[ray-log-sync] uploaded {n_files} file(s) / {n_bytes / 1073741824.0:.2f} GiB -> {dest_base} [{reason}]")
+
+
+def sync_ray_session_logs_bounded(rendezvous_dir: str | None, node_id: str, reason: str) -> None:
+    timeout = float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "60"))
+    if timeout <= 0:
+        _log(f"[ray-log-sync] skipping final upload because timeout is {timeout}s [{reason}]")
+        return
+
+    sync_thread = threading.Thread(
+        target=sync_ray_session_logs,
+        args=(rendezvous_dir, node_id, reason),
+        daemon=True,
+        name="ray-log-final-sync",
+    )
+    sync_thread.start()
+    sync_thread.join(timeout)
+    if sync_thread.is_alive():
+        _log(f"[ray-log-sync] final upload exceeded {timeout}s; continuing teardown with a partial upload [{reason}]")
 
 
 def start_ray_log_sync(rendezvous_dir: str | None, node_id: str) -> threading.Event:
@@ -1352,7 +1370,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (head rank 0)")
         # Flush this node's Ray session logs (per-actor worker stdout/tracebacks) before
         # the pod is reaped — Ray's node-local logs are deleted with the pod.
-        sync_ray_session_logs(args.rendezvous_dir, node_id, f"signal {signum} (head)")
+        sync_ray_session_logs_bounded(args.rendezvous_dir, node_id, f"signal {signum} (head)")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"signal {signum} (head)")
         if process is not None:
             try:
@@ -1428,7 +1446,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         # Final flush of this node's Ray session logs before teardown reaps them.
         if ray_log_sync_stop is not None:
             ray_log_sync_stop.set()
-        sync_ray_session_logs(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        sync_ray_session_logs_bounded(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
@@ -1485,7 +1503,7 @@ def run_worker(args: argparse.Namespace) -> int:
         # hosts the training actors' GPUs); capture its disk/GPU state before reap.
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (worker rank {rank})")
         # Flush this node's per-actor Ray worker logs before the pod is reaped.
-        sync_ray_session_logs(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
+        sync_ray_session_logs_bounded(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
         stop.set()
 
@@ -1503,7 +1521,7 @@ def run_worker(args: argparse.Namespace) -> int:
             time.sleep(POLL_INTERVAL)
         # Final flush of this worker node's Ray session logs before Ray teardown.
         ray_log_sync_stop.set()
-        sync_ray_session_logs(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
+        sync_ray_session_logs_bounded(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
     return 0

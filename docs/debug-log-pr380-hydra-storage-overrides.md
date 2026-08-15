@@ -76,6 +76,12 @@ driver now closes process telemetry and flushes logs before exiting without
 running those process-global destructors; the task runtime remains responsible
 for stopping the cluster.
 
+The following smoke reached that clean exit, then spent more than five minutes
+in the task runtime's best-effort final Ray log upload. Final diagnostic uploads
+now have a 60-second bound and may finish partially; the periodic uploader still
+preserves session material throughout the run, while diagnostics can no longer
+block cluster teardown and terminal export indefinitely.
+
 ## Future work
 
 - [ ] Rerun the Qwen3-0.6B GSM8K smoke test through checkpoint creation and
