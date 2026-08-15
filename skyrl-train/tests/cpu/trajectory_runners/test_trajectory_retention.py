@@ -158,10 +158,10 @@ def test_normalized_output_produces_complete_core_trace_schema():
 
 @pytest.mark.asyncio
 async def test_trajectory_runner_finalization_invokes_the_shared_sink(tmp_path):
-    generator = _NormalizedRunner()
-    generator.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
+    trajectory_runner = _NormalizedRunner()
+    trajectory_runner.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
 
-    output = await generator.run(_input())
+    output = await trajectory_runner.run(_input())
 
     assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
     assert {record["trajectory"]["instance_id"] for record in _records(tmp_path)} == {"a", "b", "c"}

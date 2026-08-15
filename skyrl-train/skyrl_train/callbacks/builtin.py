@@ -1235,10 +1235,10 @@ class BufferCheckpointCallback(TrainerCallback):
 
         items = []
         for entry in state["completed_groups"]:
-            gen_out: TrajectoryBatch = entry["trajectory_batch"]
+            trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
             items.append(
                 GeneratedOutputGroup(
-                    trajectory_batch=gen_out,
+                    trajectory_batch=trajectory_batch,
                     uid=entry["uid"],
                     earliest_model_step=entry["earliest_model_step"],
                     source_prompts=entry["source_prompts"],

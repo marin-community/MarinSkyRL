@@ -7,6 +7,12 @@ from skyrl_train.inference_engines.base import ConversationType
 
 TrainingPhase = Literal["train", "eval"]
 TIS_ALIGNED_TOKENS_METRIC = "generate/tis/aligned_tokens"
+TIS_EXACT_MATCH_FRACTION_METRIC = "generate/tis/exact_match_fraction"
+TIS_LCS_FALLBACK_FRACTION_METRIC = "generate/tis/lcs_fallback_fraction"
+TIS_UNALIGNED_FRACTION_METRIC = "generate/tis/unaligned_fraction"
+TIS_ALIGNMENT_FAIL_COUNT_METRIC = "generate/tis/alignment_fail_count"
+TIS_LCS_FALLBACK_MESSAGES_METRIC = "generate/tis/lcs_fallback_messages"
+TIS_LCS_FALLBACK_ALERT_METRIC = "generate/tis/lcs_fallback_alert"
 
 
 class TokenProvenance(StrEnum):

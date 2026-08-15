@@ -14,23 +14,17 @@ tokenizer/GPU stack).
 Ref: agent_logs/2026-07-03_r5_engine_starvation_rootcause.md
 """
 
-import os
-import sys
 import types
 
 import pytest
 
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 
-_EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
-if _EXAMPLES not in sys.path:
-    sys.path.insert(0, _EXAMPLES)
-
 # HarborTrajectoryRunner pulls in the harbor/terminal_bench agentic-RL stack, which
 # the CPU dev extra deliberately does not install. Skip the module where it is absent
 # (it still runs in the agentic RL env where harbor is present).
 try:
-    from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner  # noqa: E402
+    from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 

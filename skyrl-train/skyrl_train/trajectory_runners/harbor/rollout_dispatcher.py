@@ -255,7 +255,7 @@ class RolloutCoordinator:
         num_coordinators: int,
     ):
         configure_worker_process()
-        from skyrl_train.trajectory_runners.harbor.runner import (
+        from skyrl_train.trajectory_runners.harbor.runner import (  # noqa: PLC0415
             HarborTrajectoryRunner,
         )
         from transformers import AutoTokenizer

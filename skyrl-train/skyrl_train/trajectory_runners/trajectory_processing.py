@@ -11,7 +11,15 @@ from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
     TrainingPhase,
 )
-from skyrl_train.trajectory_runners.types import TIS_ALIGNED_TOKENS_METRIC
+from skyrl_train.trajectory_runners.types import (
+    TIS_ALIGNED_TOKENS_METRIC,
+    TIS_EXACT_MATCH_FRACTION_METRIC,
+    TIS_LCS_FALLBACK_FRACTION_METRIC,
+    TIS_UNALIGNED_FRACTION_METRIC,
+    TIS_ALIGNMENT_FAIL_COUNT_METRIC,
+    TIS_LCS_FALLBACK_MESSAGES_METRIC,
+    TIS_LCS_FALLBACK_ALERT_METRIC,
+)
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     refresh_trajectory_reward_shaping_metrics,
@@ -105,18 +113,29 @@ class AlignmentStats:
     def as_metrics(self, prefix: str = "tis/") -> Dict[str, float]:
         n = max(self.n_tokens, 1)
         lcs_frac = self.n_lcs / n
+        names = {
+            "aligned_tokens": TIS_ALIGNED_TOKENS_METRIC,
+            "exact_match_fraction": TIS_EXACT_MATCH_FRACTION_METRIC,
+            "lcs_fallback_fraction": TIS_LCS_FALLBACK_FRACTION_METRIC,
+            "unaligned_fraction": TIS_UNALIGNED_FRACTION_METRIC,
+            "alignment_fail_count": TIS_ALIGNMENT_FAIL_COUNT_METRIC,
+            "lcs_fallback_messages": TIS_LCS_FALLBACK_MESSAGES_METRIC,
+            "lcs_fallback_alert": TIS_LCS_FALLBACK_ALERT_METRIC,
+        }
+        if prefix != "generate/tis/":
+            names = {name: f"{prefix}{name}" for name in names}
         return {
-            f"{prefix}aligned_tokens": float(self.n_tokens),
-            f"{prefix}exact_match_fraction": self.n_exact / n,
-            f"{prefix}lcs_fallback_fraction": lcs_frac,
-            f"{prefix}unaligned_fraction": self.n_unaligned / n,
-            f"{prefix}alignment_fail_count": float(self.n_failed_messages),
-            f"{prefix}lcs_fallback_messages": float(self.n_lcs_messages),
+            names["aligned_tokens"]: float(self.n_tokens),
+            names["exact_match_fraction"]: self.n_exact / n,
+            names["lcs_fallback_fraction"]: lcs_frac,
+            names["unaligned_fraction"]: self.n_unaligned / n,
+            names["alignment_fail_count"]: float(self.n_failed_messages),
+            names["lcs_fallback_messages"]: float(self.n_lcs_messages),
             # Metered LCS guard: 1.0 when the LCS defensive fallback fired on more than
             # the alert threshold of training tokens (a serving↔training tokenizer/
             # template regression). ALWAYS emitted (keyset-stable across ranks — the
             # NumelIn=1 all_reduce-deadlock trap). Under full TITO this should stay 0.
-            f"{prefix}lcs_fallback_alert": 1.0 if lcs_frac > _lcs_alert_threshold() else 0.0,
+            names["lcs_fallback_alert"]: 1.0 if lcs_frac > _lcs_alert_threshold() else 0.0,
         }
 
 
@@ -673,22 +692,22 @@ def concatenate_trajectory_batches(
             continue
         saw_tis = True
         total_aligned += n
-        sum_exact += rm.get("generate/tis/exact_match_fraction", 0.0) * n
-        sum_lcs += rm.get("generate/tis/lcs_fallback_fraction", 0.0) * n
-        sum_unaligned += rm.get("generate/tis/unaligned_fraction", 0.0) * n
-        sum_fail += rm.get("generate/tis/alignment_fail_count", 0.0)
-        sum_lcs_msgs += rm.get("generate/tis/lcs_fallback_messages", 0.0)
+        sum_exact += rm.get(TIS_EXACT_MATCH_FRACTION_METRIC, 0.0) * n
+        sum_lcs += rm.get(TIS_LCS_FALLBACK_FRACTION_METRIC, 0.0) * n
+        sum_unaligned += rm.get(TIS_UNALIGNED_FRACTION_METRIC, 0.0) * n
+        sum_fail += rm.get(TIS_ALIGNMENT_FAIL_COUNT_METRIC, 0.0)
+        sum_lcs_msgs += rm.get(TIS_LCS_FALLBACK_MESSAGES_METRIC, 0.0)
     if saw_tis:
         denom = max(total_aligned, 1.0)
         rollout_metrics[TIS_ALIGNED_TOKENS_METRIC] = total_aligned
-        rollout_metrics["generate/tis/exact_match_fraction"] = sum_exact / denom
-        rollout_metrics["generate/tis/lcs_fallback_fraction"] = sum_lcs / denom
-        rollout_metrics["generate/tis/unaligned_fraction"] = sum_unaligned / denom
-        rollout_metrics["generate/tis/alignment_fail_count"] = sum_fail
-        rollout_metrics["generate/tis/lcs_fallback_messages"] = sum_lcs_msgs
+        rollout_metrics[TIS_EXACT_MATCH_FRACTION_METRIC] = sum_exact / denom
+        rollout_metrics[TIS_LCS_FALLBACK_FRACTION_METRIC] = sum_lcs / denom
+        rollout_metrics[TIS_UNALIGNED_FRACTION_METRIC] = sum_unaligned / denom
+        rollout_metrics[TIS_ALIGNMENT_FAIL_COUNT_METRIC] = sum_fail
+        rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
         # Recompute the metered LCS-guard alert from the recombined fraction so it
         # stays keyset-stable and consistent with the per-trajectory emission.
-        rollout_metrics["generate/tis/lcs_fallback_alert"] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
+        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
 
     rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
 

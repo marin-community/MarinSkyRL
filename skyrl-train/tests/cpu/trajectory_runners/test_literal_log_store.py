@@ -6,11 +6,7 @@ import os
 import sys
 import threading
 
-_EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "..", "examples")
-if _EXAMPLES not in sys.path:
-    sys.path.insert(0, _EXAMPLES)
-
-from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore  # noqa: E402
+from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
 
 
 def _entry(trial_id, ts, cids):

@@ -11,6 +11,7 @@ import numpy as np
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.types import TIS_LCS_FALLBACK_ALERT_METRIC
 from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
@@ -1143,7 +1144,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 # Metered LCS defensive guard: escalate to ERROR when the alert metric
                 # trips (lcs_fallback_fraction over SKYRL_TIS_LCS_ALERT_THRESHOLD),
                 # else WARNING. Under full TITO this should never fire.
-                alert = align_metrics.get("generate/tis/lcs_fallback_alert", 0.0) >= 1.0
+                alert = align_metrics.get(TIS_LCS_FALLBACK_ALERT_METRIC, 0.0) >= 1.0
                 log_fn = logger.error if alert else logger.warning
                 log_fn(
                     f"TIS alignment{' ALERT' if alert else ''}: "

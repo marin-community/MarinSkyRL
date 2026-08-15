@@ -8,6 +8,12 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch as TrajectoryRequestBatch,
     TrainingPhase as TrainingPhase,
     TIS_ALIGNED_TOKENS_METRIC,
+    TIS_EXACT_MATCH_FRACTION_METRIC,
+    TIS_LCS_FALLBACK_FRACTION_METRIC,
+    TIS_UNALIGNED_FRACTION_METRIC,
+    TIS_ALIGNMENT_FAIL_COUNT_METRIC,
+    TIS_LCS_FALLBACK_MESSAGES_METRIC,
+    TIS_LCS_FALLBACK_ALERT_METRIC,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
@@ -97,12 +103,12 @@ class TrajectoryRunner(ABC):
         rollout_metrics.update(
             {
                 TIS_ALIGNED_TOKENS_METRIC: float(aligned_tokens),
-                "generate/tis/exact_match_fraction": 1.0 if aligned_tokens else 0.0,
-                "generate/tis/lcs_fallback_fraction": 0.0,
-                "generate/tis/unaligned_fraction": 0.0,
-                "generate/tis/alignment_fail_count": 0.0,
-                "generate/tis/lcs_fallback_messages": 0.0,
-                "generate/tis/lcs_fallback_alert": 0.0,
+                TIS_EXACT_MATCH_FRACTION_METRIC: 1.0 if aligned_tokens else 0.0,
+                TIS_LCS_FALLBACK_FRACTION_METRIC: 0.0,
+                TIS_UNALIGNED_FRACTION_METRIC: 0.0,
+                TIS_ALIGNMENT_FAIL_COUNT_METRIC: 0.0,
+                TIS_LCS_FALLBACK_MESSAGES_METRIC: 0.0,
+                TIS_LCS_FALLBACK_ALERT_METRIC: 0.0,
             }
         )
         output["rollout_metrics"] = rollout_metrics

@@ -9,18 +9,11 @@ drive the REAL builder (HarborConfigBuilder._build_agent_fields) and the REAL ha
 AgentFactory so a future schema regression is caught, not mocked over.
 """
 
-import os
-import sys
-
 import pytest
 from omegaconf import OmegaConf
 
-_EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
-if _EXAMPLES not in sys.path:
-    sys.path.insert(0, _EXAMPLES)
-
 try:
-    from skyrl_train.trajectory_runners.harbor.configuration import AGENT_SCHEMA, HarborConfigBuilder  # noqa: E402
+    from skyrl_train.trajectory_runners.harbor.configuration import AGENT_SCHEMA, HarborConfigBuilder
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 

@@ -52,7 +52,7 @@ class WholeTrajectoryCollector:
 
 
 class BatchedTrajectoryCollector:
-    """Collect a batch already normalized by the legacy batched environment path."""
+    """Collect a batch from the supported single-turn batched environment path."""
 
     def __init__(self, runner):
         self._runner = runner
