@@ -114,22 +114,9 @@ class TrajectoryRunner(ABC):
         output["rollout_metrics"] = rollout_metrics
 
     async def startup(self) -> None:
-        """Initialize async resources before training begins.
-
-        Called once after __init__ but before the first run() call.
-        Override to initialize resources like orchestrators, connections, etc.
-
-        Default implementation does nothing (for backwards compatibility).
-        """
+        """Initialize runner resources before the first call to :meth:`run`."""
         pass
 
     async def shutdown(self) -> None:
-        """Cleanup async resources after training ends.
-
-        Called once after the last run() call.
-        Override to cleanup resources like orchestrators, connections, etc.
-        Should be idempotent (safe to call multiple times).
-
-        Default implementation does nothing (for backwards compatibility).
-        """
+        """Release runner resources after use; repeated calls must be safe."""
         pass

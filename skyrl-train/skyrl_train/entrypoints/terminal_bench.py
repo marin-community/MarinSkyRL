@@ -69,11 +69,7 @@ class TerminalBenchExp(BasePPOExp):
     ):
         # Check if async training is configured via placement.colocate_all=false
         # Async training requires non-colocated placement (separate GPU sets for policy/ref/inference)
-        use_async = (
-            hasattr(cfg.trainer, "placement")
-            and cfg.trainer.placement is not None
-            and getattr(cfg.trainer.placement, "colocate_all", True) is False
-        )
+        use_async = cfg.trainer.placement.colocate_all is False
 
         trainer_cls = FullyAsyncRayPPOTrainer if use_async else RayPPOTrainer
         return trainer_cls(

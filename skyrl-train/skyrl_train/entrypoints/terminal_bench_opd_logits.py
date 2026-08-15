@@ -57,20 +57,15 @@ class OnPolicyDistillationLogitsTerminalBenchExp(TerminalBenchExp):
         """Override to create teacher vLLM inference engines."""
         trainer = super()._setup_trainer()
 
-        # Create teacher engines if configured
-        if hasattr(self.cfg, "teacher") and self.cfg.teacher.model_path is not None:
-            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(self.cfg, self.tokenizer)
-            trainer.setup_teacher_engine(
-                teacher_engines,
-                student_tokenizer=self.tokenizer,
-                teacher_tokenizer=teacher_tokenizer,
-            )
-            logger.info(f"Teacher engine created for {self.cfg.teacher.model_path}")
-        else:
-            logger.warning(
-                "No teacher.model_path configured. Running without teacher logits. "
-                "Set teacher.model_path to enable teacher scoring."
-            )
+        if self.cfg.teacher.model_path is None:
+            raise ValueError("teacher.model_path is required for the teacher-logits distillation entrypoint")
+        teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(self.cfg, self.tokenizer)
+        trainer.setup_teacher_engine(
+            teacher_engines,
+            student_tokenizer=self.tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
+        )
+        logger.info(f"Teacher engine created for {self.cfg.teacher.model_path}")
 
         return trainer
 

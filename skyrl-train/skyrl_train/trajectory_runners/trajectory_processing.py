@@ -13,6 +13,7 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.trajectory_runners.types import (
     TIS_ALIGNED_TOKENS_METRIC,
+    TIS_METRIC_PREFIX,
     TIS_EXACT_MATCH_FRACTION_METRIC,
     TIS_LCS_FALLBACK_FRACTION_METRIC,
     TIS_UNALIGNED_FRACTION_METRIC,
@@ -122,7 +123,7 @@ class AlignmentStats:
             "lcs_fallback_messages": TIS_LCS_FALLBACK_MESSAGES_METRIC,
             "lcs_fallback_alert": TIS_LCS_FALLBACK_ALERT_METRIC,
         }
-        if prefix != "generate/tis/":
+        if prefix != TIS_METRIC_PREFIX:
             names = {name: f"{prefix}{name}" for name in names}
         return {
             names["aligned_tokens"]: float(self.n_tokens),

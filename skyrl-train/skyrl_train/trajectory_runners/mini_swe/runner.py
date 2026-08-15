@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, Optional, Any
 from omegaconf import DictConfig
 import yaml
 import traceback
@@ -20,6 +20,7 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryRunner,
     TrainingPhase,
 )
+from skyrl_train.trajectory_runners.types import AgentLoopOutput
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -139,7 +140,7 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
         sampling_params: Dict[str, Any],
         trajectory_id: TrajectoryID,
         batch_metadata: BatchMetadata,
-    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
+    ) -> Optional[AgentLoopOutput]:
         sweagent_config = yaml.safe_load(get_config_path(self.trajectory_runner_cfg.miniswe_config_path).read_text())
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         messages, reward, error = await init_and_run.remote(
@@ -154,7 +155,7 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
             batch_metadata.training_phase,
         )
         if not len(messages):
-            return None, None, None, None, None, None
+            return None
 
         # TODO (sumanthrh): This is currently hardcoded for SWEBench with 2 initial messages (system and user).
         response_messages = messages[2:]
@@ -199,7 +200,15 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 
-        return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
+        return AgentLoopOutput(
+            response_ids=response_ids,
+            reward=reward,
+            stop_reason=stop_reason,
+            loss_mask=loss_mask,
+            prompt_ids=prompt_ids,
+            rollout_logprobs=None,
+            env_metrics={},
+        )
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """
@@ -239,11 +248,12 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
         all_outputs = await asyncio.gather(*tasks)
 
         # Filter out the `None` entries, which means that trajectory generation failed
-        responses = [output[0] for output in all_outputs if output[0] is not None]
-        rewards = [output[1] for output in all_outputs if output[0] is not None]
-        stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
-        loss_masks = [output[3] for output in all_outputs if output[0] is not None]
-        prompt_token_ids = [output[4] for output in all_outputs if output[0] is not None]
+        valid_outputs = [output for output in all_outputs if output is not None]
+        responses = [output.response_ids for output in valid_outputs]
+        rewards = [output.reward for output in valid_outputs]
+        stop_reasons = [output.stop_reason for output in valid_outputs]
+        loss_masks = [output.loss_mask for output in valid_outputs]
+        prompt_token_ids = [output.prompt_ids for output in valid_outputs]
         if not len(responses):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."

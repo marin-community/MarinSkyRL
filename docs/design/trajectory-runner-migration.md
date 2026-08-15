@@ -126,7 +126,6 @@ entrypoints/
   main_base.py
   terminal_bench.py
   terminal_bench_generate.py
-  terminal_bench_opd.py
   terminal_bench_opd_logits.py
   mini_swe.py
   fully_async.py
