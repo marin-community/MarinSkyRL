@@ -79,5 +79,5 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
         max_input_length=4,
     )
 
-    assert outputs[0].response_ids == [7, 8]
+    assert outputs[0].evidence.response_token_ids == (7, 8)
     assert engine.requests[0]["sampling_params"]["max_tokens"] == 2

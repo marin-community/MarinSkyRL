@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.inference_engines.base import ConversationType
 
 
@@ -19,12 +20,11 @@ class TokenProvenance(StrEnum):
 class AgentLoopOutput:
     """One normalized SkyRL-Gym interaction result."""
 
-    response_ids: List[int]
-    reward: Union[List[float], float]
-    stop_reason: str
+    evidence: RolloutEvidence
+    verification: VerificationResult
+    reward: RewardResult
+    disposition: TrainingDisposition
     loss_mask: List[int]
-    prompt_ids: List[int]
-    rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     captured_global_step: Optional[int] = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE

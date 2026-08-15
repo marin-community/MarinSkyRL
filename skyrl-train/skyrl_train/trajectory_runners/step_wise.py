@@ -3,6 +3,7 @@ This file implements per-transition SkyRL-Gym collection for step-wise projectio
 """
 
 import copy
+from dataclasses import replace
 from uuid import uuid4
 import skyrl_gym
 from typing import Callable, List, Dict, Any, Optional, Tuple
@@ -12,6 +13,12 @@ from skyrl_train.trajectory_runners.types import AgentLoopOutput
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition
+from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
+    publish_rollout_evidence,
+    reward_from_env_step,
+    verification_from_env_step,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
 from skyrl_train.trajectory_runners.collectors import collect_agent_loops
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -144,14 +151,20 @@ class StepWiseRolloutCollector:
             if max_model_len is None:
                 if current_prompt_length > max_input_length:
                     if per_step_outputs:
-                        per_step_outputs[-1].stop_reason = "length"
+                        per_step_outputs[-1].evidence = replace(
+                            per_step_outputs[-1].evidence,
+                            stop_reason="length",
+                        )
                     break
                 request_sampling_params = sampling_params
             else:
                 request_max_tokens = clamp_generation_tokens(current_prompt_length, max_model_len, max_tokens)
                 if request_max_tokens == 0:
                     if per_step_outputs:
-                        per_step_outputs[-1].stop_reason = "length"
+                        per_step_outputs[-1].evidence = replace(
+                            per_step_outputs[-1].evidence,
+                            stop_reason="length",
+                        )
                     break
                 request_sampling_params = _sampling_params_with_generation_limit(
                     sampling_params,
@@ -190,9 +203,18 @@ class StepWiseRolloutCollector:
                     output_ids.append(self.tokenizer.eos_token_id)
 
             # 2. Environment step
+            publish_rollout_evidence(
+                env,
+                response=output,
+                stop_reason=stop_reason,
+                prompt_token_ids=input_ids,
+                response_token_ids=output_ids,
+                behavior_logprobs=response_logprobs,
+            )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
+            verification = verification_from_env_step(env_step_output)
             done = env_step_output["done"]
 
             response_end_idx = len(output_ids) - 1
@@ -211,31 +233,47 @@ class StepWiseRolloutCollector:
             per_step_rewards.append((step_reward, response_end_idx))
             response_ids = copy.deepcopy(input_ids[current_prompt_length:])
             per_step_output = AgentLoopOutput(
-                response_ids=response_ids,
-                reward=step_reward,
+                evidence=RolloutEvidence(
+                    response=output,
+                    stop_reason=stop_reason,
+                    generated_token_count=sum(bool(value) for value in loss_mask),
+                    prompt_token_ids=tuple(input_ids[:current_prompt_length]),
+                    response_token_ids=tuple(response_ids),
+                    behavior_logprobs=None if response_logprobs is None else tuple(response_logprobs),
+                ),
+                verification=verification,
+                reward=reward_from_env_step(env_step_output, verification),
+                disposition=TrainingDisposition.train(),
                 loss_mask=copy.deepcopy(loss_mask),
-                prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
-                rollout_logprobs=response_logprobs,
-                stop_reason=stop_reason,
                 env_metrics=env.get_metrics() if done else {},
                 token_provenance=engine_output["token_provenance"],
             )
 
-            assert len(per_step_output.loss_mask) == len(per_step_output.response_ids), (
-                f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} and {len(per_step_output.response_ids)=}"
+            response_ids = per_step_output.evidence.response_token_ids
+            assert len(per_step_output.loss_mask) == len(response_ids), (
+                f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} "
+                f"and len(response_ids)={len(response_ids)}"
             )
-            if per_step_output.rollout_logprobs is not None:
-                assert len(per_step_output.rollout_logprobs) == len(per_step_output.response_ids), (
-                    f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
+            rollout_logprobs = per_step_output.evidence.behavior_logprobs
+            if rollout_logprobs is not None:
+                assert len(rollout_logprobs) == len(response_ids), (
+                    f"rollout_logprobs and response_ids should have the same length, got "
+                    f"len(rollout_logprobs)={len(rollout_logprobs)} and len(response_ids)={len(response_ids)}"
                 )
 
             per_step_outputs.append(per_step_output)
 
         for per_step_output, (reward, resp_end_idx) in zip(per_step_outputs, per_step_rewards):
-            per_token_reward = [0.0] * len(per_step_output.response_ids)
+            per_token_reward = [0.0] * len(per_step_output.evidence.response_token_ids)
             per_token_reward[resp_end_idx] = float(reward)
             # in-place update to per-token reward
-            per_step_output.reward = per_token_reward
+            per_step_output.reward = RewardResult(
+                unshaped_reward=per_step_output.reward.unshaped_reward,
+                optimization_reward=float(reward),
+                token_rewards=tuple(per_token_reward),
+                components=per_step_output.reward.components,
+                token_credit=per_step_output.reward.token_credit,
+            )
 
         # Attach captured global_step to the first per-step output
         if per_step_outputs and captured_global_step is not None:

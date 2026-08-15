@@ -5,6 +5,7 @@ import yaml
 import traceback
 import ray
 from pathlib import Path
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 
 from minisweagent.models import get_model
 from minisweagent.agents.default import DefaultAgent
@@ -21,6 +22,7 @@ from skyrl_train.trajectory_runners.base import (
     TrainingPhase,
 )
 from skyrl_train.trajectory_runners.types import AgentLoopOutput
+from skyrl_train.trajectory_runners.projections import attach_unshaped_rewards
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -201,12 +203,17 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
         loss_mask = loss_mask[:max_response_tokens]
 
         return AgentLoopOutput(
-            response_ids=response_ids,
-            reward=reward,
-            stop_reason=stop_reason,
+            evidence=RolloutEvidence(
+                messages=tuple(response_messages),
+                stop_reason=stop_reason,
+                generated_token_count=sum(bool(value) for value in loss_mask),
+                prompt_token_ids=tuple(prompt_ids),
+                response_token_ids=tuple(response_ids),
+            ),
+            verification=VerificationResult.verified(reward),
+            reward=RewardResult(unshaped_reward=reward, optimization_reward=reward),
+            disposition=TrainingDisposition.train(),
             loss_mask=loss_mask,
-            prompt_ids=prompt_ids,
-            rollout_logprobs=None,
             env_metrics={},
         )
 
@@ -249,11 +256,12 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
 
         # Filter out the `None` entries, which means that trajectory generation failed
         valid_outputs = [output for output in all_outputs if output is not None]
-        responses = [output.response_ids for output in valid_outputs]
-        rewards = [output.reward for output in valid_outputs]
-        stop_reasons = [output.stop_reason for output in valid_outputs]
+        responses = [list(output.evidence.response_token_ids) for output in valid_outputs]
+        rewards = [output.reward.optimization_reward for output in valid_outputs]
+        unshaped_rewards = [output.reward.unshaped_reward for output in valid_outputs]
+        stop_reasons = [output.evidence.stop_reason for output in valid_outputs]
         loss_masks = [output.loss_mask for output in valid_outputs]
-        prompt_token_ids = [output.prompt_ids for output in valid_outputs]
+        prompt_token_ids = [list(output.evidence.prompt_token_ids) for output in valid_outputs]
         if not len(responses):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
@@ -268,6 +276,8 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
+            "exclude_from_baseline": [not output.disposition.baseline_eligible for output in valid_outputs],
         }
+        attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

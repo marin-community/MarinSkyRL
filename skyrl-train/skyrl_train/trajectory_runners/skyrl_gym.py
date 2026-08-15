@@ -22,6 +22,13 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
+    fold_verification_results,
+    publish_rollout_evidence,
+    reward_from_env_step,
+    verification_from_env_step,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_custom_chat_template,
     get_generation_prompt_ids,
@@ -32,6 +39,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
+    attach_unshaped_rewards,
     IdentityTrajectoryProjection,
     TrajectoryProjection,
     WholeTrajectoryProjection,
@@ -262,12 +270,26 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             env_metrics = env.get_metrics()
             await self._run_in_executor_if_available(env.close)
             return AgentLoopOutput(
-                response_ids=[],
-                reward=0.0 if retokenize_chat_history else [],
-                stop_reason="length",
+                evidence=RolloutEvidence(
+                    messages=tuple(chat_history),
+                    stop_reason="length",
+                    generated_token_count=0,
+                    prompt_token_ids=tuple(input_ids),
+                    response_token_ids=(),
+                    behavior_logprobs=(),
+                ),
+                verification=VerificationResult.unavailable("initial prompt exceeds the model input limit"),
+                reward=RewardResult(
+                    unshaped_reward=None,
+                    optimization_reward=0.0,
+                    token_rewards=None if retokenize_chat_history else (),
+                ),
+                disposition=TrainingDisposition(
+                    loss_eligible=False,
+                    baseline_eligible=True,
+                    reason="initial prompt exceeds the model input limit",
+                ),
                 loss_mask=[],
-                prompt_ids=input_ids,
-                rollout_logprobs=[],
                 env_metrics=env_metrics,
             )
 
@@ -279,6 +301,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
+        verification_results: List[VerificationResult] = []
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
@@ -343,9 +366,18 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     stop_reason=stop_reason,
                     max_gen_length=max_tokens,
                 )
+            publish_rollout_evidence(
+                env,
+                response=output,
+                stop_reason=stop_reason,
+                prompt_token_ids=input_ids,
+                response_token_ids=output_ids,
+                behavior_logprobs=response_logprobs,
+            )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
+            verification_results.append(verification_from_env_step(env_step_output))
             done = env_step_output["done"]
 
             if env_step_output.get("postprocessed_action", None) is not None:
@@ -454,7 +486,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             # TODO(Charlie): Currently, the possible response truncation will not affect the reward
             # in the if branch, but some final rewards may be lost in the else branch. Fix this
             # when we support turn-level rewards for the `retokenize_chat_history` codepath.
-            reward_out = per_step_rewards[-1][0]
+            optimization_reward = float(per_step_rewards[-1][0])
+            token_rewards = None
         else:
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
@@ -468,15 +501,32 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     token_level_rewards[-1] = step_reward
                 else:
                     token_level_rewards[idx] += step_reward
-            reward_out = token_level_rewards
+            optimization_reward = float(sum(token_level_rewards))
+            token_rewards = tuple(token_level_rewards)
 
-        return AgentLoopOutput(
-            response_ids=response_ids,
-            reward=reward_out,
+        verification, unshaped_reward = fold_verification_results(verification_results)
+
+        evidence = RolloutEvidence(
+            messages=tuple(chat_history) if retokenize_chat_history else (),
+            response=output,
             stop_reason=stop_reason,
+            generated_token_count=sum(bool(value) for value in loss_mask),
+            prompt_token_ids=tuple(prompt_ids),
+            response_token_ids=tuple(response_ids),
+            behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+        )
+        reward_result = RewardResult(
+            unshaped_reward=unshaped_reward,
+            optimization_reward=optimization_reward,
+            token_rewards=token_rewards,
+        )
+        reward_result.validate_for(evidence)
+        return AgentLoopOutput(
+            evidence=evidence,
+            verification=verification,
+            reward=reward_result,
+            disposition=TrainingDisposition.train(),
             loss_mask=loss_mask,
-            prompt_ids=prompt_ids,
-            rollout_logprobs=rollout_logprobs,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
             token_provenance=token_provenance,
@@ -522,6 +572,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         truncated_responses = []
         rewards = []
+        unshaped_rewards = []
+        exclude_from_baseline = []
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
@@ -537,10 +589,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     stop_reason=stop_reasons[i],
                     max_gen_length=max_tokens,
                 )
+            publish_rollout_evidence(
+                env,
+                messages=init_prompts[i],
+                response=output,
+                stop_reason=stop_reasons[i],
+                response_token_ids=response,
+                behavior_logprobs=None if logprobs is None else logprobs[i],
+            )
             # step on environment and compute reward
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-            reward = env_step_output["reward"]
-            rewards.append(reward)
+            verification = verification_from_env_step(env_step_output)
 
             if len(response) > max_tokens:
                 response = response[:max_tokens]
@@ -549,6 +608,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             if logprobs is not None:
                 sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
+
+            evidence = RolloutEvidence(
+                messages=tuple(init_prompts[i]),
+                response=output,
+                stop_reason=stop_reasons[i],
+                generated_token_count=len(response),
+                response_token_ids=tuple(response),
+                behavior_logprobs=None if logprobs is None else tuple(truncated_logprobs[-1]),
+            )
+            reward_result = reward_from_env_step(env_step_output, verification)
+            reward_result.validate_for(evidence)
+            disposition = TrainingDisposition.train()
+            rewards.append(reward_result.optimization_reward)
+            unshaped_rewards.append(reward_result.unshaped_reward)
+            exclude_from_baseline.append(not disposition.baseline_eligible)
 
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())
@@ -580,7 +654,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
+            "exclude_from_baseline": exclude_from_baseline,
         }
+        attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch
 

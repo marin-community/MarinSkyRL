@@ -1,5 +1,6 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, NotRequired, Optional, TypedDict
 from skyrl_gym import Env
+from skyrl_gym.verification import RolloutEvidence, VerificationResult
 from typing import Tuple
 
 MessageType = Dict[str, str]
@@ -11,7 +12,8 @@ class BaseTextEnvStepOutput(TypedDict):
     reward: float
     done: bool
     metadata: Dict[str, Any]
-    postprocessed_action: Optional[str] = None
+    postprocessed_action: NotRequired[Optional[str]]
+    verification: NotRequired[VerificationResult]
 
 
 class BaseTextEnv(Env[ConversationType, str]):
@@ -69,6 +71,14 @@ class BaseTextEnv(Env[ConversationType, str]):
         - metadata: Dict[str, Any] any metadata
         """
         pass
+
+    def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
+        """Receive immutable generation evidence before :meth:`step` verification.
+
+        Environments with native verifiers may override this hook. The default is
+        intentionally a no-op so existing environments remain compatible.
+        """
+        del evidence
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """

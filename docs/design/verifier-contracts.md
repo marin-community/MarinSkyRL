@@ -1,10 +1,10 @@
 # Shared verifier contracts
 
-## Status
+## Scope
 
-This change introduces shared verifier contracts and migrates the existing Harbor and SkyRL-Gym runner boundaries.
-It does not change an environment's scoring policy. The separately designed AIME pilot will move AIME onto the
-native verifier interface and add the outcome-length regressions.
+Shared verifier contracts govern the Harbor and SkyRL-Gym runner boundaries without defining an environment's
+scoring policy. Environment migrations, including AIME's scoring and outcome-length behavior, build on this seam
+but retain their own designs and regression coverage.
 
 ## Problem
 
@@ -30,7 +30,7 @@ its own seam between rollout collection, verification, reward policy, and traini
    | --- | --- |
    | conversation, generated response, token/logprob evidence | `RolloutEvidence` |
    | verifier verdict, diagnostics, or verifier unavailability | `VerificationResult` |
-   | raw outcome, optimization reward, components, token credit | `RewardResult` |
+   | raw outcome, optimization total, token rewards, components, token credit | `RewardResult` |
    | loss eligibility, baseline eligibility, and failure reason | `TrainingDisposition` |
 
 2. Make unavailable verification distinct from a valid zero or negative score.
@@ -41,9 +41,9 @@ its own seam between rollout collection, verification, reward policy, and traini
 
 ## Non-goals
 
-- Rewriting all SkyRL-Gym environments in this PR.
+- Rewriting all SkyRL-Gym environments as part of the contract migration.
 - Changing AIME parsing, reward values, length shaping, or evaluation budgets. Those changes belong to the AIME
-  pilot PR.
+  AIME migration.
 - Standardizing harness execution, sandbox lifecycle, or retry policy. These remain trajectory-runner concerns.
 - Putting inference-engine calls inside verifiers. A verifier consumes immutable rollout evidence; it does not
   generate or mutate a trajectory.
@@ -88,9 +88,9 @@ Optional `passed` and diagnostics are verifier facts; they do not encode trainin
 ### `RewardResult`
 
 `RewardResult` separates the raw verifier outcome from the reward optimized by the trainer. It carries the
-unshaped scalar outcome, the scalar or per-step optimization reward, named shaping components, and optional
-token-level credit. Shared construction validates finite numerics and token-credit length when evidence contains
-response token IDs.
+unshaped scalar outcome, a scalar optimization total, optional per-token reward placement, named shaping
+components, and optional token-level credit. Shared construction validates finite numerics and token-channel
+lengths when evidence contains response token IDs.
 
 The raw outcome is absent when verification is unavailable. A zero optimization reward may still be assigned by
 error policy, but it cannot masquerade as a verifier outcome.
@@ -159,7 +159,7 @@ The SkyRL-Gym trajectory runner normalizes each step as follows:
 - the normal disposition is loss-eligible and baseline-eligible.
 
 The runner's internal interaction result stores the four contracts. Its final projection derives the existing
-`TrajectoryBatch` fields, preserving current trainer behavior. The AIME pilot will replace its legacy scalar
+`TrajectoryBatch` fields, preserving current trainer behavior. The AIME migration replaces its legacy scalar
 adaptation with a native verifier and explicit reward policy.
 
 ### Harbor
@@ -168,22 +168,21 @@ A Harbor adapter converts `TrialResult` into evidence and verification before re
 treatment. Missing `verifier_result` becomes `UNAVAILABLE`; verifier exceptions become `ERROR`; numeric verifier
 scores, including zero, become `VERIFIED`.
 
-The existing error-classification configuration remains authoritative. It now returns a
-`TrainingDisposition` rather than separate booleans and later mutations. Existing Harbor reward shapers return a
-`RewardResult`. `TerminalBenchAgentOutput` stores the contracts and exposes token transport fields only where the
-trainer projection needs them.
+The existing error-classification configuration remains authoritative. The adapter records its decision in a
+`TrainingDisposition`, and records the output of existing Harbor reward shapers in a `RewardResult`.
+`TerminalBenchAgentOutput` stores those contracts without parallel compatibility fields.
 
 ### Trainer batch
 
 The runner projection is the only place that maps contracts onto legacy batch keys:
 
-- `RewardResult.optimization_reward` -> `rewards`;
+- `RewardResult.optimization_reward` or its explicit token placement -> `rewards`;
 - `RewardResult.unshaped_reward` -> `unshaped_rewards`;
-- reward components and token credit -> their existing optional channels;
+- reward components remain available to runner metrics; token credit -> its existing optional channel;
 - `TrainingDisposition.loss_eligible` -> loss-mask preservation or zeroing;
 - `not TrainingDisposition.baseline_eligible` -> `exclude_from_baseline`.
 
-This PR does not make the trainer depend on verifier classes.
+The trainer does not depend on verifier classes.
 
 ## Invariants and tests
 
@@ -192,7 +191,7 @@ Contract tests will reject:
 - `VERIFIED` without a finite score;
 - `UNAVAILABLE` or `ERROR` with a score;
 - non-finite raw, shaped, component, or token-credit values;
-- token credit whose length disagrees with available response-token evidence;
+- token rewards or token credit whose length disagrees with available response-token evidence;
 - a baseline-eligible disposition without an explicit reason when loss is ineligible.
 
 Runner regression tests will cover:
@@ -205,14 +204,12 @@ Runner regression tests will cover:
    shaped optimization reward.
 6. Token credit and disposition are projected in one place and cannot drift from loss masking.
 
-The focused PR gate is the contract suite, SkyRL-Gym runner suite, Harbor error/result-processing suites, and
-trajectory projection/processing suites. The standard lint and Marin review passes run before the PR is opened or
-updated.
+Regression coverage spans the contract suite, SkyRL-Gym runner suite, Harbor error/result-processing suites, and
+trajectory projection/processing suites.
 
-## Follow-up: AIME pilot
+## AIME migration boundary
 
-The AIME pilot will implement an AIME verifier using the native protocol, move its reward policy out of `AIMEEnv`,
-and add regressions for the reported failure modes: `+1/-1` outcome buckets, failed-rollout length visibility,
-explicit unknown termination, and separation of verifier correctness from length shaping. That PR will not add a
-second mitigation mechanism; obsolete AIME-specific generation-to-reward hooks will be removed as the shared
-contracts replace them.
+AIME uses a native verifier implementing this protocol, with reward policy outside `AIMEEnv`. Its regression scope
+includes `+1/-1` outcome buckets, failed-rollout length visibility, explicit unknown termination, and separation of
+verifier correctness from length shaping. It does not add a second mitigation mechanism; obsolete AIME-specific
+generation-to-reward hooks are removed as the shared contracts replace them.

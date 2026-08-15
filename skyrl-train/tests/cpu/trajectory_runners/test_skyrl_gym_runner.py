@@ -285,12 +285,10 @@ async def test_agent_loop_single_turn(
         prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
     )
 
-    assert output.response_ids == MOCK_LLM_OUTPUT_IDS
-    if isinstance(output.reward, list):
-        assert sum(output.reward) == 1.0
-    else:
-        assert output.reward == 1.0
-    assert output.stop_reason == "stop"
+    assert list(output.evidence.response_token_ids or ()) == MOCK_LLM_OUTPUT_IDS
+    assert output.reward.optimization_reward == 1.0
+    assert sum(output.reward.token_rewards or ()) == 1.0
+    assert (output.evidence.stop_reason or "unknown") == "stop"
     assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
 
 
@@ -323,6 +321,9 @@ async def test_generate_non_batched_preserves_rollout_logprobs(
 
     assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS]
     assert output["rollout_logprobs"] == [[0.1] * len(MOCK_LLM_OUTPUT_IDS)]
+    evidence = mock_env.set_rollout_evidence.call_args.args[0]
+    assert evidence.response_token_ids == tuple(MOCK_LLM_OUTPUT_IDS)
+    assert evidence.behavior_logprobs == tuple([0.1] * len(MOCK_LLM_OUTPUT_IDS))
     assert len(output["rollout_logprobs"][0]) == len(output["loss_masks"][0])
     assert output["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
     assert output["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
@@ -537,12 +538,13 @@ async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
         max_input_length=4,
     )
 
-    assert output.prompt_ids == [1, 2, 3, 4, 5]
-    assert output.response_ids == []
+    assert list(output.evidence.prompt_token_ids or ()) == [1, 2, 3, 4, 5]
+    assert list(output.evidence.response_token_ids or ()) == []
     assert output.loss_mask == []
-    assert output.rollout_logprobs == []
-    assert output.reward == (0.0 if retokenize_chat_history else [])
-    assert output.stop_reason == "length"
+    assert (None if output.evidence.behavior_logprobs is None else list(output.evidence.behavior_logprobs)) == []
+    assert output.reward.optimization_reward == 0.0
+    assert output.reward.token_rewards == (None if retokenize_chat_history else ())
+    assert output.evidence.stop_reason == "length"
 
 
 @pytest.mark.asyncio
@@ -846,7 +848,7 @@ async def test_length_limit_exceeded_during_conversation(
     )
 
     # Verify that length limit was hit
-    assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
+    assert output.evidence.stop_reason == "length"
 
     # Verify environment step was called the expected number of times
     expected_calls = turns_to_exceed
@@ -854,10 +856,8 @@ async def test_length_limit_exceeded_during_conversation(
         f"Expected {expected_calls} environment steps, got {mock_env.step.call_count}"
     )
 
-    # Verify response is still properly formatted
-    assert isinstance(output.response_ids, list)
-    assert isinstance(output.loss_mask, list)
-    assert isinstance(output.reward, float) or isinstance(output.reward, list)
+    assert len(output.evidence.response_token_ids) == len(output.loss_mask)
+    assert output.reward.optimization_reward == pytest.approx(0.5 * expected_calls)
 
 
 @pytest.mark.asyncio
@@ -937,16 +937,16 @@ async def test_multi_turn_response_truncation(
     )
 
     # Verify truncation occurred
-    assert len(output.response_ids) <= expected_max_response_tokens
-    assert len(output.response_ids) == expected_final_response_tokens, (
-        f"Expected {expected_final_response_tokens} response tokens, got {len(output.response_ids)}"
+    assert len(list(output.evidence.response_token_ids or ())) <= expected_max_response_tokens
+    assert len(list(output.evidence.response_token_ids or ())) == expected_final_response_tokens, (
+        f"Expected {expected_final_response_tokens} response tokens, got {len(list(output.evidence.response_token_ids or ()))}"
     )
     assert len(output.loss_mask) == expected_final_response_tokens, (
         f"Expected {expected_final_response_tokens} loss mask entries, got {len(output.loss_mask)}"
     )
 
     # Verify stop reason is "length" due to truncation
-    assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
+    assert (output.evidence.stop_reason or "unknown") == "length"
 
 
 @pytest.mark.asyncio
@@ -1017,20 +1017,18 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
 
     # Check that the postprocessed response tokens (42) are present in response_ids
     # This verifies that postprocessed_action was used instead of raw LLM output
-    assert any(token == 42 for token in output.response_ids), (
-        f"Expected postprocessed response tokens (42) in {output.response_ids}"
+    assert any(token == 42 for token in list(output.evidence.response_token_ids or ())), (
+        f"Expected postprocessed response tokens (42) in {list(output.evidence.response_token_ids or ())}"
     )
     # Make sure raw LLM tokens (99) are NOT present
-    assert not any(token == 99 for token in output.response_ids), (
-        f"Raw LLM output tokens (99) should not be in {output.response_ids}"
+    assert not any(token == 99 for token in list(output.evidence.response_token_ids or ())), (
+        f"Raw LLM output tokens (99) should not be in {list(output.evidence.response_token_ids or ())}"
     )
 
-    if isinstance(output.reward, list):
-        assert sum(output.reward) == 1.0
-    else:
-        assert output.reward == 1.0
-    assert output.stop_reason == "stop"
-    assert len(output.response_ids) == len(output.loss_mask)
+    assert output.reward.optimization_reward == 1.0
+    assert sum(output.reward.token_rewards or ()) == 1.0
+    assert (output.evidence.stop_reason or "unknown") == "stop"
+    assert len(list(output.evidence.response_token_ids or ())) == len(output.loss_mask)
 
 
 @pytest.mark.asyncio
@@ -1296,14 +1294,14 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     )
 
     # Response ids layout: step1 (3 tokens) + obs (1) + step2 (3) + final eos (1) = 8
-    assert len(out.response_ids) == 8
+    assert len(list(out.evidence.response_token_ids or ())) == 8
     # Indices: 2 (end of step1 assistant), 6 (end of step2 assistant), 7 (manually appended eos token)
     # Note that the last reward is placed at the 7 instead of at 6 since we manually move
     # it using the flag `appended_eos_token` in trajectory_runners/skyrl_gym.py
     expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 1.7]
-    assert isinstance(out.reward, list)
-    assert out.reward == expected_rewards
-    assert out.stop_reason == "stop"
+    assert out.reward.optimization_reward == sum(expected_rewards)
+    assert out.reward.token_rewards == tuple(expected_rewards)
+    assert (out.evidence.stop_reason or "unknown") == "stop"
 
 
 @pytest.mark.asyncio
@@ -1386,14 +1384,14 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     )
 
     # Response ids layout: step1 assistant (4 incl. eos) + obs(2) + step2 assistant(4 incl. eos) = 10
-    assert len(out.response_ids) == 10
+    assert len(list(out.evidence.response_token_ids or ())) == 10
     # Rewards at indices: 3 (end of step1 assistant), 9 (end of step2 assistant)
     expected = [0.0] * 10
     expected[3] = 0.5
     expected[9] = 0.25
-    assert isinstance(out.reward, list)
-    assert out.reward == expected
-    assert out.stop_reason == "stop"
+    assert out.reward.optimization_reward == sum(expected)
+    assert out.reward.token_rewards == tuple(expected)
+    assert (out.evidence.stop_reason or "unknown") == "stop"
 
 
 @pytest.mark.asyncio
@@ -1475,9 +1473,9 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
         prompt, mock_env_cfg.env_class, extras, max_tokens=50, max_input_length=512
     )
 
-    assert isinstance(out.reward, float)
-    assert out.reward == 2.5
-    assert out.stop_reason == "stop"
+    assert out.reward.optimization_reward == 2.5
+    assert out.reward.token_rewards is None
+    assert (out.evidence.stop_reason or "unknown") == "stop"
 
 
 @pytest.mark.asyncio
@@ -1560,14 +1558,13 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     )
 
     # Untruncated response would be: 4 (step1) + 4 (step2) + 1 (final eos) = 9; we expect truncation to 5
-    assert len(out.response_ids) == 5
-    assert isinstance(out.reward, list)
-    assert len(out.reward) == 5
+    assert len(list(out.evidence.response_token_ids or ())) == 5
+    assert len(out.reward.token_rewards) == 5
 
     # Step1 end index relative should be 4 (0-based) - reward placed at EOS token
     # NOTE(Dev): Because we manually append the eos token to the response, the reward is placed at the last token;
     # See the reward-placement comment in trajectory_runners/skyrl_gym.py for details.
 
-    assert out.reward[4] == 2.0
-    assert sum(out.reward) == 2.0
-    assert out.stop_reason == "stop"
+    assert out.reward.token_rewards[4] == 2.0
+    assert out.reward.optimization_reward == 2.0
+    assert (out.evidence.stop_reason or "unknown") == "stop"

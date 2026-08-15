@@ -1,4 +1,7 @@
+from dataclasses import replace
+
 from omegaconf import OmegaConf
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryID
@@ -18,14 +21,23 @@ def _config():
 
 
 def _step(response_ids, reward, *, captured_global_step=None, token_provenance="engine"):
+    outcome = float(sum(reward) if isinstance(reward, list) else reward)
     return AgentLoopOutput(
-        response_ids=response_ids,
-        reward=reward,
-        stop_reason="stop",
+        evidence=RolloutEvidence(
+            stop_reason="stop",
+            prompt_token_ids=(1, 2),
+            response_token_ids=tuple(response_ids),
+            behavior_logprobs=tuple([-0.1] * len(response_ids)),
+        ),
+        verification=VerificationResult.verified(outcome),
+        reward=RewardResult(
+            unshaped_reward=outcome,
+            optimization_reward=outcome,
+            token_rewards=tuple(reward) if isinstance(reward, list) else None,
+        ),
+        disposition=TrainingDisposition.train(),
         loss_mask=[1] * len(response_ids),
-        prompt_ids=[1, 2],
-        rollout_logprobs=[-0.1] * len(response_ids),
-        env_metrics={"score": float(reward[-1] if isinstance(reward, list) else reward)},
+        env_metrics={"score": outcome},
         captured_global_step=captured_global_step,
         token_provenance=token_provenance,
     )
@@ -75,3 +87,23 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
     assert output["is_last_step"] == [False, True]
     assert output["actual_global_step"] == 5
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.5
+
+
+def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
+    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
+    step = _step([3, 4], 0.0)
+    step = replace(
+        step,
+        reward=RewardResult(unshaped_reward=None, optimization_reward=0.0, token_credit=(0.1, -0.1)),
+        disposition=TrainingDisposition.mask("verifier unavailable"),
+    )
+
+    output = projection.project(
+        [step],
+        {"env_classes": None, "sampling_params": {"logprobs": True}},
+    )
+
+    assert output["loss_masks"] == [[0, 0]]
+    assert output["exclude_from_baseline"] == [True]
+    assert output["token_level_shaping"] == [[0.1, -0.1]]
+    assert "unshaped_rewards" not in output

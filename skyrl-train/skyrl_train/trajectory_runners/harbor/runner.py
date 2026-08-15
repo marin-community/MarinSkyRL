@@ -4,13 +4,21 @@ import os
 import re
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Deque, List, Optional, Dict, Any, Tuple
 
 import numpy as np
+from skyrl_gym.verification import (
+    RewardResult,
+    RolloutEvidence,
+    TrainingDisposition,
+    VerificationResult,
+    VerificationStatus,
+)
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.projections import project_loss_mask
 from skyrl_train.metric_names import TIS_LCS_FALLBACK_ALERT_METRIC, TIS_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
@@ -58,6 +66,7 @@ from harbor.utils.traces_utils import normalize_message
 
 # Schema-driven Harbor config mapping
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
+from skyrl_train.trajectory_runners.harbor.contracts import verification_from_harbor_result
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
 # Incremental, trial-indexed reader for the shared opencode literal log.
@@ -194,56 +203,117 @@ def detect_termination_signals(
 
 @dataclass
 class TerminalBenchAgentOutput:
-    response_ids: List[int]
-    reward: float
-    stop_reason: str
+    evidence: RolloutEvidence
+    verification: VerificationResult
+    reward_result: RewardResult
+    disposition: TrainingDisposition
     loss_mask: List[int]
-    prompt_ids: List[int]
     trajectory_id: TrajectoryID
-    # Verifier outcome before optimization-specific reward shaping. This is the
-    # stable success signal for pass@k; failed/invalidated trajectories keep zero.
-    unshaped_reward: float = 0.0
     summarization_count: Optional[int] = None
-    rollout_logprobs: Optional[List[float]] = None
-    # MoE router-replay (Stage 1 capture rail): per-token [L, K] expert-selection
-    # rows aligned 1:1 with response_ids. None unless moe_router_replay is on.
-    rollout_routed_experts: Optional[List[List[List[int]]]] = None
-    # For RLOO-N: True = exclude from baseline (infrastructure failure)
-    # False = include in baseline (agent failure or success)
-    exclude_from_baseline: bool = False
-    # Store the exception type for debugging/logging
-    exception_type: Optional[str] = None
-    # Per-component reward breakdown (composite shaper only)
-    reward_components: Optional[Dict[str, float]] = None
     # TIS logprob-alignment bookkeeping (exact-vs-LCS-vs-failed token counts).
     # Aggregated into rollout_metrics as tis/* so an LCS fallback or alignment
     # failure can never silently degrade TIS. None when no logprobs were present.
     alignment_stats: Optional[AlignmentStats] = None
-    # Loop-behavior reward shaping (Stage B / F5 + F4): per-token additive shaping
-    # channel (zeros in Stage B) + span tags, aligned 1:1 with response_ids. None
-    # unless enable_token_reward_channel is on.
-    token_level_shaping: Optional[List[float]] = None
+    # Loop-behavior span tags aligned 1:1 with response token IDs.
     response_span_tags: Optional[List[int]] = None
     # True when the truncation penalty was applied (stop_reason=="length" +
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
 
 
+def _failed_agent_output(
+    trajectory_id: TrajectoryID,
+    *,
+    verification: VerificationResult,
+    exception_type: str,
+    exclude_from_baseline: bool,
+) -> TerminalBenchAgentOutput:
+    return TerminalBenchAgentOutput(
+        evidence=_failure_evidence(),
+        verification=verification,
+        reward_result=_zero_reward(),
+        disposition=TrainingDisposition(
+            loss_eligible=False,
+            baseline_eligible=not exclude_from_baseline,
+            reason=verification.reason or "trajectory failure",
+            exception_type=exception_type,
+        ),
+        loss_mask=[0],
+        trajectory_id=trajectory_id,
+    )
+
+
+def _failure_evidence() -> RolloutEvidence:
+    return RolloutEvidence(
+        stop_reason="error",
+        generated_token_count=0,
+        prompt_token_ids=(0,),
+        response_token_ids=(0,),
+    )
+
+
+def _zero_reward() -> RewardResult:
+    return RewardResult(unshaped_reward=None, optimization_reward=0.0)
+
+
+def _rollout_evidence_from_harbor(
+    *,
+    chat_history: List[Dict[str, Any]],
+    stop_reason: str,
+    prompt_ids: List[int],
+    response_ids: List[int],
+    loss_mask: List[int],
+    rollout_logprobs: Optional[List[float]],
+    rollout_routed_experts: Optional[List[List[List[int]]]],
+) -> RolloutEvidence:
+    final_response = next(
+        (str(message.get("content") or "") for message in reversed(chat_history) if message.get("role") == "assistant"),
+        None,
+    )
+    return RolloutEvidence(
+        messages=tuple(chat_history),
+        response=final_response,
+        stop_reason=stop_reason,
+        generated_token_count=sum(bool(value) for value in loss_mask),
+        prompt_token_ids=tuple(prompt_ids),
+        response_token_ids=tuple(response_ids),
+        behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+        routed_experts=(
+            None
+            if rollout_routed_experts is None
+            else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routed_experts)
+        ),
+    )
+
+
+def _completed_disposition(
+    *,
+    preserve_timeout: bool,
+    preserve_exclude_from_baseline: bool,
+    preserve_exception_type: Optional[str],
+) -> TrainingDisposition:
+    return TrainingDisposition(
+        loss_eligible=True,
+        baseline_eligible=not preserve_exclude_from_baseline if preserve_timeout else True,
+        reason=f"preserved {preserve_exception_type}" if preserve_timeout else "verified",
+        exception_type=preserve_exception_type if preserve_timeout else None,
+    )
+
+
 def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
     """Replace an invalidated trajectory with an aligned zero-reward stub."""
-    output.response_ids = [0]
-    output.stop_reason = "error"
+    output.evidence = _failure_evidence()
     output.loss_mask = [0]
-    output.prompt_ids = [0]
-    output.reward = 0
-    output.unshaped_reward = 0
-    output.rollout_logprobs = None
-    output.rollout_routed_experts = None
-    output.token_level_shaping = None
     output.response_span_tags = None
-    output.reward_components = None
     output.alignment_stats = None
     output.truncation_penalized = False
+    output.reward_result = _zero_reward()
+    if output.disposition.loss_eligible:
+        output.disposition = replace(
+            output.disposition,
+            loss_eligible=False,
+            reason="trajectory group invalidated by peer failure",
+        )
 
 
 class HarborTrajectoryRunner(TrajectoryRunner):
@@ -821,11 +891,19 @@ class HarborTrajectoryRunner(TrajectoryRunner):
     ) -> TrajectoryBatch:
         """Create a TrajectoryBatch where all trajectories share one terminal failure."""
         num_trials = len(trajectory_ids)
+        verification = VerificationResult.unavailable(exception_type)
+        reward = _zero_reward()
+        disposition = TrainingDisposition(
+            loss_eligible=False,
+            baseline_eligible=not exclude_from_baseline,
+            reason=exception_type,
+            exception_type=exception_type,
+        )
         return {
             "prompt_token_ids": [[0] for _ in range(num_trials)],
             "response_ids": [[0] for _ in range(num_trials)],
-            "rewards": [0.0 for _ in range(num_trials)],
-            "unshaped_rewards": [0.0 for _ in range(num_trials)],
+            "rewards": [float(reward.optimization_reward) for _ in range(num_trials)],
+            "unshaped_rewards": [float(verification.score or 0.0) for _ in range(num_trials)],
             "loss_masks": [[0] for _ in range(num_trials)],
             "stop_reasons": ["error" for _ in range(num_trials)],
             "rollout_metrics": {
@@ -838,7 +916,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 f"{BATCH_ERROR_METRIC_PREFIX}{exception_type}": num_trials,
             },
             "rollout_logprobs": None,
-            "exclude_from_baseline": [exclude_from_baseline for _ in range(num_trials)],
+            "exclude_from_baseline": [not disposition.baseline_eligible for _ in range(num_trials)],
         }
 
     @property
@@ -1022,15 +1100,14 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     f"(exception_type={exception_type}, "
                     f"exclude_from_baseline={exclude_from_baseline})"
                 )
-                output = TerminalBenchAgentOutput(
-                    response_ids=[0],
-                    reward=0,
-                    stop_reason="error",
-                    loss_mask=[0],
-                    prompt_ids=[0],
+                output = _failed_agent_output(
                     trajectory_id=trajectory_id,
-                    exclude_from_baseline=bool(exclude_from_baseline),
+                    verification=VerificationResult.error(
+                        "trajectory result processing failed",
+                        diagnostics={"exception_type": exception_type},
+                    ),
                     exception_type=exception_type,
+                    exclude_from_baseline=bool(exclude_from_baseline),
                 )
             all_outputs.append(output)
 
@@ -1052,10 +1129,10 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         instance_has_agent_failure: Dict[str, bool] = {}
 
         for output in all_outputs:
-            if output.stop_reason == "error":
+            if output.evidence.stop_reason == "error":
                 failed_instance_ids.add(output.trajectory_id.instance_id)
                 num_failed_trajectories += 1
-                if output.exclude_from_baseline:
+                if not output.disposition.baseline_eligible:
                     num_masked_trajectories += 1
                     instance_has_infra_failure[output.trajectory_id.instance_id] = True
                 else:
@@ -1064,7 +1141,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         if enable_error_classification:
             # RLOO-N mode: preserve exclude_from_baseline flags, don't cascade failures
             for output in all_outputs:
-                if output.stop_reason == "error":
+                if output.evidence.stop_reason == "error":
                     # Error outputs already have correct exclude_from_baseline set
                     _clear_failed_trajectory(output)
                 else:
@@ -1074,24 +1151,24 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             for output in all_outputs:
                 if output.trajectory_id.instance_id in failed_instance_ids:
                     _clear_failed_trajectory(output)
-                    output.exclude_from_baseline = False  # Legacy: include in baseline
+                    output.disposition = replace(output.disposition, baseline_eligible=True)
                 else:
                     successful_outputs.append(output)
 
         # Calculate rollout metrics for successful outputs
         if len(successful_outputs) > 0:
             rollout_metrics = get_rollout_metrics(
-                [output.response_ids for output in successful_outputs],
-                [output.reward for output in successful_outputs],
+                [list(output.evidence.response_token_ids) for output in successful_outputs],
+                [output.reward_result.optimization_reward for output in successful_outputs],
             )
             rollout_metrics["generate/trajectories_summarized"] = sum(
                 1 for output in successful_outputs if output.summarization_count > 0
             )
             rollout_metrics["generate/trajectories_truncated"] = sum(
-                1 for output in successful_outputs if output.stop_reason == "length"
+                1 for output in successful_outputs if output.evidence.stop_reason == "length"
             )
             num_successful = len(successful_outputs)
-            num_truncated = sum(1 for o in successful_outputs if o.stop_reason == "length")
+            num_truncated = sum(1 for o in successful_outputs if o.evidence.stop_reason == "length")
             rollout_metrics["generate/truncated_fraction"] = (
                 num_truncated / num_successful if num_successful > 0 else 0.0
             )
@@ -1102,7 +1179,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # p90/p25 widens as it lengthens; a collapsing arm's narrows
             # toward the cap. Moves before the distribution finishes
             # collapsing, so it flags the failure earlier than a cap-hit count.
-            tok_lengths = [len(o.response_ids) for o in successful_outputs]
+            tok_lengths = [len(o.evidence.response_token_ids) for o in successful_outputs]
             if tok_lengths:
                 tok_arr = np.array(tok_lengths)
                 p25 = float(np.percentile(tok_arr, 25))
@@ -1170,8 +1247,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         exception_counts: Dict[str, int] = {}
         for output in all_outputs:
-            if output.exception_type:
-                exception_counts[output.exception_type] = exception_counts.get(output.exception_type, 0) + 1
+            if output.disposition.exception_type:
+                exception_type = output.disposition.exception_type
+                exception_counts[exception_type] = exception_counts.get(exception_type, 0) + 1
         if exception_counts:
             logger.info(f"Exception breakdown: {exception_counts}")
             for exc_type, count in exception_counts.items():
@@ -1203,20 +1281,20 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # Skip logprobs processing for eval - TIS only applies to training
             pass
         else:
-            has_any_logprobs = any(output.rollout_logprobs is not None for output in all_outputs)
-            missing_logprobs_count = sum(1 for output in all_outputs if output.rollout_logprobs is None)
+            has_any_logprobs = any(output.evidence.behavior_logprobs is not None for output in all_outputs)
+            missing_logprobs_count = sum(1 for output in all_outputs if output.evidence.behavior_logprobs is None)
 
             if has_any_logprobs:
                 rollout_logprobs_list = []
                 for output in all_outputs:
-                    if output.rollout_logprobs is not None:
-                        rollout_logprobs_list.append(output.rollout_logprobs)
+                    if output.evidence.behavior_logprobs is not None:
+                        rollout_logprobs_list.append(list(output.evidence.behavior_logprobs))
                     else:
                         if self._rollout_logprobs_required and any(output.loss_mask):
                             raise ValueError("rollout_logprobs are required for every trainable trajectory")
                         # Failed trajectories are fully masked, so aligned placeholders
                         # cannot affect the objective.
-                        rollout_logprobs_list.append([0.0] * len(output.response_ids))
+                        rollout_logprobs_list.append([0.0] * len(output.evidence.response_token_ids))
 
                 if missing_logprobs_count > 0 and self._collect_rollout_details:
                     # Only warn about missing logprobs if TIS is expected (collect_rollout_details=true)
@@ -1243,23 +1321,25 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # key is omitted entirely, not set to None). Skipped for eval like logprobs.
         rollout_routed_experts_list = None
         if self._moe_router_replay and not is_eval:
-            has_any_re = any(output.rollout_routed_experts is not None for output in all_outputs)
-            if has_any_re:
+            has_any_routed_experts = any(output.evidence.routed_experts is not None for output in all_outputs)
+            if has_any_routed_experts:
                 # Learn the [L, K] sentinel-row shape from the first real sample so
                 # missing/failed samples are sentinel-filled at the correct width.
                 sentinel_row = [[SENTINEL_EXPERT_ID]]
                 for output in all_outputs:
-                    if output.rollout_routed_experts:
-                        sentinel_row = _sentinel_routed_experts_row(output.rollout_routed_experts[0])
+                    if output.evidence.routed_experts:
+                        sentinel_row = _sentinel_routed_experts_row(output.evidence.routed_experts[0])
                         break
                 rollout_routed_experts_list = []
                 for output in all_outputs:
-                    if output.rollout_routed_experts is not None:
-                        rollout_routed_experts_list.append(output.rollout_routed_experts)
+                    if output.evidence.routed_experts is not None:
+                        rollout_routed_experts_list.append(
+                            [[list(layer) for layer in token] for token in output.evidence.routed_experts]
+                        )
                     else:
                         # Sentinel-fill missing samples to match response_ids length.
                         rollout_routed_experts_list.append(
-                            [list(sentinel_row) for _ in range(len(output.response_ids))]
+                            [list(sentinel_row) for _ in range(len(output.evidence.response_token_ids))]
                         )
 
         # Collect the Stage B per-token shaping channel + span tags. Gated on
@@ -1271,30 +1351,30 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         token_level_shaping_list = None
         response_span_tags_list = None
         if self._enable_token_reward_channel and not is_eval:
-            if any(output.token_level_shaping is not None for output in all_outputs):
+            if any(output.reward_result.token_credit is not None for output in all_outputs):
                 token_level_shaping_list = [
-                    output.token_level_shaping
-                    if output.token_level_shaping is not None
-                    else [0.0] * len(output.response_ids)
+                    list(output.reward_result.token_credit)
+                    if output.reward_result.token_credit is not None
+                    else [0.0] * len(output.evidence.response_token_ids)
                     for output in all_outputs
                 ]
             if any(output.response_span_tags is not None for output in all_outputs):
                 response_span_tags_list = [
                     output.response_span_tags
                     if output.response_span_tags is not None
-                    else [0] * len(output.response_ids)
+                    else [0] * len(output.evidence.response_token_ids)
                     for output in all_outputs
                 ]
 
         # Aggregate per-component reward metrics (composite shaper only)
-        component_outputs = [o for o in all_outputs if o.reward_components is not None]
+        component_outputs = [output for output in all_outputs if output.reward_result.components]
         if component_outputs:
             component_names = set()
             for o in component_outputs:
-                component_names.update(o.reward_components.keys())
+                component_names.update(o.reward_result.components.keys())
             component_metrics = {}
             for name in sorted(component_names):
-                values = [o.reward_components.get(name, 0.0) for o in component_outputs]
+                values = [o.reward_result.components.get(name, 0.0) for o in component_outputs]
                 avg = sum(values) / len(values) if values else 0.0
                 component_metrics[f"reward/component_{name}"] = avg
             rollout_metrics.update(component_metrics)
@@ -1326,15 +1406,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             actual_global_step = entry_global_step
 
         trajectory_batch: TrajectoryBatch = {
-            "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": [output.response_ids for output in all_outputs],
-            "rewards": [output.reward for output in all_outputs],
-            "unshaped_rewards": [output.unshaped_reward for output in all_outputs],
-            "loss_masks": [output.loss_mask for output in all_outputs],
-            "stop_reasons": [output.stop_reason for output in all_outputs],
+            "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
+            "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
+            "rewards": [output.reward_result.optimization_reward for output in all_outputs],
+            "unshaped_rewards": [float(output.reward_result.unshaped_reward or 0.0) for output in all_outputs],
+            "loss_masks": [
+                project_loss_mask(output, list(output.evidence.response_token_ids)) for output in all_outputs
+            ],
+            "stop_reasons": [output.evidence.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs_list,
-            "exclude_from_baseline": [output.exclude_from_baseline for output in all_outputs],
+            "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
             "actual_global_step": actual_global_step,
         }
 
@@ -1571,6 +1653,64 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         )
         return chat_history
 
+    def _shape_harbor_reward(
+        self,
+        result: TrialResult,
+        verification: VerificationResult,
+        chat_history: List[Dict[str, Any]],
+        trajectory_id: TrajectoryID,
+        *,
+        preserve_timeout: bool,
+    ) -> RewardResult:
+        """Adapt a Harbor verdict and configured shaper to the shared reward contract."""
+        if preserve_timeout:
+            return RewardResult(unshaped_reward=None, optimization_reward=0.0)
+
+        if verification.score is None:
+            raise ValueError("verified Harbor results require a score")
+        original_reward = verification.score
+        reward = original_reward
+        reward_components: Optional[Dict[str, float]] = None
+        if self._reward_shaping_config.get("enable_reward_shaping", True):
+            verifier_stdout = getattr(result.verifier_result, "stdout", None)
+            shaper_name = self._reward_shaping_config.get("reward_shaper", "pass_ratio")
+            shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
+            if shaper_name in ("composite", "composite_loop"):
+                trajectory_context = (
+                    detect_termination_signals(chat_history, original_reward)
+                    if shaper_name == "composite_loop"
+                    else None
+                )
+                reward, reward_components = shape_reward_with_components(
+                    stdout=verifier_stdout,
+                    original_reward=original_reward,
+                    parser_name=self._reward_shaping_config.get("reward_parser"),
+                    shaper_kwargs=shaper_kwargs,
+                    chat_history=chat_history,
+                    shaper_name=shaper_name,
+                    trajectory_context=trajectory_context,
+                )
+            else:
+                reward = shape_reward_from_output(
+                    stdout=verifier_stdout,
+                    original_reward=original_reward,
+                    parser_name=self._reward_shaping_config.get("reward_parser"),
+                    shaper_name=shaper_name,
+                    shaper_kwargs=shaper_kwargs,
+                    fallback_to_original=self._reward_shaping_config.get("reward_shaping_fallback", True),
+                    chat_history=chat_history,
+                )
+        if reward != original_reward:
+            logger.debug(
+                f"Trajectory {trajectory_id}: reward shaped {original_reward:.3f} -> {reward:.3f}"
+                + (f" (components={reward_components})" if reward_components else "")
+            )
+        return RewardResult(
+            unshaped_reward=original_reward,
+            optimization_reward=reward,
+            components={} if reward_components is None else reward_components,
+        )
+
     def _process_trial_result(
         self,
         result: TrialResult | Exception,
@@ -1594,16 +1734,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 f"Trajectory {trajectory_id} failed with exception: {result} "
                 f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
             )
-            return TerminalBenchAgentOutput(
-                response_ids=[0],
-                reward=0,
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
+            return _failed_agent_output(
                 trajectory_id=trajectory_id,
-                exclude_from_baseline=exclude_from_baseline,
+                verification=VerificationResult.error(
+                    "trajectory orchestration failed",
+                    diagnostics={"exception_type": exception_type},
+                ),
                 exception_type=exception_type,
+                exclude_from_baseline=exclude_from_baseline,
             )
+
+        verification = verification_from_harbor_result(result)
 
         # Preserve-on-soft-timeout state (see _should_preserve_timeout_trajectory).
         # When set, a POST-generation failure (no verifier reward) does NOT discard
@@ -1641,7 +1782,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                         is not None,
                         rollout_logprobs_required=self._rollout_logprobs_required,
                     )
-                    if result.verifier_result
+                    if verification.status is VerificationStatus.VERIFIED
                     else None
                 )
                 if missing_logprobs_error is not None:
@@ -1649,17 +1790,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                         f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH but has no "
                         "behavior logprobs; masking it from behavior-referenced training"
                     )
-                    return TerminalBenchAgentOutput(
-                        response_ids=[0],
-                        reward=0,
-                        stop_reason="error",
-                        loss_mask=[0],
-                        prompt_ids=[0],
+                    return _failed_agent_output(
                         trajectory_id=trajectory_id,
-                        exclude_from_baseline=True,
+                        verification=verification,
                         exception_type=missing_logprobs_error,
+                        exclude_from_baseline=True,
                     )
-                if result.verifier_result:
+                if verification.status is VerificationStatus.VERIFIED:
                     logger.info(
                         f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH, using verifier reward"
                     )
@@ -1682,19 +1819,15 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                         f"Trajectory {trajectory_id}: {exception_type} classified as PASSTHROUGH "
                         f"but no verifier result available, masking instead"
                     )
-                    return TerminalBenchAgentOutput(
-                        response_ids=[0],
-                        reward=0,
-                        stop_reason="error",
-                        loss_mask=[0],
-                        prompt_ids=[0],
+                    return _failed_agent_output(
                         trajectory_id=trajectory_id,
-                        exclude_from_baseline=True,
+                        verification=verification,
                         exception_type=exception_type,
+                        exclude_from_baseline=True,
                     )
             else:
                 exclude_from_baseline = treatment_excludes_from_baseline(
-                    treatment, verifier_available=bool(result.verifier_result)
+                    treatment, verifier_available=verification.status is VerificationStatus.VERIFIED
                 )
                 if self._should_preserve_timeout_trajectory(result):
                     # POST-generation failure classified ZERO/MASK (e.g.
@@ -1714,41 +1847,32 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                         f"{exception_info.exception_message if hasattr(exception_info, 'exception_message') else exception_info} "
                         f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
                     )
-                    return TerminalBenchAgentOutput(
-                        response_ids=[0],
-                        reward=0,
-                        stop_reason="error",
-                        loss_mask=[0],
-                        prompt_ids=[0],
+                    return _failed_agent_output(
                         trajectory_id=trajectory_id,
-                        exclude_from_baseline=exclude_from_baseline,
+                        verification=verification,
                         exception_type=exception_type,
+                        exclude_from_baseline=exclude_from_baseline,
                     )
 
         # Check for missing verifier result (trial ran but didn't produce valid output)
         # Note: exception_info is already handled above, so if we reach here it's None.
         # A preserved timeout trajectory legitimately has no verifier_result -> skip.
-        if not result.verifier_result and not preserve_timeout:
+        if verification.status is not VerificationStatus.VERIFIED and not preserve_timeout:
             logger.warning(
                 f"Trajectory {trajectory_id} failed: No verifier result and no exception info. "
                 f"This is unexpected - marking as infrastructure failure."
             )
-            return TerminalBenchAgentOutput(
-                response_ids=[0],
-                reward=0,
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
+            return _failed_agent_output(
                 trajectory_id=trajectory_id,
-                exclude_from_baseline=True,  # Infrastructure issue - exclude from baseline
+                verification=verification,
                 exception_type="MissingVerifierResult",
+                exclude_from_baseline=True,  # Infrastructure issue - exclude from baseline
             )
 
         # Extract data from successful trial. A preserved timeout trajectory has no
         # verifier reward -> reward 0.0, but its generated chat_history/logprobs are
         # extracted exactly like a successful trial.
         try:
-            original_reward = 0.0 if preserve_timeout else result.verifier_result.rewards["reward"]
             metadata = result.agent_result.metadata
             # terminus (harbor Chat) publishes the conversation on
             # metadata['all_messages']; opencode (a CLI agent that bypasses harbor Chat)
@@ -1777,63 +1901,25 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 f"Error: {e}, Result: {result} "
                 f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
             )
-            return TerminalBenchAgentOutput(
-                response_ids=[0],
-                reward=0,
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
+            return _failed_agent_output(
                 trajectory_id=trajectory_id,
-                exclude_from_baseline=exclude_from_baseline,
+                verification=VerificationResult.error(
+                    "could not extract Harbor rollout evidence",
+                    diagnostics={"exception_type": exception_type},
+                ),
                 exception_type=exception_type,
+                exclude_from_baseline=exclude_from_baseline,
             )
 
-        # Apply reward shaping if enabled. Skipped for a preserved timeout
-        # trajectory (there is no verifier signal to shape; reward stays 0.0).
-        reward_components: Optional[Dict[str, float]] = None
-        if not preserve_timeout and self._reward_shaping_config.get("enable_reward_shaping", True):
-            verifier_stdout = getattr(result.verifier_result, "stdout", None)
-            shaper_name = self._reward_shaping_config.get("reward_shaper", "pass_ratio")
-            shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
-
-            # For container shapers (composite / composite_loop), capture the
-            # per-component breakdown.
-            if shaper_name in ("composite", "composite_loop"):
-                # Stage 1: thread finished-trajectory termination signals into the
-                # composite_loop terminate component. None for the legacy composite
-                # (it ignores trajectory_context) and a no-op when terminate is
-                # disabled, so flag-off remains byte-identical (G1).
-                trajectory_context = (
-                    detect_termination_signals(chat_history, original_reward)
-                    if shaper_name == "composite_loop"
-                    else None
-                )
-                reward, reward_components = shape_reward_with_components(
-                    stdout=verifier_stdout,
-                    original_reward=original_reward,
-                    parser_name=self._reward_shaping_config.get("reward_parser"),
-                    shaper_kwargs=shaper_kwargs,
-                    chat_history=chat_history,
-                    shaper_name=shaper_name,
-                    trajectory_context=trajectory_context,
-                )
-            else:
-                reward = shape_reward_from_output(
-                    stdout=verifier_stdout,
-                    original_reward=original_reward,
-                    parser_name=self._reward_shaping_config.get("reward_parser"),
-                    shaper_name=shaper_name,
-                    shaper_kwargs=shaper_kwargs,
-                    fallback_to_original=self._reward_shaping_config.get("reward_shaping_fallback", True),
-                    chat_history=chat_history,
-                )
-            if reward != original_reward:
-                logger.debug(
-                    f"Trajectory {trajectory_id}: reward shaped {original_reward:.3f} -> {reward:.3f}"
-                    + (f" (components={reward_components})" if reward_components else "")
-                )
-        else:
-            reward = original_reward
+        reward_result = self._shape_harbor_reward(
+            result,
+            verification,
+            chat_history,
+            trajectory_id,
+            preserve_timeout=preserve_timeout,
+        )
+        original_reward = reward_result.unshaped_reward or 0.0
+        reward = reward_result.optimization_reward
 
         # Separate system messages from the conversation.
         # Some agents (e.g. terminus-kira) include a system prompt;
@@ -1852,15 +1938,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             logger.warning(
                 f"Trajectory {trajectory_id} failed: Invalid chat history structure. chat_history: {chat_history}"
             )
-            return TerminalBenchAgentOutput(
-                response_ids=[0],
-                reward=0,
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
+            return _failed_agent_output(
                 trajectory_id=trajectory_id,
-                exclude_from_baseline=True,  # Infrastructure issue
+                verification=VerificationResult.error("Harbor returned an invalid conversation"),
                 exception_type="InvalidChatHistory",
+                exclude_from_baseline=True,  # Infrastructure issue
             )
 
         # Process successful trial
@@ -2056,37 +2138,46 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     f"{'None' if rollout_logprobs is None else len(rollout_logprobs)} "
                     f"!= response_ids={len(response_ids)}); discarding for behavior-logprob safety"
                 )
-                return TerminalBenchAgentOutput(
-                    response_ids=[0],
-                    reward=0,
-                    stop_reason="error",
-                    loss_mask=[0],
-                    prompt_ids=[0],
+                return _failed_agent_output(
                     trajectory_id=trajectory_id,
-                    exclude_from_baseline=preserve_exclude_from_baseline,
+                    verification=verification,
                     exception_type=preserve_exception_type,
+                    exclude_from_baseline=preserve_exclude_from_baseline,
                 )
             logger.info(
                 f"Trajectory {trajectory_id}: {preserve_exception_type} PRESERVED at reward=0 "
                 f"({len(rollout_logprobs)} logprobs kept, TIS-valid)"
             )
 
-        return TerminalBenchAgentOutput(
-            response_ids=response_ids,
-            reward=reward,
+        evidence = _rollout_evidence_from_harbor(
+            chat_history=chat_history,
             stop_reason=stop_reason,
-            loss_mask=loss_mask,
             prompt_ids=prompt_ids,
-            trajectory_id=trajectory_id,
-            unshaped_reward=original_reward,
+            response_ids=response_ids,
+            loss_mask=loss_mask,
             rollout_logprobs=rollout_logprobs,
             rollout_routed_experts=rollout_routed_experts,
+        )
+        reward_result = replace(
+            reward_result,
+            optimization_reward=reward,
+            token_credit=None if token_level_shaping is None else tuple(token_level_shaping),
+        )
+        reward_result.validate_for(evidence)
+        disposition = _completed_disposition(
+            preserve_timeout=preserve_timeout,
+            preserve_exclude_from_baseline=preserve_exclude_from_baseline,
+            preserve_exception_type=preserve_exception_type,
+        )
+        return TerminalBenchAgentOutput(
+            evidence=evidence,
+            verification=verification,
+            reward_result=reward_result,
+            disposition=disposition,
+            loss_mask=loss_mask,
+            trajectory_id=trajectory_id,
             summarization_count=summarization_count,
-            reward_components=reward_components,
             alignment_stats=alignment_stats,
-            token_level_shaping=token_level_shaping,
             response_span_tags=response_span_tags,
             truncation_penalized=truncation_penalized,
-            exclude_from_baseline=preserve_exclude_from_baseline if preserve_timeout else False,
-            exception_type=preserve_exception_type if preserve_timeout else None,
         )
