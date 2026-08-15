@@ -113,8 +113,8 @@ trajectory_runners/
     ...
 ```
 
-Shared reward shaping and retention remain beside the runner boundary for this migration. PR 2 will move verifier,
-reward, and disposition policy to packages named for those responsibilities.
+Shared reward shaping and retention remain beside the runner boundary for this migration. Typed verifier, reward,
+and disposition contracts will move those policies to packages named for their responsibilities.
 
 Production entrypoints move under `skyrl_train.entrypoints`:
 
@@ -177,6 +177,6 @@ This pull request does not:
 - rename the `generator.*` Hydra namespace; or
 - fix the AIME outcome and length-instrumentation defects.
 
-The next pull request introduces `RolloutEvidence`, `VerificationResult`, `RewardResult`, and
-`TrainingDisposition` and migrates each maintained runner without changing its numerical output. The AIME pilot and
-its regression fixes follow in a third pull request.
+The deferred contract migration introduces `RolloutEvidence`, `VerificationResult`, `RewardResult`, and
+`TrainingDisposition` without changing numerical output. AIME remains outside this structural change so its
+instrumentation and evaluation-budget fixes can be validated against the completed contracts.
