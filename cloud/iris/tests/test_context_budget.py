@@ -21,6 +21,7 @@ from cloud.iris.rl_config_translation import (  # noqa: E402
     parse_rl_config,
     write_resolved_context_budget,
 )
+from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner  # noqa: E402
 
 
 @dataclass
@@ -178,6 +179,25 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     assert remote_artifact == "memory://context-budget/resolved-context-budget.json"
     with fsspec.open(remote_artifact) as artifact_file:
         assert json.load(artifact_file)["context_budget"]["request_window_tokens"] == 131072
+
+
+def test_context_budget_artifact_decodes_quoted_lifecycle_trace_path(tmp_path):
+    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/delphi_math_rl.yaml"))
+    runner = LocalRLRunner(
+        LocalRLConfig(
+            rl_config_path=str(parsed.config_path),
+            job_name="quoted-storage",
+            model_path="Qwen/Qwen3-0.6B",
+            experiments_dir=str(tmp_path),
+        )
+    )
+
+    destination = runner._context_budget_artifact_destination(
+        parsed,
+        ["++terminal_bench_config.trials_dir='s3://example/tmp/ttl=14d/run/trace_jobs'"],
+    )
+
+    assert destination == "s3://example/tmp/ttl=14d/run/trace_jobs/resolved-context-budget.json"
 
 
 def test_opencode_limit_context_mirrors_harbor_formula():

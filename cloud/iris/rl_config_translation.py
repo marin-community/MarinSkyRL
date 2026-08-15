@@ -633,7 +633,7 @@ def _quote_for_hydra(s: str) -> str:
     return f"'{escaped}'"
 
 
-def _format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
+def format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
     """Format a single Hydra CLI argument.
 
     ``prefix`` selects the Hydra override mode: "" overrides an existing key, "+"
@@ -735,7 +735,7 @@ def build_checkpoint_export_hydra_args(
 
     for key, value in _flatten_dict(trainer, "trainer").items():
         prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
-        args.append(_format_hydra_arg(key, value, prefix=prefix))
+        args.append(format_hydra_arg(key, value, prefix=prefix))
     return args
 
 
@@ -894,13 +894,13 @@ def build_skyrl_hydra_args(
     ]:
         for key, val in _flatten_dict(values, section).items():
             prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
-            args.append(_format_hydra_arg(key, val, prefix=prefix))
+            args.append(format_hydra_arg(key, val, prefix=prefix))
 
     # Teacher config (on-policy distillation) — all keys use ++ since the teacher
     # section doesn't exist in SkyRL's base Hydra config.
     if parsed.teacher:
         for key, val in _flatten_dict(parsed.teacher, "teacher").items():
-            args.append(_format_hydra_arg(key, val, prefix="++"))
+            args.append(format_hydra_arg(key, val, prefix="++"))
 
     # Terminal bench with + prefix (new keys added by the config group).
     if parsed.terminal_bench:
@@ -911,7 +911,7 @@ def build_skyrl_hydra_args(
             terminal_bench["trials_dir"] = f"{experiments_dir}/{job_name}/trace_jobs"
 
         for key, val in _flatten_dict(terminal_bench).items():
-            args.append(_format_hydra_arg(f"terminal_bench_config.{key}", val, prefix="+"))
+            args.append(format_hydra_arg(f"terminal_bench_config.{key}", val, prefix="+"))
 
     return args
 

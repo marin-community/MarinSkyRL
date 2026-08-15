@@ -363,27 +363,26 @@ def test_resolve_launch_defaults_rejects_non_path_trace_configuration(tmp_path):
         resolve_launch_defaults(args)
 
 
-def test_task_command_applies_bounded_storage_policy(tmp_path):
+def test_task_command_applies_bounded_storage_policy(tmp_path, parse_hydra_overrides):
     args = _args(tmp_path, "opencode", ["--job-name", "storage-policy", "--storage-user", "alice"])
     normalize(args)
     resolve_launch_defaults(args)
 
     options = _shell_options(build_task_command(args)[-1])
-    overrides = set(options["--skyrl_override"])
+    encoded = [override.removesuffix(";") for override in options["--skyrl_override"]]
+    overrides = parse_hydra_overrides(encoded)
 
-    assert "++trainer.max_ckpts_to_keep=2" in overrides
-    assert (
-        "++trainer.ckpt_path=s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/checkpoints" in overrides
-    )
-    assert (
-        "++terminal_bench_config.trials_dir="
-        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trace_jobs" in overrides
-    )
-    assert (
-        "++generator.trajectory_retention.output_path="
-        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trajectories" in overrides
-    )
-    assert "++trainer.export_path=s3://example-bucket/marin/users/alice/skyrl/storage-policy/exports" in overrides
+    assert overrides == {
+        "generator.trajectory_retention.output_path": (
+            "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trajectories"
+        ),
+        "terminal_bench_config.trials_dir": (
+            "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/trace_jobs"
+        ),
+        "trainer.ckpt_path": "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/checkpoints",
+        "trainer.export_path": "s3://example-bucket/marin/users/alice/skyrl/storage-policy/exports",
+        "trainer.max_ckpts_to_keep": 2,
+    }
 
 
 def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):

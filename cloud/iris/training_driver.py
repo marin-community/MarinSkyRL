@@ -49,6 +49,7 @@ from cloud.iris.rl_data import (
     derive_skyrl_export_path,
     resolve_rl_train_data,
 )
+from cloud.iris.storage_policy import hydra_override_value
 from marinskyrl.resource_locator import model_source_for_path
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 
@@ -177,9 +178,9 @@ class LocalRLRunner:
     def _context_budget_artifact_destination(self, parsed, skyrl_overrides: List[str]) -> Path | str:
         """Choose the durable Harbor bundle when this run writes one."""
         trials_dir = (parsed.terminal_bench or {}).get("trials_dir")
-        for override in skyrl_overrides:
-            if override.lstrip("+").startswith("terminal_bench_config.trials_dir="):
-                trials_dir = override.partition("=")[2]
+        override_trials_dir = hydra_override_value(skyrl_overrides, "terminal_bench_config.trials_dir")
+        if override_trials_dir is not None:
+            trials_dir = override_trials_dir
         if trials_dir and str(trials_dir).startswith(("s3://", "gs://")) and not self.config.dry_run:
             return f"{str(trials_dir).rstrip('/')}/resolved-context-budget.json"
         return Path(self.config.experiments_dir) / self.config.job_name / "resolved-context-budget.json"

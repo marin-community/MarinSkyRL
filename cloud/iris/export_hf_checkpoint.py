@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cloud.iris.model_paths import model_source_cli_args
+from cloud.iris.rl_config_translation import format_hydra_arg
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
 from marinskyrl.resource_locator import ModelLocatorError
@@ -67,13 +68,13 @@ def build_command(spec: ExportJobSpec) -> list[str]:
     request = spec.request
 
     overrides = [
-        f"++checkpoint_export.step={request.step}",
-        f"++checkpoint_export.checkpoint_path={request.checkpoint_path}",
-        f"++checkpoint_export.export_root={request.export_path}",
-        f"++checkpoint_export.hf_hub_repo_id={request.hf_hub_repo_id or 'null'}",
-        f"++checkpoint_export.hf_hub_private={str(request.hf_hub_private).lower()}",
-        f"++checkpoint_export.hf_hub_revision={request.hf_hub_revision}",
-        f"++checkpoint_export.hf_upload_mode={request.hf_upload_mode}",
+        format_hydra_arg("checkpoint_export.step", request.step, prefix="++"),
+        format_hydra_arg("checkpoint_export.checkpoint_path", request.checkpoint_path, prefix="++"),
+        format_hydra_arg("checkpoint_export.export_root", request.export_path, prefix="++"),
+        format_hydra_arg("checkpoint_export.hf_hub_repo_id", request.hf_hub_repo_id or "null", prefix="++"),
+        format_hydra_arg("checkpoint_export.hf_hub_private", request.hf_hub_private, prefix="++"),
+        format_hydra_arg("checkpoint_export.hf_hub_revision", request.hf_hub_revision, prefix="++"),
+        format_hydra_arg("checkpoint_export.hf_upload_mode", request.hf_upload_mode, prefix="++"),
     ]
 
     cmd = [

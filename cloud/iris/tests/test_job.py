@@ -330,6 +330,23 @@ def test_launcher_argv_includes_staged_data_role_plan_and_seed(tmp_path: Path) -
     assert "++trainer.seed=7" in overrides
 
 
+def test_launcher_argv_encodes_lifecycle_storage_as_valid_hydra_values(tmp_path: Path, parse_hydra_overrides) -> None:
+    envelope = _spec(tmp_path)
+    output = replace(
+        envelope.request.output,
+        checkpoint_root="s3://example/tmp/ttl=14d/iceball/checkpoints",
+        export_root="s3://example/marin/users/alice/iceball/exports",
+    )
+    envelope = replace(envelope, request=replace(envelope.request, output=output))
+
+    argv = job_launch_argv(envelope, "config.yaml")
+    encoded = [argv[index + 1] for index, value in enumerate(argv) if value == "--skyrl-override"]
+    overrides = parse_hydra_overrides(encoded)
+
+    assert overrides["trainer.ckpt_path"] == output.checkpoint_root
+    assert overrides["trainer.export_path"] == output.export_root
+
+
 def test_launcher_argv_satisfies_standalone_required_options(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
     argv = job_launch_argv(envelope, "config.yaml")

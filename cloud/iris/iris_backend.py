@@ -105,7 +105,12 @@ from marinskyrl.resource_locator import (
     join_resource_path,
     model_source_for_path,
 )
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, RL_CONFIG_TASK_DIR, resolve_rl_config_path
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    RL_CONFIG_TASK_DIR,
+    format_hydra_arg,
+    resolve_rl_config_path,
+)
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import DataLocator, LaunchMode, SkyRLJobSpec
@@ -325,9 +330,9 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         "--resolved-config-uri",
         request.output.resolved_config_uri,
         "--skyrl-override",
-        f"++trainer.ckpt_path={request.output.checkpoint_root}",
+        format_hydra_arg("trainer.ckpt_path", request.output.checkpoint_root, prefix="++"),
         "--skyrl-override",
-        f"++trainer.export_path={request.output.export_root}",
+        format_hydra_arg("trainer.export_path", request.output.export_root, prefix="++"),
         "--skyrl-override",
         "++trainer.resume_mode=latest",
         "--skyrl-override",
@@ -2145,11 +2150,11 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         raise RuntimeError("resolve_launch_defaults() must resolve RL storage before building the task command")
     if not checkpoint_export:
         storage_overrides = (
-            f"++trainer.ckpt_path={storage_paths.checkpoint_root}",
-            f"++trainer.export_path={storage_paths.export_root}",
-            f"++trainer.max_ckpts_to_keep={storage_paths.resume_checkpoint_count}",
-            f"++terminal_bench_config.trials_dir={storage_paths.trace_root}",
-            f"++generator.trajectory_retention.output_path={storage_paths.trajectory_root}",
+            format_hydra_arg("trainer.ckpt_path", storage_paths.checkpoint_root, prefix="++"),
+            format_hydra_arg("trainer.export_path", storage_paths.export_root, prefix="++"),
+            format_hydra_arg("trainer.max_ckpts_to_keep", storage_paths.resume_checkpoint_count, prefix="++"),
+            format_hydra_arg("terminal_bench_config.trials_dir", storage_paths.trace_root, prefix="++"),
+            format_hydra_arg("generator.trajectory_retention.output_path", storage_paths.trajectory_root, prefix="++"),
         )
         for override in storage_overrides:
             train_cmd.extend(["--skyrl_override", override])
