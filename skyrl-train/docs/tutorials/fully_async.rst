@@ -1,7 +1,7 @@
 (Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout
 =========================================================================================
 
-SkyRL supports fully async training for any generator that implements the ``GeneratorInterface``, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
+SkyRL supports fully async training for any generator that implements the ``TrajectoryRunner``, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
 
 We treat "fully async training" synonymous to the terms **"in-flight weight update"** and **"multi-turn partial rollout"**, as discussed in works like AReal, PipelineRL, ScaleRL, etc.
 
@@ -75,28 +75,28 @@ II. How to use fully async training in SkyRL?
 
 The fully async trainer class is implemented in ``fully_async_trainer.py::FullyAsyncRayPPOTrainer``, subclassing the synchronous trainer class ``trainer.py::RayPPOTrainer``.
 
-This trainer class is generator-agnostic, meaning it can support any generator that implements the ``GeneratorInterface`` interface, including your arbitrary agent harness.
+This trainer class accepts any harness that implements the ``TrajectoryRunner`` interface.
 
 We provide an example script in ``examples/fully_async``, where we train Qwen2.5-1.5B-Instruct on GSM8K with the fully async approach.
 
 We break down the usage into two simple steps.
 
-Step 1: Define your ``main_async.py``
+Step 1: Select the fully asynchronous entrypoint
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Following `examples/fully_async/main_async.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/main_async.py>`_, subclass the base entrypoint class ``BasePPOExp``:
+The maintained entrypoint is ``skyrl_train.entrypoints.fully_async``. To customize it, subclass ``BasePPOExp``:
 
 - Override ``get_trainer()`` to use fully async trainer class ``FullyAsyncRayPPOTrainer``
-- Override ``get_generator()`` to use your custom generator class. Note that currently we only support generators that use ``/chat/completions`` (hence the ``SkyRLGymHTTPGenerator`` used in the example).
+- Override ``get_trajectory_runner()`` to compose a runner with the required model client. The maintained entrypoint uses ``OpenAIHTTPModelClient`` for ``/chat/completions`` transport.
 
 Step 2: Config knobs to tune for fully async training
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Following `examples/fully_async/async_run_gsm8k.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/async_run_gsm8k.sh>`_, update the training configuration to use your new entrypoint ``main_async.py``:
+Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entrypoint:
 
 .. code-block:: bash
 
-    uv run --isolated --extra vllm -m examples.fully_async.main_async \
+    uv run --isolated --extra vllm -m skyrl_train.entrypoints.fully_async \
     ...
 
 For fully async specifically, the following are the main knobs to tune:
@@ -164,14 +164,14 @@ is a set of ``generator.n_samples_per_prompt`` number of trajectories generated 
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Generation workers are virtual workers, each is simply an ``asyncio.Task`` that runs ``generator.generate()``
-for a group of trajectories. There is only one ``generator`` instance (e.g. ``SkyRLGymGenerator``) and one
+for a group of trajectories. There is only one ``generator`` instance (e.g. ``SkyRLGymTrajectoryRunner``) and one
 physical ``InferenceEngineClient`` in the back serving the actual LLM inference.
 
 Each generation worker runs the following steps in a while loop:
 
 1. Prefer a stale-group retry row, otherwise get one row from the ``AsyncDataloader``. After the dataloader is exhausted,
    wait for retries. Acquire generation capacity through ``AsyncStalenessManager`` before generating.
-2. Generate one group of trajectories. Can be single-turn or multi-turn, ``SkyRLGymGenerator`` or your own generator.
+2. Generate one group of trajectories. Can be single-turn or multi-turn, ``SkyRLGymTrajectoryRunner`` or your own generator.
 3. Re-check the completed group's age. Enqueue it to ``GenerationOutputGroupBuffer`` if fresh, or enqueue its original
    row for regeneration if stale.
 4. Repeat from step 1 until the training worker finishes the epoch and cancels the generation tasks.

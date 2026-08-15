@@ -3,14 +3,14 @@
 from dataclasses import dataclass
 from typing import List, Protocol
 
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 
 @dataclass
 class GeneratedOutputGroup:
     """One prompt's rollout samples and the metadata needed to retry them."""
 
-    generator_output: GeneratorOutput
+    trajectory_batch: TrajectoryBatch
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]

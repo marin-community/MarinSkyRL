@@ -7,23 +7,23 @@ from collections import defaultdict
 
 from skyrl_train.utils import Timer
 
-from skyrl_train.generators.utils import (
-    concatenate_generator_outputs,
-    get_metrics_from_generator_output,
-    prepare_generator_input,
+from skyrl_train.trajectory_runners.utils import (
+    concatenate_trajectory_batches,
+    get_metrics_from_trajectory_batch,
+    prepare_trajectory_request,
 )
-from skyrl_train.generators.base import (
-    GeneratorOutput,
-    GeneratorInterface,
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryBatch,
+    TrajectoryRunner,
 )
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
-    validate_generator_output,
+    validate_trajectory_batch,
 )
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
-from skyrl_train.generators.trajectory_retention import (
+from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
     make_trajectory_sink,
 )
@@ -36,7 +36,7 @@ from transformers import AutoTokenizer
 @torch.no_grad()
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
-    generator: GeneratorInterface,
+    trajectory_runner: TrajectoryRunner,
     cfg: DictConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
@@ -47,7 +47,7 @@ async def evaluate(
 
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
-        generator (GeneratorInterface): generator to use
+        trajectory_runner (TrajectoryRunner): runner to use
         cfg (DictConfig): config
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
@@ -59,24 +59,24 @@ async def evaluate(
     Returns:
         Dict[str, float]: evaluation metrics
     """
-    # Start a fresh eval session if the generator supports it
+    # Start a fresh eval session if the runner supports it
     # This creates a dedicated QueueOrchestrator for this eval run
     run_name = getattr(cfg.trainer, "run_name", None) or "eval"
     eval_step = global_step if global_step is not None else 0
-    has_eval_session = hasattr(generator, "start_eval_session")
+    has_eval_session = hasattr(trajectory_runner, "start_eval_session")
     active_sink = trajectory_sink or make_trajectory_sink(cfg.generator, tokenizer)
-    generator.set_trajectory_sink(active_sink)
+    trajectory_runner.set_trajectory_sink(active_sink)
 
     if has_eval_session:
-        await generator.start_eval_session(
+        await trajectory_runner.start_eval_session(
             run_name=run_name,
             eval_step=eval_step,
             val_set_name=val_set_name,
         )
 
     try:
-        # 1. Get all generator outputs
-        generator_outputs: List[GeneratorOutput] = []
+        # 1. Get all trajectory batches
+        trajectory_batches: List[TrajectoryBatch] = []
         concat_all_envs: List[str] = []
         concat_env_extras: List[Dict[str, Any]] = []
         concat_uids: List[str] = []
@@ -84,7 +84,7 @@ async def evaluate(
         pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
         for _, prompts in enumerate(eval_dataloader):
             pbar.update(1)
-            generator_input, uids = prepare_generator_input(
+            trajectory_request, uids = prepare_trajectory_request(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
                 get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
@@ -92,35 +92,35 @@ async def evaluate(
                 "eval",
                 global_step,
             )
-            generator_output: GeneratorOutput = await generator.generate(generator_input)
-            validate_generator_output(len(generator_input["prompts"]), generator_output)
-            generator_outputs.append(generator_output)
-            concat_all_envs.extend(generator_input["env_classes"])
-            concat_env_extras.extend(generator_input["env_extras"])
+            trajectory_batch: TrajectoryBatch = await trajectory_runner.run(trajectory_request)
+            validate_trajectory_batch(len(trajectory_request["prompts"]), trajectory_batch)
+            trajectory_batches.append(trajectory_batch)
+            concat_all_envs.extend(trajectory_request["env_classes"])
+            concat_env_extras.extend(trajectory_request["env_extras"])
             concat_uids.extend(uids)
-        concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
+        concat_trajectory_batches: TrajectoryBatch = concatenate_trajectory_batches(trajectory_batches)
     finally:
         # Always stop the eval session, even if evaluation fails
         if has_eval_session:
-            await generator.stop_eval_session()
+            await trajectory_runner.stop_eval_session()
 
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-    vis = tokenizer.decode(generator_output["response_ids"][0])
+    vis = tokenizer.decode(trajectory_batch["response_ids"][0])
     log_example(
         logger,
-        prompt=generator_input["prompts"][0],
+        prompt=trajectory_request["prompts"][0],
         response=vis,
-        reward=generator_output["rewards"][0],
+        reward=trajectory_batch["rewards"][0],
     )
 
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(
-        concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
+        concat_trajectory_batches, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
     )
 
     # 3. Calculate overall metrics across all datasets
-    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+    overall_avg_score, overall_pass_at_n = get_metrics_from_trajectory_batch(concat_trajectory_batches, concat_uids)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_avg_score,
@@ -141,7 +141,7 @@ async def evaluate(
             dump_per_dataset_eval_results(
                 data_save_dir,
                 tokenizer,
-                concat_generator_outputs,
+                concat_trajectory_batches,
                 concat_data_sources,
                 concat_all_envs,
                 concat_env_extras,
@@ -154,7 +154,7 @@ async def evaluate(
 @torch.no_grad()
 async def evaluate_step_wise(
     eval_dataloader: StatefulDataLoader,
-    generator: GeneratorInterface,
+    trajectory_runner: TrajectoryRunner,
     cfg: DictConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
@@ -167,7 +167,7 @@ async def evaluate_step_wise(
 
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
-        generator (GeneratorInterface): generator to use
+        trajectory_runner (TrajectoryRunner): runner to use
         cfg (DictConfig): config
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
@@ -179,23 +179,23 @@ async def evaluate_step_wise(
     Returns:
         Dict[str, float]: evaluation metrics
     """
-    # Start a fresh eval session if the generator supports it
+    # Start a fresh eval session if the runner supports it
     # This creates a dedicated QueueOrchestrator for this eval run
     run_name = getattr(cfg.trainer, "run_name", None) or "eval"
     eval_step = global_step if global_step is not None else 0
-    has_eval_session = hasattr(generator, "start_eval_session")
-    generator.set_trajectory_sink(trajectory_sink)
+    has_eval_session = hasattr(trajectory_runner, "start_eval_session")
+    trajectory_runner.set_trajectory_sink(trajectory_sink)
 
     if has_eval_session:
-        await generator.start_eval_session(
+        await trajectory_runner.start_eval_session(
             run_name=run_name,
             eval_step=eval_step,
             val_set_name=val_set_name,
         )
 
     try:
-        # 1. Get all generator outputs
-        generator_outputs: List[GeneratorOutput] = []
+        # 1. Get all trajectory batches
+        trajectory_batches: List[TrajectoryBatch] = []
         concat_all_envs: List[str] = []
         concat_env_extras: List[Dict[str, Any]] = []
         concat_uids: List[str] = []
@@ -203,7 +203,7 @@ async def evaluate_step_wise(
         pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
         for _, prompts in enumerate(eval_dataloader):
             pbar.update(1)
-            generator_input, uids = prepare_generator_input(
+            trajectory_request, uids = prepare_trajectory_request(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
                 get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
@@ -211,41 +211,43 @@ async def evaluate_step_wise(
                 "eval",
                 global_step,
             )
-            generator_output: GeneratorOutput = await generator.generate(generator_input)
+            trajectory_batch: TrajectoryBatch = await trajectory_runner.run(trajectory_request)
             traj_id_to_input = {
                 traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
                 for traj_id, env_class, env_extra in zip(
-                    generator_input["trajectory_ids"], generator_input["env_classes"], generator_input["env_extras"]
+                    trajectory_request["trajectory_ids"],
+                    trajectory_request["env_classes"],
+                    trajectory_request["env_extras"],
                 )
             }
-            for traj_id in generator_output["trajectory_ids"]:
+            for traj_id in trajectory_batch["trajectory_ids"]:
                 assert traj_id.instance_id in traj_id_to_input, (
                     f"Trajectory ID {traj_id.instance_id} not found in input"
                 )
                 concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
                 concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
                 concat_uids.append(traj_id.instance_id)
-            # validate_generator_output(generator_input, generator_output)
-            generator_outputs.append(generator_output)
-        concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
+            # validate_trajectory_batch(trajectory_request, trajectory_batch)
+            trajectory_batches.append(trajectory_batch)
+        concat_trajectory_batches: TrajectoryBatch = concatenate_trajectory_batches(trajectory_batches)
     finally:
         # Always stop the eval session, even if evaluation fails
         if has_eval_session:
-            await generator.stop_eval_session()
+            await trajectory_runner.stop_eval_session()
 
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-    vis = tokenizer.decode(generator_output["response_ids"][0])
+    vis = tokenizer.decode(trajectory_batch["response_ids"][0])
     logger.info(f"Eval output example: {vis}")
 
     # Only use the final step metrics
-    generator_output_last_step = defaultdict(list)
-    is_last_step_mask = concat_generator_outputs["is_last_step"]
-    for key in concat_generator_outputs:
-        if isinstance(concat_generator_outputs[key], list):
-            assert len(concat_generator_outputs[key]) == len(is_last_step_mask)
-            generator_output_last_step[key] = [
-                val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
+    trajectory_batch_last_step = defaultdict(list)
+    is_last_step_mask = concat_trajectory_batches["is_last_step"]
+    for key in concat_trajectory_batches:
+        if isinstance(concat_trajectory_batches[key], list):
+            assert len(concat_trajectory_batches[key]) == len(is_last_step_mask)
+            trajectory_batch_last_step[key] = [
+                val for val, is_last_step in zip(concat_trajectory_batches[key], is_last_step_mask) if is_last_step
             ]
     uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
     data_sources_last_step = [
@@ -254,10 +256,10 @@ async def evaluate_step_wise(
 
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(
-        generator_output_last_step, uids_last_step, data_sources_last_step, cfg.generator.eval_n_samples_per_prompt
+        trajectory_batch_last_step, uids_last_step, data_sources_last_step, cfg.generator.eval_n_samples_per_prompt
     )
     # 3. Calculate overall metrics across all datasets
-    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
+    overall_avg_score, overall_pass_at_n = get_metrics_from_trajectory_batch(trajectory_batch_last_step, uids_last_step)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_avg_score,
@@ -278,7 +280,7 @@ async def evaluate_step_wise(
             dump_per_dataset_eval_results(
                 data_save_dir,
                 tokenizer,
-                concat_generator_outputs,
+                concat_trajectory_batches,
                 concat_data_sources,
                 concat_all_envs,
                 concat_env_extras,

@@ -103,7 +103,7 @@ class LocalRLRunner:
         # Set by _ingress_context when ingress_mode=controller mints a capability
         # URL. Threaded into the SkyRL Hydra cfg (see run()) so it crosses the Ray
         # .remote() boundary as DATA — os.environ mutations here do NOT reach the
-        # pre-existing Ray workers where TerminalBenchGenerator is constructed.
+        # pre-existing Ray workers where HarborTrajectoryRunner is constructed.
         self._minted_agent_api_base: str | None = None
         # Set by _ingress_context when record_literal stands up the co-located
         # RecordProxy. Threaded into the SkyRL Hydra cfg (see run()) for the SAME
@@ -395,7 +395,7 @@ class LocalRLRunner:
                 # Also thread the minted URL through the SkyRL Hydra cfg. run() injects
                 # ``++terminal_bench_config.agent_api_base=<api_base>`` from this, so the
                 # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
-                # where TerminalBenchGenerator is built. The env var alone is insufficient:
+                # where HarborTrajectoryRunner is built. The env var alone is insufficient:
                 # this runner ATTACHES to a Ray cluster the controller started BEFORE the
                 # mint, so its workers never inherit HARBOR_MODEL_ENDPOINT from this process
                 # and the generator would fall back to the pod-local (unreachable) vLLM URL.

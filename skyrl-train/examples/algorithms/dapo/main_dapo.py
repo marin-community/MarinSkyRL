@@ -11,7 +11,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 
 class DAPOTrainer(RayPPOTrainer):
@@ -22,16 +22,16 @@ class DAPOTrainer(RayPPOTrainer):
     """
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         """
         Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 
         Args:
-            generator_output: GeneratorOutput
+            generator_output: TrajectoryBatch
             uids: List[str]
 
         Returns:
-            GeneratorOutput
+            TrajectoryBatch
         """
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor

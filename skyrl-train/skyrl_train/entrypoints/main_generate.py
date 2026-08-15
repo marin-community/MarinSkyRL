@@ -39,11 +39,11 @@ class EvalOnlyEntrypoint(BasePPOExp):
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
         await inference_engine_client.wake_up()
-        generator = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        trajectory_runner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
 
         results: dict[str, Any] = await evaluate(
             eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
-            generator=generator,
+            trajectory_runner=trajectory_runner,
             cfg=self.cfg,
             global_step=None,
             tokenizer=self.tokenizer,

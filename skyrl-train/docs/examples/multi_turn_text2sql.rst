@@ -145,7 +145,7 @@ Now that we have our dataset and database files, let's walk through the some of 
 - All we have to do to enable multi-turn training with async rollouts is to simply set ``generator.max_turns`` to the maximum number of turns we want the agent to take,
   and to make sure ``generator.async_engine=true`` and ``generator.batched=false``. 
 
-- Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymGenerator`` class.
+- Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymTrajectoryRunner`` class.
 
   - In the above example, we set ``use_conversation_multi_turn=false`` to enforce that the multi-turn conversation is formatted as a single assistant response.
   - We also set ``stop='["</sql>", "</solution>"]'`` for both ``sampling_params`` and ``eval_sampling_params`` as a part

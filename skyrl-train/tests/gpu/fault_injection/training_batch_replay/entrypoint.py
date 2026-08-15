@@ -82,7 +82,7 @@ def _terminal_bench_experiment_class():
     # Harbor is a production-image dependency, not a CPU-test dependency. Keep
     # the TerminalBench import lazy so --help and pre-Ray validation work in the
     # ordinary development environment.
-    from examples.terminal_bench.entrypoints.main_tbench import TerminalBenchExp  # noqa: PLC0415
+    from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp  # noqa: PLC0415
 
     return TerminalBenchExp
 
@@ -202,7 +202,7 @@ def main(cfg: DictConfig) -> None:
     # Reuse the production TerminalBench main scaffold so Ray initialization,
     # fuse_weights environment, signals, exception logging, and shutdown remain
     # identical.
-    from examples.terminal_bench.entrypoints.main_tbench import (  # noqa: PLC0415
+    from skyrl_train.entrypoints.terminal_bench import (  # noqa: PLC0415
         run_terminal_bench_entrypoint,
     )
 

@@ -3,15 +3,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from examples.terminal_bench.rollout_coordinator import ShardTimeoutPolicy
+from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import ShardTimeoutPolicy
 
 
-class LongTailGenerator:
+class LongTailRunner:
     def __init__(self, outputs):
         self.outputs = iter(outputs)
         self.calls = 0
 
-    async def generate(self, input_batch):
+    async def run(self, input_batch):
         self.calls += 1
         output = next(self.outputs)
         if output is None:
@@ -76,30 +76,30 @@ def test_shard_timeout_override_is_independent_of_agent_timeout():
 @pytest.mark.asyncio
 async def test_shard_timeout_retries_when_agent_timeout_is_retryable():
     completed = {"response_ids": [[1]], "rollout_metrics": {}}
-    generator = LongTailGenerator([None, completed])
+    runner = LongTailRunner([None, completed])
     policy = ShardTimeoutPolicy(
         timeout_seconds=0.001,
         retry_config=_retry_config(max_retries=1, include_exceptions={"AgentTimeoutError"}),
     )
 
-    output = await policy.generate(generator, {"prompts": ["task"]})
+    output = await policy.run(runner, {"prompts": ["task"]})
 
     assert output["response_ids"] == [[1]]
-    assert generator.calls == 2
+    assert runner.calls == 2
     assert output["rollout_metrics"]["generate/outer_agent_timeouts"] == 1
 
 
 @pytest.mark.asyncio
 async def test_shard_timeout_returns_agent_timeout_when_retry_is_disabled():
-    generator = LongTailGenerator([None])
+    runner = LongTailRunner([None])
     policy = ShardTimeoutPolicy(
         timeout_seconds=0.001,
         retry_config=_retry_config(max_retries=3, exclude_exceptions={"AgentTimeoutError"}),
     )
 
-    output = await policy.generate(generator, {"prompts": ["task"]})
+    output = await policy.run(runner, {"prompts": ["task"]})
 
-    assert generator.calls == 1
+    assert runner.calls == 1
     assert output["response_ids"] == [[0]]
     assert output["rollout_metrics"] == {
         "generate/errors/AgentTimeoutError": 1,

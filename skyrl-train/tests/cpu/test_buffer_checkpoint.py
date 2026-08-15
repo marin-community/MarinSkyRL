@@ -12,7 +12,7 @@ import torch
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.fully_async_trainer import _GenerationQueues
-from skyrl_train.generators.base import TrajectoryID
+from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.io import io
 
 
@@ -36,7 +36,7 @@ def _make_item(uid: str, step: int) -> GeneratedOutputGroup:
         "actual_global_step": step,
     }
     return GeneratedOutputGroup(
-        generator_output=gen_out,
+        trajectory_batch=gen_out,
         uid=uid,
         earliest_model_step=step,
         source_prompts=[{"uid": uid}],
@@ -117,9 +117,9 @@ async def test_roundtrip_with_items():
             assert item.uid == f"uid_{i}"
             assert item.earliest_model_step == 5
             assert item.source_prompts == [{"uid": f"uid_{i}"}]
-            assert item.generator_output["prompt_token_ids"] == [[1, 2, 3]]
-            assert item.generator_output["rewards"] == [1.0]
-            tid = item.generator_output["trajectory_ids"][0]
+            assert item.trajectory_batch["prompt_token_ids"] == [[1, 2, 3]]
+            assert item.trajectory_batch["rewards"] == [1.0]
+            tid = item.trajectory_batch["trajectory_ids"][0]
             assert tid.instance_id == f"uid_{i}"
 
 

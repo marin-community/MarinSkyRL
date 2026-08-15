@@ -6,9 +6,9 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode
-from skyrl_train.generators.utils import prepare_generator_input
+from skyrl_train.trajectory_runners.utils import prepare_generator_input
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
@@ -114,7 +114,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, generation_buffer):
         # Get a generation future and await on the object
-        generator_output, uids = await generation_buffer.get()  # GeneratorOutput, List[str]
+        generator_output, uids = await generation_buffer.get()  # TrajectoryBatch, List[str]
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -164,7 +164,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
                 # generation phase
                 async with Timer("generate", self.all_timings):
-                    generator_output: GeneratorOutput = await self.generate(generator_input)
+                    generator_output: TrajectoryBatch = await self.generate(generator_input)
                     generator_output = self.postprocess_generator_output(generator_output, uids)
 
                 # Add to generation buffer

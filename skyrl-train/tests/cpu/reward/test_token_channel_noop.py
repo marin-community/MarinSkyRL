@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
-from skyrl_train.generators.utils import concatenate_generator_outputs
+from skyrl_train.trajectory_runners.utils import concatenate_trajectory_batches
 
 
 def test_config_key_defaults_false():
@@ -67,7 +67,7 @@ def test_collator_flag_off_byte_identical(tokenizer):
 
 
 def test_concatenate_flag_off_keys_absent():
-    """When no batch carries the channel keys, the concatenated GeneratorOutput
+    """When no batch carries the channel keys, the concatenated TrajectoryBatch
     must NOT contain them (key absent, not None) -> byte-identical keyset."""
     out = {
         "prompt_token_ids": [[1, 2]],
@@ -78,7 +78,7 @@ def test_concatenate_flag_off_keys_absent():
         "rollout_logprobs": None,
         "rollout_metrics": {},
     }
-    merged = concatenate_generator_outputs([out, out])
+    merged = concatenate_trajectory_batches([out, out])
     assert "token_level_shaping" not in merged
     assert "response_span_tags" not in merged
     assert "rollout_routed_experts" not in merged
@@ -108,6 +108,6 @@ def test_concatenate_flag_on_sentinel_fill():
         "rollout_logprobs": None,
         "rollout_metrics": {},
     }
-    merged = concatenate_generator_outputs([out_with, out_without])
+    merged = concatenate_trajectory_batches([out_with, out_without])
     assert merged["token_level_shaping"] == [[0.0, 0.0, 0.0], [0.0, 0.0]]
     assert merged["response_span_tags"] == [[1, 2, 2], [0, 0]]

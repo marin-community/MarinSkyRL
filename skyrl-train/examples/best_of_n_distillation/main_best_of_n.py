@@ -22,7 +22,7 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.entrypoints.main_base import create_teacher_inference_engines_from_config
 from skyrl_train.distillation_trainer import DistillationTrainer
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
@@ -44,7 +44,7 @@ class BestOfNDistillationTrainer(DistillationTrainer):
         super().__init__(*args, **kwargs)
         self._best_indices: List[int] = []
 
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         """Override to select best-of-N completions after reward computation."""
         # First, run parent postprocessing (computes rewards, pass@N metrics, etc.)
         generator_output = super().postprocess_generator_output(generator_output, uids)
@@ -100,7 +100,7 @@ class BestOfNDistillationTrainer(DistillationTrainer):
 
         return generator_output
 
-    def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
         """Override to deduplicate UIDs after best-of-N selection."""
         N = self.cfg.generator.n_samples_per_prompt
         if N > 1 and self._best_indices:

@@ -451,7 +451,7 @@ def test_calculate_kl_create_experience_batched(dummy_config, dummy_generator):
         train_dataset=DummyDataset(),
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
-        generator=dummy_generator,
+        trajectory_runner=dummy_generator,
     )
     data = _get_test_data(trainer)
     # Assertions
@@ -470,7 +470,7 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dum
         train_dataset=DummyDataset(),
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
-        generator=dummy_generator,
+        trajectory_runner=dummy_generator,
     )
     data = _get_test_data(trainer)
 
@@ -566,7 +566,7 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
     trainer.cfg = dummy_config
     trainer.tokenizer = dummy_tokenizer
     trainer.pad_batch = lambda batch: batch
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3]],
         "response_ids": [[4, 5, 6], [7]],
         "rewards": [[0.0, 0.0, 0.0], [0.0]],
@@ -575,7 +575,7 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
         "loop_advantages": [[0.0, -0.1, -0.1], [-0.2]],
     }
 
-    batch = trainer.convert_to_training_input(generator_output, ["a", "b"])
+    batch = trainer.convert_to_training_input(trajectory_batch, ["a", "b"])
 
     torch.testing.assert_close(
         batch["loop_advantages"],

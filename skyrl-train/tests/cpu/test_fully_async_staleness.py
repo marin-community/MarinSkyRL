@@ -9,11 +9,11 @@ from skyrl_train.fully_async_trainer import (
     _AsyncStalenessManager,
     _GenerationQueues,
 )
-from skyrl_train.generators.base import TrajectoryID
+from skyrl_train.trajectory_runners.base import TrajectoryID
 
 
 def _generated_group(uid: str, earliest_model_step: int) -> GeneratedOutputGroup:
-    generator_output = {
+    trajectory_batch = {
         "prompt_token_ids": [[1], [1]],
         "response_ids": [[2], [3]],
         "rewards": [0.0, 1.0],
@@ -29,7 +29,7 @@ def _generated_group(uid: str, earliest_model_step: int) -> GeneratedOutputGroup
         "exclude_from_baseline": [False, False],
     }
     return GeneratedOutputGroup(
-        generator_output=generator_output,
+        trajectory_batch=trajectory_batch,
         uid=uid,
         earliest_model_step=earliest_model_step,
         source_prompts=[{"uid": uid}],

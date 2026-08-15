@@ -1,12 +1,12 @@
 # Training trajectory retention
 
-MarinSkyRL retains a bounded sample of normalized training trajectories for debugging, replay, and audit. Retention runs at the shared `GeneratorInterface` output boundary, after reward shaping and alignment metrics. SkyRL Gym, StepWise, TerminalBench, Verifiers, synchronous training, fully asynchronous training, and evaluation therefore use one record contract.
+MarinSkyRL retains a bounded sample of normalized training trajectories for debugging, replay, and audit. Retention runs at the shared `TrajectoryRunner` output boundary, after reward shaping and alignment metrics. SkyRL Gym, StepWise, Terminal Bench, synchronous training, fully asynchronous training, and evaluation therefore use one record contract.
 
 ## Ownership and lifecycle
 
 The trainer driver owns one `TrajectorySink` and binds it to the selected generator. The sink runs on the driver rather than Ray workers so one ledger governs the entire run. Writes run in a thread to avoid blocking the trainer event loop.
 
-Each record combines the normalized `GeneratorInput` and `GeneratorOutput`:
+Each record combines the normalized `TrajectoryRequestBatch` and `TrajectoryBatch`:
 
 - trajectory identity, source rows, environment class, and environment extras;
 - prompt messages and token IDs;

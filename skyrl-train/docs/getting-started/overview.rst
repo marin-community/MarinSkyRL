@@ -29,7 +29,7 @@ Generator
 Generates complete trajectories and computes their rewards. The Generator encompasses both the InferenceEngine (to get model completions) and Environment (to execute actions) as well as custom agentic or data generation logic build around model inference, such as context management, sampling methods, or tree search.
 
 - `Base Generator interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/base.py>`_
-- `SkyRLGymGenerator built for SkyRL-Gym <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/skyrl_gym_generator.py>`_
+- `SkyRLGymTrajectoryRunner built for SkyRL-Gym <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/skyrl_gym_generator.py>`_
 
 InferenceEngine
 ~~~~~~~~~~~~~~~

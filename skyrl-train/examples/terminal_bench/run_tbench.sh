@@ -9,13 +9,11 @@ set -x
 DATA_DIR="$HOME/data/tasks"
 NUM_GPUS=1
 LOGGER="console"  # change to "console" to print to stdout
-TBENCH_CONFIG_DIR="examples/terminal_bench"
 SANDBOXES_DIR="sandboxes" # TODO: For now, `sandboxes` is cloned into SkyRL/skyrl-train.
 
-uv run --isolated --extra vllm --with "litellm[proxy]>=1.67.5" --with "sandbox@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra vllm --with "litellm[proxy]>=1.67.5" --with "sandbox@./sandboxes" -m skyrl_train.entrypoints.terminal_bench \
   data.train_data="['$DATA_DIR']" \
   data.val_data="['$DATA_DIR']" \
-  hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
   terminal_bench_config.max_episodes=16 \
   terminal_bench_config.sandboxes_dir=$SANDBOXES_DIR \

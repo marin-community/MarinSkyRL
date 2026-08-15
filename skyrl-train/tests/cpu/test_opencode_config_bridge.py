@@ -20,7 +20,7 @@ if _EXAMPLES not in sys.path:
     sys.path.insert(0, _EXAMPLES)
 
 try:
-    from terminal_bench.harbor_config import AGENT_SCHEMA, HarborConfigBuilder  # noqa: E402
+    from skyrl_train.trajectory_runners.harbor.configuration import AGENT_SCHEMA, HarborConfigBuilder  # noqa: E402
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 

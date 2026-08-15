@@ -26,11 +26,11 @@ _EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 if _EXAMPLES not in sys.path:
     sys.path.insert(0, _EXAMPLES)
 
-# TerminalBenchGenerator pulls in the harbor/terminal_bench agentic-RL stack, which
+# HarborTrajectoryRunner pulls in the harbor/terminal_bench agentic-RL stack, which
 # the CPU dev extra deliberately does not install. Skip the module where it is absent
 # (it still runs in the agentic RL env where harbor is present).
 try:
-    from terminal_bench.terminal_bench_generator import TerminalBenchGenerator  # noqa: E402
+    from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner  # noqa: E402
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
@@ -48,7 +48,7 @@ def _result_with(rollout_details):
     return types.SimpleNamespace(agent_result=agent_result)
 
 
-_gate = TerminalBenchGenerator._should_preserve_timeout_trajectory
+_gate = HarborTrajectoryRunner._should_preserve_timeout_trajectory
 
 
 def test_preserve_when_generation_has_logprobs():

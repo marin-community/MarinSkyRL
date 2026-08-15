@@ -891,7 +891,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if getattr(self, "_local_rank", None) != 0:
                 return
             interval = int(os.environ.get("SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL", "60"))
-            from examples.terminal_bench.fd_monitor import start_fd_monitor
+            from skyrl_train.trajectory_runners.harbor.fd_monitor import start_fd_monitor
 
             logger.info(
                 f"[policy-host-ram-monitor] starting on rank={self._rank} "

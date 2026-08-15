@@ -3,7 +3,7 @@
 Labels each *response* token with one of ``{OTHER, THINK, ACTION, EDIT}`` on the
 **exact token-id layout** the TIS / training path uses — i.e. the same per-turn
 segmentation produced by
-``skyrl_train.generators.utils.get_response_ids_and_loss_mask_from_messages``.
+``skyrl_train.trajectory_runners.utils.get_response_ids_and_loss_mask_from_messages``.
 
 Why this matters: Stages C (PBS test-delta) and D (think-token budget) write the
 per-token shaping channel (``token_level_shaping``) onto specific token spans —
@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from skyrl_train.generators.utils import (
+from skyrl_train.trajectory_runners.utils import (
     encode_messages_subset,
     get_generation_prompt_ids,
 )

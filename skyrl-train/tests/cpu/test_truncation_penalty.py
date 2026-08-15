@@ -14,10 +14,10 @@ _EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 if _EXAMPLES not in sys.path:
     sys.path.insert(0, _EXAMPLES)
 
-from terminal_bench.truncation_penalty import apply_truncation_penalty, detect_turn_truncation  # noqa: E402
+from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation  # noqa: E402
 
 try:
-    from terminal_bench.harbor_config import REWARD_SHAPING_SCHEMA  # noqa: E402
+    from skyrl_train.trajectory_runners.harbor.configuration import REWARD_SHAPING_SCHEMA  # noqa: E402
 except ImportError:
     REWARD_SHAPING_SCHEMA = None
 

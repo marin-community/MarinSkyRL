@@ -121,7 +121,7 @@ async def test_get_fresh_batch_returns_when_groups_arrive(monkeypatch):
         for i in range(2):
             await queues.completed.put(
                 GeneratedOutputGroup(
-                    generator_output={"response_ids": [[1]], "prompt_token_ids": [[1]]},
+                    trajectory_batch={"response_ids": [[1]], "prompt_token_ids": [[1]]},
                     uid=f"u{i}",
                     earliest_model_step=0,
                     source_prompts=[{}],

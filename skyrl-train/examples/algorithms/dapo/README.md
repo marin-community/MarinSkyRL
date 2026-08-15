@@ -74,7 +74,7 @@ To enable soft overlong punishment, you can create a custom trainer class and ov
 ```python
 class DAPOTrainer(RayPPOTrainer):
   @torch.no_grad()
-  def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+  def postprocess_generator_output(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
       # apply soft overlong punishment
       overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
       overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor

@@ -1,4 +1,4 @@
-entrypoint: examples.terminal_bench.entrypoints.main_tbench
+entrypoint: skyrl_train.entrypoints.terminal_bench
 
 
 config_groups:

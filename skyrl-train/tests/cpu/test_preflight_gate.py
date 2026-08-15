@@ -227,6 +227,6 @@ def test_trainer_populates_the_attribute_the_gate_reads():
     fn = next(
         node
         for node in ast.walk(ast.parse(trainer_src))
-        if isinstance(node, ast.FunctionDef) and node.name == "postprocess_generator_output"
+        if isinstance(node, ast.FunctionDef) and node.name == "postprocess_trajectory_batch"
     )
     assert "_current_step_rewards" in ast.get_source_segment(trainer_src, fn)

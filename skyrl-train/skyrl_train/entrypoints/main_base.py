@@ -20,7 +20,7 @@ from skyrl_train.utils.utils import (
     policy_per_gpu_bundles_enabled,
 )
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.generators.base import GeneratorInterface
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
 import ray
@@ -336,31 +336,24 @@ class BasePPOExp:
         )
         return pg
 
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
-        """Initializes the generator.
+    def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
+        """Initialize the configured trajectory runner.
 
         Returns:
-            GeneratorInterface: The generator.
+            TrajectoryRunner: The runner.
         """
-        from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+        from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
 
-        if cfg.trainer.step_wise_training:
-            from skyrl_train.generators.step_wise_generator import StepWiseGenerator
-
-            return StepWiseGenerator(
-                generator_cfg=cfg.generator,
-                skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                inference_engine_client=inference_engine_client,
-                tokenizer=tokenizer,
-                model_name=cfg.trainer.policy.model.path,
-            )
-
-        return SkyRLGymGenerator(
+        return SkyRLGymTrajectoryRunner(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             model_name=cfg.trainer.policy.model.path,
+            projection=(
+                StepWiseTrajectoryProjection(cfg.generator, tokenizer) if cfg.trainer.step_wise_training else None
+            ),
         )
 
     def get_trainer(
@@ -371,7 +364,7 @@ class BasePPOExp:
         train_dataset,
         eval_dataset,
         inference_engine_client,
-        generator: GeneratorInterface,
+        trajectory_runner: TrajectoryRunner,
         colocate_pg,
     ):
         """Initializes the trainer.
@@ -386,7 +379,7 @@ class BasePPOExp:
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             inference_engine_client=inference_engine_client,
-            generator=generator,
+            trajectory_runner=trajectory_runner,
             colocate_pg=colocate_pg,
         )
 
@@ -443,7 +436,7 @@ class BasePPOExp:
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
             cfg=self.cfg,
@@ -452,7 +445,7 @@ class BasePPOExp:
             train_dataset=self.train_dataset,
             eval_dataset=self.eval_dataset,
             inference_engine_client=inference_engine_client,
-            generator=generator,
+            trajectory_runner=trajectory_runner,
             colocate_pg=self.colocate_pg,
         )
 
@@ -507,11 +500,11 @@ class BasePPOExp:
             # those resources are released before the process exits.
             if trainer is not None:
                 try:
-                    # generator.shutdown() is async; run it in a fresh event loop
+                    # TrajectoryRunner.shutdown() is async; run it in a fresh event loop.
                     # since asyncio.run() above may have already closed the loop.
-                    asyncio.run(trainer.generator.shutdown())
+                    asyncio.run(trainer.trajectory_runner.shutdown())
                 except Exception as e:
-                    logger.warning(f"Error shutting down generator: {e}")
+                    logger.warning(f"Error shutting down trajectory runner: {e}")
                 try:
                     trainer.cleanup_ray_actors()
                 except Exception as e:
