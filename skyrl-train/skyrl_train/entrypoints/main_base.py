@@ -2,29 +2,14 @@
 Main entrypoint for training.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.remote_function import RemoteFunction
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from skyrl_train.dataset import PromptDataset
-from skyrl_train.tokenizer import create_tokenizer
-from skyrl_train.utils import validate_cfg
-
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.utils.utils import (
-    initialize_ray,
-    get_ray_pg_ready_with_timeout,
-    policy_strict_spread_eligible,
-    policy_spread_bundles,
-    policy_per_gpu_bundles_enabled,
-)
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.trajectory_runners.base import TrajectoryRunner
-from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
-from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
-from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
 import ray
@@ -34,11 +19,12 @@ import signal
 import sys
 import hydra
 from loguru import logger
-from skyrl_train.utils.tracking import Tracking
-from skyrl_train.utils.logging_utils import log_exception_as_text
-from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
 import asyncio
 import multiprocessing as mp
+
+if TYPE_CHECKING:
+    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+    from skyrl_train.trajectory_runners.base import TrajectoryRunner
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -173,6 +159,8 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
+    from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+
     # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
@@ -213,6 +201,8 @@ class BasePPOExp:
 
     def create_inference_engine_client(self) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
+        from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
         if self.cfg.generator.run_engines_locally:
             logger.info("Creating local inference engines")
             inference_engines = create_ray_wrapped_inference_engines_from_config(
@@ -247,6 +237,8 @@ class BasePPOExp:
         return OmegaConf.to_yaml(dict_cfg)
 
     def get_tokenizer(self, padding_side="left"):
+        from skyrl_train.tokenizer import create_tokenizer
+
         """Initializes a tokenizer for the given model."""
         return create_tokenizer(
             model_path=self.cfg.trainer.policy.model.path,
@@ -260,6 +252,8 @@ class BasePPOExp:
         Returns:
             PromptDataset: The training dataset.
         """
+        from skyrl_train.dataset import PromptDataset
+
         prompts_dataset = PromptDataset(
             datasets=self.cfg.data.train_data,
             tokenizer=self.tokenizer,
@@ -279,6 +273,8 @@ class BasePPOExp:
             PromptDataset: The evaluation dataset.
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+            from skyrl_train.dataset import PromptDataset
+
             prompts_dataset = PromptDataset(
                 datasets=self.cfg.data.val_data,
                 tokenizer=self.tokenizer,
@@ -288,7 +284,7 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
+    def get_colocate_pg(self, timeout: int | None = None) -> PlacementGroup:
         """Initializes a placement group for colocated training.
 
         A single placement group that packs all the inference engines together is created.
@@ -299,6 +295,10 @@ class BasePPOExp:
         Returns:
             PlacementGroup: The placement group for colocated training.
         """
+        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+        from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout
+
+        timeout = SKYRL_RAY_PG_TIMEOUT_IN_S if timeout is None else timeout
         if self.cfg.trainer.placement.colocate_all:
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
@@ -313,7 +313,7 @@ class BasePPOExp:
         else:
             return None
 
-    def get_policy_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S):
+    def get_policy_pg(self, timeout: int | None = None):
         """Reserve a dedicated whole-node placement group for the policy.
 
         Uses STRICT_SPREAD so each policy node gets exactly one bundle holding
@@ -327,6 +327,15 @@ class BasePPOExp:
         share a single placement group built inside `build_models`; that path
         is left entirely untouched (eligibility requires use_ref_model=False).
         """
+        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+        from skyrl_train.utils.utils import (
+            get_ray_pg_ready_with_timeout,
+            policy_per_gpu_bundles_enabled,
+            policy_spread_bundles,
+            policy_strict_spread_eligible,
+        )
+
+        timeout = SKYRL_RAY_PG_TIMEOUT_IN_S if timeout is None else timeout
         if not policy_strict_spread_eligible(self.cfg):
             return None
 
@@ -354,6 +363,10 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
+        from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
+        from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
+        from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
+
         """Initialize the configured trajectory runner.
 
         Returns:
@@ -389,6 +402,8 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.trainer import RayPPOTrainer
+
         return RayPPOTrainer(
             cfg=cfg,
             tracker=tracker,
@@ -406,6 +421,8 @@ class BasePPOExp:
         Returns:
             Tracking: The tracker.
         """
+        from skyrl_train.utils.tracking import Tracking
+
         return Tracking(
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
@@ -467,6 +484,8 @@ class BasePPOExp:
         return trainer
 
     def run(self):
+        from skyrl_train.telemetry import TRAINER_ROLE, process_telemetry
+
         with process_telemetry(TRAINER_ROLE):
             self._run()
 
@@ -532,6 +551,11 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 
 def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_message: str = "Training failed") -> None:
+    from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry
+    from skyrl_train.utils import validate_cfg
+    from skyrl_train.utils.logging_utils import log_exception_as_text
+    from skyrl_train.utils.utils import initialize_ray
+
     """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
     validate_cfg(cfg)
 
