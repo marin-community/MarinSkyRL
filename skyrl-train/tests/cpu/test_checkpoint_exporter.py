@@ -6,6 +6,7 @@ import torch
 
 from skyrl_train.checkpoint_exporter import CheckpointExportPlan, CheckpointExporter, RayPolicyExportWorkers
 from skyrl_train.hf_export_schema import HFUploadMode
+from skyrl_train.hf_model_io import verify_hf_model_export
 from skyrl_train.hf_publisher import HuggingFacePublisher
 
 
@@ -137,6 +138,21 @@ def test_checkpoint_exporter_rejects_incomplete_conversion_result(tmp_path, work
 
     assert workers.closed
     assert publisher.calls == []
+
+
+def test_unsharded_cloud_export_verification_does_not_head_optional_index(monkeypatch):
+    export_path = "s3://bucket/exports/global_step_1/policy"
+    monkeypatch.setattr(
+        "skyrl_train.hf_model_io.io.list_dir",
+        lambda path: [f"{path}/config.json", f"{path}/model.safetensors"],
+    )
+
+    def reject_head(path):
+        raise AssertionError(f"verification issued an object HEAD request: {path}")
+
+    monkeypatch.setattr("skyrl_train.hf_model_io.io.exists", reject_head)
+
+    verify_hf_model_export(export_path)
 
 
 def test_ray_policy_export_workers_loads_model_state_without_training_state():

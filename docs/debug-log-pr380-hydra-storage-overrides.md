@@ -108,6 +108,14 @@ the in-pod account name. Terminal export derives and preserves the storage user
 from the already validated checkpoint root, keeping export diagnostics under
 the same user-owned lifecycle prefix.
 
+That export subsequently completed and published a single `model.safetensors`
+file, but launcher-side verification queried the optional
+`model.safetensors.index.json` object first. S3 returned `400 Bad Request` for
+the absent object instead of `False`, so the successful export was reported as
+failed. Export verification now inventories the directory once and validates
+the unsharded file or every index-referenced shard from that snapshot, avoiding
+per-object existence probes for optional or missing files.
+
 ## Future work
 
 - [ ] Rerun the Qwen3-0.6B GSM8K smoke test through checkpoint creation and

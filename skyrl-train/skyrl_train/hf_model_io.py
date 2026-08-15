@@ -18,10 +18,14 @@ HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 def verify_hf_model_export(export_path: str) -> None:
     """Reject an HF export unless its safetensors weights are all present."""
+    try:
+        export_files = {Path(path).name for path in io.list_dir(export_path)}
+    except FileNotFoundError:
+        export_files = set()
+
     index_path = join_resource_path(export_path, HF_WEIGHT_INDEX_FILENAME)
-    if not io.exists(index_path):
-        unsharded_path = join_resource_path(export_path, HF_WEIGHT_FILENAME)
-        if io.exists(unsharded_path):
+    if HF_WEIGHT_INDEX_FILENAME not in export_files:
+        if HF_WEIGHT_FILENAME in export_files:
             return
         raise RuntimeError(f"HF export has no safetensors weights at {export_path}")
 
@@ -44,7 +48,7 @@ def verify_hf_model_export(export_path: str) -> None:
     if invalid_shards:
         raise RuntimeError(f"HF export index contains invalid safetensors shard paths: {invalid_shards}")
     shards = sorted(set(shard_values))
-    missing_shards = [shard for shard in shards if not io.exists(join_resource_path(export_path, shard))]
+    missing_shards = [shard for shard in shards if shard not in export_files]
     if missing_shards:
         raise RuntimeError(
             f"HF export is missing {len(missing_shards)} referenced safetensors shard(s): {missing_shards[:5]}"
