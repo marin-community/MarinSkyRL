@@ -88,7 +88,7 @@ Future harnesses can emit step-wise training samples by supplying the same step 
 3. validate and report token/logprob alignment; and
 4. retain the normalized trajectory sample.
 
-Only names and ownership change in this pull request.
+The initial migration changes names and ownership without changing finalization behavior.
 
 ## Package layout
 
@@ -167,9 +167,9 @@ Focused CPU tests must establish:
 Existing SkyRL-Gym, Terminal Bench, Mini-SWE-Agent, async staleness, trajectory shaping, trajectory retention, and
 launcher configuration tests remain in the CPU gate. The Verifiers GPU tests are removed with the dead integration.
 
-## Change boundaries
+## Initial migration boundaries
 
-This pull request does not:
+The initial migration does not:
 
 - change verifier semantics or reward numerics;
 - change error classification, masking, baseline inclusion, or retry policy;
