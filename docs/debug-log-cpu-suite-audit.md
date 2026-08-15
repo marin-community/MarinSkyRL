@@ -1,7 +1,7 @@
 # Debugging log for CPU suite audit
 
-Audit the CPU failures above `weaver/fix-hydra-storage-overrides`, remove only invalid tests, and preserve the
-lifecycle storage fix and meaningful behavior coverage.
+Audit the CPU failures in PR #387, remove only invalid tests, and preserve the lifecycle storage fix and
+meaningful behavior coverage.
 
 ## Initial status
 

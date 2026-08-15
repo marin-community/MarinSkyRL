@@ -51,19 +51,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read_hf_export_request(checkpoint_path: str) -> HFExportRequest | None:
-    from skyrl_train.hf_export import read_hf_export_request
+    from skyrl_train.hf_export import read_hf_export_request  # noqa: PLC0415 - keep launcher imports Torch-free
 
     return read_hf_export_request(checkpoint_path)
 
 
 def _write_hf_export_request(request: HFExportRequest) -> None:
-    from skyrl_train.hf_export import write_hf_export_request
+    from skyrl_train.hf_export import write_hf_export_request  # noqa: PLC0415 - keep launcher imports Torch-free
 
     write_hf_export_request(request)
 
 
 def _verify_hf_model_export(export_path: str) -> None:
-    from skyrl_train.hf_model_io import verify_hf_model_export
+    from skyrl_train.hf_model_io import verify_hf_model_export  # noqa: PLC0415 - keep launcher imports Torch-free
 
     verify_hf_model_export(export_path)
 
