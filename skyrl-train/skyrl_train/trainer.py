@@ -28,7 +28,10 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryRunner,
 )
 import copy
-from skyrl_train.trajectory_runners.utils import get_metrics_from_trajectory_batch, prepare_trajectory_request
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    get_metrics_from_trajectory_batch,
+    prepare_trajectory_request,
+)
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
@@ -309,7 +312,7 @@ class RayPPOTrainer:
         1. HTTP endpoint shutdown – cuts off the request path so in-flight
            Harbor trials get connection-refused instead of retrying against
            dead inference engines indefinitely.
-        2. Generator shutdown – waits for QueueOrchestrator to drain (should
+        2. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
            be fast now that trials can't make new requests).
         3. Inference engine teardown – sends teardown RPC to each engine.
         4. Ray actor cleanup – force-kills remaining actors.
@@ -322,7 +325,7 @@ class RayPPOTrainer:
         await self._guarded_async(
             self.trajectory_runner.shutdown(),
             timeout=60,
-            label="Generator shutdown",
+            label="Trajectory runner shutdown",
         )
         await self._guarded_async(
             self.inference_engine_client.teardown(),
@@ -366,9 +369,9 @@ class RayPPOTrainer:
         """Initialize trajectory-runner resources before any rollout can begin."""
         try:
             await self.trajectory_runner.startup()
-            logger.info("Generator startup complete")
+            logger.info("Trajectory runner startup complete")
         except Exception as e:
-            logger.opt(depth=0).error("Generator startup failed: " + str(e))
+            logger.opt(depth=0).error("Trajectory runner startup failed: " + str(e))
             raise
 
     async def _handle_resume_at_max_steps(self) -> None:
@@ -1225,7 +1228,7 @@ class RayPPOTrainer:
             be awake (i.e. on GPU).
         - after calling this method, the same model placement still holds.
         """
-        # NOTE: we assume that .generate returns samples in the same order as passed in
+        # Runners preserve the input sample order.
         trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:

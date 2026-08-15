@@ -3,7 +3,7 @@ SkyRL System Overview
 
 SkyRL breaks the RL stack into modular components and provides public APIs for each of them. 
 
-Specifically, as shown in figure below, SkyRL separates training into two major components, **Trainer** and **Generator**, and the Generator is further divided into **InferenceEngine** and **Environment**, with a single **Controller** managing setup and execution of each component. 
+SkyRL separates training into a trainer, trajectory runners, model clients, and environments, with a controller managing setup and execution.
 
 .. figure:: images/system-overview.png
    :alt: SkyRL System Overview
@@ -24,12 +24,12 @@ Performs the optimization steps based on configured RL algorithm. Updates model 
 
 - `PPORayActorGroup <https://github.com/NovaSky-AI/SkyRL/blob/5a82809e218b2e0c3dd431377fb672e35ecc4a84/skyrl-train/skyrl_train/workers/worker.py#L385>`_: Our abstraction for a group of training workers (as Ray actors) that jointly execute operations for a given model (e.g., policy model, critic model, etc.).
 
-Generator
-~~~~~~~~~
-Generates complete trajectories and computes their rewards. The Generator encompasses both the InferenceEngine (to get model completions) and Environment (to execute actions) as well as custom agentic or data generation logic build around model inference, such as context management, sampling methods, or tree search.
+Trajectory runner
+~~~~~~~~~~~~~~~~~
+Acquires complete trajectories from an environment or agent harness and normalizes them for training. Model transport, sample projection, and environment interaction are composed behind this boundary.
 
-- `Base Generator interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/base.py>`_
-- `SkyRLGymTrajectoryRunner built for SkyRL-Gym <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/skyrl_gym_generator.py>`_
+- ``TrajectoryRunner`` in ``skyrl_train/trajectory_runners/base.py``
+- ``SkyRLGymTrajectoryRunner`` in ``skyrl_train/trajectory_runners/skyrl_gym.py``
 
 InferenceEngine
 ~~~~~~~~~~~~~~~

@@ -29,9 +29,7 @@ async def test_http_model_client_normalizes_chat_completion():
 
     async def complete(request):
         requests.append(await request.json())
-        return web.json_response(
-            {"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]}
-        )
+        return web.json_response({"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]})
 
     app = web.Application()
     app.router.add_post("/v1/chat/completions", complete)
@@ -48,9 +46,7 @@ async def test_http_model_client_normalizes_chat_completion():
             return [7, 8]
 
     try:
-        client = OpenAIHTTPModelClient(
-            base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=Tokenizer()
-        )
+        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=Tokenizer())
         output = await client.generate(
             {
                 "prompts": [[{"role": "user", "content": "question"}]],

@@ -6,14 +6,14 @@ import copy
 from uuid import uuid4
 import skyrl_gym
 from typing import Callable, List, Dict, Any, Optional, Tuple
-from skyrl_train.utils.progress import tqdm
 
-from skyrl_train.trajectory_runners.base import TrajectoryID
+from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-from skyrl_train.trajectory_runners.utils import normalize_token_ids
+from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
+from skyrl_train.trajectory_runners.collectors import collect_agent_loops
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
@@ -32,16 +32,16 @@ def clamp_generation_tokens(
 
 def _sampling_params_with_generation_limit(
     sampling_params: Optional[Dict[str, Any]],
-    generator_cfg: DictConfig,
+    trajectory_runner_cfg: DictConfig,
     max_tokens: int,
 ) -> Dict[str, Any]:
     """Return backend sampling parameters constrained to one request budget."""
     params = (
         dict(sampling_params)
         if sampling_params is not None
-        else get_sampling_params_for_backend(generator_cfg.backend, generator_cfg.sampling_params)
+        else get_sampling_params_for_backend(trajectory_runner_cfg.backend, trajectory_runner_cfg.sampling_params)
     )
-    max_key = "max_tokens" if generator_cfg.backend == "vllm" else "max_new_tokens"
+    max_key = "max_tokens" if trajectory_runner_cfg.backend == "vllm" else "max_new_tokens"
     params[max_key] = max_tokens
     return params
 
@@ -54,6 +54,17 @@ class StepWiseRolloutCollector:
 
     def __getattr__(self, name):
         return getattr(self._runner, name)
+
+    def validate(self) -> None:
+        if self._runner.batched:
+            raise ValueError("step-wise collection does not support batched generation")
+        if self._runner.custom_chat_template is not None:
+            raise ValueError("step-wise collection does not support a custom chat template")
+        if not self._runner.use_conversation_multi_turn:
+            raise ValueError("step-wise collection requires multi-turn conversations")
+
+    async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
+        return await collect_agent_loops(self._runner, request, self.agent_loop, disable_tqdm=disable_tqdm)
 
     async def agent_loop(
         self,
@@ -113,7 +124,6 @@ class StepWiseRolloutCollector:
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
-        step_id = 0
         per_step_outputs: List[AgentLoopOutput] = []
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
@@ -208,6 +218,7 @@ class StepWiseRolloutCollector:
                 rollout_logprobs=response_logprobs,
                 stop_reason=stop_reason,
                 env_metrics=env.get_metrics() if done else {},
+                token_provenance=engine_output["token_provenance"],
             )
 
             assert len(per_step_output.loss_mask) == len(per_step_output.response_ids), (
@@ -219,7 +230,6 @@ class StepWiseRolloutCollector:
                 )
 
             per_step_outputs.append(per_step_output)
-            step_id += 1
 
         for per_step_output, (reward, resp_end_idx) in zip(per_step_outputs, per_step_rewards):
             per_token_reward = [0.0] * len(per_step_output.response_ids)

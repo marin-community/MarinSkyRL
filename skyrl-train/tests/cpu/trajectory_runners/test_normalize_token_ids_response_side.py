@@ -1,7 +1,7 @@
 """CPU test for `normalize_token_ids` on the RESPONSE-side `len()`-slicing sites.
 
 Regression test for the Qwen3-Next-80B production RL no-op-learning bug: the
-two response-side helpers in ``skyrl_train.trajectory_runners.utils`` slice an
+two response-side helpers in ``skyrl_train.trajectory_runners.trajectory_processing`` slice an
 ``apply_chat_template(..., tokenize=True)`` result with ``len()``-based slicing:
 
   * ``get_generation_prompt_ids``:
@@ -28,7 +28,7 @@ Run:
 
 import pytest
 
-from skyrl_train.trajectory_runners.utils import (
+from skyrl_train.trajectory_runners.trajectory_processing import (
     normalize_token_ids,
     get_generation_prompt_ids,
     encode_messages_subset,

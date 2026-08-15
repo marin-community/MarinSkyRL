@@ -1,18 +1,20 @@
 """Model transports used by trajectory runners."""
 
 import asyncio
-from typing import Literal, Protocol, TypedDict
+from typing import Protocol
 
 import aiohttp
+from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.trajectory_runners.types import TokenProvenance
 
 
 class ModelClientOutput(InferenceEngineOutput):
     """Normalized model output with explicit token provenance."""
 
-    token_provenance: Literal["engine", "reconstructed"]
+    token_provenance: TokenProvenance
 
 
 class ModelClient(Protocol):
@@ -29,13 +31,13 @@ class DirectModelClient:
 
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput:
         output = await self._client.generate(request)
-        return ModelClientOutput(**output, token_provenance="engine")
+        return ModelClientOutput(**output, token_provenance=TokenProvenance.ENGINE)
 
 
 class OpenAIHTTPModelClient:
     """Call an OpenAI-compatible chat endpoint and normalize its response."""
 
-    def __init__(self, *, base_url: str, model_name: str, tokenizer):
+    def __init__(self, *, base_url: str, model_name: str, tokenizer: PreTrainedTokenizerBase):
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
         self._tokenizer = tokenizer
@@ -71,7 +73,7 @@ class OpenAIHTTPModelClient:
             stop_reasons=[response[1] for response in responses],
             response_logprobs=None,
             prompt_logprobs=None,
-            token_provenance="reconstructed",
+            token_provenance=TokenProvenance.RECONSTRUCTED,
         )
 
     async def _generate_one(

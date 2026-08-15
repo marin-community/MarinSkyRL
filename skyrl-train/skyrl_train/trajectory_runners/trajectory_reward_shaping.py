@@ -267,15 +267,6 @@ def _empty_components() -> RewardShapingComponents:
     return {"non_termination": 0.0, "successful_length": 0.0}
 
 
-def infer_stop_reason(response_ids: Sequence[int], eos_token_id: int | None, max_generate_length: int) -> str:
-    """Infer normalized stop metadata for adapters that omit backend finish reasons."""
-    if response_ids and eos_token_id is not None and response_ids[-1] == eos_token_id:
-        return "stop"
-    if len(response_ids) >= max_generate_length:
-        return "length"
-    return "stop"
-
-
 def _trajectory_groups(output: TrajectoryBatch, batch_size: int) -> list[list[int]]:
     is_last_step = output.get("is_last_step")
     if is_last_step is None:

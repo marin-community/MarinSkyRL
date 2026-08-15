@@ -1,17 +1,16 @@
 import hydra
-from omegaconf import DictConfig, OmegaConf
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils import initialize_ray
+from omegaconf import DictConfig
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 import ray
 
+
 class MiniSWEPPOExp(BasePPOExp):
-    def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        from skyrl_train.trajectory_runners.mini_swe.runner import MiniSweTrajectoryRunner
+    def get_trajectory_runner(self, cfg, tokenizer, _inference_engine_client):
+        # mini-swe-agent is optional and absent from the CPU launcher environment.
+        from skyrl_train.trajectory_runners.mini_swe.runner import MiniSweTrajectoryRunner  # noqa: PLC0415
 
         runner = MiniSweTrajectoryRunner(
-            generator_cfg=cfg.generator,
-            skyrl_gym_cfg=OmegaConf.create({"max_env_workers": 0}),
-            inference_engine_client=inference_engine_client,
+            trajectory_runner_cfg=cfg.generator,
             tokenizer=tokenizer,
             model_name=self.cfg.trainer.policy.model.path,
         )
@@ -27,11 +26,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    # validate the arguments
-    validate_cfg(cfg)
-
-    initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+    run_ray_driver(cfg, skyrl_entrypoint)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,19 @@
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
 from skyrl_train.inference_engines.base import ConversationType
 
 
 TrainingPhase = Literal["train", "eval"]
+TIS_ALIGNED_TOKENS_METRIC = "generate/tis/aligned_tokens"
+
+
+class TokenProvenance(StrEnum):
+    """How response token IDs were obtained from a model transport."""
+
+    ENGINE = "engine"
+    RECONSTRUCTED = "reconstructed"
 
 
 @dataclass
@@ -19,6 +28,7 @@ class AgentLoopOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     captured_global_step: Optional[int] = None
+    token_provenance: TokenProvenance = TokenProvenance.ENGINE
 
 
 @dataclass
@@ -56,7 +66,7 @@ class RewardShapingLoopSpan(TypedDict):
 
 
 class TrajectoryBatch(TypedDict):
-    """Normalized output shared by trajectory generators and trainer consumers.
+    """Normalized output shared by trajectory runners and trainer consumers.
 
     Raw outcomes remain separate from optimization rewards. Optional diagnostic
     channels are absent unless their corresponding feature is active.

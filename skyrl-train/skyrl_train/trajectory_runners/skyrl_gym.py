@@ -2,63 +2,135 @@
 This file implements ``SkyRLGymTrajectoryRunner``, an implementation of the `TrajectoryRunner` that
 uses SkyRL-Gym as the environment.
 
-For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html
+For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runner.html
 """
+
+from __future__ import annotations
 
 import asyncio
 import copy
+from dataclasses import dataclass
 from uuid import uuid4
 import skyrl_gym
-from typing import Callable, List, Dict, Any, Optional, Tuple
+from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple, TypeVar
 from concurrent.futures import ThreadPoolExecutor
-from skyrl_train.utils.progress import tqdm
 from loguru import logger
 
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
-from skyrl_train.trajectory_runners.types import AgentLoopOutput
+from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-from skyrl_train.trajectory_runners.utils import (
+from skyrl_train.trajectory_runners.trajectory_processing import (
     get_custom_chat_template,
     get_generation_prompt_ids,
     apply_overlong_filtering,
-    minimum_captured_global_step,
     get_rollout_metrics,
     normalize_token_ids,
 )
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
-from skyrl_train.trajectory_runners.projections import TrajectoryProjection, WholeTrajectoryProjection
-from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
+from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
+from skyrl_train.trajectory_runners.projections import (
+    IdentityTrajectoryProjection,
+    TrajectoryProjection,
+    WholeTrajectoryProjection,
+)
+
+
+class WholeTrajectoryCollector:
+    """Collect one complete interaction record per request."""
+
+    def __init__(self, runner):
+        self._runner = runner
+
+    def validate(self) -> None:
+        pass
+
+    async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
+        return await collect_agent_loops(self._runner, request, self._runner.agent_loop, disable_tqdm=disable_tqdm)
+
+
+class BatchedTrajectoryCollector:
+    """Collect a batch already normalized by the legacy batched environment path."""
+
+    def __init__(self, runner):
+        self._runner = runner
+
+    def validate(self) -> None:
+        pass
+
+    async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
+        del disable_tqdm
+        runner = self._runner
+        batch = await runner.collect_batched(
+            request["prompts"],
+            request["env_classes"],
+            request["env_extras"],
+            runner.trajectory_runner_cfg.sampling_params.max_generate_length,
+            runner.trajectory_runner_cfg.max_input_length,
+            request.get("sampling_params"),
+        )
+        return batch
+
+
+PipelineOutputT = TypeVar("PipelineOutputT")
+
+
+@dataclass(frozen=True)
+class TrajectoryPipeline(Generic[PipelineOutputT]):
+    """A type-coupled collector and projection pair."""
+
+    collector_type: Callable[[SkyRLGymTrajectoryRunner], RolloutCollector[PipelineOutputT]]
+    projection: TrajectoryProjection[PipelineOutputT]
+
+
+SkyRLGymPipeline = (
+    TrajectoryPipeline[Sequence[AgentLoopOutput]]
+    | TrajectoryPipeline[Sequence[Sequence[AgentLoopOutput]]]
+    | TrajectoryPipeline[TrajectoryBatch]
+)
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
-        generator_cfg: DictConfig,
+        trajectory_runner_cfg: DictConfig,
         skyrl_gym_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
-        model_name: str,
         model_client: ModelClient | None = None,
-        projection: TrajectoryProjection | None = None,
+        pipeline: SkyRLGymPipeline | None = None,
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
+            trajectory_runner_cfg: trajectory-runner configuration
+            skyrl_gym_cfg: environment configuration keyed by SkyRL-Gym environment name
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            model_client: optional transport-neutral model client
+            pipeline: optional type-coupled harness collector and projection
         """
-        self.trajectory_runner_cfg = generator_cfg
+        self.trajectory_runner_cfg = trajectory_runner_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
-        self.inference_engine_client = inference_engine_client
         self.model_client = model_client or DirectModelClient(inference_engine_client)
         self.tokenizer = tokenizer
-        self.projection = projection or WholeTrajectoryProjection(generator_cfg, tokenizer)
-        self.max_turns = generator_cfg.max_turns
-        self.batched = generator_cfg.batched
-        self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+        if pipeline is None:
+            pipeline = (
+                TrajectoryPipeline(BatchedTrajectoryCollector, IdentityTrajectoryProjection())
+                if trajectory_runner_cfg.batched
+                else TrajectoryPipeline(
+                    WholeTrajectoryCollector,
+                    WholeTrajectoryProjection(trajectory_runner_cfg, tokenizer),
+                )
+            )
+        self.collector = pipeline.collector_type(self)
+        self.projection = pipeline.projection
+        self.max_turns = trajectory_runner_cfg.max_turns
+        self.batched = trajectory_runner_cfg.batched
+        self.use_conversation_multi_turn = trajectory_runner_cfg.use_conversation_multi_turn
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
+        self.custom_chat_template = get_custom_chat_template(trajectory_runner_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:
@@ -68,14 +140,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         else:
             self.env_executor = None
 
-        self._validate_cfg(generator_cfg)
-        if self.projection.step_wise:
-            if self.batched:
-                raise ValueError("step-wise projection does not support batched generation")
-            if self.custom_chat_template is not None:
-                raise ValueError("step-wise projection does not support a custom chat template")
-            if not self.use_conversation_multi_turn:
-                raise ValueError("step-wise projection requires multi-turn conversations")
+        self._validate_cfg(trajectory_runner_cfg)
+        self.collector.validate()
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
         # correctly format and tokenize observations into `observation_ids`.
@@ -93,7 +159,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
+        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runner.html#multi-turn-tokenization-and-ti-to
         if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
             last_eos_token_index = (
                 len(self.base_conversation_token_ids)
@@ -106,8 +172,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Set by the fully-async trainer before generation workers start.
         self.global_step_fn: Optional[Callable[[], int]] = None
 
-    def _validate_cfg(self, generator_cfg: DictConfig):
-        if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
+    def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
+        if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
             )
@@ -207,13 +273,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
 
         loss_mask = []  # this excludes the prompt
-        current_sampling_params = sampling_params if sampling_params is not None else self.trajectory_runner_cfg.sampling_params
+        current_sampling_params = (
+            sampling_params if sampling_params is not None else self.trajectory_runner_cfg.sampling_params
+        )
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
+        token_provenance = TokenProvenance.ENGINE
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -231,6 +300,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
             engine_output = await self.model_client.generate(engine_input)
+            if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
+                token_provenance = TokenProvenance.RECONSTRUCTED
             # Capture global_step after first inference returns — at this point the vLLM
             # engine has definitively served the request with its current weights.
             if captured_global_step is None and global_step_fn is not None:
@@ -409,9 +480,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             rollout_logprobs=rollout_logprobs,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            token_provenance=token_provenance,
         )
 
-    async def generate_batched(
+    async def collect_batched(
         self,
         prompts: List[ConversationType],
         env_classes: List[str],
@@ -517,42 +589,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
-        prompts = input_batch["prompts"]
-        env_classes = input_batch["env_classes"]
-        env_extras = input_batch["env_extras"]
-        trajectory_ids = input_batch.get("trajectory_ids")
-        sampling_params = input_batch.get("sampling_params")
-        max_tokens = self.trajectory_runner_cfg.sampling_params.max_generate_length
-        max_input_length = self.trajectory_runner_cfg.max_input_length
-
-        if self.batched:
-            if self.projection.step_wise:
-                raise ValueError("step-wise projection does not support batched generation")
-            return await self.generate_batched(
-                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
-            )
-
-        agent_loop = StepWiseRolloutCollector(self).agent_loop if self.projection.step_wise else self.agent_loop
-        tasks = [
-            agent_loop(
-                prompt,
-                env_class,
-                env_extra,
-                max_tokens,
-                max_input_length,
-                sampling_params=sampling_params,
-                trajectory_id=trajectory_ids[index] if trajectory_ids is not None else None,
-                global_step_fn=self.global_step_fn,
-            )
-            for index, (prompt, env_class, env_extra) in enumerate(zip(prompts, env_classes, env_extras))
-        ]
-        outputs = await tqdm.gather(
-            *tasks,
-            desc="Generating Trajectories",
-            miniters=max(1, len(tasks) / 10),
-            mininterval=5,
-            disable=disable_tqdm,
-        )
+        outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
         return self.projection.project(outputs, input_batch)
 
     # ----------------------------------------------------------------------------

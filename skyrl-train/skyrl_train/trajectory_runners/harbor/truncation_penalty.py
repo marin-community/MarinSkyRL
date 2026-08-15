@@ -1,7 +1,7 @@
 """Standalone truncation penalty logic.
 
-Extracted from ``terminal_bench_generator.py`` so it can be unit-tested without
-pulling in the full generator / skyrl_gym import chain.
+Extracted from ``harbor/runner.py`` so it can be unit-tested without
+pulling in the full runner / skyrl_gym import chain.
 
 The penalty keys on PER-TURN truncation (a single generation that hit
 ``max_generate_length``), not on trajectory-level ``stop_reason``.  The

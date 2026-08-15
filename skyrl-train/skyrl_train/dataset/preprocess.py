@@ -13,7 +13,7 @@ def _r3_tensor_capture_enabled() -> bool:
 
     When OFF (default) the collator's routed_experts branch is BYTE-IDENTICAL to the
     historical nested-``List[List[List[List[int]]]]`` + ``torch.tensor()`` path. When
-    ON the capture side (``generators/utils.py``) hands us per-sample ``np.int16``
+    ON the capture side (``trajectory_runners/trajectory_processing.py``) hands us per-sample ``np.int16``
     arrays (shipped by Ray out-of-band, zero-copy) and we collate by array
     ``stack``/pad instead of a GIL-held ``torch.tensor(list-of-1.5e9-ints)``. The
     resulting ``[B, resp_len, L, K]`` int16 tensor is bit-for-bit identical either

@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
-from skyrl_train.trajectory_runners.utils import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 
 
 def test_config_key_defaults_false():

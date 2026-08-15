@@ -5,19 +5,12 @@ The penalty keys on PER-TURN truncation: a single generation that hit
 almost never reached on real workloads.
 """
 
-import os
-import sys
-
 import pytest
 
-_EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
-if _EXAMPLES not in sys.path:
-    sys.path.insert(0, _EXAMPLES)
-
-from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation  # noqa: E402
+from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
 try:
-    from skyrl_train.trajectory_runners.harbor.configuration import REWARD_SHAPING_SCHEMA  # noqa: E402
+    from skyrl_train.trajectory_runners.harbor.configuration import REWARD_SHAPING_SCHEMA
 except ImportError:
     REWARD_SHAPING_SCHEMA = None
 

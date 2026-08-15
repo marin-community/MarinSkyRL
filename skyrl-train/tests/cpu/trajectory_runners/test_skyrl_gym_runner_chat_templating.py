@@ -13,9 +13,9 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.trajectory_runners.utils import get_custom_chat_template, normalize_token_ids
+from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.trajectory_runners.utils import CUSTOM_CHAT_TEMPLATES
+from skyrl_train.trajectory_runners.trajectory_processing import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
 from tests.cpu.trajectory_runners.chat_templating_test_constants import (
     QWEN2_5_EXPECTED_STR,
@@ -60,7 +60,6 @@ def _register_test_env_if_needed():
 
 def _build_runner(
     tokenizer,
-    model_name: str,
     chat_template_config,
     inference_engine_client,
     extra_overrides: Dict[str, Any] | None = None,
@@ -87,11 +86,10 @@ def _build_runner(
     env_cfg = default_cfg.environment.skyrl_gym
     env_cfg.max_env_workers = 0
     return SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=inference_engine_client,
         tokenizer=tokenizer,
-        model_name=model_name,
     )
 
 
@@ -130,7 +128,7 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
     Tests the behavior of chat templating for various models in multi-turn conversation.
 
     `tokenization_codepath` being `tito` means token-in-token-out, which is codepath 1 described in
-    `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
+    `skyrl_gym_runner.rst`. For Qwen3, we also test `generator.chat_template` being defined.
 
     We hardcode the expected string in the constants file, so it is easier to check. But we also double
     check that those expected strings are correct by applying the chat template on the expected chat history.
@@ -170,7 +168,7 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
     else:
         chat_template_config = {"source": "name", "name_or_path": None}
     # Create a mock generator config
-    runner = _build_runner(tokenizer, model_name, chat_template_config, mock_llm)
+    runner = _build_runner(tokenizer, chat_template_config, mock_llm)
 
     prompt, extras = _default_prompt_and_extras()
     input_batch: TrajectoryRequestBatch = _make_input_batch(prompt, extras)
@@ -338,7 +336,7 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
     It is used in scripts `examples/search/run_search_conversation_format.sh` and
     `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
     `tokenization_codepath` being `tito` means token-in-token-out, which is codepath 1 described in
-    `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
+    `skyrl_gym_runner.rst`. For Qwen3, we also test `generator.chat_template` being defined.
     """
     _register_test_env_if_needed()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -371,7 +369,7 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
             "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
             "append_eos_token_after_stop_str_in_multi_turn": append_flag,
         }
-        return _build_runner(tokenizer, model_name, chat_template_config, mock_llm, extra_overrides)
+        return _build_runner(tokenizer, chat_template_config, mock_llm, extra_overrides)
 
     prompt, extras = _default_prompt_and_extras()
     sp = {"stop": [stop_tag]}

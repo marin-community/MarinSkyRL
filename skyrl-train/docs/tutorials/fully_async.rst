@@ -1,11 +1,11 @@
 (Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout
 =========================================================================================
 
-SkyRL supports fully async training for any generator that implements the ``TrajectoryRunner``, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
+SkyRL supports fully async training for any ``TrajectoryRunner``, including an **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
 
 We treat "fully async training" synonymous to the terms **"in-flight weight update"** and **"multi-turn partial rollout"**, as discussed in works like AReal, PipelineRL, ScaleRL, etc.
 
-The core logic of fully async training lives in `fully_async_trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/fully_async_trainer.py>`_, a subclass of the synchronous trainer class in `trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/trainer.py>`_. This ``fully_async_trainer.py`` works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
+The core logic of fully async training lives in `fully_async_trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/fully_async_trainer.py>`_, a subclass of the synchronous trainer class in `trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/trainer.py>`_. It works with any trajectory runner without additional fully asynchronous integration code.
 
 .. figure:: images/skyrl_fully_async.png
    :alt: Systems Diagram of Fully Async Training in SkyRL
@@ -21,7 +21,7 @@ The core logic of fully async training lives in `fully_async_trainer.py <https:/
 
 .. note::
 
-    The fully async training is currently only supported for Generators that use ``/chat/completions``. We will support ``.generate()`` and ``/completions`` soon.
+    The fully async training is currently only supported for trajectory runners that use ``/chat/completions``. We will support ``/completions`` soon.
 
 I. What is Fully Async Training?
 ---------------------------------
@@ -148,7 +148,7 @@ The high-level control logics of fully async training in SkyRL are shown in the 
 
 There are 5 core components:
 
-1. K ``GenerationWorker``: workers that produce the trajectories. Each is simply an ``asyncio.Task`` that runs ``AnyGenerator.generate()``. K is ``trainer.fully_async.num_parallel_generation_workers``. ``AnyGenerator`` means that it works with any generator.
+1. K ``GenerationWorker``: workers that produce the trajectories. Each is simply an ``asyncio.Task`` that runs ``TrajectoryRunner.run()``. K is ``trainer.fully_async.num_parallel_generation_workers``. Any ``TrajectoryRunner`` implementation may be used.
 2. ``TrainingWorker``: simply a single thread that runs the training loop.
 3. ``GenerationOutputGroupBuffer``: a buffer that stores the generated groups of output.
 4. ``AsyncDataloader``: a thin wrapper of the dataloader, polled by the generation workers to get data.
@@ -163,15 +163,15 @@ is a set of ``generator.n_samples_per_prompt`` number of trajectories generated 
 1. K Generation Workers
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Generation workers are virtual workers, each is simply an ``asyncio.Task`` that runs ``generator.generate()``
-for a group of trajectories. There is only one ``generator`` instance (e.g. ``SkyRLGymTrajectoryRunner``) and one
+Generation workers are virtual workers, each is simply an ``asyncio.Task`` that runs ``trajectory_runner.run()``
+for a group of trajectories. There is only one trajectory runner (e.g. ``SkyRLGymTrajectoryRunner``) and one
 physical ``InferenceEngineClient`` in the back serving the actual LLM inference.
 
 Each generation worker runs the following steps in a while loop:
 
 1. Prefer a stale-group retry row, otherwise get one row from the ``AsyncDataloader``. After the dataloader is exhausted,
    wait for retries. Acquire generation capacity through ``AsyncStalenessManager`` before generating.
-2. Generate one group of trajectories. Can be single-turn or multi-turn, ``SkyRLGymTrajectoryRunner`` or your own generator.
+2. Collect one group of trajectories. It can use ``SkyRLGymTrajectoryRunner`` or another single-turn or multi-turn runner.
 3. Re-check the completed group's age. Enqueue it to ``GenerationOutputGroupBuffer`` if fresh, or enqueue its original
    row for regeneration if stale.
 4. Repeat from step 1 until the training worker finishes the epoch and cancels the generation tasks.
@@ -188,7 +188,7 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the ``AsyncDataloader``, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
-4. Make ``AnyGenerator`` (really the ``InferenceEngineClient`` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a ``/chat/completions`` generation, or interacting with the environment.
+4. Pause the model client (really the ``InferenceEngineClient`` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the runner is doing. It can either be in the middle of a ``/chat/completions`` generation, or interacting with the environment.
 5. Update the global step and hence the capacity controlled by the ``AsyncStalenessManager``, potentially unblocking
    generation workers stuck on step 1 -- as they can now generate new data that will not be as stale as before.
 6. Repeat from step 1 until the epoch is done.

@@ -1,4 +1,4 @@
-"""Harbor orchestrator compatibility shim for SkyRL's terminal-bench generator.
+"""Harbor orchestrator compatibility shim for SkyRL's Harbor runner.
 
 Harbor recently removed the ``harbor.orchestrators`` package entirely:
 
@@ -13,7 +13,7 @@ This shim exposes the legacy ``QueueOrchestrator`` and ``OrchestratorEvent``
 names so existing SkyRL callers keep working. On legacy Harbor it re-exports
 the originals; on unified Harbor it wraps ``TrialQueue`` to preserve the
 constructor signature, lifecycle methods, and the awaitable
-``submit_batch`` shape that ``terminal_bench_generator.py`` relies on.
+``submit_batch`` shape that ``harbor/runner.py`` relies on.
 
 Drop this file once we drop pre-unification Harbor support.
 """
@@ -72,7 +72,7 @@ if not _UNIFIED_HARBOR:
     from harbor.orchestrators.queue import QueueOrchestrator  # type: ignore[import-not-found]
 else:
     # Unified Harbor: wrap TrialQueue to preserve the legacy API surface
-    # that ``terminal_bench_generator.py`` relies on:
+    # that ``harbor/runner.py`` relies on:
     #
     #   - Constructor accepts ``trial_configs``, ``n_concurrent_trials``,
     #     ``metrics``, ``quiet``, ``retry_config`` (legacy names).
@@ -90,7 +90,7 @@ else:
     class QueueOrchestrator:
         """Legacy-API wrapper around ``harbor.trial.queue.TrialQueue``.
 
-        Exposes the surface that SkyRL's terminal-bench generator uses:
+        Exposes the surface that SkyRL's Harbor runner uses:
         ``__init__``, ``add_hook``, ``start``, ``shutdown``, ``submit_batch``.
 
         Ignores fields that no longer have a counterpart (``trial_configs``,
@@ -110,7 +110,7 @@ else:
             # ``trial_configs``, ``metrics``, ``quiet`` had meaning on legacy
             # QueueOrchestrator but have no counterpart on TrialQueue. SkyRL
             # passes them but always uses ``submit_batch`` for actual work
-            # (see ``terminal_bench_generator.py``), so dropping them is safe.
+            # (see ``harbor/runner.py``), so dropping them is safe.
             del trial_configs, metrics, quiet
             self._queue = TrialQueue(
                 n_concurrent=n_concurrent_trials,

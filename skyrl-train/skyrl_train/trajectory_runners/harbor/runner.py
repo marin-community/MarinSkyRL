@@ -11,7 +11,7 @@ import numpy as np
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
-from skyrl_train.trajectory_runners.utils import (
+from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
     get_rollout_metrics,
@@ -248,7 +248,7 @@ def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
 class HarborTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
-        generator_cfg: DictConfig,
+        trajectory_runner_cfg: DictConfig,
         terminal_bench_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
@@ -258,7 +258,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
+            trajectory_runner_cfg: trajectory-runner configuration
             terminal_bench_cfg: DictConfig object containing the terminal bench configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
@@ -272,7 +272,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 None = auto (default to ``rollout_logprobs_required``); True/False = force. The env var
                 ``SKYRL_TITO_FULL`` still wins over both. Default None.
         """
-        self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
+        self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
         # a controller-ingress endpoint it publishes the minted capability URL. The AGENT
         # (opencode, in a Daytona sandbox) must reach vLLM over the public internet at that
@@ -281,7 +281,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # (default/direct) => exactly f"{self.base_url}/v1" as before (byte-identical).
         # The verifier + re-tokenize/TIS paths keep using self.base_url.
         #
-        # SOURCE PRECEDENCE (cfg first, env fallback). This generator is constructed
+        # SOURCE PRECEDENCE (cfg first, env fallback). This runner is constructed
         # INSIDE a Ray task/actor (skyrl_entrypoint / RolloutCoordinator) that does NOT
         # inherit the run_rl driver's late HARBOR_MODEL_ENDPOINT env mutation (the runner
         # attaches to a Ray cluster started BEFORE the mint). run_rl therefore threads the
@@ -302,7 +302,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             )
         # Shared RecordProxy literal-log path, resolved cfg-FIRST then env-fallback for
         # the SAME Ray process-boundary reason as agent_api_base above: run_rl publishes
-        # it on os.environ['OTAGENT_LITERAL_LOG_PATH'] in the driver, but THIS generator
+        # it on os.environ['OTAGENT_LITERAL_LOG_PATH'] in the driver, but THIS runner
         # is constructed inside a Ray worker that never inherits that late env mutation,
         # so the driver threads it through the cfg as terminal_bench_config.literal_log_path.
         # None when record_literal is off / direct launch → the opencode correlation +
@@ -317,9 +317,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Incremental, trial-indexed reader over that shared log (owns its own lock +
         # typed cursor state). Read-only; the writer is the external harbor RecordProxy.
         self._literal_log_store = LiteralLogStore()
-        self.trajectory_runner_cfg = generator_cfg
+        self.trajectory_runner_cfg = trajectory_runner_cfg
         self.tokenizer = tokenizer
-        self.model_name = generator_cfg.model_name
+        self.model_name = trajectory_runner_cfg.model_name
         self._moe_router_replay = moe_router_replay
         # Full-TITO rollout assembly resolution inputs (see _tito_full_enabled):
         # env SKYRL_TITO_FULL wins; else explicit tito_full; else follow logprob consumption.
@@ -351,7 +351,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
 
         # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
-        # per-token shaping channel + span tagger. Default False -> the generator
+        # per-token shaping channel + span tagger. Default False -> the runner
         # emits neither field, so the TrajectoryBatch is byte-identical to today.
         self._enable_token_reward_channel = bool(self._reward_shaping_config.get("enable_token_reward_channel", False))
         self._enable_span_tagging = bool(self._reward_shaping_config.get("enable_span_tagging", True))
@@ -408,7 +408,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.get(
+        custom_chat_template_path = trajectory_runner_cfg.engine_init_kwargs.get(
             "custom_chat_template_chat_completion_path", None
         )
         if custom_chat_template_path:
@@ -457,7 +457,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             )
 
         # Shared QueueOrchestrator state (initialized in startup())
-        # This ensures all concurrent generate() calls share a single orchestrator
+        # This ensures all concurrent run() calls share a single orchestrator
         # with a global n_concurrent_trials limit, rather than each worker creating
         # its own orchestrator (which would multiply the concurrency limit)
         self._orchestrator: Optional[QueueOrchestrator] = None
@@ -539,13 +539,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         logger.info(f"Harbor logging level set to {level}")
 
     async def startup(self) -> None:
-        """Initialize shared QueueOrchestrator for all generate() calls.
+        """Initialize shared QueueOrchestrator for all run() calls.
 
         This creates a single orchestrator that enforces the n_concurrent_trials
-        limit globally across all async workers. Without this, each generate()
+        limit globally across all async workers. Without this, each run()
         call would create its own orchestrator, multiplying the concurrency limit.
 
-        Called once by the trainer before the first generate() call.
+        Called once by the trainer before the first run() call.
         """
         self._orchestrator_lock = asyncio.Lock()
         await self._create_orchestrator()
@@ -602,7 +602,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         """Restart the orchestrator after a failure.
 
         Uses locking to ensure only one restart happens at a time, even with
-        concurrent generate() calls. Other callers wait for the restart to complete.
+        concurrent run() calls. Other callers wait for the restart to complete.
 
         Returns:
             True if restart succeeded, False if max attempts exceeded.
@@ -647,7 +647,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
     async def shutdown(self) -> None:
         """Cleanup shared QueueOrchestrator.
 
-        Called once by the trainer after the last generate() call.
+        Called once by the trainer after the last run() call.
         Safe to call multiple times (idempotent).
         """
         if self._orchestrator_lock is None:
@@ -657,7 +657,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         async with self._orchestrator_lock:
             if self._orchestrator is not None and self._orchestrator_started:
                 # Mark as not started BEFORE shutdown to prevent race condition.
-                # This ensures concurrent generate() calls fail fast rather than
+                # This ensures concurrent run() calls fail fast rather than
                 # trying to submit to an orchestrator that's in the process of
                 # shutting down (which can take time with wait=True).
                 self._orchestrator_started = False
@@ -869,7 +869,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         This method includes restart logic to recover from orchestrator failures
         without killing the entire training job.
         """
-        # Record current global_step at the moment we enter generate(). Used as
+        # Record current global_step at the moment we enter run(). Used as
         # both a history checkpoint and the conservative fallback for
         # actual_global_step if no trial reports a started_at.
         self._record_step_time()
@@ -1002,7 +1002,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # out of run_shard it ALSO triggers `_pickle.PicklingError: Can't
             # pickle RayTaskError(TemplateError)` when Ray serializes the nested
             # exception back to the driver — turning a skippable per-trial error
-            # into a deterministic job kill. Catch it here, on the generator-worker
+            # into a deterministic job kill. Catch it here, on the trajectory-worker
             # side, BEFORE it can cross the Ray boundary: classify it (mask by
             # default — it's an infrastructure/serialization-class failure,
             # excluded from the RLOO-N baseline) and emit an error output, exactly
@@ -1308,7 +1308,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # actually-running, i.e. the first attempt to dispatch to vLLM.
         # Robust to vLLM fragility (no dependence on vLLM responses) and to
         # individual-trial failures (we take whatever started). Falls back to
-        # the global_step captured at generate() entry (worst case = same as
+        # the global_step captured at run() entry (worst case = same as
         # the pre-patch behavior).
         actual_global_step: Optional[int] = None
         earliest_started_ts: Optional[float] = None
@@ -1913,7 +1913,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # return a 3-tuple, and unpacking 4 here raised
         # `ValueError: not enough values to unpack (expected 4, got 3)` — which crashed the
         # RolloutCoordinator shard on the first completed 80B trial. The downstream batch
-        # collation (generators/utils.py concatenate_trajectory_batches) already tolerates
+        # collation (trajectory_runners/trajectory_processing.py concatenate_trajectory_batches) already tolerates
         # mixed presence/absence of rollout_routed_experts across trials via its
         # has_routed_experts any-check + sentinel fill, so leaving this trial's
         # rollout_routed_experts=None is safe.

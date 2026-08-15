@@ -153,11 +153,10 @@ async def run_generator_end_to_end(
     await inference_engine_client.wake_up()
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=inference_engine_client,
         tokenizer=tokenizer,
-        model_name=model,
     )
 
     input_batch: TrajectoryRequestBatch = get_test_trajectory_request(
@@ -230,7 +229,7 @@ async def run_generator_end_to_end(
 @pytest.mark.parametrize(
     ("use_async_engine", "batched", "n_samples_per_prompt", "num_inference_engines", "tensor_parallel_size"),
     [
-        (False, True, 5, 2, 1),  # tests SkyRLGymTrajectoryRunner.generate_batched for single-turn
+        (False, True, 5, 2, 1),  # tests SkyRLGymTrajectoryRunner.collect_batched for single-turn
         (True, False, 5, 1, 2),  # tests SkyRLGymTrajectoryRunner.agent_loop for single-turn
         # Add more combinations as needed
     ],

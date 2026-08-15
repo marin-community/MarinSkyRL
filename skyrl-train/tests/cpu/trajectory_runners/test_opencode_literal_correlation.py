@@ -1,4 +1,4 @@
-"""S5: opencode per-trial literal correlation in HarborTrajectoryRunner.
+"""opencode per-trial literal correlation in HarborTrajectoryRunner.
 
 opencode is a CLI agent that bypasses harbor Chat, so it returns EMPTY
 rollout_details even behind a co-located RecordProxy (which writes ONE shared
@@ -13,20 +13,14 @@ engine / config is needed.
 """
 
 import json
-import os
-import sys
 import types
 
 import pytest
 
-_EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "..", "examples")
-if _EXAMPLES not in sys.path:
-    sys.path.insert(0, _EXAMPLES)
-
-# The generator pulls in the harbor agentic-RL stack (absent under the CPU extra).
+# The runner pulls in the Harbor agentic-RL stack (absent under the CPU extra).
 try:
-    import skyrl_train.trajectory_runners.harbor.runner as terminal_bench_generator  # noqa: E402
-    from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner  # noqa: E402
+    import skyrl_train.trajectory_runners.harbor.runner as harbor_runner_module
+    from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
@@ -44,7 +38,7 @@ except ImportError:
 from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore  # noqa: E402
 
 _correlate = HarborTrajectoryRunner._maybe_correlate_opencode_rollout_details
-_select_chain = terminal_bench_generator._select_opencode_literal_chain
+_select_chain = harbor_runner_module._select_opencode_literal_chain
 
 
 def _attach_store(s):

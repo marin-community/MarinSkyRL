@@ -96,7 +96,7 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         generator.n_samples_per_prompt=5 \
         # this is used to set the max turns for the environment
         generator.max_turns=4 \
-        # multi-turn generation format - see `skyrl_train/generators/skyrl_gym_generator.py` for more details
+        # multi-turn generation format - see `skyrl_train/trajectory_runners/skyrl_gym.py` for more details
         generator.use_conversation_multi_turn=false \
         generator.sampling_params.temperature=1.0 \
         generator.sampling_params.top_p=1.0 \

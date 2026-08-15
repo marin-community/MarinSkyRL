@@ -4,11 +4,13 @@ import pytest
 
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryRunner, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
-    infer_stop_reason,
     parse_trajectory_reward_shaping_config,
     shape_trajectory_rewards,
 )
-from skyrl_train.trajectory_runners.utils import concatenate_trajectory_batches, get_metrics_from_trajectory_batch
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    get_metrics_from_trajectory_batch,
+)
 
 
 def _output(
@@ -295,15 +297,3 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
 def test_invalid_shaping_config_fails_before_generation(config, message):
     with pytest.raises(ValueError, match=message):
         parse_trajectory_reward_shaping_config(config)
-
-
-@pytest.mark.parametrize(
-    ("response_ids", "expected"),
-    [
-        ([1, 2, 99], "stop"),
-        ([1, 2, 3, 4], "length"),
-        ([1, 2], "stop"),
-    ],
-)
-def test_stop_reason_inference_distinguishes_eos_and_budget_exhaustion(response_ids, expected):
-    assert infer_stop_reason(response_ids, eos_token_id=99, max_generate_length=4) == expected

@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from skyrl_train.trajectory_runners.utils import (
+from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_routed_experts_from_rollout_details,
     align_routed_experts_with_lcs,
     get_response_ids_and_loss_mask_from_messages,

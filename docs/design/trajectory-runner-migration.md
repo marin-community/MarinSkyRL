@@ -84,7 +84,7 @@ Future harnesses can emit step-wise training samples by supplying the same step 
 `TrajectoryRunner.run()` retains the existing shared finalization order:
 
 1. run the harness;
-2. apply generator-independent trajectory reward shaping;
+2. apply runner-independent trajectory reward shaping;
 3. validate and report token/logprob alignment; and
 4. retain the normalized trajectory sample.
 

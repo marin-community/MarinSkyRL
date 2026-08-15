@@ -44,18 +44,18 @@ class BestOfNDistillationTrainer(DistillationTrainer):
         super().__init__(*args, **kwargs)
         self._best_indices: List[int] = []
 
-    def postprocess_generator_output(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
+    def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         """Override to select best-of-N completions after reward computation."""
         # First, run parent postprocessing (computes rewards, pass@N metrics, etc.)
-        generator_output = super().postprocess_generator_output(generator_output, uids)
+        trajectory_batch = super().postprocess_trajectory_batch(trajectory_batch, uids)
 
         N = self.cfg.generator.n_samples_per_prompt
         if N <= 1:
-            self._best_indices = list(range(len(generator_output["response_ids"])))
-            return generator_output
+            self._best_indices = list(range(len(trajectory_batch["response_ids"])))
+            return trajectory_batch
 
         # Get response-level rewards for selection
-        rewards = generator_output["rewards"]
+        rewards = trajectory_batch["rewards"]
         if isinstance(rewards[0], list):
             # Token-level rewards → sum to get response-level
             response_rewards = [sum(r) for r in rewards]
@@ -76,7 +76,7 @@ class BestOfNDistillationTrainer(DistillationTrainer):
             }
         )
 
-        # Filter generator_output to keep only best completions
+        # Filter the trajectory batch to keep only best completions
         for key in [
             "prompt_token_ids",
             "response_ids",
@@ -87,28 +87,28 @@ class BestOfNDistillationTrainer(DistillationTrainer):
             "is_last_step",
             "exclude_from_baseline",
         ]:
-            if key in generator_output and generator_output[key] is not None:
-                val = generator_output[key]
+            if key in trajectory_batch and trajectory_batch[key] is not None:
+                val = trajectory_batch[key]
                 if isinstance(val, list) and len(val) == len(response_rewards):
-                    generator_output[key] = [val[i] for i in self._best_indices]
+                    trajectory_batch[key] = [val[i] for i in self._best_indices]
 
         # Filter trajectory_ids if present
-        if generator_output.get("trajectory_ids") is not None:
-            tids = generator_output["trajectory_ids"]
+        if trajectory_batch.get("trajectory_ids") is not None:
+            tids = trajectory_batch["trajectory_ids"]
             if len(tids) == len(response_rewards):
-                generator_output["trajectory_ids"] = [tids[i] for i in self._best_indices]
+                trajectory_batch["trajectory_ids"] = [tids[i] for i in self._best_indices]
 
-        return generator_output
+        return trajectory_batch
 
-    def convert_to_training_input(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
         """Override to deduplicate UIDs after best-of-N selection."""
         N = self.cfg.generator.n_samples_per_prompt
         if N > 1 and self._best_indices:
             # Deduplicate UIDs: each prompt's N samples share the same UID,
-            # and we've already filtered generator_output to 1 per group
+            # and we've already filtered the trajectory batch to 1 per group
             filtered_uids = [uids[i] for i in self._best_indices]
-            return super().convert_to_training_input(generator_output, filtered_uids)
-        return super().convert_to_training_input(generator_output, uids)
+            return super().convert_to_training_input(trajectory_batch, filtered_uids)
+        return super().convert_to_training_input(trajectory_batch, uids)
 
 
 # SFT loss: simple negative log-likelihood on selected completions

@@ -21,9 +21,8 @@ from skyrl_train.trajectory_runners.base import (
     TrainingPhase,
 )
 from skyrl_train.inference_engines.base import ConversationType
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.trajectory_runners.utils import (
+from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
 )
@@ -50,7 +49,7 @@ def init_and_run(
     instance: dict,
     litellm_model_name: str,
     sweagent_config: dict,
-    generator_cfg: DictConfig,
+    trajectory_runner_cfg: DictConfig,
     data_source: str,
     sampling_params: dict,
     trajectory_id: TrajectoryID,
@@ -82,7 +81,7 @@ def init_and_run(
         extra_info = {"traceback": traceback.format_exc()}
     finally:
         # Create trajectory directory with proper structure: step_{global_step}/{train/eval}
-        path = Path(generator_cfg.miniswe_traj_dir) / f"step_{global_step}" / training_phase
+        path = Path(trajectory_runner_cfg.miniswe_traj_dir) / f"step_{global_step}" / training_phase
         path.mkdir(parents=True, exist_ok=True)
         # Use instance_id and repetition_id for meaningful filename: {instance_id}_{repetition_id}.json
         instance_id = instance["instance_id"]
@@ -119,22 +118,11 @@ def init_and_run(
 class MiniSweTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
-        generator_cfg: DictConfig,
-        skyrl_gym_cfg: DictConfig,
-        inference_engine_client: InferenceEngineClient,
+        trajectory_runner_cfg: DictConfig,
         tokenizer,
         model_name: str,
     ):
-        self.http_server_inference_engine_client_host = generator_cfg.get(
-            "http_server_inference_engine_client_host", "127.0.0.1"
-        )
-        self.http_server_inference_engine_client_port = generator_cfg.get(
-            "http_server_inference_engine_client_port", 8000
-        )
-        self.base_url = (
-            f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
-        )
-        self.trajectory_runner_cfg = generator_cfg
+        self.trajectory_runner_cfg = trajectory_runner_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.litellm_model_name = "openai/" + self.model_name

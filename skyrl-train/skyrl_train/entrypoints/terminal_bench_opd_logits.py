@@ -8,18 +8,15 @@ The teacher model is served via a separate vLLM engine (supports AWQ/GPTQ quanti
 and provides top-K log-probability distributions for student-generated sequences.
 """
 
-import signal
-import sys
-import torch
 import ray
 import hydra
 from loguru import logger
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import config_dir, create_teacher_inference_engines_from_config
-from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
-from skyrl_train.utils.loss_reduction import reduce_loss
+from skyrl_train.entrypoints.main_base import config_dir, create_teacher_inference_engines_from_config, run_ray_driver
+from skyrl_train.algorithms.on_policy_distillation import (
+    compute_importance_sampling_policy_loss as compute_importance_sampling_policy_loss,
+    compute_no_op_advantage as compute_no_op_advantage,
+)
 from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distillation_trainer import DistillationTrainer
 from skyrl_train.training_batch import TrainingInputBatch
@@ -51,21 +48,6 @@ class OnPolicyDistillationLogitsTerminalBenchTrainer(DistillationTrainer):
         self.all_metrics.update({"distill/token_kl_mean": kl_mean})
 
         return data
-
-
-# Register custom advantage estimator and policy loss for distillation
-@register_advantage_estimator("no_op")
-def compute_no_op_advantage(token_level_rewards: torch.Tensor, **kwargs):
-    return token_level_rewards, token_level_rewards
-
-
-@register_policy_loss("importance_sampling")
-def compute_importance_sampling_policy_loss(
-    log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None, **kwargs
-):
-    loss = -torch.exp(log_probs - old_log_probs) * advantages
-    loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
-    return loss, {}
 
 
 class OnPolicyDistillationLogitsTerminalBenchExp(TerminalBenchExp):
@@ -104,24 +86,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    validate_cfg(cfg)
-    initialize_ray(cfg)
-
-    def _sigterm_handler(signum, frame):
-        logger.warning("Received SIGTERM on head node, shutting down Ray...")
-        ray.shutdown()
-        sys.exit(1)
-
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-
-    try:
-        ray.get(skyrl_entrypoint.remote(cfg))
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-        raise
-    finally:
-        logger.info("Shutting down Ray on head node...")
-        ray.shutdown()
+    run_ray_driver(cfg, skyrl_entrypoint)
 
 
 if __name__ == "__main__":

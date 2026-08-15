@@ -11,7 +11,10 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
-from skyrl_train.trajectory_runners.utils import get_metrics_from_trajectory_batch, concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    get_metrics_from_trajectory_batch,
+    concatenate_trajectory_batches,
+)
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     REWARD_SHAPING_ROW_KEYS,
@@ -202,7 +205,7 @@ def sanitize_data_source(data_source: str) -> str:
 
 
 def calculate_per_dataset_metrics(
-    concat_trajectory_batches: TrajectoryBatch,
+    trajectory_batch: TrajectoryBatch,
     concat_uids: List[str],
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
@@ -223,9 +226,7 @@ def calculate_per_dataset_metrics(
     for data_source, indices in data_source_indices.items():
         # Extract subset for this data source
         subset_trajectory_batch = {
-            key: [value[i] for i in indices]
-            for key, value in concat_trajectory_batches.items()
-            if isinstance(value, list)
+            key: [value[i] for i in indices] for key, value in trajectory_batch.items() if isinstance(value, list)
         }
         subset_uids = [concat_uids[i] for i in indices]
 
@@ -243,7 +244,7 @@ def calculate_per_dataset_metrics(
 def dump_per_dataset_eval_results(
     dump_dir_path: Path,
     tokenizer: AutoTokenizer,
-    concat_trajectory_batches: TrajectoryBatch,
+    trajectory_batch: TrajectoryBatch,
     concat_data_sources: List[str],
     concat_all_envs: List[str],
     concat_env_extras: List[Dict[str, Any]],
@@ -252,8 +253,8 @@ def dump_per_dataset_eval_results(
     """Dump evaluation results per dataset and overall aggregated results."""
 
     # Prepare common data
-    input_prompts = [tokenizer.decode(prompt) for prompt in concat_trajectory_batches["prompt_token_ids"]]
-    output_responses = [tokenizer.decode(response) for response in concat_trajectory_batches["response_ids"]]
+    input_prompts = [tokenizer.decode(prompt) for prompt in trajectory_batch["prompt_token_ids"]]
+    output_responses = [tokenizer.decode(response) for response in trajectory_batch["response_ids"]]
 
     # Group indices by data source
     data_source_indices = {}
@@ -274,8 +275,8 @@ def dump_per_dataset_eval_results(
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    "score": concat_trajectory_batches["rewards"][i],
-                    "stop_reason": concat_trajectory_batches.get("stop_reasons", [None] * len(input_prompts))[i],
+                    "score": trajectory_batch["rewards"][i],
+                    "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
@@ -297,7 +298,7 @@ class DynamicSamplingState(TypedDict, total=False):
 
     Fields:
         sample_batch_count: Counter for the number of sample batches processed
-        collected_trajectory_batch: Accumulated generator output (filter strategy only)
+        collected_trajectory_batch: Accumulated trajectory batch (filter strategy only)
         collected_uids: Accumulated UIDs (filter strategy only)
         num_prompts_in_batch: Number of prompts collected so far (filter strategy only)
     """
@@ -321,7 +322,7 @@ def handle_dynamic_sampling(
     replace (used in POLARIS, WebSailor) - replace bad (std == 0) samples with good (std > 0) samples
 
     Args:
-        trajectory_batch: Current batch generator output
+        trajectory_batch: Current trajectory batch
         uids: Current batch UIDs
         sampling_config: Configuration dict with sampling parameters
         collected_state: State for accumulating data across batches (for filter strategy)
@@ -341,7 +342,7 @@ def handle_dynamic_sampling(
         )
         return processed_output, processed_uids, keep_sampling, collected_state
     elif sampling_type == "filter":
-        # For filter strategies, accumulate the generator output and UIDs across batches in collected_state if we are sampling repeatedly.
+        # For filter strategies, accumulate trajectory batches and UIDs across repeated samples.
         return handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state)
     else:
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
@@ -356,7 +357,7 @@ def handle_replace_sampling(
     Reference: https://github.com/ChenxinAn-fdu/POLARIS/blob/8c82adb16b8e45c1a34f6d0e23e35deb66dd1ae7/verl/verl/trainer/ppo/ray_trainer.py#L995-L1022.
 
     Args:
-        trajectory_batch: Current batch generator output
+        trajectory_batch: Current trajectory batch
         uids: Current batch UIDs
         sampling_config: Configuration dict with sampling parameters
     Returns:
@@ -457,7 +458,7 @@ def handle_filter_sampling(
     Handle filter-based sampling strategy (like DAPO).
 
     Args:
-        trajectory_batch: Current batch generator output
+        trajectory_batch: Current trajectory batch
         uids: Current batch UIDs
         sampling_config: Configuration dict with sampling parameters
         collected_state: State for accumulating data across batches
@@ -495,7 +496,7 @@ def handle_filter_sampling(
         if traj_uid in kept_uids_set:
             kept_traj_idxs.append(idx)
 
-    # Apply filtering to generator output
+    # Apply filtering to the trajectory batch.
     filtered_output = filter_trajectory_batch(trajectory_batch, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
 
@@ -584,7 +585,7 @@ def filter_trajectory_batch(output: TrajectoryBatch, kept_indices: List[int]) ->
 
 
 def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch):
-    """Validate the generator output.
+    """Validate the trajectory batch.
 
     Args:
         num_prompts: Number of input prompts used to produce this output.
@@ -610,7 +611,7 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
             "rollout_logprobs",
         ]:
             assert len(trajectory_batch[key]) == len(trajectory_batch["response_ids"]), (
-                f"Generator output {key} length must be equal to response_ids length, got {len(trajectory_batch[key])} and {len(trajectory_batch['response_ids'])}"
+                f"Trajectory batch {key} length must equal response_ids length, got {len(trajectory_batch[key])} and {len(trajectory_batch['response_ids'])}"
             )
 
     # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)

@@ -18,16 +18,16 @@ class DAPOTrainer(RayPPOTrainer):
     """
     Custom trainer for DAPO.
 
-    Overrides the postprocess_generator_output method to additionally apply soft overlong punishment to rewards.
+    Overrides the postprocess_trajectory_batch method to additionally apply soft overlong punishment to rewards.
     """
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
+    def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         """
-        Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
+        Overrides the postprocess_trajectory_batch method to additionally apply DAPO specific soft overlong punishment to rewards.
 
         Args:
-            generator_output: TrajectoryBatch
+            trajectory_batch: TrajectoryBatch
             uids: List[str]
 
         Returns:
@@ -36,8 +36,8 @@ class DAPOTrainer(RayPPOTrainer):
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
         # modify rewards here
-        response_ids = generator_output["response_ids"]
-        rewards = generator_output["rewards"]
+        response_ids = trajectory_batch["response_ids"]
+        rewards = trajectory_batch["rewards"]
 
         assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
 
@@ -63,10 +63,10 @@ class DAPOTrainer(RayPPOTrainer):
                 # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
                 rewards[i] = 0.0
 
-        generator_output["rewards"] = rewards
+        trajectory_batch["rewards"] = rewards
 
         # use base class impl for metrics and per-token reward conversion
-        return super().postprocess_generator_output(generator_output, uids)
+        return super().postprocess_trajectory_batch(trajectory_batch, uids)
 
 
 class DAPOExp(BasePPOExp):

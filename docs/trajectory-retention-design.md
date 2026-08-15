@@ -4,7 +4,7 @@ MarinSkyRL retains a bounded sample of normalized training trajectories for debu
 
 ## Ownership and lifecycle
 
-The trainer driver owns one `TrajectorySink` and binds it to the selected generator. The sink runs on the driver rather than Ray workers so one ledger governs the entire run. Writes run in a thread to avoid blocking the trainer event loop.
+The trainer driver owns one `TrajectorySink` and binds it to the selected trajectory runner. The sink runs on the driver rather than Ray workers so one ledger governs the entire run. Writes run in a thread to avoid blocking the trainer event loop.
 
 Each record combines the normalized `TrajectoryRequestBatch` and `TrajectoryBatch`:
 
@@ -13,7 +13,7 @@ Each record combines the normalized `TrajectoryRequestBatch` and `TrajectoryBatc
 - response text, token IDs, loss mask, trainable spans, step boundaries, stop reason, and loop spans;
 - raw outcome reward, shaped reward, and shaping components;
 - rollout metrics;
-- generator, inference backend, model, checkpoint, model step, sampling parameters, and shaping schema provenance.
+- runner, inference backend, model, checkpoint, model step, sampling parameters, and shaping schema provenance.
 
 StepWise rows with the same trajectory ID become one record. Explicit row and token boundaries preserve the individual generation steps.
 

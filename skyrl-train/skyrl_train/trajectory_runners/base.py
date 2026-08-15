@@ -1,26 +1,16 @@
 from abc import ABC, abstractmethod
 from types import MappingProxyType
 from skyrl_train.trajectory_runners.types import (
-    BatchMetadata,
-    ConversationType,
-    TrajectoryRequestBatch,
-    TrajectoryBatch,
-    TrajectoryID,
-    TrainingPhase,
+    BatchMetadata as BatchMetadata,
+    ConversationType as ConversationType,
+    TrajectoryBatch as TrajectoryBatch,
+    TrajectoryID as TrajectoryID,
+    TrajectoryRequestBatch as TrajectoryRequestBatch,
+    TrainingPhase as TrainingPhase,
+    TIS_ALIGNED_TOKENS_METRIC,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
-
-
-__all__ = [
-    "BatchMetadata",
-    "ConversationType",
-    "TrajectoryRequestBatch",
-    "TrajectoryRunner",
-    "TrajectoryBatch",
-    "TrajectoryID",
-    "TrainingPhase",
-]
 
 
 class TrajectoryRunner(ABC):
@@ -65,6 +55,12 @@ class TrajectoryRunner(ABC):
         sink.bind_runner(type(self).__name__)
         self.trajectory_sink = sink
 
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
+        """Start an evaluation-scoped resource session when a runner needs one."""
+
+    async def stop_eval_session(self) -> None:
+        """Stop resources created for the current evaluation session."""
+
     @abstractmethod
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Produce trajectories before shared output finalization."""
@@ -76,7 +72,7 @@ class TrajectoryRunner(ABC):
 
         A runner that returns rollout logprobs promises they are position-aligned
         with its response IDs. That direct token-in/token-out path is exact by
-        construction. Generators that reconstruct token streams can publish richer
+        construction. Runners that reconstruct token streams can publish richer
         exact/LCS/failure metrics themselves; those observations take precedence.
         """
         rollout_logprobs = output.get("rollout_logprobs")
@@ -84,7 +80,7 @@ class TrajectoryRunner(ABC):
             return
 
         rollout_metrics = output.get("rollout_metrics") or {}
-        if "generate/tis/aligned_tokens" in rollout_metrics:
+        if TIS_ALIGNED_TOKENS_METRIC in rollout_metrics:
             return
 
         response_ids = output["response_ids"]
@@ -100,7 +96,7 @@ class TrajectoryRunner(ABC):
 
         rollout_metrics.update(
             {
-                "generate/tis/aligned_tokens": float(aligned_tokens),
+                TIS_ALIGNED_TOKENS_METRIC: float(aligned_tokens),
                 "generate/tis/exact_match_fraction": 1.0 if aligned_tokens else 0.0,
                 "generate/tis/lcs_fallback_fraction": 0.0,
                 "generate/tis/unaligned_fraction": 0.0,
@@ -114,7 +110,7 @@ class TrajectoryRunner(ABC):
     async def startup(self) -> None:
         """Initialize async resources before training begins.
 
-        Called once after __init__ but before the first generate() call.
+        Called once after __init__ but before the first run() call.
         Override to initialize resources like orchestrators, connections, etc.
 
         Default implementation does nothing (for backwards compatibility).
@@ -124,7 +120,7 @@ class TrajectoryRunner(ABC):
     async def shutdown(self) -> None:
         """Cleanup async resources after training ends.
 
-        Called once after the last generate() call.
+        Called once after the last run() call.
         Override to cleanup resources like orchestrators, connections, etc.
         Should be idempotent (safe to call multiple times).
 

@@ -11,7 +11,7 @@ Overview
 
 ``SkyRLGymTrajectoryRunner`` is an implementation of the ``TrajectoryRunner``, where we use SkyRL Gym for
 the environment of the rollouts. If you would like to use other environments, you can write your
-own Generator by extending ``TrajectoryRunner``.
+own trajectory runner by extending ``TrajectoryRunner``.
 
 A ``SkyRLGymTrajectoryRunner`` uses an ``InferenceEngineClient`` like an LLM endpoint to generate response,
 ultimately returning ``TrajectoryBatch`` (including ``response_ids`` and ``loss_masks``) to
@@ -20,13 +20,13 @@ the training loop for updating the model.
 ``SkyRLGymTrajectoryRunner`` is implemented to enforce token-in-token-out (TI/TO) in most cases. To see
 what TI/TO is and why it is important, please refer to `issue #123 <https://github.com/NovaSky-AI/SkyRL/issues/123>`_.
 
-To implement ``TrajectoryRunner.generate()``, ``SkyRLGymTrajectoryRunner`` implements ``generate_batched()``
+To implement ``TrajectoryRunner.run()``, ``SkyRLGymTrajectoryRunner`` implements ``collect_batched()``
 for single-turn generation, and ``agent_loop()`` for multi-turn generation.
 
 Single-turn generation
 ----------------------
 
-``SkyRLGymTrajectoryRunner.generate_batched()`` is used when ``config.generator.batched`` is set to ``True``.
+``SkyRLGymTrajectoryRunner.collect_batched()`` is used when ``config.generator.batched`` is set to ``True``.
 In this case, only a single assistant message is generated for each prompt. It is used for tasks
 such as math problems, where the model is expected to generate a single response without interacting
 with the environment. We pass a list of prompts to each invocation of the underlying LLM engine's

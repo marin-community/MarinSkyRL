@@ -1,7 +1,7 @@
 import pytest
 
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryRunner, TrajectoryBatch
-from skyrl_train.trajectory_runners.utils import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 
 
 class _AlignedRunner(TrajectoryRunner):

@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from skyrl_train.trajectory_runners.base import BatchMetadata, TrajectoryRequestBatch, TrajectoryRunner, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.base import (
+    BatchMetadata,
+    TrajectoryRequestBatch,
+    TrajectoryRunner,
+    TrajectoryBatch,
+    TrajectoryID,
+)
 from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
     build_trajectory_records,
@@ -151,7 +157,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
 
 
 @pytest.mark.asyncio
-async def test_generator_interface_finalization_invokes_the_shared_sink(tmp_path):
+async def test_trajectory_runner_finalization_invokes_the_shared_sink(tmp_path):
     generator = _NormalizedRunner()
     generator.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
 

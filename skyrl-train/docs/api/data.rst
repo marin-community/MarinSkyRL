@@ -30,8 +30,8 @@ Our interface for training data is modelled after `DataProto <https://verl.readt
    :show-inheritance:
 
 
-Generator APIs
---------------
+Trajectory runner APIs
+----------------------
 
 .. autoclass:: skyrl_train.trajectory_runners.TrajectoryRequestBatch
    :members:

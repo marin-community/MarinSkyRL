@@ -10,8 +10,9 @@ from omegaconf import open_dict
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
-from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
-from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector, clamp_generation_tokens
+from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
+from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
+from skyrl_train.trajectory_runners.step_wise import clamp_generation_tokens
 
 
 class _RecordingInferenceEngine:
@@ -66,8 +67,7 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
         MagicMock(max_env_workers=0),
         engine,
         tokenizer,
-        "test-model",
-        projection=StepWiseTrajectoryProjection(cfg, tokenizer),
+        pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
     )
     generator = StepWiseRolloutCollector(runner)
 

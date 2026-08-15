@@ -3,6 +3,7 @@ Main entrypoint for training.
 """
 
 from ray.util.placement_group import placement_group, PlacementGroup
+from ray.remote_function import RemoteFunction
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from skyrl_train.dataset import PromptDataset
@@ -21,6 +22,9 @@ from skyrl_train.utils.utils import (
 )
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
+from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
+from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
 import ray
@@ -342,18 +346,18 @@ class BasePPOExp:
         Returns:
             TrajectoryRunner: The runner.
         """
-        from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
-        from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
-
+        pipeline = None
+        if cfg.trainer.step_wise_training:
+            pipeline = TrajectoryPipeline(
+                StepWiseRolloutCollector,
+                StepWiseTrajectoryProjection(cfg.generator, tokenizer),
+            )
         return SkyRLGymTrajectoryRunner(
-            generator_cfg=cfg.generator,
+            trajectory_runner_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
-            model_name=cfg.trainer.policy.model.path,
-            projection=(
-                StepWiseTrajectoryProjection(cfg.generator, tokenizer) if cfg.trainer.step_wise_training else None
-            ),
+            pipeline=pipeline,
         )
 
     def get_trainer(
@@ -469,7 +473,7 @@ class BasePPOExp:
         # sandbox-teardown socket churn (uv__epoll_ctl_prep AND uv__io_poll asserts;
         # present across libuv 1.45-1.49+). Reset the policy in this shared
         # BasePPOExp._run() path, which every training entrypoint funnels through
-        # (main_base.skyrl_entrypoint, examples.terminal_bench.main_tbench's
+        # (main_base.skyrl_entrypoint, skyrl_train.entrypoints.terminal_bench's
         # TerminalBenchExp(BasePPOExp) which does NOT override run(), etc.) -- and
         # it runs immediately before the asyncio.run() below creates the loop, so
         # both asyncio.run() calls build a stock SelectorEventLoop with no libuv
@@ -522,9 +526,8 @@ def skyrl_entrypoint(cfg: DictConfig):
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    # validate the arguments
+def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_message: str = "Training failed") -> None:
+    """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
     validate_cfg(cfg)
 
     # Set FP8 fuse_weights env vars from config (must happen before Ray init
@@ -547,13 +550,18 @@ def main(cfg: DictConfig) -> None:
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
         try:
-            ray.get(skyrl_entrypoint.remote(cfg))
+            ray.get(entrypoint.remote(cfg))
         except Exception as e:
-            log_exception_as_text("Training failed", e)
+            log_exception_as_text(failure_message, e)
             raise
         finally:
             logger.info("Shutting down Ray on head node...")
             ray.shutdown()
+
+
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    run_ray_driver(cfg, skyrl_entrypoint)
 
 
 if __name__ == "__main__":

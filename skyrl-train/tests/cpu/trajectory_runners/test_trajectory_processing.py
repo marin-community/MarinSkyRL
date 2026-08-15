@@ -1,11 +1,11 @@
 """
-uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_utils.py
+uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_trajectory_processing.py
 """
 
 import pytest
 from types import SimpleNamespace
 
-from skyrl_train.trajectory_runners.utils import (
+from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
     concatenate_trajectory_batches,
     minimum_captured_global_step,
@@ -614,7 +614,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         RECORD the failure in AlignmentStats so it surfaces as
         tis/alignment_fail_count instead of silently degrading or hard-crashing.
         """
-        from skyrl_train.trajectory_runners.utils import AlignmentStats
+        from skyrl_train.trajectory_runners.trajectory_processing import AlignmentStats
 
         messages = [
             {"role": "assistant", "content": "Hello"},
@@ -637,7 +637,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
     def test_logprobs_count_mismatch_degrades_and_reports(self, qwen_tokenizer):
         """Count mismatch with no token ids/strings: degrade + record, do not crash."""
-        from skyrl_train.trajectory_runners.utils import AlignmentStats
+        from skyrl_train.trajectory_runners.trajectory_processing import AlignmentStats
 
         messages = [{"role": "assistant", "content": "Hello"}]
         # Provide wrong number of logprobs, no token ids/strings for fallback.

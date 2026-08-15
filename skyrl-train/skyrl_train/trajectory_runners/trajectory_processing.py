@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
 from collections import defaultdict
 import numpy as np
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.trajectory_runners.types import TIS_ALIGNED_TOKENS_METRIC
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward, refresh_trajectory_reward_shaping_metrics
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
@@ -658,7 +659,7 @@ def concatenate_trajectory_batches(
     saw_tis = False
     for output in trajectory_batches:
         rm = output.get("rollout_metrics") or {}
-        n = rm.get("generate/tis/aligned_tokens")
+        n = rm.get(TIS_ALIGNED_TOKENS_METRIC)
         if n is None:
             continue
         saw_tis = True
@@ -670,7 +671,7 @@ def concatenate_trajectory_batches(
         sum_lcs_msgs += rm.get("generate/tis/lcs_fallback_messages", 0.0)
     if saw_tis:
         denom = max(total_aligned, 1.0)
-        rollout_metrics["generate/tis/aligned_tokens"] = total_aligned
+        rollout_metrics[TIS_ALIGNED_TOKENS_METRIC] = total_aligned
         rollout_metrics["generate/tis/exact_match_fraction"] = sum_exact / denom
         rollout_metrics["generate/tis/lcs_fallback_fraction"] = sum_lcs / denom
         rollout_metrics["generate/tis/unaligned_fraction"] = sum_unaligned / denom

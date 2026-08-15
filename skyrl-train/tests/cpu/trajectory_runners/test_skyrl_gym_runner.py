@@ -9,7 +9,10 @@ import numpy as np
 
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
-from skyrl_train.trajectory_runners.utils import concatenate_trajectory_batches, get_metrics_from_trajectory_batch
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    get_metrics_from_trajectory_batch,
+)
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_train.config.utils import get_default_config
 
@@ -269,11 +272,10 @@ async def test_agent_loop_single_turn(
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -304,11 +306,10 @@ async def test_generate_non_batched_preserves_rollout_logprobs(
     mock_env.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     output = await generator.run(
         {
@@ -359,11 +360,10 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     ]
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []
     output = await generator.run(
@@ -412,11 +412,10 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
     ]
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     output = await generator.run(
         {
@@ -447,11 +446,10 @@ async def test_non_batched_postprocessed_action_discards_stale_logprobs(
     )
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     output = await generator.run(
         {
@@ -483,11 +481,10 @@ async def test_non_batched_postprocessed_action_preserves_aligned_logprobs(
     mock_tokenizer.encode.return_value = MOCK_LLM_OUTPUT_IDS
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     output = await generator.run(
         {
@@ -522,11 +519,10 @@ async def test_agent_loop_initial_prompt_over_budget_returns_empty_rollout(
     mock_tokenizer.apply_chat_template.side_effect = lambda *_args, **_kwargs: [1, 2, 3, 4, 5]
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     if retokenize_chat_history:
         generator.custom_chat_template = "<custom>"
@@ -555,11 +551,10 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -712,11 +707,10 @@ async def test_generate_interface_compliance(
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -835,11 +829,10 @@ async def test_length_limit_exceeded_during_conversation(
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -925,11 +918,10 @@ async def test_multi_turn_response_truncation(
     expected_final_response_tokens = 38
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -1007,11 +999,10 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
     mock_tokenizer.encode.side_effect = mock_encode
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -1071,11 +1062,10 @@ async def test_apply_overlong_filtering_non_batched(
     mock_tokenizer.eos_token_id = 4  # Set EOS token ID
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -1192,11 +1182,10 @@ async def test_apply_overlong_filtering_batched(
     mock_tokenizer.eos_token_id = 4  # Set EOS token ID
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=generator_cfg,
+        trajectory_runner_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -1289,11 +1278,10 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=cfg,
+        trajectory_runner_cfg=cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
 
     # Run agent loop
@@ -1305,7 +1293,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     assert len(out.response_ids) == 8
     # Indices: 2 (end of step1 assistant), 6 (end of step2 assistant), 7 (manually appended eos token)
     # Note that the last reward is placed at the 7 instead of at 6 since we manually move
-    # it using the flag `appended_eos_token` in skyrl_gym_generator.py
+    # it using the flag `appended_eos_token` in trajectory_runners/skyrl_gym.py
     expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 1.7]
     assert isinstance(out.reward, list)
     assert out.reward == expected_rewards
@@ -1377,11 +1365,10 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_env_cfg.env_class = "mt_env"
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=cfg,
+        trajectory_runner_cfg=cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     # Ensure base_conversation_token_ids doesn't shift observation slicing in test
     generator.base_conversation_token_ids = []
@@ -1466,11 +1453,10 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     }
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=cfg,
+        trajectory_runner_cfg=cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="Qwen/Qwen3-0.6B",  # ensures custom_chat_template is truthy in get_custom_chat_template
     )
     # Force retokenize path regardless of model resolution logic if needed
     generator.custom_chat_template = "<custom>"
@@ -1551,11 +1537,10 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymTrajectoryRunner(
-        generator_cfg=cfg,
+        trajectory_runner_cfg=cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
 
     prompt = [{"role": "user", "content": "Q?"}]
@@ -1569,7 +1554,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
 
     # Step1 end index relative should be 4 (0-based) - reward placed at EOS token
     # NOTE(Dev): Because we manually append the eos token to the response, the reward is placed at the last token;
-    # See Charlie's comment in skyrl_gym_generator.py for more details.
+    # See the reward-placement comment in trajectory_runners/skyrl_gym.py for details.
 
     assert out.reward[4] == 2.0
     assert sum(out.reward) == 2.0

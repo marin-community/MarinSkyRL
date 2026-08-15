@@ -291,7 +291,7 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         "loop_shaping": FieldMapping("loop_shaping", default=None),
         "loop_outcome_shaper": FieldMapping("loop_outcome_shaper", default=None),
         # Loop-behavior reward shaping (Stage B / F5 + F4): the master gate for the
-        # per-token shaping channel + span tagger. Default False -> the generator
+        # per-token shaping channel + span tagger. Default False -> the runner
         # emits NEITHER token_level_shaping NOR response_span_tags, so the
         # TrajectoryBatch is byte-identical to today. When True, Stage B emits the
         # channel as ZEROS (no-op) plus the span tags; Stages C/D fill the channel.
@@ -680,7 +680,7 @@ class HarborConfigBuilder:
 
     def get_reward_shaping_config(self) -> Dict[str, Any]:
         """
-        Get reward shaping configuration for terminal bench generator.
+        Get reward shaping configuration for the Terminal-Bench runner.
 
         Returns:
             Dict with keys:

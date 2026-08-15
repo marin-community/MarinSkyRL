@@ -1,4 +1,4 @@
-"""CPU test for `normalize_token_ids` in the terminal_bench generator.
+"""CPU test for `normalize_token_ids` in the Terminal-Bench runner.
 
 Regression test for the 80B Qwen3-Next production RL crash (job 631790): the
 agentic terminal_bench prompt-assembly site fed a non-flat-list shape into the
@@ -14,19 +14,15 @@ so element 0 was the string 'input_ids'). The fix normalizes the
 the ids are still present.
 
 Run:
-    uv run --isolated --group dev --extra cpu pytest tests/cpu/trajectory_runners/testnormalize_token_ids.py
+    uv run --isolated --group dev --extra cpu pytest tests/cpu/trajectory_runners/test_normalize_token_ids.py
 """
+
+from unittest.mock import MagicMock
 
 import pytest
 
-# The terminal_bench generator imports harbor, which is an optional integration and is
-# not part of skyrl-train's dependency set.
-pytest.importorskip("harbor")
-
-from skyrl_train.trajectory_runners.utils import normalize_token_ids
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
-
-from unittest.mock import MagicMock
+from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
 
 
 def test_flat_list_passthrough():
