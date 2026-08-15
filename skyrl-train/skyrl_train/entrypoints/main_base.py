@@ -30,7 +30,7 @@ import signal
 import sys
 import hydra
 from loguru import logger
-from skyrl_train.entrypoints.ray_lifecycle import shutdown_ray
+from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
@@ -562,6 +562,8 @@ def main(cfg: DictConfig) -> None:
         finally:
             logger.info("Shutting down Ray on head node...")
             shutdown_ray()
+
+    exit_without_ray_destructors()
 
 
 if __name__ == "__main__":

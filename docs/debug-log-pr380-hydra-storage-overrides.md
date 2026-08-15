@@ -69,8 +69,12 @@ bounded `ray stop --force` teardown.
 
 ## Results
 
-The ownership and local-cluster fallback regressions pass. Live verification is
-pending on the next Qwen3-0.6B GSM8K smoke.
+The ownership and local-cluster fallback regressions pass. The next live smoke
+returned from the training loop immediately, but Python then entered Ray's C++
+global destructors and aborted with `corrupted size vs. prev_size`. The attached
+driver now closes process telemetry and flushes logs before exiting without
+running those process-global destructors; the task runtime remains responsible
+for stopping the cluster.
 
 ## Future work
 

@@ -1,5 +1,6 @@
 import atexit
 import os
+import sys
 
 import ray
 from loguru import logger
@@ -13,3 +14,15 @@ def shutdown_ray() -> None:
 
     atexit.unregister(ray.shutdown)
     logger.info(f"Leaving Ray cluster teardown to {owner}")
+
+
+def exit_without_ray_destructors() -> None:
+    owner = os.environ.get("SKYRL_RAY_CLUSTER_OWNER")
+    if not owner:
+        return
+
+    logger.info(f"Exiting after handing Ray cluster teardown to {owner}")
+    logger.complete()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
