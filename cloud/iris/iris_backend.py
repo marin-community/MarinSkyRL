@@ -380,9 +380,12 @@ class IrisBackend:
                 model_source_identity=request.model.identity,
                 policy_num_nodes=request.topology.role_plan.policy_num_nodes,
                 policy_num_gpus_per_node=request.topology.role_plan.policy_num_gpus_per_node,
-                cluster=execution.target_cluster or execution.cluster,
+                cluster=execution.cluster,
                 priority=execution.priority,
                 job_name=execution.job_name,
+                cluster_config=execution.cluster_config,
+                target_cluster=execution.target_cluster,
+                parent_cluster_config=execution.parent_cluster_config,
             )
         )
 
@@ -2665,9 +2668,12 @@ def export_terminal_policy(args: argparse.Namespace) -> None:
             model_source_identity=args.model_source_identity,
             policy_num_nodes=policy_num_nodes,
             policy_num_gpus_per_node=policy_num_gpus_per_node,
-            cluster=args.target_cluster or args.cluster,
+            cluster=args.cluster,
             priority=args.priority,
             job_name=args.job_name,
+            cluster_config=args.cluster_config,
+            target_cluster=args.target_cluster,
+            parent_cluster_config=args.parent_cluster_config,
         )
     )
 

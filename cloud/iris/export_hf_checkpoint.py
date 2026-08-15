@@ -77,6 +77,9 @@ class ExportJobSpec:
     job_name: str | None
     timeout: int
     no_wait: bool
+    cluster_config: str | None = None
+    target_cluster: str | None = None
+    parent_cluster_config: str | None = None
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -107,8 +110,6 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         str(request.gpus_per_node),
         "--cluster",
         spec.cluster,
-        "--target-cluster",
-        spec.cluster,
         "--entrypoint",
         CHECKPOINT_EXPORT_ENTRYPOINT,
         "--priority",
@@ -119,6 +120,12 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         "--timeout",
         str(spec.timeout),
     ]
+    if spec.cluster_config:
+        cmd += ["--cluster-config", spec.cluster_config]
+    if spec.target_cluster:
+        cmd += ["--target-cluster", spec.target_cluster]
+    if spec.parent_cluster_config:
+        cmd += ["--parent-cluster-config", spec.parent_cluster_config]
     cmd.extend(model_source_cli_args(request.model_source_uri, request.model_source_identity))
     if spec.no_wait:
         cmd.append("--no-wait")
@@ -139,6 +146,9 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--model-source-uri", help="object-store model source for a task-local --model_path")
     ap.add_argument("--model-source-identity", help="immutable identity for --model-source-uri")
     ap.add_argument("--cluster", default="cw-rno2a")
+    ap.add_argument("--cluster-config")
+    ap.add_argument("--target-cluster")
+    ap.add_argument("--parent-cluster-config")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--priority", default="batch")
@@ -204,6 +214,9 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         job_name=args.job_name,
         timeout=args.timeout,
         no_wait=no_wait,
+        cluster_config=args.cluster_config,
+        target_cluster=args.target_cluster,
+        parent_cluster_config=args.parent_cluster_config,
     )
 
 

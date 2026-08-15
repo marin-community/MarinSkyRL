@@ -22,11 +22,44 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
         job_name="run-export-step-1",
         timeout=7200,
         no_wait=False,
+        cluster_config="/tmp/cw-rno2a.yaml",
     )
 
     command = build_command(spec)
     encoded = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
     overrides = parse_hydra_overrides(encoded)
 
+    assert command[command.index("--cluster-config") + 1] == spec.cluster_config
+    assert "--target-cluster" not in command
     assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
     assert overrides["checkpoint_export.export_root"] == request.export_path
+
+
+def test_export_command_preserves_federated_submission_configs() -> None:
+    request = HFExportRequest(
+        step=1,
+        checkpoint_base_path="s3://example/run/checkpoints",
+        checkpoint_path="s3://example/run/checkpoints/global_step_1",
+        export_path="s3://example/run/exports",
+        model_path="Qwen/Qwen3-0.6B",
+        num_nodes=1,
+        gpus_per_node=8,
+    )
+    spec = ExportJobSpec(
+        request=request,
+        rl_config="config.yaml",
+        cluster="cw-rno2a",
+        priority="batch",
+        job_name="run-export-step-1",
+        timeout=7200,
+        no_wait=False,
+        cluster_config="/tmp/cw-rno2a.yaml",
+        target_cluster="cw-rno2a",
+        parent_cluster_config="/tmp/marin.yaml",
+    )
+
+    command = build_command(spec)
+
+    assert command[command.index("--cluster-config") + 1] == spec.cluster_config
+    assert command[command.index("--target-cluster") + 1] == spec.target_cluster
+    assert command[command.index("--parent-cluster-config") + 1] == spec.parent_cluster_config

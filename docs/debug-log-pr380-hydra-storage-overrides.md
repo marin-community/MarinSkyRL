@@ -93,6 +93,13 @@ calls blocked before the process exit in the next smoke. The handoff log was
 already visible remotely, so the external-owner path now invokes `os._exit(0)`
 immediately after it, without touching Ray's wrapped streams.
 
+That exit completed cleanly in the next smoke: one optimizer step, checkpoint,
+and 32 retained trajectories with no write errors. The synchronous terminal
+export then failed before submission because the export helper dropped the
+caller's resolved cluster configuration and unconditionally changed a direct
+launch into a federated one. Terminal exports now preserve the original direct
+or federated placement together with its target and parent configuration.
+
 ## Future work
 
 - [ ] Rerun the Qwen3-0.6B GSM8K smoke test through checkpoint creation and
