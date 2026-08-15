@@ -2194,10 +2194,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
-    # The immutable checkout owns both the launcher modules and trainer source.
-    # Keep the small /app bootstrap bundle last so a stale task image cannot
-    # shadow the requested runtime commit.
-    pythonpath = f"{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train:{APP_DIR}"
+    pythonpath = f"{APP_DIR}:{SKYRL_HOME}:{SKYRL_HOME}/skyrl-train"
     return _build_task_shell(args, controller_cmd, pythonpath)
 
 

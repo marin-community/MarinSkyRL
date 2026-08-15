@@ -47,11 +47,11 @@ That small bootstrap bundle preceded the immutable checkout at
 `/app/marinskyrl`, so Python loaded an older `training_driver.py` that could not
 import the checkout's `storage_policy` module.
 
-The task shell now keeps the controller in `/app` for bundle-integrity
-validation, puts the selected checkout ahead of that bundle on `PYTHONPATH`,
-and starts only the training driver from the selected checkout. Regressions
-verify the controller working directory, source-path order, and driver working
-directory. The focused launcher and task-runtime selection passed all 74 tests.
+The task shell keeps the controller and its imports in `/app` for
+bundle-integrity validation, then starts only the training driver from the
+selected checkout. Regressions verify the controller working directory,
+bootstrap source-path order, and driver working directory. The focused launcher
+and task-runtime selection passed all 74 tests.
 
 ## Future work
 
