@@ -99,6 +99,10 @@ export then failed before submission because the export helper dropped the
 caller's resolved cluster configuration and unconditionally changed a direct
 launch into a federated one. Terminal exports now preserve the original direct
 or federated placement together with its target and parent configuration.
+The next exporter submission reached that config, then tried to rediscover
+automatic node capacity because the terminal record had also dropped the
+launcher's resolved CPU, memory, and disk requests. Those resource values now
+travel with the placement configuration into the export-only job.
 
 ## Future work
 

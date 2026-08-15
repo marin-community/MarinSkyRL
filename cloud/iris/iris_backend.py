@@ -386,6 +386,9 @@ class IrisBackend:
                 cluster_config=execution.cluster_config,
                 target_cluster=execution.target_cluster,
                 parent_cluster_config=execution.parent_cluster_config,
+                cpu=execution.cpu,
+                memory=execution.memory,
+                disk=execution.disk,
             )
         )
 
@@ -2674,6 +2677,9 @@ def export_terminal_policy(args: argparse.Namespace) -> None:
             cluster_config=args.cluster_config,
             target_cluster=args.target_cluster,
             parent_cluster_config=args.parent_cluster_config,
+            cpu=args.cpu,
+            memory=args.memory,
+            disk=args.disk,
         )
     )
 

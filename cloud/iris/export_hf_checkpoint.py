@@ -80,6 +80,9 @@ class ExportJobSpec:
     cluster_config: str | None = None
     target_cluster: str | None = None
     parent_cluster_config: str | None = None
+    cpu: float | None = None
+    memory: str | None = None
+    disk: str | None = None
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -126,6 +129,12 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         cmd += ["--target-cluster", spec.target_cluster]
     if spec.parent_cluster_config:
         cmd += ["--parent-cluster-config", spec.parent_cluster_config]
+    if spec.cpu is not None:
+        cmd += ["--cpu", str(spec.cpu)]
+    if spec.memory:
+        cmd += ["--memory", spec.memory]
+    if spec.disk:
+        cmd += ["--disk", spec.disk]
     cmd.extend(model_source_cli_args(request.model_source_uri, request.model_source_identity))
     if spec.no_wait:
         cmd.append("--no-wait")
@@ -149,6 +158,9 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cluster-config")
     ap.add_argument("--target-cluster")
     ap.add_argument("--parent-cluster-config")
+    ap.add_argument("--cpu", type=float)
+    ap.add_argument("--memory")
+    ap.add_argument("--disk")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--priority", default="batch")
@@ -217,6 +229,9 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         cluster_config=args.cluster_config,
         target_cluster=args.target_cluster,
         parent_cluster_config=args.parent_cluster_config,
+        cpu=args.cpu,
+        memory=args.memory,
+        disk=args.disk,
     )
 
 

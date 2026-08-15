@@ -23,6 +23,9 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
         timeout=7200,
         no_wait=False,
         cluster_config="/tmp/cw-rno2a.yaml",
+        cpu=96,
+        memory="1600GB",
+        disk="800GB",
     )
 
     command = build_command(spec)
@@ -30,6 +33,9 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
     overrides = parse_hydra_overrides(encoded)
 
     assert command[command.index("--cluster-config") + 1] == spec.cluster_config
+    assert command[command.index("--cpu") + 1] == str(spec.cpu)
+    assert command[command.index("--memory") + 1] == spec.memory
+    assert command[command.index("--disk") + 1] == spec.disk
     assert "--target-cluster" not in command
     assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
     assert overrides["checkpoint_export.export_root"] == request.export_path

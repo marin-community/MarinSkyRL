@@ -33,6 +33,9 @@ class TerminalPolicyExport:
     cluster_config: str | None = None
     target_cluster: str | None = None
     parent_cluster_config: str | None = None
+    cpu: float | None = None
+    memory: str | None = None
+    disk: str | None = None
 
 
 def policy_export_geometry(
@@ -80,6 +83,12 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         command.extend(["--target-cluster", spec.target_cluster])
     if spec.parent_cluster_config:
         command.extend(["--parent-cluster-config", spec.parent_cluster_config])
+    if spec.cpu is not None:
+        command.extend(["--cpu", str(spec.cpu)])
+    if spec.memory:
+        command.extend(["--memory", spec.memory])
+    if spec.disk:
+        command.extend(["--disk", spec.disk])
     export_request_uri = join_resource_path(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
     export_filesystem, export_request_path = fs_and_path(export_request_uri)
     if export_filesystem.exists(export_request_path):
