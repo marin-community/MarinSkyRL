@@ -775,8 +775,7 @@ def validate_rendezvous_runtime(
 
 
 def _write_rendezvous_once(fs, path: str, payload: dict[str, object]) -> None:
-    """Single blocking PutObject of the rendezvous payload (the caller runs this
-    under a bounded daemon-thread join so a stalled put cannot wedge the head)."""
+    """Write one rendezvous payload to the opened filesystem path."""
     with fs.open(path, "w") as f:
         json.dump(payload, f)
 
