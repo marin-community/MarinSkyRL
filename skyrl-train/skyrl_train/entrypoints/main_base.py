@@ -211,6 +211,19 @@ class BasePPOExp:
         # eligible (disaggregated, no-ref) run.
         self.policy_pg = self.get_policy_pg()
 
+    def create_inference_engine_client(self) -> InferenceEngineClient:
+        """Create the configured local or remote inference-engine client."""
+        if self.cfg.generator.run_engines_locally:
+            logger.info("Creating local inference engines")
+            inference_engines = create_ray_wrapped_inference_engines_from_config(
+                self.cfg, self.colocate_pg, self.tokenizer
+            )
+        else:
+            logger.info("Connecting to remote inference engines")
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
+        logger.info("Inference engines ready")
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
         import sys
@@ -430,15 +443,7 @@ class BasePPOExp:
         tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            logger.info("Creating local inference engines")
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            logger.info("Connecting to remote inference engines")
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
-        logger.info("Inference engines ready")
-
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
+        inference_engine_client = self.create_inference_engine_client()
 
         trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
 

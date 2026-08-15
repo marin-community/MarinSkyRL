@@ -5,13 +5,9 @@ Main entrypoint for generating rollouts on terminal bench tasks.
 import ray
 import asyncio
 import hydra
-from loguru import logger
 from omegaconf import DictConfig
 
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.entrypoints.main_base import (
-    create_ray_wrapped_inference_engines_from_config,
-    create_remote_inference_engines_from_config,
     config_dir,
     run_ray_driver,
 )
@@ -21,18 +17,9 @@ from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch
 
 class TerminalBenchGenerateExp(TerminalBenchExp):
     def _setup_trajectory_runner(self):
-        logger.info(self.get_cfg_as_str(self.cfg))
-
-        tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
-
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
+        inference_engine_client = self.create_inference_engine_client()
         asyncio.run(inference_engine_client.wake_up())
-
-        return self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
+        return self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
     def run(self):
         trajectory_runner = self._setup_trajectory_runner()

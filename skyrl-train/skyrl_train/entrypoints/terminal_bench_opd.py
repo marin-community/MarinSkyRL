@@ -1,6 +1,4 @@
-"""
-Main entrypoint for training on terminal bench tasks.
-"""
+"""Train on Terminal-Bench tasks with on-policy distillation rewards."""
 
 import ray
 import hydra

@@ -524,7 +524,7 @@ def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch], *, require_rollout_logprobs: bool = False
 ) -> TrajectoryBatch:
     """
-    Concatenate the trajectory batches of multiple batches.
+    Concatenate multiple trajectory batches into one batch.
 
     We only aggregate rollout metrics the can deduced by responses and rewards, but not
     those that use `env_metrics` or `env_classes`.

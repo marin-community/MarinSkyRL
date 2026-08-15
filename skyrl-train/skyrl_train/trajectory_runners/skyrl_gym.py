@@ -68,7 +68,6 @@ class BatchedTrajectoryCollector:
             request["env_classes"],
             request["env_extras"],
             runner.trajectory_runner_cfg.sampling_params.max_generate_length,
-            runner.trajectory_runner_cfg.max_input_length,
             request.get("sampling_params"),
         )
         return batch
@@ -489,7 +488,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         env_classes: List[str],
         env_extras: List[Dict[str, Any]],
         max_tokens: int,
-        max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> TrajectoryBatch:
         """
@@ -500,7 +498,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             env_classes: List[str]
             env_extras: List[Dict[str, Any]]
             max_tokens: int
-            max_input_length: int --> Currently unused as we assume batched is used only for single-turn.
             sampling_params: Optional[Dict[str, Any]]
         Returns:
             TrajectoryBatch

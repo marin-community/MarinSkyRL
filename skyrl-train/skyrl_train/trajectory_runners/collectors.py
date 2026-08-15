@@ -2,6 +2,8 @@
 
 from typing import Awaitable, Callable, Generic, Protocol, TypeVar
 
+from omegaconf import DictConfig
+
 from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
 from skyrl_train.utils.progress import tqdm
 
@@ -17,8 +19,16 @@ class RolloutCollector(Protocol, Generic[InteractionT]):
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False) -> InteractionT: ...
 
 
+class AgentLoopRunner(Protocol, Generic[InteractionT]):
+    """Runner context required by the shared agent-loop fan-out helper."""
+
+    trajectory_runner_cfg: DictConfig
+    global_step_fn: Callable[[], int | None]
+    agent_loop: Callable[..., Awaitable[InteractionT]]
+
+
 async def collect_agent_loops(
-    runner,
+    runner: AgentLoopRunner[InteractionT],
     request: TrajectoryRequestBatch,
     agent_loop: Callable[..., Awaitable[InteractionT]],
     *,
