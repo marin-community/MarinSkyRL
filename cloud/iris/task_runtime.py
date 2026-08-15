@@ -643,6 +643,7 @@ def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
     ``extra_env``) reaches every pod already and is passed through untouched.
     """
     env = os.environ.copy()
+    env["SKYRL_RAY_CLUSTER_OWNER"] = "iris-task-runtime"
     if derived_gloo_ifname is not None and env.get("GLOO_SOCKET_IFNAME") == derived_gloo_ifname:
         del env["GLOO_SOCKET_IFNAME"]
         _log(f"[fabric] withholding node-derived GLOO_SOCKET_IFNAME={derived_gloo_ifname} from the training driver")

@@ -92,3 +92,4 @@ def test_node_derived_name_is_withheld_from_the_training_driver(monkeypatch):
 def test_operator_supplied_name_reaches_the_training_driver(monkeypatch):
     monkeypatch.setenv("GLOO_SOCKET_IFNAME", "bond0")
     assert training_driver_env(None)["GLOO_SOCKET_IFNAME"] == "bond0"
+    assert training_driver_env(None)["SKYRL_RAY_CLUSTER_OWNER"] == "iris-task-runtime"

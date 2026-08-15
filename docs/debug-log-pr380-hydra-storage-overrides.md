@@ -53,6 +53,25 @@ selected checkout. Regressions verify the controller working directory,
 bootstrap source-path order, and driver working directory. The focused launcher
 and task-runtime selection passed all 74 tests.
 
+## Hypothesis 2
+
+The successful trainer process remained inside `ray.shutdown()` for more than
+five minutes because it was trying to disconnect from the Ray cluster owned by
+the surrounding Iris task runtime. That prevented the synchronous launcher from
+observing training success and submitting its required terminal export.
+
+## Changes to make
+
+Mark the Ray cluster as Iris-owned in the training-driver environment. Attached
+SkyRL entrypoints leave that cluster connected and unregister Ray's redundant
+process-exit shutdown hook; the Iris task runtime remains the single owner of
+bounded `ray stop --force` teardown.
+
+## Results
+
+The ownership and local-cluster fallback regressions pass. Live verification is
+pending on the next Qwen3-0.6B GSM8K smoke.
+
 ## Future work
 
 - [ ] Rerun the Qwen3-0.6B GSM8K smoke test through checkpoint creation and

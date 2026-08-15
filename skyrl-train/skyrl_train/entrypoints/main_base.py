@@ -30,6 +30,7 @@ import signal
 import sys
 import hydra
 from loguru import logger
+from skyrl_train.entrypoints.ray_lifecycle import shutdown_ray
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, process_telemetry
@@ -548,7 +549,7 @@ def main(cfg: DictConfig) -> None:
         # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
         def _sigterm_handler(signum, frame):
             logger.warning("Received SIGTERM on head node, shutting down Ray...")
-            ray.shutdown()
+            shutdown_ray()
             sys.exit(1)
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
@@ -560,7 +561,7 @@ def main(cfg: DictConfig) -> None:
             raise
         finally:
             logger.info("Shutting down Ray on head node...")
-            ray.shutdown()
+            shutdown_ray()
 
 
 if __name__ == "__main__":
