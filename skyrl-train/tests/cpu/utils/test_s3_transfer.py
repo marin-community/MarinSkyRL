@@ -11,6 +11,7 @@ def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
     sentinel = object()
     calls = []
     monkeypatch.setattr(s3fs, "_S3_FS", None)
+    monkeypatch.delenv("OT_AGENT_S3_ADDRESSING_STYLE", raising=False)
     monkeypatch.setattr(
         s3fs.fsspec,
         "filesystem",
@@ -26,10 +27,26 @@ def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
                     "connect_timeout": 60,
                     "read_timeout": 300,
                     "retries": {"max_attempts": 10, "mode": "adaptive"},
+                    "s3": {"addressing_style": "virtual"},
                 }
             },
         )
     ]
+
+
+def test_s3_client_allows_addressing_style_override(monkeypatch):
+    calls = []
+    monkeypatch.setattr(s3fs, "_S3_FS", None)
+    monkeypatch.setenv("OT_AGENT_S3_ADDRESSING_STYLE", "path")
+    monkeypatch.setattr(
+        s3fs.fsspec,
+        "filesystem",
+        lambda protocol, **kwargs: calls.append((protocol, kwargs)) or object(),
+    )
+
+    s3fs.get_s3_fs()
+
+    assert calls[0][1]["config_kwargs"]["s3"] == {"addressing_style": "path"}
 
 
 @pytest.mark.parametrize(

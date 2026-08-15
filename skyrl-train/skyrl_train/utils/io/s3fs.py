@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+import os
 import random
 import time
 
@@ -27,18 +28,21 @@ _S3_READ_TIMEOUT_SECONDS = 300
 _S3_SDK_MAX_ATTEMPTS = 10
 _S3_TRANSFER_MAX_ATTEMPTS = 5
 _S3_RETRY_BASE_SECONDS = 1.0
+_S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
 
 
 def get_s3_fs():
     """Return a cached S3 filesystem instance, creating it once."""
     global _S3_FS
     if _S3_FS is None:
+        addressing_style = os.environ.get(_S3_ADDRESSING_STYLE_ENV, "virtual")
         _S3_FS = fsspec.filesystem(
             "s3",
             config_kwargs={
                 "connect_timeout": _S3_CONNECT_TIMEOUT_SECONDS,
                 "read_timeout": _S3_READ_TIMEOUT_SECONDS,
                 "retries": {"max_attempts": _S3_SDK_MAX_ATTEMPTS, "mode": "adaptive"},
+                "s3": {"addressing_style": addressing_style},
             },
         )
     return _S3_FS

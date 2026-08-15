@@ -115,6 +115,11 @@ the absent object instead of `False`, so the successful export was reported as
 failed. Export verification now inventories the directory once and validates
 the unsharded file or every index-referenced shard from that snapshot, avoiding
 per-object existence probes for optional or missing files.
+The resulting directory inventory exposed that the shared SkyRL S3 client did
+not pin virtual-hosted addressing outside the task runtime, so CoreWeave rejected
+its `ListObjectsV2` request with `PathStyleRequestNotAllowed`. The client now
+uses the same virtual-hosted default and `OT_AGENT_S3_ADDRESSING_STYLE` override
+as the Iris artifact and task-runtime paths.
 
 ## Future work
 
