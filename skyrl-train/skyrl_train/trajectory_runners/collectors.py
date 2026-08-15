@@ -14,9 +14,7 @@ class RolloutCollector(Protocol, Generic[InteractionT]):
 
     def validate(self) -> None: ...
 
-    async def collect(
-        self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False
-    ) -> InteractionT: ...
+    async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False) -> InteractionT: ...
 
 
 async def collect_agent_loops(
