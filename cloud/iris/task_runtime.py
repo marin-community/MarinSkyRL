@@ -746,7 +746,9 @@ def _done_uri(rendezvous_dir: str) -> str:
 
 
 def _runtime_versions() -> tuple[str, str]:
-    import ray
+    # Preserve this module's bootstrap fast path; Ray is only needed once the
+    # head or worker reaches cluster rendezvous.
+    import ray  # noqa: PLC0415
 
     python_version = ".".join(str(component) for component in sys.version_info[:3])
     return python_version, ray.__version__
@@ -758,12 +760,12 @@ def validate_rendezvous_runtime(
     worker_node: str,
     python_version: str,
     ray_version: str,
-) -> None:
+) -> RendezvousPayload:
     """Reject a worker whose Python or Ray version differs from the head."""
     head_python_version = payload.python_version
     head_ray_version = payload.ray_version
     if head_python_version == python_version and head_ray_version == ray_version:
-        return
+        return payload
 
     raise RuntimeError(
         "Iris runtime version mismatch before Ray join: "
@@ -774,7 +776,7 @@ def validate_rendezvous_runtime(
 
 def _write_rendezvous_once(fs, path: str, payload: dict[str, object]) -> None:
     """Single blocking PutObject of the rendezvous payload (the caller runs this
-    under a bounded futures timeout so a stalled put cannot wedge the head)."""
+    under a bounded daemon-thread join so a stalled put cannot wedge the head)."""
     with fs.open(path, "w") as f:
         json.dump(payload, f)
 
@@ -1445,7 +1447,7 @@ def run_worker(args: argparse.Namespace) -> int:
 
     payload = poll_rendezvous(args.rendezvous_dir, args.rendezvous_timeout, min_written_at=worker_start)
     python_version, ray_version = _runtime_versions()
-    validate_rendezvous_runtime(
+    payload = validate_rendezvous_runtime(
         payload,
         worker_node=node_id,
         python_version=python_version,

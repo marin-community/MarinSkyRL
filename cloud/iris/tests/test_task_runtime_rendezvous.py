@@ -35,15 +35,16 @@ def test_rendezvous_publishes_head_runtime_identity(tmp_path):
 
 
 def test_matching_rendezvous_runtime_is_accepted():
-    assert (
-        validate_rendezvous_runtime(
-            _head_payload(),
-            worker_node="worker-node",
-            python_version="3.12.13",
-            ray_version="2.51.1",
-        )
-        is None
+    head = _head_payload()
+
+    validated = validate_rendezvous_runtime(
+        head,
+        worker_node="worker-node",
+        python_version="3.12.13",
+        ray_version="2.51.1",
     )
+
+    assert validated == head
 
 
 @pytest.mark.parametrize(
