@@ -35,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import ray
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.env_vars import (
@@ -712,6 +713,37 @@ def _done_uri(rendezvous_dir: str) -> str:
     return f"{rendezvous_dir.rstrip('/')}/{DONE_FILENAME}"
 
 
+def _runtime_versions() -> tuple[str, str]:
+    python_version = ".".join(str(component) for component in sys.version_info[:3])
+    return python_version, ray.__version__
+
+
+def validate_rendezvous_runtime(
+    payload: dict[str, object],
+    *,
+    worker_node: str,
+    python_version: str,
+    ray_version: str,
+) -> None:
+    """Reject a worker whose Python or Ray version differs from the head."""
+    required_fields = ("python_version", "ray_version")
+    missing_fields = [field for field in required_fields if not payload.get(field)]
+    if missing_fields:
+        raise RuntimeError(f"Ray head rendezvous is missing runtime metadata: {', '.join(missing_fields)}")
+
+    head_python_version = str(payload["python_version"])
+    head_ray_version = str(payload["ray_version"])
+    if head_python_version == python_version and head_ray_version == ray_version:
+        return
+
+    head_node = str(payload.get("head_node") or payload.get("head_ip") or "unknown-head")
+    raise RuntimeError(
+        "Iris runtime version mismatch before Ray join: "
+        f"head {head_node} uses Python {head_python_version} and Ray {head_ray_version}; "
+        f"worker {worker_node} uses Python {python_version} and Ray {ray_version}"
+    )
+
+
 def _write_rendezvous_once(fs, path: str, payload: dict) -> None:
     """Single blocking PutObject of the rendezvous payload (the caller runs this
     under a bounded futures timeout so a stalled put cannot wedge the head)."""
@@ -721,10 +753,14 @@ def _write_rendezvous_once(fs, path: str, payload: dict) -> None:
 
 def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
     uri = _rendezvous_uri(rendezvous_dir)
+    python_version, ray_version = _runtime_versions()
     payload = {
         "head_ip": head_ip,
+        "head_node": socket.gethostname(),
         "port": ray_port,
         "num_tasks": _num_tasks(),
+        "python_version": python_version,
+        "ray_version": ray_version,
         "written_at": time.time(),
     }
     fs, path = fs_and_path(uri)
@@ -1375,6 +1411,13 @@ def run_worker(args: argparse.Namespace) -> int:
         )
 
     payload = poll_rendezvous(args.rendezvous_dir, args.rendezvous_timeout, min_written_at=worker_start)
+    python_version, ray_version = _runtime_versions()
+    validate_rendezvous_runtime(
+        payload,
+        worker_node=node_id,
+        python_version=python_version,
+        ray_version=ray_version,
+    )
     head_ip = payload["head_ip"]
     ray_port = int(payload.get("port", args.ray_port))
     ray_address = f"{head_ip}:{ray_port}"
