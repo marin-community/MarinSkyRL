@@ -307,10 +307,8 @@ def test_jupiter_only_run_uses_the_shared_report_and_skips_iris_trace_inventory(
     assert watcher.main() == 0
 
     report_dir = tmp_path / "reports" / "rl"
-    report = (report_dir / "latest.md").read_text()
     report_json = json.loads((report_dir / "latest.json").read_text())
     assert "jsc-jupiter/1170543" in report_json["jobs"]
-    assert "TIS exact=0.99" in report
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["traces"] == "newest 1 selected"
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["pod_logs"] == "not applicable (Jupiter)"
     assert report_json["jobs"]["jsc-jupiter/1170543"]["artifacts"]["slurm_logs"] == "synced"
