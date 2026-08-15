@@ -85,15 +85,16 @@ It runs `ruff check` + `ruff format` at line length 120 over `skyrl-train/`,
 `skyrl-gym/`, and `skyrl-tx/`. `.pre-commit-config.yaml` carries only the gitleaks
 secret scan, which marin-style does not cover; `format.sh` runs both.
 
-**Before opening or updating a PR**, run the lint-review pass and fix or answer every
-finding it reports:
+Run the lint-review pass once before opening a PR and fix or answer every finding it
+reports:
 
 ```bash
 uv run infra/pre-commit.py --review
 ```
 
-This is required, not optional (see `.agents/marin-style/AGENTS-core.md`). The first run
-bootstraps `marin-style` from git and can take several minutes; let it finish.
+The first run bootstraps `marin-style` from git and can take several minutes; let it
+finish. Small follow-up changes do not need another pass; use the relevant mechanical
+checks and tests described in `.agents/marin-style/AGENTS-core.md`.
 
 ## Agent skill policy
 
