@@ -789,7 +789,7 @@ def test_validate_trajectory_batch_mismatched_list_lengths():
         rollout_logprobs=None,
     )
 
-    with pytest.raises(AssertionError, match="Generator output rewards length must be equal to response_ids length"):
+    with pytest.raises(AssertionError, match="Trajectory batch rewards length must equal response_ids length"):
         validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
