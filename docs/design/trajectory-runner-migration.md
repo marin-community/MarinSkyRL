@@ -147,7 +147,7 @@ No compatibility import remains. MarinSkyRL is a hard fork and repository policy
 of maintaining dead aliases.
 
 This does not remove the concept of an externally maintained verifier. Harbor and other trajectory runners may
-vendor or call external verifiers. PR 2 defines how every runner reports those results through one contract.
+vendor or call external verifiers. The deferred verifier contract defines how every runner reports those results.
 
 ## Behavior gates
 
