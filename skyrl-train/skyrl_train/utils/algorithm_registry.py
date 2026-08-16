@@ -59,6 +59,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
 
     _actor_name = "advantage_estimator_registry"
     _function_type = "advantage estimator"
+    # Driver-only metadata: validate_cfg materializes it into primitive config before Ray dispatch.
     _group_contracts: dict[str, GroupAdvantageContract] = {}
 
     @classmethod

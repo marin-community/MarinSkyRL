@@ -52,11 +52,11 @@ RLOO-N and RLOO-N-PBS require `physical_count == k` and `baseline_contributor_co
 
 `NONE` bypasses group-cardinality and advantage-cohort checks, as required by estimators that do not use group-relative advantages, but still rejects fully loss-masked groups. The ordinary PPO backends retain their existing static batch geometry; custom flows that change physical cardinality remain responsible for producing a valid backend batch. General physical raggedness for group-relative estimators remains out of scope: UID construction, DP batch geometry, and worker gradient accumulation assume `prompt_count * n_samples_per_prompt`. Supporting it requires a separate dynamic-batching design and end-to-end backend tests.
 
-Step-wise training emits transition rows rather than one row per trial. Structural alignment covers every emitted transition and validates final-row boundaries. Physical trial cardinality and baseline-cohort membership use final rows selected by `is_last_step`, matching the current group-advantage path. The all-loss-masked rule checks every emitted transition because an earlier transition can remain trainable when the final transition is masked. Configuration validation rejects fully async group-relative estimators with step-wise training unless these boundaries are available unambiguously.
+Step-wise training emits transition rows rather than one row per trial. Structural alignment covers every emitted transition and validates final-row boundaries. Physical trial cardinality and baseline-cohort membership use final rows selected by `is_last_step`, matching the current group-advantage path. The all-loss-masked rule checks every emitted transition because an earlier transition can remain trainable when the final transition is masked.
 
 ### Extensible async admission
 
-Introduce a pure async `GroupAdmissionPolicy` separate from staleness control and queue mutation. It structurally validates a completed `GeneratedOutputGroup`, then returns an `AdmissionDecision` with acceptance, a primary retryable reason, and diagnostic tags. Initial retryable rules are:
+Introduce a pure async `GroupAdmissionPolicy` separate from staleness control and queue mutation. It structurally validates a completed `GeneratedOutputGroup`, then returns an `AdmissionDecision` with acceptance and an ordered tuple of retryable reasons. Initial retryable rules are:
 
 1. staleness exceeds `max_staleness_steps`;
 2. every trajectory is loss-masked;
@@ -66,7 +66,7 @@ Producer-side staleness filtering remains in place so known-stale groups do not 
 
 Batch assembly scans every currently completed group. Each rejected group requeues `source_prompts`, releases accepted/submitted capacity, and cannot count toward `mini_batch_size`. Assembly waits until it has a full accepted batch and returns accepted surplus to the completed queue.
 
-Metrics use `async/rejected_count`, `async/rejected_rate`, and `async/rejected_count/<reason>`. Diagnostic tags allow a stale-and-masked group to report both facts while retaining one primary routing reason. Staleness metrics continue to describe model-step age only.
+Metrics use `async/rejected_count`, `async/rejected_rate`, and `async/rejected_count/<reason>`. The rejection tuple records every applicable rule while its first entry supplies the primary routing reason. Staleness metrics continue to describe model-step age only.
 
 The stall watchdog measures admitted progress, not merely completed generation. If completions have arrived but every one has been rejected for a full adaptive stall interval, batch assembly raises `GenerationStalledError` with reason counts even while generators remain alive. If no completion has arrived and generators remain alive, the existing deadline extension remains. This prevents a deterministic masked or below-floor prompt from resetting the progress clock forever without introducing a second retry-budget configuration.
 
@@ -100,6 +100,14 @@ Implement the reviewed design. Keep physical group cardinality fixed in this PR.
 Three independent reviews covered algorithm semantics, async queue/accounting behavior, and configuration/API design. All three rejected the original single “usable size” abstraction. The revised design separates physical, trainable, and baseline-contributor counts; moves estimator semantics into registration metadata; retains fixed physical batches; separates fatal structural validation from retryable admission; and adds admitted-progress liveness.
 
 All three reviewers passed the revised architecture. The focused admission, async barrier, stall detection, reward, and policy-optimization regressions pass. The full launcher and trainer CPU suite reached 1,495 passes and 19 skips; the three affected trainer fixtures were then corrected and pass. The remaining three failures are pre-existing HF-export fake-filesystem failures reproduced unchanged on `main`.
+
+The mandatory Marin lint review identified and prompted corrections to the step-wise design text, rejection-result vocabulary, producer-side staleness comparison, stall-helper documentation, and a stale test name. Its remaining structural advisories are intentionally not applied:
+
+- The resolved config block has a concrete default because unvalidated test and utility configs construct trainers directly; production validation always replaces it before Ray dispatch.
+- Concrete fieldless contract variants are retained as the reviewed sum type. They prevent unsupported combinations from becoming representable; collapsing them into the runtime enum would undo the configuration review.
+- Registry metadata is deliberately driver-local. Validation resolves it into the primitive `resolved_group_advantage` block before remote actors start; remote workers never look up registry metadata.
+- Runtime structural checks remain at the Ray producer boundary even though callers are statically typed. TypedDict annotations do not validate deserialized or custom producer data.
+- Admission inspection and barrier assembly keep their validation and condition-protected state transitions together so facts cannot drift between validation and accounting. Smaller helpers would expose partial states without reducing either responsibility.
 
 ## Future work
 

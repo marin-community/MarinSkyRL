@@ -94,7 +94,7 @@ async def test_check_stall_extends_when_generators_alive():
 
 
 @pytest.mark.asyncio
-async def test_get_fresh_batch_raises_when_generators_dead(monkeypatch):
+async def test_get_admitted_batch_raises_when_generators_dead(monkeypatch):
     """When all generators have exited and the buffer is short, raise immediately."""
     trainer = _bare_trainer(mini_batch_size=2, tasks=[])
     # Patch the timeout to 0.05s so the test runs fast.

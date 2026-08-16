@@ -1066,7 +1066,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await asyncio.gather(*refs)
 
     def _classify_and_route_group(self, queues: _GenerationQueues, group: GeneratedOutputGroup) -> _GroupFreshness:
-        if self.global_step - group.earliest_model_step > self.max_staleness_steps:
+        if self._group_admission_policy.is_stale(group, global_step=self.global_step):
             queues.retries.put_nowait(group.source_prompts)
             return _GroupFreshness.STALE
         return _GroupFreshness.FRESH
@@ -1149,6 +1149,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return self._generation_stall_timeout()
 
     def _check_admission_stall(self, elapsed: float, rejection_counts: collections.Counter[str]) -> float:
+        """Raise on rejected-only progress, or return the next ordinary stall timeout."""
         if rejection_counts:
             raise GenerationStalledError(
                 f"Generation stalled: no groups admitted for {elapsed:.0f}s; "

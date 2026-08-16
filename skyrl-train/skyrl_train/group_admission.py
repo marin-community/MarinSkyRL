@@ -42,9 +42,7 @@ class GroupAdvantageInvariant:
         return cls(GroupAdvantageKind.EXACT_PHYSICAL, physical_group_size, None)
 
     @classmethod
-    def minimum_baseline_eligible(
-        cls, *, physical_group_size: int, minimum_group_size: int
-    ) -> GroupAdvantageInvariant:
+    def minimum_baseline_eligible(cls, *, physical_group_size: int, minimum_group_size: int) -> GroupAdvantageInvariant:
         return cls(GroupAdvantageKind.MINIMUM_BASELINE_ELIGIBLE, physical_group_size, minimum_group_size)
 
     @classmethod
@@ -145,15 +143,15 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
             )
 
     is_last_step = _aligned_sequence(batch, "is_last_step", row_count)
-    final_indices = list(range(row_count)) if is_last_step is None else [i for i, value in enumerate(is_last_step) if value]
+    final_indices = (
+        list(range(row_count)) if is_last_step is None else [i for i, value in enumerate(is_last_step) if value]
+    )
     if not final_indices:
         raise ValueError("is_last_step must identify at least one final trial row")
 
     exclusions = _aligned_sequence(batch, "exclude_from_baseline", row_count)
     baseline_contributor_count = (
-        len(final_indices)
-        if exclusions is None
-        else sum(not bool(exclusions[index]) for index in final_indices)
+        len(final_indices) if exclusions is None else sum(not bool(exclusions[index]) for index in final_indices)
     )
 
     rollout_logprobs = _aligned_sequence(batch, "rollout_logprobs", row_count)
@@ -192,10 +190,14 @@ class GroupAdmissionPolicy:
         self.max_staleness_steps = max_staleness_steps
         self.rollout_logprobs_required = rollout_logprobs_required
 
+    def is_stale(self, group: GeneratedGroup, *, global_step: int) -> bool:
+        """Return whether the group's oldest sample exceeds the run's staleness cap."""
+        return global_step - group.earliest_model_step > self.max_staleness_steps
+
     def evaluate(self, group: GeneratedGroup, *, global_step: int) -> AdmissionDecision:
         facts = _inspect_group(group)
         rejections = []
-        if global_step - group.earliest_model_step > self.max_staleness_steps:
+        if self.is_stale(group, global_step=global_step):
             rejections.append(AdmissionRejection.STALE)
         if facts.trainable_count == 0:
             rejections.append(AdmissionRejection.FULLY_MASKED)
@@ -215,11 +217,11 @@ class GroupAdmissionPolicy:
 
 
 def resolve_group_advantage_invariant(
-    *, advantage_estimator: str, physical_group_size: int, minimum_group_size: object
+    *, advantage_estimator: str, physical_group_size: int, minimum_group_size: int | None
 ) -> GroupAdvantageInvariant:
     """Resolve registry metadata and user input into one validated run invariant."""
     # Local import breaks the package cycle through skyrl_train.utils.__init__.
-    from skyrl_train.utils.algorithm_registry import (
+    from skyrl_train.utils.algorithm_registry import (  # noqa: PLC0415
         AdvantageEstimatorRegistry,
         ExactPhysicalGroup,
         MinimumBaselineEligibleGroup,
@@ -229,9 +231,7 @@ def resolve_group_advantage_invariant(
     contract = AdvantageEstimatorRegistry.group_contract(advantage_estimator)
     if isinstance(contract, MinimumBaselineEligibleGroup):
         if isinstance(minimum_group_size, bool) or not isinstance(minimum_group_size, int):
-            raise ValueError(
-                f"advantage estimator '{advantage_estimator}' requires integer group_advantage_min_size"
-            )
+            raise ValueError(f"advantage estimator '{advantage_estimator}' requires integer group_advantage_min_size")
         return GroupAdvantageInvariant.minimum_baseline_eligible(
             physical_group_size=physical_group_size,
             minimum_group_size=minimum_group_size,
