@@ -22,9 +22,8 @@ otherwise-unavailable Ray actor logs.
 
 ## Results
 
-The storage-policy and task-command regressions failed before the implementation because no durable Ray-log root existed.
-They pass after the launcher derives a user-owned root and passes it to task runtime. Periodic, signal, and final uploads
-now use that root while rendezvous, termination, and distributed-debug artifacts retain their existing lifecycle policy.
+The launcher derives a user-owned root and passes it to task runtime. Periodic, signal, and final uploads use that root
+while rendezvous, termination, and distributed-debug artifacts retain their existing lifecycle policy.
 
 ## Hypothesis 2
 
@@ -38,11 +37,8 @@ directly and derive it from the launcher banner, while retaining legacy rendezvo
 
 ## Results
 
-The lifecycle-path regression reproduced the bad `iris/<bucket>/tmp/ttl=...` key. URI parsing now produces the actual
-`tmp/ttl=...` object key for existing runs. Current durable paths can be supplied directly or read from the launcher
-banner, and the existing agentic and rendezvous layouts remain discoverable. The targeted tests and complete
-infrastructure suite pass. The launcher suite must be rerun after commit because its runtime-bundle guard intentionally
-rejects uncommitted changes to `task_runtime.py`.
+URI parsing produces the actual `tmp/ttl=...` object key for existing runs. Current durable paths can be supplied directly
+or read from the launcher banner, and the existing agentic and rendezvous layouts remain discoverable.
 
 ## Future work
 

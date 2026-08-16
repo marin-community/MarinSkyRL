@@ -63,6 +63,8 @@ from infra.artifact_files import LOG_SUFFIXES  # noqa: E402
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
 ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
 RAY_SUBDIR = "ray_session_logs"
+HISTORICAL_RAY_ROOT = "iris"
+HISTORICAL_RENDEZVOUS_SHORTHAND = "rl-rdv/"
 DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
 
@@ -113,7 +115,7 @@ def discover_run(s3, slug):
     """Newest `run-*` dir under `iris/<slug>/` (agentic per-run layout), or None if there is none.
 
     None means the job did not use the agentic per-run layout — a non-agentic RL job rendezvouses
-    under its own `--rendezvous-dir` instead (see resolve_ray_prefix / _derive_rendezvous_from_finelog).
+    under its own `--rendezvous-dir` instead (see resolve_ray_prefix / _ray_prefixes_from_finelog).
     """
     r = s3.list_objects_v2(Bucket=BUCKET, Prefix=f"iris/{slug}/", Delimiter="/")
     runs = sorted(
@@ -122,8 +124,8 @@ def discover_run(s3, slug):
     return runs[-1] if runs else None
 
 
-def _key_prefix_from_rendezvous(rdv):
-    """Normalize a rendezvous URI/path to its object-store key prefix.
+def _object_key_prefix(location):
+    """Normalize an object-store URI or key by removing only its scheme and bucket.
 
     Accepts every form the launcher / operator might pass:
       s3://marin-us-east-02a/iris/rl-rdv/<job>  ->  iris/rl-rdv/<job>
@@ -132,23 +134,23 @@ def _key_prefix_from_rendezvous(rdv):
       iris/rl-rdv/<job>                         ->  iris/rl-rdv/<job>
       rl-rdv/<job>                              ->  iris/rl-rdv/<job>
     """
-    value = rdv.strip()
+    value = location.strip()
     parsed = urlparse(value)
     if parsed.scheme:
         if not parsed.netloc:
-            raise ValueError(f"object-store URI has no bucket: {rdv!r}")
+            raise ValueError(f"object-store URI has no bucket: {location!r}")
         prefix = parsed.path.strip("/")
     else:
         prefix = value.strip("/")
     if not prefix:
-        raise ValueError(f"object-store path is empty: {rdv!r}")
-    if parsed.scheme or prefix.startswith(("iris/", "tmp/", "marin/")):
-        return prefix
-    return f"iris/{prefix}"
+        raise ValueError(f"object-store path is empty: {location!r}")
+    if not parsed.scheme and prefix.startswith(HISTORICAL_RENDEZVOUS_SHORTHAND):
+        return f"{HISTORICAL_RAY_ROOT}/{prefix}"
+    return prefix
 
 
 def _ray_prefix_from_log_dir(ray_log_dir):
-    prefix = _key_prefix_from_rendezvous(ray_log_dir)
+    prefix = _object_key_prefix(ray_log_dir)
     if prefix.split("/")[-1] != RAY_SUBDIR:
         raise ValueError(f"Ray log directory must end with {RAY_SUBDIR!r}: {ray_log_dir!r}")
     return f"{prefix}/"
@@ -168,21 +170,26 @@ def _ray_prefixes_from_finelog(finelog_path):
             if declared_prefix is None and (match := ray_log_pattern.search(line)):
                 declared_prefix = _ray_prefix_from_log_dir(match.group(1))
             if legacy_prefix is None and (match := rendezvous_pattern.search(line)):
-                base = _key_prefix_from_rendezvous(match.group(1))
+                base = _object_key_prefix(match.group(1))
                 legacy_prefix = f"{base}/{RAY_SUBDIR}/"
             if legacy_prefix is None and (match := raw_uri_pattern.search(line)):
-                legacy_prefix = f"{_key_prefix_from_rendezvous(match.group(0))}/"
+                legacy_prefix = f"{_object_key_prefix(match.group(0))}/"
             if declared_prefix is not None and legacy_prefix is not None:
                 break
     return declared_prefix, legacy_prefix
 
 
-def _derive_rendezvous_from_finelog(finelog_path):
-    """Return the legacy rendezvous base found in a fetched finelog."""
-    _, legacy_prefix = _ray_prefixes_from_finelog(finelog_path)
-    if legacy_prefix is None:
-        return None
-    return legacy_prefix.removesuffix(f"/{RAY_SUBDIR}/")
+def _ray_prefix_label(prefix):
+    parts = prefix.rstrip("/").split("/")
+    return parts[-2] if parts[-1] == RAY_SUBDIR else parts[-1]
+
+
+def _requested_ray_label(run, rendezvous_dir, ray_log_dir):
+    if ray_log_dir:
+        return _ray_prefix_label(_ray_prefix_from_log_dir(ray_log_dir))
+    if rendezvous_dir:
+        return _ray_prefix_label(_object_key_prefix(rendezvous_dir))
+    return run
 
 
 def resolve_ray_prefix(s3, slug, run, rendezvous_dir, finelog_path, ray_log_dir=None):
@@ -192,27 +199,29 @@ def resolve_ray_prefix(s3, slug, run, rendezvous_dir, finelog_path, ray_log_dir=
     Resolution order:
       1. explicit --ray-log-dir                → durable path for current launches
       2. explicit --rendezvous-dir             → historical non-agentic layout
-      3. explicit --run                        → historical agentic layout
-      4. auto-discovered newest run-*          → historical agentic default
-      5. Ray-log or rendezvous URI from finelog
+      3. current Ray-log URI from finelog       → durable path for current launches
+      4. explicit or pre-discovered --run       → historical agentic layout
+      5. auto-discovered newest run-*           → historical agentic default
+      6. historical Ray-log or rendezvous URI from finelog
     """
     if ray_log_dir:
         prefix = _ray_prefix_from_log_dir(ray_log_dir)
-        return prefix, prefix.rstrip("/").split("/")[-2]
+        return prefix, _ray_prefix_label(prefix)
     if rendezvous_dir:
-        base = _key_prefix_from_rendezvous(rendezvous_dir)
-        return f"{base}/{RAY_SUBDIR}/", base.split("/")[-1]
+        base = _object_key_prefix(rendezvous_dir)
+        prefix = f"{base}/{RAY_SUBDIR}/"
+        return prefix, _ray_prefix_label(prefix)
     declared_prefix, legacy_prefix = _ray_prefixes_from_finelog(finelog_path)
     if declared_prefix:
-        return declared_prefix, declared_prefix.rstrip("/").split("/")[-2]
+        return declared_prefix, _ray_prefix_label(declared_prefix)
     if run:
         r = run if run.startswith("run-") else f"run-{run}"
-        return f"iris/{slug}/{r}/{RAY_SUBDIR}/", r
+        return f"{HISTORICAL_RAY_ROOT}/{slug}/{r}/{RAY_SUBDIR}/", r
     r = discover_run(s3, slug)
     if r:
-        return f"iris/{slug}/{r}/{RAY_SUBDIR}/", r
+        return f"{HISTORICAL_RAY_ROOT}/{slug}/{r}/{RAY_SUBDIR}/", r
     if legacy_prefix:
-        return legacy_prefix, legacy_prefix.rstrip("/").split("/")[-2]
+        return legacy_prefix, _ray_prefix_label(legacy_prefix)
     return None, None
 
 
@@ -464,12 +473,7 @@ def main():
     run = a.run
     if not run and not a.rendezvous_dir and not a.ray_log_dir and (not a.no_ray or a.dest is None):
         run = discover_run(s3, slug)
-    if a.ray_log_dir:
-        label = _ray_prefix_from_log_dir(a.ray_log_dir).rstrip("/").split("/")[-2]
-    elif a.rendezvous_dir:
-        label = _key_prefix_from_rendezvous(a.rendezvous_dir).split("/")[-1]
-    else:
-        label = run
+    label = _requested_ray_label(run, a.rendezvous_dir, a.ray_log_dir)
     dest = a.dest or os.path.join(os.getcwd(), f"{slug}-{label}" if label else slug)
     os.makedirs(dest, exist_ok=True)
     finelog_path = os.path.join(dest, "finelog.log")

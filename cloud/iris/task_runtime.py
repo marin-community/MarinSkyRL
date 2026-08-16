@@ -1311,12 +1311,9 @@ def sync_ray_session_logs_bounded(ray_log_dir: str | None, node_id: str, reason:
 
 
 def start_ray_log_sync(ray_log_dir: str | None, rendezvous_dir: str | None, node_id: str) -> threading.Event:
-    """Start a daemon thread that periodically uploads this node's Ray session logs.
-    Returns the stop Event (set it to stop). No-op (returns a set-able event) when
-    disabled / no Ray-log dir. Fires a first upload after a short warmup so the
-    sync is confirmable during bring-up, then every OT_AGENT_RAY_LOG_SYNC_INTERVAL_S."""
+    """Periodically upload this node's Ray logs and managed debug artifacts."""
     stop = threading.Event()
-    if not ray_log_dir or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+    if (not ray_log_dir and not rendezvous_dir) or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
         return stop
     interval = int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300"))
     if interval <= 0:
@@ -1333,10 +1330,12 @@ def start_ray_log_sync(ray_log_dir: str | None, rendezvous_dir: str | None, node
             sync_debug_artifacts(rendezvous_dir, node_id, "periodic")
 
     threading.Thread(target=_loop, daemon=True, name="ray-log-sync").start()
-    _log(
-        f"[ray-log-sync] started (every {interval}s, first ~{min(60, interval)}s) -> "
-        f"{ray_log_dir.rstrip('/')}/{node_id}"
-    )
+    destinations = []
+    if ray_log_dir:
+        destinations.append(f"{ray_log_dir.rstrip('/')}/{node_id}")
+    if rendezvous_dir:
+        destinations.append(f"{rendezvous_dir.rstrip('/')}/debug_artifacts/{node_id}")
+    _log(f"[artifact-sync] started (every {interval}s, first ~{min(60, interval)}s) -> {', '.join(destinations)}")
     return stop
 
 
