@@ -21,13 +21,13 @@ to allow prereleases because the published Marin packages use development versio
 
 ## Results
 
-The lock resolves Iris `0.2.83`, Iris Native `0.1.6`, Finelog and Finelog Server `0.2.28`, and Rigging `0.2.83`. Iris
-`0.2.83` successfully loads the current `cw-rno2a.yaml` and exposes both new fields.
+The refreshed lock resolves one coherent set of Marin packages. The resolved Iris package successfully loads the current
+`cw-rno2a.yaml` and exposes both new fields.
 
 ## Hypothesis 2
 
-The current Iris wheel removed client symbols from the `iris.client` package initializer but retains them in the
-documented implementation module used by Iris itself.
+The resolved Iris wheel removed client symbols from the `iris.client` package initializer but retains them in the module
+used by Iris itself.
 
 ## Changes to make
 
@@ -35,10 +35,8 @@ Import `IrisClient` and `JobFailedError` from `iris.client.client` in launcher c
 
 ## Results
 
-The initial launcher-suite collection failed in five modules because the old re-exports no longer exist. Iris `0.2.83`
-imports these symbols from `iris.client.client` throughout its CLI and testing packages. After updating the imports, all
-315 launcher tests pass. A configuration-contract test now covers both the unconstrained Marin runtime dependency policy
-and the two cluster schema fields that exposed the mismatch.
+The initial launcher-suite collection failed because the old re-exports no longer exist. Iris imports these symbols from
+`iris.client.client` throughout its CLI and testing packages. After updating the imports, the launcher suite passes.
 
 ## Future work
 
