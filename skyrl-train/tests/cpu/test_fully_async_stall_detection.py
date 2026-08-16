@@ -17,6 +17,7 @@ from skyrl_train.fully_async_trainer import (
     _GenerationQueues,
 )
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
+from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 
 
 def _make_queues() -> _GenerationQueues:
@@ -33,6 +34,16 @@ def _bare_trainer(mini_batch_size=2, step_times=None, tasks=None) -> FullyAsyncR
     trainer.mini_batch_size = mini_batch_size
     trainer._step_time_history = collections.deque(step_times or [], maxlen=5)
     trainer._active_trajectory_tasks = tasks or []
+    trainer.global_step = 0
+    trainer.all_metrics = {}
+    trainer._groups_rejected_since_step = 0
+    trainer._rejection_reasons_since_step = collections.Counter()
+    trainer._groups_inspected_since_step = 0
+    trainer._group_admission_policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=1),
+        max_staleness_steps=0,
+        rollout_logprobs_required=False,
+    )
     return trainer
 
 
@@ -68,7 +79,7 @@ async def test_check_stall_raises_when_no_generators():
 
 @pytest.mark.asyncio
 async def test_check_stall_extends_when_generators_alive():
-    alive_task = asyncio.get_event_loop().create_task(asyncio.sleep(100))
+    alive_task = asyncio.create_task(asyncio.Event().wait())
     trainer = _bare_trainer(tasks=[alive_task])
     try:
         new_timeout = trainer._check_generation_stall(elapsed=600.0)
@@ -78,12 +89,12 @@ async def test_check_stall_extends_when_generators_alive():
 
 
 # --------------------------------------------------------------------------- #
-# _get_fresh_generation_group_mini_batch — end-to-end stall detection         #
+# _get_admitted_generation_group_mini_batch — end-to-end stall detection      #
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
-async def test_get_fresh_batch_raises_when_generators_dead(monkeypatch):
+async def test_get_admitted_batch_raises_when_generators_dead(monkeypatch):
     """When all generators have exited and the buffer is short, raise immediately."""
     trainer = _bare_trainer(mini_batch_size=2, tasks=[])
     # Patch the timeout to 0.05s so the test runs fast.
@@ -92,45 +103,30 @@ async def test_get_fresh_batch_raises_when_generators_dead(monkeypatch):
     queues = _make_queues()
 
     with pytest.raises(GenerationStalledError, match="no active generators"):
-        await trainer._get_fresh_generation_group_mini_batch(queues)
+        await trainer._get_admitted_generation_group_mini_batch(queues)
 
 
 @pytest.mark.asyncio
-async def test_get_fresh_batch_returns_when_groups_arrive(monkeypatch):
-    """Normal path: groups arrive and the batch completes before the stall deadline."""
+async def test_get_admitted_batch_returns_complete_group_set(monkeypatch):
     trainer = _bare_trainer(mini_batch_size=2, tasks=[])
     monkeypatch.setattr(trainer, "_generation_stall_timeout", lambda: 10.0)
 
     queues = _make_queues()
-
-    # Stub partition: all groups are fresh, none stale.
-    from skyrl_train.fully_async_trainer import _FreshnessPartition
-
-    monkeypatch.setattr(
-        trainer,
-        "_partition_and_retry_stale_groups",
-        lambda q, groups: _FreshnessPartition(fresh_groups=groups, stale_groups=[]),
-    )
-    # Stub metric helpers.
-    monkeypatch.setattr(trainer, "_record_discard_scan", lambda *a, **kw: None)
-    monkeypatch.setattr(trainer, "_publish_discard_metrics", lambda: None)
-
-    # Feed two groups after a short delay.
-    async def _producer():
-        await asyncio.sleep(0.05)
-        for i in range(2):
-            await queues.completed.put(
-                GeneratedOutputGroup(
-                    trajectory_batch={"response_ids": [[1]], "prompt_token_ids": [[1]]},
-                    uid=f"u{i}",
-                    earliest_model_step=0,
-                    source_prompts=[{}],
-                )
+    for i in range(2):
+        queues.completed.put_nowait(
+            GeneratedOutputGroup(
+                trajectory_batch={
+                    "response_ids": [[1]],
+                    "prompt_token_ids": [[1]],
+                    "loss_masks": [[1]],
+                    "rollout_logprobs": None,
+                    "exclude_from_baseline": None,
+                },
+                uid=f"u{i}",
+                earliest_model_step=0,
+                source_prompts=[{}],
             )
-            async with queues.condition:
-                queues.condition.notify_all()
+        )
 
-    asyncio.get_event_loop().create_task(_producer())
-
-    batch = await trainer._get_fresh_generation_group_mini_batch(queues)
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
     assert len(batch) == 2

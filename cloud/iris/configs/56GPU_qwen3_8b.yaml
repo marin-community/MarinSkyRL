@@ -1,4 +1,4 @@
-entrypoint: skyrl_train.entrypoints.terminal_bench
+entrypoint: terminal_bench
 
 config_groups:
   terminal_bench_config: terminal_bench
@@ -88,6 +88,7 @@ trainer:
   flash_attn: false
   algorithm:
     advantage_estimator: rloo_n
+    group_advantage_min_size: 4
     use_kl_loss: false
     kl_loss_coef: 0.0
     eps_clip_low: 0.2

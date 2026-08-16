@@ -47,7 +47,7 @@ from cloud.iris.env_vars import (
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     ensure_debug_artifact_directories,
-    iris_ray_cluster_owner_environment,
+    ray_cluster_owner_environment,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
@@ -648,7 +648,7 @@ def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
     ``extra_env``) reaches every pod already and is passed through untouched.
     """
     env = os.environ.copy()
-    env.update(iris_ray_cluster_owner_environment())
+    env.update(ray_cluster_owner_environment())
     if derived_gloo_ifname is not None and env.get("GLOO_SOCKET_IFNAME") == derived_gloo_ifname:
         del env["GLOO_SOCKET_IFNAME"]
         _log(f"[fabric] withholding node-derived GLOO_SOCKET_IFNAME={derived_gloo_ifname} from the training driver")
@@ -1200,14 +1200,14 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # raylet.out, ...) are the only place the FSDP policy / rollout actor stdout+tracebacks
 # land — the iris finelog aggregates only what reaches the head, and a pod GC / eviction
 # DELETES these node-local logs with the pod. This periodically (+ on SIGTERM) uploads
-# THIS node's session logs to the object store under the job's rendezvous prefix, keyed
-# by node id, reusing the SAME fsspec/boto3 + AWS_ENDPOINT_URL creds path the rendezvous
-# / spill / term-artifact writers already use fs_and_path. Per-node: each pod writes
-# its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
+# THIS node's session logs to the job's durable Ray-log root, keyed by node id, reusing
+# the SAME fsspec/boto3 + AWS_ENDPOINT_URL credentials as the rendezvous / spill /
+# term-artifact writers. Per-node: each pod writes its own logs under
+# <ray_log_dir>/<node_id>/. Gate:
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
 # Ray emits many small log files, so upload time is dominated by per-object latency.
-# Keep enough concurrency for a cold short-lived job to finish within the 60-second
+# Keep enough concurrency for a cold short-lived job to finish within the five-minute
 # teardown budget while staying far below object-store request-rate limits.
 RAY_LOG_SYNC_MAX_WORKERS = 16
 RAY_LOG_SYNC_MAX_FAILURE_LOGS = 3
@@ -1279,7 +1279,7 @@ class _RayLogSyncSettings:
         return cls(
             enabled=os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") == "1",
             interval_seconds=int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300")),
-            final_timeout_seconds=float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "60")),
+            final_timeout_seconds=float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "300")),
         )
 
 
@@ -1446,7 +1446,7 @@ def sync_debug_artifacts(rendezvous_dir: str | None, node_id: str, reason: str) 
 class RayLogSyncSession:
     """Incrementally upload one node's Ray logs without overlapping sync passes."""
 
-    rendezvous_dir: str | None
+    ray_log_dir: str | None
     node_id: str
     _settings: _RayLogSyncSettings = field(default_factory=_RayLogSyncSettings.from_environment, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -1454,9 +1454,9 @@ class RayLogSyncSession:
 
     @property
     def destination(self) -> str | None:
-        if not self.rendezvous_dir:
+        if not self.ray_log_dir:
             return None
-        return join_resource_path(self.rendezvous_dir, "ray_session_logs", self.node_id)
+        return join_resource_path(self.ray_log_dir, self.node_id)
 
     def sync(self, reason: str) -> RayLogSyncResult:
         """Upload new or changed files and return per-pass file and byte counts."""
@@ -1521,10 +1521,10 @@ class RayLogSyncSession:
             return RayLogSyncWaitStatus.TIMED_OUT
         return RayLogSyncWaitStatus.COMPLETED
 
-    def start_periodic(self) -> threading.Event:
-        """Start periodic incremental uploads and return the event that stops new passes."""
+    def start_periodic(self, rendezvous_dir: str | None) -> threading.Event:
+        """Start periodic Ray-log and debug-artifact uploads."""
         stop = threading.Event()
-        if not self.destination or not self._settings.enabled:
+        if (not self.destination and not rendezvous_dir) or not self._settings.enabled:
             return stop
         interval = self._settings.interval_seconds
         if interval <= 0:
@@ -1534,13 +1534,18 @@ class RayLogSyncSession:
             if stop.wait(min(60, interval)):
                 return
             self.sync("periodic")
-            sync_debug_artifacts(self.rendezvous_dir, self.node_id, "periodic")
+            sync_debug_artifacts(rendezvous_dir, self.node_id, "periodic")
             while not stop.wait(interval):
                 self.sync("periodic")
-                sync_debug_artifacts(self.rendezvous_dir, self.node_id, "periodic")
+                sync_debug_artifacts(rendezvous_dir, self.node_id, "periodic")
 
         threading.Thread(target=_loop, daemon=True, name="ray-log-sync").start()
-        _log(f"[ray-log-sync] started (every {interval}s, first ~{min(60, interval)}s) -> {self.destination}")
+        destinations: list[str] = []
+        if self.destination:
+            destinations.append(self.destination)
+        if rendezvous_dir:
+            destinations.append(join_resource_path(rendezvous_dir, "debug_artifacts", self.node_id))
+        _log(f"[artifact-sync] started (every {interval}s, first ~{min(60, interval)}s) -> {', '.join(destinations)}")
         return stop
 
 
@@ -1560,7 +1565,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     node_id = f"rank0-{socket.gethostname()}"
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
     ray_log_sync_stop: threading.Event | None = None
-    ray_log_sync = RayLogSyncSession(args.rendezvous_dir, node_id)
+    ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
 
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
@@ -1607,9 +1612,8 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     )
     _log("Ray head bootstrap complete; entering rendezvous / cluster-join phase.")
 
-    # Start the periodic Ray session-log -> object-store sync now that the session dir
-    # exists (per-node, keyed by node id, under the job's rendezvous prefix).
-    ray_log_sync_stop = ray_log_sync.start_periodic()
+    # Start periodic uploads now that Ray has created its session directory.
+    ray_log_sync_stop = ray_log_sync.start_periodic(args.rendezvous_dir)
 
     if num_tasks > 1:
         if not args.rendezvous_dir:
@@ -1670,7 +1674,7 @@ def run_worker(args: argparse.Namespace) -> int:
     node_ip = _own_ip()
     node_id = f"rank{rank}-{socket.gethostname()}"
     _log(f"ROLE=worker rank={rank}/{num_tasks} node_ip={node_ip}")
-    ray_log_sync = RayLogSyncSession(args.rendezvous_dir, node_id)
+    ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
 
     if not args.rendezvous_dir:
         raise ValueError(
@@ -1700,7 +1704,7 @@ def run_worker(args: argparse.Namespace) -> int:
 
     # Periodic Ray session-log -> object-store sync for THIS worker node (the FSDP/rollout
     # actors on this node log to its local /tmp/ray session, deleted with the pod on GC).
-    ray_log_sync_stop = ray_log_sync.start_periodic()
+    ray_log_sync_stop = ray_log_sync.start_periodic(args.rendezvous_dir)
 
     stop = threading.Event()
 
@@ -1764,6 +1768,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default=os.environ.get("OT_AGENT_IRIS_RENDEZVOUS_DIR"),
         help="Shared object-store/dir for the head/worker rendezvous (gs://, s3://, "
         "or a shared path). Defaults to $OT_AGENT_IRIS_RENDEZVOUS_DIR.",
+    )
+    parser.add_argument(
+        "--ray-log-dir",
+        default=os.environ.get("OT_AGENT_RAY_LOG_DIR"),
+        help="Durable object-store root for per-node Ray session logs. Defaults to $OT_AGENT_RAY_LOG_DIR.",
     )
     parser.add_argument(
         "--rendezvous-timeout",

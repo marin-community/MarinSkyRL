@@ -18,12 +18,16 @@ from omegaconf import DictConfig
 from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimator,
     AdvantageEstimatorRegistry,
+    ExactPhysicalGroup,
+    MinimumBaselineEligibleGroup,
+    NoGroupAdvantage,
     register_advantage_estimator,
 )
 from skyrl_train.utils.policy_math import masked_whiten, right_pad_to_match
+from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 
 
-@register_advantage_estimator(AdvantageEstimator.REINFORCE_PP)
+@register_advantage_estimator(AdvantageEstimator.REINFORCE_PP, group_contract=NoGroupAdvantage())
 def compute_reinforce_plus_plus_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -58,7 +62,7 @@ def compute_reinforce_plus_plus_outcome_advantage(
     return advantages, returns
 
 
-@register_advantage_estimator(AdvantageEstimator.RLOO)
+@register_advantage_estimator(AdvantageEstimator.RLOO, group_contract=ExactPhysicalGroup())
 def compute_rloo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -109,12 +113,13 @@ def compute_rloo_outcome_advantage(
     return scores, scores
 
 
-@register_advantage_estimator(AdvantageEstimator.RLOO_N)
+@register_advantage_estimator(AdvantageEstimator.RLOO_N, group_contract=MinimumBaselineEligibleGroup())
 def compute_rloo_n_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     exclude_from_baseline: Optional[np.ndarray] = None,
+    group_advantage_invariant: GroupAdvantageInvariant | None = None,
     config=None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -149,10 +154,14 @@ def compute_rloo_n_outcome_advantage(
 
     # Minimum included samples per group for a reliable leave-one-out baseline.
     # Groups below this threshold get advantage=0 for all samples.
-    min_group_size = 2
+    if group_advantage_invariant is None:
+        raise ValueError("RLOO-N requires a resolved group_advantage_invariant")
+    if group_advantage_invariant.kind is not GroupAdvantageKind.MINIMUM_BASELINE_ELIGIBLE:
+        raise ValueError(f"RLOO-N requires a minimum baseline-eligible contract, got {group_advantage_invariant.kind}")
+    assert group_advantage_invariant.minimum_group_size is not None
+    min_group_size = group_advantage_invariant.minimum_group_size
     filter_zero_reward_groups = True
     if config is not None:
-        min_group_size = getattr(config, "rloo_n_min_group_size", 2)
         filter_zero_reward_groups = getattr(config, "rloo_n_filter_zero_reward_groups", True)
 
     # Default: include all samples in baseline
@@ -258,12 +267,13 @@ def compute_rloo_n_outcome_advantage(
     return scores, scores
 
 
-@register_advantage_estimator("rloo_n_pbs")
+@register_advantage_estimator("rloo_n_pbs", group_contract=MinimumBaselineEligibleGroup())
 def compute_rloo_n_pbs_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     exclude_from_baseline: Optional[np.ndarray] = None,
+    group_advantage_invariant: GroupAdvantageInvariant | None = None,
     config=None,
     token_level_shaping: Optional[torch.Tensor] = None,
     **kwargs,
@@ -300,6 +310,7 @@ def compute_rloo_n_pbs_advantage(
         response_mask=response_mask,
         index=index,
         exclude_from_baseline=exclude_from_baseline,
+        group_advantage_invariant=group_advantage_invariant,
         config=config,
         **kwargs,
     )
@@ -315,7 +326,7 @@ def compute_rloo_n_pbs_advantage(
     return combined, combined
 
 
-@register_advantage_estimator(AdvantageEstimator.GAE)
+@register_advantage_estimator(AdvantageEstimator.GAE, group_contract=NoGroupAdvantage())
 def compute_gae_advantage_return(
     token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],
     values: Float[torch.Tensor, "batch_size seqlen"],
@@ -346,7 +357,7 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
-@register_advantage_estimator(AdvantageEstimator.GRPO)
+@register_advantage_estimator(AdvantageEstimator.GRPO, group_contract=ExactPhysicalGroup())
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,

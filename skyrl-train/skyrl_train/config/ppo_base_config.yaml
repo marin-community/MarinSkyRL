@@ -141,6 +141,11 @@ trainer:
   algorithm:
     batch_invariant: false
     advantage_estimator: "grpo"
+    group_advantage_min_size: null
+    resolved_group_advantage:
+      kind: exact_physical
+      physical_group_size: ${generator.n_samples_per_prompt}
+      minimum_group_size: null
     kl_ctrl:
       type: "fixed"
       kl_target: 0.1
@@ -158,7 +163,6 @@ trainer:
     policy_loss_type: "regular"
     loss_reduction: "token_mean"
     grpo_norm_by_std: true
-    rloo_n_min_group_size: 4
     rloo_n_filter_zero_reward_groups: true
     lambd: 1.0
     gamma: 1.0

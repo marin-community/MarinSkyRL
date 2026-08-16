@@ -99,9 +99,9 @@ def test_context_budget_derives_all_hydra_length_arguments():
     assert "generator.max_turns=90" in args
     assert "generator.sampling_params.max_generate_length=16384" in args
     assert any(arg.endswith("generator.engine_init_kwargs.max_model_len=131072") for arg in args)
-    assert "+terminal_bench_config.model_info.max_input_tokens=114688" in args
-    assert "+terminal_bench_config.model_info.max_output_tokens=16384" in args
-    assert "+terminal_bench_config.harbor.max_turns=90" in args
+    assert "++terminal_bench_config.model_info.max_input_tokens=114688" in args
+    assert "++terminal_bench_config.model_info.max_output_tokens=16384" in args
+    assert "++terminal_bench_config.harbor.max_turns=90" in args
 
 
 def test_context_budget_rejects_impossible_and_legacy_config_fields(tmp_path):

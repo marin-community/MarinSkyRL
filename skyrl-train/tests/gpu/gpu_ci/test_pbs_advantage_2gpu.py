@@ -27,6 +27,7 @@ from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, get_test_actor_config, validate_cfg
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 
 
@@ -35,19 +36,24 @@ def cfg() -> DictConfig:
     cfg = get_test_actor_config()
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
-    cfg.trainer.policy_mini_batch_size = 2
-    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.policy_mini_batch_size = 1
+    cfg.generator.n_samples_per_prompt = 2
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
     cfg.generator.inference_engine_tensor_parallel_size = 2
     cfg.trainer.algorithm.advantage_estimator = "rloo_n_pbs"
+    cfg.trainer.algorithm.group_advantage_min_size = 2
     cfg.trainer.algorithm.enable_token_reward_channel = True
     validate_cfg(cfg)
     return cfg
 
 
 def _adv_cfg():
-    return type("C", (), {"rloo_n_min_group_size": 2, "rloo_n_filter_zero_reward_groups": False})()
+    return type("C", (), {"rloo_n_filter_zero_reward_groups": False})()
+
+
+def _group_invariant():
+    return GroupAdvantageInvariant.minimum_baseline_eligible(physical_group_size=2, minimum_group_size=2)
 
 
 def test_pbs_dispatcher_on_gpu(ray_init_fixture):
@@ -68,6 +74,7 @@ def test_pbs_dispatcher_on_gpu(ray_init_fixture):
         adv_estimator="rloo_n",
         config=_adv_cfg(),
         values=None,
+        group_advantage_invariant=_group_invariant(),
     )
 
     # rloo_n_pbs with zeros channel == base (byte-identical).
@@ -80,6 +87,7 @@ def test_pbs_dispatcher_on_gpu(ray_init_fixture):
         config=_adv_cfg(),
         values=None,
         token_level_shaping=zeros,
+        group_advantage_invariant=_group_invariant(),
     )
     assert torch.equal(adv_zeros, base), "zeros channel must reproduce pure RLOO-N"
 
@@ -94,6 +102,7 @@ def test_pbs_dispatcher_on_gpu(ray_init_fixture):
         config=_adv_cfg(),
         values=None,
         token_level_shaping=shaping,
+        group_advantage_invariant=_group_invariant(),
     )
     edit_adv = adv_pbs[0, 2].item()
     non_edit = [adv_pbs[0, j].item() for j in range(seqlen) if j != 2]

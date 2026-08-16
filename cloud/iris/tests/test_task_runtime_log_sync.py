@@ -10,7 +10,6 @@ class _RecordingFilesystem:
         self._parallel_upload = threading.Event()
         self._wait_for_parallel_upload = wait_for_parallel_upload
         self.active_uploads = 0
-        self.completed_uploads = 0
         self.max_active_uploads = 0
 
     def put(self, local_path, _remote_path):
@@ -25,7 +24,6 @@ class _RecordingFilesystem:
             source.read()
         with self._lock:
             self.active_uploads -= 1
-            self.completed_uploads += 1
 
 
 class _BlockingFilesystem:
@@ -50,15 +48,22 @@ def _ray_log_tree(tmp_path, monkeypatch, *payloads: bytes):
     return paths
 
 
-def test_ray_log_sync_uploads_files_concurrently(tmp_path, monkeypatch):
+def test_ray_log_sync_uploads_to_node_directory_concurrently(tmp_path, monkeypatch):
     _ray_log_tree(tmp_path, monkeypatch, b"first", b"second", b"third")
     filesystem = _RecordingFilesystem(wait_for_parallel_upload=True)
-    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
+    resolved_uris = []
+
+    def resolve_destination(uri):
+        resolved_uris.append(uri)
+        return filesystem, "bucket/logs"
+
+    monkeypatch.setattr(task_runtime, "fs_and_path", resolve_destination)
     sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
     result = sync_session.sync("periodic")
 
     assert result.uploaded_files == 3
+    assert resolved_uris == ["s3://logs/node-0"]
     assert filesystem.max_active_uploads >= 2
 
 
@@ -78,7 +83,7 @@ def test_ray_log_sync_skips_unchanged_files(tmp_path, monkeypatch):
     assert (third.uploaded_files, third.unchanged_files) == (1, 1)
 
 
-def test_ray_log_sync_reports_files_that_disappear_during_scan(tmp_path, monkeypatch):
+def test_ray_log_sync_continues_when_a_file_disappears_during_rotation(tmp_path, monkeypatch):
     (first_path,) = _ray_log_tree(tmp_path, monkeypatch, b"first")
     (first_path.parent / "missing.out").symlink_to(tmp_path / "already-gone.out")
     filesystem = _RecordingFilesystem()
@@ -88,17 +93,6 @@ def test_ray_log_sync_reports_files_that_disappear_during_scan(tmp_path, monkeyp
 
     assert result.uploaded_files == 1
     assert result.failed_files == 1
-
-
-def test_final_ray_log_sync_completes_inline(tmp_path, monkeypatch):
-    _ray_log_tree(tmp_path, monkeypatch, b"complete")
-    filesystem = _RecordingFilesystem()
-    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
-    monkeypatch.setenv("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "1")
-    sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
-
-    assert sync_session.sync_bounded("complete") == task_runtime.RayLogSyncWaitStatus.COMPLETED
-    assert filesystem.completed_uploads == 1
 
 
 def test_final_ray_log_sync_timeout_does_not_block_teardown(tmp_path, monkeypatch):

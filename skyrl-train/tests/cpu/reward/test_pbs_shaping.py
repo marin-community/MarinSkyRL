@@ -19,10 +19,15 @@ from skyrl_train.utils.span_tagger import SPAN_OTHER, SPAN_THINK, SPAN_ACTION, S
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping, _potential
 from skyrl_train.utils.test_delta_parser import TestRunResult
 from skyrl_train.utils.advantage_estimators import compute_rloo_n_outcome_advantage, compute_rloo_n_pbs_advantage
+from skyrl_train.group_admission import GroupAdvantageInvariant
 
 
 def _cfg():
-    return type("C", (), {"rloo_n_min_group_size": 2, "rloo_n_filter_zero_reward_groups": False})()
+    return type("C", (), {"rloo_n_filter_zero_reward_groups": False})()
+
+
+def _invariant():
+    return GroupAdvantageInvariant.minimum_baseline_eligible(physical_group_size=2, minimum_group_size=2)
 
 
 def _run(idx, passed, failed):
@@ -129,9 +134,16 @@ def _setup_batch():
 
 def test_estimator_none_shaping_is_pure_rloo_n():
     tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg())
+    base, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
+    )
     adv, ret = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), token_level_shaping=None
+        token_level_rewards=tlr,
+        response_mask=rm,
+        index=idx,
+        config=_cfg(),
+        group_advantage_invariant=_invariant(),
+        token_level_shaping=None,
     )
     assert torch.equal(adv, base)
     assert torch.equal(ret, base)
@@ -139,12 +151,15 @@ def test_estimator_none_shaping_is_pure_rloo_n():
 
 def test_estimator_zeros_shaping_is_pure_rloo_n():
     tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg())
+    base, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
+    )
     adv, _ = compute_rloo_n_pbs_advantage(
         token_level_rewards=tlr,
         response_mask=rm,
         index=idx,
         config=_cfg(),
+        group_advantage_invariant=_invariant(),
         token_level_shaping=torch.zeros_like(rm),
     )
     assert torch.equal(adv, base)
@@ -152,12 +167,19 @@ def test_estimator_zeros_shaping_is_pure_rloo_n():
 
 def test_estimator_adds_shaping_at_exact_tokens():
     tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg())
+    base, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
+    )
     shaping = torch.zeros_like(rm)
     shaping[0, 2] = 0.3
     shaping[2, 4] = -0.1
     adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), token_level_shaping=shaping
+        token_level_rewards=tlr,
+        response_mask=rm,
+        index=idx,
+        config=_cfg(),
+        group_advantage_invariant=_invariant(),
+        token_level_shaping=shaping,
     )
     delta = adv - base
     assert torch.isclose(delta[0, 2], torch.tensor(0.3))
@@ -172,12 +194,19 @@ def test_edit_token_advantage_higher_than_non_edit():
     """The validation-gate assertion: edit tokens that moved tests get measurably
     higher advantage than non-edit / no-delta tokens of the same trajectory."""
     tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg())
+    base, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
+    )
     # Sample 0: an edit at token 2 moved tests (positive PBS), other tokens flat.
     shaping = torch.zeros_like(rm)
     shaping[0, 2] = 0.25
     adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), token_level_shaping=shaping
+        token_level_rewards=tlr,
+        response_mask=rm,
+        index=idx,
+        config=_cfg(),
+        group_advantage_invariant=_invariant(),
+        token_level_shaping=shaping,
     )
     edit_adv = adv[0, 2].item()
     non_edit = [adv[0, j].item() for j in range(rm.shape[1]) if j != 2]
@@ -189,11 +218,18 @@ def test_loss_parity_denominator_unchanged():
     not changed by shaping — the recurring seqnorm-style failure mode. The
     shaping only changes the numerator at response-token positions."""
     tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg())
+    base, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
+    )
     shaping = torch.zeros_like(rm)
     shaping[1, 3] = 0.2
     adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), token_level_shaping=shaping
+        token_level_rewards=tlr,
+        response_mask=rm,
+        index=idx,
+        config=_cfg(),
+        group_advantage_invariant=_invariant(),
+        token_level_shaping=shaping,
     )
     denom = rm.sum()
     # A token-mean loss over response tokens: denominator is the mask sum, which
@@ -208,10 +244,17 @@ def test_shaping_masked_outside_response():
     # Shaping that lands on a masked (response_mask==0) token must NOT enter.
     tlr, rm, idx = _setup_batch()
     rm[3, 5] = 0.0  # mask a token
-    base, _ = compute_rloo_n_outcome_advantage(token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg())
+    base, _ = compute_rloo_n_outcome_advantage(
+        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
+    )
     shaping = torch.zeros_like(rm)
     shaping[3, 5] = 0.5  # on the masked token
     adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), token_level_shaping=shaping
+        token_level_rewards=tlr,
+        response_mask=rm,
+        index=idx,
+        config=_cfg(),
+        group_advantage_invariant=_invariant(),
+        token_level_shaping=shaping,
     )
     assert torch.equal(adv, base)  # masked out

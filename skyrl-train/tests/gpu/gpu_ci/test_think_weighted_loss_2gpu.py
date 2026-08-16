@@ -36,12 +36,13 @@ def cfg() -> DictConfig:
     cfg = get_test_actor_config()
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
-    cfg.trainer.policy_mini_batch_size = 2
-    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.policy_mini_batch_size = 1
+    cfg.generator.n_samples_per_prompt = 2
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
     cfg.generator.inference_engine_tensor_parallel_size = 2
     cfg.trainer.algorithm.advantage_estimator = "rloo_n"
+    cfg.trainer.algorithm.group_advantage_min_size = 2
     cfg.trainer.algorithm.enable_token_reward_channel = True
     cfg.trainer.strategy = "fsdp2"  # production path; deepspeed absent in the rl venv
     validate_cfg(cfg)

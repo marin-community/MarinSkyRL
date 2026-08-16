@@ -25,7 +25,7 @@ from skyrl_train.distillation_trainer import DistillationTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
-from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
+from skyrl_train.utils.algorithm_registry import NoGroupAdvantage, register_advantage_estimator, register_policy_loss
 from skyrl_train.utils.loss_reduction import reduce_loss
 from skyrl_train.utils.distillation_utils import best_of_n_select
 import hydra
@@ -121,7 +121,7 @@ def sft_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollo
 
 
 # Uniform advantage estimator: all advantages = 1.0 (for SFT mode)
-@register_advantage_estimator("uniform")
+@register_advantage_estimator("uniform", group_contract=NoGroupAdvantage())
 def compute_uniform_advantage(token_level_rewards: torch.Tensor, **kwargs):
     ones = torch.ones_like(token_level_rewards)
     return ones, ones

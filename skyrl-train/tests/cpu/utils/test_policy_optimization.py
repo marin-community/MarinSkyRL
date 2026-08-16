@@ -20,6 +20,7 @@ from skyrl_train.utils.advantage_estimators import (
 from skyrl_train.utils.kl_controllers import AdaptiveKLController, FixedKLController
 from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimatorRegistry,
+    NoGroupAdvantage,
     register_advantage_estimator,
     PolicyLossRegistry,
     register_policy_loss,
@@ -513,6 +514,25 @@ def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
         validate_cfg(cfg)
 
 
+def test_validate_cfg_materializes_rloo_n_group_invariant():
+    cfg = _validatable_dummy_config()
+    cfg.generator.n_samples_per_prompt = 2
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_pipeline_parallel_size = 1
+    cfg.generator.inference_engine_data_parallel_size = 1
+    cfg.trainer.algorithm.advantage_estimator = "rloo_n"
+    cfg.trainer.algorithm.group_advantage_min_size = 2
+
+    validate_cfg(cfg)
+
+    assert OmegaConf.to_container(cfg.trainer.algorithm.resolved_group_advantage) == {
+        "kind": "minimum_baseline_eligible",
+        "physical_group_size": 2,
+        "minimum_group_size": 2,
+    }
+
+
 def test_adaptive_kl_controller_update():
     controller = AdaptiveKLController(init_kl_coef=0.2, target=0.1, horizon=100)
     controller.update(current=0.2, n_steps=10)
@@ -536,7 +556,7 @@ def test_base_function_registry_registration_and_retrieval():
         return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
 
     # Register function
-    AdvantageEstimatorRegistry.register("test_basic", dummy_function)
+    AdvantageEstimatorRegistry.register("test_basic", dummy_function, group_contract=NoGroupAdvantage())
 
     # Test retrieval
     retrieved_func = AdvantageEstimatorRegistry.get("test_basic")
@@ -547,6 +567,14 @@ def test_base_function_registry_registration_and_retrieval():
 
     # Clean up
     AdvantageEstimatorRegistry.unregister("test_basic")
+
+
+def test_advantage_estimator_registration_requires_group_contract():
+    def dummy_function(**kwargs):
+        return None, None
+
+    with pytest.raises(ValueError, match="must declare a group_contract"):
+        AdvantageEstimatorRegistry.register("missing_contract", dummy_function)
 
 
 def test_base_function_registry_error_handling():
@@ -564,9 +592,9 @@ def test_base_function_registry_error_handling():
         AdvantageEstimatorRegistry.unregister("non_existent")
 
     # Test duplicate registration
-    AdvantageEstimatorRegistry.register("test_dup", dummy_function)
+    AdvantageEstimatorRegistry.register("test_dup", dummy_function, group_contract=NoGroupAdvantage())
     with pytest.raises(ValueError, match="already registered"):
-        AdvantageEstimatorRegistry.register("test_dup", dummy_function)
+        AdvantageEstimatorRegistry.register("test_dup", dummy_function, group_contract=NoGroupAdvantage())
 
     # Clean up
     AdvantageEstimatorRegistry.unregister("test_dup")
@@ -579,7 +607,7 @@ def test_base_registry_unregister():
         return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
 
     # Register and verify
-    AdvantageEstimatorRegistry.register("test_unregister", dummy_function)
+    AdvantageEstimatorRegistry.register("test_unregister", dummy_function, group_contract=NoGroupAdvantage())
     assert "test_unregister" in AdvantageEstimatorRegistry.list_available()
 
     # Unregister and verify
@@ -590,7 +618,7 @@ def test_base_registry_unregister():
 def test_advantage_estimator_registry_specific():
     """Test AdvantageEstimatorRegistry-specific functionality."""
 
-    @register_advantage_estimator("test_decorator")
+    @register_advantage_estimator("test_decorator", group_contract=NoGroupAdvantage())
     def decorated_estimator(**kwargs):
         return torch.ones_like(kwargs["token_level_rewards"]), torch.ones_like(kwargs["token_level_rewards"])
 
@@ -712,7 +740,9 @@ def test_registry_cross_ray_process():
 
         # Test basic registration and retrieval
         PolicyLossRegistry.register("cross_process_test", test_policy_loss)
-        AdvantageEstimatorRegistry.register("cross_process_adv_test", test_advantage_estimator)
+        AdvantageEstimatorRegistry.register(
+            "cross_process_adv_test", test_advantage_estimator, group_contract=NoGroupAdvantage()
+        )
 
         # Test Ray integration
         @ray.remote
@@ -767,7 +797,7 @@ def test_registry_named_actor_creation():
             return rewards * 2, rewards * 3
 
         # Register function (should create/use named actor)
-        AdvantageEstimatorRegistry.register("named_actor_test", test_func)
+        AdvantageEstimatorRegistry.register("named_actor_test", test_func, group_contract=NoGroupAdvantage())
 
         # Verify local retrieval works
         retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
@@ -818,7 +848,7 @@ def test_registry_reconnects_after_ray_shutdown():
             rewards = kwargs["token_level_rewards"]
             return rewards * 2, rewards * 3
 
-        AdvantageEstimatorRegistry.register("named_actor_test", test_func)
+        AdvantageEstimatorRegistry.register("named_actor_test", test_func, group_contract=NoGroupAdvantage())
         retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
         assert retrieved == test_func
         actor = ray.get_actor(AdvantageEstimatorRegistry._actor_name)

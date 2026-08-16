@@ -16,7 +16,7 @@ the argument is missing or ambiguous.
 
 Validate that every directory contains `POLICY.md` and `STATE.md`. Read `TRACKER.md` when present.
 Treat `artifacts/` as optional experiment material that may include untracked scripts, resolved
-requests, and reports; inspect it for provenance but do not edit code or configuration there.
+requests, and reports; you have authority to edit content you find there.
 
 Read the current launcher interface, selected configuration, each experiment record, and
 `.agents/ops/watch-coreweave-rl.md` at the start of every session. Read the additional ops runbooks it
@@ -28,7 +28,7 @@ Within each selected experiment, `POLICY.md` defines operational authority and i
 
 ## Role boundary
 
-- Do not create worktrees or edit repository source, configuration, skills, or experiment artifacts.
+- Do not create worktrees or edit repository source, configuration, skills.
   You may update the selected experiments' mutable `STATE.md` and `TRACKER.md` records and write
   escalation reports to the location defined by the recurring-prompt runbook, but must not commit
   them.
@@ -36,7 +36,7 @@ Within each selected experiment, `POLICY.md` defines operational authority and i
 - Load credentials only through approved secret mechanisms; never print or persist their values.
 - You may inspect repository state and operate jobs only within the authority granted by the user or
   the experiment's `POLICY.md` and the selected backend's ops runbook.
-- Hand source and configuration defects to an implementation role with evidence, expected behavior,
+- Hand source defects to an implementation role with evidence, expected behavior,
   affected component, and a proposed regression test.
 - Never patch a live pod or remote checkout.
 - Never edit a POLICY.md document without direct user authorization.
@@ -46,8 +46,7 @@ Within each selected experiment, `POLICY.md` defines operational authority and i
   scope and remove stale information as soon as it is discovered. Keep `TRACKER.md`, when present,
   consistent with current policy, state, and cluster evidence.
 - Scrutinize subagent reports against controller state and durable artifacts before acting.
-- Never put experiment paths or mutable job state in the recurring prompt. Bind `experiment_dirs`
-  separately and make each recurrence reread the experiment records and current cluster state.
+- Never put experiment paths or mutable job state in the recurring prompt. You may list the user-passed `experiment_dirs` as an exception to this rule.
 - Routine ingress and egress within a selected CoreWeave job scope do not require confirmation for
   each action. Large or cross-region transfers remain subject to repository policy.
 

@@ -5,7 +5,8 @@ Harbor rollout artifacts) to a local dir.
 For a given job it syncs:
   (1) ray_session_logs  — the per-actor Ray logs (worker-*.out/.err, python-*, raylet, gcs) from the
       durable object store, reached via the LOTA endpoint cwobject.com + the in-cluster `iris-task-env`
-      creds + virtual addressing. Two layouts are supported (see "Ray-log layouts" below):
+      creds + virtual addressing. Three layouts are supported (see "Ray-log layouts" below):
+        - current:      `s3://<bucket>/marin/users/<user>/skyrl/<job>/ray_session_logs/`
         - agentic:     `s3://marin-us-east-02a/iris/<slug>/<run>/ray_session_logs/`
         - non-agentic: `s3://marin-us-east-02a/iris/<rendezvous>/ray_session_logs/` (e.g. `iris/rl-rdv/<job>/`)
   (2) finelog.log       — the aggregated controller/job finelog via `iris job logs --no-tail`.
@@ -15,12 +16,10 @@ For a given job it syncs:
       so we never materialize the tree on the (unified-memory) Mac: one archive, not millions of inodes.
 
 Ray-log layouts:
-  Agentic jobs publish per-run Ray logs under `iris/<slug>/run-<ts>/ray_session_logs/`; the run dir is
-  auto-discovered (newest `run-*`). Non-agentic multi-node RL jobs instead rendezvous through a shared
-  `--rendezvous-dir` (`iris_backend.py`, e.g. `s3://marin-us-east-02a/iris/rl-rdv/<job>`) and write
-  their Ray logs under THAT prefix — there is no `run-*` dir. For those, pass `--rendezvous-dir` with the
-  same URI you launched with, or let the tool auto-derive it from the finelog (the launcher prints
-  `Rendezvous: <uri>`), so non-agentic jobs sync with no extra flags as long as the finelog is fetched.
+  Current launches publish Ray logs to the durable user-owned path printed as `Ray logs: <uri>` in the launcher banner.
+  Pass that URI with `--ray-log-dir` or let the tool derive it from finelog. Historical agentic jobs use
+  `iris/<slug>/run-<ts>/ray_session_logs/`, with the newest `run-*` auto-discovered. Historical non-agentic jobs place
+  logs below their rendezvous URI; pass `--rendezvous-dir` or let the tool derive that URI from finelog.
 
 Ray logs land in the marin-us-east-02a bucket for every supported CoreWeave cluster, so the object-store
 creds always come from the east-02a store; the finelog is fetched from the job's own cluster. trace_jobs
@@ -28,11 +27,11 @@ is written under the job SLUG (run-independent), unlike ray_session_logs.
 
 Usage:
   sync_rl_logs.py /benjaminfeuer/<job> [--cluster cw-us-east-02a|cw-us-east-08a|cw-rno2a]
-                  [--run run-<ts>] [--rendezvous-dir URI] [--dest DIR] [--finelog-lines N]
+                  [--run run-<ts>] [--ray-log-dir URI] [--rendezvous-dir URI] [--dest DIR] [--finelog-lines N]
                   [--no-ray] [--no-finelog] [--trace-jobs] [--trace-jobs-no-gzip]
 
-Defaults: cluster cw-us-east-02a; agentic run = newest run-* under the job prefix; non-agentic
-rendezvous auto-derived from the finelog; dest = ./<slug>-<run|rendezvous>; trace_jobs OFF.
+Defaults: cluster cw-us-east-02a; current Ray-log storage or historical rendezvous is derived from finelog, with historical
+agentic runs falling back to the newest run-* under the job prefix; dest = ./<slug>-<run|rendezvous>; trace_jobs OFF.
 Re-runnable: existing same-size ray files are skipped, so re-syncing a live job only pulls new logs.
 """
 
@@ -47,6 +46,7 @@ import sys
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -62,7 +62,9 @@ from infra.artifact_files import LOG_SUFFIXES  # noqa: E402
 
 BUCKET = "marin-us-east-02a"  # shared CoreWeave ray-log and trace-job store
 ENDPOINT = COREWEAVE_OBJECT_ENDPOINT
-RAY_SUBDIR = "ray_session_logs"  # the leaf under both the agentic run dir and the rendezvous dir
+RAY_SUBDIR = "ray_session_logs"
+HISTORICAL_RAY_ROOT = "iris"
+HISTORICAL_RENDEZVOUS_SHORTHAND = "rl-rdv/"
 DEFAULT_TRACE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_NON_LOG_BYTES = 100 * 1024 * 1024
 
@@ -113,7 +115,7 @@ def discover_run(s3, slug):
     """Newest `run-*` dir under `iris/<slug>/` (agentic per-run layout), or None if there is none.
 
     None means the job did not use the agentic per-run layout — a non-agentic RL job rendezvouses
-    under its own `--rendezvous-dir` instead (see resolve_ray_prefix / _derive_rendezvous_from_finelog).
+    under its own `--rendezvous-dir` instead (see resolve_ray_prefix / _ray_prefixes_from_finelog).
     """
     r = s3.list_objects_v2(Bucket=BUCKET, Prefix=f"iris/{slug}/", Delimiter="/")
     runs = sorted(
@@ -122,67 +124,104 @@ def discover_run(s3, slug):
     return runs[-1] if runs else None
 
 
-def _key_prefix_from_rendezvous(rdv):
-    """Normalize a rendezvous URI/path to its object-store key prefix (no scheme, no bucket, no
-    trailing slash), anchored at `iris/`.
+def _object_key_prefix(location):
+    """Normalize an object-store URI or key by removing only its scheme and bucket.
 
     Accepts every form the launcher / operator might pass:
       s3://marin-us-east-02a/iris/rl-rdv/<job>  ->  iris/rl-rdv/<job>
+      s3://marin-us-east-02a/tmp/ttl=14d/<job>  ->  tmp/ttl=14d/<job>
       gs://some-bucket/iris/rl-rdv/<job>        ->  iris/rl-rdv/<job>
       iris/rl-rdv/<job>                         ->  iris/rl-rdv/<job>
       rl-rdv/<job>                              ->  iris/rl-rdv/<job>
     """
-    p = re.sub(r"^[a-z0-9]+://", "", rdv.strip()).strip("/")  # drop scheme
-    i = p.find("iris/")
-    if i != -1:  # drop a leading bucket segment
-        p = p[i:]
-    elif not p.startswith("iris/"):  # bare `rl-rdv/<job>`
-        p = f"iris/{p}"
-    return p.rstrip("/")
+    value = location.strip()
+    parsed = urlparse(value)
+    if parsed.scheme:
+        if not parsed.netloc:
+            raise ValueError(f"object-store URI has no bucket: {location!r}")
+        prefix = parsed.path.strip("/")
+    else:
+        prefix = value.strip("/")
+    if not prefix:
+        raise ValueError(f"object-store path is empty: {location!r}")
+    if not parsed.scheme and prefix.startswith(HISTORICAL_RENDEZVOUS_SHORTHAND):
+        return f"{HISTORICAL_RAY_ROOT}/{prefix}"
+    return prefix
 
 
-def _derive_rendezvous_from_finelog(finelog_path):
-    """Parse a fetched finelog for the launcher's rendezvous location and return its normalized
-    `iris/...` key prefix, or None. Matches either the launcher's `Rendezvous: <uri>` banner line
-    or any `<scheme>://.../ray_session_logs` URI the controller logged."""
+def _ray_prefix_from_log_dir(ray_log_dir):
+    prefix = _object_key_prefix(ray_log_dir)
+    if prefix.split("/")[-1] != RAY_SUBDIR:
+        raise ValueError(f"Ray log directory must end with {RAY_SUBDIR!r}: {ray_log_dir!r}")
+    return f"{prefix}/"
+
+
+def _ray_prefixes_from_finelog(finelog_path):
+    """Return current and legacy Ray-log prefixes from one pass over a fetched finelog."""
     if not finelog_path or not os.path.exists(finelog_path):
-        return None
-    pat_rdv = re.compile(r"Rendezvous:\s*(\S+)")
-    pat_uri = re.compile(r"[a-z0-9]+://[^\s'\"]+/" + RAY_SUBDIR + r"\b")
-    with open(finelog_path, errors="replace") as f:
-        for line in f:
-            m = pat_rdv.search(line)
-            if m:
-                return _key_prefix_from_rendezvous(m.group(1))
-            m = pat_uri.search(line)
-            if m:
-                return _key_prefix_from_rendezvous(m.group(0).rsplit("/" + RAY_SUBDIR, 1)[0])
-    return None
+        return None, None
+    ray_log_pattern = re.compile(r"Ray logs:\s*(\S+)")
+    rendezvous_pattern = re.compile(r"Rendezvous:\s*(\S+)")
+    raw_uri_pattern = re.compile(r"[a-z0-9]+://[^\s'\"]+/" + RAY_SUBDIR + r"\b")
+    declared_prefix = None
+    legacy_prefix = None
+    with open(finelog_path, errors="replace") as finelog:
+        for line in finelog:
+            if declared_prefix is None and (match := ray_log_pattern.search(line)):
+                declared_prefix = _ray_prefix_from_log_dir(match.group(1))
+            if legacy_prefix is None and (match := rendezvous_pattern.search(line)):
+                base = _object_key_prefix(match.group(1))
+                legacy_prefix = f"{base}/{RAY_SUBDIR}/"
+            if legacy_prefix is None and (match := raw_uri_pattern.search(line)):
+                legacy_prefix = f"{_object_key_prefix(match.group(0))}/"
+            if declared_prefix is not None and legacy_prefix is not None:
+                break
+    return declared_prefix, legacy_prefix
 
 
-def resolve_ray_prefix(s3, slug, run, rendezvous_dir, finelog_path):
-    """Resolve the `iris/.../ray_session_logs/` key prefix for a job's Ray logs, plus a short label
+def _ray_prefix_label(prefix):
+    parts = prefix.rstrip("/").split("/")
+    return parts[-2] if parts[-1] == RAY_SUBDIR else parts[-1]
+
+
+def _requested_ray_label(run, rendezvous_dir, ray_log_dir):
+    if ray_log_dir:
+        return _ray_prefix_label(_ray_prefix_from_log_dir(ray_log_dir))
+    if rendezvous_dir:
+        return _ray_prefix_label(_object_key_prefix(rendezvous_dir))
+    return run
+
+
+def resolve_ray_prefix(s3, slug, run, rendezvous_dir, finelog_path, ray_log_dir=None):
+    """Resolve the object-store key prefix for a job's Ray logs, plus a short label
     (used for the default dest name). Returns (prefix, label) or (None, None) if unresolvable.
 
-    Resolution order — the agentic per-run path (2 & 3) is unchanged; the rendezvous paths (1 & 4)
-    are the non-agentic additions:
-      1. explicit --rendezvous-dir            → iris/<rendezvous>/ray_session_logs/   (non-agentic)
-      2. explicit --run                        → iris/<slug>/run-<ts>/ray_session_logs/ (agentic)
-      3. auto-discovered newest run-*          → iris/<slug>/run-<ts>/ray_session_logs/ (agentic default)
-      4. rendezvous derived from the finelog   → iris/<rendezvous>/ray_session_logs/   (non-agentic fallback)
+    Resolution order:
+      1. explicit --ray-log-dir                → durable path for current launches
+      2. explicit --rendezvous-dir             → historical non-agentic layout
+      3. current Ray-log URI from finelog       → durable path for current launches
+      4. explicit or pre-discovered --run       → historical agentic layout
+      5. auto-discovered newest run-*           → historical agentic default
+      6. historical Ray-log or rendezvous URI from finelog
     """
+    if ray_log_dir:
+        prefix = _ray_prefix_from_log_dir(ray_log_dir)
+        return prefix, _ray_prefix_label(prefix)
     if rendezvous_dir:
-        base = _key_prefix_from_rendezvous(rendezvous_dir)
-        return f"{base}/{RAY_SUBDIR}/", base.split("/")[-1]
+        base = _object_key_prefix(rendezvous_dir)
+        prefix = f"{base}/{RAY_SUBDIR}/"
+        return prefix, _ray_prefix_label(prefix)
+    declared_prefix, legacy_prefix = _ray_prefixes_from_finelog(finelog_path)
+    if declared_prefix:
+        return declared_prefix, _ray_prefix_label(declared_prefix)
     if run:
         r = run if run.startswith("run-") else f"run-{run}"
-        return f"iris/{slug}/{r}/{RAY_SUBDIR}/", r
+        return f"{HISTORICAL_RAY_ROOT}/{slug}/{r}/{RAY_SUBDIR}/", r
     r = discover_run(s3, slug)
     if r:
-        return f"iris/{slug}/{r}/{RAY_SUBDIR}/", r
-    base = _derive_rendezvous_from_finelog(finelog_path)
-    if base:
-        return f"{base}/{RAY_SUBDIR}/", base.split("/")[-1]
+        return f"{HISTORICAL_RAY_ROOT}/{slug}/{r}/{RAY_SUBDIR}/", r
+    if legacy_prefix:
+        return legacy_prefix, _ray_prefix_label(legacy_prefix)
     return None, None
 
 
@@ -374,6 +413,13 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cluster", default="cw-us-east-02a", choices=list(COREWEAVE_CLUSTERS))
     ap.add_argument("--run", default=None, help="agentic rendezvous run-<ts> (default: newest under the job prefix)")
     ap.add_argument(
+        "--ray-log-dir",
+        "--ray_log_dir",
+        dest="ray_log_dir",
+        default=None,
+        help="durable Ray session-log URI printed by the launcher. Omit to auto-derive it from the finelog.",
+    )
+    ap.add_argument(
         "--rendezvous-dir",
         "--rendezvous_dir",
         dest="rendezvous_dir",
@@ -425,16 +471,16 @@ def main():
     # once; a non-agentic job (no run-*, no --rendezvous-dir) resolves to None here and is derived
     # from the finelog after it is fetched, below.
     run = a.run
-    if not run and not a.rendezvous_dir and (not a.no_ray or a.dest is None):
+    if not run and not a.rendezvous_dir and not a.ray_log_dir and (not a.no_ray or a.dest is None):
         run = discover_run(s3, slug)
-    if a.rendezvous_dir:
-        label = _key_prefix_from_rendezvous(a.rendezvous_dir).split("/")[-1]
-    else:
-        label = run
+    label = _requested_ray_label(run, a.rendezvous_dir, a.ray_log_dir)
     dest = a.dest or os.path.join(os.getcwd(), f"{slug}-{label}" if label else slug)
     os.makedirs(dest, exist_ok=True)
     finelog_path = os.path.join(dest, "finelog.log")
-    print(f"job={a.job}  cluster={a.cluster}  run={run}  rendezvous={a.rendezvous_dir}\ndest={dest}\n")
+    print(
+        f"job={a.job}  cluster={a.cluster}  run={run}  rendezvous={a.rendezvous_dir}  "
+        f"ray_logs={a.ray_log_dir}\ndest={dest}\n"
+    )
 
     # Finelog FIRST: it is the input to the non-agentic ray-prefix fallback (the launcher prints the
     # rendezvous URI there), and it never depends on the ray run-dir.
@@ -442,12 +488,19 @@ def main():
         sync_finelog(a.job, a.cluster, dest, a.finelog_lines)
 
     if not a.no_ray:
-        prefix, _ = resolve_ray_prefix(s3, slug, run, a.rendezvous_dir, finelog_path if not a.no_finelog else None)
+        prefix, _ = resolve_ray_prefix(
+            s3,
+            slug,
+            run,
+            a.rendezvous_dir,
+            finelog_path if not a.no_finelog else None,
+            ray_log_dir=a.ray_log_dir,
+        )
         if not prefix:
             sys.exit(
                 f"[sync] could not locate ray_session_logs: no run-* under iris/{slug}/, no "
-                "--rendezvous-dir, and none derivable from the finelog. Pass --rendezvous-dir "
-                "s3://marin-us-east-02a/iris/rl-rdv/<job> (the URI you launched with)."
+                "--ray-log-dir or --rendezvous-dir, and none derivable from the finelog. Pass the "
+                "Ray logs URI printed by the launcher with --ray-log-dir."
             )
         sync_ray(s3, prefix, dest)
     if a.trace_jobs:

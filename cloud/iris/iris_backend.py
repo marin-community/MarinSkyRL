@@ -67,7 +67,7 @@ from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import yaml
-from iris.client import IrisClient
+from iris.client.client import IrisClient
 from iris.cluster.constraints import (
     CLUSTER_CONSTRAINT_KEY,
     Constraint,
@@ -114,6 +114,7 @@ from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
     format_hydra_arg,
+    resolve_rl_entrypoint,
     resolve_rl_config_path,
 )
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
@@ -1979,6 +1980,14 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit(str(error)) from error
 
     contents = source.read_bytes()
+    try:
+        raw = yaml.safe_load(contents) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{source}: RL config must be a mapping")
+        resolve_rl_entrypoint(raw.get("entrypoint"), config_path=source)
+    except (ValueError, yaml.YAMLError) as error:
+        raise SystemExit(str(error)) from error
+
     digest = hashlib.sha256(contents).hexdigest()[:16]
     suffix = source.suffix or ".yaml"
     args.rl_config = str(source)
@@ -2184,6 +2193,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     ]
     if args.rendezvous_dir:
         controller_cmd.extend(["--rendezvous-dir", args.rendezvous_dir])
+    controller_cmd.extend(["--ray-log-dir", storage_paths.ray_log_root])
     # Worker rendezvous poll deadline. Unset = controller default (1800s). Raise it when
     # rank-0's per-node pre-stage of a large model can legitimately exceed 30 min, so a
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
@@ -2299,6 +2309,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
         print(f"[rl-iris] Canonical:  {storage_paths.export_root}", flush=True)
         print(f"[rl-iris] Raw traces: {storage_paths.trace_root}", flush=True)
         print(f"[rl-iris] Trajectory: {storage_paths.trajectory_root}", flush=True)
+        print(f"[rl-iris] Ray logs:   {storage_paths.ray_log_root}", flush=True)
         print(f"[rl-iris] Ray spill:  {args.ray_spill_backend.value}:{args.ray_spill_dir}", flush=True)
     # Surface the resolved SKYRL_* runtime-knob flag env here (before the --dry-run
     # return) so a dry-run confirms e.g. --collective-phase-diagnostics actually resolves.

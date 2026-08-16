@@ -20,6 +20,7 @@ import fsspec
 import json
 import os
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol
 
@@ -32,6 +33,44 @@ from marinskyrl.resource_locator import join_resource_path, model_source_for_pat
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
+
+
+class RLEntrypoint(StrEnum):
+    """Execution modes supported by Iris RL configurations."""
+
+    FULLY_ASYNC = "fully_async"
+    GENERATE = "generate"
+    MINI_SWE = "mini_swe"
+    STANDARD = "standard"
+    TERMINAL_BENCH = "terminal_bench"
+    TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
+    TERMINAL_BENCH_TEACHER_LOGITS = "terminal_bench_teacher_logits"
+
+
+RL_ENTRYPOINT_MODULES = {
+    RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
+    RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+    RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
+    RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
+    RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
+    RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
+    RLEntrypoint.TERMINAL_BENCH_TEACHER_LOGITS: "skyrl_train.entrypoints.terminal_bench_teacher_logits",
+}
+
+
+def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
+    """Resolve one supported RL execution mode to its packaged module."""
+    name = RLEntrypoint.STANDARD if value is None else value
+    try:
+        entrypoint = RLEntrypoint(name)
+    except ValueError as error:
+        choices = ", ".join(item.value for item in RLEntrypoint)
+        raise ValueError(
+            f"{config_path}: entrypoint must be a registered name ({choices}); got {name!r}. "
+            "Python module paths are not accepted in RL configs."
+        ) from error
+
+    return RL_ENTRYPOINT_MODULES[entrypoint]
 
 
 class HPCGeometry(Protocol):
@@ -496,7 +535,7 @@ def parse_rl_config(
 
     context_budget = resolve_context_budget(raw, path)
 
-    entrypoint = raw.get("entrypoint", "skyrl_train.entrypoints.main_base")
+    entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
     config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))
@@ -902,7 +941,7 @@ def build_skyrl_hydra_args(
         for key, val in _flatten_dict(parsed.teacher, "teacher").items():
             args.append(format_hydra_arg(key, val, prefix="++"))
 
-    # Terminal bench with + prefix (new keys added by the config group).
+    # Terminal-Bench experiments may override packaged group keys or add new ones.
     if parsed.terminal_bench:
         terminal_bench = dict(parsed.terminal_bench)
 
@@ -911,7 +950,7 @@ def build_skyrl_hydra_args(
             terminal_bench["trials_dir"] = f"{experiments_dir}/{job_name}/trace_jobs"
 
         for key, val in _flatten_dict(terminal_bench).items():
-            args.append(format_hydra_arg(f"terminal_bench_config.{key}", val, prefix="+"))
+            args.append(format_hydra_arg(f"terminal_bench_config.{key}", val, prefix="++"))
 
     return args
 
