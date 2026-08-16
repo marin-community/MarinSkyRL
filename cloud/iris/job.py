@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
 
-from iris.client import JobFailedError
+from iris.client.client import JobFailedError
 
 from cloud.iris.artifacts import (
     fs_and_path,

@@ -33,7 +33,7 @@ from cloud.iris.protocol import (  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
-from iris.client import JobFailedError  # noqa: E402
+from iris.client.client import JobFailedError  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
 from iris.rpc import job_pb2  # noqa: E402
 

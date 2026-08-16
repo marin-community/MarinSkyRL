@@ -67,7 +67,7 @@ from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import yaml
-from iris.client import IrisClient
+from iris.client.client import IrisClient
 from iris.cluster.constraints import (
     CLUSTER_CONSTRAINT_KEY,
     Constraint,

@@ -19,10 +19,10 @@ dependencies = [
     "hydra-core==1.3.2",
     "jaxtyping",
     "loguru",
-    "marin-finelog==0.2.19.dev30724030287",
-    "marin-finelog-server==0.2.17.dev30664483151",
-    "marin-iris==0.2.70.dev30755316227",
-    "marin-iris-native==0.1.5.dev30223685542",
+    "marin-finelog",
+    "marin-finelog-server",
+    "marin-iris",
+    "marin-iris-native",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -106,7 +106,7 @@ megatron = [
     "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
-    "marin-rigging[prometheus]==0.2.70.dev30755316227",
+    "marin-rigging[prometheus]",
     "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
@@ -131,7 +131,7 @@ docs = [
 dev = [
     { include-group = "analysis" },
     "litellm",
-    "marin-rigging[prometheus]==0.2.70.dev30755316227",
+    "marin-rigging[prometheus]",
     "marin-style @ git+https://github.com/marin-community/marin-style@64ceb7ac07a4f66bba134cae814f6928f9e6af62",
     "prometheus-client",
     "pytest>=8.4",
@@ -146,6 +146,7 @@ dev = [
 
 [tool.uv]
 package = true
+prerelease = "allow"
 required-version = ">=0.8.10"
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
