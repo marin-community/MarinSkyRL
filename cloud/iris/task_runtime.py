@@ -1205,7 +1205,10 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # its own logs under <rendezvous_dir>/ray_session_logs/<node_id>/. Gate:
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
-RAY_LOG_SYNC_MAX_WORKERS = 8
+# Ray emits many small log files, so upload time is dominated by per-object latency.
+# Keep enough concurrency for a cold short-lived job to finish within the 60-second
+# teardown budget while staying far below object-store request-rate limits.
+RAY_LOG_SYNC_MAX_WORKERS = 16
 RAY_LOG_SYNC_MAX_FAILURE_LOGS = 3
 DEBUG_SYNC_MAX_FILE_BYTES = 512 * 1024 * 1024
 DEBUG_SYNC_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
