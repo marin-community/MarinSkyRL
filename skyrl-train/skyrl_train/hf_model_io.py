@@ -18,10 +18,15 @@ HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"
 
 def verify_hf_model_export(export_path: str) -> None:
     """Reject an HF export unless its safetensors weights are all present."""
-    try:
-        export_files = {Path(path).name for path in io.list_dir(export_path)}
-    except FileNotFoundError:
-        export_files = set()
+    local_export = not io.is_cloud_path(export_path)
+    if local_export:
+        export_root = Path(export_path)
+        export_files = {path.name for path in export_root.iterdir()} if export_root.is_dir() else set()
+    else:
+        try:
+            export_files = {Path(path).name for path in io.list_dir(export_path)}
+        except FileNotFoundError:
+            export_files = set()
 
     index_path = join_resource_path(export_path, HF_WEIGHT_INDEX_FILENAME)
     if HF_WEIGHT_INDEX_FILENAME not in export_files:
@@ -30,7 +35,8 @@ def verify_hf_model_export(export_path: str) -> None:
         raise RuntimeError(f"HF export has no safetensors weights at {export_path}")
 
     try:
-        with io.open_file(index_path, "r") as source:
+        source_context = Path(index_path).open() if local_export else io.open_file(index_path, "r")
+        with source_context as source:
             index = json.load(source)
     except (OSError, ValueError) as error:
         raise RuntimeError(f"HF export has an unreadable safetensors index at {index_path}: {error}") from error
