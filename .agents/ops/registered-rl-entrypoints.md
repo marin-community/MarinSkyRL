@@ -24,13 +24,8 @@ keep the task-side driver on the same contract.
 The external-config dry-run test failed before the implementation because `normalize()` accepted the deleted module
 path. The named-resolution test also showed that task-side parsing returned the YAML string unchanged.
 
-The shared resolver now accepts only registered names and verifies that the mapped package module exists. Launcher
-normalization applies it before constructing the task payload; task-side parsing uses the same resolver. Both regression
-tests and the Delphi configuration tests pass.
-
-The first full Iris run reached 309 passing tests. Seven runtime-bundle tests rejected the intentionally uncommitted
-`rl_config_translation.py`, as required by their source-identity contract. The full suite must run again after the branch
-checkpoint is committed.
+The shared resolver accepts only registered names. Launcher normalization applies it before constructing the task
+payload; task-side parsing uses the same resolver. The regression tests pass, and the full Iris suite passes 316 tests.
 
 ## Future work
 

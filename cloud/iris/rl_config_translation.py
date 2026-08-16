@@ -17,7 +17,6 @@ import base64
 import binascii
 import copy
 import fsspec
-import importlib.util
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -59,22 +58,19 @@ RL_ENTRYPOINT_MODULES = {
 }
 
 
-def resolve_rl_entrypoint(value: Any, *, config_path: Path) -> str:
+def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
     """Resolve one supported RL execution mode to its packaged module."""
     name = RLEntrypoint.STANDARD if value is None else value
     try:
         entrypoint = RLEntrypoint(name)
-    except (TypeError, ValueError) as error:
+    except ValueError as error:
         choices = ", ".join(item.value for item in RLEntrypoint)
         raise ValueError(
             f"{config_path}: entrypoint must be a registered name ({choices}); got {name!r}. "
             "Python module paths are not accepted in RL configs."
         ) from error
 
-    module = RL_ENTRYPOINT_MODULES[entrypoint]
-    if importlib.util.find_spec(module) is None:
-        raise ValueError(f"{config_path}: registered entrypoint {entrypoint.value!r} is unavailable ({module})")
-    return module
+    return RL_ENTRYPOINT_MODULES[entrypoint]
 
 
 class HPCGeometry(Protocol):
