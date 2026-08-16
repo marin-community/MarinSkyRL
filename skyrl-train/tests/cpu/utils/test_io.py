@@ -423,6 +423,13 @@ class FakeHFCloudFilesystem:
     def isdir(self, path):
         return False
 
+    def ls(self, path, detail):
+        assert not detail
+        if is_cloud_path(path):
+            prefix = self._strip_protocol(path).rstrip("/") + "/"
+            return [key for key in self.objects if key.startswith(prefix)]
+        return [str(child) for child in Path(path).iterdir()]
+
     def rm(self, path):
         self.objects.pop(self._strip_protocol(path))
 

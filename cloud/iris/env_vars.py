@@ -58,6 +58,7 @@ WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
+RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -116,6 +117,12 @@ ENV_VAR_SPECS = (
         "runtime.bootstrap",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        RAY_CLUSTER_OWNER_ENV,
+        "iris.task_runtime",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.DRIVER}),
     ),
 )
 
@@ -346,6 +353,11 @@ def wandb_launch_environment(*, entity: str | None, environ: Mapping[str, str] |
     """Resolve the W&B entity with explicit launch configuration taking precedence."""
     ambient = os.environ if environ is None else environ
     return {WANDB_ENTITY_ENV: entity or ambient.get(WANDB_ENTITY_ENV, "dogml")}
+
+
+def iris_ray_cluster_owner_environment() -> dict[str, str]:
+    """Mark the Iris task runtime as the owner of Ray cluster teardown."""
+    return EnvVarManager({RAY_CLUSTER_OWNER_ENV: "iris-task-runtime"}).environment_for(EnvVarScope.DRIVER)
 
 
 def _main(argv: list[str]) -> None:

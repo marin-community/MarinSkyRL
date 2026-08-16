@@ -47,6 +47,7 @@ from cloud.iris.env_vars import (
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     ensure_debug_artifact_directories,
+    iris_ray_cluster_owner_environment,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
@@ -647,7 +648,7 @@ def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
     ``extra_env``) reaches every pod already and is passed through untouched.
     """
     env = os.environ.copy()
-    env["SKYRL_RAY_CLUSTER_OWNER"] = "iris-task-runtime"
+    env.update(iris_ray_cluster_owner_environment())
     if derived_gloo_ifname is not None and env.get("GLOO_SOCKET_IFNAME") == derived_gloo_ifname:
         del env["GLOO_SOCKET_IFNAME"]
         _log(f"[fabric] withholding node-derived GLOO_SOCKET_IFNAME={derived_gloo_ifname} from the training driver")
