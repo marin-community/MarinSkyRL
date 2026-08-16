@@ -1409,7 +1409,12 @@ class HFModelWrapper(nn.Module):
 
         return per_layer_targets, replay_mask
 
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        gradient_checkpointing_kwargs = dict(gradient_checkpointing_kwargs or {"use_reentrant": False})
+        if self.moe_grouped_gemm and not gradient_checkpointing_kwargs.get("use_reentrant", True):
+            from skyrl_train.models.layers.moe_checkpoint import moe_recompute_context_fn
+
+            gradient_checkpointing_kwargs["context_fn"] = moe_recompute_context_fn
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
 
     def gradient_checkpointing_disable(self):

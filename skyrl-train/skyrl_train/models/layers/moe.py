@@ -37,6 +37,11 @@ via ``get_active_replay()`` and pulls its per-layer ``[N, K]`` target slice,
 threading it into the native router's ``routed_experts`` arg. The
 ``model_wrapper.forward`` replay-install seam is therefore UNCHANGED between the
 eager (3a) and grouped (3b) paths.
+
+Activation-checkpoint recomputation uses a separate, forward-local replay path:
+the checkpoint context records this forward's selected indices and feeds them
+back through the same ``routed_experts`` hook during backward. This preserves
+expert-parallel collective split sizes without enabling rollout-time R3.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from skyrl_train.models.layers.moe_routing import (
     grouped_expert_contributions,
     run_experts_for_loop,
 )
+from skyrl_train.models.layers.moe_checkpoint import get_recomputed_routes, record_forward_routes
 
 # torchtitan's expert-parallel wrapper (pinned a1fdd7e). On the torch-EP path it
 # does the DTensor->local convert + generate_permute_indices (cross-rank
@@ -506,12 +512,17 @@ class MoE(nn.Module):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
+        checkpoint_routes = get_recomputed_routes(self)
+        if checkpoint_routes is not None:
+            routed_experts = checkpoint_routes
+
         if routed_experts is not None:
-            _, _, top_k = routed_experts.shape
-            # Reshape here because the source [bs, slen, top_k] is non-contiguous.
-            routed_experts = routed_experts.reshape(-1, top_k)
+            # The public hook receives [batch, sequence, top_k]. Checkpoint replay
+            # is already flattened because that is the router's native layout.
+            routed_experts = routed_experts.reshape(-1, routed_experts.shape[-1])
 
         top_scores, selected_experts_indices, _ = self.router(x, routed_experts=routed_experts)
+        record_forward_routes(self, selected_experts_indices, self.experts.num_experts)
 
         if self.ep_comm_backend == "deepep":
             # DeepEP drives dispatch→local-experts→combine; combine already
