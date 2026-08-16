@@ -93,6 +93,12 @@ def test_key_prefix_normalizes_every_uri_form():
         assert srl._key_prefix_from_rendezvous(f) == "iris/rl-rdv/myjob", f
 
 
+def test_key_prefix_preserves_lifecycle_managed_object_key():
+    rendezvous = "s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/alice/job/rendezvous"
+
+    assert srl._key_prefix_from_rendezvous(rendezvous) == "tmp/ttl=14d/skyrl/users/alice/job/rendezvous"
+
+
 def test_rendezvous_dir_short_circuits_without_s3():
     """--rendezvous-dir resolves purely from the string; discovery is never invoked."""
     s3 = FakeS3(RUNS)
@@ -100,6 +106,22 @@ def test_rendezvous_dir_short_circuits_without_s3():
         s3, SLUG, run=None, rendezvous_dir="s3://marin-us-east-02a/iris/rl-rdv/myjob", finelog_path=None
     )
     assert prefix == f"iris/rl-rdv/myjob/{srl.RAY_SUBDIR}/"
+    assert label == "myjob"
+    assert s3.calls == 0
+
+
+def test_ray_log_dir_short_circuits_without_s3():
+    s3 = FakeS3(RUNS)
+    prefix, label = srl.resolve_ray_prefix(
+        s3,
+        SLUG,
+        run=None,
+        rendezvous_dir=None,
+        finelog_path=None,
+        ray_log_dir="s3://marin-us-east-02a/marin/users/alice/skyrl/myjob/ray_session_logs",
+    )
+
+    assert prefix == "marin/users/alice/skyrl/myjob/ray_session_logs/"
     assert label == "myjob"
     assert s3.calls == 0
 
@@ -113,6 +135,30 @@ def test_finelog_derive_from_rendezvous_banner(tmp_path):
     prefix, label = srl.resolve_ray_prefix(s3, SLUG, run=None, rendezvous_dir=None, finelog_path=str(finelog))
     assert prefix == f"iris/rl-rdv/delphi-rl-d1/{srl.RAY_SUBDIR}/"
     assert label == "delphi-rl-d1"
+
+
+def test_finelog_derive_from_ray_log_banner(tmp_path):
+    finelog = tmp_path / "finelog.log"
+    finelog.write_text(
+        "[rl-iris] Ray logs:   s3://marin-us-east-02a/marin/users/alice/skyrl/delphi-rl-d1/ray_session_logs\n"
+    )
+
+    prefix, label = srl.resolve_ray_prefix(FakeS3([]), SLUG, None, None, str(finelog))
+
+    assert prefix == "marin/users/alice/skyrl/delphi-rl-d1/ray_session_logs/"
+    assert label == "delphi-rl-d1"
+
+
+def test_ray_log_banner_wins_over_historical_agentic_run(tmp_path):
+    finelog = tmp_path / "finelog.log"
+    finelog.write_text(
+        "[rl-iris] Ray logs:   s3://marin-us-east-02a/marin/users/alice/skyrl/current-job/ray_session_logs\n"
+    )
+
+    prefix, label = srl.resolve_ray_prefix(FakeS3(RUNS), SLUG, RUNS[0], None, str(finelog))
+
+    assert prefix == "marin/users/alice/skyrl/current-job/ray_session_logs/"
+    assert label == "current-job"
 
 
 def test_finelog_derive_from_bare_session_uri(tmp_path):
