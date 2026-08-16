@@ -17,9 +17,11 @@ import base64
 import binascii
 import copy
 import fsspec
+import importlib.util
 import json
 import os
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol
 
@@ -32,6 +34,47 @@ from marinskyrl.resource_locator import join_resource_path, model_source_for_pat
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
+
+
+class RLEntrypoint(StrEnum):
+    """Execution modes supported by Iris RL configurations."""
+
+    FULLY_ASYNC = "fully_async"
+    GENERATE = "generate"
+    MINI_SWE = "mini_swe"
+    STANDARD = "standard"
+    TERMINAL_BENCH = "terminal_bench"
+    TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
+    TERMINAL_BENCH_TEACHER_LOGITS = "terminal_bench_teacher_logits"
+
+
+RL_ENTRYPOINT_MODULES = {
+    RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
+    RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+    RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
+    RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
+    RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
+    RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
+    RLEntrypoint.TERMINAL_BENCH_TEACHER_LOGITS: "skyrl_train.entrypoints.terminal_bench_teacher_logits",
+}
+
+
+def resolve_rl_entrypoint(value: Any, *, config_path: Path) -> str:
+    """Resolve one supported RL execution mode to its packaged module."""
+    name = RLEntrypoint.STANDARD if value is None else value
+    try:
+        entrypoint = RLEntrypoint(name)
+    except (TypeError, ValueError) as error:
+        choices = ", ".join(item.value for item in RLEntrypoint)
+        raise ValueError(
+            f"{config_path}: entrypoint must be a registered name ({choices}); got {name!r}. "
+            "Python module paths are not accepted in RL configs."
+        ) from error
+
+    module = RL_ENTRYPOINT_MODULES[entrypoint]
+    if importlib.util.find_spec(module) is None:
+        raise ValueError(f"{config_path}: registered entrypoint {entrypoint.value!r} is unavailable ({module})")
+    return module
 
 
 class HPCGeometry(Protocol):
@@ -496,7 +539,7 @@ def parse_rl_config(
 
     context_budget = resolve_context_budget(raw, path)
 
-    entrypoint = raw.get("entrypoint", "skyrl_train.entrypoints.main_base")
+    entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
     config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))

@@ -114,6 +114,7 @@ from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
     format_hydra_arg,
+    resolve_rl_entrypoint,
     resolve_rl_config_path,
 )
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
@@ -1979,6 +1980,14 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit(str(error)) from error
 
     contents = source.read_bytes()
+    try:
+        raw = yaml.safe_load(contents) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{source}: RL config must be a mapping")
+        resolve_rl_entrypoint(raw.get("entrypoint"), config_path=source)
+    except (ValueError, yaml.YAMLError) as error:
+        raise SystemExit(str(error)) from error
+
     digest = hashlib.sha256(contents).hexdigest()[:16]
     suffix = source.suffix or ".yaml"
     args.rl_config = str(source)

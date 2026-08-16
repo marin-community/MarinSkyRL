@@ -1,25 +1,35 @@
-import importlib
-from pathlib import Path
-
-import yaml
+import pytest
 from hydra import compose, initialize_config_dir
 
+from cloud.iris.iris_backend import create_parser, normalize
+from cloud.iris.rl_config_translation import parse_rl_config
 from skyrl_train.entrypoints.main_base import config_dir
 
 
-CONFIG_DIR = Path(__file__).parents[1] / "configs"
+def test_external_rl_config_rejects_deleted_module_path_before_dry_run(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text("entrypoint: examples.terminal_bench.entrypoints.main_tbench\n")
+    args = create_parser().parse_args(["--rl_config", str(config), "--model_path", "Qwen/Qwen3-8B", "--dry-run"])
+
+    with pytest.raises(SystemExit, match="examples.terminal_bench.entrypoints.main_tbench"):
+        normalize(args)
 
 
-def test_every_iris_rl_entrypoint_imports_from_the_installed_package():
-    entrypoints = {
-        config["entrypoint"]
-        for path in CONFIG_DIR.glob("*.yaml")
-        if (config := yaml.safe_load(path.read_text())) and "entrypoint" in config
-    }
+def test_rl_config_resolves_named_terminal_bench_entrypoint(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: terminal_bench
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+"""
+    )
 
-    for entrypoint in entrypoints:
-        assert entrypoint.startswith("skyrl_train.entrypoints.")
-        importlib.import_module(entrypoint)
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
 
 
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():

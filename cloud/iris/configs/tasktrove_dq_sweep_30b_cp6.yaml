@@ -1,4 +1,4 @@
-entrypoint: skyrl_train.entrypoints.terminal_bench
+entrypoint: terminal_bench
 
 config_groups:
   terminal_bench_config: terminal_bench
