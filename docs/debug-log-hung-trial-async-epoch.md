@@ -17,7 +17,7 @@ Three independent defects each convert one hung trial into a dead job.
 - `rollout_coordinator.py`: store shard timeout from `override_timeout_sec`, wrap `generate()`
 - `fully_async_trainer.py`: handle `TimeoutError` gracefully in `_run_generate_for_a_group_loop`
   (retry the items instead of `sys.exit(1)`)
-- `fully_async_trainer.py`: bound `_get_fresh_generation_group_mini_batch` with adaptive deadline
+- `fully_async_trainer.py`: bound `_get_admitted_generation_group_mini_batch` with adaptive deadline
 - `fully_async_trainer.py`: bound `_next_generation_prompts` retry-queue wait
 - `fully_async_trainer.py`: add `GenerationStalledError`, track step-time history
 - `vllm_engine.py`: log `resume_generation`

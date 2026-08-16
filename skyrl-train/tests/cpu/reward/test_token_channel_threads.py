@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.utils.advantage_estimators import compute_rloo_n_outcome_advantage
+from skyrl_train.group_admission import GroupAdvantageInvariant
 
 
 @pytest.fixture
@@ -71,7 +72,10 @@ def test_zeros_channel_is_pure_rloo_n():
         token_level_rewards=token_level_rewards,
         response_mask=response_mask,
         index=index,
-        config=type("C", (), {"rloo_n_min_group_size": 2, "rloo_n_filter_zero_reward_groups": False})(),
+        config=type("C", (), {"rloo_n_filter_zero_reward_groups": False})(),
+        group_advantage_invariant=GroupAdvantageInvariant.minimum_baseline_eligible(
+            physical_group_size=2, minimum_group_size=2
+        ),
     )
     zeros = torch.zeros_like(adv)
     combined = _combine_advantage_with_shaping(adv, zeros, response_mask)
@@ -92,7 +96,10 @@ def test_nonzero_channel_shifts_exact_tokens():
         token_level_rewards=token_level_rewards,
         response_mask=response_mask,
         index=index,
-        config=type("C", (), {"rloo_n_min_group_size": 2, "rloo_n_filter_zero_reward_groups": False})(),
+        config=type("C", (), {"rloo_n_filter_zero_reward_groups": False})(),
+        group_advantage_invariant=GroupAdvantageInvariant.minimum_baseline_eligible(
+            physical_group_size=2, minimum_group_size=2
+        ),
     )
     shaping = torch.zeros(bsz, seqlen)
     shaping[0, 2] = 0.3  # one edit token on sample 0

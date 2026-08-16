@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
+from skyrl_train.group_admission import GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
@@ -525,6 +526,7 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
             }
         }
     )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=4)
     trainer.all_metrics = {}
     loop_start = 18
     response_mask = torch.ones(4, response_length)
@@ -564,6 +566,7 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
 def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_tokenizer):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = dummy_tokenizer
     trainer.pad_batch = lambda batch: batch
     trajectory_batch = {

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from functools import wraps
+from dataclasses import dataclass
 from typing import Callable, Union
 
 import ray
@@ -25,6 +26,24 @@ class AdvantageEstimator(StrEnum):
     REINFORCE_PP = "reinforce++"
 
 
+@dataclass(frozen=True)
+class ExactPhysicalGroup:
+    """Require the estimator's complete physical rollout group."""
+
+
+@dataclass(frozen=True)
+class MinimumBaselineEligibleGroup:
+    """Allow a ragged baseline cohort down to a user-configured floor."""
+
+
+@dataclass(frozen=True)
+class NoGroupAdvantage:
+    """Declare that the estimator does not compute group-relative advantages."""
+
+
+GroupAdvantageContract = ExactPhysicalGroup | MinimumBaselineEligibleGroup | NoGroupAdvantage
+
+
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     """
     Registry for advantage estimator functions.
@@ -40,6 +59,26 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
 
     _actor_name = "advantage_estimator_registry"
     _function_type = "advantage estimator"
+    _group_contracts: dict[str, GroupAdvantageContract] = {}
+
+    @classmethod
+    def register(cls, name: str, func: Callable, *, group_contract: GroupAdvantageContract | None = None):
+        if group_contract is None:
+            raise ValueError(f"advantage estimator '{name}' must declare a group_contract")
+        super().register(name, func)
+        cls._group_contracts[name] = group_contract
+
+    @classmethod
+    def group_contract(cls, name: str) -> GroupAdvantageContract:
+        try:
+            return cls._group_contracts[name]
+        except KeyError as error:
+            raise ValueError(f"advantage estimator '{name}' has no local group contract") from error
+
+    @classmethod
+    def unregister(cls, name: str):
+        super().unregister(name)
+        cls._group_contracts.pop(name, None)
 
 
 class PolicyLossType(StrEnum):
@@ -80,7 +119,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     _function_type = "policy loss"
 
 
-def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
+def register_advantage_estimator(name: Union[str, AdvantageEstimator], *, group_contract: GroupAdvantageContract):
     """Decorator to register an advantage estimator function."""
     registry_name = name.value if isinstance(name, AdvantageEstimator) else name
 
@@ -89,7 +128,7 @@ def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
 
-        AdvantageEstimatorRegistry.register(registry_name, wrapper)
+        AdvantageEstimatorRegistry.register(registry_name, wrapper, group_contract=group_contract)
         return wrapper
 
     return decorator

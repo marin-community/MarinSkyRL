@@ -16,11 +16,15 @@ You can register custom advantage estimators using either a decorator or the reg
 
 .. code-block:: python
 
-   from skyrl_train.utils.algorithm_registry import register_advantage_estimator, AdvantageEstimatorRegistry
+   from skyrl_train.utils.algorithm_registry import (
+       AdvantageEstimatorRegistry,
+       NoGroupAdvantage,
+       register_advantage_estimator,
+   )
    import torch
 
    # Using the decorator
-   @register_advantage_estimator("simple_baseline")
+   @register_advantage_estimator("simple_baseline", group_contract=NoGroupAdvantage())
    def compute_simple_baseline_advantage(
         token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, **kwargs
     ):
@@ -39,7 +43,9 @@ You can register custom advantage estimators using either a decorator or the reg
        # Implementation here
        pass
 
-   AdvantageEstimatorRegistry.register("direct_registration", another_estimator)
+   AdvantageEstimatorRegistry.register(
+       "direct_registration", another_estimator, group_contract=NoGroupAdvantage()
+   )
 
 Registering a Custom Policy Loss
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

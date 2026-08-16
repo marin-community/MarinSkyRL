@@ -37,6 +37,7 @@ from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
 
@@ -102,9 +103,9 @@ class _GroupFreshness(Enum):
 
 
 @dataclass
-class _FreshnessPartition:
-    stale_groups: List[GeneratedOutputGroup]
-    fresh_groups: List[GeneratedOutputGroup]
+class _AdmissionPartition:
+    accepted_groups: List[GeneratedOutputGroup]
+    rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
 
 
 class _AsyncStalenessManager:
@@ -202,7 +203,7 @@ class _AsyncStalenessManager:
             self._cond.notify_all()
 
     async def on_rollouts_discarded(self, count: int) -> None:
-        """Remove completed stale attempts from capacity accounting."""
+        """Remove completed rejected attempts from capacity accounting."""
         async with self._cond:
             self._stat.accepted -= count
             self._stat.submitted -= count
@@ -346,6 +347,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         # Initialize base trainer
         super().__init__(*args, **kwargs)
+        self._group_admission_policy = GroupAdmissionPolicy(
+            self.group_advantage_invariant,
+            max_staleness_steps=self.max_staleness_steps,
+            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
+                self.cfg.trainer.algorithm.policy_loss_type
+            ),
+        )
 
         # K-actor rollout fan-out gate. Resolved in _maybe_enable_rollout_fanout()
         # at train() start; initialized False so the flag is always defined
@@ -386,7 +394,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
         self._active_trajectory_tasks: List[asyncio.Task] = []
-        self._stale_groups_discarded_since_step = 0
+        self._groups_rejected_since_step = 0
+        self._rejection_reasons_since_step: collections.Counter[str] = collections.Counter()
         self._groups_inspected_since_step = 0
         self._step_time_history: collections.deque[float] = collections.deque(maxlen=5)
 
@@ -635,7 +644,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         Timer("wait_for_generation_buffer", self.all_timings),
                         critical_phase("rollout_or_inference_wait"),
                     ):
-                        cur_generation_group_mini_batch = await self._get_fresh_generation_group_mini_batch(
+                        cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
                             generation_queues,
                         )
 
@@ -945,7 +954,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if freshness is _GroupFreshness.STALE:
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
-                    self._record_discard_scan(discarded_count=1, inspected_count=1)
+                    self._record_admission_scan(
+                        [(completed_group, AdmissionDecision((AdmissionRejection.STALE,)))],
+                        inspected_count=1,
+                    )
                     continue
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
                 await self._staleness_manager.on_rollout_accepted()
@@ -1059,41 +1071,51 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return _GroupFreshness.STALE
         return _GroupFreshness.FRESH
 
-    def _record_discard_scan(self, discarded_count: int, inspected_count: int) -> None:
-        self._stale_groups_discarded_since_step += discarded_count
+    def _record_admission_scan(
+        self,
+        rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]],
+        *,
+        inspected_count: int,
+    ) -> None:
+        self._groups_rejected_since_step += len(rejected_groups)
+        for _, decision in rejected_groups:
+            assert decision.primary_rejection is not None
+            self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
         self._groups_inspected_since_step += inspected_count
 
-    def _partition_and_retry_stale_groups(
-        self,
-        queues: _GenerationQueues,
-        completed_groups: List[GeneratedOutputGroup],
-    ) -> _FreshnessPartition:
-        """Queue retries for every stale group and return stale and fresh partitions."""
-        stale_groups = []
-        fresh_groups = []
+    def _partition_completed_groups(self, completed_groups: List[GeneratedOutputGroup]) -> _AdmissionPartition:
+        """Evaluate every completed group without mutating async lifecycle state."""
+        accepted_groups = []
+        rejected_groups = []
         for group in completed_groups:
-            if self._classify_and_route_group(queues, group) is _GroupFreshness.STALE:
-                stale_groups.append(group)
+            decision = self._group_admission_policy.evaluate(group, global_step=self.global_step)
+            if decision.accepted:
+                accepted_groups.append(group)
             else:
-                fresh_groups.append(group)
-        return _FreshnessPartition(stale_groups=stale_groups, fresh_groups=fresh_groups)
+                rejected_groups.append((group, decision))
+        return _AdmissionPartition(accepted_groups=accepted_groups, rejected_groups=rejected_groups)
 
-    def _publish_discard_metrics(self) -> None:
-        discarded = self._stale_groups_discarded_since_step
+    def _publish_admission_metrics(self) -> None:
+        rejected = self._groups_rejected_since_step
         inspected = self._groups_inspected_since_step
-        assert inspected > 0, "A fresh training batch requires at least one inspected completed group"
-        self._stale_groups_discarded_since_step = 0
+        assert inspected > 0, "An admitted training batch requires at least one inspected completed group"
+        reason_counts = self._rejection_reasons_since_step
+        self._groups_rejected_since_step = 0
+        self._rejection_reasons_since_step = collections.Counter()
         self._groups_inspected_since_step = 0
-        self.all_metrics.update(
-            {
-                "async/discarded_count": discarded,
-                "async/discard_rate": discarded / inspected,
-            }
+        metrics = {
+            "async/rejected_count": rejected,
+            "async/rejected_rate": rejected / inspected,
+        }
+        metrics.update(
+            {f"async/rejected_count/{reason.value}": reason_counts[reason.value] for reason in AdmissionRejection}
         )
-        if discarded:
+        self.all_metrics.update(metrics)
+        if rejected:
             logger.warning(
-                f"Discarded {discarded} completed stale groups before step "
-                f"{self.global_step}; waiting produced a full {self.mini_batch_size}-group replacement batch."
+                f"Rejected {rejected} completed groups before step {self.global_step}; "
+                f"reasons={dict(reason_counts)}. Waiting produced a full "
+                f"{self.mini_batch_size}-group replacement batch."
             )
 
     def _generation_stall_timeout(self) -> float:
@@ -1126,62 +1148,72 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         return self._generation_stall_timeout()
 
-    async def _get_fresh_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
-        """Discard completed stale attempts and wait for a full fresh mini-batch.
+    def _check_admission_stall(self, elapsed: float, rejection_counts: collections.Counter[str]) -> float:
+        if rejection_counts:
+            raise GenerationStalledError(
+                f"Generation stalled: no groups admitted for {elapsed:.0f}s; "
+                f"rejected completions={dict(rejection_counts)}"
+            )
+        return self._check_generation_stall(elapsed)
 
-        Raises ``GenerationStalledError`` when no new groups arrive within the
-        adaptive stall deadline and no generation tasks remain to produce them.
+    async def _get_admitted_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
+        """Reject ineligible completed attempts and wait for a full admitted mini-batch.
+
+        Raises ``GenerationStalledError`` when producers stop or when completed
+        attempts are repeatedly rejected without admitted progress.
         """
-        fresh_groups = []
+        accepted_groups = []
         loop = asyncio.get_event_loop()
-        last_progress = loop.time()
+        last_admitted_progress = loop.time()
         stall_timeout = self._generation_stall_timeout()
+        rejection_counts_since_admission: collections.Counter[str] = collections.Counter()
 
         while True:
             async with queues.condition:
-                while len(fresh_groups) < self.mini_batch_size and queues.completed.empty():
-                    elapsed = loop.time() - last_progress
+                while len(accepted_groups) < self.mini_batch_size and queues.completed.empty():
+                    elapsed = loop.time() - last_admitted_progress
                     remaining = stall_timeout - elapsed
                     if remaining <= 0:
-                        stall_timeout = self._check_generation_stall(elapsed)
-                        last_progress = loop.time()
+                        stall_timeout = self._check_admission_stall(elapsed, rejection_counts_since_admission)
+                        last_admitted_progress = loop.time()
                         continue
                     try:
                         await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
                     except asyncio.TimeoutError:
-                        stall_timeout = self._check_generation_stall(loop.time() - last_progress)
-                        last_progress = loop.time()
+                        stall_timeout = self._check_admission_stall(
+                            loop.time() - last_admitted_progress, rejection_counts_since_admission
+                        )
+                        last_admitted_progress = loop.time()
 
                 completed_groups = _drain_queue(queues.completed)
+                partition = self._partition_completed_groups(completed_groups)
+                accepted_groups.extend(partition.accepted_groups)
+                for group, decision in partition.rejected_groups:
+                    queues.retries.put_nowait(group.source_prompts)
+                    assert decision.primary_rejection is not None
+                    rejection_counts_since_admission[decision.primary_rejection.value] += 1
 
-                partition = self._partition_and_retry_stale_groups(queues, completed_groups)
-                stale_groups = partition.stale_groups
-                fresh_groups.extend(partition.fresh_groups)
-
-                # Reset the stall timer whenever new groups arrive.
-                if completed_groups:
-                    last_progress = asyncio.get_event_loop().time()
+                if partition.accepted_groups:
+                    last_admitted_progress = loop.time()
                     stall_timeout = self._generation_stall_timeout()
+                    rejection_counts_since_admission.clear()
 
-                if not stale_groups and len(fresh_groups) >= self.mini_batch_size:
-                    batch = fresh_groups[: self.mini_batch_size]
-                    for group in fresh_groups[self.mini_batch_size :]:
+                if len(accepted_groups) >= self.mini_batch_size:
+                    batch = accepted_groups[: self.mini_batch_size]
+                    for group in accepted_groups[self.mini_batch_size :]:
                         queues.completed.put_nowait(group)
                 else:
                     batch = None
                 queues.condition.notify_all()
 
-            if stale_groups:
-                self._record_discard_scan(len(stale_groups), inspected_count=len(completed_groups))
-                await self._staleness_manager.on_rollouts_discarded(len(stale_groups))
-                continue
-
-            self._record_discard_scan(0, inspected_count=len(completed_groups))
+            self._record_admission_scan(partition.rejected_groups, inspected_count=len(completed_groups))
+            if partition.rejected_groups:
+                await self._staleness_manager.on_rollouts_discarded(len(partition.rejected_groups))
 
             if batch is not None:
                 break
 
-        self._publish_discard_metrics()
+        self._publish_admission_metrics()
         return batch
 
     def convert_generation_group_mini_batch_to_training_input(
@@ -1194,12 +1226,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trajectory_batches = []
         uids = []
         stalenesses = []
-        group_size = len(cur_generation_group_mini_batch[0].trajectory_batch["response_ids"])
-
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
             stalenesses.append(cur_staleness)
             trajectory_batches.append(cur_generated_output_group.trajectory_batch)
+            group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
             uids.extend([cur_generated_output_group.uid] * group_size)
 
         assert max(stalenesses) <= self.max_staleness_steps, (

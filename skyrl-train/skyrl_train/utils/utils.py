@@ -28,6 +28,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_traje
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
+from skyrl_train.group_admission import resolve_group_advantage_invariant
 
 from .constants import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -636,6 +637,12 @@ def validate_cfg(cfg: DictConfig):
     # add field to algorithm config needed for loss functions
     # create a new config to make it modifiable
     algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
+    group_advantage = resolve_group_advantage_invariant(
+        advantage_estimator=str(algorithm_config.advantage_estimator),
+        physical_group_size=int(cfg.generator.n_samples_per_prompt),
+        minimum_group_size=algorithm_config.group_advantage_min_size,
+    )
+    algorithm_config.resolved_group_advantage = group_advantage.to_config()
     # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a

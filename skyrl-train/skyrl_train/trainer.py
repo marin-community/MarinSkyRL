@@ -58,6 +58,7 @@ from skyrl_train.distributed.dispatch import (
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -119,6 +120,9 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
+        self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
+            cfg.trainer.algorithm.resolved_group_advantage
+        )
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
@@ -1061,6 +1065,7 @@ class RayPPOTrainer:
 
     def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
+        assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
         rewards: List[List[float]] = trajectory_batch["rewards"]
@@ -1357,6 +1362,7 @@ class RayPPOTrainer:
                 gamma=gamma,
                 lambd=lambd,
                 grpo_norm_by_std=grpo_norm_by_std,
+                group_advantage_invariant=self.group_advantage_invariant,
             )
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
@@ -1388,6 +1394,7 @@ class RayPPOTrainer:
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
                 exclude_from_baseline=exclude_from_baseline,
                 token_level_shaping=token_level_shaping,
+                group_advantage_invariant=self.group_advantage_invariant,
             )
         data["returns"] = returns
         data["advantages"] = advantages

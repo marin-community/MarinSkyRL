@@ -4,7 +4,7 @@ import torch
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils.algorithm_registry import register_advantage_estimator, register_policy_loss
+from skyrl_train.utils.algorithm_registry import NoGroupAdvantage, register_advantage_estimator, register_policy_loss
 from skyrl_train.utils.loss_reduction import reduce_loss
 
 
@@ -24,7 +24,7 @@ def compute_reverse_kl_rewards(data: TrainingInputBatch) -> torch.Tensor:
     return -(action_log_probs - teacher_log_probs) * loss_masks
 
 
-@register_advantage_estimator("no_op")
+@register_advantage_estimator("no_op", group_contract=NoGroupAdvantage())
 def compute_no_op_advantage(token_level_rewards: torch.Tensor, **kwargs):
     """Use token rewards directly as returns and advantages."""
     return token_level_rewards, token_level_rewards
