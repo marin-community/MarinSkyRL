@@ -22,7 +22,8 @@ experiment config.
 
 The real TaskTrove arguments reproduced Hydra's `Could not append to config` failure at
 `terminal_bench_config.trace_upload.enabled`. With `++`, the complete launcher argument list composes against
-`ppo_base_config`, and the packaged `prm` and `trace_upload` fields retain the experiment values.
+`ppo_base_config`, the packaged `prm` and `trace_upload` fields retain the experiment values, and the full Iris suite
+passes 317 tests.
 
 ## Future work
 

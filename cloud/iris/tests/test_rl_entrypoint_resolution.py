@@ -1,5 +1,6 @@
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hydra import compose, initialize_config_dir
@@ -11,11 +12,6 @@ from skyrl_train.entrypoints.main_base import config_dir
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-@dataclass
-class _HPCStub:
-    gpus_per_node: int = 8
 
 
 def test_external_rl_config_rejects_deleted_module_path_before_dry_run(tmp_path):
@@ -70,7 +66,7 @@ def test_terminal_bench_launcher_overrides_compose_with_packaged_group():
         parsed,
         terminal_bench={**parsed.terminal_bench, "prm": expected_prm, "trace_upload": expected_trace_upload},
     )
-    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 4}, _HPCStub())
+    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 4}, SimpleNamespace(gpus_per_node=8))
 
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
