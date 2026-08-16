@@ -24,4 +24,9 @@ checkpoint determinism error or NCCL abort.
 - Before the MoE integration, the regression fails during backward with `CheckpointError`: saved expert input shapes
   `[2, 2]` become `[0, 2]` on recomputation and vice versa because every token switches experts.
 - With checkpoint-local route replay, the regression passes and only the forward-selected expert receives a gradient.
-- The repository CPU gate passes: 1,505 passed and 19 skipped.
+
+## Review responses
+
+- Kept the test's narrow `torchtitan` decorator stub instead of skipping when `torchtitan` is absent. The CPU dependency
+  closure deliberately omits `torchtitan`; skipping would remove this regression from the PR gate. The stub is used only
+  to import the EP=1 for-loop path and is removed from `sys.modules` immediately afterward.

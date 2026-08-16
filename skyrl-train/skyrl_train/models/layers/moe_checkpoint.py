@@ -23,12 +23,11 @@ class _CheckpointRoutes:
     replay_positions: dict[int, int] = field(default_factory=lambda: defaultdict(int))
 
     def record(self, module: nn.Module, routes: torch.Tensor, num_experts: int) -> None:
-        if num_experts <= 256:
-            storage_dtype = torch.uint8
-        elif num_experts <= 32768:
-            storage_dtype = torch.int16
-        else:
-            storage_dtype = torch.int32
+        if num_experts > 32768:
+            raise ValueError(f"checkpoint route storage supports at most 32768 experts, got {num_experts}")
+        # Qwen3-Next has 512 experts, so uint8 is not sufficient for every
+        # supported model. Keep the common <=256 case half the size.
+        storage_dtype = torch.uint8 if num_experts <= 256 else torch.int16
         self.routes[id(module)].append(routes.detach().to(dtype=storage_dtype))
 
     def replay(self, module: nn.Module) -> torch.Tensor:
