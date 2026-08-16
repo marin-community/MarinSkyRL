@@ -10,6 +10,7 @@ class _RecordingFilesystem:
         self._parallel_upload = threading.Event()
         self._wait_for_parallel_upload = wait_for_parallel_upload
         self.active_uploads = 0
+        self.completed_uploads = 0
         self.max_active_uploads = 0
 
     def put(self, local_path, _remote_path):
@@ -24,6 +25,17 @@ class _RecordingFilesystem:
             source.read()
         with self._lock:
             self.active_uploads -= 1
+            self.completed_uploads += 1
+
+
+class _BlockingFilesystem:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def put(self, _local_path, _remote_path):
+        self.started.set()
+        self.release.wait()
 
 
 def _ray_log_tree(tmp_path, monkeypatch, *payloads: bytes):
@@ -42,8 +54,9 @@ def test_ray_log_sync_uploads_files_concurrently(tmp_path, monkeypatch):
     _ray_log_tree(tmp_path, monkeypatch, b"first", b"second", b"third")
     filesystem = _RecordingFilesystem(wait_for_parallel_upload=True)
     monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
+    sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
-    result = task_runtime.sync_ray_session_logs("s3://logs", "node-0", "periodic")
+    result = sync_session.sync("periodic")
 
     assert result.uploaded_files == 3
     assert filesystem.max_active_uploads >= 2
@@ -53,36 +66,39 @@ def test_ray_log_sync_skips_unchanged_files(tmp_path, monkeypatch):
     first_path, _ = _ray_log_tree(tmp_path, monkeypatch, b"first", b"second")
     filesystem = _RecordingFilesystem()
     monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
-    state = task_runtime.RayLogSyncState()
+    sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
-    first = task_runtime.sync_ray_session_logs("s3://logs", "node-0", "periodic", state)
-    second = task_runtime.sync_ray_session_logs("s3://logs", "node-0", "periodic", state)
+    first = sync_session.sync("periodic")
+    second = sync_session.sync("periodic")
     first_path.write_bytes(b"first changed")
-    third = task_runtime.sync_ray_session_logs("s3://logs", "node-0", "final", state)
+    third = sync_session.sync("final")
 
     assert (first.uploaded_files, first.unchanged_files) == (2, 0)
     assert (second.uploaded_files, second.unchanged_files) == (0, 2)
     assert (third.uploaded_files, third.unchanged_files) == (1, 1)
 
 
-def test_final_ray_log_sync_completes_inline(monkeypatch):
-    calls = []
+def test_final_ray_log_sync_completes_inline(tmp_path, monkeypatch):
+    _ray_log_tree(tmp_path, monkeypatch, b"complete")
+    filesystem = _RecordingFilesystem()
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
     monkeypatch.setenv("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "1")
-    monkeypatch.setattr(task_runtime, "sync_ray_session_logs", lambda *args: calls.append(args))
+    sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
-    task_runtime.sync_ray_session_logs_bounded("s3://logs", "node-0", "complete")
+    assert sync_session.sync_bounded("complete")
+    assert filesystem.completed_uploads == 1
 
-    assert calls == [("s3://logs", "node-0", "complete")]
 
-
-def test_final_ray_log_sync_timeout_does_not_block_teardown(monkeypatch):
-    release = threading.Event()
-    messages = []
+def test_final_ray_log_sync_timeout_does_not_block_teardown(tmp_path, monkeypatch):
+    _ray_log_tree(tmp_path, monkeypatch, b"blocked")
+    filesystem = _BlockingFilesystem()
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
     monkeypatch.setenv("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "0.01")
-    monkeypatch.setattr(task_runtime, "sync_ray_session_logs", lambda *_args: release.wait())
-    monkeypatch.setattr(task_runtime, "_log", messages.append)
+    sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
-    task_runtime.sync_ray_session_logs_bounded("s3://logs", "node-0", "timeout")
-    release.set()
+    completed = sync_session.sync_bounded("timeout")
+    assert filesystem.started.wait(timeout=1)
+    filesystem.release.set()
 
-    assert any("continuing teardown with a partial upload" in message for message in messages)
+    assert not completed
+    assert sync_session.sync("cleanup").unchanged_files == 1

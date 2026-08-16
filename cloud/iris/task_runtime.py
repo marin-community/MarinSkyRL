@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.env_vars import (
@@ -1215,32 +1216,52 @@ class RayLogSyncResult:
     failed_files: int = 0
 
 
-@dataclass
-class RayLogSyncState:
-    """Successful destination-file versions shared by periodic and final sync passes."""
+class _RayLogFilesystem(Protocol):
+    def put(self, local_path: str, remote_path: str) -> object: ...
 
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _uploaded_versions: dict[str, tuple[int, int]] = field(default_factory=dict, repr=False)
+
+@dataclass(frozen=True)
+class _RayLogVersion:
+    size_bytes: int
+    modified_ns: int
 
 
 @dataclass(frozen=True)
 class _RayLogUpload:
     local_path: str
     remote_path: str
-    version: tuple[int, int]
+    version: _RayLogVersion
 
 
-def _ray_log_version(path: str) -> tuple[int, int]:
+@dataclass(frozen=True)
+class _RayLogUploadResult:
+    upload: _RayLogUpload
+    current_version: _RayLogVersion | None
+    error: Exception | None
+
+
+@dataclass(frozen=True)
+class _RayLogUploadPlan:
+    uploads: tuple[_RayLogUpload, ...]
+    active_remote_paths: frozenset[str]
+    unchanged_files: int
+
+
+def _ray_log_version(path: str) -> _RayLogVersion:
+    """Return the byte size and nanosecond modification time for one local log."""
     stat = os.stat(path)
-    return stat.st_size, stat.st_mtime_ns
+    return _RayLogVersion(size_bytes=stat.st_size, modified_ns=stat.st_mtime_ns)
 
 
-def _upload_ray_logs(fs, uploads: list[_RayLogUpload]) -> list[tuple[_RayLogUpload, tuple[int, int] | None]]:
-    """Upload independent files concurrently with daemon workers safe for bounded teardown."""
+def _upload_ray_logs(
+    filesystem: _RayLogFilesystem,
+    uploads: tuple[_RayLogUpload, ...],
+) -> tuple[_RayLogUploadResult, ...]:
+    """Return one success or captured exception for each requested upload."""
     if not uploads:
-        return []
+        return ()
     pending: queue.Queue[_RayLogUpload] = queue.Queue()
-    completed: queue.Queue[tuple[_RayLogUpload, tuple[int, int] | None]] = queue.Queue()
+    completed: queue.Queue[_RayLogUploadResult] = queue.Queue()
     for upload in uploads:
         pending.put(upload)
 
@@ -1251,11 +1272,12 @@ def _upload_ray_logs(fs, uploads: list[_RayLogUpload]) -> list[tuple[_RayLogUplo
             except queue.Empty:
                 return
             try:
-                fs.put(upload.local_path, upload.remote_path)
+                filesystem.put(upload.local_path, upload.remote_path)
                 current_version = _ray_log_version(upload.local_path)
-            except Exception:  # noqa: BLE001 - skip a single unreadable/racing file
-                current_version = None
-            completed.put((upload, current_version))
+            except Exception as error:  # noqa: BLE001 - capture per-file I/O failures for the result and log
+                completed.put(_RayLogUploadResult(upload=upload, current_version=None, error=error))
+            else:
+                completed.put(_RayLogUploadResult(upload=upload, current_version=current_version, error=None))
 
     workers = [
         threading.Thread(target=_worker, daemon=True, name=f"ray-log-upload-{index}")
@@ -1265,7 +1287,71 @@ def _upload_ray_logs(fs, uploads: list[_RayLogUpload]) -> list[tuple[_RayLogUplo
         worker.start()
     for worker in workers:
         worker.join()
-    return [completed.get_nowait() for _ in uploads]
+    return tuple(completed.get_nowait() for _ in uploads)
+
+
+def _plan_ray_log_uploads(
+    log_dirs: list[str],
+    destination_path: str,
+    uploaded_versions: dict[str, _RayLogVersion],
+) -> _RayLogUploadPlan:
+    uploads: list[_RayLogUpload] = []
+    active_remote_paths: set[str] = set()
+    unchanged_files = 0
+    for log_dir in log_dirs:
+        session = os.path.basename(os.path.dirname(log_dir))
+        for root, directories, files in os.walk(log_dir):
+            directories.sort()
+            for filename in sorted(files):
+                local_path = os.path.join(root, filename)
+                try:
+                    version = _ray_log_version(local_path)
+                except OSError:
+                    continue
+                if version.size_bytes > RAY_LOG_SYNC_MAX_FILE_BYTES:
+                    continue
+                relative_path = os.path.relpath(local_path, log_dir)
+                remote_path = f"{destination_path}/{session}/{relative_path}"
+                active_remote_paths.add(remote_path)
+                if uploaded_versions.get(remote_path) == version:
+                    unchanged_files += 1
+                    continue
+                uploads.append(_RayLogUpload(local_path=local_path, remote_path=remote_path, version=version))
+    return _RayLogUploadPlan(
+        uploads=tuple(uploads),
+        active_remote_paths=frozenset(active_remote_paths),
+        unchanged_files=unchanged_files,
+    )
+
+
+def _record_ray_log_uploads(
+    uploaded_versions: dict[str, _RayLogVersion],
+    plan: _RayLogUploadPlan,
+    upload_results: tuple[_RayLogUploadResult, ...],
+) -> tuple[RayLogSyncResult, tuple[_RayLogUploadResult, ...]]:
+    for remote_path in tuple(uploaded_versions):
+        if remote_path not in plan.active_remote_paths:
+            del uploaded_versions[remote_path]
+    uploaded_files = uploaded_bytes = 0
+    failures: list[_RayLogUploadResult] = []
+    for upload_result in upload_results:
+        if upload_result.error is not None or upload_result.current_version is None:
+            failures.append(upload_result)
+            continue
+        upload = upload_result.upload
+        uploaded_files += 1
+        uploaded_bytes += upload.version.size_bytes
+        if upload_result.current_version == upload.version:
+            uploaded_versions[upload.remote_path] = upload.version
+    return (
+        RayLogSyncResult(
+            uploaded_files=uploaded_files,
+            uploaded_bytes=uploaded_bytes,
+            unchanged_files=plan.unchanged_files,
+            failed_files=len(failures),
+        ),
+        tuple(failures),
+    )
 
 
 def sync_debug_artifacts(rendezvous_dir: str | None, node_id: str, reason: str) -> None:
@@ -1316,146 +1402,99 @@ def sync_debug_artifacts(rendezvous_dir: str | None, node_id: str, reason: str) 
         _log(f"[debug-sync] manifest upload failed ({exc}) [{reason}]")
 
 
-def sync_ray_session_logs(
-    rendezvous_dir: str | None,
-    node_id: str,
-    reason: str,
-    state: RayLogSyncState | None = None,
-) -> RayLogSyncResult:
-    """Upload THIS node's /tmp/ray/session_*/logs/ tree to the object store under
-    ``<rendezvous_dir>/ray_session_logs/<node_id>/<session>/``. Best-effort; never
-    raises; parallel per-file writes keep one bad file from aborting the rest."""
-    if not rendezvous_dir:
-        return RayLogSyncResult()
-    if os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
-        return RayLogSyncResult()
-    import glob
+@dataclass
+class RayLogSyncSession:
+    """Incrementally upload one node's Ray logs without overlapping sync passes."""
 
-    log_dirs = sorted(glob.glob("/tmp/ray/session_*/logs"))
-    if not log_dirs:
-        return RayLogSyncResult()
-    dest_base = f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
-    try:
-        fs, dest_path = fs_and_path(dest_base)
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        _log(f"[ray-log-sync] cannot resolve dest {dest_base} ({exc}) [{reason}]")
-        return RayLogSyncResult()
+    rendezvous_dir: str | None
+    node_id: str
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _uploaded_versions: dict[str, _RayLogVersion] = field(default_factory=dict, repr=False)
 
-    active_state = state or RayLogSyncState()
-    with active_state._lock:
-        uploads: list[_RayLogUpload] = []
-        unchanged_files = 0
-        remote_paths: set[str] = set()
-        for log_dir in log_dirs:
-            session = os.path.basename(os.path.dirname(log_dir))  # session_YYYY-MM-DD_...
-            for root, directories, files in os.walk(log_dir):
-                directories.sort()
-                for filename in sorted(files):
-                    local_path = os.path.join(root, filename)
-                    try:
-                        version = _ray_log_version(local_path)
-                    except OSError:
-                        continue
-                    if version[0] > RAY_LOG_SYNC_MAX_FILE_BYTES:
-                        continue
-                    relative_path = os.path.relpath(local_path, log_dir)
-                    remote_path = f"{dest_path}/{session}/{relative_path}"
-                    remote_paths.add(remote_path)
-                    if active_state._uploaded_versions.get(remote_path) == version:
-                        unchanged_files += 1
-                        continue
-                    uploads.append(
-                        _RayLogUpload(
-                            local_path=local_path,
-                            remote_path=remote_path,
-                            version=version,
-                        )
-                    )
+    @property
+    def destination(self) -> str | None:
+        if not self.rendezvous_dir:
+            return None
+        return f"{self.rendezvous_dir.rstrip('/')}/ray_session_logs/{self.node_id}"
 
-        active_state._uploaded_versions = {
-            path: version for path, version in active_state._uploaded_versions.items() if path in remote_paths
-        }
-        uploaded_files = uploaded_bytes = failed_files = 0
-        for upload, current_version in _upload_ray_logs(fs, uploads):
-            if current_version is None:
-                failed_files += 1
-                continue
-            uploaded_files += 1
-            uploaded_bytes += upload.version[0]
-            if current_version == upload.version:
-                active_state._uploaded_versions[upload.remote_path] = upload.version
+    def sync(self, reason: str) -> RayLogSyncResult:
+        """Upload new or changed files and return per-pass file and byte counts."""
+        if not self.destination or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+            return RayLogSyncResult()
+        import glob
 
-    result = RayLogSyncResult(
-        uploaded_files=uploaded_files,
-        uploaded_bytes=uploaded_bytes,
-        unchanged_files=unchanged_files,
-        failed_files=failed_files,
-    )
-    _log(
-        f"[ray-log-sync] uploaded {result.uploaded_files} file(s) / "
-        f"{result.uploaded_bytes / 1073741824.0:.2f} GiB "
-        f"(unchanged={result.unchanged_files}, failed={result.failed_files}) -> {dest_base} [{reason}]"
-    )
-    return result
+        log_dirs = sorted(glob.glob("/tmp/ray/session_*/logs"))
+        if not log_dirs:
+            return RayLogSyncResult()
+        try:
+            filesystem, destination_path = fs_and_path(self.destination)
+        except Exception as error:  # noqa: BLE001 - best-effort teardown evidence
+            _log(f"[ray-log-sync] cannot resolve dest {self.destination} ({error}) [{reason}]")
+            return RayLogSyncResult()
 
+        with self._lock:
+            plan = _plan_ray_log_uploads(log_dirs, destination_path, self._uploaded_versions)
+            upload_results = _upload_ray_logs(filesystem, plan.uploads)
+            result, failures = _record_ray_log_uploads(self._uploaded_versions, plan, upload_results)
 
-def sync_ray_session_logs_bounded(
-    rendezvous_dir: str | None,
-    node_id: str,
-    reason: str,
-    state: RayLogSyncState | None = None,
-) -> None:
-    timeout = float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "60"))
-    if timeout <= 0:
-        _log(f"[ray-log-sync] skipping final upload because timeout is {timeout}s [{reason}]")
-        return
+        for failure in failures[:3]:
+            error = failure.error
+            _log(
+                f"[ray-log-sync] upload failed for {failure.upload.local_path}: "
+                f"{type(error).__name__}: {error} [{reason}]"
+            )
+        if len(failures) > 3:
+            _log(f"[ray-log-sync] {len(failures) - 3} additional upload failure(s) [{reason}]")
+        _log(
+            f"[ray-log-sync] uploaded {result.uploaded_files} file(s) / "
+            f"{result.uploaded_bytes / 1073741824.0:.2f} GiB "
+            f"(unchanged={result.unchanged_files}, failed={result.failed_files}) -> {self.destination} [{reason}]"
+        )
+        return result
 
-    sync_args = (rendezvous_dir, node_id, reason) if state is None else (rendezvous_dir, node_id, reason, state)
-    sync_thread = threading.Thread(
-        target=sync_ray_session_logs,
-        args=sync_args,
-        daemon=True,
-        name="ray-log-final-sync",
-    )
-    sync_thread.start()
-    sync_thread.join(timeout)
-    if sync_thread.is_alive():
-        _log(f"[ray-log-sync] final upload exceeded {timeout}s; continuing teardown with a partial upload [{reason}]")
+    def sync_bounded(self, reason: str) -> bool:
+        """Wait at most the configured teardown budget and report whether sync completed."""
+        timeout = float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "60"))
+        if timeout <= 0:
+            _log(f"[ray-log-sync] skipping final upload because timeout is {timeout}s [{reason}]")
+            return False
 
+        sync_thread = threading.Thread(
+            target=self.sync,
+            args=(reason,),
+            daemon=True,
+            name="ray-log-final-sync",
+        )
+        sync_thread.start()
+        sync_thread.join(timeout)
+        if sync_thread.is_alive():
+            _log(
+                f"[ray-log-sync] final upload exceeded {timeout}s; continuing teardown with a partial upload [{reason}]"
+            )
+            return False
+        return True
 
-def start_ray_log_sync(
-    rendezvous_dir: str | None,
-    node_id: str,
-    state: RayLogSyncState | None = None,
-) -> threading.Event:
-    """Start a daemon thread that periodically uploads this node's Ray session logs.
-    Returns the stop Event (set it to stop). No-op (returns a set-able event) when
-    disabled / no rendezvous dir. Fires a first upload after a short warmup so the
-    sync is confirmable during bring-up, then every OT_AGENT_RAY_LOG_SYNC_INTERVAL_S."""
-    stop = threading.Event()
-    if not rendezvous_dir or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+    def start_periodic(self) -> threading.Event:
+        """Start periodic incremental uploads and return the event that stops new passes."""
+        stop = threading.Event()
+        if not self.destination or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+            return stop
+        interval = int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300"))
+        if interval <= 0:
+            return stop
+
+        def _loop() -> None:
+            if stop.wait(min(60, interval)):
+                return
+            self.sync("periodic")
+            sync_debug_artifacts(self.rendezvous_dir, self.node_id, "periodic")
+            while not stop.wait(interval):
+                self.sync("periodic")
+                sync_debug_artifacts(self.rendezvous_dir, self.node_id, "periodic")
+
+        threading.Thread(target=_loop, daemon=True, name="ray-log-sync").start()
+        _log(f"[ray-log-sync] started (every {interval}s, first ~{min(60, interval)}s) -> {self.destination}")
         return stop
-    interval = int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300"))
-    if interval <= 0:
-        return stop
-    active_state = state or RayLogSyncState()
-
-    def _loop() -> None:
-        # brief warmup so Ray has created the session dir + some logs before the first push
-        if stop.wait(min(60, interval)):
-            return
-        sync_ray_session_logs(rendezvous_dir, node_id, "periodic", active_state)
-        sync_debug_artifacts(rendezvous_dir, node_id, "periodic")
-        while not stop.wait(interval):
-            sync_ray_session_logs(rendezvous_dir, node_id, "periodic", active_state)
-            sync_debug_artifacts(rendezvous_dir, node_id, "periodic")
-
-    threading.Thread(target=_loop, daemon=True, name="ray-log-sync").start()
-    _log(
-        f"[ray-log-sync] started (every {interval}s, first ~{min(60, interval)}s) -> "
-        f"{rendezvous_dir.rstrip('/')}/ray_session_logs/{node_id}"
-    )
-    return stop
 
 
 def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
@@ -1474,7 +1513,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     node_id = f"rank0-{socket.gethostname()}"
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
     ray_log_sync_stop: threading.Event | None = None
-    ray_log_sync_state = RayLogSyncState()
+    ray_log_sync = RayLogSyncSession(args.rendezvous_dir, node_id)
 
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
@@ -1490,12 +1529,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (head rank 0)")
         # Flush this node's Ray session logs (per-actor worker stdout/tracebacks) before
         # the pod is reaped — Ray's node-local logs are deleted with the pod.
-        sync_ray_session_logs_bounded(
-            args.rendezvous_dir,
-            node_id,
-            f"signal {signum} (head)",
-            ray_log_sync_state,
-        )
+        ray_log_sync.sync_bounded(f"signal {signum} (head)")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"signal {signum} (head)")
         if process is not None:
             try:
@@ -1528,7 +1562,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
 
     # Start the periodic Ray session-log -> object-store sync now that the session dir
     # exists (per-node, keyed by node id, under the job's rendezvous prefix).
-    ray_log_sync_stop = start_ray_log_sync(args.rendezvous_dir, node_id, ray_log_sync_state)
+    ray_log_sync_stop = ray_log_sync.start_periodic()
 
     if num_tasks > 1:
         if not args.rendezvous_dir:
@@ -1571,12 +1605,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         # Final flush of this node's Ray session logs before teardown reaps them.
         if ray_log_sync_stop is not None:
             ray_log_sync_stop.set()
-        sync_ray_session_logs_bounded(
-            args.rendezvous_dir,
-            node_id,
-            f"driver exit_code={exit_code} (head)",
-            ray_log_sync_state,
-        )
+        ray_log_sync.sync_bounded(f"driver exit_code={exit_code} (head)")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
@@ -1594,7 +1623,7 @@ def run_worker(args: argparse.Namespace) -> int:
     node_ip = _own_ip()
     node_id = f"rank{rank}-{socket.gethostname()}"
     _log(f"ROLE=worker rank={rank}/{num_tasks} node_ip={node_ip}")
-    ray_log_sync_state = RayLogSyncState()
+    ray_log_sync = RayLogSyncSession(args.rendezvous_dir, node_id)
 
     if not args.rendezvous_dir:
         raise ValueError(
@@ -1624,7 +1653,7 @@ def run_worker(args: argparse.Namespace) -> int:
 
     # Periodic Ray session-log -> object-store sync for THIS worker node (the FSDP/rollout
     # actors on this node log to its local /tmp/ray session, deleted with the pod on GC).
-    ray_log_sync_stop = start_ray_log_sync(args.rendezvous_dir, node_id, ray_log_sync_state)
+    ray_log_sync_stop = ray_log_sync.start_periodic()
 
     stop = threading.Event()
 
@@ -1634,12 +1663,7 @@ def run_worker(args: argparse.Namespace) -> int:
         # hosts the training actors' GPUs); capture its disk/GPU state before reap.
         capture_termination_artifacts(args.rendezvous_dir, f"signal {signum} (worker rank {rank})")
         # Flush this node's per-actor Ray worker logs before the pod is reaped.
-        sync_ray_session_logs_bounded(
-            args.rendezvous_dir,
-            node_id,
-            f"signal {signum} (worker rank {rank})",
-            ray_log_sync_state,
-        )
+        ray_log_sync.sync_bounded(f"signal {signum} (worker rank {rank})")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"signal {signum} (worker rank {rank})")
         stop.set()
 
@@ -1657,12 +1681,7 @@ def run_worker(args: argparse.Namespace) -> int:
             time.sleep(POLL_INTERVAL)
         # Final flush of this worker node's Ray session logs before Ray teardown.
         ray_log_sync_stop.set()
-        sync_ray_session_logs_bounded(
-            args.rendezvous_dir,
-            node_id,
-            f"worker rank {rank} teardown",
-            ray_log_sync_state,
-        )
+        ray_log_sync.sync_bounded(f"worker rank {rank} teardown")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
     return 0
