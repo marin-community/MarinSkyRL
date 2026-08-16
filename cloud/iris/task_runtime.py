@@ -27,6 +27,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 from dataclasses import asdict, dataclass, field, fields
+from enum import StrEnum
+import glob
 import json
 import os
 import queue
@@ -47,7 +49,7 @@ from cloud.iris.env_vars import (
     ensure_debug_artifact_directories,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
-from marinskyrl.resource_locator import is_cloud_uri
+from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
@@ -1204,6 +1206,7 @@ def capture_termination_artifacts(rendezvous_dir: str | None, reason: str) -> No
 # OT_AGENT_RAY_LOG_SYNC (default "1"); interval OT_AGENT_RAY_LOG_SYNC_INTERVAL_S (300s).
 RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log (pathological)
 RAY_LOG_SYNC_MAX_WORKERS = 8
+RAY_LOG_SYNC_MAX_FAILURE_LOGS = 3
 DEBUG_SYNC_MAX_FILE_BYTES = 512 * 1024 * 1024
 DEBUG_SYNC_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -1214,6 +1217,13 @@ class RayLogSyncResult:
     uploaded_bytes: int = 0
     unchanged_files: int = 0
     failed_files: int = 0
+
+
+class RayLogSyncWaitStatus(StrEnum):
+    DISABLED = "disabled"
+    SKIPPED = "skipped"
+    COMPLETED = "completed"
+    TIMED_OUT = "timed_out"
 
 
 class _RayLogFilesystem(Protocol):
@@ -1241,10 +1251,32 @@ class _RayLogUploadResult:
 
 
 @dataclass(frozen=True)
+class _RayLogScanFailure:
+    local_path: str
+    error: OSError
+
+
+@dataclass(frozen=True)
 class _RayLogUploadPlan:
     uploads: tuple[_RayLogUpload, ...]
     active_remote_paths: frozenset[str]
     unchanged_files: int
+    scan_failures: tuple[_RayLogScanFailure, ...]
+
+
+@dataclass(frozen=True)
+class _RayLogSyncSettings:
+    enabled: bool
+    interval_seconds: int
+    final_timeout_seconds: float
+
+    @classmethod
+    def from_environment(cls) -> "_RayLogSyncSettings":
+        return cls(
+            enabled=os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") == "1",
+            interval_seconds=int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300")),
+            final_timeout_seconds=float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "60")),
+        )
 
 
 def _ray_log_version(path: str) -> _RayLogVersion:
@@ -1297,6 +1329,7 @@ def _plan_ray_log_uploads(
 ) -> _RayLogUploadPlan:
     uploads: list[_RayLogUpload] = []
     active_remote_paths: set[str] = set()
+    scan_failures: list[_RayLogScanFailure] = []
     unchanged_files = 0
     for log_dir in log_dirs:
         session = os.path.basename(os.path.dirname(log_dir))
@@ -1306,7 +1339,8 @@ def _plan_ray_log_uploads(
                 local_path = os.path.join(root, filename)
                 try:
                     version = _ray_log_version(local_path)
-                except OSError:
+                except OSError as error:
+                    scan_failures.append(_RayLogScanFailure(local_path=local_path, error=error))
                     continue
                 if version.size_bytes > RAY_LOG_SYNC_MAX_FILE_BYTES:
                     continue
@@ -1321,14 +1355,16 @@ def _plan_ray_log_uploads(
         uploads=tuple(uploads),
         active_remote_paths=frozenset(active_remote_paths),
         unchanged_files=unchanged_files,
+        scan_failures=tuple(scan_failures),
     )
 
 
-def _record_ray_log_uploads(
+def _apply_ray_log_upload_results(
     uploaded_versions: dict[str, _RayLogVersion],
     plan: _RayLogUploadPlan,
     upload_results: tuple[_RayLogUploadResult, ...],
 ) -> tuple[RayLogSyncResult, tuple[_RayLogUploadResult, ...]]:
+    """Prune stale versions, record stable uploads, and return the pass result and failures."""
     for remote_path in tuple(uploaded_versions):
         if remote_path not in plan.active_remote_paths:
             del uploaded_versions[remote_path]
@@ -1348,7 +1384,7 @@ def _record_ray_log_uploads(
             uploaded_files=uploaded_files,
             uploaded_bytes=uploaded_bytes,
             unchanged_files=plan.unchanged_files,
-            failed_files=len(failures),
+            failed_files=len(plan.scan_failures) + len(failures),
         ),
         tuple(failures),
     )
@@ -1408,6 +1444,7 @@ class RayLogSyncSession:
 
     rendezvous_dir: str | None
     node_id: str
+    _settings: _RayLogSyncSettings = field(default_factory=_RayLogSyncSettings.from_environment, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _uploaded_versions: dict[str, _RayLogVersion] = field(default_factory=dict, repr=False)
 
@@ -1415,13 +1452,12 @@ class RayLogSyncSession:
     def destination(self) -> str | None:
         if not self.rendezvous_dir:
             return None
-        return f"{self.rendezvous_dir.rstrip('/')}/ray_session_logs/{self.node_id}"
+        return join_resource_path(self.rendezvous_dir, "ray_session_logs", self.node_id)
 
     def sync(self, reason: str) -> RayLogSyncResult:
         """Upload new or changed files and return per-pass file and byte counts."""
-        if not self.destination or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+        if not self.destination or not self._settings.enabled:
             return RayLogSyncResult()
-        import glob
 
         log_dirs = sorted(glob.glob("/tmp/ray/session_*/logs"))
         if not log_dirs:
@@ -1435,16 +1471,21 @@ class RayLogSyncSession:
         with self._lock:
             plan = _plan_ray_log_uploads(log_dirs, destination_path, self._uploaded_versions)
             upload_results = _upload_ray_logs(filesystem, plan.uploads)
-            result, failures = _record_ray_log_uploads(self._uploaded_versions, plan, upload_results)
+            result, upload_failures = _apply_ray_log_upload_results(self._uploaded_versions, plan, upload_results)
 
-        for failure in failures[:3]:
-            error = failure.error
-            _log(
-                f"[ray-log-sync] upload failed for {failure.upload.local_path}: "
-                f"{type(error).__name__}: {error} [{reason}]"
-            )
-        if len(failures) > 3:
-            _log(f"[ray-log-sync] {len(failures) - 3} additional upload failure(s) [{reason}]")
+        failure_messages = [
+            f"stat failed for {failure.local_path}: {type(failure.error).__name__}: {failure.error}"
+            for failure in plan.scan_failures
+        ]
+        failure_messages.extend(
+            f"upload failed for {failure.upload.local_path}: {type(failure.error).__name__}: {failure.error}"
+            for failure in upload_failures
+        )
+        for failure_message in failure_messages[:RAY_LOG_SYNC_MAX_FAILURE_LOGS]:
+            _log(f"[ray-log-sync] {failure_message} [{reason}]")
+        if len(failure_messages) > RAY_LOG_SYNC_MAX_FAILURE_LOGS:
+            additional_failures = len(failure_messages) - RAY_LOG_SYNC_MAX_FAILURE_LOGS
+            _log(f"[ray-log-sync] {additional_failures} additional sync failure(s) [{reason}]")
         _log(
             f"[ray-log-sync] uploaded {result.uploaded_files} file(s) / "
             f"{result.uploaded_bytes / 1073741824.0:.2f} GiB "
@@ -1452,12 +1493,14 @@ class RayLogSyncSession:
         )
         return result
 
-    def sync_bounded(self, reason: str) -> bool:
-        """Wait at most the configured teardown budget and report whether sync completed."""
-        timeout = float(os.environ.get("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "60"))
+    def sync_bounded(self, reason: str) -> RayLogSyncWaitStatus:
+        """Wait at most the configured teardown budget and report the terminal wait status."""
+        if not self.destination or not self._settings.enabled:
+            return RayLogSyncWaitStatus.DISABLED
+        timeout = self._settings.final_timeout_seconds
         if timeout <= 0:
             _log(f"[ray-log-sync] skipping final upload because timeout is {timeout}s [{reason}]")
-            return False
+            return RayLogSyncWaitStatus.SKIPPED
 
         sync_thread = threading.Thread(
             target=self.sync,
@@ -1471,15 +1514,15 @@ class RayLogSyncSession:
             _log(
                 f"[ray-log-sync] final upload exceeded {timeout}s; continuing teardown with a partial upload [{reason}]"
             )
-            return False
-        return True
+            return RayLogSyncWaitStatus.TIMED_OUT
+        return RayLogSyncWaitStatus.COMPLETED
 
     def start_periodic(self) -> threading.Event:
         """Start periodic incremental uploads and return the event that stops new passes."""
         stop = threading.Event()
-        if not self.destination or os.environ.get("OT_AGENT_RAY_LOG_SYNC", "1") != "1":
+        if not self.destination or not self._settings.enabled:
             return stop
-        interval = int(os.environ.get("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "300"))
+        interval = self._settings.interval_seconds
         if interval <= 0:
             return stop
 

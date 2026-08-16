@@ -78,6 +78,18 @@ def test_ray_log_sync_skips_unchanged_files(tmp_path, monkeypatch):
     assert (third.uploaded_files, third.unchanged_files) == (1, 1)
 
 
+def test_ray_log_sync_reports_files_that_disappear_during_scan(tmp_path, monkeypatch):
+    (first_path,) = _ray_log_tree(tmp_path, monkeypatch, b"first")
+    (first_path.parent / "missing.out").symlink_to(tmp_path / "already-gone.out")
+    filesystem = _RecordingFilesystem()
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
+
+    result = task_runtime.RayLogSyncSession("s3://logs", "node-0").sync("periodic")
+
+    assert result.uploaded_files == 1
+    assert result.failed_files == 1
+
+
 def test_final_ray_log_sync_completes_inline(tmp_path, monkeypatch):
     _ray_log_tree(tmp_path, monkeypatch, b"complete")
     filesystem = _RecordingFilesystem()
@@ -85,7 +97,7 @@ def test_final_ray_log_sync_completes_inline(tmp_path, monkeypatch):
     monkeypatch.setenv("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "1")
     sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
-    assert sync_session.sync_bounded("complete")
+    assert sync_session.sync_bounded("complete") == task_runtime.RayLogSyncWaitStatus.COMPLETED
     assert filesystem.completed_uploads == 1
 
 
@@ -96,9 +108,9 @@ def test_final_ray_log_sync_timeout_does_not_block_teardown(tmp_path, monkeypatc
     monkeypatch.setenv("OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S", "0.01")
     sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
 
-    completed = sync_session.sync_bounded("timeout")
+    status = sync_session.sync_bounded("timeout")
     assert filesystem.started.wait(timeout=1)
     filesystem.release.set()
 
-    assert not completed
+    assert status == task_runtime.RayLogSyncWaitStatus.TIMED_OUT
     assert sync_session.sync("cleanup").unchanged_files == 1
