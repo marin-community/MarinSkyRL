@@ -58,6 +58,7 @@ WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
+RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -117,6 +118,12 @@ ENV_VAR_SPECS = (
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
+    EnvVarSpec(
+        RAY_CLUSTER_OWNER_ENV,
+        "runtime.ray_cluster",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.DRIVER}),
+    ),
 )
 
 _SPECS_BY_NAME = {spec.name: spec for spec in ENV_VAR_SPECS}
@@ -126,6 +133,11 @@ if len(_SPECS_BY_NAME) != len(ENV_VAR_SPECS):
 _REMOTE_PATH = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 _NCCL_SETUP_SUBSYSTEMS = "INIT,BOOTSTRAP,ENV,NET,GRAPH,TUNING"
+
+
+def ray_cluster_owner_environment() -> dict[str, str]:
+    """Identify the Iris task runtime as the owner of its attached Ray cluster."""
+    return {RAY_CLUSTER_OWNER_ENV: "iris-task-runtime"}
 
 
 def _config_value(config: Any, dotted_path: str, default: Any = None) -> Any:
