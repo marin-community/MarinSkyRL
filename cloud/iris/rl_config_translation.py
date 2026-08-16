@@ -941,7 +941,7 @@ def build_skyrl_hydra_args(
         for key, val in _flatten_dict(parsed.teacher, "teacher").items():
             args.append(format_hydra_arg(key, val, prefix="++"))
 
-    # Terminal bench with + prefix (new keys added by the config group).
+    # Terminal-Bench experiments may override packaged group keys or add new ones.
     if parsed.terminal_bench:
         terminal_bench = dict(parsed.terminal_bench)
 
@@ -950,7 +950,7 @@ def build_skyrl_hydra_args(
             terminal_bench["trials_dir"] = f"{experiments_dir}/{job_name}/trace_jobs"
 
         for key, val in _flatten_dict(terminal_bench).items():
-            args.append(format_hydra_arg(f"terminal_bench_config.{key}", val, prefix="+"))
+            args.append(format_hydra_arg(f"terminal_bench_config.{key}", val, prefix="++"))
 
     return args
 
