@@ -33,4 +33,20 @@ microbatches and preserve the structured records for comparison with the next na
 
 ## Results
 
-Pending local and Jupiter execution.
+Local protocol and parser tests pass, including concatenated JSON records from concurrent rank writes.
+
+Jupiter job `1396698` passed on commit `caf4e251` in 91 seconds. The production EP4/FSDP4 model completed eight
+forward/backward microbatches through three MoE layers on 16 GH200 GPUs. The controller validated 3,456 ordered
+stage records with matching sequence numbers inside every EP group. Raw output, normalized JSONL, and the
+validation summary are in
+`/e/scratch/jureap59/feuer1/codex/results/moe-dispatch-caf4e251`.
+
+The successful standalone run does not reproduce the fleet wedge. It does establish a production-topology
+control and a record format that distinguishes a rank missing before token-dispatch enqueue, after enqueue but
+before CUDA completion, or after dispatch completion. The same stage wrapper can be applied to a natural
+failure without replacing the dispatch implementation.
+
+Backend numerics job `1396643` passed T1 and every T2 variant on commit `46fa14d8`. Corrected T3 job `1396730`
+passed all five cases on commit `53624bfd`; its durable artifacts are in
+`/e/scratch/jureap59/feuer1/codex/results/t3-53624bfd`. The Jupiter batch runtime now activates the frozen CUDA
+wheel closure from `uv.lock`, while the multi-node FSDP control retains the validated container runtime.

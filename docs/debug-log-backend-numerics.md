@@ -67,3 +67,28 @@ The FSDP2/Megatron norm gap was a real FSDP2 expert-gradient scale defect: missi
 `fsdp2_clip_grad_norm_` overcounting correct shards. The fix restores the logical single-batch gradient scale.
 The standalone diagnostics find no material log-probability, isolated MoE-direction, or attention-direction
 disagreement at their stated tolerances.
+
+## Follow-up: complete T3 coverage
+
+The original T3 MoE case was mislabeled: it constructed SkyRL MoE with `use_grouped_mm=False`, so it only tested
+the per-expert for-loop. The corrected test keeps that FP32 control and adds the real BF16 `torch._grouped_mm`
+path, Megatron Core 0.18 `TEGroupedMLP`, and Transformer Engine `DotProductAttention`. The existing Hugging Face
+eager-versus-FlashAttention2 comparison remains.
+
+Jupiter job `1396643` passed T1 and every T2 variant on commit `46fa14d8`. After normalizing Transformer
+Engine's flattened attention output at its API boundary, job `1396730` passed all five T3 cases on commit
+`53624bfd`. The runtime was four NVIDIA GH200 120GB GPUs for T1/T2 and one GH200 for T3, using the frozen
+`uv.lock` closure: Torch 2.11.0+cu129, CUDA 12.9, Megatron Core 0.18.0, Transformer Engine 2.11.0, and
+Transformers 5.8.1.
+
+T3's minimum cosines and norm-ratio ranges were:
+
+- SkyRL FP32 for-loop: cosine 1.00000000, ratio 0.99999998–1.00000011.
+- SkyRL BF16 grouped MM: cosine 0.99999520, ratio 0.99956100–1.00031626.
+- Megatron BF16 grouped experts: cosine 0.99998485, ratio 0.99780938–1.00177332.
+- Hugging Face BF16 FlashAttention2: cosine 0.99995738, ratio 0.99904464–1.00008918.
+- Transformer Engine BF16 attention: cosine 1.00000000, ratio 1.00000000.
+
+Artifacts are in `/e/scratch/jureap59/feuer1/codex/results/backend-numerics-46fa14d8` and
+`/e/scratch/jureap59/feuer1/codex/results/t3-53624bfd` on Jupiter. These results close the missing T2/T3 test
+debt without finding a direction-changing backend discrepancy at the stated tolerances.
