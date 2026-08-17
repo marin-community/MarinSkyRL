@@ -15,12 +15,10 @@ set -euo pipefail
 CHECKOUT=${CHECKOUT:?set CHECKOUT to the staged MarinSkyRL checkout}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:?set ARTIFACT_ROOT to a bounded shared output directory}
 . "$CHECKOUT/.agents/ops/jupiter/production-runtime.env"
-FROZEN_PYTHON=${FROZEN_PYTHON:?set FROZEN_PYTHON to the frozen FSDP environment}
-module load GCC/14.3.0 nvidia-compilers/25.9-CUDA-13
 
 mkdir -p "$ARTIFACT_ROOT"
 POLICY_PYTHONPATH="$CHECKOUT:$CHECKOUT/skyrl-train:$CHECKOUT/skyrl-gym:$POLICY_PYDEPS"
-NODE_PREFIX="env PYTHONPATH=$POLICY_PYTHONPATH PATH=$(dirname "$FROZEN_PYTHON"):$PATH"
+NODE_PREFIX="apptainer exec --nv --pwd / --overlay $POLICY_OVERLAY:ro --env PYTHONPATH=$POLICY_PYTHONPATH $POLICY_SIF"
 
 cd "$CHECKOUT/skyrl-train"
 PYTHONPATH="$CHECKOUT:$CHECKOUT/skyrl-train" "$HOST_PYTHON" -m pytest -s \

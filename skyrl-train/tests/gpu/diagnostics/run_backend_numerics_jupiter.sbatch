@@ -17,6 +17,7 @@ ARTIFACT_ROOT=${ARTIFACT_ROOT:?set ARTIFACT_ROOT to a bounded shared output dire
 CHECKOUT_REVISION=${CHECKOUT_REVISION:?set CHECKOUT_REVISION before entering the compute node}
 module load GCC/14.3.0 nvidia-compilers/25.9-CUDA-13
 FROZEN_PYTHON=${FROZEN_PYTHON:?set FROZEN_PYTHON to the frozen Megatron environment}
+POLICY_SIF=${POLICY_SIF:?set POLICY_SIF to the validated GPU runtime}
 POLICY_PYDEPS=${POLICY_PYDEPS:?set POLICY_PYDEPS to its TorchTitan dependency path}
 
 mkdir -p "$ARTIFACT_ROOT"
@@ -29,11 +30,21 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export GLOO_USE_IPV6=0
 export NCCL_SOCKET_FAMILY=AF_INET
 export MASTER_ADDR=127.0.0.1
-export PATH="$(dirname "$FROZEN_PYTHON"):$PATH"
 cd "$CHECKOUT/skyrl-train"
 
 run_in_policy_runtime() {
-  "$@"
+  if [[ $1 != python ]]; then
+    echo "run_in_policy_runtime expects a Python command, got $1" >&2
+    return 2
+  fi
+  shift
+  apptainer exec --nv --pwd "$CHECKOUT/skyrl-train" \
+    --env "PYTHONPATH=$PYTHONPATH" \
+    --env "SKYRL_NUMERICS_ARTIFACT_DIR=$SKYRL_NUMERICS_ARTIFACT_DIR" \
+    --env "TRITON_CACHE_DIR=$TRITON_CACHE_DIR" \
+    --env "TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR" \
+    --env "CUDA_DEVICE_MAX_CONNECTIONS=$CUDA_DEVICE_MAX_CONNECTIONS" \
+    "$POLICY_SIF" "$FROZEN_PYTHON" "$@"
 }
 
 {
@@ -54,13 +65,16 @@ run_diagnostic() {
   RESULTS+=("$name=$status")
 }
 
-run_diagnostic t1 torchrun --master-addr=127.0.0.1 --master-port=29601 --nproc-per-node=4 -m pytest -s \
+run_diagnostic t1 python -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29601 --nproc-per-node=4 \
+  -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t1_gradient_norms.py
 run_diagnostic t2-fsdp python -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t2_logprob_gradients.py -k fsdp
-run_diagnostic t2-megatron-tp1 torchrun --master-addr=127.0.0.1 --master-port=29602 --nproc-per-node=1 -m pytest -s \
+run_diagnostic t2-megatron-tp1 python -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29602 \
+  --nproc-per-node=1 -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t2_logprob_gradients.py -k megatron
-run_diagnostic t2-megatron-tp2 torchrun --master-addr=127.0.0.1 --master-port=29603 --nproc-per-node=2 -m pytest -s \
+run_diagnostic t2-megatron-tp2 python -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29603 \
+  --nproc-per-node=2 -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t2_logprob_gradients.py -k 'megatron and not inference_only'
 run_diagnostic t3 python -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t3_moe_attention_gradients.py
