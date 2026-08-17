@@ -55,9 +55,7 @@ def test_dispatch_stage_validation_identifies_first_rank_missing_after_token_enq
 def test_dispatch_stage_validation_rejects_ep_sequence_divergence() -> None:
     records = list(_complete_records())
     divergent_index = next(
-        index
-        for index, record in enumerate(records)
-        if record.rank == 3 and record.stage.value == "tokens_a2a_before"
+        index for index, record in enumerate(records) if record.rank == 3 and record.stage.value == "tokens_a2a_before"
     )
     records[divergent_index] = replace(records[divergent_index], sequence_number=99)
 

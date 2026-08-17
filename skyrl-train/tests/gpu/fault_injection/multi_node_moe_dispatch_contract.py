@@ -172,9 +172,7 @@ def test_multinode_moe_dispatch_crosses_every_stage_with_matching_ep_sequences(
         microbatches=DISPATCH_MICROBATCHES,
         layers=DISPATCH_LAYERS,
     )
-    (artifact_root / "dispatch-stages.jsonl").write_text(
-        "".join(f"{record.json_line()}\n" for record in records)
-    )
+    (artifact_root / "dispatch-stages.jsonl").write_text("".join(f"{record.json_line()}\n" for record in records))
     (artifact_root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     assert result.output.count("MOE_DISPATCH_OK") == 1, result.output
     print(
