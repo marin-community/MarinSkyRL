@@ -47,14 +47,17 @@ class DispatchStageRecord:
 
 
 def dispatch_stage_records(output: str) -> tuple[DispatchStageRecord, ...]:
-    """Parse dispatch records from torchrun output, tolerating launcher prefixes."""
+    """Parse dispatch records despite launcher prefixes and concurrent writes."""
 
     records = []
-    for line in output.splitlines():
-        marker_index = line.find(f"{DISPATCH_STAGE_MARKER} ")
+    decoder = json.JSONDecoder()
+    cursor = 0
+    marker = f"{DISPATCH_STAGE_MARKER} "
+    while True:
+        marker_index = output.find(marker, cursor)
         if marker_index < 0:
-            continue
-        payload = json.loads(line[marker_index + len(DISPATCH_STAGE_MARKER) + 1 :])
+            break
+        payload, cursor = decoder.raw_decode(output, marker_index + len(marker))
         records.append(
             DispatchStageRecord(
                 rank=int(payload["rank"]),

@@ -41,6 +41,13 @@ def test_dispatch_stage_records_round_trip_and_validate_complete_ep_group() -> N
     assert summary == {"records": 36, "ranks": 4, "microbatches": 1, "layers": 1}
 
 
+def test_dispatch_stage_records_parse_concatenated_rank_writes() -> None:
+    first, second = _complete_records()[:2]
+    output = f"launcher prefix {first.json_line()}{second.json_line()} trailing text"
+
+    assert dispatch_stage_records(output) == (first, second)
+
+
 def test_dispatch_stage_validation_identifies_first_rank_missing_after_token_enqueue() -> None:
     records = tuple(
         record
