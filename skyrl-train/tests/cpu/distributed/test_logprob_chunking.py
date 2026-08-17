@@ -29,9 +29,11 @@ from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
 
+from skyrl_train.distributed.megatron import model_utils  # noqa: E402
 from skyrl_train.distributed.megatron.model_utils import (  # noqa: E402
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
+    vocab_parallel_entropy,
 )
 
 
@@ -153,6 +155,34 @@ def test_chunked_backward_does_not_allocate_a_full_fp32_gradient(single_rank_gro
     _logprobs(logits, targets, single_rank_group, chunk_size=3, inference_only=False).sum().backward()
     assert logits.grad is not None
     assert logits.grad.dtype is torch.bfloat16
+
+
+def test_vocab_parallel_entropy_and_logprob_share_logits_without_corrupting_backward(single_rank_group, monkeypatch):
+    """Entropy and policy losses must backpropagate through the same logits tensor."""
+    monkeypatch.setattr(model_utils.mpu, "get_tensor_model_parallel_group", lambda: single_rank_group, raising=False)
+    torch.manual_seed(5)
+    base_logits = torch.randn(2, 7, 16, dtype=torch.float32)
+    targets = torch.randint(0, base_logits.shape[-1], (base_logits.shape[0], base_logits.shape[1]))
+
+    parallel_logits = base_logits.clone().requires_grad_(True)
+    parallel_logprobs = _logprobs(
+        parallel_logits,
+        targets,
+        single_rank_group,
+        chunk_size=3,
+        inference_only=False,
+    )
+    parallel_entropy = vocab_parallel_entropy(parallel_logits)
+    (parallel_logprobs.sum() + 0.003 * parallel_entropy.sum()).backward()
+
+    reference_logits = base_logits.clone().requires_grad_(True)
+    reference_log_probs = reference_logits.log_softmax(dim=-1)
+    rolled_targets = targets.roll(shifts=-1, dims=-1)
+    reference_chosen = reference_log_probs.gather(-1, rolled_targets.unsqueeze(-1)).squeeze(-1)[:, :-1]
+    reference_entropy = -(reference_log_probs.exp() * reference_log_probs).sum(dim=-1)
+    (reference_chosen.sum() + 0.003 * reference_entropy.sum()).backward()
+
+    assert torch.allclose(parallel_logits.grad, reference_logits.grad, atol=1e-6, rtol=1e-6)
 
 
 def test_packed_logprobs_preserve_left_padded_action_positions(single_rank_group):
