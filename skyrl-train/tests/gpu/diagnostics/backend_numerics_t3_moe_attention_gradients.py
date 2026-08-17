@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from megatron.core.transformer.moe.experts import GroupedMLP
+from megatron.core.extensions.transformer_engine import TEColumnParallelGroupedLinear, TERowParallelGroupedLinear
+from megatron.core.transformer.moe.experts import GroupedMLPSubmodules, TEGroupedMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
@@ -98,7 +99,15 @@ class _MegatronGroupedMoE(nn.Module):
             params_dtype=torch.bfloat16,
             perform_initialization=False,
         )
-        self.experts = GroupedMLP(NUM_EXPERTS, config, _SingletonModelCommProcessGroups())
+        self.experts = TEGroupedMLP(
+            NUM_EXPERTS,
+            config,
+            GroupedMLPSubmodules(
+                linear_fc1=TEColumnParallelGroupedLinear,
+                linear_fc2=TERowParallelGroupedLinear,
+            ),
+            pg_collection=_SingletonModelCommProcessGroups(),
+        )
 
     def forward(self, inputs: torch.Tensor, routes: torch.Tensor) -> torch.Tensor:
         flat = inputs.flatten(0, 1)
@@ -138,12 +147,12 @@ def _copy_moe_weights(reference: _EagerMoE, candidate: MoE) -> None:
 def _copy_megatron_moe_weights(reference: _EagerMoE, candidate: _MegatronGroupedMoE) -> None:
     with torch.no_grad():
         candidate.router.weight.copy_(reference.router.weight)
-        weight1 = candidate.experts.weight1.view(NUM_EXPERTS, MODEL_SIZE, 2 * HIDDEN_SIZE)
-        weight2 = candidate.experts.weight2.view(NUM_EXPERTS, HIDDEN_SIZE, MODEL_SIZE)
         for expert in range(NUM_EXPERTS):
-            weight1[expert, :, :HIDDEN_SIZE].copy_(reference.gate[expert].weight.T)
-            weight1[expert, :, HIDDEN_SIZE:].copy_(reference.up[expert].weight.T)
-            weight2[expert].copy_(reference.down[expert].weight.T)
+            weight1 = getattr(candidate.experts.linear_fc1, f"weight{expert}")
+            weight2 = getattr(candidate.experts.linear_fc2, f"weight{expert}")
+            weight1[:HIDDEN_SIZE].copy_(reference.gate[expert].weight)
+            weight1[HIDDEN_SIZE:].copy_(reference.up[expert].weight)
+            weight2.copy_(reference.down[expert].weight)
 
 
 def _comparison_row(
@@ -187,15 +196,15 @@ def _megatron_comparison_rows(
     reference: _EagerMoE,
     candidate: _MegatronGroupedMoE,
 ) -> list[dict[str, float | str | bool]]:
-    weight1 = candidate.experts.weight1.grad.view(NUM_EXPERTS, MODEL_SIZE, 2 * HIDDEN_SIZE)
-    weight2 = candidate.experts.weight2.grad.view(NUM_EXPERTS, HIDDEN_SIZE, MODEL_SIZE)
     pairs = [("router.weight", reference.router.weight.grad, candidate.router.weight.grad)]
     for expert in range(NUM_EXPERTS):
+        weight1 = getattr(candidate.experts.linear_fc1, f"weight{expert}").grad
+        weight2 = getattr(candidate.experts.linear_fc2, f"weight{expert}").grad
         pairs.extend(
             [
-                (f"expert.{expert}.gate", reference.gate[expert].weight.grad, weight1[expert, :, :HIDDEN_SIZE].T),
-                (f"expert.{expert}.up", reference.up[expert].weight.grad, weight1[expert, :, HIDDEN_SIZE:].T),
-                (f"expert.{expert}.down", reference.down[expert].weight.grad, weight2[expert].T),
+                (f"expert.{expert}.gate", reference.gate[expert].weight.grad, weight1[:HIDDEN_SIZE]),
+                (f"expert.{expert}.up", reference.up[expert].weight.grad, weight1[HIDDEN_SIZE:]),
+                (f"expert.{expert}.down", reference.down[expert].weight.grad, weight2),
             ]
         )
     rows = [
