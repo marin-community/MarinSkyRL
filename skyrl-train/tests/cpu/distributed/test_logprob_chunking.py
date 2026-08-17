@@ -8,18 +8,20 @@ from null (unchunked) to 1024, which routes both the policy and ref logprob forw
 through `ChunkedDistributedLogprob` (per-position log-softmax, chunked along the
 sequence dim), bounding peak memory regardless of sequence length.
 
-These tests pin the two properties that make that default flip safe:
+These tests pin the properties that make the Megatron logprob and entropy paths safe:
   1. The chunked path is numerically identical to the unchunked path — in both the
      forward log-probs AND the backward gradient — so turning it on cannot change
      training results. (Log-softmax is per-position over vocab; chunking only splits
      the independent sequence positions, so it is exact, not approximate.)
   2. The composed base config defaults `logprob_chunk_size` to 1024 for BOTH the
      policy and ref megatron_config (the two keys the workers read).
+  3. Entropy and logprob losses can backpropagate through the same logits tensor,
+     and their combined gradient matches an independent PyTorch reference.
 
 `model_utils` imports `megatron.core.parallel_state` at module load, but the functions
-under test never touch it, so when megatron is not installed (the CPU CI env) we stub
-it via the shared tests/cpu/util.py helper — only if megatron is genuinely absent, so a
-real-megatron env is left untouched.
+under test only need one tensor-parallel group lookup. When megatron is not installed
+(the CPU CI env), the shared tests/cpu/util.py helper stubs the import and the entropy
+test supplies the real single-rank process group. A real-megatron env is left untouched.
 """
 
 import pytest
@@ -138,8 +140,6 @@ def test_chunked_backward_does_not_allocate_a_full_fp32_gradient(single_rank_gro
     gradient is filled chunk-by-chunk, so a zeroed fp32 destination is neither
     necessary nor safe at this sequence length.
     """
-    import skyrl_train.distributed.megatron.model_utils as model_utils
-
     torch.manual_seed(4)
     logits = torch.randn(1, 9, 16, dtype=torch.bfloat16).requires_grad_(True)
     targets = torch.randint(0, 16, (1, 9))
