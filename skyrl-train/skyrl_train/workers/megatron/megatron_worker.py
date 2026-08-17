@@ -409,7 +409,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # IncompleteRead / dropped connection / spurious "no .safetensors")
             # that otherwise kill the whole gang at scale; genuine missing/auth
             # failures still surface. no-op if already downloaded.
-            load_pretrained_with_retry(lambda: snapshot_download(model_path), model_id=model_path)
+            retry = self.cfg.trainer.model_load_retry
+            load_pretrained_with_retry(
+                lambda: snapshot_download(model_path),
+                model_id=model_path,
+                max_retries=int(retry.max_retries),
+                backoff_base=float(retry.backoff_base_seconds),
+                backoff_cap=float(retry.backoff_cap_seconds),
+            )
         torch.distributed.barrier()
 
         if self._rank == 0:
@@ -788,7 +795,14 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             # IncompleteRead / dropped connection / spurious "no .safetensors")
             # that otherwise kill the whole gang at scale; genuine missing/auth
             # failures still surface. no-op if already downloaded.
-            load_pretrained_with_retry(lambda: snapshot_download(model_path), model_id=model_path)
+            retry = self.cfg.trainer.model_load_retry
+            load_pretrained_with_retry(
+                lambda: snapshot_download(model_path),
+                model_id=model_path,
+                max_retries=int(retry.max_retries),
+                backoff_base=float(retry.backoff_base_seconds),
+                backoff_cap=float(retry.backoff_cap_seconds),
+            )
         torch.distributed.barrier()
 
         # load weights

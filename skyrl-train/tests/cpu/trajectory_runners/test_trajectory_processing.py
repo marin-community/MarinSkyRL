@@ -923,7 +923,8 @@ def test_failure_metrics_survive_concatenation():
     # unequal: the fraction has to come from the summed totals, not from averaging
     # 0.75 and 0.0 to 0.375.
     merged = concatenate_trajectory_batches(
-        [_generated_group(4, 3), _generated_group(2, 1, error_type="ContextLengthExceededError")]
+        [_generated_group(4, 3), _generated_group(2, 1, error_type="ContextLengthExceededError")],
+        tis_lcs_alert_threshold=0.005,
     )
 
     assert merged["rollout_metrics"]["generate/num_trials"] == 6
@@ -936,7 +937,9 @@ def test_failure_metrics_survive_concatenation():
 def test_generators_that_report_no_trials_get_no_failure_series():
     # Only the agentic generator counts trials, and a fabricated zero series for
     # every other generator would read as a measured "nothing failed".
-    merged = concatenate_trajectory_batches([{**_generated_group(2, 0), "rollout_metrics": {}}])
+    merged = concatenate_trajectory_batches(
+        [{**_generated_group(2, 0), "rollout_metrics": {}}], tis_lcs_alert_threshold=0.005
+    )
 
     assert "generate/num_trials" not in merged["rollout_metrics"]
     assert "generate/failed_trajectory_fraction" not in merged["rollout_metrics"]
@@ -948,7 +951,7 @@ def test_concatenation_preserves_unshaped_rewards_with_incomplete_timeout_output
     timeout = _generated_group(1, 1, error_type="AgentTimeoutError")
     groups = [timeout, normal] if timeout_first else [normal, timeout]
 
-    merged = concatenate_trajectory_batches(groups)
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
 
     assert merged["unshaped_rewards"] == ([0.0, 1.0] if timeout_first else [1.0, 0.0])
 
@@ -958,7 +961,7 @@ def test_partial_failure_metrics_are_rejected_during_concatenation():
     del group["rollout_metrics"]["generate/num_masked_trajectories"]
 
     with pytest.raises(ValueError, match="generate/num_masked_trajectories"):
-        concatenate_trajectory_batches([group])
+        concatenate_trajectory_batches([group], tis_lcs_alert_threshold=0.005)
 
 
 def test_required_rollout_logprobs_reject_partial_generation_batch():
@@ -968,4 +971,5 @@ def test_required_rollout_logprobs_reject_partial_generation_batch():
         concatenate_trajectory_batches(
             [with_logprobs, _generated_group(2, 0)],
             require_rollout_logprobs=True,
+            tis_lcs_alert_threshold=0.005,
         )

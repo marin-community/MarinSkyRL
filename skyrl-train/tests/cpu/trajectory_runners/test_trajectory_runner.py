@@ -53,7 +53,7 @@ async def test_run_adds_alignment_health_for_position_aligned_logprobs():
         "generate/tis/lcs_fallback_alert": 0.0,
     }
 
-    concatenated = concatenate_trajectory_batches([output])
+    concatenated = concatenate_trajectory_batches([output], tis_lcs_alert_threshold=0.005)
     assert concatenated["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
     assert concatenated["rollout_metrics"]["generate/tis/aligned_tokens"] == 2.0
 

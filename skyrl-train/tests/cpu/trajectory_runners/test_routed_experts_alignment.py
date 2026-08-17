@@ -237,8 +237,8 @@ def test_packer_noop_flag_off(char_tokenizer):
 
 # ---------------------------------------------------------------------------
 # Case 4b: TrainingInputBatch byte-identical when the flag is off (TensorBatch.__eq__).
-# At the batch boundary, the flag-off batch must have the same keys and tensors,
-# while the flag-on batch adds exactly one key (rollout_routed_experts).
+# At the batch boundary, nested-list input must have the same keys and tensors,
+# while array input adds exactly one key (rollout_routed_experts).
 # ---------------------------------------------------------------------------
 def test_training_input_batch_noop_vs_present(char_tokenizer):
     from skyrl_train.training_batch import TrainingInputBatch
@@ -279,7 +279,7 @@ def test_training_input_batch_noop_vs_present(char_tokenizer):
     assert "rollout_routed_experts" not in off_a
 
     on = build([re0, re1])
-    # Flag on adds exactly one key; otherwise NOT equal to the flag-off batch.
+    # Array input adds exactly one key; otherwise the batches are equal.
     assert "rollout_routed_experts" in on
     assert on != off_a
     # All shared keys remain byte-identical (purely additive).
@@ -340,7 +340,7 @@ def test_collator_container_parity_byte_identical(char_tokenizer, num_experts):
 
 def test_training_input_batch_container_parity(char_tokenizer):
     """Full TrainingInputBatch parity: same key set + every tensor torch.equal between
-    the flag-off (nested) and flag-on (array) builds."""
+    the nested-list and array builds."""
     from skyrl_train.training_batch import TrainingInputBatch
 
     prompts = [[97, 98, 99], [49, 50, 51, 52, 53]]
@@ -375,7 +375,7 @@ def test_training_input_batch_container_parity(char_tokenizer):
     assert set(off.keys()) == set(on.keys())
     assert "rollout_routed_experts" in on
     for k in off.keys():
-        assert torch.equal(off[k], on[k]), f"key {k} diverged between flag-off and flag-on"
+        assert torch.equal(off[k], on[k]), f"key {k} diverged between nested-list and array input"
 
 
 def test_align_array_twin_parity():
@@ -410,7 +410,7 @@ def test_align_array_twin_parity():
 
 def test_end_to_end_alignment_and_collate_container_parity(char_tokenizer):
     """END-TO-END gate: multi-turn get_response_ids_and_loss_mask_from_messages +
-    collator, flag-off (nested per-turn) vs flag-on (np.int16 per-turn arrays), must
+    collator, nested per-turn data vs np.int16 per-turn arrays, must
     yield a byte-identical collated routed_experts tensor. Exercises extract-shape,
     sentinel-fill, LCS alignment, AND the collator — the correctness-sensitive path."""
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
@@ -488,7 +488,7 @@ def test_concat_cross_sample_sentinel_matches_LK():
         # no rollout_routed_experts key
     }
 
-    merged = concatenate_trajectory_batches([out_a, out_b])
+    merged = concatenate_trajectory_batches([out_a, out_b], tis_lcs_alert_threshold=0.005)
     assert "rollout_routed_experts" in merged
     re = merged["rollout_routed_experts"]
     assert len(re) == 2  # one entry per sample

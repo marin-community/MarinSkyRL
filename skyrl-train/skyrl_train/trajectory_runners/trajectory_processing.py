@@ -91,7 +91,7 @@ class AlignmentStats:
         self.n_lcs_messages += other.n_lcs_messages
         self.n_failed_messages += other.n_failed_messages
 
-    def as_metrics(self, prefix: str = "tis/", *, lcs_alert_threshold: float = 0.005) -> Dict[str, float]:
+    def as_metrics(self, prefix: str = "tis/", *, lcs_alert_threshold: float) -> Dict[str, float]:
         n = max(self.n_tokens, 1)
         lcs_frac = self.n_lcs / n
         names = {
@@ -524,7 +524,7 @@ def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
     require_rollout_logprobs: bool = False,
-    tis_lcs_alert_threshold: float = 0.005,
+    tis_lcs_alert_threshold: float,
 ) -> TrajectoryBatch:
     """
     Concatenate multiple trajectory batches into one batch.

@@ -83,7 +83,7 @@ def test_metrics_fractions():
     stats.n_lcs = 1
     stats.n_unaligned = 1
     stats.n_failed_messages = 0
-    m = stats.as_metrics(prefix="tis/")
+    m = stats.as_metrics(prefix="tis/", lcs_alert_threshold=0.005)
     assert math.isclose(m["tis/exact_match_fraction"], 0.8)
     assert math.isclose(m["tis/lcs_fallback_fraction"], 0.1)
     assert math.isclose(m["tis/unaligned_fraction"], 0.1)
@@ -96,20 +96,20 @@ def test_lcs_fallback_alert_metric():
     clean = AlignmentStats()
     clean.n_tokens = 100
     clean.n_exact = 100
-    mc = clean.as_metrics()
+    mc = clean.as_metrics(lcs_alert_threshold=0.005)
     assert "tis/lcs_fallback_alert" in mc and mc["tis/lcs_fallback_alert"] == 0.0
     # A tiny sub-threshold LCS fraction does NOT alert.
     tiny = AlignmentStats()
     tiny.n_tokens = 1000
     tiny.n_exact = 998
     tiny.n_lcs = 2  # 0.002 < 0.005
-    assert tiny.as_metrics()["tis/lcs_fallback_alert"] == 0.0
+    assert tiny.as_metrics(lcs_alert_threshold=0.005)["tis/lcs_fallback_alert"] == 0.0
     # Above threshold -> alert.
     bad = AlignmentStats()
     bad.n_tokens = 100
     bad.n_exact = 90
     bad.n_lcs = 10  # 0.10 > 0.005
-    assert bad.as_metrics()["tis/lcs_fallback_alert"] == 1.0
+    assert bad.as_metrics(lcs_alert_threshold=0.005)["tis/lcs_fallback_alert"] == 1.0
     # Typed threshold raises the bar.
     assert bad.as_metrics(lcs_alert_threshold=0.2)["tis/lcs_fallback_alert"] == 0.0
 

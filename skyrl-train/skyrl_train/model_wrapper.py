@@ -39,6 +39,7 @@ from skyrl_train.utils.flash_attention import (
     flash_unpad_input,
 )
 from packaging.version import Version
+from marinskyrl.runtime_options import GDNBackend
 
 # Rank-0 HF weight-index resolution retry (transient EOF flake). The helper now
 # lives in skyrl_train.utils.hf_load_retry (dependency-light) so the Megatron
@@ -605,7 +606,7 @@ class HFModelWrapper(nn.Module):
             if _gdn_mask:
                 from skyrl_train.models.qwen3_next_gdn import engage_flashqla
 
-                engage_flashqla(self.model, enabled=gdn_backend == "flashqla")
+                engage_flashqla(self.model, enabled=gdn_backend == GDNBackend.FLASHQLA)
         else:
             self.model = pretrain_or_model
 

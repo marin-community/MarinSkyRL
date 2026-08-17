@@ -650,7 +650,7 @@ def test_trajectory_batch_concatenation():
     }
 
     trajectory_batches = [trajectory_batch_1, trajectory_batch_2]
-    concatenated_output = concatenate_trajectory_batches(trajectory_batches)
+    concatenated_output = concatenate_trajectory_batches(trajectory_batches, tis_lcs_alert_threshold=0.005)
 
     assert concatenated_output["prompt_token_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["response_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]

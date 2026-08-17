@@ -4,7 +4,8 @@ import logging
 import os
 import socket
 from typing import Dict, Optional, Type, List, Any, Callable
-from skyrl_train.utils.progress import tqdm
+from skyrl_train.utils.progress import configure_progress, tqdm
+from marinskyrl.runtime_options import R3Transport
 from collections import defaultdict
 
 import ray
@@ -27,7 +28,7 @@ from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECO
 from skyrl_train.utils.io import io
 from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
 from skyrl_train.utils.policy_math import masked_mean
-from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
+from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
@@ -331,6 +332,7 @@ class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        configure_progress(cfg.trainer.progress)
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
@@ -798,16 +800,11 @@ class PPORayActorGroup:
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
 
     def _dispatch(self, dispatch_class, method_name, *args, **kwargs):
-        if dispatch_class is DispatchRegistry.get("mesh"):
-            return dispatch_class.dispatch(
-                self.actor_infos,
-                method_name,
-                *args,
-                **kwargs,
-                r3_transport=str(self.cfg.generator.r3_transport),
-                dispatch_put_timeout_seconds=float(self.cfg.generator.r3_dispatch_put_timeout_seconds),
-            )
-        return dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
+        settings = DispatchSettings(
+            r3_transport=R3Transport(self.cfg.generator.r3_transport),
+            r3_dispatch_put_timeout_seconds=float(self.cfg.generator.r3_dispatch_put_timeout_seconds),
+        )
+        return dispatch_class.dispatch(self.actor_infos, method_name, *args, settings=settings, **kwargs)
 
     def async_init_model(
         self,
@@ -996,7 +993,7 @@ class PolicyWorkerBase(Worker):
         # relocation) so the non-decentral / 8B (no `rollout_routed_experts`) path is
         # byte-identical; does NOT raise the 600 s unshard timeout (operator rejected that).
         _r3_decentral_stagger = (
-            self.cfg.generator.r3_transport == "decentral" and "rollout_routed_experts" in train_data.keys()
+            self.cfg.generator.r3_transport == R3Transport.DECENTRAL and "rollout_routed_experts" in train_data.keys()
         )
         if _r3_decentral_stagger and self._world_size > 1 and torch.distributed.is_initialized():
             # UNGATED per-rank marker: on the next 80B run all `mesh_fsdp` members must log this

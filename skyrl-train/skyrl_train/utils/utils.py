@@ -29,6 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_retention_config import parse_tra
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
+from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
@@ -583,11 +584,11 @@ def validate_cfg(cfg: DictConfig):
         )
     if cfg.trainer.progress.mode not in {"auto", "tqdm", "logging"}:
         raise ValueError(f"trainer.progress.mode must be one of auto, tqdm, logging; got {cfg.trainer.progress.mode!r}")
-    if cfg.generator.r3_transport not in {"by_value", "resident", "decentral"}:
+    if cfg.generator.r3_transport not in set(R3Transport):
         raise ValueError(
             f"generator.r3_transport must be one of by_value, resident, decentral; got {cfg.generator.r3_transport!r}"
         )
-    if cfg.generator.gdn_backend not in {"torch", "flashqla"}:
+    if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)

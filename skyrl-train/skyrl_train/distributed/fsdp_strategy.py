@@ -22,7 +22,7 @@ from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
-from skyrl_train.utils.constants import get_worker_nccl_timeout_s
+from skyrl_train.utils.constants import validate_worker_collective_timeout_seconds
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     DEFAULT_EP_COMM_BACKEND,
@@ -103,7 +103,7 @@ class FSDPStrategy(DistributedStrategy):
         self.seed = seed
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
-        self.collective_timeout_seconds = get_worker_nccl_timeout_s(collective_timeout_seconds)
+        self.collective_timeout_seconds = validate_worker_collective_timeout_seconds(collective_timeout_seconds)
         self.optimizer_name = (
             optimizer_config.get("optimizer", _DEFAULT_OPTIMIZER_NAME)
             if optimizer_config is not None

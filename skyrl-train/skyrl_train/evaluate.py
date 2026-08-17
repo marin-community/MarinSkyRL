@@ -137,7 +137,10 @@ async def _collect_evaluation_rollouts(
     if last_request is None or last_batch is None:
         raise ValueError("evaluation dataloader produced no batches")
     return _EvaluationRollouts(
-        batch=concatenate_trajectory_batches(trajectory_batches),
+        batch=concatenate_trajectory_batches(
+            trajectory_batches,
+            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
+        ),
         env_classes=accumulator.env_classes,
         env_extras=accumulator.env_extras,
         uids=accumulator.uids,

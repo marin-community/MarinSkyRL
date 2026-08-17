@@ -12,24 +12,20 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 import inspect
 from loguru import logger
+from marinskyrl.runtime_options import R3Transport
 
 
 class DispatchPutTimeoutError(RuntimeError):
-    """Raised by `_ray_put_bounded` when a dispatch-loop `ray.put()` does not return
-    within `SKYRL_DISPATCH_PUT_TIMEOUT_S` seconds.
+    """Raised when a dispatch-loop ``ray.put()`` exceeds its configured timeout.
 
     WHY THIS EXISTS (2026-07-10, 80B v4/v5 wedge): `MeshDispatch.dispatch` below is a
     plain synchronous Python `for` loop calling `ray.put()` inline once per dp-group
     (the R3-resident-set fix, ac4b3806/6cfee800). It is called *inline* (not via
     `asyncio.to_thread`) from `Worker.async_run_method` / `async_run_ray_method`
     (worker.py), so it runs directly on the trainer's own asyncio event-loop thread.
-    Unlike every other blocking primitive in this codebase (NCCL collectives all have
-    an explicit watchdog/heartbeat timeout: SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
-    TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC, VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS,
-    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, override_timeout_sec, ...), this `ray.put()`
-    call has NO bound at all: if it stalls (object-store capacity/eviction pressure,
+    If this call stalls because of object-store capacity, eviction pressure,
     a slow/unresponsive R2 spill target, or an object still pinned by a stuck
-    consumer task), the loop never reaches the next dp-group's `ray.put()`, so those
+    consumer task, the loop never reaches the next dp-group's `ray.put()`, so those
     dp-groups' actors are NEVER dispatched a `forward.remote()` call at all -- and
     the failure is invisible until some unrelated downstream watchdog (NCCL
     heartbeat, hours later) finally fires. See
@@ -46,8 +42,14 @@ class DispatchPutTimeoutError(RuntimeError):
     """
 
 
-def _ray_put_bounded(obj, timeout_s: float, what: str) -> ObjectRef:
-    """`ray.put(obj)`, bounded to `timeout_s` seconds.
+@dataclass(frozen=True)
+class DispatchSettings:
+    r3_transport: R3Transport
+    r3_dispatch_put_timeout_seconds: float
+
+
+def _ray_put_bounded(obj, timeout_seconds: float, what: str) -> ObjectRef:
+    """Run ``ray.put(obj)`` with a timeout.
 
     `ray.put()` has no native timeout param, so the put runs on a daemon helper
     thread and this function waits on it with `Thread.join(timeout=...)`. On timeout
@@ -57,10 +59,10 @@ def _ray_put_bounded(obj, timeout_s: float, what: str) -> ObjectRef:
     let the exception propagate and the process restart (the launcher's
     `--max-retries` already handles this).
 
-    `timeout_s <= 0` disables the bound entirely -> byte-identical to a bare
+    ``timeout_seconds <= 0`` disables the bound entirely, matching a bare
     `ray.put(obj)` call (including the exact same exception behavior on failure).
     """
-    if timeout_s <= 0:
+    if timeout_seconds <= 0:
         return ray.put(obj)
 
     result: Dict[str, Any] = {}
@@ -73,11 +75,11 @@ def _ray_put_bounded(obj, timeout_s: float, what: str) -> ObjectRef:
 
     t = threading.Thread(target=_do_put, name=f"skyrl-dispatch-put-{what}", daemon=True)
     t.start()
-    t.join(timeout=timeout_s)
+    t.join(timeout=timeout_seconds)
     if t.is_alive():
         raise DispatchPutTimeoutError(
-            f"ray.put() for {what} did not return within {timeout_s:.0f}s "
-            f"(SKYRL_DISPATCH_PUT_TIMEOUT_S). This is the dispatch-loop stall signature "
+            f"ray.put() for {what} did not return within {timeout_seconds:.0f}s. "
+            f"This is the dispatch-loop stall signature "
             f"documented in agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md: failing "
             f"loud+fast here instead of hanging silently (previously only surfaced hours "
             f"later via an unrelated NCCL watchdog, with dp-groups after this one never "
@@ -90,10 +92,10 @@ def _ray_put_bounded(obj, timeout_s: float, what: str) -> ObjectRef:
 
 
 # ---------------------------------------------------------------------------
-# Fix A -- R3 de-centralization (SKYRL_R3_DECENTRAL, default ON as of 2026-07-11)
+# R3 decentralization
 # ---------------------------------------------------------------------------
 #
-# WHY (2026-07-10, 80B head-plasma overflow). The `SKYRL_R3_RESIDENT` fix
+# WHY (2026-07-10, 80B head-plasma overflow). Resident R3 transport
 # (ac4b3806) deduped the per-actor R3 fan-out to one `ray.put` per dp-group, but
 # that `ray.put` runs ON THE DRIVER, so the multi-GB `rollout_routed_experts`
 # (R3) chunk still lands in the DRIVER (head-node) plasma and stays PINNED there
@@ -104,7 +106,7 @@ def _ray_put_bounded(obj, timeout_s: float, what: str) -> ObjectRef:
 # agent_logs/2026-07-09_80b_v5_98k_nccl_wedge_kill.md). Prior frameworks
 # (prime-rl / verl / slime) never centralize R3 in the head.
 #
-# WHAT this does. When SKYRL_R3_DECENTRAL=1, the per-dp-group chunk is
+# WHAT this does. With decentralized transport, the per-dp-group chunk is
 # materialized into the plasma of a CONSUMER (dp-group) NODE instead of the
 # driver: a tiny NodeAffinity-scheduled task runs on that node and RETURNS the
 # chunk unchanged. Ray stores a task's return value in the EXECUTING worker's
@@ -122,8 +124,8 @@ def _ray_put_bounded(obj, timeout_s: float, what: str) -> ObjectRef:
 # `ray.put(chunk)` it replaces (same `data.chunk` rows, same Ray serialization).
 # All upstream row / dp / CP / micro-batch alignment (#6335) lives in the collate
 # + chunk path and is inherited UNCHANGED -- exactly the property the
-# SKYRL_R3_RESIDENT fix relied on. Set SKYRL_R3_DECENTRAL=0 to force the old
-# driver-put behavior (strict A/B isolation); default is now ON (2026-07-11) so
+# resident transport fix relied on. Select resident transport to force the old
+# driver-put behavior (strict A/B isolation); decentral is the default so
 # the head-plasma DispatchPutTimeout footgun does not recur at scale.
 #
 # SCOPE (honest). This removes the PINNED driver residency (the wedge cause) but
@@ -151,12 +153,12 @@ def _relocate_chunk_to_node(chunk: TrainingInputBatch) -> TrainingInputBatch:
     return chunk
 
 
-def _resolve_actor_node_id(handle: ActorHandle, timeout_s: float) -> Optional[str]:
+def _resolve_actor_node_id(handle: ActorHandle, timeout_seconds: float) -> Optional[str]:
     """Best-effort resolve (and cache) the Ray node id an actor lives on.
 
     Returns None on any failure/timeout so the caller can fall back to the bounded
     driver put -- we NEVER want to lose the loud-fail (DispatchPutTimeoutError)
-    property or hang here. `timeout_s <= 0` waits unbounded (matches the disabled
+    property or hang here. ``timeout_seconds <= 0`` waits unbounded (matches the disabled
     dispatch-put bound).
     """
     try:
@@ -167,10 +169,10 @@ def _resolve_actor_node_id(handle: ActorHandle, timeout_s: float) -> Optional[st
         return _ACTOR_NODE_ID_CACHE[key]
     try:
         ref = handle.get_ray_node_id.remote()
-        node_id = ray.get(ref, timeout=(timeout_s if timeout_s > 0 else None))
+        node_id = ray.get(ref, timeout=(timeout_seconds if timeout_seconds > 0 else None))
     except Exception as e:  # noqa: BLE001 - actor lacks the method / call failed / timed out
         logger.warning(
-            f"SKYRL_R3_DECENTRAL: could not resolve node id for actor {key[:8]} "
+            f"Decentralized R3 transport could not resolve node id for actor {key[:8]} "
             f"({e!r}); falling back to the bounded driver ray.put for this dp-group."
         )
         return None
@@ -273,7 +275,14 @@ class Dispatch(ABC):
 
     @classmethod
     @abstractmethod
-    def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
+    def dispatch(
+        cls,
+        actor_infos: List[ActorInfo],
+        method: str,
+        *args,
+        settings: DispatchSettings,
+        **kwargs,
+    ) -> List[ObjectRef]:
         """Dispatches method calls to the actors with data sharing if necessary."""
         pass
 
@@ -335,8 +344,7 @@ class MeshDispatch(Dispatch):
         method: str,
         data: TrainingInputBatch,
         *,
-        r3_transport: str = "decentral",
-        dispatch_put_timeout_seconds: float = 600,
+        settings: DispatchSettings,
     ) -> List[ObjectRef]:
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = []
@@ -382,24 +390,27 @@ class MeshDispatch(Dispatch):
         # inherited unchanged (NO new slicing path; satisfies the #6335 guardrail).
         # ``r3_transport=by_value`` retains the per-actor dispatch path.
         # Only engage the resident-put when the batch actually carries the bulky R3
-        # tensor — so flag-off / 8B (no `rollout_routed_experts`) runs keep TODAY's
+        # tensor — so runs without `rollout_routed_experts` keep the
         # exact per-actor by-value dispatch. `data.chunk` replicates
         # the key set to every chunk, so probing chunk 0 answers for all chunks.
-        resident = r3_transport != "by_value" and len(data_chunks) > 0 and "rollout_routed_experts" in data_chunks[0]
+        resident = (
+            settings.r3_transport is not R3Transport.BY_VALUE
+            and len(data_chunks) > 0
+            and "rollout_routed_experts" in data_chunks[0]
+        )
         # Bound on each per-dp-group `ray.put()` below (see `_ray_put_bounded` /
         # `DispatchPutTimeoutError` docstrings for the full incident writeup). Default
         # 600s is generous relative to observed local put durations for a single
         # multi-GB dp-chunk (low single-digit seconds even under object-store
         # pressure) while still being well inside the existing NCCL/collective
-        # timeout budgets this codebase already uses (SKYRL_WORKER_NCCL_TIMEOUT_IN_S /
-        # TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC = 3600s) -- i.e. a stuck put fails loud
+        # collective timeout budgets this codebase already uses -- i.e. a stuck put fails loud
         # well before the watchdog would otherwise silently wait out the full hour.
         # <=0 disables the bound (byte-identical to today's bare `ray.put()`).
         # Under ``r3_transport=decentral``, materialize each dp-chunk on a consumer node instead of the
         # driver plasma. Only meaningful alongside `resident` (it is the R3
         # transport that overflows the head). See the module-level block above.
         # ``resident`` retains the centralized driver-put behavior for diagnostics.
-        decentral = resident and r3_transport == "decentral"
+        decentral = resident and settings.r3_transport is R3Transport.DECENTRAL
         chunk_refs: List[Optional[ObjectRef]] = [None] * len(data_chunks)
         for actor_info in actor_infos:
             # index into tensordict to get the correct data to send
@@ -412,7 +423,9 @@ class MeshDispatch(Dispatch):
                     nbytes = int(_r3.nbytes) if _r3 is not None else 0
                     dtype = _r3.dtype if _r3 is not None else None
                     node_id = (
-                        _resolve_actor_node_id(actor_info.handle, dispatch_put_timeout_seconds) if decentral else None
+                        _resolve_actor_node_id(actor_info.handle, settings.r3_dispatch_put_timeout_seconds)
+                        if decentral
+                        else None
                     )
                     if decentral and node_id is not None:
                         # Materialize the chunk's object-store copy on a CONSUMER
@@ -432,7 +445,9 @@ class MeshDispatch(Dispatch):
                         # Default / fallback: bounded driver-side ray.put (today's
                         # behavior; keeps the loud DispatchPutTimeoutError on stall).
                         chunk_refs[dp] = _ray_put_bounded(
-                            data_chunks[dp], dispatch_put_timeout_seconds, what=f"method={method} dp={dp}"
+                            data_chunks[dp],
+                            settings.r3_dispatch_put_timeout_seconds,
+                            what=f"method={method} dp={dp}",
                         )
                         # UNGATED per-dp-group marker so we can SEE the resident set
                         # install (target: one line per dp-group, on every step) and
@@ -475,10 +490,14 @@ class MeshDispatch(Dispatch):
     @classmethod
     def validate_dispatch_args(cls, *args, **kwargs) -> Tuple[Tuple, Dict[str, Any]]:
         sig = inspect.signature(cls.dispatch)
-        # pass dummy actor_infos and method_name
-        bound_args = sig.bind([], "dummy", *args, **kwargs)
+        # Dispatch settings are supplied by PPORayActorGroup after user arguments are validated.
+        validation_settings = DispatchSettings(
+            r3_transport=R3Transport.BY_VALUE,
+            r3_dispatch_put_timeout_seconds=0,
+        )
+        bound_args = sig.bind([], "dummy", *args, settings=validation_settings, **kwargs)
         bound_args.apply_defaults()
-        data = bound_args.arguments.get("data")
+        bound_args.arguments.pop("settings")
 
         # Check if there are any extra arguments
         if len(bound_args.arguments) > 3:  #  data, actor_infos, method_name
@@ -503,7 +522,14 @@ class PassThroughDispatch(Dispatch):
     """
 
     @classmethod
-    def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
+    def dispatch(
+        cls,
+        actor_infos: List[ActorInfo],
+        method: str,
+        *args,
+        settings: DispatchSettings,
+        **kwargs,
+    ) -> List[ObjectRef]:
         return [getattr(actor_info.handle, method).remote(*args, **kwargs) for actor_info in actor_infos]
 
     @classmethod

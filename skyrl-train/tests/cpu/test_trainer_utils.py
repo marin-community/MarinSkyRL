@@ -549,6 +549,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
         "train_batch_size": 2,  # Need 2 prompts
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
+        "tis_lcs_alert_threshold": 0.005,
     }
 
     collected_state = {"sample_batch_count": 1}
@@ -598,6 +599,7 @@ def test_handle_filter_sampling_accumulation():
         "train_batch_size": 2,  # Need 2 prompts
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
+        "tis_lcs_alert_threshold": 0.005,
     }
 
     collected_state = {"sample_batch_count": 1}

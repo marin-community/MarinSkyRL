@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from tqdm import tqdm as _std_tqdm
@@ -52,26 +53,35 @@ except Exception:  # pragma: no cover - defensive
     _loguru_logger = None
 
 
-_MODE = "auto"
-_MIN_INTERVAL = 0.5
-_HEARTBEAT = 15.0
-_PCT_STEP = 5.0
-_COUNT_STEP = 1000.0
+@dataclass(frozen=True)
+class _ProgressSettings:
+    mode: str
+    min_interval_seconds: float
+    heartbeat_seconds: float
+    percent_step: float
+    count_step: float
+
+
+_SETTINGS: _ProgressSettings | None = None
 
 
 def configure_progress(config) -> None:
     """Install process-local progress settings from ``trainer.progress``."""
-    global _MODE, _MIN_INTERVAL, _HEARTBEAT, _PCT_STEP, _COUNT_STEP
-    _MODE = str(config.mode)
-    _MIN_INTERVAL = float(config.min_interval_seconds)
-    _HEARTBEAT = float(config.heartbeat_seconds)
-    _PCT_STEP = float(config.percent_step)
-    _COUNT_STEP = float(config.count_step)
+    global _SETTINGS
+    _SETTINGS = _ProgressSettings(
+        mode=str(config.mode),
+        min_interval_seconds=float(config.min_interval_seconds),
+        heartbeat_seconds=float(config.heartbeat_seconds),
+        percent_step=float(config.percent_step),
+        count_step=float(config.count_step),
+    )
 
 
 def _use_real_tqdm() -> bool:
     """Return True iff we should delegate to the real tqdm (interactive TTY)."""
-    mode = _MODE
+    if _SETTINGS is None:
+        return True
+    mode = _SETTINGS.mode
     if mode == "tqdm":
         return True
     if mode == "logging":
@@ -135,14 +145,16 @@ class _LoggingProgress:
         self._last_emit_n = -1
         self._last_bucket: Optional[int] = None
         self._closed = False
+        assert _SETTINGS is not None, "configure_progress must run before logging progress is constructed"
+        self._settings = _SETTINGS
         # Initial line so operators immediately see the bar exists (and its total).
         self._maybe_emit(force=True)
 
     # --- bucketing ---------------------------------------------------------
     def _bucket(self) -> Optional[int]:
         if self.total and self.total > 0:
-            return int((self.n * 100.0 / self.total) // _PCT_STEP)
-        return int(self.n // _COUNT_STEP)
+            return int((self.n * 100.0 / self.total) // self._settings.percent_step)
+        return int(self.n // self._settings.count_step)
 
     def _should_emit(self, now: float, force: bool) -> bool:
         if self.disable:
@@ -151,16 +163,16 @@ class _LoggingProgress:
             return True
         if self._last_emit_t == 0.0:
             return True
-        if (now - self._last_emit_t) < _MIN_INTERVAL:
+        if (now - self._last_emit_t) < self._settings.min_interval_seconds:
             return False
         # Heartbeat is checked BEFORE the unchanged-counter early-return below: a
         # FROZEN counter must still emit periodically, otherwise a stalled bar goes
         # silent and becomes indistinguishable in the log from a healthy idle one.
         # That silence is exactly what hid the v0d generation-buffer wedge (stuck at
-        # 31/64 for ~4h with zero log lines). Emitting "31/64 [Xs]" every _HEARTBEAT
+        # 31/64 for ~4h with zero log lines). Emitting "31/64 [Xs]" every heartbeat
         # keeps a stall visible + greppable (same n, growing elapsed). Env-tunable via
         # trainer.progress.heartbeat_seconds.
-        if (now - self._last_emit_t) >= _HEARTBEAT:
+        if (now - self._last_emit_t) >= self._settings.heartbeat_seconds:
             return True
         if self.n == self._last_emit_n:
             return False

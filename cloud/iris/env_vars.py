@@ -289,9 +289,9 @@ _BOUNDARY_WRITERS = {
     **{name: (EnvVarSource.EXTERNAL, _RUNTIME_BOUNDARY_WRITERS) for name in _RUNTIME_BOUNDARIES},
 }
 ENV_VAR_SPECS = tuple(
-    replace(spec, source=source, writers=writers | {EnvVarWriter.MANAGER}) if spec.name in _BOUNDARY_WRITERS else spec
+    replace(spec, writers=writers | {EnvVarWriter.MANAGER}) if spec.name in _BOUNDARY_WRITERS else spec
     for spec in ENV_VAR_SPECS
-    for source, writers in [_BOUNDARY_WRITERS.get(spec.name, (spec.source, spec.writers))]
+    for _, writers in [_BOUNDARY_WRITERS.get(spec.name, (spec.source, spec.writers))]
 )
 _DECLARED_NAMES = {spec.name for spec in ENV_VAR_SPECS}
 ENV_VAR_SPECS += tuple(

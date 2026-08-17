@@ -110,6 +110,7 @@ from marinskyrl.resource_locator import (
     join_resource_path,
     model_source_for_path,
 )
+from marinskyrl.runtime_options import GDNBackend, R3Transport
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -140,6 +141,8 @@ MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
 DAYTONA_RL_SECRET_VERSION = "1"
+
+
 # The RL Daytona org enforces a 40-snapshot quota. Harbor mints one "harbor__*" env
 # snapshot per trial (auto_snapshot=true); once the org is over quota, snapshot creation
 # fails and harbor's fallthrough attempts a declarative sandbox build, which this org
@@ -610,8 +613,6 @@ def resolve_node_resource_requests(
 
 RL_PYTHON = "python"
 SKYRL_HOME = MARINSKYRL_TASK_ROOT
-DEFAULT_GDN_BACKEND = "torch"
-FLASHQLA_GDN_BACKEND = "flashqla"
 # Iris synchronizes the small controller bundle to /app. The setup phase checks
 # out the same immutable MarinSkyRL commit and installs its locked training
 # environment under /app/marinskyrl.
@@ -961,12 +962,12 @@ def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
 def _effective_gdn_backend(args: argparse.Namespace) -> str:
     """Resolve the GDN backend with the same precedence as the training command."""
     if args.gdn_flashqla is not None:
-        return FLASHQLA_GDN_BACKEND if args.gdn_flashqla == "on" else DEFAULT_GDN_BACKEND
+        return GDNBackend.FLASHQLA if args.gdn_flashqla == "on" else GDNBackend.TORCH
     override = hydra_override_value(getattr(args, "skyrl_override", None) or [], "generator.gdn_backend")
     if override is not None:
         return override.lower()
     raw_config = _load_rl_config_yaml(args.rl_config)
-    return str((raw_config.get("generator") or {}).get("gdn_backend", DEFAULT_GDN_BACKEND)).lower()
+    return str((raw_config.get("generator") or {}).get("gdn_backend", GDNBackend.TORCH)).lower()
 
 
 def _sanitize_job_name_component(value: str) -> str:
@@ -1700,7 +1701,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--r3-transport",
         "--r3_transport",
         dest="r3_transport",
-        choices=["by_value", "resident", "decentral"],
+        choices=list(R3Transport),
         default=None,
         help="R3 transport. Overrides generator.r3_transport.",
     )
@@ -1803,9 +1804,9 @@ def build_skyrl_flag_overrides(args: argparse.Namespace) -> list[str]:
         "trainer.algorithm.tis_splice": None if args.tis_splice is None else args.tis_splice == "on",
         "generator.gdn_backend": None
         if args.gdn_flashqla is None
-        else FLASHQLA_GDN_BACKEND
+        else GDNBackend.FLASHQLA
         if args.gdn_flashqla == "on"
-        else DEFAULT_GDN_BACKEND,
+        else GDNBackend.TORCH,
         "trainer.policy.fsdp_config.expert_loader_chunk_rows": args.ep_loader_chunk_rows,
         "trainer.collective_phase_diagnostics": None
         if args.collective_phase_diagnostics is None
@@ -1983,7 +1984,7 @@ def _build_task_shell(
     # teardown + done-marker on preemption) that a plain child would lose. `wait` is
     # interrupted by the trapped signal (rc>128); we re-`wait` to reap the child's
     # real exit code after its forwarded-TERM shutdown.
-    flashqla_enabled = _effective_gdn_backend(args) == FLASHQLA_GDN_BACKEND
+    flashqla_enabled = _effective_gdn_backend(args) == GDNBackend.FLASHQLA
     gdn_branch = (
         f'export TILELANG_CACHE_DIR="${{TILELANG_CACHE_DIR:-/root/.tilelang/cache}}"; '
         f"export TILELANG_CACHE_MODEL_PATH={shlex.quote(args.model_path)}; "

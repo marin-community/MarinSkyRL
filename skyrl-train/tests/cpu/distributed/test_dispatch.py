@@ -4,6 +4,7 @@ import threading
 
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.distributed.dispatch import (
+    DispatchSettings,
     WorkerGroupTaskError,
     MeshDispatch,
     PassThroughDispatch,
@@ -13,6 +14,7 @@ from skyrl_train.distributed.dispatch import (
     Dispatch,
     collect_actor_results,
 )
+from marinskyrl.runtime_options import R3Transport
 import ray
 import torch
 from typing import List, Optional, Union
@@ -21,6 +23,10 @@ import pytest
 
 
 pytestmark = pytest.mark.usefixtures("ray_module")
+
+
+def _dispatch_settings(transport: R3Transport = R3Transport.DECENTRAL) -> DispatchSettings:
+    return DispatchSettings(r3_transport=transport, r3_dispatch_put_timeout_seconds=600)
 
 
 @ray.remote
@@ -39,7 +45,7 @@ class RayActor:
 
     def get_ray_node_id(self):
         # Mirror skyrl_train.workers.worker.Worker.get_ray_node_id so the
-        # SKYRL_R3_DECENTRAL path can resolve this actor's node id.
+        # Decentralized R3 transport resolves the consumer actor's node id.
         return ray.get_runtime_context().get_node_id()
 
     def raise_oom(self):
@@ -73,13 +79,13 @@ class RayActorGroup:
         ]
 
     def mesh_dispatch_and_collect(self, data: TrainingInputBatch):
-        object_refs = MeshDispatch.dispatch(self.actor_infos, "do_work", data)
+        object_refs = MeshDispatch.dispatch(self.actor_infos, "do_work", data, settings=_dispatch_settings())
         ret = MeshDispatch.sync_collect(self.actor_infos, object_refs)
         return ret
 
     def pass_through_dispatch(self, a, b):
         # just pass values as is
-        object_refs = PassThroughDispatch.dispatch(self.actor_infos, "dummy", a, b)
+        object_refs = PassThroughDispatch.dispatch(self.actor_infos, "dummy", a, b, settings=_dispatch_settings())
         ret = PassThroughDispatch.sync_collect(self.actor_infos, object_refs)
         return ret
 
@@ -134,6 +140,7 @@ def test_mesh_dispatch_with_mixed():
         actor_group.actor_infos,
         "do_work",
         TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4])}),
+        settings=_dispatch_settings(),
     )
     object_refs[0] = ray.put(None)
     with pytest.raises(AssertionError):
@@ -162,7 +169,7 @@ def test_r3_decentral_byte_identical():
             group.actor_infos,
             "do_work",
             _r3_batch(),
-            r3_transport="decentral" if decentral else "resident",
+            settings=_dispatch_settings(R3Transport.DECENTRAL if decentral else R3Transport.RESIDENT),
         )
         return MeshDispatch.sync_collect(group.actor_infos, object_refs)
 
@@ -180,7 +187,9 @@ def test_r3_decentral_byte_identical():
 def test_r3_resident_transport_preserves_values():
     """Resident transport keeps the existing driver-put behavior."""
     group = RayActorGroup(8)
-    refs = MeshDispatch.dispatch(group.actor_infos, "do_work", _r3_batch(), r3_transport="resident")
+    refs = MeshDispatch.dispatch(
+        group.actor_infos, "do_work", _r3_batch(), settings=_dispatch_settings(R3Transport.RESIDENT)
+    )
     out = MeshDispatch.sync_collect(group.actor_infos, refs)
     assert torch.equal(out["a"], torch.tensor([1, 3, 5, 7]))
     # R3 passes through unchanged.
@@ -193,7 +202,14 @@ def test_dispatch_registry():
 
         class CustomDispatch(Dispatch):
             @classmethod
-            def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
+            def dispatch(
+                cls,
+                actor_infos: List[ActorInfo],
+                method: str,
+                *args,
+                settings: DispatchSettings,
+                **kwargs,
+            ) -> List[ObjectRef]:
                 pass
 
             @classmethod

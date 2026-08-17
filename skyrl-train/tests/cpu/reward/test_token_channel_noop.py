@@ -78,7 +78,7 @@ def test_concatenate_flag_off_keys_absent():
         "rollout_logprobs": None,
         "rollout_metrics": {},
     }
-    merged = concatenate_trajectory_batches([out, out])
+    merged = concatenate_trajectory_batches([out, out], tis_lcs_alert_threshold=0.005)
     assert "token_level_shaping" not in merged
     assert "response_span_tags" not in merged
     assert "rollout_routed_experts" not in merged
@@ -108,6 +108,6 @@ def test_concatenate_flag_on_sentinel_fill():
         "rollout_logprobs": None,
         "rollout_metrics": {},
     }
-    merged = concatenate_trajectory_batches([out_with, out_without])
+    merged = concatenate_trajectory_batches([out_with, out_without], tis_lcs_alert_threshold=0.005)
     assert merged["token_level_shaping"] == [[0.0, 0.0, 0.0], [0.0, 0.0]]
     assert merged["response_span_tags"] == [[1, 2, 2], [0, 0]]

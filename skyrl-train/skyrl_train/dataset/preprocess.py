@@ -39,21 +39,13 @@ def _collate_routed_experts_from_arrays(
     max_output_len: int,
     num_experts: Optional[int],
 ) -> "torch.Tensor":
-    """Build the
-    ``[B, resp_len, L, K]`` int16 routed-experts transport tensor from per-sample
-    ``np.int16`` arrays by array stack + sentinel-0 right-pad, BYTE-IDENTICALLY to
-    the nested-list ``torch.tensor(padded_re, dtype=long).to(int16)`` branch, but
-    without the GIL-held Python-object element walk.
+    """Build a dense ``[B, response, layer, top_k]`` routed-expert tensor.
 
-    Each ``sample_re`` is a per-sample ``[resp_len_i, L, K]`` int16 array (or a list
-    of per-token ``[L, K]`` int16 arrays that ``np.asarray`` stacks to the same).
-    Mirrors the nested-list branch exactly: ``L, K`` = the WIDEST real row across all
-    samples; each sample is right-padded on the response axis to ``max_output_len``
-    with sentinel-0 rows (or truncated); the deterministic dtype narrow
-    (``_routed_experts_dtype_for_num_experts``) is applied unchanged.
+    Inputs may use NumPy arrays or nested sequences. Ragged sentinel rows are
+    normalized to the widest layer/top-k shape, and response rows are right-padded
+    with zeroes before the configured expert-count dtype is applied.
     """
-    # Normalize every sample to a 3-D [n, l, k] int16 array and learn the widest
-    # [L, K] (matches the nested-list "scan ALL samples for the WIDEST real row").
+    # Normalize each token row and learn the widest layer/top-k shape.
     L, K = 1, 1
     sample_arrs: List[List["np.ndarray"]] = []
     for sample_re in routed_experts:
@@ -72,8 +64,7 @@ def _collate_routed_experts_from_arrays(
         sample_arrs.append(rows)
 
     B = len(sample_arrs)
-    # Preallocated sentinel-0 canvas == the nested-list branch's per-sample
-    # sentinel_row right-pad. Slice-assign each sample's real rows in.
+    # Preallocate the sentinel-zero canvas and slice-assign each real row.
     out = np.zeros((B, max_output_len, L, K), dtype=np.int16)
     for b, rows in enumerate(sample_arrs):
         for token_index, arr in enumerate(rows[:max_output_len]):
@@ -83,8 +74,7 @@ def _collate_routed_experts_from_arrays(
 
     _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
     if _re_dtype is None:
-        # Same NON-DETERMINISTIC per-batch-max fallback as the nested-list branch
-        # (num_experts unknown / non-MoE); values are identical so the pick matches.
+        # num_experts is unknown/non-MoE, so fall back to a per-batch maximum.
         _max_expert_id = int(out.max()) if out.size else 0
         if _max_expert_id <= torch.iinfo(torch.uint8).max:
             _re_dtype = torch.uint8

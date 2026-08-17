@@ -513,7 +513,8 @@ def handle_filter_sampling(
         )
     else:
         collected_state["collected_trajectory_batch"] = concatenate_trajectory_batches(
-            [collected_state["collected_trajectory_batch"], filtered_output]
+            [collected_state["collected_trajectory_batch"], filtered_output],
+            tis_lcs_alert_threshold=float(sampling_config["tis_lcs_alert_threshold"]),
         )
         collected_state["collected_uids"].extend(filtered_uids)
         collected_state["num_prompts_in_batch"] += len(kept_uids)

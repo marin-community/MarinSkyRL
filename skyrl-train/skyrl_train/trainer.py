@@ -1846,6 +1846,7 @@ class RayPPOTrainer:
             "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
+            "tis_lcs_alert_threshold": self.cfg.trainer.algorithm.tis_lcs_alert_threshold,
         }
 
         if self.dynamic_sampling_state is None:

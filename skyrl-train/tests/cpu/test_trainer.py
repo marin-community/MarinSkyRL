@@ -39,6 +39,15 @@ from tests.cpu.util import example_dummy_config
 from tests.grug_training_parity import ORACLE_FIXTURE_DIR
 
 
+_TEST_PROGRESS_CONFIG = {
+    "mode": "tqdm",
+    "min_interval_seconds": 0.5,
+    "heartbeat_seconds": 15,
+    "percent_step": 5,
+    "count_step": 1000,
+}
+
+
 @pytest.fixture
 def dummy_config():
     return example_dummy_config()
@@ -623,6 +632,7 @@ def test_normalize_mini_batch_size():
         cfg = OmegaConf.create(
             {
                 "trainer": {
+                    "progress": _TEST_PROGRESS_CONFIG,
                     "train_batch_size": train_batch_size,
                     "policy_mini_batch_size": policy_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -659,6 +669,7 @@ def test_normalize_mini_batch_size():
         cfg = OmegaConf.create(
             {
                 "trainer": {
+                    "progress": _TEST_PROGRESS_CONFIG,
                     "train_batch_size": train_batch_size,
                     "critic_mini_batch_size": critic_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -928,6 +939,7 @@ def test_ppo_train_batch_calculations():
     cfg = OmegaConf.create(
         {
             "trainer": {
+                "progress": _TEST_PROGRESS_CONFIG,
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
                 "policy": {
@@ -1104,6 +1116,7 @@ def test_grug_ppo_train_does_not_retain_consumed_microbatches():
     cfg = OmegaConf.create(
         {
             "trainer": {
+                "progress": _TEST_PROGRESS_CONFIG,
                 "micro_train_batch_size_per_gpu": 1,
                 "update_epochs_per_batch": 1,
                 "policy": {

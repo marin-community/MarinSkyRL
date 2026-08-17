@@ -323,11 +323,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         terminal_bench_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        tis_lcs_alert_threshold: float,
         moe_router_replay: bool = False,
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
         tis_splice: bool = True,
-        tis_lcs_alert_threshold: float = 0.005,
     ):
         """
         Args:

@@ -248,7 +248,7 @@ def test_concatenation_recomputes_shaping_metrics_from_retained_components():
     shape_trajectory_rewards(short, config)
     shape_trajectory_rewards(long, config)
 
-    concatenated = concatenate_trajectory_batches([short, long])
+    concatenated = concatenate_trajectory_batches([short, long], tis_lcs_alert_threshold=0.005)
 
     assert concatenated["rewards"] == pytest.approx([1.0, 0.7])
     assert concatenated["rollout_metrics"]["generate/reward_shaping/shaped_reward_mean"] == pytest.approx(0.85)
