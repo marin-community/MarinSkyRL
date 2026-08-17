@@ -17,11 +17,11 @@ ARTIFACT_ROOT=${ARTIFACT_ROOT:?set ARTIFACT_ROOT to a bounded shared output dire
 . "$CHECKOUT/.agents/ops/jupiter/production-runtime.env"
 
 mkdir -p "$ARTIFACT_ROOT"
-POLICY_PYTHONPATH="$CHECKOUT/skyrl-train:$POLICY_PYDEPS"
+POLICY_PYTHONPATH="$CHECKOUT:$CHECKOUT/skyrl-train:$POLICY_PYDEPS"
 NODE_PREFIX="apptainer exec --nv --pwd / --overlay $POLICY_OVERLAY:ro --env PYTHONPATH=$POLICY_PYTHONPATH $POLICY_SIF"
 
 cd "$CHECKOUT/skyrl-train"
-PYTHONPATH="$CHECKOUT/skyrl-train" "$HOST_PYTHON" -m pytest -s \
+PYTHONPATH="$CHECKOUT:$CHECKOUT/skyrl-train" "$HOST_PYTHON" -m pytest -s \
   tests/gpu/fault_injection/multi_node_moe_dispatch_contract.py \
   --confcutdir=tests/gpu/fault_injection \
   --node-agent-command-prefix="$NODE_PREFIX" \
