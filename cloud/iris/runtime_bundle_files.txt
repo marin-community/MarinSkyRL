@@ -20,6 +20,7 @@ marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py
 marinskyrl/hf_model.py
 marinskyrl/resource_locator.py
+marinskyrl/runtime_options.py
 chat_templates/delphi_v0.jinja2
 chat_templates/delphi_v1.jinja2
 chat_templates/qwen3_thinking_acc.jinja2
