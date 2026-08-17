@@ -16,8 +16,7 @@ CHECKOUT=${CHECKOUT:?set CHECKOUT to the staged MarinSkyRL checkout}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:?set ARTIFACT_ROOT to a bounded shared output directory}
 CHECKOUT_REVISION=${CHECKOUT_REVISION:?set CHECKOUT_REVISION before entering the compute node}
 module load GCC/14.3.0 nvidia-compilers/25.9-CUDA-13
-POLICY_SIF=${POLICY_SIF:?set POLICY_SIF to the validated Megatron runtime}
-POLICY_OVERLAY=${POLICY_OVERLAY:?set POLICY_OVERLAY to the validated runtime overlay}
+FROZEN_PYTHON=${FROZEN_PYTHON:?set FROZEN_PYTHON to the frozen Megatron environment}
 POLICY_PYDEPS=${POLICY_PYDEPS:?set POLICY_PYDEPS to its TorchTitan dependency path}
 
 mkdir -p "$ARTIFACT_ROOT"
@@ -30,16 +29,11 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export GLOO_USE_IPV6=0
 export NCCL_SOCKET_FAMILY=AF_INET
 export MASTER_ADDR=127.0.0.1
+export PATH="$(dirname "$FROZEN_PYTHON"):$PATH"
 cd "$CHECKOUT/skyrl-train"
 
 run_in_policy_runtime() {
-  apptainer exec --nv --pwd "$CHECKOUT/skyrl-train" --overlay "$POLICY_OVERLAY:ro" \
-    --env "PYTHONPATH=$PYTHONPATH" \
-    --env "SKYRL_NUMERICS_ARTIFACT_DIR=$SKYRL_NUMERICS_ARTIFACT_DIR" \
-    --env "TRITON_CACHE_DIR=$TRITON_CACHE_DIR" \
-    --env "TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR" \
-    --env "CUDA_DEVICE_MAX_CONNECTIONS=$CUDA_DEVICE_MAX_CONNECTIONS" \
-    "$POLICY_SIF" "$@"
+  "$@"
 }
 
 {
