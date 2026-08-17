@@ -14,9 +14,12 @@ T1 runs the same serialized toy-MoE batch through an fp32 oracle, the production
 EP=4, and Megatron Core's production gradient-norm helper. Its per-tensor output includes raw-gradient cosine,
 norm ratio, a fitted scale and scale-removed residual, and the cosine and norm ratio of a simulated first Adam
 step. T2 checks eager, compiled, chunked, inference-only, TP=1, and TP=2 log-probability variants against an
-fp64 `log_softmax` oracle. T3 reports per-tensor gradient cosines and norm ratios for isolated MoE and attention
-comparisons.
+fp64 `log_softmax` oracle. T3 reports per-tensor gradient cosines and norm ratios for the SkyRL for-loop and
+grouped-MM experts, Megatron Core's Transformer Engine grouped experts, Hugging Face FlashAttention2, and
+Transformer Engine attention.
 
-The checked-in Jupiter batch file is a Jupiter-only SIF test. It uses the validated Torch 2.9 Megatron runtime
-with the TorchTitan overlay dependencies, and records the checkout revision, GPU topology, imported package
-versions, commands, and test output alongside the numerical artifacts.
+The checked-in Jupiter batch file combines the validated Jupiter GPU container with a frozen Megatron Python
+environment resolved from this checkout's `uv.lock`. The container supplies the cluster CUDA runtime; the
+frozen environment supplies the exact Torch, Megatron Core, and Transformer Engine closure under test. The job
+records the checkout revision, GPU topology, imported package versions, commands, and test output alongside the
+numerical artifacts.
