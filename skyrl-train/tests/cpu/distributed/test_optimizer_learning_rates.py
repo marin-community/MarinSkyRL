@@ -5,10 +5,7 @@ from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_
 
 
 def _optimizer_with_learning_rates(*learning_rates: float) -> torch.optim.Optimizer:
-    groups = [
-        {"params": [torch.nn.Parameter(torch.zeros(1))], "lr": learning_rate}
-        for learning_rate in learning_rates
-    ]
+    groups = [{"params": [torch.nn.Parameter(torch.zeros(1))], "lr": learning_rate} for learning_rate in learning_rates]
     return torch.optim.SGD(groups, lr=learning_rates[0])
 
 
