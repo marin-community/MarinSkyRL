@@ -72,6 +72,11 @@ def test_aime_aggregates_evaluation_budget_diagnostics_by_outcome():
     assert metrics["answered_within_evaluation_budget_fraction"] == pytest.approx(0.25)
 
 
+def test_aime_aggregation_rejects_missing_budget_diagnostics():
+    with pytest.raises(KeyError):
+        AIMEEnv.aggregate_metrics([{"acc": True}])
+
+
 def test_aime_verifier_marks_missing_answer_unparseable():
     env = skyrl_gym.make(
         "aime",

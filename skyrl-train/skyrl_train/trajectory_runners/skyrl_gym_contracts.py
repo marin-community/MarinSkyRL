@@ -43,6 +43,14 @@ def reward_from_env_step(
     )
 
 
+def environment_metrics_from_step(
+    step_output: BaseTextEnvStepOutput,
+    episode_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine terminal environment metrics with the current step diagnostics."""
+    return {**episode_metrics, **step_output["metadata"]}
+
+
 def publish_rollout_evidence(
     env: BaseTextEnv,
     *,

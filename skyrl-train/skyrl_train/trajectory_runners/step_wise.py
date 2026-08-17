@@ -15,6 +15,7 @@ from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
+    environment_metrics_from_step,
     publish_rollout_evidence,
     reward_from_env_step,
     verification_from_env_step,
@@ -245,7 +246,7 @@ class StepWiseRolloutCollector:
                 reward=reward_from_env_step(env_step_output, verification),
                 disposition=TrainingDisposition.train(),
                 loss_mask=copy.deepcopy(loss_mask),
-                env_metrics=env.get_metrics() if done else {},
+                env_metrics=environment_metrics_from_step(env_step_output, env.get_metrics() if done else {}),
                 token_provenance=engine_output["token_provenance"],
             )
 

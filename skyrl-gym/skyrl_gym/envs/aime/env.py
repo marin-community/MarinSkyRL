@@ -68,10 +68,10 @@ class AIMEEnv(BaseTextEnv):
     @staticmethod
     def aggregate_metrics(metrics: list[Dict[str, Any]]) -> Dict[str, float]:
         def fraction(rows: list[Dict[str, Any]], key: str) -> float:
-            return sum(bool(row.get(key)) for row in rows) / len(rows) if rows else 0.0
+            return sum(bool(row[key]) for row in rows) / len(rows) if rows else 0.0
 
-        correct = [row for row in metrics if bool(row.get("acc"))]
-        incorrect = [row for row in metrics if not bool(row.get("acc"))]
+        correct = [row for row in metrics if bool(row["acc"])]
+        incorrect = [row for row in metrics if not bool(row["acc"])]
         aggregated = default_aggregate_metrics(metrics)
         aggregated.update(
             {

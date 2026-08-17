@@ -24,6 +24,7 @@ from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
+    environment_metrics_from_step,
     fold_verification_results,
     publish_rollout_evidence,
     reward_from_env_step,
@@ -432,7 +433,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 per_step_rewards.append((step_reward, response_end_idx))
 
         # Get environment-specific metrics after the episode is done
-        env_metrics = env.get_metrics()
+        env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         # Close the environment
         await self._run_in_executor_if_available(env.close)
 
@@ -614,7 +615,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             exclude_from_baseline.append(not disposition.baseline_eligible)
 
             # Get environment-specific metrics
-            env_metrics.append(env.get_metrics())
+            env_metrics.append(environment_metrics_from_step(env_step_output, env.get_metrics()))
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 

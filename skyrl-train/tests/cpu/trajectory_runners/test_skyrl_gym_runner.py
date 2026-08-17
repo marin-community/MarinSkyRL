@@ -6,6 +6,7 @@ import pytest
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
+from omegaconf import DictConfig
 
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
@@ -586,6 +587,39 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert trajectory_batch["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [True, False])
+async def test_generate_aggregates_aime_step_metadata(mock_tokenizer, mock_llm, generator_cfg, batched):
+    generator_cfg.batched = batched
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["Answer: \\boxed{42}"],
+            "stop_reasons": ["stop"],
+            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()],
+        }
+    )
+    trajectory_runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=DictConfig({"max_env_workers": 0, "aime": {"evaluation_token_budget": 8}}),
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    trajectory_batch = await trajectory_runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "Solve the problem"}]],
+            "env_extras": [{"reward_model": {"ground_truth": "42"}}],
+            "env_classes": ["aime"],
+        }
+    )
+
+    assert trajectory_batch["unshaped_rewards"] == [1.0]
+    assert trajectory_batch["rollout_metrics"]["environment/acc"] == pytest.approx(1.0)
+    assert trajectory_batch["rollout_metrics"][
+        "environment/answered_within_evaluation_budget_fraction"
+    ] == pytest.approx(1.0)
 
 
 def test_trajectory_batch_concatenation():
