@@ -22,8 +22,6 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
-from skyrl_train.utils.progress import configure_progress
-
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -489,6 +487,7 @@ class BasePPOExp:
 
     def run(self):
         from skyrl_train.telemetry import TRAINER_ROLE, process_telemetry
+        from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
 
         configure_progress(self.cfg.trainer.progress)
 
@@ -562,6 +561,7 @@ def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_messa
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
+    from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
     validate_cfg(cfg)
