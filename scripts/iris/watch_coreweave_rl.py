@@ -807,8 +807,8 @@ def iris_trials_uri(job: IrisRlJob) -> str:
     submitted_uri = trials_uri_from_entrypoint(job.entrypoint)
     if submitted_uri is not None:
         return submitted_uri
-    # This is exactly the launcher's --trials-dir auto convention.  Keep the
-    # fallback local and visible rather than reading a possibly different YAML.
+    # Older jobs may omit the submitted value. Preserve their historical path
+    # without applying it to jobs that record the lifecycle-managed URI.
     return f"s3://marin-us-east-02a/iris/{job.short_name}/trace_jobs"
 
 
