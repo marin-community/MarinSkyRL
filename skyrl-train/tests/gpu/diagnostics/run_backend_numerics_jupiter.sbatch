@@ -15,21 +15,21 @@ set -euo pipefail
 CHECKOUT=${CHECKOUT:?set CHECKOUT to the staged MarinSkyRL checkout}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:?set ARTIFACT_ROOT to a bounded shared output directory}
 CHECKOUT_REVISION=${CHECKOUT_REVISION:?set CHECKOUT_REVISION before entering the compute node}
-module load GCC/14.3.0 nvidia-compilers/25.9-CUDA-13
 FROZEN_PYTHON=${FROZEN_PYTHON:?set FROZEN_PYTHON to the frozen Megatron environment}
-POLICY_SIF=${POLICY_SIF:?set POLICY_SIF to the validated GPU runtime}
-POLICY_PYDEPS=${POLICY_PYDEPS:?set POLICY_PYDEPS to its TorchTitan dependency path}
 
 mkdir -p "$ARTIFACT_ROOT"
 export SKYRL_NUMERICS_ARTIFACT_DIR="$ARTIFACT_ROOT/artifacts"
 export TRITON_CACHE_DIR="$ARTIFACT_ROOT/triton-cache"
 export TORCHINDUCTOR_CACHE_DIR="$ARTIFACT_ROOT/torchinductor-cache"
 mkdir -p "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
-export PYTHONPATH="$CHECKOUT:$CHECKOUT/skyrl-train:$POLICY_PYDEPS"
+export PYTHONPATH="$CHECKOUT:$CHECKOUT/skyrl-train"
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export GLOO_USE_IPV6=0
 export NCCL_SOCKET_FAMILY=AF_INET
 export MASTER_ADDR=127.0.0.1
+FROZEN_CUDA_ACTIVATION="$ARTIFACT_ROOT/frozen-cuda-runtime.env"
+"$FROZEN_PYTHON" -m cloud.iris.env_vars write-frozen-cuda-runtime "$FROZEN_CUDA_ACTIVATION"
+. "$FROZEN_CUDA_ACTIVATION"
 cd "$CHECKOUT/skyrl-train"
 
 run_in_policy_runtime() {
@@ -38,13 +38,7 @@ run_in_policy_runtime() {
     return 2
   fi
   shift
-  apptainer exec --nv --pwd "$CHECKOUT/skyrl-train" \
-    --env "PYTHONPATH=$PYTHONPATH" \
-    --env "SKYRL_NUMERICS_ARTIFACT_DIR=$SKYRL_NUMERICS_ARTIFACT_DIR" \
-    --env "TRITON_CACHE_DIR=$TRITON_CACHE_DIR" \
-    --env "TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR" \
-    --env "CUDA_DEVICE_MAX_CONNECTIONS=$CUDA_DEVICE_MAX_CONNECTIONS" \
-    "$POLICY_SIF" "$FROZEN_PYTHON" "$@"
+  "$FROZEN_PYTHON" "$@"
 }
 
 {
