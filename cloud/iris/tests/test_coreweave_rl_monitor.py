@@ -837,6 +837,74 @@ def _remote_trace_objects():
     return root, first, objects
 
 
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        json.dumps(
+            {
+                "command": [
+                    "python",
+                    "cloud.iris.training_driver",
+                    "++terminal_bench_config.trials_dir='s3://bucket/tmp/ttl=14d/run/trace_jobs'",
+                ]
+            }
+        ),
+        json.dumps(
+            {
+                "command": [
+                    "python",
+                    "cloud.iris.training_driver",
+                    "--trials-dir",
+                    "s3://bucket/tmp/ttl=14d/run/trace_jobs",
+                ]
+            }
+        ),
+    ],
+)
+def test_iris_trials_uri_uses_submitted_trials_directory(entrypoint):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    job = watch_coreweave_rl.IrisRlJob(cluster, "/user/run", "running", 0, entrypoint)
+
+    assert job.trials_uri == "s3://bucket/tmp/ttl=14d/run/trace_jobs"
+
+
+def test_trace_inventory_and_manifest_use_submitted_trials_directory(monkeypatch, tmp_path):
+    trials_uri = "s3://bucket/tmp/ttl=14d/run/trace_jobs"
+    entrypoint = json.dumps(
+        {
+            "command": [
+                "python",
+                "cloud.iris.training_driver",
+                f"++terminal_bench_config.trials_dir='{trials_uri}'",
+            ]
+        }
+    )
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    job = watch_coreweave_rl.IrisRlJob(cluster, "/user/run", "running", 0, entrypoint)
+    observed_prefixes = []
+    modified = datetime(2026, 8, 17, 8, tzinfo=UTC)
+
+    monkeypatch.setattr(watch_coreweave_rl, "kubectl_base", lambda *_args: [])
+    monkeypatch.setattr(watch_coreweave_rl, "object_store_client", lambda *_args: object())
+
+    def listed_objects(_client, bucket, prefix):
+        observed_prefixes.append((bucket, prefix))
+        return [{"Key": f"{prefix}trial-1/result.json", "Size": 1, "LastModified": modified}]
+
+    monkeypatch.setattr(watch_coreweave_rl, "iter_objects", listed_objects)
+
+    inventory = watch_coreweave_rl.collect_trace_inventory(job)
+    directory = job_bundle(tmp_path, cluster.name, job.job_id).directory
+    directory.mkdir(parents=True)
+    artifacts = watch_coreweave_rl.ArtifactResult("synced", "synced", "synced", "synced", 1, 1, ())
+    watch_coreweave_rl.write_job_manifest(job, tmp_path, directory, artifacts, 0, 500)
+    manifest = load_bundle_manifest(job_bundle(tmp_path, cluster.name, job.job_id))
+
+    assert observed_prefixes == [("bucket", "tmp/ttl=14d/run/trace_jobs/")]
+    assert inventory.available == 1
+    assert manifest["trials_uri"] == trials_uri
+
+
 def test_recent_trace_jobs_uses_remote_last_modified_and_preserves_remote_counts():
     root, _first, objects = _remote_trace_objects()
 

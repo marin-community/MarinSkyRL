@@ -127,9 +127,10 @@ AWAITING_PLACEMENT = "awaiting placement"
 PRE_RUNNING_STATES = frozenset({"pending", "building"})
 RL_ENTRYPOINT_MARKERS = ("task_runtime.py", "cloud.iris.training_driver")
 TRIALS_URI_PATTERN = re.compile(
-    r"(?:terminal_bench_config\.trials_dir=|--trials-dir(?:=|\s+))"
+    r"(?:terminal_bench_config\.trials_dir=|--trials[_-]dir(?:=|\s+))['\"]?"
     r"(?P<uri>s3://[^\s'\"\\]+)"
 )
+TRIALS_DIR_OPTIONS = frozenset({"--trials-dir", "--trials_dir"})
 TRAIN_DATA_PATTERN = re.compile(
     r"--train[_-]data(?:=|\s+)(?:'(?P<single>\[[^']+\])'|\"(?P<double>\[[^\"]+\])\"|(?P<bare>\[[^\s]+\]))"
 )
@@ -788,10 +789,24 @@ def sync_pod_and_ray_logs(
     return f"{len(pods)} pod(s), {len(running_pods)} Running", f"{ray_files:,} files", errors
 
 
+def trials_uri_from_entrypoint(entrypoint: str) -> str | None:
+    """Return the object-store trials directory submitted to Iris."""
+    arguments = command_strings(entrypoint)
+    for index, argument in enumerate(arguments):
+        match = TRIALS_URI_PATTERN.search(argument)
+        if match:
+            return match.group("uri").rstrip("/")
+        if argument in TRIALS_DIR_OPTIONS and index + 1 < len(arguments):
+            candidate = arguments[index + 1].strip("'\"").rstrip("/")
+            if candidate.startswith("s3://"):
+                return candidate
+    return None
+
+
 def iris_trials_uri(job: IrisRlJob) -> str:
-    match = TRIALS_URI_PATTERN.search(job.entrypoint)
-    if match:
-        return match.group("uri").rstrip("/")
+    submitted_uri = trials_uri_from_entrypoint(job.entrypoint)
+    if submitted_uri is not None:
+        return submitted_uri
     # This is exactly the launcher's --trials-dir auto convention.  Keep the
     # fallback local and visible rather than reading a possibly different YAML.
     return f"s3://marin-us-east-02a/iris/{job.short_name}/trace_jobs"
