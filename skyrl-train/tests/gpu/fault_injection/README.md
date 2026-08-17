@@ -147,6 +147,33 @@ is not the runtime under test. See
 `.agents/ops/jupiter/` for the current Jupiter policy-runtime command and GPFS-safe launch procedure.
 The `--confcutdir` boundary also prevents unrelated GPU fixtures from becoming host-controller dependencies.
 
+## Four-node MoE dispatch stages
+
+`multi_node_moe_dispatch_contract.py` runs a tiny grouped-MoE model through the production TorchTitan EP and
+FSDP2 wrappers on the Jupiter EP4/FSDP4 geometry. Eight forward/backward microbatches use different sequence
+lengths across FSDP replicas while preserving the replicated input within each EP group. The test records these
+ordered stages for every layer and rank:
+
+1. MoE entry and routing completion;
+2. count-vector all-to-all before and after enqueue;
+3. split construction;
+4. routed-token all-to-all before and after enqueue;
+5. routed-token CUDA completion and MoE exit.
+
+The controller requires matching EP sequence counters at every stage and writes normalized JSONL plus a summary
+to `--debug-artifact-root`. A missing stage identifies whether a rank stopped before token-dispatch enqueue,
+after enqueue but before CUDA completion, or after dispatch. Run the Jupiter-only SIF test with:
+
+```bash
+CHECKOUT=/e/scratch/jureap59/feuer1/codex/<clean-worktree>
+ARTIFACT_ROOT=/e/scratch/jureap59/feuer1/codex/results/<run>
+sbatch --export=ALL,CHECKOUT="$CHECKOUT",ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+  tests/gpu/fault_injection/run_moe_dispatch_jupiter.sbatch
+```
+
+The test owns and reaps its Slurm step under separate setup and execution deadlines. Run it only in an otherwise
+idle allocation containing exactly four four-GPU nodes.
+
 ## Distributed debug artifact contract
 
 `distributed_debug_artifact_contract.py` is the smaller two-node acceptance gate for the managed debug preset.
