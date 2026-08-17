@@ -171,6 +171,23 @@ def test_routes_and_three_step_jax_oracle():
             torch.testing.assert_close(expert_norm, initial_expert_norm, rtol=2e-5, atol=2e-6)
 
 
+def test_muonh_routes_default_to_master_learning_rate():
+    with np.load(FIXTURE, allow_pickle=False) as fixture:
+        model = _TinyGrug(fixture)
+        master_learning_rate = 1e-5
+        optimizer = build_grug_muonh(
+            model.named_parameters(),
+            _Config(
+                lr=master_learning_rate,
+                weight_decay=0.0,
+                adam_betas=(0.9, 0.95),
+                optimizer_kwargs={},
+            ),
+        )
+
+    assert {group["lr"] for group in optimizer.param_groups} == {master_learning_rate}
+
+
 def test_fsdp_parameter_storage_dtype_defaults_and_overrides_optimizer():
     cfg = get_default_config()
     policy = cfg.trainer.policy.optimizer_config

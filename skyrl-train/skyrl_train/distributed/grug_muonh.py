@@ -10,9 +10,9 @@ This is the PyTorch form of Marin's ``grug_moe_muonh_v1`` recipe:
 * ``torch.optim.Adam`` for embeddings, routers, attention gates, biases,
   vectors, and one-dimensional norm weights.
 
-MuonH and AdamH share one learning-rate track. Plain Adam has its own track.
-Every group has zero weight decay, independent of the surrounding trainer
-configuration.
+Every route inherits the master learning rate by default. Plain Adam can use an
+explicit ``adam_lr`` override. Every group has zero weight decay, independent of
+the surrounding trainer configuration.
 
 The Newton--Schulz routine and its quintic coefficients are adapted from
 NVIDIA NeMo Emerging-Optimizers (Apache-2.0), pinned at commit
@@ -44,7 +44,6 @@ _QUINTIC_COEFFICIENTS = (
     (2.8366, -3.0525, 1.2012),
 )
 _HYPERBALL_EPS = 1e-10
-_DEFAULT_ADAM_LR = 6e-4
 _DEFAULT_BETAS = (0.9, 0.95)
 _DEFAULT_EPS = 1e-8
 _DEFAULT_MOMENTUM = 0.95
@@ -351,7 +350,7 @@ class GrugMuonH(_CompositeOptimizer):
         adam_params: Iterable[Tensor],
         *,
         lr: float,
-        adam_lr: float = _DEFAULT_ADAM_LR,
+        adam_lr: float | None = None,
         momentum: float = _DEFAULT_MOMENTUM,
         nesterov: bool = True,
         ns_steps: int = _DEFAULT_MUON_STEPS,
@@ -366,6 +365,8 @@ class GrugMuonH(_CompositeOptimizer):
             raise ValueError("MuonH routing found no hidden rank-2 or rank-3 matrices")
         if not adamh_params:
             raise ValueError("MuonH routing found no output-head parameter for AdamH")
+        if adam_lr is None:
+            adam_lr = lr
 
         self.muonh = MuonH(
             muonh_params,
@@ -467,7 +468,7 @@ def build_grug_muonh(
         parameters["adamh"],
         parameters["adam"],
         lr=float(optim_config.lr),
-        adam_lr=float(extra.get("adam_lr", _DEFAULT_ADAM_LR)),
+        adam_lr=float(extra["adam_lr"]) if "adam_lr" in extra else None,
         momentum=float(extra.get("momentum", _DEFAULT_MOMENTUM)),
         nesterov=bool(extra.get("nesterov", True)),
         ns_steps=int(extra.get("backend_steps", _DEFAULT_MUON_STEPS)),

@@ -147,14 +147,15 @@ class HybridMuon(_CompositeOptimizer):
         muon_params: Iterable[Tensor],
         adamw_params: Iterable[Tensor],
         *,
-        muon_lr: float = 0.02,
+        lr: float,
+        muon_lr: float | None = None,
         muon_weight_decay: float = 0.0,
         muon_momentum: float = 0.95,
         muon_nesterov: bool = True,
         ns_steps: int = 5,
         muon_eps: float = 1e-7,
         adjust_lr_fn: Optional[str] = None,
-        adamw_lr: float = 8e-6,
+        adamw_lr: float | None = None,
         adamw_betas: tuple = (0.9, 0.999),
         adamw_eps: float = 1e-8,
         adamw_weight_decay: float = 0.0,
@@ -166,6 +167,10 @@ class HybridMuon(_CompositeOptimizer):
                 "HybridMuon constructed with zero Muon params — classification found "
                 "no 2-D hidden weights. Refusing to silently degrade to AdamW-only."
             )
+        if muon_lr is None:
+            muon_lr = lr
+        if adamw_lr is None:
+            adamw_lr = lr
 
         self.muon = Muon(
             muon_params,
@@ -192,7 +197,7 @@ class HybridMuon(_CompositeOptimizer):
         )
 
         children = [child for child in (self.muon, self.adamw) if child is not None]
-        super().__init__(children, defaults={"lr": muon_lr})
+        super().__init__(children, defaults={"lr": lr})
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -212,10 +217,10 @@ def build_hybrid_muon(named_parameters, optim_config) -> HybridMuon:
     groups and construct a :class:`HybridMuon` from ``optim_config``.
 
     ``optim_config`` is the policy ``optimizer_config`` mapping. Recognized keys:
-      - ``lr``: AdamW-group LR (kept identical to the AdamW baseline).
+      - ``lr``: master LR inherited by every optimizer route.
       - ``adam_betas``, ``weight_decay``: AdamW-group hyperparameters.
       - ``optimizer_kwargs`` (Muon-group overrides):
-          ``muon_lr`` (default 0.02), ``muon_momentum`` (default 0.95),
+          ``muon_lr`` (default = ``lr``), ``muon_momentum`` (default 0.95),
           ``ns_steps`` (default 5), ``muon_weight_decay`` (default = ``weight_decay``),
           ``muon_nesterov`` (default True), ``adjust_lr_fn`` (default None).
     """
@@ -232,20 +237,20 @@ def build_hybrid_muon(named_parameters, optim_config) -> HybridMuon:
             adamw_names.append(name)
 
     extra = dict(optim_config.get("optimizer_kwargs", {}) or {})
-    adamw_lr = float(optim_config.lr)
+    master_learning_rate = float(optim_config.lr)
     adamw_wd = float(optim_config.get("weight_decay", 0.0))
     adamw_betas = tuple(optim_config.get("adam_betas", (0.9, 0.999)))
 
     opt = HybridMuon(
         muon_params,
         adamw_params,
-        muon_lr=float(extra.get("muon_lr", 0.02)),
+        lr=master_learning_rate,
+        muon_lr=float(extra["muon_lr"]) if "muon_lr" in extra else None,
         muon_weight_decay=float(extra.get("muon_weight_decay", adamw_wd)),
         muon_momentum=float(extra.get("muon_momentum", 0.95)),
         muon_nesterov=bool(extra.get("muon_nesterov", True)),
         ns_steps=int(extra.get("ns_steps", 5)),
         adjust_lr_fn=extra.get("adjust_lr_fn", None),
-        adamw_lr=adamw_lr,
         adamw_betas=adamw_betas,
         adamw_eps=float(extra.get("adamw_eps", 1e-8)),
         adamw_weight_decay=adamw_wd,

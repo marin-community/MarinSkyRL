@@ -98,6 +98,7 @@ def test_is_optimizer_and_scheduler_attaches():
     cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={})
     opt = build_hybrid_muon(m.named_parameters(), cfg)
     assert isinstance(opt, torch.optim.Optimizer)
+    assert {group["lr"] for group in opt.param_groups} == {cfg.lr}
     # transformers' get_scheduler -> LRScheduler does isinstance(opt, Optimizer)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda step: 1.0)
     # initial_lr stamped on each (child) param group

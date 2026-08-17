@@ -18,6 +18,7 @@ from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.distributed.grug_muonh import build_grug_muonh
+from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_learning_rates
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
@@ -560,6 +561,11 @@ class FSDPStrategy(DistributedStrategy):
 
                 new_optimizer = optimizer_cls(fsdp_module.parameters(), **optimizer_kwargs)
 
+            validate_optimizer_learning_rates(
+                new_optimizer,
+                master_learning_rate=float(optim_config.lr),
+                optimizer_kwargs=optim_config.get("optimizer_kwargs", None),
+            )
             lr_scheduler = get_scheduler(
                 optim_config.scheduler,
                 new_optimizer,
