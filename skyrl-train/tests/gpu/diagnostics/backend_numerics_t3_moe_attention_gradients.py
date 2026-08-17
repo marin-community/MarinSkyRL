@@ -422,7 +422,7 @@ def test_t3_transformer_engine_attention_gradients_match_sdpa_reference() -> Non
         qkv_format="bshd",
         attn_mask_type="causal",
     ).to(device)
-    candidate_output = attention(*candidate_inputs)
+    candidate_output = attention(*candidate_inputs).view(batch, sequence, heads, head_dim)
     (candidate_output * output_weights).float().sum().backward()
 
     rows = [
