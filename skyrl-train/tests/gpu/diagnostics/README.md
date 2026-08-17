@@ -18,8 +18,7 @@ fp64 `log_softmax` oracle. T3 reports per-tensor gradient cosines and norm ratio
 grouped-MM experts, Megatron Core's Transformer Engine grouped experts, Hugging Face FlashAttention2, and
 Transformer Engine attention.
 
-The checked-in Jupiter batch file combines the validated Jupiter GPU container with a frozen Megatron Python
-environment resolved from this checkout's `uv.lock`. The container supplies the cluster CUDA runtime; the
-frozen environment supplies the exact Torch, Megatron Core, and Transformer Engine closure under test. The job
-records the checkout revision, GPU topology, imported package versions, commands, and test output alongside the
-numerical artifacts.
+The checked-in Jupiter batch file runs a frozen GPU environment resolved from this checkout's `uv.lock`. The
+Iris frozen-CUDA activation supplies the wheel-backed CUDA runtime and the exact Torch, Megatron Core, and
+Transformer Engine closure under test. The job records the checkout revision, GPU topology, imported package
+versions, commands, and test output alongside the numerical artifacts.

@@ -29,6 +29,14 @@ EXPECTED_DISPATCH_STAGES = tuple(DispatchStage)
 
 
 @dataclass(frozen=True)
+class DispatchStageSummary:
+    records: int
+    ranks: int
+    microbatches: int
+    layers: int
+
+
+@dataclass(frozen=True)
 class DispatchStageRecord:
     rank: int
     microbatch: int
@@ -80,7 +88,7 @@ def validate_dispatch_stage_records(
     world_size: int,
     microbatches: int,
     layers: int,
-) -> dict[str, int]:
+) -> DispatchStageSummary:
     """Require complete ordered dispatch stages and matching EP-group sequences."""
 
     records = tuple(records)
@@ -124,9 +132,9 @@ def validate_dispatch_stage_records(
                             f"{reference} != {candidate}"
                         )
 
-    return {
-        "records": len(records),
-        "ranks": world_size,
-        "microbatches": microbatches,
-        "layers": layers,
-    }
+    return DispatchStageSummary(
+        records=len(records),
+        ranks=world_size,
+        microbatches=microbatches,
+        layers=layers,
+    )

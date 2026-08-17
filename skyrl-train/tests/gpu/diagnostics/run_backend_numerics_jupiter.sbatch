@@ -1,5 +1,5 @@
 #!/bin/bash
-# Jupiter-only SIF test: this manual Slurm job uses the standard Jupiter RL environment.
+# Jupiter-only frozen-environment test using the standard Iris CUDA activation.
 #SBATCH --account=reformo
 #SBATCH --partition=booster
 #SBATCH --qos=normal
@@ -32,19 +32,10 @@ FROZEN_CUDA_ACTIVATION="$ARTIFACT_ROOT/frozen-cuda-runtime.env"
 . "$FROZEN_CUDA_ACTIVATION"
 cd "$CHECKOUT/skyrl-train"
 
-run_in_policy_runtime() {
-  if [[ $1 != python ]]; then
-    echo "run_in_policy_runtime expects a Python command, got $1" >&2
-    return 2
-  fi
-  shift
-  "$FROZEN_PYTHON" "$@"
-}
-
 {
   echo "$CHECKOUT_REVISION"
   nvidia-smi --query-gpu=name,uuid,driver_version --format=csv,noheader
-  run_in_policy_runtime python -c 'import megatron.core, torch, torchtitan, transformers; print(torch.__version__, torch.version.cuda, megatron.core.__file__, torchtitan.__file__, transformers.__version__)'
+  "$FROZEN_PYTHON" -c 'import megatron.core, torch, torchtitan, transformers; print(torch.__version__, torch.version.cuda, megatron.core.__file__, torchtitan.__file__, transformers.__version__)'
 } > "$ARTIFACT_ROOT/runtime.txt" 2>&1
 
 declare -a RESULTS=()
@@ -53,24 +44,24 @@ run_diagnostic() {
   local name=$1
   shift
   set +e
-  run_in_policy_runtime "$@" 2>&1 | tee "$ARTIFACT_ROOT/$name.log"
+  "$FROZEN_PYTHON" "$@" 2>&1 | tee "$ARTIFACT_ROOT/$name.log"
   local status=${PIPESTATUS[0]}
   set -e
   RESULTS+=("$name=$status")
 }
 
-run_diagnostic t1 python -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29601 --nproc-per-node=4 \
+run_diagnostic t1 -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29601 --nproc-per-node=4 \
   -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t1_gradient_norms.py
-run_diagnostic t2-fsdp python -m pytest -s \
+run_diagnostic t2-fsdp -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t2_logprob_gradients.py -k fsdp
-run_diagnostic t2-megatron-tp1 python -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29602 \
+run_diagnostic t2-megatron-tp1 -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29602 \
   --nproc-per-node=1 -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t2_logprob_gradients.py -k megatron
-run_diagnostic t2-megatron-tp2 python -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29603 \
+run_diagnostic t2-megatron-tp2 -m torch.distributed.run --master-addr=127.0.0.1 --master-port=29603 \
   --nproc-per-node=2 -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t2_logprob_gradients.py -k 'megatron and not inference_only'
-run_diagnostic t3 python -m pytest -s \
+run_diagnostic t3 -m pytest -s \
   tests/gpu/diagnostics/backend_numerics_t3_moe_attention_gradients.py
 
 printf '%s\n' "${RESULTS[@]}" | tee "$ARTIFACT_ROOT/summary.txt"

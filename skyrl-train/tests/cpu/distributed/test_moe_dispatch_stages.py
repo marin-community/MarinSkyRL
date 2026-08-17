@@ -5,6 +5,7 @@ import pytest
 from tests.moe_dispatch_stages import (
     EXPECTED_DISPATCH_STAGES,
     DispatchStageRecord,
+    DispatchStageSummary,
     dispatch_stage_records,
     validate_dispatch_stage_records,
 )
@@ -38,7 +39,7 @@ def test_dispatch_stage_records_round_trip_and_validate_complete_ep_group() -> N
     summary = validate_dispatch_stage_records(actual, world_size=4, microbatches=1, layers=1)
 
     assert actual == expected
-    assert summary == {"records": 36, "ranks": 4, "microbatches": 1, "layers": 1}
+    assert summary == DispatchStageSummary(records=36, ranks=4, microbatches=1, layers=1)
 
 
 def test_dispatch_stage_records_parse_concatenated_rank_writes() -> None:

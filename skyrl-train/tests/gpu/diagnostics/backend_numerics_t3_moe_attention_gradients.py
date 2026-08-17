@@ -1,10 +1,10 @@
 """T3: compare independent eager, grouped-kernel, and attention gradients.
 
-The MoE isolation uses an eager per-expert oracle and the SkyRL MoE with
-identical weights and forced routes. FP32 covers the for-loop parity path; BF16
-separately exercises the real ``torch._grouped_mm`` kernel. The attention
-isolation compares Hugging Face eager attention with FlashAttention2 through its
-attention boundary.
+The MoE isolation uses an eager per-expert oracle with identical weights and
+forced routes. It covers the SkyRL FP32 for-loop, SkyRL BF16
+``torch._grouped_mm``, and Megatron Core ``TEGroupedMLP`` paths. Attention
+coverage compares Hugging Face eager attention with FlashAttention2 and PyTorch
+SDPA with Transformer Engine ``DotProductAttention``.
 
 Run on one GPU::
 
@@ -12,6 +12,8 @@ Run on one GPU::
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import torch
 from torch import nn
@@ -215,6 +217,44 @@ def _megatron_comparison_rows(
     return rows
 
 
+def _backward_moe_pair(
+    reference: _EagerMoE,
+    candidate_forward: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> None:
+    generator = torch.Generator(device=device).manual_seed(SEED + 1)
+    inputs = torch.randn(
+        BATCH_SIZE,
+        SEQUENCE_LENGTH,
+        MODEL_SIZE,
+        generator=generator,
+        device=device,
+        dtype=dtype,
+    )
+    routes = torch.topk(reference.router(inputs).float(), TOP_K, dim=-1).indices
+    weights = torch.randn(inputs.shape, generator=generator, device=device, dtype=dtype)
+    (reference(inputs, routes) * weights).float().sum().backward()
+    (candidate_forward(inputs, routes) * weights).float().sum().backward()
+
+
+def _write_moe_rows(
+    artifact_name: str,
+    isolation: str,
+    rows: list[dict[str, float | str | bool]],
+) -> None:
+    write_rows(
+        artifact_name,
+        rows,
+        {
+            "isolation": isolation,
+            "cosine_tolerance": COSINE_TOLERANCE,
+            "norm_ratio_interval": [NORM_RATIO_LOW, NORM_RATIO_HIGH],
+        },
+    )
+
+
 def _moe_comparison(
     device: torch.device,
     *,
@@ -234,29 +274,14 @@ def _moe_comparison(
         use_grouped_mm=use_grouped_mm,
     ).to(device=device, dtype=dtype)
     _copy_moe_weights(reference, candidate)
-    generator = torch.Generator(device=device).manual_seed(SEED + 1)
-    inputs = torch.randn(
-        BATCH_SIZE,
-        SEQUENCE_LENGTH,
-        MODEL_SIZE,
-        generator=generator,
+    _backward_moe_pair(
+        reference,
+        lambda inputs, routes: candidate(inputs, routed_experts=routes),
         device=device,
         dtype=dtype,
     )
-    routes = torch.topk(reference.router(inputs).float(), TOP_K, dim=-1).indices
-    weights = torch.randn(inputs.shape, generator=generator, device=device, dtype=dtype)
-    (reference(inputs, routes) * weights).float().sum().backward()
-    (candidate(inputs, routed_experts=routes) * weights).float().sum().backward()
     rows = _comparison_rows(reference, candidate)
-    write_rows(
-        artifact_name,
-        rows,
-        {
-            "isolation": isolation,
-            "cosine_tolerance": COSINE_TOLERANCE,
-            "norm_ratio_interval": [NORM_RATIO_LOW, NORM_RATIO_HIGH],
-        },
-    )
+    _write_moe_rows(artifact_name, isolation, rows)
     return rows
 
 
@@ -291,28 +316,17 @@ def test_t3_megatron_grouped_moe_bf16_gradients_match_eager_reference() -> None:
     reference = _EagerMoE().to(device=device, dtype=torch.bfloat16)
     candidate = _MegatronGroupedMoE().to(device)
     _copy_megatron_moe_weights(reference, candidate)
-    generator = torch.Generator(device=device).manual_seed(SEED + 1)
-    inputs = torch.randn(
-        BATCH_SIZE,
-        SEQUENCE_LENGTH,
-        MODEL_SIZE,
-        generator=generator,
+    _backward_moe_pair(
+        reference,
+        candidate,
         device=device,
         dtype=torch.bfloat16,
     )
-    routes = torch.topk(reference.router(inputs).float(), TOP_K, dim=-1).indices
-    weights = torch.randn(inputs.shape, generator=generator, device=device, dtype=torch.bfloat16)
-    (reference(inputs, routes) * weights).float().sum().backward()
-    (candidate(inputs, routes) * weights).float().sum().backward()
     rows = _megatron_comparison_rows(reference, candidate)
-    write_rows(
+    _write_moe_rows(
         "t3-megatron-grouped-moe-bf16",
+        "shared eager router and routes; eager experts versus Megatron GroupedMLP",
         rows,
-        {
-            "isolation": "shared eager router and routes; eager experts versus Megatron GroupedMLP",
-            "cosine_tolerance": COSINE_TOLERANCE,
-            "norm_ratio_interval": [NORM_RATIO_LOW, NORM_RATIO_HIGH],
-        },
     )
     assert all(row["passed"] for row in rows)
 

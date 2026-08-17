@@ -17,6 +17,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -173,10 +174,10 @@ def test_multinode_moe_dispatch_crosses_every_stage_with_matching_ep_sequences(
         layers=DISPATCH_LAYERS,
     )
     (artifact_root / "dispatch-stages.jsonl").write_text("".join(f"{record.json_line()}\n" for record in records))
-    (artifact_root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    (artifact_root / "summary.json").write_text(json.dumps(asdict(summary), indent=2, sort_keys=True) + "\n")
     assert result.output.count("MOE_DISPATCH_OK") == 1, result.output
     print(
-        f"MULTI_NODE_MOE_DISPATCH_OK records={summary['records']} world={WORLD_SIZE} "
+        f"MULTI_NODE_MOE_DISPATCH_OK records={summary.records} world={WORLD_SIZE} "
         f"microbatches={DISPATCH_MICROBATCHES} layers={DISPATCH_LAYERS}",
         flush=True,
     )
