@@ -11,7 +11,7 @@ import socket
 import sys
 from contextlib import contextmanager
 from collections.abc import Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -36,29 +36,47 @@ class EnvVarSource(StrEnum):
     SECRET = "secret"
 
 
+class EnvVarWriter(StrEnum):
+    MANAGER = "manager"
+    PYTHON_ASSIGNMENT = "python-assignment"
+    PYTHON_PUTENV = "python-putenv"
+    PYTHON_SETDEFAULT = "python-setdefault"
+    PYTHON_ENV_MAPPING = "python-env-mapping"
+    PYTHON_ENV_UPDATE = "python-env-update"
+    PYTHON_ENV_KEYWORD = "python-env-keyword"
+    PYTHON_ENV_RETURN = "python-env-return"
+    YAML_EXTRA_ENV = "yaml-extra-env"
+    SHELL_EXPORT = "shell-export"
+    DOCKER_ENV = "docker-env"
+
+
 @dataclass(frozen=True)
 class EnvVarSpec:
     name: str
     owner: str
     source: EnvVarSource
     scopes: frozenset[EnvVarScope]
+    writers: frozenset[EnvVarWriter] = frozenset({EnvVarWriter.MANAGER})
 
 
 ALL_RUNTIME_SCOPES = frozenset(EnvVarScope)
 
 DEBUG_MODE_ENV = "SKYRL_DEBUG_MODE"
 DEBUG_ARTIFACT_DIR_ENV = "SKYRL_DEBUG_ARTIFACT_DIR"
+COLLECTIVE_PHASE_DIAGNOSTICS_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
 FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 PYTHONPATH_ENV = "PYTHONPATH"
 VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
+VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
+NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -69,8 +87,12 @@ ENV_VAR_SPECS = (
     EnvVarSpec("NCCL_DEBUG_SUBSYS", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("NCCL_DEBUG_FILE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("PYTHONFAULTHANDLER", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
-    EnvVarSpec("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
-    EnvVarSpec("SKYRL_POLICY_HOST_RAM_MONITOR", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
+    EnvVarSpec(
+        COLLECTIVE_PHASE_DIAGNOSTICS_ENV,
+        "trainer.collective_phase_diagnostics",
+        EnvVarSource.DERIVED,
+        ALL_RUNTIME_SCOPES,
+    ),
     EnvVarSpec("TORCH_FR_BUFFER_SIZE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("TORCH_CPP_LOG_LEVEL", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec(FR_DUMP_TEMP_FILE_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
@@ -99,6 +121,12 @@ ENV_VAR_SPECS = (
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
+    EnvVarSpec(
+        VLLM_ALLOW_INSECURE_SERIALIZATION_ENV,
+        "generator.fuse_weights",
+        EnvVarSource.CONFIG,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
     EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
     EnvVarSpec(
         HF_HUB_OFFLINE_ENV,
@@ -124,6 +152,152 @@ ENV_VAR_SPECS = (
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.DRIVER}),
     ),
+    EnvVarSpec(
+        NUMA_AFFINITY_ENV,
+        "trainer.placement.enable_numa_affinity",
+        EnvVarSource.CONFIG,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+)
+
+_PYTHON_WRITERS = frozenset(
+    {
+        EnvVarWriter.PYTHON_ASSIGNMENT,
+        EnvVarWriter.PYTHON_PUTENV,
+        EnvVarWriter.PYTHON_SETDEFAULT,
+        EnvVarWriter.PYTHON_ENV_MAPPING,
+        EnvVarWriter.PYTHON_ENV_UPDATE,
+        EnvVarWriter.PYTHON_ENV_KEYWORD,
+        EnvVarWriter.PYTHON_ENV_RETURN,
+    }
+)
+_RUNTIME_BOUNDARY_WRITERS = _PYTHON_WRITERS | {
+    EnvVarWriter.YAML_EXTRA_ENV,
+    EnvVarWriter.SHELL_EXPORT,
+    EnvVarWriter.DOCKER_ENV,
+}
+_BUILD_BOUNDARY_WRITERS = frozenset({EnvVarWriter.SHELL_EXPORT, EnvVarWriter.DOCKER_ENV})
+
+# Explicit interfaces owned outside MarinSkyRL. These names may be projected at
+# process, task, container, or build boundaries, but they are not training controls.
+_SECRET_BOUNDARIES = {
+    "DAYTONA_API_KEY",
+    "KUBECONFIG",
+    "MLFLOW_TRACKING_TOKEN",
+    "WANDB_API_KEY",
+}
+_BUILD_BOUNDARIES = {
+    "CPATH",
+    "CUDNN_PATH",
+    "DEBIAN_FRONTEND",
+    "DOCKER_CONFIG",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "MAX_JOBS",
+    "NVCC_THREADS",
+    "TORCH_CUDA_ARCH_LIST",
+    "UV_HTTP_TIMEOUT",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_RETRIES",
+    "VLLM_FORK_DIR",
+    "VLLM_TARGET_DEVICE",
+    "WHEEL_VENV",
+}
+_RUNTIME_BOUNDARIES = {
+    "AWS_CONFIG_FILE",
+    "AWS_DEFAULT_REGION",
+    "AWS_ENDPOINT_URL",
+    "AWS_REGION",
+    "AWS_S3_ADDRESSING_STYLE",
+    "CUDA_DEVICE_MAX_CONNECTIONS",
+    "CUDA_DEVICE_ORDER",
+    "CUDA_MODULE_LOADING",
+    "CUDA_VISIBLE_DEVICES",
+    "DATA_DIR",
+    "FSSPEC_S3",
+    "GLOO_SOCKET_IFNAME",
+    "HARBOR_DISTRIBUTED_CONTAINERS",
+    "HARBOR_MODEL_ENDPOINT",
+    "HF_HUB_DOWNLOAD_TIMEOUT",
+    "HF_HUB_OFFLINE",
+    "LD_LIBRARY_PATH",
+    "LOCAL_RANK",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "MLFLOW_TRACKING_URI",
+    "NCCL_CUMEM_ENABLE",
+    "NCCL_DEBUG",
+    "NCCL_DEBUG_SUBSYS",
+    "NCCL_NVLS_ENABLE",
+    "NCCL_P2P_DISABLE",
+    "NCCL_SHM_DISABLE",
+    "NCCL_SOCKET_FAMILY",
+    "NCCL_SOCKET_IFNAME",
+    "NUM_INFERENCE_ENGINES",
+    "NVTE_FUSED_ATTN",
+    "OMP_NUM_THREADS",
+    "OTAGENT_LITERAL_LOG_PATH",
+    "OT_AGENT_IRIS_RAY_PORT",
+    "OT_AGENT_IRIS_RENDEZVOUS_DIR",
+    "POLICY_NUM_NODES",
+    "PYTHONPATH",
+    "PYTHONUNBUFFERED",
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "RANK",
+    "RAY_ADDRESS",
+    "RAY_USE_UVLOOP",
+    "RL_ENV_DIR",
+    "RL_SYNC",
+    "SKYRL_HOME",
+    "TENSOR_PARALLEL_SIZE",
+    "TEST_FILE",
+    "TF_CPP_MIN_LOG_LEVEL",
+    "TORCH_FR_BUFFER_SIZE",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+    "TORCH_NCCL_AVOID_RECORD_STREAMS",
+    "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
+    "TORCH_NCCL_DESYNC_DEBUG",
+    "TORCH_NCCL_DUMP_ON_TIMEOUT",
+    "TORCH_NCCL_ENABLE_MONITORING",
+    "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
+    "TORCH_NCCL_TRACE_CPP_STACK",
+    "TRAIN_FILE",
+    "TRANSFORMERS_OFFLINE",
+    "UV_USE_IO_URING",
+    "VLLM_ALLOW_INSECURE_SERIALIZATION",
+    "VLLM_ALLOW_ROUTED_EXPERTS_DCP",
+    "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
+    "VLLM_ALLREDUCE_USE_SYMM_MEM",
+    "VLLM_DISABLE_COMPILE_CACHE",
+    "VLLM_ENABLE_V1_MULTIPROCESSING",
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+    "VLLM_MQ_MAX_CHUNK_BYTES_MB",
+    "VLLM_RAY_BUNDLE_INDICES",
+    "VLLM_RAY_PER_WORKER_GPUS",
+    "VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS",
+    "VLLM_USE_DEEP_GEMM",
+    "VLLM_USE_FLASHINFER_SAMPLER",
+    "VLLM_USE_V1",
+    "WANDB_DIR",
+    "WORLD_SIZE",
+}
+
+_BOUNDARY_WRITERS = {
+    **{name: (EnvVarSource.SECRET, _RUNTIME_BOUNDARY_WRITERS) for name in _SECRET_BOUNDARIES},
+    **{name: (EnvVarSource.EXTERNAL, _BUILD_BOUNDARY_WRITERS) for name in _BUILD_BOUNDARIES},
+    **{name: (EnvVarSource.EXTERNAL, _RUNTIME_BOUNDARY_WRITERS) for name in _RUNTIME_BOUNDARIES},
+}
+ENV_VAR_SPECS = tuple(
+    replace(spec, source=source, writers=writers | {EnvVarWriter.MANAGER}) if spec.name in _BOUNDARY_WRITERS else spec
+    for spec in ENV_VAR_SPECS
+    for source, writers in [_BOUNDARY_WRITERS.get(spec.name, (spec.source, spec.writers))]
+)
+_DECLARED_NAMES = {spec.name for spec in ENV_VAR_SPECS}
+ENV_VAR_SPECS += tuple(
+    EnvVarSpec(name, "external.runtime", source, frozenset(), writers)
+    for name, (source, writers) in sorted(_BOUNDARY_WRITERS.items())
+    if name not in _DECLARED_NAMES
 )
 
 _SPECS_BY_NAME = {spec.name: spec for spec in ENV_VAR_SPECS}
@@ -176,7 +350,13 @@ class EnvVarManager:
             values[NVRTC_HOME_ENV] = nvrtc_home
         if _config_value(config, "trainer.algorithm.batch_invariant", False):
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
-        raw_mode = ambient.get(DEBUG_MODE_ENV, _config_value(config, "trainer.debug_mode", "off"))
+        if _config_value(config, "generator.fuse_weights", False):
+            values[VLLM_ALLOW_INSECURE_SERIALIZATION_ENV] = "1"
+        if _config_value(config, "trainer.placement.enable_numa_affinity", False):
+            values[NUMA_AFFINITY_ENV] = "1"
+        if _config_value(config, "trainer.collective_phase_diagnostics", False):
+            values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
+        raw_mode = _config_value(config, "trainer.debug_mode", "off")
         try:
             mode = DistributedDebugMode(str(raw_mode))
         except ValueError as error:
@@ -241,8 +421,7 @@ class EnvVarManager:
             "NCCL_DEBUG_SUBSYS": _NCCL_SETUP_SUBSYSTEMS,
             "NCCL_DEBUG_FILE": str(Path(root) / "nccl" / "nccl.%h.%p.log"),
             "PYTHONFAULTHANDLER": "1",
-            "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS": "1",
-            "SKYRL_POLICY_HOST_RAM_MONITOR": "1",
+            COLLECTIVE_PHASE_DIAGNOSTICS_ENV: "1",
             "TORCH_CPP_LOG_LEVEL": "INFO",
             FR_DUMP_TEMP_FILE_ENV: flight_prefix,
             NCCL_DEBUG_INFO_TEMP_FILE_ENV: flight_prefix,
@@ -262,8 +441,8 @@ class EnvVarManager:
         target = os.environ if environ is None else environ
         values = self.environment_for(scope)
         target.update(values)
-        if values:
-            ensure_debug_artifact_directories(values[DEBUG_ARTIFACT_DIR_ENV])
+        if artifact_root := values.get(DEBUG_ARTIFACT_DIR_ENV):
+            ensure_debug_artifact_directories(artifact_root)
         return values
 
 

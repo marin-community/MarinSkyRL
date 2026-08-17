@@ -22,6 +22,8 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.utils.progress import configure_progress
+
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -75,6 +77,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
         # Opt-in mp executor backend (Qwen3-Next R3 capture hang workaround; default off).
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
+        "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -295,10 +298,9 @@ class BasePPOExp:
         Returns:
             PlacementGroup: The placement group for colocated training.
         """
-        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S  # noqa: PLC0415
         from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout  # noqa: PLC0415
 
-        timeout = SKYRL_RAY_PG_TIMEOUT_IN_S if timeout is None else timeout
+        timeout = int(self.cfg.trainer.distributed.placement_group_timeout_seconds) if timeout is None else timeout
         if self.cfg.trainer.placement.colocate_all:
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
@@ -327,7 +329,6 @@ class BasePPOExp:
         share a single placement group built inside `build_models`; that path
         is left entirely untouched (eligibility requires use_ref_model=False).
         """
-        from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S  # noqa: PLC0415
         from skyrl_train.utils.utils import (
             get_ray_pg_ready_with_timeout,
             policy_per_gpu_bundles_enabled,
@@ -335,7 +336,7 @@ class BasePPOExp:
             policy_strict_spread_eligible,
         )  # noqa: PLC0415
 
-        timeout = SKYRL_RAY_PG_TIMEOUT_IN_S if timeout is None else timeout
+        timeout = int(self.cfg.trainer.distributed.placement_group_timeout_seconds) if timeout is None else timeout
         if not policy_strict_spread_eligible(self.cfg):
             return None
 
@@ -489,6 +490,8 @@ class BasePPOExp:
     def run(self):
         from skyrl_train.telemetry import TRAINER_ROLE, process_telemetry
 
+        configure_progress(self.cfg.trainer.progress)
+
         with process_telemetry(TRAINER_ROLE):
             self._run()
 
@@ -562,13 +565,7 @@ def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_messa
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
     validate_cfg(cfg)
-
-    # Set FP8 fuse_weights env vars from config (must happen before Ray init
-    # so all workers inherit them).
-    if getattr(cfg.generator, "fuse_weights", False):
-        os.environ["SKYRL_FUSE_WEIGHTS"] = "1"
-        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-        logger.info("FP8 fuse_weights enabled: set SKYRL_FUSE_WEIGHTS=1, VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+    configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)
 

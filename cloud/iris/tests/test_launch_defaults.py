@@ -27,7 +27,8 @@ from cloud.iris.env_vars import grug_gpu_gate_environment, wandb_launch_environm
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
     build_debug_launch_env,
-    build_skyrl_flag_env,
+    build_skyrl_flag_overrides,
+    _effective_gdn_backend,
     build_task_command,
     create_parser,
     derive_default_job_name,
@@ -391,10 +392,51 @@ def test_task_command_applies_bounded_storage_policy(tmp_path, parse_hydra_overr
     }
 
 
-def test_collective_phase_diagnostics_flag_sets_worker_environment(tmp_path):
+def test_collective_phase_diagnostics_flag_sets_typed_override(tmp_path):
     args = _args(tmp_path, "opencode", ["--collective-phase-diagnostics", "on"])
 
-    assert build_skyrl_flag_env(args)["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
+    assert build_skyrl_flag_overrides(args) == ["++trainer.collective_phase_diagnostics=true"]
+
+
+def test_runtime_flags_map_to_typed_overrides_without_environment_entries(tmp_path):
+    args = _args(
+        tmp_path,
+        "opencode",
+        [
+            "--r3-transport",
+            "resident",
+            "--r3-put-timeout-s",
+            "90",
+            "--nccl-timeout-s",
+            "1200",
+            "--host-ram-monitor",
+            "off",
+            "--tis-splice",
+            "off",
+            "--gdn-flashqla",
+            "on",
+            "--ep-loader-chunk-rows",
+            "4",
+        ],
+    )
+
+    overrides = build_skyrl_flag_overrides(args)
+
+    assert overrides == [
+        "++generator.r3_transport=resident",
+        "++generator.r3_dispatch_put_timeout_seconds=90",
+        "++trainer.distributed.worker_collective_timeout_seconds=1200",
+        "++trainer.policy.host_memory_monitor.enabled=false",
+        "++trainer.algorithm.tis_splice=false",
+        "++generator.gdn_backend=flashqla",
+        "++trainer.policy.fsdp_config.expert_loader_chunk_rows=4",
+    ]
+
+
+def test_gdn_cache_gate_honors_canonical_hydra_override(tmp_path):
+    args = _args(tmp_path, "opencode", ["--skyrl_override", "generator.gdn_backend=flashqla"])
+
+    assert _effective_gdn_backend(args) == "flashqla"
 
 
 def test_distributed_debug_cli_sets_one_job_scoped_contract(tmp_path):

@@ -41,7 +41,6 @@ from skyrl_train.dataset.preprocess import (
 from skyrl_train.utils import trainer_utils
 from skyrl_train.utils.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
@@ -829,7 +828,9 @@ class RayPPOTrainer:
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
                 pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                get_ray_pg_ready_with_timeout(
+                    pg, timeout=int(self.cfg.trainer.distributed.placement_group_timeout_seconds)
+                )
 
             # Dedicated, pre-reserved STRICT_SPREAD policy placement group
             # (disaggregated no-ref case only). Supplied (non-None) by the

@@ -1,8 +1,4 @@
-import os
-
-
-#
-SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180))
+DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS = 180
 """
 Timeout for allocating the placement group for different actors in SkyRL
 """
@@ -11,16 +7,18 @@ Timeout for allocating the placement group for different actors in SkyRL
 # and the accessor (was previously divergent: constants default 600 vs utils.py
 # `max(1200, env-or-1200)`). Raised to 1800s (30 min) — the long MoE weight-sync
 # gather + first-step forward on 80B routinely exceeds the old 600s watchdog and
-# SIGABRTs the gang; every live iris config already sets >=1800 so this is a
-# no-op there and only protects a config that forgot the line. Env var is the
-# override (env > default); set it lower for a quick test.
+# SIGABRTs the gang. ``trainer.distributed.worker_collective_timeout_seconds``
+# is the runtime authority; this constant supplies lower-level API defaults.
 DEFAULT_WORKER_NCCL_TIMEOUT_IN_S = 1800
 DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT = 300
 
 
-def get_worker_nccl_timeout_s() -> int:
-    """Resolve the worker NCCL-collective timeout (seconds): env override, else default."""
-    return int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S", DEFAULT_WORKER_NCCL_TIMEOUT_IN_S))
+def get_worker_nccl_timeout_s(value: int | None = None) -> int:
+    """Validate a configured worker collective timeout."""
+    timeout = DEFAULT_WORKER_NCCL_TIMEOUT_IN_S if value is None else int(value)
+    if timeout <= 0:
+        raise ValueError("trainer.distributed.worker_collective_timeout_seconds must be positive")
+    return timeout
 
 
 def get_nccl_monitor_heartbeat_timeout(value: int | None = None) -> int:
@@ -29,20 +27,3 @@ def get_nccl_monitor_heartbeat_timeout(value: int | None = None) -> int:
     if timeout <= 0:
         raise ValueError("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC must be positive")
     return timeout
-
-
-SKYRL_WORKER_NCCL_TIMEOUT_IN_S = get_worker_nccl_timeout_s()
-"""
-Timeout for initializing the NCCL process group for the worker, defaults to 30 minutes.
-"""
-
-SKYRL_PYTHONPATH_EXPORT = str(os.environ.get("SKYRL_PYTHONPATH_EXPORT", "False")).lower() in (
-    "true",
-    "1",
-    "yes",
-)
-"""
-Whether to export ``PYTHONPATH`` environment variable from the driver to the workers with Ray's runtime env.
-
-See https://github.com/ray-project/ray/issues/56697 for details on why this is needed.
-"""

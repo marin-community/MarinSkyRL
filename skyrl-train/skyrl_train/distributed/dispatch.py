@@ -1,6 +1,5 @@
 """Defines dispatch and collect logic for distributed training"""
 
-import os
 import threading
 from dataclasses import dataclass
 from ray.actor import ActorHandle
@@ -330,7 +329,15 @@ class MeshDispatch(Dispatch):
     """
 
     @classmethod
-    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch) -> List[ObjectRef]:
+    def dispatch(
+        cls,
+        actor_infos: List[ActorInfo],
+        method: str,
+        data: TrainingInputBatch,
+        *,
+        r3_transport: str = "decentral",
+        dispatch_put_timeout_seconds: float = 600,
+    ) -> List[ObjectRef]:
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = []
         dp_size = actor_infos[0].rank.dp_size
@@ -373,18 +380,12 @@ class MeshDispatch(Dispatch):
         # the resident chunk is byte-identical to today's by-value chunk (same
         # `data.chunk` rows) — so ALL existing row/dp/CP/micro-batch alignment is
         # inherited unchanged (NO new slicing path; satisfies the #6335 guardrail).
-        # Gated by SKYRL_R3_RESIDENT (default ON); OFF == today's per-actor by-value
-        # dispatch, for A/B isolation.
+        # ``r3_transport=by_value`` retains the per-actor dispatch path.
         # Only engage the resident-put when the batch actually carries the bulky R3
         # tensor — so flag-off / 8B (no `rollout_routed_experts`) runs keep TODAY's
-        # exact per-actor by-value dispatch even with SKYRL_R3_RESIDENT=1, and the
-        # A/B flag isolates EXACTLY the R3-transport change. `data.chunk` replicates
+        # exact per-actor by-value dispatch. `data.chunk` replicates
         # the key set to every chunk, so probing chunk 0 answers for all chunks.
-        resident = (
-            os.environ.get("SKYRL_R3_RESIDENT", "1") == "1"
-            and len(data_chunks) > 0
-            and "rollout_routed_experts" in data_chunks[0]
-        )
+        resident = r3_transport != "by_value" and len(data_chunks) > 0 and "rollout_routed_experts" in data_chunks[0]
         # Bound on each per-dp-group `ray.put()` below (see `_ray_put_bounded` /
         # `DispatchPutTimeoutError` docstrings for the full incident writeup). Default
         # 600s is generous relative to observed local put durations for a single
@@ -394,15 +395,11 @@ class MeshDispatch(Dispatch):
         # TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC = 3600s) -- i.e. a stuck put fails loud
         # well before the watchdog would otherwise silently wait out the full hour.
         # <=0 disables the bound (byte-identical to today's bare `ray.put()`).
-        dispatch_put_timeout_s = float(os.environ.get("SKYRL_DISPATCH_PUT_TIMEOUT_S", "600"))
-        # Fix A (SKYRL_R3_DECENTRAL, default ON): when the resident path is
-        # engaged, materialize each dp-chunk on a CONSUMER node instead of the
+        # Under ``r3_transport=decentral``, materialize each dp-chunk on a consumer node instead of the
         # driver plasma. Only meaningful alongside `resident` (it is the R3
         # transport that overflows the head). See the module-level block above.
-        # operator 2026-07-11: default-on to prevent the R3-head-plasma
-        # DispatchPutTimeout footgun (the 80B gs1 forward wedge); set =0 to force
-        # the old centralized driver-put behavior (e.g. for strict A/B isolation).
-        decentral = resident and os.environ.get("SKYRL_R3_DECENTRAL", "1") == "1"
+        # ``resident`` retains the centralized driver-put behavior for diagnostics.
+        decentral = resident and r3_transport == "decentral"
         chunk_refs: List[Optional[ObjectRef]] = [None] * len(data_chunks)
         for actor_info in actor_infos:
             # index into tensordict to get the correct data to send
@@ -414,7 +411,9 @@ class MeshDispatch(Dispatch):
                     _r3 = data_chunks[dp]["rollout_routed_experts"]
                     nbytes = int(_r3.nbytes) if _r3 is not None else 0
                     dtype = _r3.dtype if _r3 is not None else None
-                    node_id = _resolve_actor_node_id(actor_info.handle, dispatch_put_timeout_s) if decentral else None
+                    node_id = (
+                        _resolve_actor_node_id(actor_info.handle, dispatch_put_timeout_seconds) if decentral else None
+                    )
                     if decentral and node_id is not None:
                         # Materialize the chunk's object-store copy on a CONSUMER
                         # node (this actor's node), NOT the driver head plasma.
@@ -433,7 +432,7 @@ class MeshDispatch(Dispatch):
                         # Default / fallback: bounded driver-side ray.put (today's
                         # behavior; keeps the loud DispatchPutTimeoutError on stall).
                         chunk_refs[dp] = _ray_put_bounded(
-                            data_chunks[dp], dispatch_put_timeout_s, what=f"method={method} dp={dp}"
+                            data_chunks[dp], dispatch_put_timeout_seconds, what=f"method={method} dp={dp}"
                         )
                         # UNGATED per-dp-group marker so we can SEE the resident set
                         # install (target: one line per dp-group, on every step) and

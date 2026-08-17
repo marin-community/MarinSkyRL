@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TileLang JIT-cache sync shim for CoreWeave iris GDN/FlashQLA RL runs (Fix A).
 
-``SKYRL_GDN_FLASHQLA=1`` runs JIT-compile the FlashQLA GatedDeltaNet TileLang
+FlashQLA runs JIT-compile the GatedDeltaNet TileLang
 kernels lazily on the first GPU forward into the node-local, ephemeral TileLang
 cache (``~/.tilelang/cache`` == ``/root/.tilelang/cache`` for the root pod user).
 Kaniko is CPU-only, so those kernels CANNOT be baked into the gpu-rl image at
@@ -55,10 +55,8 @@ path-style addressing, so boto3 MUST use virtual addressing
 (``Config(s3={"addressing_style":"virtual"})``) — matching the pod's ``FSSPEC_S3``
 setting and the coreweave_gpu_ops.md in-pod one-liner.
 
-Gate: the shim self-gates on ``SKYRL_GDN_FLASHQLA`` (in {1,true,on,yes}). When it
-is unset (e.g. the 30B-coder runs, which use no GDN/TileLang) both modes are a
-clean no-op. A missing cache key is ALSO a no-op, so the shim is harmless even
-if wired unconditionally.
+The launcher invokes this shim only when ``generator.gdn_backend=flashqla``. A
+missing cache key is a no-op, so cache availability never controls correctness.
 
 Standalone by design (no launcher imports) so it runs identically from the pod's
 bash wrapper regardless of PYTHONPATH state.
@@ -92,16 +90,9 @@ KERNEL_SENTINELS = ("executable.so", "params.pkl", "kernel_lib.so", "wrapped_ker
 # --up only uploads NEWLY-compiled dirs (minimizes redundant S3 writes).
 BASELINE_MARKER = ".otagent_tilelang_baseline.json"
 
-_GDN_TRUE = {"1", "true", "on", "yes"}
-
 
 def _log(msg: str) -> None:
     print(f"[tilelang-sync] {msg}", flush=True)
-
-
-def gdn_flashqla_enabled() -> bool:
-    """The shim's gate: only act for FlashQLA GDN runs."""
-    return str(os.environ.get("SKYRL_GDN_FLASHQLA", "")).strip().lower() in _GDN_TRUE
 
 
 # --------------------------------------------------------------------------- #
@@ -437,14 +428,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--down", action="store_true", help="pull+unpack the warm cache at pod boot")
     mode.add_argument("--up", action="store_true", help="push newly-compiled kernels at pod exit")
-    parser.add_argument(
-        "--force", action="store_true", help="act even if SKYRL_GDN_FLASHQLA is not set (for manual/testing use)"
-    )
     args = parser.parse_args(argv)
-
-    if not args.force and not gdn_flashqla_enabled():
-        _log("SKYRL_GDN_FLASHQLA not set -> no-op (non-GDN run)")
-        return 0
 
     try:
         if args.down:

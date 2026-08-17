@@ -28,10 +28,10 @@ Training (BF16)                    Inference (FP8)
 
 ## How to Enable
 
-Set the environment variable before launching training:
+Enable fused receiver-side loading in the training config:
 
 ```bash
-export SKYRL_FUSE_WEIGHTS=1
+generator.fuse_weights=true
 ```
 
 And add `--quantization fp8` to the vLLM engine config:
@@ -59,8 +59,8 @@ vLLM's FP8 `process_weights_after_loading` transposes weights from `[out, in]` t
 3. Preserves `weight_loader`, `output_dim`, `subclass_type` and other attributes that FP8 processing destroys (needed for `load_weights` to work)
 
 ```python
-# In vllm/__init__.py, activated when SKYRL_FUSE_WEIGHTS=1
-if os.environ.get("SKYRL_FUSE_WEIGHTS") == "1":
+# In vllm/__init__.py, installed by the fused-weight receiver path
+if fuse_weights:
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
     original_process = Fp8LinearMethod.process_weights_after_loading
@@ -99,7 +99,7 @@ Since weights are stored as `[out, in]` (un-transposed), the `apply()` method tr
 ```python
 # In Fp8LinearMethod.apply():
 _weight = layer.weight
-if os.environ.get("SKYRL_FUSE_WEIGHTS") == "1" and _weight.dim() == 2:
+if fuse_weights and _weight.dim() == 2:
     _weight = _weight.t()  # non-contiguous view for cutlass
 return self.fp8_linear.apply(input=x, weight=_weight, ...)
 ```
@@ -157,7 +157,7 @@ Called during engine initialization. Patches `Fp8LinearMethod.process_weights_af
 The FSDP worker wraps the NCCL weight broadcast loop with begin/end hooks:
 
 ```python
-_fuse_weights = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
+_fuse_weights = cfg.generator.fuse_weights
 
 if _fuse_weights and rank == 0:
     await inference_engine_client.begin_weight_update()
@@ -182,7 +182,7 @@ The following files in the vLLM installation need to be patched. These are in th
 | `__init__.py` | No-transpose patch + attribute preservation | ~109-151 |
 | `model_executor/layers/quantization/fp8.py` | On-the-fly `.t()` in `apply()` | ~611-615 |
 
-These patches are gated by `SKYRL_FUSE_WEIGHTS=1` and have no effect when the env var is unset.
+These patches are gated by `generator.fuse_weights=true` and have no effect at the default `false` value.
 
 ## Known Issues
 

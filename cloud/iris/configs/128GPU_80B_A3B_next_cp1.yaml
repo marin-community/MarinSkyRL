@@ -84,6 +84,8 @@ terminal_bench:
     cleanup: true
 
 trainer:
+  distributed:
+    worker_collective_timeout_seconds: 3600
   strategy: megatron
   flash_attn: false
   use_sample_packing: true
@@ -192,6 +194,7 @@ trainer:
     num_parallel_generation_workers: 128
 
 generator:
+  gdn_backend: flashqla
   vllm_attention_backend: FLASH_ATTN
   backend: vllm
   timeout_multiplier: 1.0
@@ -254,18 +257,10 @@ extra_env:
   HF_HUB_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
   HF_HUB_DOWNLOAD_TIMEOUT: "60"
-  SKYRL_GDN_MASK_FLA: "1"
-  SKYRL_GDN_FLASHQLA: "1"
-  SKYRL_R3_DECENTRAL: "1"
-  SKYRL_R3_TENSOR_CAPTURE: "1"
-  SKYRL_POLICY_HOST_RAM_MONITOR: "1"
-  SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL: "60"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-  SKYRL_TIS_SERVED_ID_SPLICE: "1"
   NCCL_DEBUG: WARN
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   NCCL_SOCKET_FAMILY: AF_INET
-  SKYRL_WORKER_NCCL_TIMEOUT_IN_S: "3600"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "3600"
   TORCH_NCCL_ENABLE_MONITORING: "1"
   TORCH_NCCL_DUMP_ON_TIMEOUT: "1"

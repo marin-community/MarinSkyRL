@@ -30,10 +30,7 @@ from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 
-from .constants import (
-    SKYRL_RAY_PG_TIMEOUT_IN_S,
-    SKYRL_PYTHONPATH_EXPORT,
-)
+from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 from .logging_utils import format_exception_text
 from .loss_reduction import SUPPORTED_LOSS_REDUCTIONS
@@ -558,6 +555,40 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    runtime_values = {
+        "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
+        "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,
+        "trainer.policy.host_memory_monitor.interval_seconds": cfg.trainer.policy.host_memory_monitor.interval_seconds,
+        "trainer.model_load_retry.backoff_base_seconds": cfg.trainer.model_load_retry.backoff_base_seconds,
+        "trainer.model_load_retry.backoff_cap_seconds": cfg.trainer.model_load_retry.backoff_cap_seconds,
+        "trainer.progress.min_interval_seconds": cfg.trainer.progress.min_interval_seconds,
+        "trainer.progress.heartbeat_seconds": cfg.trainer.progress.heartbeat_seconds,
+        "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
+        "trainer.progress.count_step": cfg.trainer.progress.count_step,
+        "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
+        "generator.coordinator_executor_workers": cfg.generator.coordinator_executor_workers,
+        "trainer.policy.fsdp_config.expert_loader_chunk_rows": cfg.trainer.policy.fsdp_config.expert_loader_chunk_rows,
+    }
+    for path, value in runtime_values.items():
+        if value <= 0:
+            raise ValueError(f"{path} must be positive; got {value}")
+    if cfg.trainer.model_load_retry.max_retries < 0:
+        raise ValueError(
+            f"trainer.model_load_retry.max_retries must be non-negative; got {cfg.trainer.model_load_retry.max_retries}"
+        )
+    if cfg.trainer.algorithm.tis_lcs_alert_threshold < 0:
+        raise ValueError(
+            "trainer.algorithm.tis_lcs_alert_threshold must be non-negative; "
+            f"got {cfg.trainer.algorithm.tis_lcs_alert_threshold}"
+        )
+    if cfg.trainer.progress.mode not in {"auto", "tqdm", "logging"}:
+        raise ValueError(f"trainer.progress.mode must be one of auto, tqdm, logging; got {cfg.trainer.progress.mode!r}")
+    if cfg.generator.r3_transport not in {"by_value", "resident", "decentral"}:
+        raise ValueError(
+            f"generator.r3_transport must be one of by_value, resident, decentral; got {cfg.generator.r3_transport!r}"
+        )
+    if cfg.generator.gdn_backend not in {"torch", "flashqla"}:
+        raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
@@ -1215,7 +1246,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
     # Resolve the actual collective deadline last so the debug preset's heartbeat
     # cannot exceed a shorter explicitly configured process-group timeout.
-    env_vars.update(worker_nccl_environment(base_environment=env_vars))
+    env_vars.update(
+        worker_nccl_environment(
+            base_environment=env_vars,
+            collective_timeout_seconds=int(cfg.trainer.distributed.worker_collective_timeout_seconds),
+        )
+    )
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
@@ -1278,7 +1314,10 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
-    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
+    if not peer_access_supported(
+        max_num_gpus_per_node=max_num_gpus_per_node,
+        placement_group_timeout_seconds=int(cfg.trainer.distributed.placement_group_timeout_seconds),
+    ):
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
@@ -1361,12 +1400,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # the trace for a diagnostic run, set NCCL_DEBUG=INFO (+ NCCL_DEBUG_SUBSYS) in
     # the config's extra_env -- the passthrough loop above forwards both.)
     env_vars.setdefault("NCCL_DEBUG", "WARN")
-
-    if SKYRL_PYTHONPATH_EXPORT:
-        # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # not recommended since it can cause unexpected conflicts with UV packages, but keeping for backwards compatibility
-        logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
-        env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
     return env_vars
 
@@ -1550,7 +1583,10 @@ def run_p2p_access_check():
     return True
 
 
-def peer_access_supported(max_num_gpus_per_node: int):
+def peer_access_supported(
+    max_num_gpus_per_node: int,
+    placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+):
     # whatever the max num gpus per node is, we can check p2p access if there are at least 2 GPUs
     # if max is 1, p2p access is not supported
     if max_num_gpus_per_node <= 1:
@@ -1560,7 +1596,7 @@ def peer_access_supported(max_num_gpus_per_node: int):
         # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
         ray.init()
         pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        get_ray_pg_ready_with_timeout(pg, timeout=placement_group_timeout_seconds)
         result = ray.get(
             ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
                 run_p2p_access_check

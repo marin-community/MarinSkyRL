@@ -1,6 +1,5 @@
 """Utility functions for weight extraction."""
 
-import os
 from collections import defaultdict
 from typing import Any, Callable, Dict, Iterator, List
 import torch
@@ -10,12 +9,6 @@ from skyrl_train.weight_sync import WeightChunk
 import logging
 
 logger = logging.getLogger(__name__)
-
-# vLLM fuses certain layers (gate+up → gate_up_proj, q+k+v → qkv_proj).
-# When SKYRL_FUSE_WEIGHTS=1, we fuse policy weights before syncing so shapes
-# match the inference engine.  This is required for FP8 quantized engines
-# but safe to enable for BF16 too (vLLM always uses fused layers).
-_FUSE_WEIGHTS = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
 
 # Mapping: fused_name_suffix -> list of source suffixes (in concat order)
 _FUSE_RULES = {
@@ -29,14 +22,16 @@ def _maybe_fuse_module_weights(
     module_tensors: List[torch.Tensor],
     module_shapes: List[List[int]],
     module_dtypes: List[str],
+    *,
+    fuse_weights: bool,
 ) -> tuple:
     """Fuse separate proj weights into vLLM's packed format.
 
     For example, gate_proj.weight + up_proj.weight → gate_up_proj.weight
-    Only active when SKYRL_FUSE_WEIGHTS=1.
+    Only active when ``fuse_weights`` is true.
     Returns (names, tensors, shapes, dtypes) with fused entries replacing originals.
     """
-    if not _FUSE_WEIGHTS:
+    if not fuse_weights:
         return module_names, module_tensors, module_shapes, module_dtypes
 
     # Index tensors by their short name (e.g. "gate_proj.weight")
@@ -99,6 +94,7 @@ def yield_module_grouped_chunks(
     gather_tensor_fn: Callable[[Any], torch.Tensor],
     get_shape_fn: Callable[[str, Any, torch.Tensor], List[int]],
     batch_size_threshold_gb: float = 0.0,
+    fuse_weights: bool = False,
 ) -> Iterator[WeightChunk]:
     """Yield WeightChunk objects grouped by module.
 
@@ -109,7 +105,7 @@ def yield_module_grouped_chunks(
     from the parameter name. For example:
     "model.layers.0.self_attn.q_proj.weight" -> "model.layers.0.self_attn"
 
-    When SKYRL_FUSE_WEIGHTS=1, fuses gate_proj+up_proj→gate_up_proj and
+    When ``fuse_weights`` is true, fuses gate_proj+up_proj→gate_up_proj and
     q_proj+k_proj+v_proj→qkv_proj to match vLLM's packed module format.
     This enables FP8 quantized inference with weight sync.
 
@@ -123,8 +119,8 @@ def yield_module_grouped_chunks(
     Yields:
         WeightChunk objects containing all parameters for each module (or batched modules if threshold set)
     """
-    if _FUSE_WEIGHTS:
-        logger.info("SKYRL_FUSE_WEIGHTS=1: will fuse gate/up and q/k/v weights for vLLM packed format")
+    if fuse_weights:
+        logger.info("Fused weight transfer enabled: packing gate/up and q/k/v weights for vLLM")
 
     # Group parameters by module for FlashRL
     # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
@@ -170,7 +166,7 @@ def yield_module_grouped_chunks(
 
         # Fuse weights if enabled (gate+up → gate_up_proj, q+k+v → qkv_proj)
         module_names, module_tensors, module_shapes, module_dtypes = _maybe_fuse_module_weights(
-            module_names, module_tensors, module_shapes, module_dtypes
+            module_names, module_tensors, module_shapes, module_dtypes, fuse_weights=fuse_weights
         )
         module_size = sum(t.nbytes for t in module_tensors)
 

@@ -326,6 +326,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         moe_router_replay: bool = False,
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
+        tis_splice: bool = True,
+        tis_lcs_alert_threshold: float = 0.005,
     ):
         """
         Args:
@@ -340,8 +342,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             rollout_logprobs_required: Whether the selected policy objective consumes
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
             tito_full: ``trainer.algorithm.tito_full`` — explicit full-TITO override.
-                None = auto (default to ``rollout_logprobs_required``); True/False = force. The env var
-                ``SKYRL_TITO_FULL`` still wins over both. Default None.
+                None = auto (default to ``rollout_logprobs_required``); True/False = force.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
@@ -392,10 +393,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self.tokenizer = tokenizer
         self.model_name = trajectory_runner_cfg.model_name
         self._moe_router_replay = moe_router_replay
-        # Full-TITO rollout assembly resolution inputs (see _tito_full_enabled):
-        # env SKYRL_TITO_FULL wins; else explicit tito_full; else follow logprob consumption.
+        # Full-TITO follows the explicit setting when present, otherwise logprob consumption.
         self._rollout_logprobs_required = rollout_logprobs_required
         self._tito_full = tito_full
+        self._tis_splice = tis_splice
+        self._tis_lcs_alert_threshold = tis_lcs_alert_threshold
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
@@ -1215,11 +1217,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 batch_align.merge(output.alignment_stats)
                 any_align = True
         if any_align:
-            align_metrics = batch_align.as_metrics(prefix=TIS_METRIC_PREFIX)
+            align_metrics = batch_align.as_metrics(
+                prefix=TIS_METRIC_PREFIX, lcs_alert_threshold=self._tis_lcs_alert_threshold
+            )
             rollout_metrics.update(align_metrics)
             if batch_align.n_lcs_messages > 0 or batch_align.n_failed_messages > 0:
                 # Metered LCS defensive guard: escalate to ERROR when the alert metric
-                # trips (lcs_fallback_fraction over SKYRL_TIS_LCS_ALERT_THRESHOLD),
+                # trips (lcs_fallback_fraction over the configured threshold),
                 # else WARNING. Under full TITO this should never fire.
                 alert = align_metrics.get(TIS_LCS_FALLBACK_ALERT_METRIC, 0.0) >= 1.0
                 log_fn = logger.error if alert else logger.warning
@@ -1232,8 +1236,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     f"(of {batch_align.n_messages} assistant messages). "
                     f"Non-zero LCS/failure means serving↔training tokenizer divergence"
                     + (
-                        f" ABOVE the {os.environ.get('SKYRL_TIS_LCS_ALERT_THRESHOLD', '0.005')} "
-                        f"alert threshold — investigate before trusting TIS."
+                        f" ABOVE the {self._tis_lcs_alert_threshold} alert threshold — investigate before trusting TIS."
                         if alert
                         else "."
                     )
@@ -1976,8 +1979,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # with assistant_logprobs. Enables the exact (no re-tokenization guess) TIS path.
         assistant_token_ids = extract_token_ids_from_rollout_details(rollout_details)
         # Full-TITO context ids: Harbor's per-turn prompt_token_ids (the exact served
-        # context stream). Consumed only when SKYRL_TITO_FULL is on (default OFF ⇒ no
-        # behavior change); lets the trainer assemble the MASKED context from exact ids
+        # context stream). When full TITO is selected, this lets the trainer assemble the masked context from exact ids
         # instead of re-tokenizing. None-safe (absent on non-token-id captures).
         assistant_prompt_token_ids = extract_prompt_token_ids_from_rollout_details(rollout_details)
         # Accumulate per-message exact/LCS/fail counts; surfaced as tis/* metrics.
@@ -2022,6 +2024,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 assistant_prompt_token_ids=assistant_prompt_token_ids,
                 rollout_logprobs_required=self._rollout_logprobs_required,
                 tito_full=self._tito_full,
+                tis_splice=self._tis_splice,
             )
         else:
             response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
@@ -2035,6 +2038,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 assistant_prompt_token_ids=assistant_prompt_token_ids,
                 rollout_logprobs_required=self._rollout_logprobs_required,
                 tito_full=self._tito_full,
+                tis_splice=self._tis_splice,
             )
 
         # Determine stop reason

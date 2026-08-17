@@ -17,9 +17,9 @@ notes/skyrl/stage8_scope.md and stage7_scope.md):
    (jobs 596157/596282, finite loss + grad). This mask is REQUIRED for any run
    that mounts the fla overlay; without it the import dies.
 
-2. **FlashQLA fused tilelang kernel (opt-in via SKYRL_GDN_FLASHQLA=1).** The
+2. **FlashQLA fused tilelang kernel (selected by ``generator.gdn_backend``).** The
    pure-torch GDN path is correct but slow (Stage-8: 27x slower at S=8192).
-   When SKYRL_GDN_FLASHQLA=1, after a model is constructed we rebind every
+   When the backend is ``flashqla``, after a model is constructed we rebind every
    `Qwen3NextGatedDeltaNet.chunk_gated_delta_rule` instance attribute to a
    FlashQLA shim that re-wraps FlashQLA's *functional* fwd/bwd tilelang kernels
    in a torch-2.9-correct autograd.Function (contiguity-fixed + grad-arity
@@ -33,10 +33,9 @@ again on each constructed model):
     from skyrl_train.models.qwen3_next_gdn import mask_fla, engage_flashqla
     mask_fla()                 # always — keeps the modeling import from crashing
     ... model = AutoModelForCausalLM.from_pretrained(...) ...
-    engage_flashqla(model)     # no-op unless SKYRL_GDN_FLASHQLA=1
+    engage_flashqla(model, enabled=gdn_backend == "flashqla")
 """
 
-import os
 import logging
 
 logger = logging.getLogger(__name__)
@@ -165,15 +164,15 @@ def _build_flashqla_chunk():
 _FLASHQLA_FN = None
 
 
-def engage_flashqla(model) -> int:
+def engage_flashqla(model, *, enabled: bool = False) -> int:
     """Rebind every Qwen3NextGatedDeltaNet's chunk kernel to FlashQLA.
 
-    No-op (returns 0) unless env SKYRL_GDN_FLASHQLA is truthy. Builds the
+    No-op (returns 0) unless enabled by typed generator config. Builds the
     FlashQLA shim once (cached). Returns the number of GDN modules rebound.
     Safe to call on non-Qwen3-Next models (returns 0).
     """
     global _FLASHQLA_FN
-    if os.environ.get("SKYRL_GDN_FLASHQLA", "0") not in ("1", "true", "True"):
+    if not enabled:
         return 0
     if _FLASHQLA_FN is None:
         _FLASHQLA_FN = _build_flashqla_chunk()

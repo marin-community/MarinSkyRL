@@ -23,7 +23,7 @@ from skyrl_train.utils import (
     get_ray_pg_ready_with_timeout,
     ray_noset_visible_devices,
 )
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
 from skyrl_train.inference_engines.placement import colocated_engine_bundle_layout
 
@@ -258,6 +258,7 @@ def create_ray_wrapped_inference_engines(
     enable_ray_prometheus_stats: bool = False,
     max_logprobs: int = 1,
     mp_backend: bool = False,
+    placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -419,7 +420,7 @@ def create_ray_wrapped_inference_engines(
                 {"GPU": tp_pp_size, "CPU": tp_pp_size} for _ in range(num_inference_engines * data_parallel_size)
             ]
             shared_pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
             # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
             # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
@@ -432,7 +433,7 @@ def create_ray_wrapped_inference_engines(
                 )
                 per_engine_pgs.append(pg)
             for pg in per_engine_pgs:
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                get_ray_pg_ready_with_timeout(pg, timeout=placement_group_timeout_seconds)
             # Keep `shared_pg` defined for downstream indexing; per-engine path
             # re-selects the engine's own PG in the loop.
             shared_pg = per_engine_pgs[0]
@@ -444,7 +445,7 @@ def create_ray_wrapped_inference_engines(
             # behavior that the per-engine STRICT_PACK broke (lever1/swesmith).
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):

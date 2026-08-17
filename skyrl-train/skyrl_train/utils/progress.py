@@ -16,13 +16,13 @@ nothing regresses.
 Gate
 ----
 By default the mode is auto-detected from ``sys.stderr.isatty()`` — this covers
-CoreWeave AND SLURM with no launcher wiring. It can be forced via the
-``SKYRL_PROGRESS_MODE`` env var (``tqdm`` | ``logging`` | ``auto``).
+CoreWeave AND SLURM with no launcher wiring. ``trainer.progress.mode`` can force
+``tqdm``, ``logging``, or ``auto``.
 
 Throttling (bounds log volume — this environment has had disk-brick incidents from
 log floods): a progress line is emitted only when a new percent-bucket is crossed OR
 a heartbeat interval elapses (and a per-emit minimum interval is respected), PLUS a
-guaranteed final 100% line. Tunable via ``SKYRL_PROGRESS_*`` env vars.
+guaranteed final 100% line. The thresholds live under ``trainer.progress``.
 
 API
 ---
@@ -39,7 +39,6 @@ Drop-in for the subset of the tqdm API SkyRL uses:
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
 from typing import Any, Iterable, Optional
@@ -53,23 +52,26 @@ except Exception:  # pragma: no cover - defensive
     _loguru_logger = None
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
+_MODE = "auto"
+_MIN_INTERVAL = 0.5
+_HEARTBEAT = 15.0
+_PCT_STEP = 5.0
+_COUNT_STEP = 1000.0
 
 
-# Throttle knobs (overridable for ops safety).
-_MIN_INTERVAL = _env_float("SKYRL_PROGRESS_MIN_INTERVAL_S", 0.5)  # never emit faster than this
-_HEARTBEAT = _env_float("SKYRL_PROGRESS_HEARTBEAT_S", 15.0)  # emit even without a bucket change
-_PCT_STEP = max(1.0, _env_float("SKYRL_PROGRESS_PCT_STEP", 5.0))  # bucket width, percent
-_COUNT_STEP = max(1.0, _env_float("SKYRL_PROGRESS_COUNT_STEP", 1000.0))  # bucket width when total unknown
+def configure_progress(config) -> None:
+    """Install process-local progress settings from ``trainer.progress``."""
+    global _MODE, _MIN_INTERVAL, _HEARTBEAT, _PCT_STEP, _COUNT_STEP
+    _MODE = str(config.mode)
+    _MIN_INTERVAL = float(config.min_interval_seconds)
+    _HEARTBEAT = float(config.heartbeat_seconds)
+    _PCT_STEP = float(config.percent_step)
+    _COUNT_STEP = float(config.count_step)
 
 
 def _use_real_tqdm() -> bool:
     """Return True iff we should delegate to the real tqdm (interactive TTY)."""
-    mode = os.environ.get("SKYRL_PROGRESS_MODE", "auto").strip().lower()
+    mode = _MODE
     if mode == "tqdm":
         return True
     if mode == "logging":
@@ -157,7 +159,7 @@ class _LoggingProgress:
         # That silence is exactly what hid the v0d generation-buffer wedge (stuck at
         # 31/64 for ~4h with zero log lines). Emitting "31/64 [Xs]" every _HEARTBEAT
         # keeps a stall visible + greppable (same n, growing elapsed). Env-tunable via
-        # SKYRL_PROGRESS_HEARTBEAT_S.
+        # trainer.progress.heartbeat_seconds.
         if (now - self._last_emit_t) >= _HEARTBEAT:
             return True
         if self.n == self._last_emit_n:

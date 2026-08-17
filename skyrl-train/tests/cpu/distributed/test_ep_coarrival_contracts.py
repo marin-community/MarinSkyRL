@@ -43,12 +43,13 @@ def test_worker_replicates_dispatch_data_across_ep_and_cp_ranks(
     config = OmegaConf.create(
         {
             "trainer": {
+                "distributed": {"worker_collective_timeout_seconds": 1800},
                 "policy": {
                     "fsdp_config": {
                         "context_parallel_size": context_parallel_size,
                         "expert_model_parallel_size": expert_parallel_size,
                     }
-                }
+                },
             }
         }
     )
@@ -124,7 +125,6 @@ async def test_fully_async_step_finishes_policy_drain_before_forward():
 
 @pytest.mark.asyncio
 async def test_worker_drain_runs_cuda_barrier_off_event_loop(monkeypatch):
-    monkeypatch.setenv("SKYRL_WEIGHTSYNC_DRAIN_BARRIER", "1")
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     event_loop_thread = threading.get_ident()
     events = []
@@ -150,7 +150,6 @@ async def test_worker_drain_runs_cuda_barrier_off_event_loop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fsdp_forward_runs_blocking_body_off_event_loop(monkeypatch):
-    monkeypatch.setenv("SKYRL_FORWARD_DISPATCH_FIX", "1")
     event_loop_thread = threading.get_ident()
     body_threads = []
     expected = object()
@@ -165,8 +164,6 @@ async def test_fsdp_forward_runs_blocking_body_off_event_loop(monkeypatch):
 
 
 def test_decentralized_router_replay_training_enters_barrier_before_training(monkeypatch):
-    monkeypatch.setenv("SKYRL_R3_RESIDENT", "1")
-    monkeypatch.setenv("SKYRL_R3_DECENTRAL", "1")
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     events = []
 
@@ -180,6 +177,7 @@ def test_decentralized_router_replay_training_enters_barrier_before_training(mon
     worker = object.__new__(PolicyWorkerBase)
     worker._rank = 0
     worker._world_size = 2
+    worker.cfg = OmegaConf.create({"generator": {"r3_transport": "decentral"}})
     training_input = TrainingInputBatch({"rollout_routed_experts": torch.zeros((1, 1, 1, 1), dtype=torch.int16)})
 
     with pytest.raises(EntryBarrierReached):

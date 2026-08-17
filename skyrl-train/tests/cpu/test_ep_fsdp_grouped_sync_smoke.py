@@ -9,7 +9,7 @@ believed to cause the r2-r9 MoE token-salad — DISPROVEN (the +30-min canary on
 still saladded; CPU ``full_tensor()`` never mis-orders; the EP=8 on-GPU gather was later
 proven bit-exact vs the disk checkpoint). The real cause was the FlashInfer-CUTLASS ``w13``
 gate/up swap not re-applied on the disaggregated RL weight update (fixed in ``2bb70a88`` /
-``SKYRL_W13_RELOAD_BRACKET``). Keep this test — it guards a REAL torch-2.11 strided-gather
+the layerwise-reload bracket). Keep this test — it guards a REAL torch-2.11 strided-gather
 correctness property. See agent_logs/2026-06-27_coreweave_moe_ep_garbage_debug_cycle.md.
 
 Mechanism recap (see ``gather_dtensor_strided_safe`` docstring): the grouped

@@ -1,26 +1,9 @@
 from typing import List, Tuple, Optional, Sequence
-import os
 import numpy as np
 import torch
 from loguru import logger
 from transformers import AutoTokenizer
 from jaxtyping import Float, Integer
-
-
-def _r3_tensor_capture_enabled() -> bool:
-    """Fix B (SKYRL_R3_TENSOR_CAPTURE, default OFF) — is the np.int16 array-carrier
-    path for ``rollout_routed_experts`` armed?
-
-    When OFF (default) the collator's routed_experts branch is BYTE-IDENTICAL to the
-    historical nested-``List[List[List[List[int]]]]`` + ``torch.tensor()`` path. When
-    ON the capture side (``trajectory_runners/trajectory_processing.py``) hands us per-sample ``np.int16``
-    arrays (shipped by Ray out-of-band, zero-copy) and we collate by array
-    ``stack``/pad instead of a GIL-held ``torch.tensor(list-of-1.5e9-ints)``. The
-    resulting ``[B, resp_len, L, K]`` int16 tensor is bit-for-bit identical either
-    way — only the CONTAINER TYPE of the ids on the wire changes. Mirrors the
-    existing ``SKYRL_R3_RESIDENT`` / ``SKYRL_R3_DECENTRAL`` env-flag discipline.
-    """
-    return os.environ.get("SKYRL_R3_TENSOR_CAPTURE", "0") == "1"
 
 
 def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optional[torch.dtype]:
@@ -56,7 +39,7 @@ def _collate_routed_experts_from_arrays(
     max_output_len: int,
     num_experts: Optional[int],
 ) -> "torch.Tensor":
-    """Fix B collator (SKYRL_R3_TENSOR_CAPTURE=1) — build the
+    """Build the
     ``[B, resp_len, L, K]`` int16 routed-experts transport tensor from per-sample
     ``np.int16`` arrays by array stack + sentinel-0 right-pad, BYTE-IDENTICALLY to
     the nested-list ``torch.tensor(padded_re, dtype=long).to(int16)`` branch, but
@@ -72,28 +55,29 @@ def _collate_routed_experts_from_arrays(
     # Normalize every sample to a 3-D [n, l, k] int16 array and learn the widest
     # [L, K] (matches the nested-list "scan ALL samples for the WIDEST real row").
     L, K = 1, 1
-    sample_arrs: List["np.ndarray"] = []
+    sample_arrs: List[List["np.ndarray"]] = []
     for sample_re in routed_experts:
-        arr = np.asarray(sample_re)
-        if arr.size == 0:
-            arr = np.zeros((0, 1, 1), dtype=np.int16)
-        elif arr.ndim == 2:
-            # Degenerate per-token rows collapsed to [n, x] — treat each as [x, 1].
-            arr = arr.reshape(arr.shape[0], arr.shape[1], 1)
-        elif arr.ndim != 3:
-            arr = arr.reshape(arr.shape[0], -1, 1) if arr.ndim >= 1 else np.zeros((0, 1, 1), dtype=np.int16)
-        L = max(L, arr.shape[1])
-        K = max(K, arr.shape[2])
-        sample_arrs.append(arr)
+        rows = []
+        for row in sample_re:
+            arr = np.asarray(row, dtype=np.int16)
+            if arr.size == 0:
+                arr = np.zeros((1, 1), dtype=np.int16)
+            elif arr.ndim == 1:
+                arr = arr.reshape(arr.shape[0], 1)
+            elif arr.ndim != 2:
+                arr = arr.reshape(-1, 1)
+            L = max(L, arr.shape[0])
+            K = max(K, arr.shape[1])
+            rows.append(arr)
+        sample_arrs.append(rows)
 
     B = len(sample_arrs)
     # Preallocated sentinel-0 canvas == the nested-list branch's per-sample
     # sentinel_row right-pad. Slice-assign each sample's real rows in.
     out = np.zeros((B, max_output_len, L, K), dtype=np.int16)
-    for b, arr in enumerate(sample_arrs):
-        n = min(arr.shape[0], max_output_len)
-        if n > 0:
-            out[b, :n, : arr.shape[1], : arr.shape[2]] = arr[:n].astype(np.int16, copy=False)
+    for b, rows in enumerate(sample_arrs):
+        for token_index, arr in enumerate(rows[:max_output_len]):
+            out[b, token_index, : arr.shape[0], : arr.shape[1]] = arr
 
     routed_experts_tensor = torch.from_numpy(out)  # int16 [B, max_output_len, L, K]
 
@@ -302,109 +286,12 @@ def convert_prompts_responses_to_batch_tensors(
     # rows are sentinel [L, K] (all zeros). 4-D is accepted by TensorBatch since
     # _check_consistency only validates dim-0.
     routed_experts_tensor = None
-    if routed_experts and _r3_tensor_capture_enabled():
-        # Fix B array-carrier path (SKYRL_R3_TENSOR_CAPTURE=1): the ids arrive as
+    if routed_experts:
+        # Routed expert ids arrive as
         # per-sample np.int16 arrays (Ray-shipped out-of-band, GIL-released), so we
-        # collate by np.stack + slice-assign pad → torch.from_numpy, NOT the GIL-held
-        # element-walk of torch.tensor(nested-1.5e9-int-list). The produced
-        # [B, resp_len, L, K] int16 tensor is BYTE-IDENTICAL to the nested-list
-        # branch below (same ids, same sentinel-0 right-pad, same deterministic
-        # dtype narrow) — only how we GET there changes.
+        # collate by slice assignment into a dense NumPy canvas, avoiding the
+        # GIL-held element walk of torch.tensor over nested Python integers.
         routed_experts_tensor = _collate_routed_experts_from_arrays(routed_experts, action_mask.size(1), num_experts)
-    elif routed_experts:
-        max_output_len = action_mask.size(1)
-        # Infer the true [L, K] per-token row shape by scanning ALL samples for the
-        # WIDEST real row, not just routed_experts[0][0]. Samples/rows that lack the
-        # full routing (cross-sample sentinels emitted as a degenerate [1, 1], or
-        # preempted/quant paths) would otherwise leave the L axis ragged ([48, K] vs
-        # [1, 1]) and crash the dense torch.tensor() collation with
-        # "expected sequence of length 1 at dim 2 (got 48)". We then NORMALIZE every
-        # row to [L, K] so the tensorize is shape-uniform regardless of upstream raggedness.
-        L, K = 1, 1
-        for sample_re in routed_experts:
-            for row in sample_re:
-                if isinstance(row, (list, tuple)) and len(row) > L:
-                    L = len(row)
-                    inner = row[0] if L > 0 else None
-                    K = len(inner) if isinstance(inner, (list, tuple)) and len(inner) > K else K
-        sentinel_row = [[0] * K for _ in range(L)]
-
-        def _normalize_row(row):
-            # Coerce a per-token routed-experts row to exactly [L, K].
-            if not isinstance(row, (list, tuple)) or len(row) == 0:
-                return [list(layer) for layer in sentinel_row]
-            out = []
-            for layer in row[:L]:
-                if isinstance(layer, (list, tuple)):
-                    layer = list(layer[:K]) + [0] * (K - len(layer))
-                else:
-                    layer = [int(layer)] + [0] * (K - 1)
-                out.append(layer)
-            # pad missing layers
-            for _ in range(L - len(out)):
-                out.append([0] * K)
-            return out
-
-        # Fast path: rows already uniform [L, K] (the production MoE path) skip
-        # per-row normalization entirely so the byte-identical batch is preserved.
-        def _row_is_canonical(row):
-            return (
-                isinstance(row, (list, tuple))
-                and len(row) == L
-                and all(isinstance(l, (list, tuple)) and len(l) == K for l in row)
-            )
-
-        padded_re = []
-        for sample_re in routed_experts:
-            sample_re = list(sample_re)
-            normalized = [r if _row_is_canonical(r) else _normalize_row(r) for r in sample_re]
-            pad_n = max_output_len - len(normalized)
-            if pad_n > 0:
-                normalized = normalized + [sentinel_row for _ in range(pad_n)]
-            elif pad_n < 0:
-                normalized = normalized[:max_output_len]
-            padded_re.append(normalized)
-        # Width-minimize the expert-id tensor (the R3 by-value forward-arg spill
-        # fix, part 1). This tensor is [B, response_len, L, K] (48*8=384 ids/token
-        # at Qwen3-Coder-30B-A3B) and at 131k it is multiple GB at int64 — the bulk
-        # that, shipped by-value through every per-forward Ray task arg, spilled the
-        # object store and wedged the 32-rank forward. Expert ids are small
-        # non-negative ints, so pick the NARROWEST integer dtype that can hold ANY
-        # valid id for this model. The choice is keyed on the model's num_experts
-        # (max possible id = num_experts - 1), NOT the per-batch observed max, so it
-        # is DETERMINISTIC across every rank and batch: a data-dependent pick lets
-        # two batches whose observed max straddles a dtype boundary (e.g. Qwen3-Next
-        # 512 experts: one batch max=200 -> uint8, another max=300 -> int16) diverge,
-        # which size-mismatches a later cross-rank collective on this tensor -> NCCL
-        # hang. Qwen3-Coder (128 experts) -> uint8 (max id 127 <= 255, identical to
-        # the earlier per-batch pick); Qwen3-Next (512) -> int16 (deterministic). The
-        # sentinel id (0) and every real id fit by construction. The training-side
-        # consumer upcasts back to int64 (`model_wrapper._build_router_replay_targets`:
-        # `.to(dtype=torch.long)`), so this is downstream-transparent — a pure
-        # transport-size optimization. No torch.uint16 storage support across the
-        # saved/pinned/transport path, so int16 (not uint16) is the mid tier.
-        routed_experts_tensor = torch.tensor(padded_re, dtype=torch.long)
-        _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
-        if _re_dtype is None:
-            # Fallback: num_experts unknown (non-MoE / unresolved config). Preserve
-            # the ORIGINAL per-batch-max behavior so those cases are unaffected, but
-            # warn once — this branch is NON-DETERMINISTIC across ranks/batches and
-            # must not be hit on a real MoE-RL run.
-            _max_expert_id = int(routed_experts_tensor.max().item()) if routed_experts_tensor.numel() else 0
-            if _max_expert_id <= torch.iinfo(torch.uint8).max:
-                _re_dtype = torch.uint8
-            elif _max_expert_id <= torch.iinfo(torch.int16).max:
-                _re_dtype = torch.int16
-            else:
-                _re_dtype = torch.int64
-            logger.warning(
-                "convert_prompts_responses_to_batch_tensors: num_experts is None; "
-                "using the NON-DETERMINISTIC per-batch-max dtype pick for "
-                "rollout_routed_experts (chose {}). This is safe for non-MoE / "
-                "unknown-config cases but must NOT be hit on a MoE-RL run — thread "
-                "the model's num_experts through to make the dtype rank-invariant.".format(_re_dtype)
-            )
-        routed_experts_tensor = routed_experts_tensor.to(_re_dtype)
 
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
     # shaping channel and span tags on the response axis exactly like rewards /

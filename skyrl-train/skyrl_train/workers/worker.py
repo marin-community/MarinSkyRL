@@ -23,7 +23,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.config.query_bias import GrugQueryBiasUpdateMode, resolve_grug_query_bias_update_mode
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.utils.io import io
 from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
 from skyrl_train.utils.policy_math import masked_mean
@@ -174,7 +174,9 @@ class DistributedTorchRayActor:
         # Device-pinned NCCL PG init via the shared helper — pins set_device(LOCAL_RANK) and
         # passes device_id so ProcessGroupNCCL never guesses the device (fixes the cw-rno2a
         # unmasked-CVD collective deadlock; see init_worker_process_group_with_device).
-        init_worker_process_group_with_device(timeout_seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+        init_worker_process_group_with_device(
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed
@@ -579,16 +581,14 @@ class Worker(DistributedTorchRayActor):
         so EVERY peer's loop is provably drained-to-idle before the sync forward arrives —
         robust to BOTH M1 (loop busy) and M2 (coroutine not unwound).
 
-        Gated behind SKYRL_WEIGHTSYNC_DRAIN_BARRIER (default ON). Symmetric on every rank
-        (cannot itself strand), changes no tensor values (correctness/R3-replay neutral),
-        strict no-op for single-rank / uninitialized runs.
+        Symmetric on every rank (cannot itself strand), changes no tensor values
+        (correctness/R3-replay neutral), and is a strict no-op for single-rank or
+        uninitialized runs.
         """
         # UNGATED per-rank marker so we can SEE the drain fire on every rank (mirrors
         # WORKER_FORWARD_ENTER). Pre-fix only rank 0 reached the forward; post-fix all
         # FSDP shard ranks (0/8/16/24 ...) must log this immediately before that step.
         logger.info(f"WORKER_DRAIN_BARRIER rank={self._rank}")
-        if os.environ.get("SKYRL_WEIGHTSYNC_DRAIN_BARRIER", "1") != "1":
-            return
         if self._world_size > 1 and torch.distributed.is_initialized():
             # Yield to the event loop so any lingering weight-sync coroutine task is
             # fully retired and the loop is idle before we issue the collective.
@@ -693,7 +693,14 @@ class PPORayActorGroup:
                     bundles[i][resources_name] = self._num_resources_per_node
 
             pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            get_ray_pg_ready_with_timeout(
+                pg,
+                timeout=int(
+                    self.cfg.trainer.distributed.get(
+                        "placement_group_timeout_seconds", DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
+                    )
+                ),
+            )
         if pg:
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,
@@ -790,6 +797,18 @@ class PPORayActorGroup:
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
 
+    def _dispatch(self, dispatch_class, method_name, *args, **kwargs):
+        if dispatch_class is DispatchRegistry.get("mesh"):
+            return dispatch_class.dispatch(
+                self.actor_infos,
+                method_name,
+                *args,
+                **kwargs,
+                r3_transport=str(self.cfg.generator.r3_transport),
+                dispatch_put_timeout_seconds=float(self.cfg.generator.r3_dispatch_put_timeout_seconds),
+            )
+        return dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
+
     def async_init_model(
         self,
         *args,
@@ -851,7 +870,7 @@ class PPORayActorGroup:
         args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
 
         # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
+        object_refs = self._dispatch(dispatch_class, method_name, *args, **kwargs)
         # Collect results from all the actors
         ret = dispatch_class.sync_collect(self.actor_infos, object_refs)
         return ret
@@ -873,7 +892,7 @@ class PPORayActorGroup:
         args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
 
         # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
+        object_refs = self._dispatch(dispatch_class, method_name, *args, **kwargs)
         return object_refs
 
     async def async_run_method(
@@ -895,7 +914,7 @@ class PPORayActorGroup:
         args, kwargs = dispatch_class.validate_dispatch_args(*args, **kwargs)
 
         # Dispatch the method call
-        object_refs = dispatch_class.dispatch(self.actor_infos, method_name, *args, **kwargs)
+        object_refs = self._dispatch(dispatch_class, method_name, *args, **kwargs)
         return await dispatch_class.async_collect(self.actor_infos, object_refs)
 
     def kill_actors(self, no_restart: bool = True) -> None:
@@ -977,9 +996,7 @@ class PolicyWorkerBase(Worker):
         # relocation) so the non-decentral / 8B (no `rollout_routed_experts`) path is
         # byte-identical; does NOT raise the 600 s unshard timeout (operator rejected that).
         _r3_decentral_stagger = (
-            os.environ.get("SKYRL_R3_RESIDENT", "1") == "1"
-            and os.environ.get("SKYRL_R3_DECENTRAL", "1") == "1"
-            and "rollout_routed_experts" in train_data.keys()
+            self.cfg.generator.r3_transport == "decentral" and "rollout_routed_experts" in train_data.keys()
         )
         if _r3_decentral_stagger and self._world_size > 1 and torch.distributed.is_initialized():
             # UNGATED per-rank marker: on the next 80B run all `mesh_fsdp` members must log this

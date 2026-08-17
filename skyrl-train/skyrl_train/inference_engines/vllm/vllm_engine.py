@@ -326,16 +326,14 @@ class WorkerWrap:
         )
 
     @staticmethod
-    def _apply_fp8_weight_loader_patches():
+    def _apply_fp8_weight_loader_patches(*, fuse_weights: bool = False):
         """Patch Fp8LinearMethod.process_weights_after_loading to preserve weight_loader.
 
         Following verl's approach: after FP8 processing creates new Parameter objects,
         copy custom attributes (weight_loader, output_dim, input_dim, subclass_type)
         from the original specialized parameter so weight sync can reload weights.
         """
-        import os
-
-        if os.environ.get("SKYRL_FUSE_WEIGHTS", "0") != "1":
+        if not fuse_weights:
             return
 
         try:
@@ -453,7 +451,7 @@ class WorkerWrap:
         Materializes + runs ``process_weights_after_loading`` over the WHOLE weight
         set exactly once -> re-applies the FlashInfer-CUTLASS ``swap_w13_to_w31`` the
         per-chunk ``model.load_weights`` skips. Must be called after every chunk's
-        ``load_weights`` (and after ``end_weight_update``'s flush, SKYRL_FUSE path).
+        ``load_weights`` (and after ``end_weight_update``'s fused flush).
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError("skyrl_begin_weight_reload must be called before skyrl_finish_weight_reload.")
@@ -471,7 +469,7 @@ class WorkerWrap:
     def begin_weight_update(self) -> None:
         """Start accumulating weights for batched load_weights call.
 
-        When SKYRL_FUSE_WEIGHTS=1, weights are accumulated instead of loaded
+        When fused loading is requested, weights are accumulated instead of loaded
         immediately. Call end_weight_update() to flush and apply them all at once
         via model.load_weights(), which handles packed module mapping (qkv_proj, gate_up_proj).
         Weights are stored on CPU to avoid GPU OOM during accumulation.
@@ -657,7 +655,7 @@ class WorkerWrap:
 
         This method is called via collective_rpc from VLLMWeightLoader.
 
-        When SKYRL_FUSE_WEIGHTS=1 and begin_weight_update() was called,
+        When fused loading is requested and begin_weight_update() was called,
         weights are accumulated on CPU instead of loaded immediately.
 
         Args:
@@ -2267,9 +2265,7 @@ class VLLMWeightTransferReceiver:
 
     def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via torch.distributed.broadcast."""
-        import os
-
-        _fuse = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
+        _fuse = bool(request.get("packed", False))
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
             if not _fuse and not self._is_fp32_grug_router_bias(name, dtype):

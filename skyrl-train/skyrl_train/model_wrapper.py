@@ -4,7 +4,6 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
 import contextlib
-import os
 import threading
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
@@ -46,6 +45,9 @@ from packaging.version import Version
 # worker can share it without importing this heavy module. Re-exported under the
 # original private names to keep this module's call sites + any importers stable.
 from skyrl_train.utils.hf_load_retry import (  # noqa: E402
+    DEFAULT_BACKOFF_BASE_SECONDS,
+    DEFAULT_BACKOFF_CAP_SECONDS,
+    DEFAULT_MAX_RETRIES,
     load_pretrained_with_retry as _load_pretrained_with_retry,
 )
 
@@ -327,20 +329,6 @@ def _model_is_gdn_arch(pretrain_or_model) -> bool:
     return False
 
 
-def _gdn_mask_fla_enabled(pretrain_or_model) -> bool:
-    """Resolve whether to force the pure-torch GDN path (mask the broken fla wheel).
-
-    Footgun default (deslop stage 2): ON, AUTO-derived from the model arch. The
-    ``SKYRL_GDN_MASK_FLA`` env var is the override (set ``0`` to force off, ``1`` to
-    force on); UNSET auto-enables ONLY for GDN archs (Qwen3-Next), so it is a strict
-    no-op on dense / full-attention models (which never import fla) — byte-identical
-    to today, where dense configs left it unset and GDN configs set it ``1``."""
-    val = os.environ.get("SKYRL_GDN_MASK_FLA")
-    if val is not None:
-        return val in ("1", "true", "True")
-    return _model_is_gdn_arch(pretrain_or_model)
-
-
 class HFModelWrapper(nn.Module):
     """
     Base class for wrapped HF models in reinforcement learning.
@@ -393,6 +381,8 @@ class HFModelWrapper(nn.Module):
         cp_mesh=None,
         cp_rotate_method: str = "allgather",
         training_strategy: str | None = None,
+        model_load_retry=None,
+        gdn_backend: str = "torch",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -444,10 +434,8 @@ class HFModelWrapper(nn.Module):
             # overlay is mounted, the broken fla-0.5.0 wheel would crash the
             # qwen3_next modeling import — mask fla off BEFORE from_pretrained so
             # transformers uses its pure-torch (or, opt-in, FlashQLA) GDN path.
-            # Footgun default ON, auto-derived from arch (no-op on dense); the
-            # SKYRL_GDN_MASK_FLA env var is the override. Computed ONCE, reused for
-            # the FlashQLA gate below.
-            _gdn_mask = _gdn_mask_fla_enabled(pretrain_or_model)
+            # The architecture determines whether the broken FLA surface is masked.
+            _gdn_mask = _model_is_gdn_arch(pretrain_or_model)
             if _gdn_mask:
                 from skyrl_train.models.qwen3_next_gdn import mask_fla
 
@@ -495,7 +483,7 @@ class HFModelWrapper(nn.Module):
             # IncompleteRead / dropped connection / spurious "no .safetensors"),
             # which previously killed the whole gang. Retries only the transient
             # classes; a genuinely-missing repo/file still surfaces. See
-            # _load_pretrained_with_retry above (SKYRL_HF_LOAD_MAX_RETRIES knob).
+            # _load_pretrained_with_retry above (trainer.model_load_retry).
             self.model = _load_pretrained_with_retry(
                 lambda: model_class.from_pretrained(
                     pretrain_or_model,
@@ -507,6 +495,13 @@ class HFModelWrapper(nn.Module):
                     **rope_scaling_kwargs,
                 ),
                 model_id=pretrain_or_model,
+                max_retries=int(model_load_retry.max_retries) if model_load_retry is not None else DEFAULT_MAX_RETRIES,
+                backoff_base=float(model_load_retry.backoff_base_seconds)
+                if model_load_retry is not None
+                else DEFAULT_BACKOFF_BASE_SECONDS,
+                backoff_cap=float(model_load_retry.backoff_cap_seconds)
+                if model_load_retry is not None
+                else DEFAULT_BACKOFF_CAP_SECONDS,
             )
 
             # Qwen3.5/3.6 multimodal shell -> text CausalLM (tmax-aligned: "load
@@ -520,8 +515,7 @@ class HFModelWrapper(nn.Module):
             # ``self.model.config``), ``count_moe_layers``, and the vLLM
             # weight-sync prefix. We re-point the already-loaded text tower +
             # lm_head into a plain ``Qwen3_5MoeForCausalLM`` (no re-download; the
-            # text weights map 1:1) and drop vision/MTP. Gated on
-            # SKYRL_QWEN3_5_VLM_UNWRAP (default on).
+            # text weights map 1:1) and drop vision/MTP.
             from skyrl_train.models.qwen3_5_vlm import (
                 is_qwen3_5_vlm_shell,
                 unwrap_to_text_causal_lm,
@@ -603,15 +597,15 @@ class HFModelWrapper(nn.Module):
             self.model.config.use_cache = False
 
             # Qwen3-Next: opt-in FlashQLA fused GDN kernel (Stage 8). No-op unless
-            # SKYRL_GDN_FLASHQLA=1 and the fla_tilelang overlay is mounted; rebinds
+            # generator.gdn_backend=flashqla and the fla_tilelang overlay is mounted; rebinds
             # each Qwen3NextGatedDeltaNet.chunk_gated_delta_rule to the fused
             # tilelang kernel. Falls back to pure-torch (warning) if unavailable.
             # Gated on the same resolved GDN-arch decision as mask_fla above
-            # (engage_flashqla is itself a no-op unless SKYRL_GDN_FLASHQLA=1).
+            # (engage_flashqla is itself a no-op unless explicitly enabled).
             if _gdn_mask:
                 from skyrl_train.models.qwen3_next_gdn import engage_flashqla
 
-                engage_flashqla(self.model)
+                engage_flashqla(self.model, enabled=gdn_backend == "flashqla")
         else:
             self.model = pretrain_or_model
 
@@ -838,15 +832,8 @@ class HFModelWrapper(nn.Module):
             # tokens first, pads trailing). The roll is recorded in
             # `cp_left_shifts` and INVERTED on the per-token outputs (Stage 5b)
             # so the returned logprobs/entropy are in the ORIGINAL column order —
-            # byte-identical alignment to the cp=1 path. Gated by
-            # SKYRL_CP_REQUIRE_RIGHT_ALIGN (default "1"); set "0" only if the
-            # caller has independently guaranteed right-alignment and wants to
-            # skip the per-step realignment. cp_size==1 never reaches here (G1).
-            if attention_mask_fwd is not None and os.environ.get("SKYRL_CP_REQUIRE_RIGHT_ALIGN", "1") not in (
-                "0",
-                "false",
-                "False",
-            ):
+            # byte-identical alignment to the cp=1 path. cp_size==1 never reaches here.
+            if attention_mask_fwd is not None:
                 am = attention_mask_fwd.to(torch.bool)
                 _, S = am.shape
                 # `first_real`: index of the FIRST real (mask==1) token per row.

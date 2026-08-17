@@ -37,7 +37,8 @@ def _run_worker_setup_probe() -> None:
 
 def test_ray_worker_setup_prepares_process_before_torch_import() -> None:
     package_root = Path(__file__).parents[3]
-    python_path = os.pathsep.join(filter(None, (str(package_root), os.environ.get("PYTHONPATH"))))
+    repository_root = Path(__file__).parents[4]
+    python_path = os.pathsep.join(filter(None, (str(repository_root), str(package_root), os.environ.get("PYTHONPATH"))))
     result = subprocess.run(
         [sys.executable, __file__],
         check=True,

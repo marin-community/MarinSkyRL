@@ -42,7 +42,6 @@ def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
     assert environment["NCCL_DEBUG"] == "INFO"
     assert environment["NCCL_DEBUG_SUBSYS"] == "INIT,BOOTSTRAP,ENV,NET,GRAPH,TUNING"
     assert environment["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
-    assert environment["SKYRL_POLICY_HOST_RAM_MONITOR"] == "1"
     assert environment["TORCH_CPP_LOG_LEVEL"] == "INFO"
     assert environment["TORCH_NCCL_DESYNC_DEBUG"] == "1"
     assert environment["TORCH_NCCL_ENABLE_TIMING"] == "1"
@@ -65,10 +64,10 @@ def test_distributed_mode_stages_remote_runs_locally(monkeypatch):
     assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/tmp/skyrl-debug/test-run"
 
 
-def test_environment_mode_activates_same_contract_for_launcher(monkeypatch):
-    monkeypatch.setenv(DEBUG_MODE_ENV, "distributed")
+def test_config_mode_uses_launcher_owned_artifact_path(monkeypatch):
     monkeypatch.setenv(DEBUG_ARTIFACT_DIR_ENV, "/tmp/launcher-owned-debug")
     cfg = example_dummy_config()
+    OmegaConf.update(cfg, "trainer.debug_mode", "distributed")
 
     environment = distributed_debug_environment(cfg)
 

@@ -31,7 +31,6 @@ from skyrl_train.distributed.megatron.megatron_utils import print_model_size, br
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 from skyrl_train.models.grug_moe import validate_grug_training_strategy
-from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import (
     GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
@@ -350,7 +349,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # passes device_id so ProcessGroupNCCL never "guesses device ID based on global rank".
         # The guess deadlocks the first collective (weight-init barrier) on unmasked-CVD clusters
         # where every actor sees all GPUs (cw-rno2a); see init_worker_process_group_with_device.
-        init_worker_process_group_with_device(timeout_seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+        init_worker_process_group_with_device(
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
         # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
@@ -609,9 +610,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # DEFER processing and a single finalize re-runs process_weights_after_loading
         # (re-applying swap_w13_to_w31) EXACTLY once. Without it the engine holds checkpoint
         # [gate;up] while the FlashInfer-CUTLASS kernel reads [up;gate]. Swap-inert on
-        # triton/dense backends, so byte-identical there. Gated by env for safety. Rank-0 drives
+        # triton/dense backends, so byte-identical there. Rank 0 drives
         # the engine RPC (same global-rank-0 semantics the broadcast/update loop uses below).
-        _w13_bracket = not self.use_cuda_ipc and os.environ.get("SKYRL_W13_RELOAD_BRACKET", "1") == "1"
+        _w13_bracket = not self.use_cuda_ipc and not bool(self.cfg.generator.fuse_weights)
 
         # Extract weights using the initialized extractor
         if not self.use_cuda_ipc:
@@ -738,7 +739,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         # Device-pinned NCCL PG init via the shared helper (see init_worker_process_group_with_device) —
         # avoids the ProcessGroupNCCL device-guess collective deadlock on unmasked-CVD clusters (cw-rno2a).
-        init_worker_process_group_with_device(timeout_seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+        init_worker_process_group_with_device(
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.ref.megatron_config,

@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional, Protocol
@@ -269,6 +268,7 @@ class RolloutCoordinator:
 
         self._shard_idx = shard_idx
         self._num_coordinators = num_coordinators
+        self._executor_workers = int(cfg.generator.coordinator_executor_workers)
 
         scaled_tb_cfg = _scale_terminal_bench_cfg(terminal_bench_cfg, num_coordinators)
 
@@ -298,6 +298,8 @@ class RolloutCoordinator:
             moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
             rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
+            tis_splice=bool(cfg.trainer.algorithm.tis_splice),
+            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
         configured_timeout = cfg.get("rollout", {}).get("fanout", {}).get("shard_timeout_seconds", None)
@@ -322,10 +324,9 @@ class RolloutCoordinator:
         # ~n_concurrent_trials/num_coordinators trials multiplexed on this one loop, that
         # 32-wide pool serializes the completion preambles and starves the vLLM engines
         # (bursty saturation, ~1/3 TDP — v0i round-3 py-spy). Widen it so all in-flight
-        # completions dispatch concurrently. Tunable via SKYRL_COORDINATOR_EXECUTOR_WORKERS
-        # (default 256). Best-effort: never fail startup on this.
+        # completions dispatch concurrently. Best-effort: never fail startup on this.
         try:
-            workers = int(os.environ.get("SKYRL_COORDINATOR_EXECUTOR_WORKERS", "256"))
+            workers = self._executor_workers
             asyncio.get_running_loop().set_default_executor(
                 ThreadPoolExecutor(max_workers=workers, thread_name_prefix="coord-exec")
             )

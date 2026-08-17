@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-"""Reject new production environment-variable definition sites.
-
-Legacy sites are frozen in ``env_var_legacy_definitions.json``. New variables and
-new write sites must be declared and resolved by ``skyrl_train.env_vars``.
-"""
+"""Enforce explicit ownership for production environment-variable definitions."""
 
 from __future__ import annotations
 
-import argparse
 import ast
-import json
 import re
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BASELINE_PATH = Path(__file__).with_name("env_var_legacy_definitions.json")
+sys.path.insert(0, str(REPO_ROOT))
+
+from cloud.iris.env_vars import ENV_VAR_SPECS  # noqa: E402
+
 MANAGER_PATH = Path("cloud/iris/env_vars.py")
 EXCLUDED_PARTS = {".agents", ".git", ".venv", "__pycache__", "skyrl-agent", "tests"}
 ENV_MAPPING_NAMES = {"env", "env_vars", "environ", "environment", "extra_env", "runtime_env"}
@@ -181,27 +179,30 @@ def definitions() -> Counter[str]:
     return found
 
 
+def contract_errors(current: Counter[str], specs) -> list[str]:
+    specs_by_name = {spec.name: spec for spec in specs}
+    errors = []
+    for definition, count in sorted(current.items()):
+        _, kind, name = definition.rsplit("::", 2)
+        spec = specs_by_name.get(name)
+        if spec is None:
+            errors.append(f"{definition} ({count} occurrences): unregistered name")
+            continue
+        allowed = {writer.value for writer in spec.writers}
+        if kind not in allowed:
+            errors.append(
+                f"{definition} ({count} occurrences): writer kind {kind!r} is not allowed for owner {spec.owner!r}"
+            )
+    return errors
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--write-baseline", action="store_true")
-    args = parser.parse_args()
-    current = definitions()
-    if args.write_baseline:
-        BASELINE_PATH.write_text(json.dumps(dict(sorted(current.items())), indent=2) + "\n")
+    errors = contract_errors(definitions(), ENV_VAR_SPECS)
+    if not errors:
         return 0
-    baseline = Counter(json.loads(BASELINE_PATH.read_text()))
-    additions = current - baseline
-    removals = baseline - current
-    if not additions and not removals:
-        return 0
-    if additions:
-        print("New environment-variable definitions must be owned by cloud.iris.env_vars:")
-        for definition, count in sorted(additions.items()):
-            print(f"  {definition} (new occurrences: {count})")
-    if removals:
-        print("Legacy environment-variable sites were removed; regenerate the shrink-only baseline:")
-        for definition, count in sorted(removals.items()):
-            print(f"  {definition} (removed occurrences: {count})")
+    print("Environment-variable definitions violate cloud.iris.env_vars ownership:")
+    for error in errors:
+        print(f"  {error}")
     return 1
 
 

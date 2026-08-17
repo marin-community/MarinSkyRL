@@ -23,7 +23,6 @@ from skyrl_train.hf_export_schema import (
 from skyrl_train.hf_publisher import HuggingFacePublisher
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
@@ -190,7 +189,9 @@ def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
         strategy="PACK" if per_gpu_bundles else "STRICT_SPREAD",
     )
     try:
-        get_ray_pg_ready_with_timeout(policy_placement, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        get_ray_pg_ready_with_timeout(
+            policy_placement, timeout=int(cfg.trainer.distributed.placement_group_timeout_seconds)
+        )
         actor_group = PPORayActorGroup(
             cfg,
             placement_config.policy_num_nodes,

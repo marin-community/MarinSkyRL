@@ -46,7 +46,6 @@ from cloud.iris.rl_config_translation import (
 from cloud.iris.rl_data import (
     check_rl_environment,
     compute_num_inference_engines,
-    derive_skyrl_export_path,
     resolve_rl_train_data,
 )
 from cloud.iris.storage_policy import hydra_override_value
@@ -454,12 +453,6 @@ class LocalRLRunner:
         )
         os.environ["POLICY_NUM_NODES"] = str(self.config.num_nodes)
 
-        export_path = derive_skyrl_export_path(
-            self.config.experiments_dir,
-            self.config.job_name,
-        )
-        os.environ["SKYRL_EXPORT_PATH"] = export_path
-
         os.environ["VLLM_USE_V1"] = "1"
 
         wandb_dir = os.path.join(self.config.experiments_dir, "wandb")
@@ -469,7 +462,6 @@ class LocalRLRunner:
         print("\nEnvironment configured:")
         print(f"  TENSOR_PARALLEL_SIZE={os.environ['TENSOR_PARALLEL_SIZE']}")
         print(f"  NUM_INFERENCE_ENGINES={os.environ['NUM_INFERENCE_ENGINES']}")
-        print(f"  SKYRL_EXPORT_PATH={export_path}")
         print(f"  WANDB_DIR={wandb_dir}")
 
     def _run_skyrl(self, entrypoint: str, hydra_args: List[str]) -> int:

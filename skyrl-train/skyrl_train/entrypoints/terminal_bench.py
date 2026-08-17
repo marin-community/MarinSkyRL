@@ -22,6 +22,8 @@ class TerminalBenchExp(BasePPOExp):
             moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
             rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
             tito_full=cfg.trainer.algorithm.get("tito_full", None),
+            tis_splice=bool(cfg.trainer.algorithm.tis_splice),
+            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
     def get_train_dataset(self):

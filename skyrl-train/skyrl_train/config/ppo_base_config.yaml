@@ -21,6 +21,20 @@ checkpoint_export:
 
 trainer:
   debug_mode: "off"
+  collective_phase_diagnostics: false
+  distributed:
+    placement_group_timeout_seconds: 180
+    worker_collective_timeout_seconds: 1800
+  model_load_retry:
+    max_retries: 5
+    backoff_base_seconds: 2.0
+    backoff_cap_seconds: 32.0
+  progress:
+    mode: "auto"
+    min_interval_seconds: 0.5
+    heartbeat_seconds: 15.0
+    percent_step: 5.0
+    count_step: 1000
   placement:
     colocate_all: true
     colocate_policy_ref: true
@@ -33,9 +47,13 @@ trainer:
     policy_strict_spread_pg: false
     policy_per_gpu_bundles: false
     policy_force_cvd_mask: false
+    enable_numa_affinity: false
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
+    host_memory_monitor:
+      enabled: true
+      interval_seconds: 60
     grug_query_bias_update_mode: "frozen"
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -74,6 +92,7 @@ trainer:
       deepep_num_sms: 20
       deepep_token_chunk_size: null
       context_parallel_size: 1
+      expert_loader_chunk_rows: 8
       cp_style: "ring_sdpa"
       cp_rotate_method: "allgather"
     sequence_parallel_size: 1
@@ -172,6 +191,8 @@ trainer:
     tis_imp_ratio_cap: -1.0
     use_tis: false
     tito_full: null
+    tis_splice: true
+    tis_lcs_alert_threshold: 0.005
     enable_token_reward_channel: false
     think_token_weight: 1.0
     think_token_cost: 0.0
@@ -282,6 +303,10 @@ generator:
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
   fuse_weights: false
+  r3_transport: "decentral"
+  r3_dispatch_put_timeout_seconds: 600
+  coordinator_executor_workers: 256
+  gdn_backend: "torch"
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
   inference_engine_pipeline_parallel_size: 1

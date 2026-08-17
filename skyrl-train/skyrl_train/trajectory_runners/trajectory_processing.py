@@ -1,4 +1,3 @@
-import os
 import torch
 from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
@@ -43,25 +42,6 @@ _NUM_TRIALS_METRIC = "generate/num_trials"
 _NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
 _NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
 _NUM_MASKED_TRAJECTORIES_METRIC = "generate/num_masked_trajectories"
-
-
-def _lcs_alert_threshold() -> float:
-    """Threshold on ``tis/lcs_fallback_fraction`` above which the LCS guard ALERTS.
-
-    Under full TITO the served-id splice / prompt-id assembly make tier-1
-    exact-by-id alignment exact by construction, so ``align_logprobs_with_lcs`` is
-    a DEFENSIVE GUARD that should fire ~0×. When it fires more than this fraction it
-    signals a real serving↔training tokenizer/template regression and must surface
-    loudly (metric ``tis/lcs_fallback_alert`` = 1.0 + an error log). Override via
-    ``SKYRL_TIS_LCS_ALERT_THRESHOLD`` (default 0.005 = 0.5% of training tokens).
-    """
-    val = os.environ.get("SKYRL_TIS_LCS_ALERT_THRESHOLD")
-    if val is not None:
-        try:
-            return float(val)
-        except ValueError:
-            pass
-    return 0.005
 
 
 class AlignmentStats:
@@ -111,7 +91,7 @@ class AlignmentStats:
         self.n_lcs_messages += other.n_lcs_messages
         self.n_failed_messages += other.n_failed_messages
 
-    def as_metrics(self, prefix: str = "tis/") -> Dict[str, float]:
+    def as_metrics(self, prefix: str = "tis/", *, lcs_alert_threshold: float = 0.005) -> Dict[str, float]:
         n = max(self.n_tokens, 1)
         lcs_frac = self.n_lcs / n
         names = {
@@ -136,7 +116,7 @@ class AlignmentStats:
             # the alert threshold of training tokens (a serving↔training tokenizer/
             # template regression). ALWAYS emitted (keyset-stable across ranks — the
             # NumelIn=1 all_reduce-deadlock trap). Under full TITO this should stay 0.
-            names["lcs_fallback_alert"]: 1.0 if lcs_frac > _lcs_alert_threshold() else 0.0,
+            names["lcs_fallback_alert"]: 1.0 if lcs_frac > lcs_alert_threshold else 0.0,
         }
 
 
@@ -541,7 +521,10 @@ def _outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
 
 
 def concatenate_trajectory_batches(
-    trajectory_batches: List[TrajectoryBatch], *, require_rollout_logprobs: bool = False
+    trajectory_batches: List[TrajectoryBatch],
+    *,
+    require_rollout_logprobs: bool = False,
+    tis_lcs_alert_threshold: float = 0.005,
 ) -> TrajectoryBatch:
     """
     Concatenate multiple trajectory batches into one batch.
@@ -708,7 +691,7 @@ def concatenate_trajectory_batches(
         rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
         # Recompute the metered LCS-guard alert from the recombined fraction so it
         # stays keyset-stable and consistent with the per-trajectory emission.
-        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = 1.0 if (sum_lcs / denom) > _lcs_alert_threshold() else 0.0
+        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
 
     rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
 
@@ -1244,45 +1227,21 @@ def extract_routed_experts_from_rollout_details(
         return None
 
     logger.debug(f"Extracted routed_experts from rollout_details: {len(routed_experts)} turns")
-    if _r3_tensor_capture_enabled():
-        # Fix B capture repackage: tensorize each turn's [gen_len, L, K] to a
-        # contiguous np.int16 array HERE, at the earliest capture point, so every
-        # downstream Ray crossing ships it out-of-band (no nested-list msgpack
-        # deserialize). Empty/degenerate turns pass through untouched so the
-        # sentinel-shape learning downstream is unchanged.
-        out = []
-        for turn_re in routed_experts:
-            if turn_re is not None and len(turn_re) > 0:
-                out.append(_as_routed_experts_array(turn_re))
-            else:
-                out.append(turn_re)
-        return out
-    return routed_experts
+    out = []
+    for turn_re in routed_experts:
+        if turn_re is not None and len(turn_re) > 0:
+            out.append(_as_routed_experts_array(turn_re))
+        else:
+            out.append(turn_re)
+    return out
 
 
 SENTINEL_EXPERT_ID = 0  # sentinel for unmatched / non-generated token rows in routed_experts
 
 # Fix B: int16 array dtype for the routed-experts carrier (512 experts -> max id 511
 # needs 9 bits, so uint8 overflows; int16 is near-minimal and matches the collator's
-# deterministic narrow). See _r3_tensor_capture_enabled.
+# deterministic narrow).
 _ROUTED_EXPERTS_ARRAY_DTYPE = np.int16
-
-
-def _r3_tensor_capture_enabled() -> bool:
-    """Fix B (SKYRL_R3_TENSOR_CAPTURE, default OFF) — carry ``routed_experts`` as
-    ``np.int16`` arrays end-to-end instead of nested ``List[List[List[List[int]]]]``.
-
-    When OFF (default) every routed-experts code path below is BYTE-IDENTICAL to the
-    historical nested-list behavior (the array branches are never taken). When ON,
-    each per-token ``[L, K]`` row is an ``np.int16`` array from the capture boundary
-    onward, so Ray ships it OUT-OF-BAND (zero-copy, GIL-releasing memcpy) — killing
-    the driver-side ``_deserialize_msgpack_data`` GIL-hold that both slows the 80B
-    forward and root-causes the #6936 gs1 watchdog stall. The collated
-    ``[B, resp_len, L, K]`` int16 tensor is bit-for-bit identical either way (only the
-    CONTAINER TYPE of the ids on the wire changes). Mirrors the existing
-    ``SKYRL_R3_RESIDENT`` / ``SKYRL_R3_DECENTRAL`` env-flag discipline.
-    """
-    return os.environ.get("SKYRL_R3_TENSOR_CAPTURE", "0") == "1"
 
 
 def _as_routed_experts_array(turn_re: Any) -> "np.ndarray":
@@ -1326,7 +1285,7 @@ def align_routed_experts_with_lcs(
         List of ``[L, K]`` rows aligned to ``retokenized_ids`` (one per token).
         Unmatched tokens get a sentinel ``[L, K]`` row.
     """
-    if _r3_tensor_capture_enabled() and isinstance(vllm_routed_experts, np.ndarray):
+    if isinstance(vllm_routed_experts, np.ndarray):
         # Fix B array path: identical LCS/positional alignment + sentinel placement,
         # expressed as np.int16 array-row slice-assign instead of list-row copy. The
         # returned [n_retok, L, K] array's .tolist() is bit-identical to the list
@@ -1465,29 +1424,6 @@ def _re_sentinel_rows(n: int, sentinel_row: Optional[List[List[int]]]) -> List[L
     return [list(sentinel_row) for _ in range(n)]
 
 
-def _tis_splice_enabled() -> bool:
-    """Unified TIS served-id splice policy (deslop stage 2). Default ON.
-
-    Uses vLLM's raw served ``completion_token_ids`` as the generated (loss_mask==1)
-    region so TIS tier-1 exact-by-id alignment holds, closing the residual think-block
-    re-tokenization divergence. The GENERALIZED served-id splice supersedes the
-    qwen3_5 empty-think special case; this single gate arms both blocks (which are
-    mutually exclusive by construction — empty-think fires only when the template
-    renders the empty ``<think></think>``, the generalized path handles the rest).
-
-    Byte-identical for turns whose guards don't match (non-thinking models: the
-    re-tokenized turn already equals the served stream, so splicing is a no-op). The
-    canonical knob is ``SKYRL_TIS_SPLICE``; the two legacy names
-    (``SKYRL_TIS_SERVED_ID_SPLICE``, ``SKYRL_QWEN3_5_TIS_SPLICE``) are still honored as
-    overrides. Set any of them to a falsey value to disable.
-    """
-    for var in ("SKYRL_TIS_SPLICE", "SKYRL_TIS_SERVED_ID_SPLICE", "SKYRL_QWEN3_5_TIS_SPLICE"):
-        val = os.environ.get(var)
-        if val is not None:
-            return val in ("1", "true", "True")
-    return True
-
-
 def _tito_full_enabled(rollout_logprobs_required: bool = False, tito_full: Optional[bool] = None) -> bool:
     """Full token-in-token-out assembly policy for behavior-logprob consumers.
 
@@ -1502,20 +1438,15 @@ def _tito_full_enabled(rollout_logprobs_required: bool = False, tito_full: Optio
     residual BPE-boundary re-tokenization drift of prior assistant turns fed back as
     text (Stage 0 catalogue).
 
-    Resolution precedence (params come from the caller's cfg — no globals):
-      1. ``SKYRL_TITO_FULL`` env var — if set, WINS (quick override / testing escape
-         hatch). Truthy ⇒ ON, else OFF.
-      2. else the EXPLICIT config flag ``tito_full`` (``trainer.algorithm.tito_full``)
+    Resolution precedence:
+      1. the EXPLICIT config flag ``tito_full`` (``trainer.algorithm.tito_full``)
          — if not ``None`` (an explicit True/False), use it verbatim.
-      3. else (auto / unset) — default to whether the selected objective consumes
+      2. else (auto / unset) — default to whether the selected objective consumes
          behavior-policy logprobs.
 
-    With no behavior-logprob consumer and no explicit flag/env, every existing
+    With no behavior-logprob consumer and no explicit flag, every existing
     assembly path remains untouched.
     """
-    val = os.environ.get("SKYRL_TITO_FULL")
-    if val is not None:
-        return val in ("1", "true", "True")
     if tito_full is not None:
         return bool(tito_full)
     return rollout_logprobs_required
@@ -1707,6 +1638,7 @@ def get_response_ids_and_loss_mask_from_messages(
     assistant_prompt_token_ids=None,
     rollout_logprobs_required: bool = False,
     tito_full: Optional[bool] = None,
+    tis_splice: bool = True,
 ):
     """
     Get the response ids and loss mask from a list of messages.
@@ -1763,8 +1695,8 @@ def get_response_ids_and_loss_mask_from_messages(
         tokenizer, custom_chat_template=custom_chat_template, chat_template_kwargs=chat_template_kwargs
     )
 
-    # --- Full TITO assembly (default OFF, additive superset of the splice) ---
-    # When SKYRL_TITO_FULL is on AND Harbor's per-turn prompt_token_ids are present,
+    # --- Full TITO assembly (additive superset of the splice) ---
+    # When full TITO is selected and Harbor's per-turn prompt_token_ids are present,
     # assemble the WHOLE trajectory from the exact served id streams (no re-tok of the
     # multi-turn context), making the MASKED context byte-exact to what the engine
     # served. Fails loud → None → falls through to the re-tok + splice path below
@@ -1794,7 +1726,7 @@ def get_response_ids_and_loss_mask_from_messages(
             return _rids, _lmask, _rlp, _rre
         else:
             logger.warning(
-                "SKYRL_TITO_FULL on but prompt-id assembly declined (missing/inconsistent "
+                "Full TITO prompt-id assembly declined (missing/inconsistent "
                 "served id streams or prefix invariant failed); falling back to re-tok + splice."
             )
 
@@ -1808,10 +1740,10 @@ def get_response_ids_and_loss_mask_from_messages(
     # re-tokenizing. ``qwen3_5_assistant_prefix_ids`` is the real
     # ``<|im_start|>assistant\n`` prefix (BEFORE the injected empty think block).
     # Returns None for every non-qwen3_5 tokenizer → byte-identical old behavior,
-    # consistent with the aa11512 qwen3_5 arch-gating. Gated by the unified
-    # ``_tis_splice_enabled()`` policy (default ON; disable via SKYRL_TIS_SPLICE=0).
+    # consistent with the aa11512 qwen3_5 arch-gating. Controlled by the configured
+    # served-id splice policy.
     qwen3_5_assistant_prefix_ids = None
-    if assistant_token_ids is not None and _tis_splice_enabled():
+    if assistant_token_ids is not None and tis_splice:
         qwen3_5_assistant_prefix_ids = detect_qwen3_5_empty_think_prefix(tokenizer, generation_prompt_ids)
 
     # 1. Initalize the things to accumulate
@@ -1925,18 +1857,14 @@ def get_response_ids_and_loss_mask_from_messages(
             # (generated_token_ids == served ids) and trains on the exact sampled
             # tokens. Trailing template tokens (e.g. ``\n`` after the served EOS) are
             # recovered from the last EOS of the re-tokenized turn, mirroring the
-            # empty-think splice. Fully gated behind SKYRL_TIS_SERVED_ID_SPLICE=1;
-            # with the env unset this entire block is skipped → BYTE-IDENTICAL to the
-            # prior behavior (the empty-think splice above is independently gated by
-            # SKYRL_QWEN3_5_TIS_SPLICE and is untouched here).
-            # NOTE (deslop stage 2): gated by the unified _tis_splice_enabled()
-            # policy (default ON — this generalized served-id path SUPERSEDES the
-            # empty-think special case above). Byte-identical for turns whose guards
+            # empty-think splice. The configured ``tis_splice`` policy controls both
+            # paths. This generalized served-id path supersedes the empty-think
+            # special case above. Byte-identical for turns whose guards
             # (prefix_matches + served ids present) don't match, i.e. the common
             # non-thinking case where re-tok already equals the served stream.
             if (
                 not spliced
-                and _tis_splice_enabled()
+                and tis_splice
                 and prefix_matches
                 and assistant_token_ids is not None
                 and assistant_msg_idx < len(assistant_token_ids)

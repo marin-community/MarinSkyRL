@@ -57,6 +57,25 @@ STAGE2_TRAINER_FIELDS = {
 DEBUG_MODE_TRAINER_FIELDS = {
     "debug_mode": "off",
 }
+RUNTIME_CONFIG_TRAINER_FIELDS = {
+    "collective_phase_diagnostics": False,
+    "distributed": {
+        "placement_group_timeout_seconds": 180,
+        "worker_collective_timeout_seconds": 1800,
+    },
+    "model_load_retry": {
+        "max_retries": 5,
+        "backoff_base_seconds": 2.0,
+        "backoff_cap_seconds": 32.0,
+    },
+    "progress": {
+        "mode": "auto",
+        "min_interval_seconds": 0.5,
+        "heartbeat_seconds": 15.0,
+        "percent_step": 5.0,
+        "count_step": 1000,
+    },
+}
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
 }
@@ -66,6 +85,10 @@ ADDITIVE_GENERATOR_FIELDS = {
     "inference_engine_decode_context_parallel_size": 1,
     "vllm_attention_backend": None,
     "engine_init_timeout_seconds": 1800,
+    "r3_transport": "decentral",
+    "r3_dispatch_put_timeout_seconds": 600,
+    "coordinator_executor_workers": 256,
+    "gdn_backend": "torch",
 }
 ADDITIVE_TEACHER_FIELDS = {
     "engine_init_timeout_seconds": "${generator.engine_init_timeout_seconds}",
@@ -121,7 +144,7 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         optimizer = container["trainer"][role]["optimizer_config"]
         for k in ADDITIVE_TRAINING_OPTIMIZER_FIELDS:
             optimizer.pop(k, None)
-    for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS):
+    for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS, *RUNTIME_CONFIG_TRAINER_FIELDS):
         container["trainer"].pop(k, None)
     for k in ADDITIVE_ALGORITHM_FIELDS:
         container["trainer"]["algorithm"].pop(k, None)
@@ -131,6 +154,11 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["teacher"].pop(k, None)
     for k in ADDITIVE_POLICY_MODEL_FIELDS:
         container["trainer"]["policy"]["model"].pop(k, None)
+    container["trainer"]["placement"].pop("enable_numa_affinity", None)
+    container["trainer"]["policy"].pop("host_memory_monitor", None)
+    container["trainer"]["policy"]["fsdp_config"].pop("expert_loader_chunk_rows", None)
+    container["trainer"]["algorithm"].pop("tis_splice", None)
+    container["trainer"]["algorithm"].pop("tis_lcs_alert_threshold", None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the no-CP baseline"
 
@@ -144,15 +172,18 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
         cur_fsdp = current["trainer"][role]["fsdp_config"]
         gold_fsdp = golden["trainer"][role]["fsdp_config"]
         added = set(cur_fsdp) - set(gold_fsdp)
-        assert added == expected_added, (
-            f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(expected_added)}"
+        role_expected_added = expected_added | ({"expert_loader_chunk_rows"} if role == "policy" else set())
+        assert added == role_expected_added, (
+            f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(role_expected_added)}"
         )
         # And the added keys carry the disabled defaults.
         for k, v in {**CP_FIELDS, **MOE_FSDP_FIELDS}.items():
             assert cur_fsdp[k] == v
+        if role == "policy":
+            assert cur_fsdp["expert_loader_chunk_rows"] == 8
     # Only explicitly additive top-level trainer keys may differ from the golden.
     added_trainer = set(current["trainer"]) - set(golden["trainer"])
-    expected_trainer_fields = STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS
+    expected_trainer_fields = STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS | RUNTIME_CONFIG_TRAINER_FIELDS
     assert added_trainer == set(expected_trainer_fields), (
         f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(expected_trainer_fields)}"
     )

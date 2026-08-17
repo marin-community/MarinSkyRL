@@ -9,7 +9,7 @@ Detection strategy (in priority order):
 2. Pure sysfs + numactl (no nvidia-smi needed — enumerates NVIDIA PCI devices, reads
    their NUMA nodes, then maps GPU NUMA nodes to CPU NUMA nodes via distance matrix)
 
-Activation: Set SKYRL_ENABLE_NUMA_AFFINITY=1 in the environment to install CPU and memory
+Activation: Set ``trainer.placement.enable_numa_affinity=true`` to install CPU and memory
 affinity. Topology queries and placement diagnostics remain available when it is unset.
 """
 

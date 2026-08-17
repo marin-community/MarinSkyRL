@@ -272,7 +272,13 @@ def _refresh_ep_gradient_scaling(model: torch.nn.Module) -> tuple[int, int]:
 # Fsdp2 load full state dict from `accelerate`
 # Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
 # NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
-def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None, ep_enabled=False):
+def fsdp2_load_full_state_dict(
+    model: torch.nn.Module,
+    full_sd: dict,
+    cpu_offload=None,
+    ep_enabled=False,
+    expert_loader_chunk_rows: int = 8,
+):
     """
     Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
     parameters from rank 0 to all other ranks. This function modifies the model in-place.
@@ -318,8 +324,6 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         # inference (which reads the MODEL's local params) is symmetric across ranks. full_sd holds
         # the real weights on rank 0 and is empty ({}) on the other ranks, which is exactly what
         # broadcast_from_rank0=True expects.
-        import os as _os
-
         # ------------------------------------------------------------------
         # STREAMED EP full-state-dict load (80B GPU-0 init OOM fix).
         #
@@ -356,10 +360,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
 
         # Per-broadcast row budget along dim 0. The grouped-expert params are the
         # only ones large enough to matter; a small budget caps the GPU transient.
-        # Override via env for finer granularity if even one chunk is too large.
-        max_rows = int(_os.environ.get("SKYRL_EP_LOADER_CHUNK_ROWS", "8"))
-        if max_rows < 1:
-            max_rows = 1
+        max_rows = expert_loader_chunk_rows
 
         def _extract_local_shard(full_cpu, dtensor_meta):
             """Reproduce distribute_tensor's LOCAL scatter result for this rank.
@@ -1093,7 +1094,7 @@ def gather_dtensor_strided_safe(dt) -> torch.Tensor:
 
     ⚠ NOT THE r2–r9 SALAD FIX (RESOLVED 2026-06-27). The CoreWeave MoE token-salad was the
     FlashInfer-CUTLASS ``w13`` gate/up swap not being re-applied on the disaggregated RL
-    weight update — fixed in ``2bb70a88`` (the ``SKYRL_W13_RELOAD_BRACKET`` layerwise-reload
+    weight update — fixed in ``2bb70a88`` (the layerwise-reload
     bracket; see ``vllm_engine.py`` ``skyrl_begin/finish_weight_reload`` and
     ``fsdp_worker.broadcast_to_inference_engines``). This gather function is NOT that cause:
     committed (ac44079) as the *suspected* fix, but the +30-min canary (CoreWeave r8, fix LIVE

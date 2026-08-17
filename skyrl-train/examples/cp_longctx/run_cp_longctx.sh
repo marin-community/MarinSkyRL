@@ -40,9 +40,7 @@ set -x
 #    LEFT-pads prompts, so the CP forward DETECTS the per-row leading-pad count
 #    and ROLLS each row left (left-flush) before the CP context, then INVERTS the
 #    roll on the per-token logprobs/entropy afterward — the returned tensors are
-#    byte-identical column order to cp=1. Gated by SKYRL_CP_REQUIRE_RIGHT_ALIGN=1
-#    (default); set 0 only if alignment is already guaranteed upstream (skips the
-#    per-step realign). cp_size==1 is an unconditional no-op.
+#    byte-identical column order to cp=1. cp_size==1 is an unconditional no-op.
 #  * Production precision is bf16 (fp16 was diagnostic only). Only the
 #    "allgather" rotate method works on torch 2.11 (all_to_all → NotImplemented).
 # ===========================================================================

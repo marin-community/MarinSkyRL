@@ -1,7 +1,7 @@
 """RL job data-staging + topology helpers for the Iris launcher.
 
 - ``resolve_rl_train_data``: extract HF task datasets to local task directories.
-- ``compute_num_inference_engines`` / ``derive_skyrl_export_path``: placement math.
+- ``compute_num_inference_engines``: placement math.
 - ``check_rl_environment``: locate an optional standalone RL venv.
 """
 
@@ -205,15 +205,6 @@ def compute_num_inference_engines(
     """Compute the number of vLLM inference engines: total GPUs // tensor_parallel_size."""
     total_gpus = num_nodes * gpus_per_node
     return total_gpus // tensor_parallel_size
-
-
-def derive_skyrl_export_path(
-    experiments_dir: str,
-    run_name: str,
-    exports_subdir: str = "exports",
-) -> str:
-    """Derive the SkyRL export path (``<experiments_dir>/<run_name>/<exports_subdir>``)."""
-    return str(Path(experiments_dir) / run_name / exports_subdir)
 
 
 def check_rl_environment() -> Optional[Path]:

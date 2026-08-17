@@ -38,11 +38,13 @@ class DeepSpeedWeightExtractor(WeightExtractor):
         zero_stage: int,
         group_by_module: bool = False,
         batch_size_threshold_gb: float = 0.0,
+        fuse_weights: bool = False,
     ):
         self.model = model
         self.zero_stage = zero_stage
         self.group_by_module = group_by_module
         self.batch_size_threshold_gb = batch_size_threshold_gb
+        self.fuse_weights = fuse_weights
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from DeepSpeed model.
@@ -74,6 +76,7 @@ class DeepSpeedWeightExtractor(WeightExtractor):
                 gather_tensor_fn=self._gather_tensor,
                 get_shape_fn=lambda name, param, tensor: list(param.shape if self.zero_stage != 3 else param.ds_shape),
                 batch_size_threshold_gb=self.batch_size_threshold_gb,
+                fuse_weights=self.fuse_weights,
             ):
                 yield chunk
 
@@ -121,6 +124,8 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             rope_scaling=get_rope_scaling_config(self.cfg.trainer),
             rope_theta=get_rope_theta_config(self.cfg.trainer),
             training_strategy=self.cfg.trainer.strategy,
+            model_load_retry=self.cfg.trainer.model_load_retry,
+            gdn_backend=str(self.cfg.generator.gdn_backend),
         )
 
     def init_model(self, model_id_or_path, num_training_steps: int = None):
@@ -175,6 +180,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             batch_size_threshold_gb=(
                 self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
             ),
+            fuse_weights=bool(self.cfg.generator.fuse_weights),
         )
 
         self._model_update_group_name = None
@@ -410,6 +416,8 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             rope_scaling=get_rope_scaling_config(self.cfg.trainer),
             rope_theta=get_rope_theta_config(self.cfg.trainer),
             training_strategy=self.cfg.trainer.strategy,
+            model_load_retry=self.cfg.trainer.model_load_retry,
+            gdn_backend=str(self.cfg.generator.gdn_backend),
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

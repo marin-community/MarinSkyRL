@@ -90,6 +90,7 @@ class FSDPStrategy(DistributedStrategy):
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
         num_training_steps: Optional[int] = None,
+        collective_timeout_seconds: int | None = None,
     ) -> None:
         super().__init__()
         assert fsdp_strategy in ("fsdp", "fsdp2"), f"Unsupported FSDP strategy: {fsdp_strategy}"
@@ -102,6 +103,7 @@ class FSDPStrategy(DistributedStrategy):
         self.seed = seed
         self.device_mesh = None
         self.total_training_steps: Optional[int] = num_training_steps
+        self.collective_timeout_seconds = get_worker_nccl_timeout_s(collective_timeout_seconds)
         self.optimizer_name = (
             optimizer_config.get("optimizer", _DEFAULT_OPTIMIZER_NAME)
             if optimizer_config is not None
@@ -166,7 +168,7 @@ class FSDPStrategy(DistributedStrategy):
         self.device_mesh = create_device_mesh(
             world_size=self.world_size,
             fsdp_size=self.fsdp_config.fsdp_size,
-            timeout_seconds=get_worker_nccl_timeout_s(),
+            timeout_seconds=self.collective_timeout_seconds,
             ep_size=ep_size,
             cp_size=cp_size,
         )
@@ -490,7 +492,13 @@ class FSDPStrategy(DistributedStrategy):
 
                 _gc.collect()
                 torch.cuda.empty_cache()
-            fsdp2_load_full_state_dict(module, full_state, cpu_offload, ep_enabled=ep_on)
+            fsdp2_load_full_state_dict(
+                module,
+                full_state,
+                cpu_offload,
+                ep_enabled=ep_on,
+                expert_loader_chunk_rows=int(self.fsdp_config.expert_loader_chunk_rows),
+            )
             fsdp_module = module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")

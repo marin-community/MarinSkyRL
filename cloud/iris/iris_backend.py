@@ -610,6 +610,8 @@ def resolve_node_resource_requests(
 
 RL_PYTHON = "python"
 SKYRL_HOME = MARINSKYRL_TASK_ROOT
+DEFAULT_GDN_BACKEND = "torch"
+FLASHQLA_GDN_BACKEND = "flashqla"
 # Iris synchronizes the small controller bundle to /app. The setup phase checks
 # out the same immutable MarinSkyRL commit and installs its locked training
 # environment under /app/marinskyrl.
@@ -954,6 +956,17 @@ def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
     trainer = config.get("trainer") if isinstance(config, dict) else None
     strategy = trainer.get("strategy") if isinstance(trainer, dict) else None
     return strategy.strip().lower() if isinstance(strategy, str) and strategy.strip() else None
+
+
+def _effective_gdn_backend(args: argparse.Namespace) -> str:
+    """Resolve the GDN backend with the same precedence as the training command."""
+    if args.gdn_flashqla is not None:
+        return FLASHQLA_GDN_BACKEND if args.gdn_flashqla == "on" else DEFAULT_GDN_BACKEND
+    override = hydra_override_value(getattr(args, "skyrl_override", None) or [], "generator.gdn_backend")
+    if override is not None:
+        return override.lower()
+    raw_config = _load_rl_config_yaml(args.rl_config)
+    return str((raw_config.get("generator") or {}).get("gdn_backend", DEFAULT_GDN_BACKEND)).lower()
 
 
 def _sanitize_job_name_component(value: str) -> str:
@@ -1680,27 +1693,16 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="W&B entity for this run. Overrides the launch host's ambient WANDB_ENTITY.",
     )
-    # ----------------------------------------------------------------------- #
-    # MarinSkyRL runtime-knob flags (deslop stage 3). Each promotes a live      #
-    # SKYRL_* runtime env var to a first-class CLI flag. ALL default to None    #
-    # ("unspecified") so an all-defaults launch injects NOTHING and the pod env #
-    # is byte-identical to today (the SkyRL code's own default applies). A       #
-    # config's `extra_env:` block is overlaid on TOP of these, so extra_env      #
-    # still wins: precedence is  env/extra_env > flag > code-default.            #
-    # ----------------------------------------------------------------------- #
-    g = parser.add_argument_group("MarinSkyRL runtime knobs (SKYRL_* -> flags)")
+    # Convenience aliases for common Hydra settings. The resolved training config,
+    # rather than task-global environment state, remains authoritative.
+    g = parser.add_argument_group("MarinSkyRL runtime configuration")
     g.add_argument(
         "--r3-transport",
         "--r3_transport",
         dest="r3_transport",
         choices=["by_value", "resident", "decentral"],
         default=None,
-        help="R3 (rollout routed-experts) transport for MoE async RL. 'decentral' "
-        "(code default) routes the captured routed-experts generation-worker -> "
-        "node-resident consumer (head holds ~0 R3); 'resident' de-dups to 1 "
-        "copy/dp-group on the driver head plasma; 'by_value' is the old per-actor "
-        "by-value dispatch. Folds SKYRL_R3_RESIDENT + SKYRL_R3_DECENTRAL. "
-        "Default: unset = code default (decentral).",
+        help="R3 transport. Overrides generator.r3_transport.",
     )
     g.add_argument(
         "--r3-put-timeout-s",
@@ -1708,8 +1710,7 @@ def create_parser() -> argparse.ArgumentParser:
         dest="r3_put_timeout_s",
         type=int,
         default=None,
-        help="Bounded ray.put() timeout (s) for an R3 dp-chunk dispatch "
-        "(SKYRL_DISPATCH_PUT_TIMEOUT_S). Default: unset = 600.",
+        help="Bounded ray.put() timeout. Overrides generator.r3_dispatch_put_timeout_seconds.",
     )
     g.add_argument(
         "--nccl-timeout-s",
@@ -1717,88 +1718,42 @@ def create_parser() -> argparse.ArgumentParser:
         dest="nccl_timeout_s",
         type=int,
         default=None,
-        help="Worker NCCL-collective timeout in seconds (SKYRL_WORKER_NCCL_TIMEOUT_IN_S). Default: unset = 1800.",
+        help="Worker collective timeout. Overrides trainer.distributed.worker_collective_timeout_seconds.",
     )
     g.add_argument(
         "--host-ram-monitor",
         dest="host_ram_monitor",
         choices=["on", "off"],
         default=None,
-        help="Policy-worker host-RAM/cgroup-mem monitor thread (SKYRL_POLICY_HOST_RAM_MONITOR). Default: unset = on.",
+        help="Policy-worker host-memory monitor. Overrides trainer.policy.host_memory_monitor.enabled.",
     )
     g.add_argument(
         "--host-ram-monitor-interval-s",
         dest="host_ram_monitor_interval_s",
         type=int,
         default=None,
-        help="Host-RAM monitor sample interval, s (SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL). Default: unset = 60.",
+        help="Host-memory monitor interval. Overrides trainer.policy.host_memory_monitor.interval_seconds.",
     )
     g.add_argument(
         "--tis-splice",
         dest="tis_splice",
         choices=["on", "off"],
         default=None,
-        help="TIS served-id splice policy (SKYRL_TIS_SPLICE) — use vLLM's raw served "
-        "token ids as the generated region for exact-by-id TIS alignment. "
-        "Default: unset = on (no-op on non-thinking turns).",
-    )
-    g.add_argument(
-        "--gdn-mask-fla",
-        dest="gdn_mask_fla",
-        choices=["auto", "on", "off"],
-        default=None,
-        help="Force the pure-torch GatedDeltaNet path / mask the broken fla wheel "
-        "(SKYRL_GDN_MASK_FLA). 'auto' (and unset) derive it from the model arch "
-        "(on for Qwen3-Next/GDN, off for dense). Default: unset = auto.",
+        help="TIS served-id splice policy. Overrides trainer.algorithm.tis_splice.",
     )
     g.add_argument(
         "--gdn-flashqla",
         dest="gdn_flashqla",
         choices=["on", "off"],
         default=None,
-        help="Opt-in FlashQLA fused GDN tilelang kernel (SKYRL_GDN_FLASHQLA); needs the "
-        "fla_tilelang overlay. Default: unset = off.",
-    )
-    g.add_argument(
-        "--forward-dispatch-fix",
-        dest="forward_dispatch_fix",
-        choices=["on", "off"],
-        default=None,
-        help="MoE async-dispatch forward fix (SKYRL_FORWARD_DISPATCH_FIX), a correctness "
-        "knob. Default: unset = on. Pass off only for an A/B.",
-    )
-    g.add_argument(
-        "--weightsync-drain-barrier",
-        dest="weightsync_drain_barrier",
-        choices=["on", "off"],
-        default=None,
-        help="Post-weight-sync async drain barrier (SKYRL_WEIGHTSYNC_DRAIN_BARRIER), a "
-        "correctness knob. Default: unset = on.",
-    )
-    g.add_argument(
-        "--cp-require-right-align",
-        dest="cp_require_right_align",
-        choices=["on", "off"],
-        default=None,
-        help="Require right-aligned attention mask under context-parallel "
-        "(SKYRL_CP_REQUIRE_RIGHT_ALIGN), a correctness knob. Default: unset = on.",
-    )
-    g.add_argument(
-        "--w13-reload-bracket",
-        dest="w13_reload_bracket",
-        choices=["on", "off"],
-        default=None,
-        help="Bracket the MoE weight-sync with layerwise-reload init/finalize so FusedMoE "
-        "w13 is re-swapped exactly once (SKYRL_W13_RELOAD_BRACKET), a correctness "
-        "knob. Default: unset = on.",
+        help="Select the FlashQLA GDN backend. Overrides generator.gdn_backend.",
     )
     g.add_argument(
         "--ep-loader-chunk-rows",
         dest="ep_loader_chunk_rows",
         type=int,
         default=None,
-        help="Per-broadcast dim-0 row budget for the streamed EP full-state-dict loader "
-        "(SKYRL_EP_LOADER_CHUNK_ROWS). Default: unset = 8.",
+        help="Streamed EP loader row budget. Overrides trainer.policy.fsdp_config.expert_loader_chunk_rows.",
     )
     g.add_argument(
         "--debug-mode",
@@ -1835,47 +1790,29 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_skyrl_flag_env(args: argparse.Namespace) -> dict[str, str]:
-    """Translate the MarinSkyRL runtime-knob CLI flags into SKYRL_* env vars for the
-    pod. Only flags that were explicitly set (non-None) emit an entry, so an
-    all-defaults invocation returns {} and the pod env stays byte-identical to today.
-    The caller overlays the config's ``extra_env:`` on top of this, so a config's
-    explicit value still wins (precedence: env/extra_env > flag > code default)."""
-    env: dict[str, str] = {}
-
-    def _onoff(name: str, value) -> None:
-        if value is not None:
-            env[name] = "1" if value == "on" else "0"
-
-    # R3 transport: fold the nested resident && decentral gating into one choice.
-    if args.r3_transport == "by_value":
-        env["SKYRL_R3_RESIDENT"] = "0"
-    elif args.r3_transport == "resident":
-        env["SKYRL_R3_RESIDENT"] = "1"
-        env["SKYRL_R3_DECENTRAL"] = "0"
-    elif args.r3_transport == "decentral":
-        env["SKYRL_R3_RESIDENT"] = "1"
-        env["SKYRL_R3_DECENTRAL"] = "1"
-    if args.r3_put_timeout_s is not None:
-        env["SKYRL_DISPATCH_PUT_TIMEOUT_S"] = str(args.r3_put_timeout_s)
-    if args.nccl_timeout_s is not None:
-        env["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = str(args.nccl_timeout_s)
-    _onoff("SKYRL_POLICY_HOST_RAM_MONITOR", args.host_ram_monitor)
-    if args.host_ram_monitor_interval_s is not None:
-        env["SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL"] = str(args.host_ram_monitor_interval_s)
-    _onoff("SKYRL_TIS_SPLICE", args.tis_splice)
-    # GDN mask: 'auto' (like unset) leaves the env unset so the code auto-derives.
-    if args.gdn_mask_fla in ("on", "off"):
-        env["SKYRL_GDN_MASK_FLA"] = "1" if args.gdn_mask_fla == "on" else "0"
-    _onoff("SKYRL_GDN_FLASHQLA", args.gdn_flashqla)
-    _onoff("SKYRL_FORWARD_DISPATCH_FIX", args.forward_dispatch_fix)
-    _onoff("SKYRL_WEIGHTSYNC_DRAIN_BARRIER", args.weightsync_drain_barrier)
-    _onoff("SKYRL_CP_REQUIRE_RIGHT_ALIGN", args.cp_require_right_align)
-    _onoff("SKYRL_W13_RELOAD_BRACKET", args.w13_reload_bracket)
-    if args.ep_loader_chunk_rows is not None:
-        env["SKYRL_EP_LOADER_CHUNK_ROWS"] = str(args.ep_loader_chunk_rows)
-    _onoff("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", args.collective_phase_diagnostics)
-    return env
+def build_skyrl_flag_overrides(args: argparse.Namespace) -> list[str]:
+    """Translate convenience flags into canonical Hydra overrides."""
+    values = {
+        "generator.r3_transport": args.r3_transport,
+        "generator.r3_dispatch_put_timeout_seconds": args.r3_put_timeout_s,
+        "trainer.distributed.worker_collective_timeout_seconds": args.nccl_timeout_s,
+        "trainer.policy.host_memory_monitor.enabled": None
+        if args.host_ram_monitor is None
+        else args.host_ram_monitor == "on",
+        "trainer.policy.host_memory_monitor.interval_seconds": args.host_ram_monitor_interval_s,
+        "trainer.algorithm.tis_splice": None if args.tis_splice is None else args.tis_splice == "on",
+        "generator.gdn_backend": None
+        if args.gdn_flashqla is None
+        else FLASHQLA_GDN_BACKEND
+        if args.gdn_flashqla == "on"
+        else DEFAULT_GDN_BACKEND,
+        "trainer.policy.fsdp_config.expert_loader_chunk_rows": args.ep_loader_chunk_rows,
+        "trainer.collective_phase_diagnostics": None
+        if args.collective_phase_diagnostics is None
+        else args.collective_phase_diagnostics == "on",
+        "trainer.debug_mode": args.debug_mode,
+    }
+    return [format_hydra_arg(path, value, prefix="++") for path, value in values.items() if value is not None]
 
 
 def build_debug_launch_env(args: argparse.Namespace) -> dict[str, str]:
@@ -1920,6 +1857,12 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
     container_env = (raw.get("container") or {}).get("extra_env") or {}
     for k, v in container_env.items():
         extra.setdefault(k, v)
+    skyrl_controls = sorted(str(key) for key in extra if str(key).startswith("SKYRL_"))
+    if skyrl_controls:
+        raise ValueError(
+            "RL config extra_env may not define MarinSkyRL behavior; use typed Hydra settings instead: "
+            + ", ".join(skyrl_controls)
+        )
     out: dict[str, str] = {}
     for k, v in extra.items():
         if v is None:
@@ -2016,7 +1959,7 @@ def _build_task_shell(
         args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir
     ).shell_preflight()
     # TileLang JIT-cache warm-start shim for GDN/FlashQLA runs only.
-    # SKYRL_GDN_FLASHQLA=1 lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
+    # generator.gdn_backend=flashqla lazily JIT-compiles the FlashQLA GatedDeltaNet TileLang
     # kernels on the first GPU forward into the node-local, ephemeral TileLang cache.
     # This brackets the train command with a per-pod, per-NODE cache sync (the bash
     # runs once per task pod / node, and
@@ -2027,9 +1970,7 @@ def _build_task_shell(
     #   --up   at EXIT (bash EXIT trap; fires on normal completion AND a `set -e`/crash
     #          exit) -> uploads NEWLY-compiled hash-dirs as per-hash objects (race-free
     #          across the ~16 writers — content-addressed, no cache.tgz overwrite).
-    # The shim self-gates on SKYRL_GDN_FLASHQLA and NEVER fails the job (best-effort;
-    # exits 0 even on S3 error). We ALSO branch here on SKYRL_GDN_FLASHQLA so non-GDN
-    # runs keep the BYTE-IDENTICAL `exec <controller>` fast path.
+    # The shim never fails the job (best-effort; exits 0 even on S3 error).
     # TILELANG_CACHE_DIR is exported (defaulting to TileLang's own default) so the shim
     # and the trainer's TileLang agree on the location; a config-set value wins.
     # TILELANG_CACHE_MODEL_PATH lets the shim derive the model component of the key.
@@ -2042,10 +1983,8 @@ def _build_task_shell(
     # teardown + done-marker on preemption) that a plain child would lose. `wait` is
     # interrupted by the trapped signal (rc>128); we re-`wait` to reap the child's
     # real exit code after its forwarded-TERM shutdown.
+    flashqla_enabled = _effective_gdn_backend(args) == FLASHQLA_GDN_BACKEND
     gdn_branch = (
-        f'if [ "${{SKYRL_GDN_FLASHQLA:-0}}" = "1" ] || '
-        f'[ "${{SKYRL_GDN_FLASHQLA:-}}" = "true" ] || '
-        f'[ "${{SKYRL_GDN_FLASHQLA:-}}" = "on" ]; then '
         f'export TILELANG_CACHE_DIR="${{TILELANG_CACHE_DIR:-/root/.tilelang/cache}}"; '
         f"export TILELANG_CACHE_MODEL_PATH={shlex.quote(args.model_path)}; "
         f"{tl_down}; "
@@ -2054,9 +1993,10 @@ def _build_task_shell(
         f"set +e; {ctrl} & _child=$!; "
         f'wait "$_child"; _rc=$?; '
         f'if [ $_rc -gt 128 ]; then wait "$_child" 2>/dev/null; _rc=$?; fi; '
-        f"exit $_rc; "
-        f"else exec {ctrl}; fi"
+        f"exit $_rc"
     )
+    if not flashqla_enabled:
+        gdn_branch = f"exec {ctrl}"
     bash = (
         f"set -e; {spill_preflight}cd {APP_DIR}; "
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
@@ -2142,6 +2082,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.val_data and args.val_data != "[]":
         train_cmd.extend(["--val_data", args.val_data])
     for override in args.skyrl_override or []:
+        train_cmd.extend(["--skyrl_override", override])
+    for override in build_skyrl_flag_overrides(args):
         train_cmd.extend(["--skyrl_override", override])
 
     # Cross-cluster ingress (opencode-RL literal capture): forward the ingress flags to
@@ -2311,13 +2253,10 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
         print(f"[rl-iris] Trajectory: {storage_paths.trajectory_root}", flush=True)
         print(f"[rl-iris] Ray logs:   {storage_paths.ray_log_root}", flush=True)
         print(f"[rl-iris] Ray spill:  {args.ray_spill_backend.value}:{args.ray_spill_dir}", flush=True)
-    # Surface the resolved SKYRL_* runtime-knob flag env here (before the --dry-run
-    # return) so a dry-run confirms e.g. --collective-phase-diagnostics actually resolves.
-    # This is display-only; main() re-derives it (idempotent, pure fn of args) below.
-    _flag_env_preview = build_skyrl_flag_env(args)
-    if _flag_env_preview:
+    flag_overrides = build_skyrl_flag_overrides(args)
+    if flag_overrides:
         print(
-            f"[rl-iris] SKYRL flag env: {', '.join(f'{k}={v}' for k, v in sorted(_flag_env_preview.items()))}",
+            f"[rl-iris] Runtime overrides: {', '.join(flag_overrides)}",
             flush=True,
         )
     print(f"[rl-iris] Rendezvous: {args.rendezvous_dir}", flush=True)
@@ -2373,17 +2312,9 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     # Env: secrets file values + the standard RL/iris-serve signals. iris injects
     # IRIS_TASK_ID / IRIS_NUM_TASKS / IRIS_ADVERTISE_HOST per task automatically.
     env_vars: dict[str, str] = {}
-    # MarinSkyRL runtime-knob flags (deslop stage 3) -> SKYRL_* env vars. Seeded
-    # FIRST (below the config extra_env) so a config's explicit extra_env value still
-    # OVERRIDES a flag; an all-defaults launch contributes {} (byte-identical).
-    flag_env = build_skyrl_flag_env(args)
-    if flag_env:
-        env_vars.update(flag_env)
-        print(f"[rl-iris] SKYRL flag env: {', '.join(f'{k}={v}' for k, v in sorted(flag_env.items()))}", flush=True)
     # Forward the RL config YAML's top-level `extra_env:` block (the Iris analog of
-    # the SLURM container.extra_env exports — see load_config_extra_env). Overlaid
-    # ON TOP of the flag env so an explicit config value wins; the launcher's own
-    # signals (rendezvous/secrets, below) then win over both on any collision.
+    # the SLURM container.extra_env exports — see load_config_extra_env). The
+    # launcher's own signals (rendezvous/secrets, below) win on any collision.
     config_extra_env = load_config_extra_env(args.rl_config)
     if config_extra_env:
         env_vars.update(config_extra_env)
@@ -2398,8 +2329,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     env_vars.update(args.rl_config_launch.task_environment())
     # ── Per-cluster infra-env DEFAULTS (fill-gap belt for cluster-specific footguns) ──────────
     # Some clusters need a specific network/NCCL interface that a cluster-AGNOSTIC RL config
-    # won't (and shouldn't) carry. Fill it in here, keyed on --target-cluster, ONLY if neither
-    # the flag env nor the config's extra_env already set it (lowest precedence — an explicit
+    # won't (and shouldn't) carry. Fill it in here, keyed on --target-cluster, only if the
+    # config's extra_env did not set it (lowest precedence — an explicit
     # value always wins). cw-rno2a: its host_network:true nodes expose IB/IPoIB (ibs*/ibp*) +
     # virtual ifaces, so NCCL AND Ray's raylet/GCS mis-detect the bootstrap interface and the
     # multi-node gang SILENTLY never forms (keep-6 2026-07-19: 6 arms idle-heartbeated 3.4h at

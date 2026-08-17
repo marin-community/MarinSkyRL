@@ -181,6 +181,7 @@ class FSDPWeightExtractor(WeightExtractor):
         _cfg = getattr(model, "config", None)
         self._model_type = getattr(_cfg, "model_type", "") or "" if _cfg is not None else ""
         validate_weight_sync_mode(self._model_type, fuse_weights=fuse_weights)
+        self.fuse_weights = fuse_weights
         self.group_by_module = group_by_module and self._model_type != GRUG_MOE_MODEL_TYPE
         # Qwen3.5/3.6 VLM-shell weight-sync (tmax Stage 2): the RL policy is the
         # unwrapped TEXT tower (``Qwen3_5MoeForCausalLM``, names ``model.*``) but the
@@ -273,6 +274,7 @@ class FSDPWeightExtractor(WeightExtractor):
                 gather_tensor_fn=self._gather_tensor,
                 get_shape_fn=lambda name, param, tensor: list(tensor.shape),
                 batch_size_threshold_gb=self.batch_size_threshold_gb,
+                fuse_weights=self.fuse_weights,
             ):
                 yield chunk
 
@@ -805,6 +807,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 cp_mesh=self.cp_mesh,
                 cp_rotate_method=str(self.cfg.trainer.policy.fsdp_config.get("cp_rotate_method", "allgather")),
                 training_strategy=self.cfg.trainer.strategy,
+                model_load_retry=self.cfg.trainer.model_load_retry,
+                gdn_backend=str(self.cfg.generator.gdn_backend),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -827,6 +831,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
             num_training_steps=num_training_steps,
+            collective_timeout_seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds,
         )
         strategy.setup_distributed()
         self.strategy = strategy
@@ -855,7 +860,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
             ),
             moe_grouped_gemm=bool(self.cfg.trainer.policy.fsdp_config.get("moe_grouped_gemm", False)),
-            fuse_weights=(bool(self.cfg.generator.fuse_weights) or os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"),
+            fuse_weights=bool(self.cfg.generator.fuse_weights),
         )
 
         self._maybe_start_host_ram_monitor()
@@ -881,17 +886,18 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         Gating (low-overhead, best-effort, never raises into init_model):
           * ONE rank per node only (``self._local_rank == 0``) — node mem/cgroup
             is shared across the 8 ranks on a node, so 8x logging would be spam.
-          * env ``SKYRL_POLICY_HOST_RAM_MONITOR`` (default "1"; set "0" to disable).
-          * env ``SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL`` seconds (default 60 —
+          * ``trainer.policy.host_memory_monitor.enabled`` (default true).
+          * ``trainer.policy.host_memory_monitor.interval_seconds`` (default 60 —
             tighter than the fd-monitor's 120s default so the fast GDN-scan peak
             is sampled; <=0 disables).
         """
         try:
-            if int(os.environ.get("SKYRL_POLICY_HOST_RAM_MONITOR", "1")) == 0:
+            monitor = self.cfg.trainer.policy.host_memory_monitor
+            if not bool(monitor.enabled):
                 return
             if getattr(self, "_local_rank", None) != 0:
                 return
-            interval = int(os.environ.get("SKYRL_POLICY_HOST_RAM_MONITOR_INTERVAL", "60"))
+            interval = int(monitor.interval_seconds)
             logger.info(
                 f"[policy-host-ram-monitor] starting on rank={self._rank} "
                 f"host={socket.gethostname()} interval={interval}s"
@@ -959,9 +965,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return
 
         # Extract weights using the initialized extractor
-        import os
-
-        _fuse_weights = os.environ.get("SKYRL_FUSE_WEIGHTS", "0") == "1"
+        _fuse_weights = bool(self.cfg.generator.fuse_weights)
 
         # #1685 fix (FlashInfer-CUTLASS w13 swap skipped on RL update -> MoE token-salad):
         # bracket the WHOLE multi-chunk sync with vLLM's layerwise reload so per-chunk
@@ -969,10 +973,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # process_weights_after_loading (re-applying swap_w13_to_w31) EXACTLY once. PROVEN
         # by the disagg kernel-format diag: without this the engine holds checkpoint
         # [gate;up] while the FlashInfer CUTLASS kernel reads [up;gate]. Inert (swap-wise)
-        # on triton/dense backends, so byte-identical there. Gated by env for safety.
-        _w13_bracket = (
-            not self.use_cuda_ipc and not _fuse_weights and os.environ.get("SKYRL_W13_RELOAD_BRACKET", "1") == "1"
-        )
+        # on triton/dense backends, so byte-identical there.
+        _w13_bracket = not self.use_cuda_ipc and not _fuse_weights
 
         if not self.use_cuda_ipc:
             # Signal engines to start accumulating weights (for FP8 batched quantization)
@@ -1145,9 +1147,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         Ray transparently awaits async actor methods, so the driver's `ray.get(refs)`
         still returns the `TrainingOutputBatch` unchanged -> no driver-side change.
 
-        Gated behind SKYRL_FORWARD_DISPATCH_FIX (default ON). Flag OFF -> the sync body
-        runs INLINE -> byte-identical to the pre-fix forward (still an async method, but
-        no yield / no thread hop, so a single-rank / non-racy run is unaffected).
+        This cooperative scheduling is the required forward path.
         """
         # UNGATED per-rank rendezvous marker: we MUST see this on all 32 ranks on the
         # next run (mirrors WORKER_FORWARD_ENTER, which fires deeper inside the sync
@@ -1165,8 +1165,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         ):
             _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.FORWARD_ENTER)
             try:
-                if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
-                    return self._forward_impl(data)
                 # Yield so this dispatched coroutine is guaranteed a loop turn and is scheduled
                 # even if it arrived while the loop was mid-cycle servicing another coroutine.
                 await asyncio.sleep(0)
@@ -1194,6 +1192,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+            collective_timeout_seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -1263,13 +1262,10 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         Identical mechanism/justification to FSDPPolicyWorkerBase.forward (see its
         docstring): async entry + `await asyncio.sleep(0)` yield + `asyncio.to_thread`
         of the sync body so the dispatched forward task on this Ray async actor cannot
-        be head-of-line-blocked by a concurrently-running coroutine. Inference-only body
-        (no autograd graph). Gated SKYRL_FORWARD_DISPATCH_FIX (default ON); flag OFF ->
-        inline sync body (byte-identical to pre-fix).
+        be head-of-line-blocked by a concurrently-running coroutine. The body is
+        inference-only and builds no autograd graph.
         """
         logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
-        if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
-            return self._forward_impl(data)
         await asyncio.sleep(0)
         return await asyncio.to_thread(self._forward_impl, data)
 
@@ -1288,6 +1284,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+            collective_timeout_seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds,
         )
         strategy.setup_distributed()
         self.strategy = strategy
@@ -1324,6 +1321,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 cp_mesh=self.cp_mesh,
                 cp_rotate_method=str(self.cfg.trainer.ref.fsdp_config.get("cp_rotate_method", "allgather")),
                 training_strategy=self.cfg.trainer.strategy,
+                model_load_retry=self.cfg.trainer.model_load_retry,
+                gdn_backend=str(self.cfg.generator.gdn_backend),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
@@ -1346,12 +1345,9 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         Identical mechanism/justification to FSDPPolicyWorkerBase.forward (see its
         docstring): async entry + `await asyncio.sleep(0)` yield + `asyncio.to_thread`
-        of the sync body. Inference-only body. Gated SKYRL_FORWARD_DISPATCH_FIX
-        (default ON); flag OFF -> inline sync body (byte-identical to pre-fix).
+        of the sync body. The body is inference-only.
         """
         logger.info(f"WORKER_FORWARD_DISPATCH_RDV rank={self._rank}")
-        if os.environ.get("SKYRL_FORWARD_DISPATCH_FIX", "1") != "1":
-            return self._forward_impl(data)
         await asyncio.sleep(0)
         return await asyncio.to_thread(self._forward_impl, data)
 

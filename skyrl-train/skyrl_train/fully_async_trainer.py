@@ -1241,6 +1241,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trajectory_batch = concatenate_trajectory_batches(
             trajectory_batches,
             require_rollout_logprobs=policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type),
+            tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
         assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(trajectory_batch["rollout_metrics"])

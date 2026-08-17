@@ -14,10 +14,8 @@
 # safe to import from BOTH the FSDP model wrapper and the Megatron worker
 # without pulling in heavy deps (flash-attn/peft) or risking a circular import.
 #
-# Tunables (match the repo's os.environ.get style, e.g. SKYRL_GDN_MASK_FLA):
-#   SKYRL_HF_LOAD_MAX_RETRIES   (default 5)  number of retries after attempt 1
-#   SKYRL_HF_LOAD_BACKOFF_BASE  (default 2.0) base seconds for 2**n backoff
-#   SKYRL_HF_LOAD_BACKOFF_CAP   (default 32.0) per-sleep cap in seconds
+# Retry count and backoff live under ``trainer.model_load_retry`` and are passed
+# explicitly by each model-loading backend.
 #
 # Guarded imports: huggingface_hub errors / requests / urllib3 may be absent in
 # some envs; we degrade to whatever is importable rather than hard-failing the
@@ -29,6 +27,9 @@ from typing import Optional, Tuple
 from loguru import logger
 
 _HF_TRANSIENT_EXC: Tuple[type, ...] = (OSError,)  # OSError covers EOFError-ish IO + connection resets
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_BACKOFF_BASE_SECONDS = 2.0
+DEFAULT_BACKOFF_CAP_SECONDS = 32.0
 # Genuine "not there"/auth/gated failures that must NEVER be retried — they are
 # checked FIRST in is_transient_hf_load_error and short-circuit to non-transient
 # even though some subclass HfHubHTTPError (which IS in the transient tuple).
@@ -135,7 +136,14 @@ def is_transient_hf_load_error(exc: BaseException) -> bool:
     return False
 
 
-def load_pretrained_with_retry(load_fn, *, model_id: str):
+def load_pretrained_with_retry(
+    load_fn,
+    *,
+    model_id: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_base: float = DEFAULT_BACKOFF_BASE_SECONDS,
+    backoff_cap: float = DEFAULT_BACKOFF_CAP_SECONDS,
+):
     """Call `load_fn()` (a no-arg HF-load closure — `from_pretrained` or
     `snapshot_download`) with exponential backoff on transient HF
     weight-index/safetensors fetch flakes only.
@@ -145,9 +153,6 @@ def load_pretrained_with_retry(load_fn, *, model_id: str):
     final re-raise of the last exception if every attempt fails. Non-transient
     exceptions (genuine missing repo/file, auth) are re-raised immediately.
     """
-    max_retries = int(os.environ.get("SKYRL_HF_LOAD_MAX_RETRIES", "5"))
-    backoff_base = float(os.environ.get("SKYRL_HF_LOAD_BACKOFF_BASE", "2.0"))
-    backoff_cap = float(os.environ.get("SKYRL_HF_LOAD_BACKOFF_CAP", "32.0"))
     rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
     total_attempts = max_retries + 1  # initial try + retries
 

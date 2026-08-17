@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from skyrl_train.env_vars import NUMA_AFFINITY_ENV
 
 MEMORY_POLICY_BIND = "bind"
-NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 
 
 _MEMORY_POLICY_NAMES = {

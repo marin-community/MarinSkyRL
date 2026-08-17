@@ -941,6 +941,7 @@ def test_ppo_train_batch_calculations():
                 },
             },
             "generator": {
+                "r3_transport": "decentral",
                 "sampling_params": {
                     "temperature": 1.0,
                 },
@@ -1115,7 +1116,7 @@ def test_grug_ppo_train_does_not_retain_consumed_microbatches():
                     "loss_reduction": "token_mean",
                 },
             },
-            "generator": {"sampling_params": {"temperature": 1.0}},
+            "generator": {"r3_transport": "decentral", "sampling_params": {"temperature": 1.0}},
         }
     )
     worker, batch = _grug_ppo_worker_and_batch(

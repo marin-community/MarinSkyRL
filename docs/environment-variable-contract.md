@@ -9,13 +9,7 @@ Scheduler inputs, credentials, and variables owned by third-party runtimes do no
 settings. They do need an `EXTERNAL` or `SECRET` registry declaration when MarinSkyRL begins forwarding them.
 Reading an inherited external variable is not a definition.
 
-`infra/check_env_var_contract.py` records pre-existing production definition sites in
-`infra/env_var_legacy_definitions.json`. CI permits those exact grandfathered counts and rejects additions. The
-baseline is shrink-only: migrate a legacy site to `EnvVarManager`, then regenerate the baseline with:
-
-```bash
-uv run python infra/check_env_var_contract.py --write-baseline
-```
-
-Do not regenerate the baseline to admit a new site. A PR may bypass the check only when the user explicitly
-authorizes that exception.
+`infra/check_env_var_contract.py` checks every production definition against that registry. Each entry declares
+its single owner, source classification, propagation scopes, and permitted writer boundary. Marin-owned `CONFIG`
+and `DERIVED` values may only be emitted by `EnvVarManager`; explicit `EXTERNAL`, `SECRET`, and build boundaries may
+allow narrow Python, YAML, shell, or container writers. There is no grandfathered location-count baseline.

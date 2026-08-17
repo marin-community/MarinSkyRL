@@ -152,16 +152,18 @@ def _r3_batch():
     )
 
 
-def test_r3_decentral_byte_identical(monkeypatch):
-    """SKYRL_R3_DECENTRAL=1 must yield BYTE-IDENTICAL collected output to the
-    resident driver-put path (Fix A changes object LOCATION, never VALUE)."""
+def test_r3_decentral_byte_identical():
+    """Decentral transport yields byte-identical output to resident transport."""
     num_actors = 8
 
     def run(decentral: bool):
-        monkeypatch.setenv("SKYRL_R3_RESIDENT", "1")
-        monkeypatch.setenv("SKYRL_R3_DECENTRAL", "1" if decentral else "0")
         group = RayActorGroup(num_actors)
-        object_refs = MeshDispatch.dispatch(group.actor_infos, "do_work", _r3_batch())
+        object_refs = MeshDispatch.dispatch(
+            group.actor_infos,
+            "do_work",
+            _r3_batch(),
+            r3_transport="decentral" if decentral else "resident",
+        )
         return MeshDispatch.sync_collect(group.actor_infos, object_refs)
 
     resident = run(decentral=False)
@@ -175,15 +177,10 @@ def test_r3_decentral_byte_identical(monkeypatch):
         assert torch.equal(decentral[k], resident[k]), f"decentral diverged on key {k}"
 
 
-def test_r3_decentral_off_is_resident_default(monkeypatch):
-    """With DECENTRAL=0 but RESIDENT on, behavior is the existing driver-put
-    resident path (no regression, byte-identical to today). NOTE: as of
-    2026-07-11 SKYRL_R3_DECENTRAL defaults to ON, so this test sets =0
-    EXPLICITLY to exercise the off path (was relying on the unset default)."""
-    monkeypatch.setenv("SKYRL_R3_RESIDENT", "1")
-    monkeypatch.setenv("SKYRL_R3_DECENTRAL", "0")
+def test_r3_resident_transport_preserves_values():
+    """Resident transport keeps the existing driver-put behavior."""
     group = RayActorGroup(8)
-    refs = MeshDispatch.dispatch(group.actor_infos, "do_work", _r3_batch())
+    refs = MeshDispatch.dispatch(group.actor_infos, "do_work", _r3_batch(), r3_transport="resident")
     out = MeshDispatch.sync_collect(group.actor_infos, refs)
     assert torch.equal(out["a"], torch.tensor([1, 3, 5, 7]))
     # R3 passes through unchanged.
