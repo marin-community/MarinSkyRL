@@ -408,9 +408,8 @@ def check_constraint(response: str, ground_truth: str) -> bool:
 def compute_score(response: str, ground_truth: str) -> Dict[str, Any]:
     """Compute the IFEval constraint-satisfaction reward for a response.
 
-    Returns a dict with ``score`` (1.0 satisfied / 0.0 violated), ``acc`` (bool), and
-    ``func_name`` for logging, mirroring the aime env's ``compute_score`` shape. Reward is
-    binary all-or-nothing (RLVR-IFeval has one constraint per example).
+    ``score`` is the fraction of constraints satisfied and ``acc`` reports whether all
+    constraints passed. Single-constraint artifacts retain binary scoring.
     """
     spec = json.loads(ground_truth) if isinstance(ground_truth, str) else ground_truth
     constraints = spec if isinstance(spec, list) else [spec]

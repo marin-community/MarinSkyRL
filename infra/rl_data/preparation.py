@@ -20,6 +20,7 @@ from infra.rl_data.sources import PreparedRow, Source
 TokenCount = Callable[[str], int]
 ParquetWriter = Callable[[list[PreparedRow], Path], None]
 PREPARATION_VERSION = 2
+PROVENANCE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -220,7 +221,7 @@ def prepare_artifact(
         row["extra_info"]["index"] = index
 
     provenance = {
-        "schema_version": 1,
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
         "preparation_version": PREPARATION_VERSION,
         "source": {
             "name": source.name,

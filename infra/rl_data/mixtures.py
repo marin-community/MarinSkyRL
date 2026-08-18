@@ -12,8 +12,22 @@ import yaml
 from skyrl_gym import get_data_contract
 
 from infra.rl_data.contracts import VerifierDataContract
-from infra.rl_data.preparation import PREPARATION_VERSION, PreparationOptions, PreparedArtifact, TokenCount, prepare_artifact
-from infra.rl_data.sources import PreparedRow, Source, load_source_rows, source_by_name
+from infra.rl_data.preparation import (
+    PREPARATION_VERSION,
+    PROVENANCE_SCHEMA_VERSION,
+    PreparationOptions,
+    PreparedArtifact,
+    TokenCount,
+    prepare_artifact,
+)
+from infra.rl_data.sources import (
+    TEST_ONLY_SOURCE_LABELS,
+    TEST_ONLY_SOURCE_NAMES,
+    PreparedRow,
+    Source,
+    load_source_rows,
+    source_by_name,
+)
 
 
 @dataclass(frozen=True)
@@ -41,13 +55,17 @@ ContractLookup = Callable[[str], VerifierDataContract]
 RowLoader = Callable[[Source, str, Mapping[str, Any]], Iterable[Mapping[str, Any]]]
 
 
+def _reject_unknown_fields(raw: Mapping[str, Any], supported: set[str], location: str) -> None:
+    unknown = set(raw) - supported
+    if unknown:
+        raise ValueError(f"{location} has unsupported fields: {sorted(unknown)}.")
+
+
 def _parse_slice(raw: Any, location: str) -> MixtureSlice:
     if not isinstance(raw, Mapping):
         raise TypeError(f"{location} must be a mapping.")
     supported = {"source", "revision", "cap", "minimum_unique_rows", "parameters", "split"}
-    unknown = set(raw) - supported
-    if unknown:
-        raise ValueError(f"{location} has unsupported fields: {sorted(unknown)}.")
+    _reject_unknown_fields(raw, supported, location)
     source = raw.get("source")
     revision = raw.get("revision")
     if not isinstance(source, str) or not source:
@@ -74,9 +92,7 @@ def load_mixture_spec(path: Path) -> MixtureSpec:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, Mapping):
         raise TypeError("Mixture YAML must contain a mapping.")
-    unknown = set(raw) - {"train", "validation"}
-    if unknown:
-        raise ValueError(f"Mixture YAML has unsupported fields: {sorted(unknown)}.")
+    _reject_unknown_fields(raw, {"train", "validation"}, "Mixture YAML")
 
     def parse_split(name: str) -> tuple[MixtureSlice, ...]:
         entries = raw.get(name)
@@ -106,7 +122,7 @@ def _compose(artifacts: list[PreparedArtifact], seed: int, split: str) -> Prepar
     return PreparedArtifact(
         rows=rows,
         provenance={
-            "schema_version": 1,
+            "schema_version": PROVENANCE_SCHEMA_VERSION,
             "preparation_version": PREPARATION_VERSION,
             "mixture": True,
             "split": split,
@@ -134,8 +150,9 @@ def prepare_mixture(
         artifacts: list[PreparedArtifact] = []
         for source_slice in slices:
             source = source_lookup(source_slice.source)
-            if split == "train" and source.name == "math500" and not allow_train_on_test:
-                raise ValueError("MATH-500 is test-only; enable allow_train_on_test to train on it.")
+            if split == "train" and source.name in TEST_ONLY_SOURCE_NAMES and not allow_train_on_test:
+                label = TEST_ONLY_SOURCE_LABELS[source.name]
+                raise ValueError(f"{label} is test-only; enable allow_train_on_test to train on it.")
             if source_slice.split is not None:
                 source = replace(source, split=source_slice.split)
             contract = contract_lookup(source.env_id)

@@ -697,5 +697,8 @@ def test_nemotron_if_adapter_builds_fractional_ifeval_constraints():
     )
 
     constraints = json.loads(artifact.rows[0]["reward_model"]["ground_truth"])
-    assert len(constraints) == 2
+    assert constraints == [
+        {"N": 3, "func_name": "verify_sentence_constraint", "quantifier": "at least"},
+        {"func_name": "verify_postscript", "postscript_marker": "P.S."},
+    ]
     assert [json.loads(ifeval_utils.normalize_ground_truth(constraint)) for constraint in constraints] == constraints

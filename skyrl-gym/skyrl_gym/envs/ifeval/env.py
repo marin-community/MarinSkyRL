@@ -9,10 +9,8 @@ from skyrl_gym.envs.ifeval import utils
 class IFEvalEnv(BaseTextEnv):
     """Environment for IFEval instruction-following constraint-satisfaction tasks.
 
-    Scores the model's response against the IFEval constraint named in
-    ``extras["reward_model"]["ground_truth"]`` (a JSON spec with ``func_name`` + kwargs),
-    rather than a boxed-math answer match. Reward is 1.0 if the constraint is satisfied,
-    0.0 otherwise. Mirrors :class:`AIMEEnv` (single step, no tool calls, no observation).
+    Ground truth is one constraint or a list of constraints. The reward is the fraction
+    satisfied. A single constraint therefore retains the original binary behavior.
     """
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):

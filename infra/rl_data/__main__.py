@@ -8,7 +8,13 @@ from pathlib import Path
 
 from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
 from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_bundle
-from infra.rl_data.sources import SOURCES, load_source_rows, source_by_name
+from infra.rl_data.sources import (
+    SOURCES,
+    TEST_ONLY_SOURCE_LABELS,
+    TEST_ONLY_SOURCE_NAMES,
+    load_source_rows,
+    source_by_name,
+)
 
 
 def _token_counter(tokenizer_name: str):
@@ -90,8 +96,9 @@ def main() -> None:
 
     train_source = source_by_name(args.source)
     validation_source = source_by_name(args.validation_source)
-    if train_source.name == "math500" and not args.allow_train_on_test:
-        parser.error("MATH-500 is test-only; pass --allow-train-on-test to use it as a training source.")
+    if train_source.name in TEST_ONLY_SOURCE_NAMES and not args.allow_train_on_test:
+        label = TEST_ONLY_SOURCE_LABELS[train_source.name]
+        parser.error(f"{label} is test-only; pass --allow-train-on-test to use it as a training source.")
 
     from skyrl_gym import get_data_contract
 

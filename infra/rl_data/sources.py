@@ -6,11 +6,12 @@ import ast
 import itertools
 import json
 import re
-from importlib.metadata import version
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from typing import Any
 
+import numpy as np
 import reasoning_gym
 
 from infra.rl_data.contracts import VerifierDataContract
@@ -30,9 +31,12 @@ HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
 NEMOTRON_DATASET = "nvidia/Llama-Nemotron-Post-Training-Dataset"
 REASONING_GYM_DATASET = "open-thought/reasoning-gym"
+TEST_ONLY_SOURCE_LABELS = {"math500": "MATH-500"}
+TEST_ONLY_SOURCE_NAMES = frozenset(TEST_ONLY_SOURCE_LABELS)
 
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
 _DAPO_TRAILING_MARKERS = ("Remember to put your answer", "The last line of your response")
+_EURUS2_CODE_ABILITY = "code"
 
 
 PreparedRow = dict[str, Any]
@@ -50,6 +54,7 @@ class Source:
     streaming: bool
     verification: str
     prepare_row: PrepareRow
+    load_rows: Callable[[Source, str, Mapping[str, Any]], Iterable[Mapping[str, Any]]] | None = None
 
 
 def _last_user_content(messages: list[Mapping[str, Any]]) -> str:
@@ -246,7 +251,7 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
 
 def _prepare_eurus2_code(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = eurus2_code_source()
-    if example.get("ability") != "code":
+    if example.get("ability") != _EURUS2_CODE_ABILITY:
         raise ValueError("Eurus-2 row is not in the code subset.")
     prompt = example.get("prompt")
     reward_model = example.get("reward_model")
@@ -347,7 +352,7 @@ def _prepare_nemotron_if(example: Mapping[str, Any], index: int, contract: Verif
 
 
 def _json_default(value: Any) -> Any:
-    if hasattr(value, "item"):
+    if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, tuple):
         return list(value)
@@ -531,7 +536,16 @@ def apps_source() -> Source:
 
 
 def eurus2_code_source() -> Source:
-    return Source("eurus2_code", EURUS2_DATASET, "lcb", "train", True, "schema_only", _prepare_eurus2_code)
+    return Source(
+        "eurus2_code",
+        EURUS2_DATASET,
+        "lcb",
+        "train",
+        True,
+        "schema_only",
+        _prepare_eurus2_code,
+        _load_eurus2_rows,
+    )
 
 
 def nemotron_if_source() -> Source:
@@ -543,6 +557,7 @@ def nemotron_if_source() -> Source:
         True,
         "schema_only",
         _prepare_nemotron_if,
+        _load_nemotron_rows,
     )
 
 
@@ -555,6 +570,7 @@ def reasoning_gym_source() -> Source:
         False,
         "two_sided",
         _prepare_reasoning_gym,
+        _load_reasoning_gym_rows,
     )
 
 
@@ -572,6 +588,97 @@ def kto_mix_source() -> Source:
 
 def hh_rlhf_source() -> Source:
     return Source("hh_rlhf", HH_RLHF_DATASET, "preference", "train", False, "two_sided", _prepare_hh_rlhf)
+
+
+def generate_reasoning_gym_rows(
+    *, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0
+):
+    """Generate a deterministic, index-disjoint slice for each Reasoning Gym task."""
+    if not tasks:
+        raise ValueError("Reasoning Gym requires at least one task.")
+    if rows_per_task <= 0:
+        raise ValueError("Reasoning Gym rows_per_task must be positive.")
+    if start_index < 0:
+        raise ValueError("Reasoning Gym start_index cannot be negative.")
+    for task_index, task in enumerate(tasks):
+        dataset = reasoning_gym.create_dataset(
+            task,
+            size=start_index + rows_per_task,
+            seed=seed + task_index,
+        )
+        for index in range(start_index, start_index + rows_per_task):
+            yield dataset[index]
+
+
+def _validate_source_parameters(source_name: str, parameters: Mapping[str, Any], supported: set[str]) -> None:
+    unknown = set(parameters) - supported
+    if unknown:
+        raise ValueError(f"{source_name} parameters contain unsupported fields: {sorted(unknown)}.")
+
+
+def _load_reasoning_gym_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    installed_version = version("reasoning-gym")
+    if revision != installed_version:
+        raise ValueError(
+            f"Reasoning Gym revision must match the installed package version {installed_version!r}, got {revision!r}."
+        )
+    _validate_source_parameters(
+        "Reasoning Gym", parameters, {"tasks", "rows_per_task", "seed", "start_index"}
+    )
+    tasks = parameters.get("tasks")
+    if not isinstance(tasks, list) or not tasks or not all(isinstance(task, str) and task for task in tasks):
+        raise TypeError("Reasoning Gym parameters.tasks must be a non-empty list of task names.")
+    rows_per_task = parameters.get("rows_per_task", 100)
+    seed = parameters.get("seed", 42)
+    start_index = parameters.get("start_index", 0)
+    if type(rows_per_task) is not int or type(seed) is not int or type(start_index) is not int:
+        raise TypeError("Reasoning Gym rows_per_task, seed, and start_index must be integers.")
+    return generate_reasoning_gym_rows(
+        tasks=tuple(tasks),
+        rows_per_task=rows_per_task,
+        seed=seed,
+        start_index=start_index,
+    )
+
+
+def _load_hugging_face_dataset(source: Source, revision: str, config: str | None = None):
+    import datasets
+
+    return datasets.load_dataset(
+        source.dataset_id,
+        config,
+        split=source.split,
+        revision=revision,
+        streaming=source.streaming,
+    )
+
+
+def _skip_source_rows(source: Source, rows, parameters: Mapping[str, Any]):
+    _validate_source_parameters(source.name, parameters, {"skip"})
+    skip = parameters.get("skip", 0)
+    if type(skip) is not int or skip < 0:
+        raise ValueError(f"{source.name} parameters.skip must be a non-negative integer.")
+    return itertools.islice(rows, skip, None)
+
+
+def _load_hugging_face_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    return _skip_source_rows(source, _load_hugging_face_dataset(source, revision), parameters)
+
+
+def _load_eurus2_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    rows = _load_hugging_face_dataset(source, revision)
+    code_rows = rows.filter(lambda example: example["ability"] == _EURUS2_CODE_ABILITY)
+    return _skip_source_rows(source, code_rows, parameters)
+
+
+def _load_nemotron_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    return _skip_source_rows(source, _load_hugging_face_dataset(source, revision, "RL"), parameters)
+
+
+def load_source_rows(source: Source, revision: str, parameters: Mapping[str, Any] | None = None):
+    """Load source rows only when the CLI is invoked, keeping core tests offline."""
+    loader = source.load_rows or _load_hugging_face_rows
+    return loader(source, revision, parameters or {})
 
 
 SOURCES = {
@@ -602,74 +709,3 @@ def source_by_name(name: str) -> Source:
         return SOURCES[name]
     except KeyError as exc:
         raise ValueError(f"Unknown RLVR source {name!r}; choose from {sorted(SOURCES)}.") from exc
-
-
-def generate_reasoning_gym_rows(
-    *, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0
-):
-    """Generate a deterministic, index-disjoint slice for each Reasoning Gym task."""
-    if not tasks:
-        raise ValueError("Reasoning Gym requires at least one task.")
-    if rows_per_task <= 0:
-        raise ValueError("Reasoning Gym rows_per_task must be positive.")
-    if start_index < 0:
-        raise ValueError("Reasoning Gym start_index cannot be negative.")
-    for task_index, task in enumerate(tasks):
-        dataset = reasoning_gym.create_dataset(
-            task,
-            size=start_index + rows_per_task,
-            seed=seed + task_index,
-        )
-        for index in range(start_index, start_index + rows_per_task):
-            yield dataset[index]
-
-
-def load_source_rows(source: Source, revision: str, parameters: Mapping[str, Any] | None = None):
-    """Load source rows only when the CLI is invoked, keeping core tests offline."""
-    parameters = parameters or {}
-    if source.name == "reasoning_gym":
-        installed_version = version("reasoning-gym")
-        if revision != installed_version:
-            raise ValueError(
-                f"Reasoning Gym revision must match the installed package version {installed_version!r}, got {revision!r}."
-            )
-        supported = {"tasks", "rows_per_task", "seed", "start_index"}
-        unknown = set(parameters) - supported
-        if unknown:
-            raise ValueError(f"Reasoning Gym parameters contain unsupported fields: {sorted(unknown)}.")
-        tasks = parameters.get("tasks")
-        if not isinstance(tasks, list) or not tasks or not all(isinstance(task, str) and task for task in tasks):
-            raise TypeError("Reasoning Gym parameters.tasks must be a non-empty list of task names.")
-        rows_per_task = parameters.get("rows_per_task", 100)
-        seed = parameters.get("seed", 42)
-        start_index = parameters.get("start_index", 0)
-        if type(rows_per_task) is not int or type(seed) is not int or type(start_index) is not int:
-            raise TypeError("Reasoning Gym rows_per_task, seed, and start_index must be integers.")
-        return generate_reasoning_gym_rows(
-            tasks=tuple(tasks),
-            rows_per_task=rows_per_task,
-            seed=seed,
-            start_index=start_index,
-        )
-
-    supported = {"skip"}
-    unknown = set(parameters) - supported
-    if unknown:
-        raise ValueError(f"{source.name} parameters contain unsupported fields: {sorted(unknown)}.")
-
-    import datasets
-
-    config = "RL" if source.name == "nemotron_if" else None
-    rows = datasets.load_dataset(
-        source.dataset_id,
-        config,
-        split=source.split,
-        revision=revision,
-        streaming=source.streaming,
-    )
-    if source.name == "eurus2_code":
-        rows = rows.filter(lambda example: example["ability"] == "code")
-    skip = parameters.get("skip", 0)
-    if type(skip) is not int or skip < 0:
-        raise ValueError(f"{source.name} parameters.skip must be a non-negative integer.")
-    return itertools.islice(rows, skip, None)

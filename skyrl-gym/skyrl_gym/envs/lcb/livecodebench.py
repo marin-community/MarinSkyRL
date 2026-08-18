@@ -79,9 +79,17 @@ class CODE_TYPE(Enum):
     standard_input = 1
 
 
+class TestExecutionMode(Enum):
+    collect_all = 0
+    stop_on_failure = 1
+
+
 STDIN_TEST_TYPE = "stdin"
 FUNCTIONAL_TEST_TYPE = "functional"
 FUNCTION_NAME_KEY = "func_name"
+BINARY_REWARD_MODE = "binary"
+FRACTIONAL_REWARD_MODE = "fractional"
+LCB_REWARD_MODES = frozenset({BINARY_REWARD_MODE, FRACTIONAL_REWARD_MODE})
 CodeGroundTruth = str | Mapping[str, Any] | list[Mapping[str, Any]]
 ParsedCodeGroundTruth = Mapping[str, Any] | list[Any] | str | int | float | bool | None
 _STDIN_SOURCE_TEST_TYPES = {STDIN_TEST_TYPE, "stdin_stdout"}
@@ -330,13 +338,25 @@ def get_stripped_lines(val: str):
     return [val_line.strip() for val_line in val.split("\n")]
 
 
+def _execution_failure(error: Exception, test_input, expected_output) -> tuple[int, dict[str, Any]]:
+    timed_out = "timeoutexception" in repr(error).lower()
+    error_code = -3 if timed_out else -4
+    return error_code, {
+        "error": repr(error),
+        "error_code": error_code,
+        "error_message": "Time Limit Exceeded" if timed_out else "Runtime Error",
+        "inputs": truncatefn(test_input),
+        "expected": truncatefn(expected_output),
+    }
+
+
 def grade_call_based(
     code: str,
     all_inputs: list,
     all_outputs: list,
     fn_name: str,
     timeout: int,
-    stop_on_failure: bool = False,
+    execution_mode: TestExecutionMode = TestExecutionMode.collect_all,
 ):
     # call-based clean up logic
     # need to wrap in try-catch logic after to catch the correct errors, but for now this is fine.
@@ -387,31 +407,15 @@ def grade_call_based(
                     "error_code": -2,
                     "error_message": "Wrong Answer",
                 }
-            if not tmp_result and stop_on_failure:
+            if not tmp_result and execution_mode is TestExecutionMode.stop_on_failure:
                 return all_results, failure_metadata
         except Exception as e:
             signal.alarm(0)
-            if "timeoutexception" in repr(e).lower():
-                all_results.append(-3)
-                metadata = {
-                    "error": repr(e),
-                    "error_code": -3,
-                    "error_message": "Time Limit Exceeded",
-                    "inputs": truncatefn(gt_inp),
-                    "expected": truncatefn(gt_out),
-                }
-            else:
-                all_results.append(-4)
-                metadata = {
-                    "error": repr(e),
-                    "error_code": -4,
-                    "error_message": "Runtime Error",
-                    "inputs": truncatefn(gt_inp),
-                    "expected": truncatefn(gt_out),
-                }
+            error_code, metadata = _execution_failure(e, gt_inp, gt_out)
+            all_results.append(error_code)
             if failure_metadata is None:
                 failure_metadata = metadata
-            if stop_on_failure:
+            if execution_mode is TestExecutionMode.stop_on_failure:
                 return all_results, failure_metadata
 
         finally:
@@ -426,7 +430,7 @@ def grade_stdio(
     all_inputs: list,
     all_outputs: list,
     timeout: int,
-    stop_on_failure: bool = False,
+    execution_mode: TestExecutionMode = TestExecutionMode.collect_all,
 ):
     ## runtime doesn't interact well with __name__ == '__main__'
     code = clean_if_name(code)
@@ -462,24 +466,8 @@ def grade_stdio(
                 signal.alarm(0)
             except Exception as e:
                 signal.alarm(0)
-                if "timeoutexception" in repr(e).lower():
-                    all_results.append(-3)
-                    metadata = {
-                        "error": repr(e),
-                        "error_code": -3,
-                        "error_message": "Time Limit Exceeded",
-                        "inputs": truncatefn(gt_inp),
-                        "expected": truncatefn(gt_out),
-                    }
-                else:
-                    all_results.append(-4)
-                    metadata = {
-                        "error": repr(e),
-                        "error_code": -4,
-                        "error_message": "Runtime Error",
-                        "inputs": truncatefn(gt_inp),
-                        "expected": truncatefn(gt_out),
-                    }
+                error_code, metadata = _execution_failure(e, gt_inp, gt_out)
+                all_results.append(error_code)
                 if failure_metadata is None:
                     failure_metadata = metadata
                 execution_failed = True
@@ -489,7 +477,7 @@ def grade_stdio(
                 faulthandler.disable()
 
         if execution_failed:
-            if stop_on_failure:
+            if execution_mode is TestExecutionMode.stop_on_failure:
                 return all_results, failure_metadata
             continue
 
@@ -512,7 +500,7 @@ def grade_stdio(
             WA_send_args["error_message"] = "Wrong answer: mismatched output length"
             if failure_metadata is None:
                 failure_metadata = WA_send_args
-            if stop_on_failure:
+            if execution_mode is TestExecutionMode.stop_on_failure:
                 return all_results, failure_metadata
             continue
 
@@ -552,13 +540,13 @@ def grade_stdio(
         all_results.append(True if matches else -2)
         if not matches and failure_metadata is None:
             failure_metadata = WA_send_args
-        if not matches and stop_on_failure:
+        if not matches and execution_mode is TestExecutionMode.stop_on_failure:
             return all_results, failure_metadata
 
     return all_results, failure_metadata or {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, debug=False, timeout=6, stop_on_failure=False):
+def run_test(sample, test=None, debug=False, timeout=6, execution_mode=TestExecutionMode.collect_all):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -607,7 +595,7 @@ def run_test(sample, test=None, debug=False, timeout=6, stop_on_failure=False):
                     all_outputs=in_outs["outputs"],
                     fn_name=method_name,
                     timeout=timeout,
-                    stop_on_failure=stop_on_failure,
+                    execution_mode=execution_mode,
                 )
                 return results, metadata
             except Exception as e:
@@ -628,7 +616,7 @@ def run_test(sample, test=None, debug=False, timeout=6, stop_on_failure=False):
                     all_inputs=in_outs["inputs"],
                     all_outputs=in_outs["outputs"],
                     timeout=timeout,
-                    stop_on_failure=stop_on_failure,
+                    execution_mode=execution_mode,
                 )
                 return results, metadata
             except Exception as e:
@@ -747,22 +735,30 @@ def postprocess_lcb_sample(sample):
     return sample
 
 
-def _run_test_in_subprocess(sample, generation, debug, result, metadata_list, timeout, stop_on_failure):
+def _run_test_in_subprocess(sample, generation, debug, result, metadata_list, timeout, execution_mode):
     res, metadata = run_test(
         sample,
         test=generation,
         debug=debug,
         timeout=timeout,
-        stop_on_failure=stop_on_failure,
+        execution_mode=execution_mode,
     )
     result.append(res)
     metadata_list.append(metadata)
 
 
-def lcb_test_results(sample, generation, timeout=6, debug=False, collect_all=True):
-    """Check correctness of code generation with a global timeout.
-    The global timeout is to catch some extreme/rare cases not handled by the timeouts
-    inside `run_test`"""
+def lcb_test_results(
+    sample,
+    generation,
+    timeout=6,
+    debug=False,
+    execution_mode=TestExecutionMode.collect_all,
+):
+    """Return one pass/failure result per executed test case.
+
+    A process-level timeout catches extreme cases not handled by the per-test alarms.
+    Stop-on-failure mode preserves the binary scorer's original short circuit.
+    """
     assert len(sample) >= 1, "Sample must contain at least one test case"
     sample = postprocess_lcb_sample(sample)
 
@@ -775,7 +771,7 @@ def lcb_test_results(sample, generation, timeout=6, debug=False, collect_all=Tru
     # the default on macOS.
     p = multiprocessing.Process(
         target=_run_test_in_subprocess,
-        args=(sample, generation, debug, result, metadata_list, timeout, not collect_all),
+        args=(sample, generation, debug, result, metadata_list, timeout, execution_mode),
     )
     p.start()
     p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
@@ -791,7 +787,16 @@ def lcb_test_results(sample, generation, timeout=6, debug=False, collect_all=Tru
 
 
 def lcb_check_correctness(sample, generation, timeout=6, debug=False):
-    return all(result is True for result in lcb_test_results(sample, generation, timeout, debug, collect_all=False))
+    return all(
+        result is True
+        for result in lcb_test_results(
+            sample,
+            generation,
+            timeout,
+            debug,
+            execution_mode=TestExecutionMode.stop_on_failure,
+        )
+    )
 
 
 def extract_code_from_model(model_response: str):
@@ -810,13 +815,13 @@ def extract_code_from_model(model_response: str):
     return code_blocks[-1].strip()
 
 
-def compute_score(model_response, tests, reward_mode="binary"):
+def compute_score(model_response, tests, reward_mode=BINARY_REWARD_MODE):
     output_code = extract_code_from_model(model_response)
     if output_code is None:
         return output_code, 0.0
-    if reward_mode == "binary":
+    if reward_mode == BINARY_REWARD_MODE:
         reward = 1.0 if lcb_check_correctness(tests, output_code, debug=False) else 0.0
-    elif reward_mode == "fractional":
+    elif reward_mode == FRACTIONAL_REWARD_MODE:
         results = lcb_test_results(tests, output_code, debug=False)
         reward = sum(result is True for result in results) / len(results)
     else:
