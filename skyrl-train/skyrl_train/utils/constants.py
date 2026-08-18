@@ -3,11 +3,9 @@ DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS = 180
 Timeout for allocating the placement group for different actors in SkyRL
 """
 
-# Default worker-NCCL-collective timeout. Raised to 1800s (30 min) because the long MoE weight-sync
-# gather + first-step forward on 80B routinely exceeds the old 600s watchdog and
-# SIGABRTs the gang. ``trainer.distributed.worker_collective_timeout_seconds``
-# is the runtime authority; this constant supplies lower-level API defaults.
-DEFAULT_WORKER_NCCL_TIMEOUT_IN_S = 1800
+# ``trainer.distributed.worker_collective_timeout_seconds`` is the runtime
+# authority; this constant keeps lower-level API defaults aligned with it.
+DEFAULT_WORKER_NCCL_TIMEOUT_IN_S = 300
 DEFAULT_NCCL_MONITOR_HEARTBEAT_TIMEOUT = 300
 
 

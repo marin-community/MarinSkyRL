@@ -61,7 +61,7 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": False,
     "distributed": {
         "placement_group_timeout_seconds": 180,
-        "worker_collective_timeout_seconds": 1800,
+        "worker_collective_timeout_seconds": 300,
     },
     "model_load_retry": {
         "max_retries": 5,

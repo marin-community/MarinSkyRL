@@ -24,7 +24,7 @@ trainer:
   collective_phase_diagnostics: false
   distributed:
     placement_group_timeout_seconds: 180
-    worker_collective_timeout_seconds: 1800
+    worker_collective_timeout_seconds: 300
   model_load_retry:
     max_retries: 5
     backoff_base_seconds: 2.0

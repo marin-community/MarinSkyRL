@@ -6,6 +6,15 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     _build_inference_engine_runtime_env,
 )
 from skyrl_train.utils.utils import prepare_runtime_environment
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.utils.constants import validate_worker_collective_timeout_seconds
+
+
+def test_worker_collective_timeout_fallback_matches_trainer_default():
+    config = get_default_config()
+
+    assert config.trainer.distributed.worker_collective_timeout_seconds == 300
+    assert validate_worker_collective_timeout_seconds() == 300
 
 
 def test_runtime_environment_does_not_enable_nonblocking_communicators(monkeypatch):
