@@ -3,7 +3,9 @@ import json
 import pytest
 
 from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_artifact, write_bundle
+from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
+    Source,
     apps_source,
     dapo_math_source,
     deepscaler_source,
@@ -11,11 +13,18 @@ from infra.rl_data.sources import (
     gsm8k_source,
     hh_rlhf_source,
     kto_mix_source,
+    eurus2_code_source,
+    generate_reasoning_gym_rows,
+    math500_source,
+    nemotron_if_source,
     openscience_source,
     rlvr_math_source,
     rlvr_ifeval_source,
+    source_by_name,
     verifiable_code_source,
 )
+from skyrl_gym import get_data_contract
+from skyrl_gym.envs.ifeval import utils as ifeval_utils
 
 
 class FakeContract:
@@ -501,3 +510,192 @@ def test_hh_rlhf_rejects_identical_pairs():
             token_count=lambda text: len(text.split()),
             options=PreparationOptions(**_OPTS),
         )
+
+
+def _fake_source(name: str, env_id: str) -> Source:
+    def prepare(example, index, contract):
+        ground_truth = contract.normalize_ground_truth(example["answer"])
+        return {
+            "data_source": f"fixture/{name}",
+            "prompt": [{"role": "user", "content": example["prompt"]}],
+            "env_class": env_id,
+            "reward_model": {"ground_truth": ground_truth},
+            "extra_info": {"split": "train", "index": index},
+        }
+
+    return Source(name, f"fixture/{name}", env_id, "train", False, "schema_only", prepare)
+
+
+def test_mixture_yaml_parses_source_slice_controls(tmp_path):
+    path = tmp_path / "mixture.yaml"
+    path.write_text(
+        """\
+train:
+  - source: eurus2_code
+    revision: abc123
+    split: validation
+    cap: 3
+    minimum_unique_rows: 2
+    parameters:
+      skip: 7
+validation:
+  - source: reasoning_gym
+    revision: 0.1.25
+    parameters:
+      tasks: [leg_counting]
+      rows_per_task: 100
+"""
+    )
+
+    spec = load_mixture_spec(path)
+
+    assert spec.train == (
+        MixtureSlice(
+            source="eurus2_code",
+            revision="abc123",
+            cap=3,
+            minimum_unique_rows=2,
+            parameters={"skip": 7},
+            split="validation",
+        ),
+    )
+    assert spec.validation[0].parameters == {"tasks": ["leg_counting"], "rows_per_task": 100}
+
+
+def test_mixture_preparation_preserves_source_verifiers_caps_and_validation_slices():
+    sources = {"math": _fake_source("math", "aime"), "if": _fake_source("if", "ifeval")}
+    rows = {
+        "math": [{"prompt": f"a{index}", "answer": index + 1} for index in range(4)],
+        "if": [{"prompt": f"b{index}", "answer": f"constraint-{index}"} for index in range(3)],
+    }
+    contracts = {"aime": FakeContract("aime"), "ifeval": FakeContract("ifeval")}
+    spec = MixtureSpec(
+        train=(MixtureSlice("math", "math-rev", cap=3), MixtureSlice("if", "if-rev", cap=2)),
+        validation=(MixtureSlice("math", "math-val", cap=1), MixtureSlice("if", "if-val", cap=1)),
+    )
+
+    def build():
+        return prepare_mixture(
+            spec,
+            token_count=lambda text: len(text),
+            max_prompt_tokens=100,
+            seed=17,
+            source_lookup=sources.__getitem__,
+            contract_lookup=contracts.__getitem__,
+            row_loader=lambda source, revision, parameters: rows[source.name],
+        )
+
+    train, validation = build()
+
+    assert [row["prompt"][0]["content"] for row in train.rows] == ["a1", "a3", "a2", "b1", "b2"]
+    assert [row["env_class"] for row in train.rows] == ["aime", "aime", "aime", "ifeval", "ifeval"]
+    assert len(validation.rows) == 2
+    assert {row["env_class"] for row in validation.rows} == {"aime", "ifeval"}
+    assert build() == (train, validation)
+    assert [source["source"]["revision"] for source in train.provenance["sources"]] == ["math-rev", "if-rev"]
+    assert [source["counts"]["emitted_rows"] for source in train.provenance["sources"]] == [3, 2]
+    assert [source["share"] for source in train.provenance["sources"]] == pytest.approx([0.6, 0.4])
+
+
+def test_mixture_rejects_math500_training_without_explicit_permission():
+    spec = MixtureSpec(
+        train=(MixtureSlice("math500", "fixture", cap=1),),
+        validation=(MixtureSlice("math500", "fixture", cap=1),),
+    )
+
+    with pytest.raises(ValueError, match="MATH-500 is test-only"):
+        prepare_mixture(
+            spec,
+            token_count=lambda text: len(text),
+            max_prompt_tokens=100,
+            seed=1,
+            source_lookup=lambda name: math500_source(),
+            contract_lookup=lambda env_id: FakeContract(env_id, " answer"),
+            row_loader=lambda source, revision, parameters: [{"problem": "2+2", "answer": "4"}],
+        )
+
+
+def test_eurus_code_adapter_normalizes_apps_tests():
+    artifact = prepare_artifact(
+        eurus2_code_source(),
+        [
+            {
+                "ability": "code",
+                "prompt": [{"role": "user", "content": "Read two integers and print their sum."}],
+                "reward_model": {
+                    "ground_truth": json.dumps({"inputs": ["1 2\n", "4 5\n"], "outputs": ["3\n", "9\n"]})
+                },
+            }
+        ],
+        get_data_contract("lcb"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**_OPTS),
+    )
+
+    tests = json.loads(artifact.rows[0]["reward_model"]["ground_truth"])
+    assert tests == [
+        {"input": "1 2\n", "output": "3\n", "testtype": "stdin"},
+        {"input": "4 5\n", "output": "9\n", "testtype": "stdin"},
+    ]
+    assert artifact.rows[0]["env_class"] == "lcb"
+
+
+def test_reasoning_gym_generation_is_deterministic_verifiable_and_disjoint():
+    train_rows = list(
+        generate_reasoning_gym_rows(
+            tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0
+        )
+    )
+    rebuilt_rows = list(
+        generate_reasoning_gym_rows(
+            tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0
+        )
+    )
+    holdout_rows = list(
+        generate_reasoning_gym_rows(
+            tasks=("leg_counting", "knights_knaves"), rows_per_task=100, seed=41, start_index=3
+        )
+    )
+
+    assert rebuilt_rows == train_rows
+    assert {row["question"] for row in train_rows}.isdisjoint(row["question"] for row in holdout_rows)
+    contract = get_data_contract("reasoning_gym")
+    artifact = prepare_artifact(
+        source=source_by_name("reasoning_gym"),
+        examples=train_rows,
+        contract=contract,
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**_OPTS),
+    )
+    for row in artifact.rows:
+        ground_truth = row["reward_model"]["ground_truth"]
+        assert contract.is_correct(json.loads(ground_truth)["entry"]["answer"], ground_truth)
+        assert not contract.is_correct("definitely wrong", ground_truth)
+
+
+def test_nemotron_if_adapter_builds_fractional_ifeval_constraints():
+    artifact = prepare_artifact(
+        nemotron_if_source(),
+        [
+            {
+                "input": [{"role": "user", "content": "Write three sentences and add a P.S."}],
+                "args": {
+                    "instruction_id_list": [
+                        "length_constraints:number_sentences",
+                        "detectable_content:postscript",
+                    ],
+                    "instruction_kwargs": [
+                        {"num_sentences": 3, "relation": "at least"},
+                        {"postscript_marker": "P.S."},
+                    ],
+                },
+            }
+        ],
+        get_data_contract("ifeval"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**_OPTS),
+    )
+
+    constraints = json.loads(artifact.rows[0]["reward_model"]["ground_truth"])
+    assert len(constraints) == 2
+    assert [json.loads(ifeval_utils.normalize_ground_truth(constraint)) for constraint in constraints] == constraints

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import json
+import re
+from importlib.metadata import version
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+import reasoning_gym
 
 from infra.rl_data.contracts import VerifierDataContract
 
@@ -22,6 +27,9 @@ GPQA_DATASET = "Idavidrein/gpqa"
 OPENSCIENCE_DATASET = "nvidia/OpenScience"
 KTO_MIX_DATASET = "trl-lib/kto-mix-14k"
 HH_RLHF_DATASET = "Anthropic/hh-rlhf"
+EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
+NEMOTRON_DATASET = "nvidia/Llama-Nemotron-Post-Training-Dataset"
+REASONING_GYM_DATASET = "open-thought/reasoning-gym"
 
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
 _DAPO_TRAILING_MARKERS = ("Remember to put your answer", "The last line of your response")
@@ -236,6 +244,132 @@ def _prepare_apps(example: Mapping[str, Any], index: int, contract: VerifierData
     return _schema_row(problem, input_output, source, index, contract)
 
 
+def _prepare_eurus2_code(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = eurus2_code_source()
+    if example.get("ability") != "code":
+        raise ValueError("Eurus-2 row is not in the code subset.")
+    prompt = example.get("prompt")
+    reward_model = example.get("reward_model")
+    if not isinstance(prompt, list) or not isinstance(reward_model, Mapping):
+        raise TypeError("Eurus-2 code row requires prompt and reward_model fields.")
+    return _schema_row(_last_user_content(prompt), reward_model.get("ground_truth"), source, index, contract)
+
+
+_NEMOTRON_CONSTRAINTS: dict[str, tuple[str, dict[str, str]]] = {
+    "keywords:existence": ("verify_keywords", {"keywords": "keyword_list"}),
+    "keywords:frequency": (
+        "verify_keyword_frequency_relation",
+        {"keywords": "keyword_list", "frequency": "N", "relation": "quantifier"},
+    ),
+    "keywords:forbidden_words": ("validate_forbidden_words", {"forbidden_words": "forbidden_words"}),
+    "keywords:letter_frequency": ("verify_letter_frequency", {"letter": "letter", "let_frequency": "N"}),
+    "language:response_language": ("validate_response_language", {"language": "language"}),
+    "length_constraints:number_paragraphs": ("verify_paragraph_count", {"num_paragraphs": "N"}),
+    "length_constraints:number_words": (
+        "validate_word_constraint",
+        {"num_words": "N", "relation": "quantifier"},
+    ),
+    "length_constraints:number_sentences": (
+        "verify_sentence_constraint",
+        {"num_sentences": "N", "relation": "quantifier"},
+    ),
+    "length_constraints:nth_paragraph_first_word": (
+        "validate_paragraphs",
+        {"num_paragraphs": "N", "first_word": "first_word", "nth_paragraph": "i"},
+    ),
+    "detectable_content:postscript": ("verify_postscript", {"postscript_marker": "postscript_marker"}),
+    "detectable_content:number_placeholders": ("validate_placeholders", {"num_placeholders": "N"}),
+    "detectable_format:number_bullet_lists": ("verify_bullet_points", {"num_bullets": "N"}),
+    "detectable_format:title": ("validate_title", {}),
+    "detectable_format:constrained_response": ("validate_choice", {"options": "options"}),
+    "detectable_format:number_highlighted_sections": (
+        "validate_highlighted_sections",
+        {"num_highlights": "N"},
+    ),
+    "detectable_format:multiple_sections": (
+        "validate_sections",
+        {"num_sections": "N", "section_spliter": "section_splitter"},
+    ),
+    "detectable_format:json_format": ("validate_json_format", {}),
+    "combination:repeat_prompt": ("validate_repeat_prompt", {"original_prompt": "original_prompt"}),
+    "combination:two_responses": ("validate_two_responses", {}),
+    "change_case:capital_word_frequency": (
+        "validate_frequency_capital_words",
+        {"frequency": "N", "relation": "quantifier"},
+    ),
+    "change_case:english_capital": ("validate_uppercase", {}),
+    "change_case:english_lowercase": ("validate_lowercase", {}),
+    "startend:end_checker": ("validate_end", {"end_phrase": "end_phrase"}),
+    "punctuation:no_comma": ("validate_no_commas", {}),
+    "detectable_format:quotation": ("validate_quotation", {}),
+}
+
+
+def _nemotron_constraint(instruction_id: str, arguments: Mapping[str, Any], prompt: str) -> dict[str, Any]:
+    try:
+        function_name, argument_names = _NEMOTRON_CONSTRAINTS[instruction_id]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Nemotron instruction id: {instruction_id!r}.") from exc
+    constraint: dict[str, Any] = {"func_name": function_name}
+    for source_name, target_name in argument_names.items():
+        value = prompt if source_name == "original_prompt" else arguments.get(source_name)
+        if instruction_id == "keywords:frequency" and source_name == "keywords" and value is None:
+            keyword = arguments.get("keyword")
+            value = [keyword] if isinstance(keyword, str) else re.findall(r'"([^"\n]+)"', prompt.split("\n\n", 1)[0])
+        if value is None:
+            raise ValueError(f"Nemotron instruction {instruction_id!r} requires {source_name!r}.")
+        constraint[target_name] = value
+    return constraint
+
+
+def _prepare_nemotron_if(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = nemotron_if_source()
+    messages = example.get("input")
+    arguments = example.get("args")
+    if not isinstance(messages, list) or not isinstance(arguments, Mapping):
+        raise TypeError("Nemotron IF row requires input messages and args.")
+    prompt = _last_user_content(messages)
+    instruction_ids = arguments.get("instruction_id_list")
+    instruction_kwargs = arguments.get("instruction_kwargs")
+    if not isinstance(instruction_ids, list) or not isinstance(instruction_kwargs, list):
+        raise TypeError("Nemotron IF args require instruction_id_list and instruction_kwargs lists.")
+    if not instruction_ids or len(instruction_ids) != len(instruction_kwargs):
+        raise ValueError("Nemotron IF instruction ids and kwargs must be non-empty and aligned.")
+    constraints = [
+        _nemotron_constraint(str(instruction_id), kwargs, prompt)
+        for instruction_id, kwargs in zip(instruction_ids, instruction_kwargs)
+        if isinstance(kwargs, Mapping)
+    ]
+    if len(constraints) != len(instruction_ids):
+        raise TypeError("Nemotron IF instruction kwargs must be mappings.")
+    normalized = contract.normalize_ground_truth(constraints)
+    return _prepared_verifier_row(prompt, normalized, source, index)
+
+
+def _json_default(value: Any) -> Any:
+    if hasattr(value, "item"):
+        return value.item()
+    if isinstance(value, tuple):
+        return list(value)
+    raise TypeError(f"Reasoning Gym metadata value {type(value).__name__} is not JSON serializable.")
+
+
+def _prepare_reasoning_gym(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = reasoning_gym_source()
+    question = example.get("question")
+    metadata = example.get("metadata")
+    answer = example.get("answer")
+    if not isinstance(question, str) or not isinstance(metadata, Mapping) or not isinstance(answer, str):
+        raise TypeError("Reasoning Gym rows require string question/answer and mapping metadata.")
+    task = metadata.get("source_dataset")
+    if not isinstance(task, str) or not task:
+        raise ValueError("Reasoning Gym metadata requires source_dataset.")
+    entry = json.loads(json.dumps(dict(example), default=_json_default))
+    ground_truth = {"task": task, "entry": entry}
+    normalized = contract.validate_example(ground_truth, answer, "definitely wrong")
+    return _prepared_verifier_row(question, normalized, source, index)
+
+
 # ---------------------------------------------------------------------------
 # Science MCQ: GPQA and OpenScience
 # ---------------------------------------------------------------------------
@@ -284,8 +418,6 @@ def _prepare_gpqa(example: Mapping[str, Any], index: int, contract: VerifierData
 
 def _prepare_openscience(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = openscience_source()
-    import re
-
     prompt_text = example.get("input")
     output = example.get("output")
     if not isinstance(prompt_text, str):
@@ -398,6 +530,34 @@ def apps_source() -> Source:
     return Source("apps", APPS_DATASET, "lcb", "train", False, "schema_only", _prepare_apps)
 
 
+def eurus2_code_source() -> Source:
+    return Source("eurus2_code", EURUS2_DATASET, "lcb", "train", True, "schema_only", _prepare_eurus2_code)
+
+
+def nemotron_if_source() -> Source:
+    return Source(
+        "nemotron_if",
+        NEMOTRON_DATASET,
+        "ifeval",
+        "instruction_following",
+        True,
+        "schema_only",
+        _prepare_nemotron_if,
+    )
+
+
+def reasoning_gym_source() -> Source:
+    return Source(
+        "reasoning_gym",
+        REASONING_GYM_DATASET,
+        "reasoning_gym",
+        "generated",
+        False,
+        "two_sided",
+        _prepare_reasoning_gym,
+    )
+
+
 def gpqa_source() -> Source:
     return Source("gpqa", GPQA_DATASET, "mcq", "gpqa_diamond", False, "two_sided", _prepare_gpqa)
 
@@ -425,6 +585,9 @@ SOURCES = {
         gsm8k_source(),
         verifiable_code_source(),
         apps_source(),
+        eurus2_code_source(),
+        nemotron_if_source(),
+        reasoning_gym_source(),
         gpqa_source(),
         openscience_source(),
         kto_mix_source(),
@@ -441,8 +604,72 @@ def source_by_name(name: str) -> Source:
         raise ValueError(f"Unknown RLVR source {name!r}; choose from {sorted(SOURCES)}.") from exc
 
 
-def load_source_rows(source: Source, revision: str):
+def generate_reasoning_gym_rows(
+    *, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0
+):
+    """Generate a deterministic, index-disjoint slice for each Reasoning Gym task."""
+    if not tasks:
+        raise ValueError("Reasoning Gym requires at least one task.")
+    if rows_per_task <= 0:
+        raise ValueError("Reasoning Gym rows_per_task must be positive.")
+    if start_index < 0:
+        raise ValueError("Reasoning Gym start_index cannot be negative.")
+    for task_index, task in enumerate(tasks):
+        dataset = reasoning_gym.create_dataset(
+            task,
+            size=start_index + rows_per_task,
+            seed=seed + task_index,
+        )
+        for index in range(start_index, start_index + rows_per_task):
+            yield dataset[index]
+
+
+def load_source_rows(source: Source, revision: str, parameters: Mapping[str, Any] | None = None):
     """Load source rows only when the CLI is invoked, keeping core tests offline."""
+    parameters = parameters or {}
+    if source.name == "reasoning_gym":
+        installed_version = version("reasoning-gym")
+        if revision != installed_version:
+            raise ValueError(
+                f"Reasoning Gym revision must match the installed package version {installed_version!r}, got {revision!r}."
+            )
+        supported = {"tasks", "rows_per_task", "seed", "start_index"}
+        unknown = set(parameters) - supported
+        if unknown:
+            raise ValueError(f"Reasoning Gym parameters contain unsupported fields: {sorted(unknown)}.")
+        tasks = parameters.get("tasks")
+        if not isinstance(tasks, list) or not tasks or not all(isinstance(task, str) and task for task in tasks):
+            raise TypeError("Reasoning Gym parameters.tasks must be a non-empty list of task names.")
+        rows_per_task = parameters.get("rows_per_task", 100)
+        seed = parameters.get("seed", 42)
+        start_index = parameters.get("start_index", 0)
+        if type(rows_per_task) is not int or type(seed) is not int or type(start_index) is not int:
+            raise TypeError("Reasoning Gym rows_per_task, seed, and start_index must be integers.")
+        return generate_reasoning_gym_rows(
+            tasks=tuple(tasks),
+            rows_per_task=rows_per_task,
+            seed=seed,
+            start_index=start_index,
+        )
+
+    supported = {"skip"}
+    unknown = set(parameters) - supported
+    if unknown:
+        raise ValueError(f"{source.name} parameters contain unsupported fields: {sorted(unknown)}.")
+
     import datasets
 
-    return datasets.load_dataset(source.dataset_id, split=source.split, revision=revision, streaming=source.streaming)
+    config = "RL" if source.name == "nemotron_if" else None
+    rows = datasets.load_dataset(
+        source.dataset_id,
+        config,
+        split=source.split,
+        revision=revision,
+        streaming=source.streaming,
+    )
+    if source.name == "eurus2_code":
+        rows = rows.filter(lambda example: example["ability"] == "code")
+    skip = parameters.get("skip", 0)
+    if type(skip) is not int or skip < 0:
+        raise ValueError(f"{source.name} parameters.skip must be a non-negative integer.")
+    return itertools.islice(rows, skip, None)

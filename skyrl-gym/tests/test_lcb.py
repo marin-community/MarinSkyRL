@@ -127,3 +127,31 @@ def test_malformed_reward_model_scores_zero(extras):
 
     assert output["reward"] == 0.0
     assert output["metadata"]["verifier_error"]
+
+
+def test_fractional_reward_reports_fraction_of_tests_passed_while_binary_remains_all_or_nothing():
+    tests = json.dumps(
+        [
+            {"input": "1\n", "output": "1\n", "testtype": "stdin"},
+            {"input": "2\n", "output": "2\n", "testtype": "stdin"},
+            {"input": "3\n", "output": "6\n", "testtype": "stdin"},
+            {"input": "4\n", "output": "8\n", "testtype": "stdin"},
+        ]
+    )
+    response = """```python
+print(int(input()))
+```"""
+
+    fractional = skyrl_gym.make(
+        "lcb",
+        env_config=DictConfig({"reward_mode": "fractional"}),
+        extras={"reward_model": {"ground_truth": tests}},
+    )
+    binary = skyrl_gym.make(
+        "lcb",
+        env_config=DictConfig({"reward_mode": "binary"}),
+        extras={"reward_model": {"ground_truth": tests}},
+    )
+
+    assert fractional.step(response)["reward"] == 0.5
+    assert binary.step(response)["reward"] == 0.0

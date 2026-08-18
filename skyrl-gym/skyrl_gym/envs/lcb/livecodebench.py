@@ -330,7 +330,14 @@ def get_stripped_lines(val: str):
     return [val_line.strip() for val_line in val.split("\n")]
 
 
-def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: str, timeout: int):
+def grade_call_based(
+    code: str,
+    all_inputs: list,
+    all_outputs: list,
+    fn_name: str,
+    timeout: int,
+    stop_on_failure: bool = False,
+):
     # call-based clean up logic
     # need to wrap in try-catch logic after to catch the correct errors, but for now this is fine.
     code = import_string + "\n\n" + code
@@ -350,6 +357,7 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
 
     total_execution = 0
     all_results = []
+    failure_metadata = None
     for idx, (gt_inp, gt_out) in enumerate(zip(all_inputs, all_outputs)):
         signal.alarm(timeout)
         faulthandler.enable()
@@ -371,19 +379,21 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
 
             all_results.append(tmp_result)
 
-            if not tmp_result:
-                return all_results, {
+            if not tmp_result and failure_metadata is None:
+                failure_metadata = {
                     "output": truncatefn(prediction),
                     "inputs": truncatefn(gt_inp),
                     "expected": truncatefn(gt_out),
                     "error_code": -2,
                     "error_message": "Wrong Answer",
                 }
+            if not tmp_result and stop_on_failure:
+                return all_results, failure_metadata
         except Exception as e:
             signal.alarm(0)
             if "timeoutexception" in repr(e).lower():
                 all_results.append(-3)
-                return all_results, {
+                metadata = {
                     "error": repr(e),
                     "error_code": -3,
                     "error_message": "Time Limit Exceeded",
@@ -392,19 +402,23 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                 }
             else:
                 all_results.append(-4)
-                return all_results, {
+                metadata = {
                     "error": repr(e),
                     "error_code": -4,
                     "error_message": "Runtime Error",
                     "inputs": truncatefn(gt_inp),
                     "expected": truncatefn(gt_out),
                 }
+            if failure_metadata is None:
+                failure_metadata = metadata
+            if stop_on_failure:
+                return all_results, failure_metadata
 
         finally:
             signal.alarm(0)
             faulthandler.disable()
 
-    return all_results, {"execution time": total_execution}
+    return all_results, failure_metadata or {"execution time": total_execution}
 
 
 def grade_stdio(
@@ -412,6 +426,7 @@ def grade_stdio(
     all_inputs: list,
     all_outputs: list,
     timeout: int,
+    stop_on_failure: bool = False,
 ):
     ## runtime doesn't interact well with __name__ == '__main__'
     code = clean_if_name(code)
@@ -431,11 +446,13 @@ def grade_stdio(
 
     all_results = []
     total_execution_time = 0
+    failure_metadata = None
     for idx, (gt_inp, gt_out) in enumerate(zip(all_inputs, all_outputs)):
         signal.alarm(timeout)
         faulthandler.enable()
 
         signal.alarm(timeout)
+        execution_failed = False
         with Capturing() as captured_output:
             try:
                 start = time.time()
@@ -447,7 +464,7 @@ def grade_stdio(
                 signal.alarm(0)
                 if "timeoutexception" in repr(e).lower():
                     all_results.append(-3)
-                    return all_results, {
+                    metadata = {
                         "error": repr(e),
                         "error_code": -3,
                         "error_message": "Time Limit Exceeded",
@@ -456,17 +473,25 @@ def grade_stdio(
                     }
                 else:
                     all_results.append(-4)
-                    return all_results, {
+                    metadata = {
                         "error": repr(e),
                         "error_code": -4,
                         "error_message": "Runtime Error",
                         "inputs": truncatefn(gt_inp),
                         "expected": truncatefn(gt_out),
                     }
+                if failure_metadata is None:
+                    failure_metadata = metadata
+                execution_failed = True
 
             finally:
                 signal.alarm(0)
                 faulthandler.disable()
+
+        if execution_failed:
+            if stop_on_failure:
+                return all_results, failure_metadata
+            continue
 
         prediction = captured_output[0]
 
@@ -485,8 +510,13 @@ def grade_stdio(
         if len(stripped_prediction_lines) != len(stripped_gt_out_lines):
             all_results.append(-2)
             WA_send_args["error_message"] = "Wrong answer: mismatched output length"
-            return all_results, WA_send_args
+            if failure_metadata is None:
+                failure_metadata = WA_send_args
+            if stop_on_failure:
+                return all_results, failure_metadata
+            continue
 
+        matches = True
         for output_line_idx, (
             stripped_prediction_line,
             stripped_gt_out_line,
@@ -507,24 +537,28 @@ def grade_stdio(
 
             success, decimal_prediction_line = convert_line_to_decimals(stripped_prediction_line)
             if not success:
-                all_results.append(-2)
-                return all_results, WA_send_args
+                matches = False
+                break
             success, decimal_gtout_line = convert_line_to_decimals(stripped_gt_out_line)
             if not success:
-                all_results.append(-2)
-                return all_results, WA_send_args
+                matches = False
+                break
 
             if decimal_prediction_line == decimal_gtout_line:
                 continue
 
-            all_results.append(-2)
-            return all_results, WA_send_args
-        all_results.append(True)
+            matches = False
+            break
+        all_results.append(True if matches else -2)
+        if not matches and failure_metadata is None:
+            failure_metadata = WA_send_args
+        if not matches and stop_on_failure:
+            return all_results, failure_metadata
 
-    return all_results, {"execution time": total_execution_time}
+    return all_results, failure_metadata or {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, debug=False, timeout=6):
+def run_test(sample, test=None, debug=False, timeout=6, stop_on_failure=False):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -573,6 +607,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
                     all_outputs=in_outs["outputs"],
                     fn_name=method_name,
                     timeout=timeout,
+                    stop_on_failure=stop_on_failure,
                 )
                 return results, metadata
             except Exception as e:
@@ -593,6 +628,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
                     all_inputs=in_outs["inputs"],
                     all_outputs=in_outs["outputs"],
                     timeout=timeout,
+                    stop_on_failure=stop_on_failure,
                 )
                 return results, metadata
             except Exception as e:
@@ -711,13 +747,19 @@ def postprocess_lcb_sample(sample):
     return sample
 
 
-def _run_test_in_subprocess(sample, generation, debug, result, metadata_list, timeout):
-    res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
+def _run_test_in_subprocess(sample, generation, debug, result, metadata_list, timeout, stop_on_failure):
+    res, metadata = run_test(
+        sample,
+        test=generation,
+        debug=debug,
+        timeout=timeout,
+        stop_on_failure=stop_on_failure,
+    )
     result.append(res)
     metadata_list.append(metadata)
 
 
-def lcb_check_correctness(sample, generation, timeout=6, debug=False):
+def lcb_test_results(sample, generation, timeout=6, debug=False, collect_all=True):
     """Check correctness of code generation with a global timeout.
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
@@ -733,7 +775,7 @@ def lcb_check_correctness(sample, generation, timeout=6, debug=False):
     # the default on macOS.
     p = multiprocessing.Process(
         target=_run_test_in_subprocess,
-        args=(sample, generation, debug, result, metadata_list, timeout),
+        args=(sample, generation, debug, result, metadata_list, timeout, not collect_all),
     )
     p.start()
     p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
@@ -745,11 +787,11 @@ def lcb_check_correctness(sample, generation, timeout=6, debug=False):
         result = [[-1 for i in range(len(in_outs["inputs"]))]]
         if debug:
             print("global timeout")
-    if not result:
-        return False
-    # print(result[0], metadata_list)
-    # Check if all elements in result[0] are True
-    return all(x is True for x in result[0])
+    return list(result[0])
+
+
+def lcb_check_correctness(sample, generation, timeout=6, debug=False):
+    return all(result is True for result in lcb_test_results(sample, generation, timeout, debug, collect_all=False))
 
 
 def extract_code_from_model(model_response: str):
@@ -768,11 +810,15 @@ def extract_code_from_model(model_response: str):
     return code_blocks[-1].strip()
 
 
-def compute_score(model_response, tests):
+def compute_score(model_response, tests, reward_mode="binary"):
     output_code = extract_code_from_model(model_response)
     if output_code is None:
         return output_code, 0.0
-    is_correct = lcb_check_correctness(tests, output_code, debug=False)
-
-    reward = 1.0 if is_correct else 0.0
+    if reward_mode == "binary":
+        reward = 1.0 if lcb_check_correctness(tests, output_code, debug=False) else 0.0
+    elif reward_mode == "fractional":
+        results = lcb_test_results(tests, output_code, debug=False)
+        reward = sum(result is True for result in results) / len(results)
+    else:
+        raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}.")
     return output_code, reward

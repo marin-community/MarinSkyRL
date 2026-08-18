@@ -51,3 +51,8 @@ register(
     id="preference",
     entry_point="skyrl_gym.envs.preference.env:PreferenceEnv",
 )
+
+register(
+    id="reasoning_gym",
+    entry_point="skyrl_gym.envs.reasoning_gym.env:ReasoningGymEnv",
+)

@@ -22,6 +22,8 @@ from skyrl_gym.envs.lcb.livecodebench import (
     compute_score,
     normalize_lcb_ground_truth,
 )
+from skyrl_gym.envs.reasoning_gym.scoring import normalize_ground_truth as normalize_reasoning_gym_ground_truth
+from skyrl_gym.envs.reasoning_gym.scoring import score_response as score_reasoning_gym_response
 from skyrl_gym.envs.registration import spec
 from skyrl_gym.verification import RolloutEvidence
 
@@ -66,13 +68,17 @@ def _normalize_ifeval(ground_truth: Any) -> str:
             ground_truth = json.loads(ground_truth)
         except json.JSONDecodeError as exc:
             raise ValueError("IFeval ground_truth must be valid JSON.") from exc
-    if not isinstance(ground_truth, Mapping):
-        raise ValueError("IFeval ground_truth must be a JSON object or mapping.")
+    if not isinstance(ground_truth, (Mapping, list)):
+        raise ValueError("IFeval ground_truth must be a constraint mapping or list of constraint mappings.")
     return ifeval_utils.normalize_ground_truth(ground_truth)
 
 
 def _ifeval_is_correct(response: str, ground_truth: str) -> bool:
-    return bool(ifeval_utils.compute_score(response, ground_truth)["acc"])
+    return ifeval_utils.compute_score(response, ground_truth)["score"] == 1.0
+
+
+def _reasoning_gym_is_correct(response: str, ground_truth: str) -> bool:
+    return score_reasoning_gym_response(response, ground_truth) == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +164,11 @@ CONTRACTS = {
         normalize_ground_truth=normalize_lcb_ground_truth,
         is_correct=_code_is_correct,
         prompt_instruction=LCB_PROMPT_INSTRUCTION,
+    ),
+    "reasoning_gym": VerifierDataContract(
+        env_id="reasoning_gym",
+        normalize_ground_truth=normalize_reasoning_gym_ground_truth,
+        is_correct=_reasoning_gym_is_correct,
     ),
     "mcq": VerifierDataContract(
         env_id="mcq",

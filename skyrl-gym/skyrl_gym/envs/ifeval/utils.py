@@ -13,7 +13,7 @@
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Dict
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,19 @@ def verify_keyword_frequency(text, word, N):
     words = re.findall(r"\b\w+\b", text)
     actual_count = sum(1 for w in words if w == keyword)
     return actual_count == N
+
+
+def verify_keyword_frequency_relation(text: str, keyword_list: list[str], N: int, quantifier: str) -> bool:
+    """Verify that every keyword obeys the requested frequency relation."""
+    words = re.findall(r"\b\w+\b", text.lower())
+    counts = [sum(word == keyword.lower() for word in words) for keyword in keyword_list]
+    if quantifier == "exactly":
+        return all(count == N for count in counts)
+    if quantifier == "at least":
+        return all(count >= N for count in counts)
+    if quantifier == "less than":
+        return all(count < N for count in counts)
+    return False
 
 
 # Forbidden Words: Do not include keywords {forbidden words} in the response.
@@ -86,6 +99,10 @@ def validate_word_constraint(text: str, N: int, quantifier: str) -> bool:
     tolerance = max(round(N * 0.1), 1)
     if quantifier == "at least":
         return actual_count >= N
+    elif quantifier == "more than":
+        return actual_count > N
+    elif quantifier == "less than":
+        return actual_count < N
     elif quantifier == "at most":
         return actual_count <= N
     elif quantifier == "around":
@@ -101,6 +118,10 @@ def verify_sentence_constraint(text: str, N: int, quantifier: str) -> bool:
     actual_count = len(sentences)
     if quantifier == "at least":
         return actual_count >= N
+    elif quantifier == "more than":
+        return actual_count > N
+    elif quantifier == "less than":
+        return actual_count < N
     elif quantifier == "around":
         return abs(actual_count - N) <= 1
     elif quantifier == "at most":
@@ -251,6 +272,7 @@ def validate_no_commas(text: str) -> bool:
 IF_FUNCTIONS_MAP: Dict[str, Callable[..., bool]] = {
     "verify_keywords": verify_keywords,
     "verify_keyword_frequency": verify_keyword_frequency,
+    "verify_keyword_frequency_relation": verify_keyword_frequency_relation,
     "validate_forbidden_words": validate_forbidden_words,
     "verify_letter_frequency": verify_letter_frequency,
     "validate_response_language": validate_response_language,
@@ -282,6 +304,7 @@ IF_FUNCTIONS_MAP: Dict[str, Callable[..., bool]] = {
 _FUNC_ARG_NAMES: Dict[str, tuple] = {
     "verify_keywords": ("keyword_list",),
     "verify_keyword_frequency": ("word", "N"),
+    "verify_keyword_frequency_relation": ("keyword_list", "N", "quantifier"),
     "validate_forbidden_words": ("forbidden_words",),
     "verify_letter_frequency": ("letter", "N"),
     "validate_response_language": ("language",),
@@ -308,16 +331,8 @@ _FUNC_ARG_NAMES: Dict[str, tuple] = {
 }
 
 
-def normalize_ground_truth(ground_truth: Mapping[str, Any]) -> str:
-    """Validate and canonicalize an IFEval constraint for dataset preparation.
-
-    Runtime scoring deliberately treats malformed examples as incorrect instead of
-    crashing a rollout. Dataset builders should use this stricter boundary before
-    writing an artifact so that malformed or incomplete constraints cannot silently
-    become permanently unlearnable rows.
-    """
+def _normalize_constraint(ground_truth: Mapping[str, Any]) -> dict[str, Any]:
     raw_spec = dict(ground_truth)
-
     func_name = raw_spec.get("func_name")
     if func_name not in IF_FUNCTIONS_MAP:
         raise ValueError(f"Unknown IFEval func_name: {func_name!r}.")
@@ -327,7 +342,23 @@ def normalize_ground_truth(ground_truth: Mapping[str, Any]) -> str:
         if argument not in raw_spec or raw_spec[argument] is None:
             raise ValueError(f"IFeval {func_name!r} requires non-null {argument!r}.")
         normalized[argument] = raw_spec[argument]
+    return normalized
 
+
+def normalize_ground_truth(ground_truth: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> str:
+    """Validate and canonicalize an IFEval constraint for dataset preparation.
+
+    Runtime scoring deliberately treats malformed examples as incorrect instead of
+    crashing a rollout. Dataset builders should use this stricter boundary before
+    writing an artifact so that malformed or incomplete constraints cannot silently
+    become permanently unlearnable rows.
+    """
+    if isinstance(ground_truth, Mapping):
+        normalized: dict[str, Any] | list[dict[str, Any]] = _normalize_constraint(ground_truth)
+    else:
+        if not ground_truth:
+            raise ValueError("IFeval ground_truth constraint list must be non-empty.")
+        normalized = [_normalize_constraint(constraint) for constraint in ground_truth]
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
@@ -382,9 +413,14 @@ def compute_score(response: str, ground_truth: str) -> Dict[str, Any]:
     binary all-or-nothing (RLVR-IFeval has one constraint per example).
     """
     spec = json.loads(ground_truth) if isinstance(ground_truth, str) else ground_truth
-    satisfied = check_constraint(response, ground_truth)
+    constraints = spec if isinstance(spec, list) else [spec]
+    satisfied = [check_constraint(response, constraint) for constraint in constraints]
+    satisfied_count = sum(satisfied)
+    total = len(constraints)
     return {
-        "score": 1.0 if satisfied else 0.0,
-        "acc": satisfied,
+        "score": satisfied_count / total if total else 0.0,
+        "acc": all(satisfied),
         "func_name": spec.get("func_name") if isinstance(spec, dict) else None,
+        "constraints_satisfied": satisfied_count,
+        "constraints_total": total,
     }

@@ -150,3 +150,23 @@ def test_missing_func_name_scores_zero():
     )
     step_output = env.step("anything")
     assert step_output["reward"] == 0.0
+
+
+def test_multiple_constraints_score_the_satisfied_fraction():
+    ground_truth = json.dumps(
+        [
+            {"func_name": "verify_sentence_constraint", "N": 2, "quantifier": "at least"},
+            {"func_name": "verify_postscript", "postscript_marker": "P.S."},
+        ]
+    )
+    env = skyrl_gym.make(
+        "ifeval",
+        env_config=DictConfig({"env_class": "ifeval"}),
+        extras={"reward_model": {"ground_truth": ground_truth}},
+    )
+
+    output = env.step("First sentence. Second sentence.")
+
+    assert output["reward"] == 0.5
+    assert output["metadata"]["constraints_satisfied"] == 1
+    assert output["metadata"]["constraints_total"] == 2

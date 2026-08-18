@@ -18,6 +18,7 @@ dependencies = [
     "pandas", 
     "requests",
     "omegaconf",
+    "reasoning-gym==0.1.25",
 ]
 
 [project.urls]

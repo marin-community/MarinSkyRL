@@ -6,6 +6,7 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
+from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
 from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_bundle
 from infra.rl_data.sources import SOURCES, load_source_rows, source_by_name
 
@@ -37,10 +38,11 @@ def _options(args: argparse.Namespace, source_name: str, revision: str) -> Prepa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", choices=sorted(SOURCES), required=True)
-    parser.add_argument("--revision", required=True, help="Immutable Hugging Face revision for the training source.")
-    parser.add_argument("--validation-source", choices=sorted(SOURCES), required=True)
-    parser.add_argument("--validation-revision", required=True, help="Immutable Hugging Face revision for validation.")
+    parser.add_argument("--mixture", type=Path, help="YAML file declaring train and validation source slices.")
+    parser.add_argument("--source", choices=sorted(SOURCES))
+    parser.add_argument("--revision", help="Immutable Hugging Face revision for the training source.")
+    parser.add_argument("--validation-source", choices=sorted(SOURCES))
+    parser.add_argument("--validation-revision", help="Immutable Hugging Face revision for validation.")
     parser.add_argument(
         "--output-dir", type=Path, required=True, help="New local directory for train/validation parquet."
     )
@@ -58,6 +60,34 @@ def main() -> None:
     parser.add_argument("--allow-train-on-test", action="store_true")
     args = parser.parse_args()
 
+    counter = _token_counter(args.tokenizer)
+    if args.mixture is not None:
+        single_source_args = (args.source, args.revision, args.validation_source, args.validation_revision)
+        if any(value is not None for value in single_source_args):
+            parser.error("--mixture cannot be combined with single-source arguments.")
+        train, validation = prepare_mixture(
+            load_mixture_spec(args.mixture),
+            counter,
+            args.max_prompt_tokens,
+            args.seed,
+            allow_train_on_test=args.allow_train_on_test,
+        )
+        write_bundle(train, validation, args.output_dir)
+        return
+
+    missing = [
+        name
+        for name, value in (
+            ("--source", args.source),
+            ("--revision", args.revision),
+            ("--validation-source", args.validation_source),
+            ("--validation-revision", args.validation_revision),
+        )
+        if value is None
+    ]
+    if missing:
+        parser.error(f"single-source mode requires {', '.join(missing)}; otherwise pass --mixture.")
+
     train_source = source_by_name(args.source)
     validation_source = source_by_name(args.validation_source)
     if train_source.name == "math500" and not args.allow_train_on_test:
@@ -65,7 +95,6 @@ def main() -> None:
 
     from skyrl_gym import get_data_contract
 
-    counter = _token_counter(args.tokenizer)
     train_contract = get_data_contract(train_source.env_id)
     validation_contract = get_data_contract(validation_source.env_id)
     train_options = _options(args, train_source.name, args.revision)

@@ -25,6 +25,9 @@ class LCBEnv(BaseTextEnv):
         extras: dict[str, Any] | None = None,
     ):
         super().__init__()
+        self.reward_mode = str(env_config.get("reward_mode", "binary"))
+        if self.reward_mode not in {"binary", "fractional"}:
+            raise ValueError(f"Unsupported LCB reward_mode: {self.reward_mode!r}.")
 
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
@@ -46,7 +49,7 @@ class LCBEnv(BaseTextEnv):
                 done=True,
                 metadata={"parsed_code": None, "verifier_error": _INVALID_GROUND_TRUTH_ERROR},
             )
-        parsed_code, reward = compute_score(action, self.tests)
+        parsed_code, reward = compute_score(action, self.tests, self.reward_mode)
 
         # RL on LCB w/ single-turn
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata={"parsed_code": parsed_code})
