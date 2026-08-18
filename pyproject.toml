@@ -132,7 +132,7 @@ dev = [
     { include-group = "analysis" },
     "litellm",
     "marin-rigging[prometheus]",
-    "marin-style @ git+https://github.com/marin-community/marin-style@64ceb7ac07a4f66bba134cae814f6928f9e6af62",
+    "marin-style @ git+https://github.com/marin-community/marin-style@5094279da60b47b9a8fa8effaf7f73cd13f1e96f",
     "prometheus-client",
     "pytest>=8.4",
     "pytest-asyncio",

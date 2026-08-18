@@ -2808,7 +2808,7 @@ prometheus = [
 [[package]]
 name = "marin-style"
 version = "0.3.1"
-source = { git = "https://github.com/marin-community/marin-style?rev=64ceb7ac07a4f66bba134cae814f6928f9e6af62#64ceb7ac07a4f66bba134cae814f6928f9e6af62" }
+source = { git = "https://github.com/marin-community/marin-style?rev=5094279da60b47b9a8fa8effaf7f73cd13f1e96f#5094279da60b47b9a8fa8effaf7f73cd13f1e96f" }
 dependencies = [
     { name = "click" },
     { name = "pyyaml" },
@@ -3069,7 +3069,7 @@ analysis = [
 dev = [
     { name = "litellm" },
     { name = "marin-rigging", extras = ["prometheus"] },
-    { name = "marin-style", git = "https://github.com/marin-community/marin-style?rev=64ceb7ac07a4f66bba134cae814f6928f9e6af62" },
+    { name = "marin-style", git = "https://github.com/marin-community/marin-style?rev=5094279da60b47b9a8fa8effaf7f73cd13f1e96f" },
     { name = "matplotlib" },
     { name = "pandas" },
     { name = "prometheus-client" },

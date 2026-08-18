@@ -26,7 +26,7 @@ jobs:
       - name: Lint and format
         run: uv run infra/pre-commit.py --all-files
       - name: Check the vendored marin-style tree is current
-        run: uvx --from git+https://github.com/marin-community/marin-style@64ceb7ac07a4f66bba134cae814f6928f9e6af62 marin-style sync --check
+        run: uvx --from git+https://github.com/marin-community/marin-style@5094279da60b47b9a8fa8effaf7f73cd13f1e96f marin-style sync --check
       - name: Secret scan
         run: uv run --with pre-commit pre-commit run gitleaks --all-files --config .pre-commit-config.yaml
 
