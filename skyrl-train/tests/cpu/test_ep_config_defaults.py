@@ -18,19 +18,12 @@ EP_FIELDS = {
     "ep_comm_backend": "torch",
     "deepep_num_sms": 20,
     "deepep_token_chunk_size": None,
-}
-
-EXPERT_LOADER_FIELDS = {
     "expert_loader_chunk_rows": 8,
 }
 
 
 def test_ep_fields_parse_with_defaults():
     assert_role_fsdp_defaults(get_default_config(), EP_FIELDS)
-
-
-def test_expert_loader_fields_parse_with_defaults():
-    assert_role_fsdp_defaults(get_default_config(), EXPERT_LOADER_FIELDS)
 
 
 def test_expert_loader_policy_override_applies_to_all_roles():

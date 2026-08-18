@@ -16,7 +16,7 @@ First extend the shared FSDP default regression test to require `expert_loader_c
 
 ## Results
 
-The new shared-default test failed on unmodified `main` with `trainer.ref.fsdp_config missing expert_loader_chunk_rows`, matching the nightly traceback. The reference and critic defaults now interpolate the authoritative policy value. The completed configuration, placement, and nightly subset passed 43 tests. The required changed-file lint passed.
+The shared-default test failed on unmodified `main` with `trainer.ref.fsdp_config missing expert_loader_chunk_rows`, matching the nightly traceback. The reference and critic defaults now interpolate the authoritative policy value. The completed configuration, placement, and nightly subset passed 42 tests. The required changed-file lint passed.
 
 The full CPU CI command collected 1,535 tests and reached the later trainer tests without an assertion failure, then the constrained session was killed with exit 137 after repeated local Ray instances. A fresh run including `test_trainer.py` later inherited an unavailable Ray GCS address and was interrupted. These resource failures occurred outside the changed configuration tests.
 

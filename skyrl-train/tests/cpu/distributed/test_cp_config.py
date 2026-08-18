@@ -177,7 +177,7 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
         assert added == expected_added, (
             f"trainer.{role}.fsdp_config added keys {sorted(added)}, expected {sorted(expected_added)}"
         )
-        # And the added keys carry the disabled defaults.
+        # The CP and grouped-mm keys carry their disabled defaults.
         for k, v in {**CP_FIELDS, **MOE_FSDP_FIELDS}.items():
             assert cur_fsdp[k] == v
     # Only explicitly additive top-level trainer keys may differ from the golden.
