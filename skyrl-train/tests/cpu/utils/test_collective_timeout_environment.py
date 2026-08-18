@@ -12,9 +12,10 @@ from skyrl_train.utils.constants import validate_worker_collective_timeout_secon
 
 def test_worker_collective_timeout_fallback_matches_trainer_default():
     config = get_default_config()
+    trainer_default = config.trainer.distributed.worker_collective_timeout_seconds
 
-    assert config.trainer.distributed.worker_collective_timeout_seconds == 300
-    assert validate_worker_collective_timeout_seconds() == 300
+    assert trainer_default == validate_worker_collective_timeout_seconds()
+    assert trainer_default == 300
 
 
 def test_runtime_environment_does_not_enable_nonblocking_communicators(monkeypatch):
