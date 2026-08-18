@@ -12,7 +12,8 @@ from skyrl_train.entrypoints.main_base import (
     run_ray_driver,
 )
 from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 
 
 class TerminalBenchGenerateExp(TerminalBenchExp):
@@ -24,12 +25,13 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
     def run(self):
         trajectory_runner = self._setup_trajectory_runner()
 
-        # Build input from the training dataset
-        input_batch = TrajectoryRequestBatch(
-            prompts=[item["prompt"] for item in self.train_dataset],
-            env_classes=None,
-            env_extras=None,
-            sampling_params=None,
+        input_batch, _ = prepare_trajectory_request(
+            list(self.train_dataset),
+            self.cfg.generator.n_samples_per_prompt,
+            get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+            self.cfg.environment.env_class,
+            "eval",
+            0,
         )
 
         asyncio.run(trajectory_runner.run(input_batch))
