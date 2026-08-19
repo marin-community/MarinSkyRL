@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --gres=gpu:gh200:1
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --job-name=mskyrl-sif-cu130
 #SBATCH --output=/e/scratch/jureap59/feuer1/sif_build/logs/cuda130-gh200-%j.log
 
