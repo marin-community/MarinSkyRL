@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import importlib.metadata
-import importlib.util
-import os
 import platform
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -30,15 +30,37 @@ def main() -> None:
     assert torch.version.cuda == "13.0", torch.version.cuda
     assert torch.cuda.is_available()
     assert torch.cuda.get_device_capability() == (9, 0), torch.cuda.get_device_capability()
-    assert torch.cuda.nccl.version() == (2, 31, 2), torch.cuda.nccl.version()
+    # torch.cuda.nccl.version() reports the headers used to compile PyTorch, not
+    # the dynamically loaded NCCL library. Torch 2.11.0+cu130 was compiled with
+    # 2.28.9; this image deliberately validates its newer ABI-compatible runtime.
+    assert torch.cuda.nccl.version() == (2, 28, 9), torch.cuda.nccl.version()
     assert distribution_version("nvidia-nccl-cu13") == "2.31.2"
 
-    nccl_root = Path(importlib.util.find_spec("nvidia.nccl").submodule_search_locations[0])
-    nccl_library = (nccl_root / "lib" / "libnccl.so.2").resolve()
+    nccl_distribution = importlib.metadata.distribution("nvidia-nccl-cu13")
+    nccl_library = Path(nccl_distribution.locate_file("nvidia/nccl/lib/libnccl.so.2")).resolve()
     assert nccl_library.is_file(), nccl_library
     torch_library = Path(torch.__file__).parent / "lib" / "libtorch_cuda.so"
     ldd = subprocess.run(["ldd", str(torch_library)], check=True, capture_output=True, text=True).stdout
-    assert str(nccl_library) in ldd, ldd
+    nccl_links = [line for line in ldd.splitlines() if "libnccl.so" in line]
+    assert len(nccl_links) == 1, ldd
+    loaded_nccl = Path(nccl_links[0].split("=>", maxsplit=1)[1].split()[0]).resolve()
+    assert loaded_nccl == nccl_library, (loaded_nccl, nccl_library)
+
+    runtime_nccl = ctypes.CDLL(str(nccl_library))
+    runtime_nccl_version = ctypes.c_int()
+    assert runtime_nccl.ncclGetVersion(ctypes.byref(runtime_nccl_version)) == 0
+    assert runtime_nccl_version.value == 23102, runtime_nccl_version.value
+
+    import torch.distributed as dist
+
+    with tempfile.TemporaryDirectory() as rendezvous_dir:
+        rendezvous = Path(rendezvous_dir) / "nccl-rendezvous"
+        dist.init_process_group("nccl", init_method=f"file://{rendezvous}", rank=0, world_size=1)
+        value = torch.ones(1, device="cuda")
+        dist.all_reduce(value)
+        torch.cuda.synchronize()
+        assert value.item() == 1.0, value
+        dist.destroy_process_group()
 
     import vllm
     import vllm._C_stable_libtorch  # noqa: F401
@@ -71,7 +93,8 @@ def main() -> None:
             "host": platform.node(),
             "torch": torch.__version__,
             "cuda": torch.version.cuda,
-            "nccl": torch.cuda.nccl.version(),
+            "nccl_build": torch.cuda.nccl.version(),
+            "nccl_runtime": runtime_nccl_version.value,
             "vllm": vllm.__version__,
             "vllm_commit": args.vllm_commit,
             "harbor_commit": args.harbor_commit,
