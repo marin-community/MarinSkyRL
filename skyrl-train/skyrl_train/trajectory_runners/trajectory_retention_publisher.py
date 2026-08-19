@@ -1,5 +1,6 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import multiprocessing
 from multiprocessing.connection import Connection, wait
 import threading
@@ -7,10 +8,15 @@ import time
 from typing import Any, Protocol
 
 
+class PublicationOperation(StrEnum):
+    INITIALIZE = "initialize"
+    PUBLISH = "publish"
+
+
 @dataclass(frozen=True)
 class PublicationRequest:
     request_id: str
-    operation: str
+    operation: PublicationOperation
     output_path: str
     archive_path: str | None = None
     archive_payload: bytes | None = None
@@ -31,11 +37,11 @@ class PublicationResult:
 class TrajectoryPublisher(Protocol):
     def execute(self, request: PublicationRequest) -> PublicationResult: ...
 
-    def submit(self, request: PublicationRequest) -> bool: ...
+    def submit(self, request: PublicationRequest) -> bool:
+        """Submit a best-effort request, returning false when the single slot is occupied."""
+        ...
 
     def poll(self) -> PublicationResult | None: ...
-
-    def wait_pending(self) -> PublicationResult | None: ...
 
     def close(self) -> PublicationResult | None: ...
 
@@ -85,14 +91,6 @@ class ProcessTrajectoryPublisher:
             event = self._pending_event
         if event is None or not event.is_set():
             return None
-        return self._take_pending_result()
-
-    def wait_pending(self) -> PublicationResult | None:
-        with self._lock:
-            event = self._pending_event
-        if event is None:
-            return None
-        event.wait(self._publish_timeout_seconds + 1)
         return self._take_pending_result()
 
     def close(self) -> PublicationResult | None:

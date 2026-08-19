@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.trajectory_retention import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
     ProcessTrajectoryPublisher,
+    PublicationOperation,
     PublicationRequest,
     PublicationResult,
 )
@@ -52,9 +53,6 @@ class _BlockingPublisher:
     def poll(self):
         return None
 
-    def wait_pending(self):
-        return None
-
     def close(self):
         return None
 
@@ -76,9 +74,6 @@ class _FailingPublisher:
         result = self.result
         self.result = None
         return result
-
-    def wait_pending(self):
-        return self.poll()
 
     def close(self):
         return self.poll()
@@ -467,7 +462,7 @@ def test_storage_worker_is_terminated_at_the_publication_deadline():
         shutdown_timeout_seconds=0.05,
     )
 
-    result = publisher.execute(PublicationRequest("blocked", "publish", "/unused"))
+    result = publisher.execute(PublicationRequest("blocked", PublicationOperation.PUBLISH, "/unused"))
 
     assert result.timed_out
     assert result.error is not None

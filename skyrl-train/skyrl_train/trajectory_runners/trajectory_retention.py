@@ -29,6 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_retention_config import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
     ProcessTrajectoryPublisher,
+    PublicationOperation,
     PublicationRequest,
     PublicationResult,
     TrajectoryPublisher,
@@ -128,6 +129,14 @@ class _SelectedRecord:
     record: "TrajectoryRecord"
     payload: bytes
     selection: _Selection
+
+
+@dataclass(frozen=True)
+class _SelectedArchive:
+    path: str
+    payload: bytes
+    ledger: _RetentionLedger
+    record_count: int
 
 
 @dataclass(frozen=True)
@@ -255,11 +264,8 @@ class _FilesystemTrajectoryWriter:
 
     def find_files(self) -> dict[str, int]:
         absolute_files = io.find_files(self.output_path)
-        prefix = self.output_path.rstrip("/") + "/"
-        normalized_prefix = prefix.split("://", 1)[-1]
-        return {
-            path.removeprefix(prefix).removeprefix(normalized_prefix): size for path, size in absolute_files.items()
-        }
+        normalized_root = self.output_path.split("://", 1)[-1].rstrip("/")
+        return {posixpath.relpath(path, normalized_root): size for path, size in absolute_files.items()}
 
     def _write(self, relative_path: str, payload: bytes) -> None:
         io.write_bytes_atomic(self._path(relative_path), payload)
@@ -458,7 +464,7 @@ def _copy_ledger(ledger: _RetentionLedger) -> _RetentionLedger:
     )
 
 
-def _archive_payload(selected: Sequence[_SelectedRecord]) -> tuple[bytes, dict[str, Any]]:
+def _archive_payload(selected: Sequence[_SelectedRecord]) -> bytes:
     manifest_records = []
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_STORED, strict_timestamps=True) as archive:
@@ -483,7 +489,7 @@ def _archive_payload(selected: Sequence[_SelectedRecord]) -> tuple[bytes, dict[s
         info.date_time = (1980, 1, 1, 0, 0, 0)
         info.compress_type = zipfile.ZIP_STORED
         archive.writestr(info, canonical_json_bytes(manifest))
-    return buffer.getvalue(), manifest
+    return buffer.getvalue()
 
 
 def _read_archive_manifest(payload: bytes) -> dict[str, Any]:
@@ -540,18 +546,53 @@ def _add_archive_to_ledger(ledger: _RetentionLedger, path: str, payload: bytes) 
     ledger.step_bytes[step] = ledger.step_bytes.get(step, 0) + archive_bytes
 
 
-def _record_sample_score(value: Mapping[str, Any]) -> int:
-    trajectory = value["trajectory"]
+def _sample_score(
+    run_id: str,
+    phase: str,
+    global_step: int,
+    instance_id: str,
+    repetition_id: int,
+) -> int:
     sample_key = ":".join(
         (
-            str(value["run_id"]),
-            str(value["phase"]),
-            str(value["global_step"]),
-            str(trajectory["instance_id"]),
-            str(trajectory["repetition_id"]),
+            run_id,
+            phase,
+            str(global_step),
+            instance_id,
+            str(repetition_id),
         )
     )
     return int(hashlib.sha256(sample_key.encode("utf-8")).hexdigest(), 16)
+
+
+def _serialized_sample_score(value: Mapping[str, Any]) -> int:
+    trajectory = value["trajectory"]
+    return _sample_score(
+        str(value["run_id"]),
+        str(value["phase"]),
+        int(value["global_step"]),
+        str(trajectory["instance_id"]),
+        int(trajectory["repetition_id"]),
+    )
+
+
+def _is_mandatory(
+    *,
+    outcome: float,
+    stop_reason: str | None,
+    has_loops: bool,
+    config: TrajectoryRetentionConfig,
+) -> bool:
+    normalized_stop = None if stop_reason is None else str(stop_reason).strip().lower()
+    return any(
+        (
+            config.always_retain_failures and outcome <= 0.0,
+            config.always_retain_non_terminating and normalized_stop not in config.accepted_stop_reasons,
+            config.always_retain_loops and has_loops,
+            config.reward_below is not None and outcome <= config.reward_below,
+            config.reward_above is not None and outcome >= config.reward_above,
+        )
+    )
 
 
 def _orphan_reasons(value: Mapping[str, Any], config: TrajectoryRetentionConfig) -> tuple[str, ...]:
@@ -559,19 +600,15 @@ def _orphan_reasons(value: Mapping[str, Any], config: TrajectoryRetentionConfig)
     response = value["response"]
     outcome = float(reward["outcome"])
     stop_reason = response.get("stop_reason")
-    normalized_stop = None if stop_reason is None else str(stop_reason).strip().lower()
-    mandatory = any(
-        (
-            config.always_retain_failures and outcome <= 0.0,
-            config.always_retain_non_terminating and normalized_stop not in config.accepted_stop_reasons,
-            config.always_retain_loops and bool(response.get("loop_spans")),
-            config.reward_below is not None and outcome <= config.reward_below,
-            config.reward_above is not None and outcome >= config.reward_above,
-        )
+    mandatory = _is_mandatory(
+        outcome=outcome,
+        stop_reason=None if stop_reason is None else str(stop_reason),
+        has_loops=bool(response.get("loop_spans")),
+        config=config,
     )
     if mandatory:
         return (_SELECTION_MANDATORY,)
-    score = _record_sample_score(value)
+    score = _serialized_sample_score(value)
     if score / (1 << 256) < config.sample_fraction:
         return (_SELECTION_FRACTION,)
     return ()
@@ -616,7 +653,7 @@ def _reconciled_ledger(writer: TrajectoryWriter, config: TrajectoryRetentionConf
             bytes=len(payload),
             step=step,
             reasons=_orphan_reasons(value, config),
-            sample_score=_record_sample_score(value),
+            sample_score=_serialized_sample_score(value),
         )
         ledger.total_bytes += len(payload)
         ledger.step_bytes[step] = ledger.step_bytes.get(step, 0) + len(payload)
@@ -624,19 +661,29 @@ def _reconciled_ledger(writer: TrajectoryWriter, config: TrajectoryRetentionConf
     return ledger
 
 
+def _initialize_publication(request: PublicationRequest) -> _RetentionLedger:
+    writer = _FilesystemTrajectoryWriter(request.output_path)
+    config = parse_trajectory_retention_config(request.retention_config)
+    return _reconciled_ledger(writer, config)
+
+
+def _publish_archive(request: PublicationRequest) -> _RetentionLedger:
+    if request.archive_path is None or request.archive_payload is None or request.ledger is None:
+        raise ValueError("trajectory publication request is incomplete")
+    writer = _FilesystemTrajectoryWriter(request.output_path)
+    if not writer.exists(request.archive_path):
+        writer.write_bytes(request.archive_path, request.archive_payload)
+    ledger = _RetentionLedger.from_json(request.ledger)
+    writer.write_json(_LEDGER_NAME, to_jsonable(ledger))
+    return ledger
+
+
 def _publication_worker(request: PublicationRequest, sender) -> None:
     try:
-        config = parse_trajectory_retention_config(request.retention_config)
-        writer = _FilesystemTrajectoryWriter(request.output_path)
-        if request.operation == "initialize":
-            ledger = _reconciled_ledger(writer, config)
-        elif request.operation == "publish":
-            if request.archive_path is None or request.archive_payload is None or request.ledger is None:
-                raise ValueError("trajectory publication request is incomplete")
-            if not writer.exists(request.archive_path):
-                writer.write_bytes(request.archive_path, request.archive_payload)
-            ledger = _RetentionLedger.from_json(request.ledger)
-            writer.write_json(_LEDGER_NAME, to_jsonable(ledger))
+        if request.operation is PublicationOperation.INITIALIZE:
+            ledger = _initialize_publication(request)
+        elif request.operation is PublicationOperation.PUBLISH:
+            ledger = _publish_archive(request)
         else:
             raise ValueError(f"unknown trajectory publication operation: {request.operation}")
         sender.send(
@@ -692,7 +739,7 @@ class TrajectorySink:
         self._lock = threading.Lock()
         self._ledger: _RetentionLedger | None = None
         self._runner_name: str | None = None
-        self._pending_operation: str | None = None
+        self._pending_operation: PublicationOperation | None = None
         self._pending_archive_path: str | None = None
         self._pending_archive_bytes = 0
         if config.enabled:
@@ -748,59 +795,71 @@ class TrajectorySink:
             runner_name=self._runner_name,
         )
         metrics[f"{RETENTION_METRIC_PREFIX}/candidates"] = float(len(records))
-        if self._ledger is None:
-            if self.config.required:
-                result = self.publisher.execute(self._initialization_request())
-                if result.error is not None:
-                    self._raise_publication_error(result, _LEDGER_NAME)
-                self._ledger = _RetentionLedger.from_json(result.ledger)
-            else:
-                self._start_initialization()
-                metrics[f"{RETENTION_METRIC_PREFIX}/write_errors"] += float(len(records))
-                return metrics
+        if not self._ensure_ledger(metrics, len(records)):
+            return metrics
 
         if self._pending_operation is not None:
             metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_backpressure"] += float(len(records))
             return metrics
 
+        assert self._ledger is not None
         archive = self._select_archive(records, self._ledger, metrics)
         if archive is None:
             return metrics
-        archive_path, archive_payload, next_ledger, record_count = archive
-        request = PublicationRequest(
-            request_id=hashlib.sha256(archive_path.encode("utf-8")).hexdigest(),
-            operation="publish",
-            output_path=self.config.output_path,
-            archive_path=archive_path,
-            archive_payload=archive_payload,
-            ledger=to_jsonable(next_ledger),
-            retention_config=to_jsonable(self.config),
-            record_count=record_count,
-        )
+        self._dispatch_archive(archive, metrics)
+        return metrics
+
+    def _ensure_ledger(self, metrics: dict[str, float], record_count: int) -> bool:
+        if self._ledger is not None:
+            return True
+        if not self.config.required:
+            self._start_initialization()
+            metrics[f"{RETENTION_METRIC_PREFIX}/write_errors"] += float(record_count)
+            return False
+        result = self.publisher.execute(self._initialization_request())
+        if result.error is not None:
+            self._raise_publication_error(result, _LEDGER_NAME)
+        self._ledger = _RetentionLedger.from_json(result.ledger)
+        return True
+
+    def _dispatch_archive(self, archive: _SelectedArchive, metrics: dict[str, float]) -> None:
+        request = self._publication_request(archive)
         if self.config.required:
             result = self.publisher.execute(request)
             if result.error is not None:
-                self._raise_publication_error(result, archive_path)
+                self._raise_publication_error(result, archive.path)
             self._ledger = _RetentionLedger.from_json(result.ledger)
-            metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(record_count)
-            metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(len(archive_payload))
-            return metrics
+            metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(archive.record_count)
+            metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(len(archive.payload))
+            return
 
         if not self.publisher.submit(request):
-            metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_backpressure"] += float(record_count)
-            return metrics
-        self._pending_operation = "publish"
-        self._pending_archive_path = archive_path
-        self._pending_archive_bytes = len(archive_payload)
-        metrics[f"{RETENTION_METRIC_PREFIX}/enqueued"] += float(record_count)
-        return metrics
+            metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_backpressure"] += float(archive.record_count)
+            return
+        self._pending_operation = PublicationOperation.PUBLISH
+        self._pending_archive_path = archive.path
+        self._pending_archive_bytes = len(archive.payload)
+        metrics[f"{RETENTION_METRIC_PREFIX}/enqueued"] += float(archive.record_count)
+
+    def _publication_request(self, archive: _SelectedArchive) -> PublicationRequest:
+        return PublicationRequest(
+            request_id=hashlib.sha256(archive.path.encode("utf-8")).hexdigest(),
+            operation=PublicationOperation.PUBLISH,
+            output_path=self.config.output_path,
+            archive_path=archive.path,
+            archive_payload=archive.payload,
+            ledger=to_jsonable(archive.ledger),
+            retention_config=to_jsonable(self.config),
+            record_count=archive.record_count,
+        )
 
     def _select_archive(
         self,
         records: Sequence[TrajectoryRecord],
         ledger: _RetentionLedger,
         metrics: dict[str, float],
-    ) -> tuple[str, bytes, _RetentionLedger, int] | None:
+    ) -> _SelectedArchive | None:
+        """Build the bounded archive and next ledger, or return none when no record qualifies."""
         next_ledger = _copy_ledger(ledger)
         selected = []
         reserved_bytes = _ARCHIVE_BASE_OVERHEAD_BYTES
@@ -836,7 +895,7 @@ class TrajectorySink:
 
         if not selected:
             return None
-        archive_payload, _ = _archive_payload(selected)
+        archive_payload = _archive_payload(selected)
         if len(archive_payload) > reserved_bytes:
             raise ValueError("trajectory retention archive overhead exceeded its reserved bound")
         first = selected[0].record
@@ -852,7 +911,12 @@ class TrajectorySink:
         )
         next_ledger.step_bytes[step_key] = next_ledger.step_bytes.get(step_key, 0) + len(archive_payload)
         next_ledger.total_bytes += len(archive_payload)
-        return archive_path, archive_payload, next_ledger, len(selected)
+        return _SelectedArchive(
+            path=archive_path,
+            payload=archive_payload,
+            ledger=next_ledger,
+            record_count=len(selected),
+        )
 
     def _encode_record(self, record: TrajectoryRecord) -> bytes:
         return gzip.compress(
@@ -863,7 +927,7 @@ class TrajectorySink:
     def _initialization_request(self) -> PublicationRequest:
         return PublicationRequest(
             request_id="initialize",
-            operation="initialize",
+            operation=PublicationOperation.INITIALIZE,
             output_path=self.config.output_path,
             retention_config=to_jsonable(self.config),
         )
@@ -872,7 +936,7 @@ class TrajectorySink:
         if self._pending_operation is not None:
             return
         if self.publisher.submit(self._initialization_request()):
-            self._pending_operation = "initialize"
+            self._pending_operation = PublicationOperation.INITIALIZE
 
     def _drain_publication(self, metrics: dict[str, float]) -> None:
         result = self.publisher.poll()
@@ -891,7 +955,7 @@ class TrajectorySink:
             self._ledger = None
             return
         self._ledger = _RetentionLedger.from_json(result.ledger)
-        if operation == "publish":
+        if operation is PublicationOperation.PUBLISH:
             metrics[f"{RETENTION_METRIC_PREFIX}/written"] += float(result.record_count)
             metrics[f"{RETENTION_METRIC_PREFIX}/bytes_written"] += float(archive_bytes)
             logger.info("Published trajectory retention archive {}", archive_path)
@@ -905,7 +969,12 @@ class TrajectorySink:
 
     def _selection(self, record: TrajectoryRecord, ledger: _RetentionLedger) -> _Selection | None:
         reasons = []
-        if self._is_mandatory(record):
+        if _is_mandatory(
+            outcome=record.reward.outcome,
+            stop_reason=record.response.stop_reason,
+            has_loops=bool(record.response.loop_spans),
+            config=self.config,
+        ):
             return _Selection((_SELECTION_MANDATORY,))
 
         score = self._sample_score(record)
@@ -942,35 +1011,15 @@ class TrajectorySink:
             return
         del ledger.records[displaced_id]
 
-    def _is_mandatory(self, record: TrajectoryRecord) -> bool:
-        outcome = record.reward.outcome
-        stop_reason = record.response.stop_reason
-        normalized_stop = None if stop_reason is None else str(stop_reason).strip().lower()
-        return any(
-            (
-                self.config.always_retain_failures and outcome <= 0.0,
-                self.config.always_retain_non_terminating and normalized_stop not in self.config.accepted_stop_reasons,
-                self.config.always_retain_loops and bool(record.response.loop_spans),
-                self.config.reward_below is not None and outcome <= self.config.reward_below,
-                self.config.reward_above is not None and outcome >= self.config.reward_above,
-            )
-        )
-
     @staticmethod
-    def _sample_key(record: TrajectoryRecord) -> str:
-        return ":".join(
-            (
-                record.run_id,
-                record.phase,
-                str(record.global_step),
-                record.trajectory.instance_id,
-                str(record.trajectory.repetition_id),
-            )
+    def _sample_score(record: TrajectoryRecord) -> int:
+        return _sample_score(
+            record.run_id,
+            record.phase,
+            record.global_step,
+            record.trajectory.instance_id,
+            record.trajectory.repetition_id,
         )
-
-    @classmethod
-    def _sample_score(cls, record: TrajectoryRecord) -> int:
-        return int(hashlib.sha256(cls._sample_key(record).encode("utf-8")).hexdigest(), 16)
 
     @staticmethod
     def _step_key(record: TrajectoryRecord) -> str:
