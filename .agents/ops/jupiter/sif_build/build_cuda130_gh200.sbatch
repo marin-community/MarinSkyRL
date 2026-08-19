@@ -19,7 +19,7 @@ if [[ -z ${SLURM_JOB_ID:-} || -z ${SLURM_JOB_NODELIST:-} ]]; then
   echo "FATAL: this script must run as a Slurm compute job" >&2
   exit 2
 fi
-if [[ -z ${BUNDLE_DIR:-} || ! -f $BUNDLE_DIR/manifest.env ]]; then
+if [[ -z ${BUNDLE_DIR:-} || ! -f $BUNDLE_DIR/manifest.env || ! -f $BUNDLE_DIR/sources.tar ]]; then
   echo "FATAL: BUNDLE_DIR must name a staged build bundle" >&2
   exit 2
 fi
@@ -33,15 +33,6 @@ if [[ $actual_base_sha256 != "$BASE_SIF_SHA256" ]]; then
   echo "FATAL: base SIF changed after staging" >&2
   exit 2
 fi
-if [[ $(git -C "$BUNDLE_DIR/sources/vllm" rev-parse HEAD) != "$VLLM_COMMIT" ]]; then
-  echo "FATAL: staged vLLM revision does not match the manifest" >&2
-  exit 2
-fi
-if [[ $(git -C "$BUNDLE_DIR/sources/harbor" rev-parse HEAD) != "$HARBOR_COMMIT" ]]; then
-  echo "FATAL: staged Harbor revision does not match the manifest" >&2
-  exit 2
-fi
-
 module load Apptainer 2>/dev/null || true
 command -v apptainer >/dev/null
 mkdir -p "$JUPITER_ROOT/sif_build/logs" "$CONTAINER_DIR"
@@ -58,10 +49,20 @@ export APPTAINER_CACHEDIR=$work_root/apptainer-cache
 build_inputs=$work_root/inputs
 sandbox=$work_root/sandbox
 wheelhouse=$work_root/wheelhouse
-mkdir -p "$build_inputs" "$wheelhouse"
-cp -a "$BUNDLE_DIR/sources/." "$build_inputs/"
+mkdir -p "$wheelhouse"
+sha256sum --check "$BUNDLE_DIR/sources.tar.sha256"
+tar -C "$work_root" -xf "$BUNDLE_DIR/sources.tar"
+mv "$work_root/sources" "$build_inputs"
 cp -a "$BUNDLE_DIR/wheels/." "$wheelhouse/"
 chmod -R u+w "$build_inputs" "$wheelhouse"
+if [[ $(git -C "$build_inputs/vllm" rev-parse HEAD) != "$VLLM_COMMIT" ]]; then
+  echo "FATAL: staged vLLM revision does not match the manifest" >&2
+  exit 2
+fi
+if [[ $(git -C "$build_inputs/harbor" rev-parse HEAD) != "$HARBOR_COMMIT" ]]; then
+  echo "FATAL: staged Harbor revision does not match the manifest" >&2
+  exit 2
+fi
 
 vllm_short=${VLLM_COMMIT:0:12}
 output_name=marinskyrl_cuda130_gh200_vllm-gpu-${vllm_short}_nccl-2.31.2.sif

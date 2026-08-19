@@ -48,12 +48,23 @@ fi
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 bundle=$STAGING_ROOT/cuda130-gh200-$stamp
-mkdir -p "$STAGING_ROOT/logs" "$bundle/sources" "$bundle/wheels"
+local_stage=$(mktemp -d "${TMPDIR:-/tmp}/marinskyrl-sif-stage.XXXXXX")
+sources=$local_stage/sources
+
+cleanup() {
+  case "$local_stage" in
+    /tmp/marinskyrl-sif-stage.*|/var/tmp/marinskyrl-sif-stage.*) rm -rf -- "$local_stage" ;;
+    *) echo "WARNING: refusing to clean unexpected staging path: $local_stage" >&2 ;;
+  esac
+}
+trap cleanup EXIT
+
+mkdir -p "$STAGING_ROOT/logs" "$bundle/wheels" "$sources"
 cp "$SCRIPT_DIR/validate_cuda130_gh200.py" "$bundle/validate_cuda130_gh200.py"
 
-echo "Staging source trees in $bundle"
-clone_ref "$VLLM_REPOSITORY" "$VLLM_REF" "$bundle/sources/vllm"
-clone_ref "$HARBOR_REPOSITORY" "$HARBOR_REF" "$bundle/sources/harbor"
+echo "Staging source trees in login-local storage before archiving them to $bundle"
+clone_ref "$VLLM_REPOSITORY" "$VLLM_REF" "$sources/vllm"
+clone_ref "$HARBOR_REPOSITORY" "$HARBOR_REF" "$sources/harbor"
 
 # These revisions come from the selected vLLM source tree. Keep them in sync
 # with its CMake files when changing VLLM_REF. Fail before cloning large source
@@ -71,28 +82,28 @@ declare -A vllm_dependency_markers=(
 )
 for dependency in "${!vllm_dependency_markers[@]}"; do
   marker=${vllm_dependency_markers[$dependency]}
-  if ! grep -RqsF "$marker" "$bundle/sources/vllm/CMakeLists.txt" "$bundle/sources/vllm/cmake/external_projects"; then
+  if ! grep -RqsF "$marker" "$sources/vllm/CMakeLists.txt" "$sources/vllm/cmake/external_projects"; then
     echo "FATAL: vLLM changed its $dependency revision; update this staging script after review" >&2
     exit 2
   fi
 done
 
-clone_ref https://github.com/nvidia/cutlass.git refs/tags/v4.4.2 "$bundle/sources/cutlass"
+clone_ref https://github.com/nvidia/cutlass.git refs/tags/v4.4.2 "$sources/cutlass"
 clone_ref https://github.com/vllm-project/flash-attention.git f3e1a4f74c99145c0717709860bf765de1703779 \
-  "$bundle/sources/vllm-flash-attn" true
+  "$sources/vllm-flash-attn" true
 clone_ref https://github.com/vllm-project/FlashMLA.git a8f794d1251cbfd88a5011445dd5582289c727e4 \
-  "$bundle/sources/flashmla" true
-clone_ref https://github.com/triton-lang/triton.git refs/tags/v3.5.1 "$bundle/sources/triton"
+  "$sources/flashmla" true
+clone_ref https://github.com/triton-lang/triton.git refs/tags/v3.5.1 "$sources/triton"
 clone_ref https://github.com/vllm-project/DeepGEMM.git e21c821f39a2056d68067a466c64ddc942200106 \
-  "$bundle/sources/deepgemm" true
+  "$sources/deepgemm" true
 clone_ref https://github.com/vllm-project/MSA.git 087c161814d4d9c735b46c21212a09e5f8eb92fa \
-  "$bundle/sources/fmha-sm100" true
+  "$sources/fmha-sm100" true
 clone_ref https://github.com/vllm-project/FlashKDA.git b5d11010ff01c1d4a683c0dde42e76cbeaa8107f \
-  "$bundle/sources/flashkda" true
+  "$sources/flashkda" true
 clone_ref https://github.com/IST-DASLab/qutlass.git e74319e3405ce6d71965732880f5dc1f52371f64 \
-  "$bundle/sources/qutlass" true
+  "$sources/qutlass" true
 clone_ref https://github.com/vllm-project/tml-fa4.git b206834606ed5b5f21f8eed6b0683f528ea9cf7d \
-  "$bundle/sources/tml-fa4" true
+  "$sources/tml-fa4" true
 
 wget --quiet "$NCCL_URL" -O "$bundle/wheels/$NCCL_WHEEL"
 echo "$NCCL_SHA256  $bundle/wheels/$NCCL_WHEEL" | sha256sum --check
@@ -105,8 +116,8 @@ apptainer exec --pwd / "$BASE_SIF" python -m pip download \
   'setuptools>=77.0.3,<81.0.0' 'setuptools-scm>=8.0' 'setuptools-rust>=1.9.0' \
   'semantic-version>=2.8.2' 'uv_build>=0.8.4,<0.9.0'
 
-vllm_commit=$(git -C "$bundle/sources/vllm" rev-parse HEAD)
-harbor_commit=$(git -C "$bundle/sources/harbor" rev-parse HEAD)
+vllm_commit=$(git -C "$sources/vllm" rev-parse HEAD)
+harbor_commit=$(git -C "$sources/harbor" rev-parse HEAD)
 base_sha256=$(sha256sum "$BASE_SIF" | awk '{print $1}')
 cat > "$bundle/manifest.env" <<EOF
 BASE_SIF=$BASE_SIF
@@ -124,14 +135,16 @@ CUDA_VERSION=13.0
 CUDA_ARCH=9.0
 EOF
 
-find "$bundle/sources" -mindepth 1 -maxdepth 1 -type d -print0 \
+find "$sources" -mindepth 1 -maxdepth 1 -type d -print0 \
   | sort -z \
   | while IFS= read -r -d '' source; do
       printf '%s=%s\n' "$(basename "$source")" "$(git -C "$source" rev-parse HEAD)"
     done > "$bundle/source-revisions.txt"
+tar -C "$local_stage" -cf "$bundle/sources.tar" sources
 sha256sum "$bundle/wheels"/* > "$bundle/wheel-sha256.txt"
-chmod -R a-w "$bundle/sources" "$bundle/wheels" "$bundle/manifest.env" "$bundle/source-revisions.txt" \
-  "$bundle/wheel-sha256.txt" "$bundle/validate_cuda130_gh200.py"
+sha256sum "$bundle/sources.tar" > "$bundle/sources.tar.sha256"
+chmod -R a-w "$bundle/sources.tar" "$bundle/sources.tar.sha256" "$bundle/wheels" "$bundle/manifest.env" \
+  "$bundle/source-revisions.txt" "$bundle/wheel-sha256.txt" "$bundle/validate_cuda130_gh200.py"
 
 echo "Staging complete. Submit the compute-node build with:"
 echo "sbatch --export=ALL,BUNDLE_DIR=$bundle $(dirname "$0")/build_cuda130_gh200.sbatch"
