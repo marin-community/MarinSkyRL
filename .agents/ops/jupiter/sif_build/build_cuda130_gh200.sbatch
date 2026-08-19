@@ -67,10 +67,10 @@ else
   tar -C "$work_root" -xf "$BUNDLE_DIR/sources.tar"
   mv "$work_root/sources" "$build_inputs"
   cp -a "$BUNDLE_DIR/wheels/." "$wheelhouse/"
+  chmod -R u+w "$build_inputs" "$wheelhouse"
   if compgen -G "$vllm_wheel_cache/vllm-*.whl" >/dev/null; then
     cp "$vllm_wheel_cache"/vllm-*.whl "$wheelhouse/"
   fi
-  chmod -R u+w "$build_inputs" "$wheelhouse"
   if [[ $(<"$build_inputs/vllm/.git/HEAD") != "$VLLM_COMMIT" ]]; then
     echo "FATAL: staged vLLM revision does not match the manifest" >&2
     exit 2
