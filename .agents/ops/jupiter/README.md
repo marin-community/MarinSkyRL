@@ -57,8 +57,9 @@ one sampled node represents the gang.
 
 ## Runtime and tests
 
-Read [runtime.md](runtime.md) before selecting a SIF or overlay. The opt-in distributed test contracts and their
-topology requirements live in
+Read [runtime.md](runtime.md) before selecting a SIF or overlay. The historical build and rebake procedures for the
+current Torch 2.11 image lineage live in [sif_build/README.md](sif_build/README.md). The opt-in distributed test
+contracts and their topology requirements live in
 [`skyrl-train/tests/gpu/fault_injection/README.md`](../../../skyrl-train/tests/gpu/fault_injection/README.md).
 The host-side controller must retain access to `scontrol` and `srun`; its remote node agents enter the policy
 runtime through the explicit command prefix documented there.
