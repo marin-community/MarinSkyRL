@@ -180,6 +180,8 @@ apptainer exec --writable --nv --pwd / "$sandbox" \
   --vllm-commit "$VLLM_COMMIT" --harbor-commit "$HARBOR_COMMIT"
 
 echo "=== Build and validate the immutable SIF ==="
+mkdir -p "$publish_stage/apptainer-tmp"
+export APPTAINER_TMPDIR=$publish_stage/apptainer-tmp
 apptainer build "$temporary_sif" "$sandbox"
 apptainer exec --nv --pwd / "$temporary_sif" \
   python /opt/marinskyrl-build/validate_cuda130_gh200.py \
@@ -191,7 +193,7 @@ cp "$BUNDLE_DIR/manifest.env" "$temporary_sif.manifest.env"
 mv "$temporary_sif" "$output_sif"
 mv "$temporary_sif.sha256" "$output_sif.sha256"
 mv "$temporary_sif.manifest.env" "$output_sif.manifest.env"
-rmdir "$publish_stage"
+rmdir "$publish_stage/apptainer-tmp" "$publish_stage"
 
 echo "=== Build complete ==="
 echo "SIF=$output_sif"
