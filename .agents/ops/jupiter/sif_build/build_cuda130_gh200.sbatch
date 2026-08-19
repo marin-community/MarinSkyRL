@@ -116,7 +116,8 @@ apptainer exec --writable --nv --pwd / \
       "/build/wheels/nvidia_nccl_cu13-${NCCL_VERSION}-py3-none-manylinux_2_18_aarch64.whl"
     python -m pip install --disable-pip-version-check --no-deps --force-reinstall \
       /build/wheels/setuptools-*.whl /build/wheels/setuptools_scm-*.whl \
-      /build/wheels/setuptools_rust-*.whl /build/wheels/semantic_version-*.whl
+      /build/wheels/setuptools_rust-*.whl /build/wheels/semantic_version-*.whl \
+      /build/wheels/vcs_versioning-*.whl
 
     cd /build/sources/vllm
     python use_existing_torch.py --prefix

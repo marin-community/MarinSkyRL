@@ -114,7 +114,7 @@ apptainer exec --pwd / "$BASE_SIF" python -m pip download \
   --disable-pip-version-check --no-deps --only-binary=:all: \
   --dest "$bundle/wheels" \
   'setuptools>=77.0.3,<81.0.0' 'setuptools-scm>=8.0' 'setuptools-rust>=1.9.0' \
-  'semantic-version>=2.8.2' 'uv_build>=0.8.4,<0.9.0'
+  'semantic-version>=2.8.2' 'vcs-versioning>=1.0.0' 'uv_build>=0.8.4,<0.9.0'
 
 vllm_commit=$(git -C "$sources/vllm" rev-parse HEAD)
 harbor_commit=$(git -C "$sources/harbor" rev-parse HEAD)
