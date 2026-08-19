@@ -77,7 +77,9 @@ only when the source delta contains no compiled files or dependency changes; the
   package instead of the image installation.
 - The r5 FlashAttention 2.8.3 build returns five values from `unpad_input`; older builds returned four.
 - The historical r5 image fails MarinSkyRL's Megatron FlashAttention version guard when `trainer.flash_attn` is
-  enabled. Do not treat its FSDP2 validation as Megatron validation.
+  enabled. Its baked Transformer Engine extension also fails to import against its baked Torch with an undefined
+  `c10::SymInt::sym_ne` symbol. The current build preserves those packages, so standalone SIF acceptance does not
+  claim Megatron readiness. The production launcher overlay must supply and validate the Megatron native closure.
 - The Titan overlay can shadow the Torchtitan package baked into the SIF. Validate the exact production overlay and
   `PYTHONPATH` stack, including the `expert_parallel` symbol MarinSkyRL imports.
 - vLLM CUDA extensions were compiled against the image's Torch installation. A Torch or NCCL change requires ABI

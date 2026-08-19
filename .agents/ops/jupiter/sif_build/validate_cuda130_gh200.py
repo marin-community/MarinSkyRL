@@ -80,8 +80,6 @@ def main() -> None:
     import deep_ep  # noqa: F401
     import flash_attn
     import harbor  # noqa: F401
-    import megatron.core  # noqa: F401
-    import transformer_engine  # noqa: F401
     from torchtitan.distributed.expert_parallel import expert_parallel  # noqa: F401
 
     assert flash_attn.__version__ == "2.8.3", flash_attn.__version__
