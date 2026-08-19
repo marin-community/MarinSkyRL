@@ -55,6 +55,7 @@ export APPTAINER_CACHEDIR=$work_root/apptainer-cache
 build_inputs=$work_root/inputs
 sandbox=$work_root/sandbox
 wheelhouse=$work_root/wheelhouse
+vllm_wheel_cache=$JUPITER_ROOT/sif_build/wheel-cache/torch-2.11.0-cu130-aarch64-sm90/$VLLM_COMMIT
 sha256sum --check "$BUNDLE_DIR/sources.tar.sha256"
 if [[ $resume_build == true ]]; then
   if [[ ! -d $sandbox/opt/marinskyrl-build ]]; then
@@ -66,6 +67,9 @@ else
   tar -C "$work_root" -xf "$BUNDLE_DIR/sources.tar"
   mv "$work_root/sources" "$build_inputs"
   cp -a "$BUNDLE_DIR/wheels/." "$wheelhouse/"
+  if compgen -G "$vllm_wheel_cache/vllm-*.whl" >/dev/null; then
+    cp "$vllm_wheel_cache"/vllm-*.whl "$wheelhouse/"
+  fi
   chmod -R u+w "$build_inputs" "$wheelhouse"
   if [[ $(<"$build_inputs/vllm/.git/HEAD") != "$VLLM_COMMIT" ]]; then
     echo "FATAL: staged vLLM revision does not match the manifest" >&2
@@ -141,10 +145,12 @@ if [[ $resume_build == false ]]; then
 
     cd /build/sources/vllm
     python use_existing_torch.py --prefix
-    rm -rf .deps/*-build .deps/*-subbuild build
-    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0.dev0+marin.${VLLM_COMMIT:0:12}.cu130" \
-      python -m pip wheel --disable-pip-version-check --no-build-isolation --no-deps \
-      --wheel-dir /build/wheels .
+    if ! compgen -G "/build/wheels/vllm-*.whl" >/dev/null; then
+      rm -rf .deps/*-build .deps/*-subbuild build
+      SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0.dev0+marin.${VLLM_COMMIT:0:12}.cu130" \
+        python -m pip wheel --disable-pip-version-check --no-build-isolation --no-deps \
+        --wheel-dir /build/wheels .
+    fi
     python -m pip install --disable-pip-version-check --no-deps --force-reinstall \
       /build/wheels/vllm-*.whl
 
@@ -160,6 +166,9 @@ if [[ $resume_build == false ]]; then
     printf "%s\n" "$NCCL_VERSION" > /opt/marinskyrl-build/nccl-version
     python -m pip freeze > /opt/marinskyrl-build/pip-freeze.txt
   '
+
+  mkdir -p "$vllm_wheel_cache"
+  cp "$wheelhouse"/vllm-*.whl "$vllm_wheel_cache/"
 fi
 
 cp "$BUNDLE_DIR/validate_cuda130_gh200.py" \
