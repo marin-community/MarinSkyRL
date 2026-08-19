@@ -143,18 +143,25 @@ def _prepare_dapo_math(example: Mapping[str, Any], index: int, contract: Verifie
     )
 
 
-def _prepare_math500(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+def _prepare_problem_answer_math(
+    example: Mapping[str, Any],
+    index: int,
+    contract: VerifierDataContract,
+    source: Source,
+    label: str,
+) -> PreparedRow:
     problem = example.get("problem")
     if not isinstance(problem, str):
-        raise TypeError("MATH-500 row problem must be a string.")
-    return _math_row(problem, example.get("answer"), math500_source(), index, contract)
+        raise TypeError(f"{label} row problem must be a string.")
+    return _math_row(problem, example.get("answer"), source, index, contract)
+
+
+def _prepare_math500(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    return _prepare_problem_answer_math(example, index, contract, math500_source(), "MATH-500")
 
 
 def _prepare_aime24(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
-    problem = example.get("problem")
-    if not isinstance(problem, str):
-        raise TypeError("AIME24 row problem must be a string.")
-    return _math_row(problem, example.get("answer"), aime24_source(), index, contract)
+    return _prepare_problem_answer_math(example, index, contract, aime24_source(), "AIME24")
 
 
 def _prepare_rlvr_ifeval(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
@@ -197,11 +204,7 @@ def rlvr_ifeval_source() -> Source:
 
 
 def _prepare_deepscaler(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
-    source = deepscaler_source()
-    problem = example.get("problem")
-    if not isinstance(problem, str):
-        raise TypeError("DeepScaleR row problem must be a string.")
-    return _math_row(problem, example.get("answer"), source, index, contract)
+    return _prepare_problem_answer_math(example, index, contract, deepscaler_source(), "DeepScaleR")
 
 
 def _gsm8k_extract_answer(answer_text: str) -> str:

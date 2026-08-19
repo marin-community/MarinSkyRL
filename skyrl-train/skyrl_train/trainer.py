@@ -397,7 +397,7 @@ class RayPPOTrainer:
         logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
-        """Run train-end callbacks and saves at the last completed optimizer step."""
+        """Run train-end callbacks, evaluation, and saves at the last completed optimizer step."""
         self.global_step = completed_step
         final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
