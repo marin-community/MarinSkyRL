@@ -80,6 +80,7 @@ nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 
 echo "=== Convert the immutable r5 input to a compute-local sandbox ==="
 apptainer build --sandbox "$sandbox" "$BASE_SIF"
+mkdir -p "$sandbox/build/sources" "$sandbox/build/wheels"
 
 echo "=== Build vLLM and install the requested revisions ==="
 apptainer exec --writable --nv --pwd / \
@@ -91,7 +92,7 @@ apptainer exec --writable --nv --pwd / \
   "$sandbox" bash -lc '
     set -euo pipefail
     test "$(uname -m)" = aarch64
-    test "$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)" = 9.0
+    python -c "import torch; assert torch.cuda.get_device_capability() == (9, 0), torch.cuda.get_device_capability()"
     test "$(python -c "import torch; print(torch.version.cuda)")" = 13.0
 
     export PIP_NO_INDEX=1
