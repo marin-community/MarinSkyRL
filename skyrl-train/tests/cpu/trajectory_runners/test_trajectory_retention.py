@@ -1,6 +1,9 @@
 import gzip
 import json
 from pathlib import Path
+import asyncio
+import threading
+import zipfile
 
 import pytest
 
@@ -13,8 +16,15 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
+    TrajectoryRetentionPublicationError,
+    TrajectoryRetentionPublicationTimeout,
     build_trajectory_records,
     parse_trajectory_retention_config,
+)
+from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
+    ProcessTrajectoryPublisher,
+    PublicationRequest,
+    PublicationResult,
 )
 
 
@@ -28,21 +38,70 @@ class _NormalizedRunner(TrajectoryRunner):
         return _output()
 
 
-class _FailingWriter:
-    def exists(self, relative_path: str) -> bool:
-        return False
+class _BlockingPublisher:
+    def __init__(self):
+        self.pending = False
 
-    def read_json(self, relative_path: str):
+    def execute(self, request):
+        return PublicationResult(request.request_id, request.record_count, ledger=_empty_ledger())
+
+    def submit(self, request):
+        self.pending = True
+        return True
+
+    def poll(self):
         return None
 
-    def write_bytes(self, relative_path: str, payload: bytes) -> None:
-        raise OSError("storage unavailable")
+    def wait_pending(self):
+        return None
 
-    def write_json(self, relative_path: str, value: dict) -> None:
-        raise OSError("storage unavailable")
+    def close(self):
+        return None
 
-    def remove(self, relative_path: str) -> None:
-        raise OSError("storage unavailable")
+
+class _FailingPublisher:
+    def __init__(self):
+        self.result = None
+
+    def execute(self, request):
+        if request.operation == "initialize":
+            return PublicationResult(request.request_id, request.record_count, ledger=_empty_ledger())
+        return PublicationResult(request.request_id, request.record_count, error="OSError: storage unavailable")
+
+    def submit(self, request):
+        self.result = PublicationResult(request.request_id, request.record_count, error="OSError: storage unavailable")
+        return True
+
+    def poll(self):
+        result = self.result
+        self.result = None
+        return result
+
+    def wait_pending(self):
+        return self.poll()
+
+    def close(self):
+        return self.poll()
+
+
+class _TimeoutPublisher(_FailingPublisher):
+    def execute(self, request):
+        if request.operation == "initialize":
+            return PublicationResult(request.request_id, request.record_count, ledger=_empty_ledger())
+        return PublicationResult(
+            request.request_id,
+            request.record_count,
+            error="storage operation exceeded 0.05 seconds",
+            timed_out=True,
+        )
+
+
+def _empty_ledger():
+    return {"schema_version": 1, "total_bytes": 0, "step_bytes": {}, "records": {}, "archives": {}}
+
+
+def _never_finishes(_request, _sender):
+    threading.Event().wait()
 
 
 def _input(step: int = 7, phase: str = "train") -> TrajectoryRequestBatch:
@@ -114,15 +173,23 @@ def _config(output_path: Path, **overrides):
 
 
 def _records(output_path: Path) -> list[dict]:
+    ledger_path = output_path / "_retention_ledger.json"
+    active_ids = None
+    if ledger_path.exists():
+        ledger = json.loads(ledger_path.read_text())
+        active_ids = {record_id for record_id, entry in ledger["records"].items() if entry["reasons"]}
     records = []
-    for path in sorted(output_path.rglob("*.json.gz")):
-        with gzip.open(path, "rt", encoding="utf-8") as source:
-            records.append(json.load(source))
+    for path in sorted(output_path.rglob("*.zip")):
+        with zipfile.ZipFile(path) as archive:
+            for name in sorted(name for name in archive.namelist() if name.endswith(".json.gz")):
+                record = json.loads(gzip.decompress(archive.read(name)))
+                if active_ids is None or record["record_id"] in active_ids:
+                    records.append(record)
     return records
 
 
-def _sink(config, writer=None) -> TrajectorySink:
-    sink = TrajectorySink(config, _Tokenizer(), writer=writer)
+def _sink(config, publisher=None) -> TrajectorySink:
+    sink = TrajectorySink(config, _Tokenizer(), publisher=publisher)
     sink.bind_runner("SkyRLGymTrajectoryRunner")
     return sink
 
@@ -165,6 +232,23 @@ async def test_trajectory_runner_finalization_invokes_the_shared_sink(tmp_path):
 
     assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
     assert {record["trajectory"]["instance_id"] for record in _records(tmp_path)} == {"a", "b", "c"}
+    assert len(list(tmp_path.rglob("*.zip"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_best_effort_retention_does_not_wait_for_blocked_storage(tmp_path):
+    publisher = _BlockingPublisher()
+    trajectory_runner = _NormalizedRunner()
+    trajectory_runner.set_trajectory_sink(
+        TrajectorySink(_config(tmp_path, required=False), _Tokenizer(), publisher=publisher)
+    )
+
+    output = await asyncio.wait_for(trajectory_runner.run(_input()), 0.1)
+    backpressured = await asyncio.wait_for(trajectory_runner.run(_input(step=8)), 0.1)
+
+    assert publisher.pending
+    assert output["rollout_metrics"]["generate/trajectory_retention/enqueued"] == 3.0
+    assert backpressured["rollout_metrics"]["generate/trajectory_retention/dropped_by_backpressure"] == 3.0
 
 
 def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries():
@@ -213,15 +297,16 @@ def test_train_phase_retains_sample_and_anomalies(tmp_path):
     records = _records(tmp_path)
     assert {record["trajectory"]["instance_id"] for record in records} == {"a", "b", "c"}
     assert metrics["generate/trajectory_retention/written"] == 3.0
-    assert records[1]["reward"]["outcome"] == 0.0
-    assert records[1]["reward"]["shaped"] == -0.25
-    assert records[1]["reward"]["components"]["non_termination"] == -0.25
+    failed = next(record for record in records if record["trajectory"]["instance_id"] == "b")
+    assert failed["reward"]["outcome"] == 0.0
+    assert failed["reward"]["shaped"] == -0.25
+    assert failed["reward"]["components"]["non_termination"] == -0.25
 
 
 def test_resume_is_idempotent_and_new_content_appends(tmp_path):
     first_sink = _sink(_config(tmp_path))
     first_sink.retain(_input(), _output())
-    original_paths = {path.relative_to(tmp_path) for path in tmp_path.rglob("*.json.gz")}
+    original_paths = {path.relative_to(tmp_path) for path in tmp_path.rglob("*.zip")}
 
     resumed_sink = _sink(_config(tmp_path))
     duplicate_metrics = resumed_sink.retain(_input(), _output())
@@ -229,7 +314,7 @@ def test_resume_is_idempotent_and_new_content_appends(tmp_path):
     changed_output["response_ids"][1] = [20, 99]
     resumed_sink.retain(_input(), changed_output)
 
-    final_paths = {path.relative_to(tmp_path) for path in tmp_path.rglob("*.json.gz")}
+    final_paths = {path.relative_to(tmp_path) for path in tmp_path.rglob("*.zip")}
     assert duplicate_metrics["generate/trajectory_retention/duplicates"] == 3.0
     assert len(final_paths - original_paths) == 1
 
@@ -351,15 +436,21 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
 
 
 def test_best_effort_failure_is_reported_and_required_failure_raises(tmp_path):
-    best_effort = _sink(_config(tmp_path, required=False), writer=_FailingWriter())
-    metrics = best_effort.retain(_input(), _output())
+    best_effort = _sink(_config(tmp_path, required=False), publisher=_FailingPublisher())
+    submitted = best_effort.retain(_input(), _output())
+    metrics = best_effort.retain(_input(step=8), _output())
 
-    assert metrics["generate/trajectory_retention/write_errors"] == 3.0
+    assert submitted["generate/trajectory_retention/enqueued"] == 3.0
+    assert metrics["generate/trajectory_retention/write_errors"] == 6.0
     assert metrics["generate/trajectory_retention/written"] == 0.0
 
-    required = _sink(_config(tmp_path, required=True), writer=_FailingWriter())
-    with pytest.raises(OSError, match="storage unavailable"):
+    required = _sink(_config(tmp_path, required=True), publisher=_FailingPublisher())
+    with pytest.raises(TrajectoryRetentionPublicationError, match="storage unavailable"):
         required.retain(_input(), _output())
+
+    timed_out = _sink(_config(tmp_path, required=True), publisher=_TimeoutPublisher())
+    with pytest.raises(TrajectoryRetentionPublicationTimeout, match=r"\.zip"):
+        timed_out.retain(_input(), _output())
 
 
 def test_disabled_sink_is_a_noop(tmp_path):
@@ -367,3 +458,29 @@ def test_disabled_sink_is_a_noop(tmp_path):
 
     assert sink.retain(_input(), _output()) == {}
     assert list(tmp_path.iterdir()) == []
+
+
+def test_storage_worker_is_terminated_at_the_publication_deadline():
+    publisher = ProcessTrajectoryPublisher(
+        _never_finishes,
+        publish_timeout_seconds=0.05,
+        shutdown_timeout_seconds=0.05,
+    )
+
+    result = publisher.execute(PublicationRequest("blocked", "publish", "/unused"))
+
+    assert result.timed_out
+    assert result.error is not None
+
+
+def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path):
+    first_sink = _sink(_config(tmp_path))
+    first_sink.retain(_input(), _output())
+    (tmp_path / "_retention_ledger.json").unlink()
+
+    resumed_sink = _sink(_config(tmp_path))
+    metrics = resumed_sink.retain(_input(), _output())
+
+    assert metrics["generate/trajectory_retention/duplicates"] == 3.0
+    assert metrics["generate/trajectory_retention/written"] == 0.0
+    assert len(list(tmp_path.rglob("*.zip"))) == 1

@@ -22,6 +22,8 @@ class TrajectoryRetentionConfig:
     max_bytes_per_step: int = 8 * 1024 * 1024
     max_bytes_per_run: int = 256 * 1024 * 1024
     required: bool = False
+    publish_timeout_seconds: float = 120.0
+    shutdown_timeout_seconds: float = 30.0
     redact_fields: tuple[str, ...] = ()
     model_path: str | None = None
     model_source_identity: str | None = None
@@ -65,6 +67,8 @@ def parse_trajectory_retention_config(config: Mapping[str, Any] | None) -> Traje
         max_bytes_per_step=int(config.get("max_bytes_per_step", defaults.max_bytes_per_step)),
         max_bytes_per_run=int(config.get("max_bytes_per_run", defaults.max_bytes_per_run)),
         required=bool(config.get("required", defaults.required)),
+        publish_timeout_seconds=float(config.get("publish_timeout_seconds", defaults.publish_timeout_seconds)),
+        shutdown_timeout_seconds=float(config.get("shutdown_timeout_seconds", defaults.shutdown_timeout_seconds)),
         redact_fields=tuple(str(field) for field in redact_value),
         model_path=_optional_string(config.get("model_path", defaults.model_path)),
         model_source_identity=_optional_string(config.get("model_source_identity", defaults.model_source_identity)),
@@ -96,5 +100,7 @@ def _validate_config(config: TrajectoryRetentionConfig) -> None:
         raise ValueError("trajectory retention byte bounds must be non-negative")
     if config.max_bytes_per_step > config.max_bytes_per_run:
         raise ValueError("trajectory retention per-step bound cannot exceed its run bound")
+    if config.publish_timeout_seconds <= 0 or config.shutdown_timeout_seconds <= 0:
+        raise ValueError("trajectory retention publication timeouts must be positive")
     if not config.accepted_stop_reasons:
         raise ValueError("trajectory_retention.accepted_stop_reasons cannot be empty")

@@ -77,6 +77,23 @@ def write_bytes_atomic(path: str, payload: bytes) -> None:
             os.remove(temporary_path)
 
 
+def read_bytes(path: str) -> bytes:
+    """Read one local or cloud object."""
+    with open_file(path, "rb") as source:
+        return source.read()
+
+
+def find_files(path: str) -> dict[str, int]:
+    """Return recursive file paths and sizes below a local or cloud prefix."""
+    filesystem = _get_filesystem(path)
+    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
+    if path.startswith("s3://"):
+        details = call_with_s3_retry(filesystem, filesystem.find, normalized, detail=True, withdirs=False)
+    else:
+        details = filesystem.find(normalized, detail=True, withdirs=False)
+    return {str(file_path): int(detail["size"]) for file_path, detail in details.items()}
+
+
 def makedirs(path: str, exist_ok: bool = True) -> None:
     """Create directories. Only applies to local filesystem paths."""
     if not is_cloud_path(path):

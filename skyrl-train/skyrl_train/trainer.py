@@ -330,6 +330,7 @@ class RayPPOTrainer:
             timeout=60,
             label="Trajectory runner shutdown",
         )
+        self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
         await self._guarded_async(
             self.inference_engine_client.teardown(),
             timeout=30,

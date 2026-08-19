@@ -221,30 +221,35 @@ async def evaluate(
     Returns:
         Dict[str, float]: evaluation metrics
     """
+    owns_sink = trajectory_sink is None
     active_sink = trajectory_sink or make_trajectory_sink(cfg.generator, tokenizer)
-    accumulator = _WholeTrajectoryAccumulator([], [], [])
-    rollouts = await _collect_evaluation_rollouts(
-        eval_dataloader, trajectory_runner, cfg, global_step, active_sink, val_set_name, accumulator
-    )
-    concatenated_batch = rollouts.batch
-    concat_data_sources = [env_extra.get("data_source") for env_extra in rollouts.env_extras]
-    vis = tokenizer.decode(rollouts.example_batch["response_ids"][0])
-    log_example(
-        logger,
-        prompt=rollouts.example_prompt,
-        response=vis,
-        reward=rollouts.example_batch["rewards"][0],
-    )
+    try:
+        accumulator = _WholeTrajectoryAccumulator([], [], [])
+        rollouts = await _collect_evaluation_rollouts(
+            eval_dataloader, trajectory_runner, cfg, global_step, active_sink, val_set_name, accumulator
+        )
+        concatenated_batch = rollouts.batch
+        concat_data_sources = [env_extra.get("data_source") for env_extra in rollouts.env_extras]
+        vis = tokenizer.decode(rollouts.example_batch["response_ids"][0])
+        log_example(
+            logger,
+            prompt=rollouts.example_prompt,
+            response=vis,
+            reward=rollouts.example_batch["rewards"][0],
+        )
 
-    eval_metrics = _calculate_eval_metrics(
-        concatenated_batch,
-        rollouts.uids,
-        concat_data_sources,
-        cfg.generator.eval_n_samples_per_prompt,
-    )
-    _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
+        eval_metrics = _calculate_eval_metrics(
+            concatenated_batch,
+            rollouts.uids,
+            concat_data_sources,
+            cfg.generator.eval_n_samples_per_prompt,
+        )
+        _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
 
-    return eval_metrics
+        return eval_metrics
+    finally:
+        if owns_sink:
+            active_sink.close()
 
 
 @torch.no_grad()

@@ -362,6 +362,8 @@ generator:
     max_bytes_per_step: 8388608
     max_bytes_per_run: 268435456
     required: false
+    publish_timeout_seconds: 120
+    shutdown_timeout_seconds: 30
     redact_fields: []
     model_path: ${trainer.policy.model.path}
     model_source_identity: ${trainer.policy.model.source_identity}
