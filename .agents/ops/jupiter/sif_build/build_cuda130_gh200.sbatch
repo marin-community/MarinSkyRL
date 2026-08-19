@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=reformo
+#SBATCH --account=jureap59
 #SBATCH --partition=booster
 #SBATCH --qos=normal
 #SBATCH --nodes=1
