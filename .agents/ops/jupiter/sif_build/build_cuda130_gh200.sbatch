@@ -55,11 +55,11 @@ tar -C "$work_root" -xf "$BUNDLE_DIR/sources.tar"
 mv "$work_root/sources" "$build_inputs"
 cp -a "$BUNDLE_DIR/wheels/." "$wheelhouse/"
 chmod -R u+w "$build_inputs" "$wheelhouse"
-if [[ $(git -C "$build_inputs/vllm" rev-parse HEAD) != "$VLLM_COMMIT" ]]; then
+if [[ $(<"$build_inputs/vllm/.git/HEAD") != "$VLLM_COMMIT" ]]; then
   echo "FATAL: staged vLLM revision does not match the manifest" >&2
   exit 2
 fi
-if [[ $(git -C "$build_inputs/harbor" rev-parse HEAD) != "$HARBOR_COMMIT" ]]; then
+if [[ $(<"$build_inputs/harbor/.git/HEAD") != "$HARBOR_COMMIT" ]]; then
   echo "FATAL: staged Harbor revision does not match the manifest" >&2
   exit 2
 fi
