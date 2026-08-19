@@ -37,7 +37,13 @@ module load Apptainer 2>/dev/null || true
 command -v apptainer >/dev/null
 mkdir -p "$JUPITER_ROOT/sif_build/logs" "$CONTAINER_DIR"
 
-work_root=${SLURM_TMPDIR:-/tmp/marinskyrl-sif-$SLURM_JOB_ID}
+if [[ -n ${RESUME_WORK_ROOT:-} ]]; then
+  work_root=$RESUME_WORK_ROOT
+  resume_build=true
+else
+  work_root=${SLURM_TMPDIR:-/tmp/marinskyrl-sif-$SLURM_JOB_ID}
+  resume_build=false
+fi
 case "$work_root" in
   /tmp/*|/var/tmp/*) ;;
   *) echo "FATAL: refusing non-local build root: $work_root" >&2; exit 2 ;;
@@ -49,19 +55,26 @@ export APPTAINER_CACHEDIR=$work_root/apptainer-cache
 build_inputs=$work_root/inputs
 sandbox=$work_root/sandbox
 wheelhouse=$work_root/wheelhouse
-mkdir -p "$wheelhouse"
 sha256sum --check "$BUNDLE_DIR/sources.tar.sha256"
-tar -C "$work_root" -xf "$BUNDLE_DIR/sources.tar"
-mv "$work_root/sources" "$build_inputs"
-cp -a "$BUNDLE_DIR/wheels/." "$wheelhouse/"
-chmod -R u+w "$build_inputs" "$wheelhouse"
-if [[ $(<"$build_inputs/vllm/.git/HEAD") != "$VLLM_COMMIT" ]]; then
-  echo "FATAL: staged vLLM revision does not match the manifest" >&2
-  exit 2
-fi
-if [[ $(<"$build_inputs/harbor/.git/HEAD") != "$HARBOR_COMMIT" ]]; then
-  echo "FATAL: staged Harbor revision does not match the manifest" >&2
-  exit 2
+if [[ $resume_build == true ]]; then
+  if [[ ! -d $sandbox/opt/marinskyrl-build ]]; then
+    echo "FATAL: resumable sandbox not found under $work_root" >&2
+    exit 2
+  fi
+else
+  mkdir -p "$wheelhouse"
+  tar -C "$work_root" -xf "$BUNDLE_DIR/sources.tar"
+  mv "$work_root/sources" "$build_inputs"
+  cp -a "$BUNDLE_DIR/wheels/." "$wheelhouse/"
+  chmod -R u+w "$build_inputs" "$wheelhouse"
+  if [[ $(<"$build_inputs/vllm/.git/HEAD") != "$VLLM_COMMIT" ]]; then
+    echo "FATAL: staged vLLM revision does not match the manifest" >&2
+    exit 2
+  fi
+  if [[ $(<"$build_inputs/harbor/.git/HEAD") != "$HARBOR_COMMIT" ]]; then
+    echo "FATAL: staged Harbor revision does not match the manifest" >&2
+    exit 2
+  fi
 fi
 
 vllm_short=${VLLM_COMMIT:0:12}
@@ -74,16 +87,17 @@ if [[ -e $output_sif ]]; then
 fi
 
 echo "=== Build identity ==="
-echo "job=$SLURM_JOB_ID node=$(hostname) bundle=$BUNDLE_DIR"
+echo "job=$SLURM_JOB_ID node=$(hostname) bundle=$BUNDLE_DIR resume=$resume_build"
 cat "$BUNDLE_DIR/manifest.env"
 nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 
-echo "=== Convert the immutable r5 input to a compute-local sandbox ==="
-apptainer build --sandbox "$sandbox" "$BASE_SIF"
-mkdir -p "$sandbox/build/sources" "$sandbox/build/wheels"
+if [[ $resume_build == false ]]; then
+  echo "=== Convert the immutable r5 input to a compute-local sandbox ==="
+  apptainer build --sandbox "$sandbox" "$BASE_SIF"
+  mkdir -p "$sandbox/build/sources" "$sandbox/build/wheels"
 
-echo "=== Build vLLM and install the requested revisions ==="
-apptainer exec --writable --nv --pwd / \
+  echo "=== Build vLLM and install the requested revisions ==="
+  apptainer exec --writable --nv --pwd / \
   --bind "$build_inputs:/build/sources" \
   --bind "$wheelhouse:/build/wheels" \
   --env VLLM_COMMIT="$VLLM_COMMIT" \
@@ -140,16 +154,20 @@ apptainer exec --writable --nv --pwd / \
     printf "%s\n" "$NCCL_VERSION" > /opt/marinskyrl-build/nccl-version
     python -m pip freeze > /opt/marinskyrl-build/pip-freeze.txt
   '
+fi
+
+cp "$BUNDLE_DIR/validate_cuda130_gh200.py" \
+  "$sandbox/opt/marinskyrl-build/validate_cuda130_gh200.py"
 
 echo "=== Validate the writable sandbox ==="
 apptainer exec --writable --nv --pwd / "$sandbox" \
-  python "$BUNDLE_DIR/validate_cuda130_gh200.py" \
+  python /opt/marinskyrl-build/validate_cuda130_gh200.py \
   --vllm-commit "$VLLM_COMMIT" --harbor-commit "$HARBOR_COMMIT"
 
 echo "=== Build and validate the immutable SIF ==="
 apptainer build "$temporary_sif" "$sandbox"
 apptainer exec --nv --pwd / "$temporary_sif" \
-  python "$BUNDLE_DIR/validate_cuda130_gh200.py" \
+  python /opt/marinskyrl-build/validate_cuda130_gh200.py \
   --vllm-commit "$VLLM_COMMIT" --harbor-commit "$HARBOR_COMMIT"
 
 output_sha256=$(sha256sum "$temporary_sif" | awk '{print $1}')
