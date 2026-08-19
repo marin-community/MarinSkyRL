@@ -80,9 +80,15 @@ fi
 vllm_short=${VLLM_COMMIT:0:12}
 output_name=marinskyrl_cuda130_gh200_vllm-gpu-${vllm_short}_nccl-2.31.2.sif
 output_sif=$CONTAINER_DIR/$output_name
-temporary_sif=$work_root/$output_name
+publish_stage=$JUPITER_ROOT/sif_build/publish-$SLURM_JOB_ID
+temporary_sif=$publish_stage/$output_name
 if [[ -e $output_sif ]]; then
   echo "FATAL: output already exists: $output_sif" >&2
+  exit 2
+fi
+mkdir -p "$publish_stage"
+if [[ -e $temporary_sif ]]; then
+  echo "FATAL: staged output already exists: $temporary_sif" >&2
   exit 2
 fi
 
@@ -176,6 +182,7 @@ cp "$BUNDLE_DIR/manifest.env" "$temporary_sif.manifest.env"
 mv "$temporary_sif" "$output_sif"
 mv "$temporary_sif.sha256" "$output_sif.sha256"
 mv "$temporary_sif.manifest.env" "$output_sif.manifest.env"
+rmdir "$publish_stage"
 
 echo "=== Build complete ==="
 echo "SIF=$output_sif"
