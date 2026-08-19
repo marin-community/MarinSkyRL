@@ -19,6 +19,7 @@ from infra.rl_data.contracts import VerifierDataContract
 RLVR_MATH_DATASET = "allenai/RLVR-MATH"
 RLVR_IFEVAL_DATASET = "allenai/RLVR-IFeval"
 DAPO_MATH_DATASET = "BytedTsinghua-SIA/DAPO-Math-17k"
+AIME24_DATASET = "HuggingFaceH4/aime_2024"
 MATH500_DATASET = "HuggingFaceH4/MATH-500"
 DEEPSCALER_DATASET = "agentica-org/DeepScaleR-Preview-Dataset"
 GSM8K_DATASET = "openai/gsm8k"
@@ -31,7 +32,7 @@ HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
 NEMOTRON_DATASET = "nvidia/Llama-Nemotron-Post-Training-Dataset"
 REASONING_GYM_DATASET = "open-thought/reasoning-gym"
-TEST_ONLY_SOURCE_LABELS = {"math500": "MATH-500"}
+TEST_ONLY_SOURCE_LABELS = {"aime24": "AIME24", "math500": "MATH-500"}
 TEST_ONLY_SOURCE_NAMES = frozenset(TEST_ONLY_SOURCE_LABELS)
 
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
@@ -149,6 +150,13 @@ def _prepare_math500(example: Mapping[str, Any], index: int, contract: VerifierD
     return _math_row(problem, example.get("answer"), math500_source(), index, contract)
 
 
+def _prepare_aime24(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    problem = example.get("problem")
+    if not isinstance(problem, str):
+        raise TypeError("AIME24 row problem must be a string.")
+    return _math_row(problem, example.get("answer"), aime24_source(), index, contract)
+
+
 def _prepare_rlvr_ifeval(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     messages = example.get("messages")
     if not isinstance(messages, list):
@@ -173,6 +181,10 @@ def dapo_math_source() -> Source:
 
 def math500_source() -> Source:
     return Source("math500", MATH500_DATASET, "aime", "test", False, "two_sided", _prepare_math500)
+
+
+def aime24_source() -> Source:
+    return Source("aime24", AIME24_DATASET, "aime", "train", False, "two_sided", _prepare_aime24)
 
 
 def rlvr_ifeval_source() -> Source:
@@ -686,6 +698,7 @@ SOURCES = {
     for source in (
         rlvr_math_source(),
         dapo_math_source(),
+        aime24_source(),
         math500_source(),
         rlvr_ifeval_source(),
         deepscaler_source(),

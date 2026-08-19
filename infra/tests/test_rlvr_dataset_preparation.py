@@ -6,6 +6,7 @@ from infra.rl_data.preparation import PreparationOptions, prepare_artifact, writ
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
     Source,
+    aime24_source,
     apps_source,
     dapo_math_source,
     deepscaler_source,
@@ -183,6 +184,32 @@ def test_preparation_rejects_overlength_prompts_before_artifact_write(tmp_path):
         )
 
     assert not (tmp_path / "artifact").exists()
+
+
+def test_aime24_preparation_uses_the_aime_verifier_contract():
+    artifact = prepare_artifact(
+        aime24_source(),
+        [{"problem": "What is 100 + 24?", "answer": "124"}],
+        FakeContract("aime", " Answer: \\boxed{ANSWER}"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(
+            source_revision="fixture",
+            max_prompt_tokens=20,
+            minimum_unique_rows=1,
+            artifact_split="validation",
+        ),
+    )
+
+    assert artifact.rows == [
+        {
+            "data_source": "HuggingFaceH4/aime_2024",
+            "prompt": [{"role": "user", "content": "What is 100 + 24? Answer: \\boxed{ANSWER}"}],
+            "env_class": "aime",
+            "reward_model": {"ground_truth": "124"},
+            "extra_info": {"split": "validation", "index": 0},
+        }
+    ]
+    assert artifact.provenance["verification"] == "two_sided"
 
 
 def test_preparation_rejects_dedup_collapse():
@@ -597,19 +624,23 @@ def test_mixture_preparation_preserves_source_verifiers_caps_and_validation_slic
     assert [source["share"] for source in train.provenance["sources"]] == pytest.approx([0.6, 0.4])
 
 
-def test_mixture_rejects_math500_training_without_explicit_permission():
+@pytest.mark.parametrize(
+    ("source_factory", "source_name", "label"),
+    [(aime24_source, "aime24", "AIME24"), (math500_source, "math500", "MATH-500")],
+)
+def test_mixture_rejects_test_only_math_training_without_explicit_permission(source_factory, source_name, label):
     spec = MixtureSpec(
-        train=(MixtureSlice("math500", "fixture", cap=1),),
-        validation=(MixtureSlice("math500", "fixture", cap=1),),
+        train=(MixtureSlice(source_name, "fixture", cap=1),),
+        validation=(MixtureSlice(source_name, "fixture", cap=1),),
     )
 
-    with pytest.raises(ValueError, match="MATH-500 is test-only"):
+    with pytest.raises(ValueError, match=f"{label} is test-only"):
         prepare_mixture(
             spec,
             token_count=lambda text: len(text),
             max_prompt_tokens=100,
             seed=1,
-            source_lookup=lambda name: math500_source(),
+            source_lookup=lambda name: source_factory(),
             contract_lookup=lambda env_id: FakeContract(env_id, " answer"),
             row_loader=lambda source, revision, parameters: [{"problem": "2+2", "answer": "4"}],
         )

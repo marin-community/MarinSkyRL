@@ -23,7 +23,7 @@ without booting Ray / models, so they run on CPU.
 """
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -62,6 +62,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._control = TrainerControl()
+    trainer.eval_dataset = object()
 
     # epochs is read from cfg in _handle_resume_at_max_steps
     cfg = MagicMock()
@@ -76,7 +77,12 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
 
     trainer.save_checkpoints = MagicMock(name="save_checkpoints")
     trainer.handle_hf_export = MagicMock(name="handle_hf_export")
+    trainer.eval = AsyncMock(name="eval", return_value={"eval/accuracy": 0.75})
+    trainer._log_metrics_stdout = MagicMock(name="_log_metrics_stdout")
+    trainer.tracker = MagicMock(name="tracker")
     trainer.policy_model = MagicMock(name="policy_model")
+    trainer.inference_engine_client = MagicMock(name="inference_engine_client")
+    trainer.inference_engine_client.sleep = AsyncMock(name="sleep")
     return trainer
 
 
@@ -160,6 +166,37 @@ def test_train_end_saves_the_last_completed_step(cls):
     assert trainer.global_step == 16
     assert trainer.callback_handler.states[0].global_step == 16
     assert saved_steps == [16, 16]
+    assert trainer.callback_handler.events == ["on_train_end", "on_save"]
+
+
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+def test_train_end_runs_and_logs_the_requested_evaluation(cls):
+    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
+    requested = TrainerControl()
+    requested.should_evaluate = True
+    trainer.callback_handler = _RecordingCallbackHandler(requested)
+
+    asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
+
+    trainer.eval.assert_awaited_once()
+    trainer._log_metrics_stdout.assert_called_once_with({"eval/accuracy": 0.75}, step=16, kind="eval")
+    trainer.tracker.log.assert_called_once_with({"eval/accuracy": 0.75}, step=16, commit=True)
+    assert trainer.callback_handler.events == ["on_train_end", "on_evaluate"]
+
+
+@pytest.mark.parametrize("cls", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+def test_train_end_still_saves_when_the_final_evaluation_fails(cls):
+    trainer = _make_bare_trainer(cls, global_step=17, total_training_steps=16)
+    requested = TrainerControl()
+    requested.should_evaluate = True
+    requested.should_save = True
+    trainer.callback_handler = _RecordingCallbackHandler(requested)
+    trainer.eval.side_effect = RuntimeError("evaluation failed")
+
+    with pytest.raises(RuntimeError, match="evaluation failed"):
+        asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
+
+    trainer.save_checkpoints.assert_called_once()
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 

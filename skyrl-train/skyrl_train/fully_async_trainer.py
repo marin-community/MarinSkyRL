@@ -551,22 +551,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 f"This can happen after epoch boundary transitions or error recovery."
                             )
 
-            # Resume-overshoot guard: if we resumed AT or PAST max_steps, the run is
-            # already complete. Without this guard, the unconditional `self.global_step += 1`
-            # below (followed by the inner `for _ in range(self.global_step, ...)` loop) would
-            # execute a spurious step gs N+1 ("overshoot") before the post-increment max_steps
-            # check at the bottom of the loop ever fires — wasting a node slot and typically
-            # ending FAILED, which (because it is a *failure*) keeps the afternotok restart
-            # chain alive and spawns yet more overshoot links. Recognize completion here and
-            # exit 0 cleanly so the chain terminates and the final export/upload runs.
-            # NOTE: `self.global_step` here is the *completed* step count loaded from the
-            # checkpoint (save_checkpoints writes it after a step finishes), so `>=` (not `>`)
-            # correctly treats "resumed exactly at max_steps" as done. A mid-training resume
-            # (global_step < total_training_steps) falls through and continues normally.
-            if self.global_step >= self.total_training_steps:
-                await self._handle_resume_at_max_steps()
-                return
-
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
@@ -578,6 +562,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # shard rank is free before the step-1 forward is dispatched (the MoE-RL
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             await self._drain_policy_event_loops()
+
+        # Synchronize before checking completion so a requested final evaluation uses
+        # the checkpoint weights. The loaded global_step is the completed step count;
+        # >= treats a resume exactly at max_steps as complete without running gs N+1.
+        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            await self._handle_resume_at_max_steps()
+            return
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch

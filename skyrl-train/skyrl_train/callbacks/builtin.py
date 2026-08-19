@@ -148,6 +148,16 @@ class EvaluationCallback(TrainerCallback):
             control.should_evaluate = True
         return control
 
+    def on_train_end(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        if self.eval_on_train_end and self.eval_steps > 0:
+            control.should_evaluate = True
+        return control
+
 
 @register_callback(HF_MODEL_SAVE_CALLBACK_TYPE)
 class HFModelSaveCallback(TrainerCallback):
