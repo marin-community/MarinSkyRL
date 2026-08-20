@@ -17,7 +17,8 @@ from skyrl_train.fully_async_trainer import (
     _GenerationQueues,
 )
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
-from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant, GroupSelectionPolicy
+from skyrl_train.dynamic_sampling import GroupSelectionPolicy
+from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 
 
 def _make_queues() -> _GenerationQueues:
@@ -41,7 +42,7 @@ def _bare_trainer(mini_batch_size=2, step_times=None, tasks=None) -> FullyAsyncR
     trainer._groups_inspected_since_step = 0
     trainer._dynamic_sampling_type = None
     trainer._dynamic_sampling_max_candidate_groups = None
-    trainer._group_selection_policy = GroupSelectionPolicy.from_sampling_type(None)
+    trainer._group_selection_policy = GroupSelectionPolicy.for_fully_async(None)
     trainer._group_admission_policy = GroupAdmissionPolicy(
         GroupAdvantageInvariant.exact_physical(physical_group_size=1),
         max_staleness_steps=0,

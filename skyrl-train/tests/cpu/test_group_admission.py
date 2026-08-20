@@ -1,12 +1,11 @@
 import pytest
 
 from skyrl_train.fully_async_trainer import GeneratedOutputGroup
+from skyrl_train.dynamic_sampling import GroupSelectionPolicy, GroupSelectionResult
 from skyrl_train.group_admission import (
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
-    GroupSelectionPolicy,
-    SelectionRejection,
     resolve_group_advantage_invariant,
 )
 
@@ -190,7 +189,7 @@ def test_grpo_rejects_unused_group_floor():
 
 
 def test_dynamic_filter_uses_final_unshaped_outcomes():
-    policy = GroupSelectionPolicy.from_sampling_type("filter")
+    policy = GroupSelectionPolicy.for_fully_async("filter")
     group = _group(loss_masks=[[1], [1], [1], [1]])
     group.trajectory_batch.update(
         {
@@ -202,11 +201,11 @@ def test_dynamic_filter_uses_final_unshaped_outcomes():
 
     decision = policy.evaluate(group)
 
-    assert decision.rejections == (SelectionRejection.UNIFORM_OUTCOMES,)
+    assert decision is GroupSelectionResult.UNIFORM_OUTCOMES
 
 
 def test_dynamic_filter_requires_unshaped_outcomes():
-    policy = GroupSelectionPolicy.from_sampling_type("filter")
+    policy = GroupSelectionPolicy.for_fully_async("filter")
 
     with pytest.raises(ValueError, match="requires unshaped_rewards"):
         policy.evaluate(_group(loss_masks=[[1], [1]]))
@@ -214,4 +213,4 @@ def test_dynamic_filter_requires_unshaped_outcomes():
 
 def test_fully_async_selection_rejects_replace_sampling():
     with pytest.raises(ValueError, match="supports dynamic_sampling.type=filter or null"):
-        GroupSelectionPolicy.from_sampling_type("replace")
+        GroupSelectionPolicy.for_fully_async("replace")

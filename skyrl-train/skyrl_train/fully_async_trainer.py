@@ -37,12 +37,12 @@ from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
-from skyrl_train.group_admission import (
-    AdmissionDecision,
-    AdmissionRejection,
-    GroupAdmissionPolicy,
+from skyrl_train.dynamic_sampling import (
+    DynamicSamplingType,
     GroupSelectionPolicy,
+    GroupSelectionResult,
 )
+from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
 
@@ -111,6 +111,14 @@ class _GroupFreshness(Enum):
 class _AdmissionPartition:
     accepted_groups: List[GeneratedOutputGroup]
     rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
+
+
+@dataclass
+class _CandidateSelection:
+    admitted_groups: List[GeneratedOutputGroup]
+    surplus_groups: List[GeneratedOutputGroup]
+    discarded_reasons: collections.Counter[str]
+    candidate_count: int
 
 
 class _AsyncStalenessManager:
@@ -312,8 +320,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
-        self._dynamic_sampling_type = cfg.trainer.algorithm.dynamic_sampling.type
-        self._group_selection_policy = GroupSelectionPolicy.from_sampling_type(self._dynamic_sampling_type)
+        self._group_selection_policy = GroupSelectionPolicy.for_fully_async(cfg.trainer.algorithm.dynamic_sampling.type)
+        self._dynamic_sampling_type = self._group_selection_policy.sampling_type
         max_sample_batches = int(cfg.trainer.algorithm.dynamic_sampling.max_sample_batches)
         self._dynamic_sampling_max_sample_batches = max_sample_batches
         self._dynamic_sampling_max_candidate_groups = (
@@ -1115,7 +1123,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "async/rejected_count": rejected,
             "async/rejected_rate": rejected / inspected,
         }
-        if self._dynamic_sampling_type == "filter":
+        if self._dynamic_sampling_type is DynamicSamplingType.FILTER:
             metrics.update(
                 {
                     "async/dynamic_sampling/candidate_count": dynamic_candidate_count,
@@ -1180,11 +1188,45 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
         return self._check_generation_stall(elapsed)
 
-    async def _get_admitted_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
-        """Reject ineligible completed attempts and wait for a full admitted mini-batch.
+    def _select_dynamic_sampling_candidates(
+        self,
+        candidates: List[GeneratedOutputGroup],
+        *,
+        available_slots: int,
+    ) -> _CandidateSelection:
+        admitted_groups = []
+        discarded_reasons: collections.Counter[str] = collections.Counter()
+        candidate_count = 0
 
-        Raises ``GenerationStalledError`` when producers stop or when completed
-        attempts are repeatedly rejected without admitted progress.
+        for candidate_index, group in enumerate(candidates):
+            if len(admitted_groups) >= available_slots:
+                return _CandidateSelection(
+                    admitted_groups=admitted_groups,
+                    surplus_groups=candidates[candidate_index:],
+                    discarded_reasons=discarded_reasons,
+                    candidate_count=candidate_count,
+                )
+
+            selection_result = self._group_selection_policy.evaluate(group)
+            candidate_count += int(self._dynamic_sampling_type is DynamicSamplingType.FILTER)
+            if selection_result is GroupSelectionResult.KEEP:
+                admitted_groups.append(group)
+            else:
+                discarded_reasons[selection_result.value] += 1
+
+        return _CandidateSelection(
+            admitted_groups=admitted_groups,
+            surplus_groups=[],
+            discarded_reasons=discarded_reasons,
+            candidate_count=candidate_count,
+        )
+
+    async def _get_admitted_generation_group_mini_batch(self, queues: _GenerationQueues) -> List[GeneratedOutputGroup]:
+        """Discard or retry rejected groups and wait for a full admitted mini-batch.
+
+        Raises:
+            GenerationStalledError: No producer can make admission progress.
+            RuntimeError: Dynamic sampling exhausts its per-step candidate budget.
         """
         accepted_groups = []
         loop = asyncio.get_event_loop()
@@ -1218,28 +1260,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     assert decision.primary_rejection is not None
                     rejection_counts_since_admission[decision.primary_rejection.value] += 1
 
-                admitted_this_scan = 0
-                dynamic_discarded_this_scan = 0
-                uninspected_surplus = []
-                for candidate_index, group in enumerate(partition.accepted_groups):
-                    if len(accepted_groups) >= self.mini_batch_size:
-                        uninspected_surplus.extend(partition.accepted_groups[candidate_index:])
-                        break
+                selection = self._select_dynamic_sampling_candidates(
+                    partition.accepted_groups,
+                    available_slots=self.mini_batch_size - len(accepted_groups),
+                )
+                accepted_groups.extend(selection.admitted_groups)
+                dynamic_candidate_count += selection.candidate_count
+                dynamic_discarded_this_scan = sum(selection.discarded_reasons.values())
+                dynamic_discarded_count += dynamic_discarded_this_scan
+                rejection_counts_since_admission.update(selection.discarded_reasons)
 
-                    selection = self._group_selection_policy.evaluate(group)
-                    dynamic_candidate_count += int(self._dynamic_sampling_type == "filter")
-                    if not selection.accepted:
-                        dynamic_discarded_count += 1
-                        dynamic_discarded_this_scan += 1
-                        rejection_counts_since_admission.update(rejection.value for rejection in selection.rejections)
-                        continue
-                    accepted_groups.append(group)
-                    admitted_this_scan += 1
-
-                for group in uninspected_surplus:
+                for group in selection.surplus_groups:
                     queues.completed.put_nowait(group)
 
-                if admitted_this_scan:
+                if selection.admitted_groups:
                     last_admitted_progress = loop.time()
                     stall_timeout = self._generation_stall_timeout()
                     rejection_counts_since_admission.clear()

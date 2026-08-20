@@ -12,6 +12,7 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
+from skyrl_train.dynamic_sampling import DynamicSamplingType, group_is_informative_for_dynamic_sampling
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     concatenate_trajectory_batches,
@@ -339,17 +340,21 @@ def handle_dynamic_sampling(
     Returns:
         The processed batch, UIDs, continuation decision, and updated state.
     """
-    sampling_type = sampling_config.get("type", None)
+    sampling_type_value = sampling_config.get("type", None)
 
-    if sampling_type is None:
+    if sampling_type_value is None:
         return DynamicSamplingResult(trajectory_batch, uids, False, None)
 
-    if sampling_type == "replace":
+    try:
+        sampling_type = DynamicSamplingType(sampling_type_value)
+    except ValueError:
+        raise ValueError(f"Invalid dynamic sampling type: {sampling_type_value}") from None
+
+    if sampling_type is DynamicSamplingType.REPLACE:
         return handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    elif sampling_type == "filter":
+    if sampling_type is DynamicSamplingType.FILTER:
         return handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state)
-    else:
-        raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
+    raise AssertionError(f"unhandled dynamic sampling type: {sampling_type}")
 
 
 def handle_replace_sampling(
@@ -471,29 +476,15 @@ def handle_filter_sampling(
         The processed batch, UIDs, continuation decision, and updated state.
     """
     target_batch_size = sampling_config["train_batch_size"]
-    n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
 
-    # Filter on verifier outcomes, not shaped optimization rewards.
-    rewards_list = trajectory_batch.get("unshaped_rewards")
-    if rewards_list is None:
-        raise ValueError("dynamic sampling filter requires unshaped_rewards")
-    if rewards_list and isinstance(rewards_list[0], list):
-        # Token-level rewards: sum to get sequence rewards
-        rewards = np.array([sum(r) for r in rewards_list])
-    else:
-        rewards = np.array(rewards_list)
-
-    # Group by UID and calculate standard deviation
-    uid2metric_vals = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
-        uid2metric_vals[uid].append(reward)
-
-    uid2metric_std = {}
-    for uid, metric_vals in uid2metric_vals.items():
-        uid2metric_std[uid] = np.std(metric_vals)
-
-    # Filter out groups with std == 0 and group size > 1
-    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1]
+    uid2indices = defaultdict(list)
+    for row_index, uid in enumerate(uids):
+        uid2indices[uid].append(row_index)
+    kept_uids = [
+        uid
+        for uid, row_indices in uid2indices.items()
+        if group_is_informative_for_dynamic_sampling(trajectory_batch, row_indices)
+    ]
     kept_uids_set = set(kept_uids)
 
     # Filter trajectories based on kept UIDs

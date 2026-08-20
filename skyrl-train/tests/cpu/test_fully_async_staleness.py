@@ -10,7 +10,8 @@ from skyrl_train.fully_async_trainer import (
     _AsyncStalenessManager,
     _GenerationQueues,
 )
-from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant, GroupSelectionPolicy
+from skyrl_train.dynamic_sampling import GroupSelectionPolicy
+from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.base import TrajectoryID
 
 
@@ -63,10 +64,10 @@ def _batch_assembly_state(
     trainer._groups_rejected_since_step = 0
     trainer._rejection_reasons_since_step = collections.Counter()
     trainer._groups_inspected_since_step = 0
-    trainer._dynamic_sampling_type = dynamic_sampling_type
+    trainer._group_selection_policy = GroupSelectionPolicy.for_fully_async(dynamic_sampling_type)
+    trainer._dynamic_sampling_type = trainer._group_selection_policy.sampling_type
     trainer._dynamic_sampling_max_sample_batches = max_sample_batches
     trainer._dynamic_sampling_max_candidate_groups = max_sample_batches * mini_batch_size
-    trainer._group_selection_policy = GroupSelectionPolicy(filter_uniform_outcomes=dynamic_sampling_type == "filter")
     trainer._step_time_history = collections.deque([1000.0], maxlen=5)
     trainer._active_generator_tasks = []
     trainer._staleness_manager = _AsyncStalenessManager(
