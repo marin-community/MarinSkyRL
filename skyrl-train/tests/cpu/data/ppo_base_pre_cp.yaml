@@ -342,6 +342,9 @@ generator:
     non_termination:
       penalty: 0.0
       accepted_stop_reasons: [stop, complete, eos, end_turn]
+    overlong:
+      l_max: 0
+      l_cache: 0
     successful_length:
       free_tokens: 0
       penalty_per_token: 0.0

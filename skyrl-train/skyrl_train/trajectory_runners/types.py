@@ -7,6 +7,7 @@ from skyrl_train.inference_engines.base import ConversationType
 
 
 TrainingPhase = Literal["train", "eval"]
+REWARD_SHAPING_COMPONENT_NAMES = ("non_termination", "overlong", "successful_length")
 
 
 class TokenProvenance(StrEnum):
@@ -56,6 +57,7 @@ class TrajectoryRequestBatch(TypedDict):
 
 class RewardShapingComponents(TypedDict):
     non_termination: float
+    overlong: float
     successful_length: float
 
 

@@ -668,9 +668,9 @@ def test_filter_trajectory_batch():
         "rollout_metrics": {"metric": "value"},
         "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
         "reward_shaping_components": [
-            {"non_termination": 0.0, "successful_length": 0.0},
-            {"non_termination": 0.0, "successful_length": 0.0},
-            {"non_termination": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
         ],
         "reward_shaping_loop_spans": [[{"start": 0, "end": 2}], [], [{"start": 1, "end": 2}]],
         "loop_advantages": [[-0.05, -0.05], [0.0, 0.0], [0.0, -0.2]],
@@ -690,8 +690,8 @@ def test_filter_trajectory_batch():
     assert filtered["rollout_metrics"]["generate/reward_shaping/loop_advantage_mean"] == pytest.approx(-0.15)
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
     assert filtered["reward_shaping_components"] == [
-        {"non_termination": 0.0, "successful_length": 0.0},
-        {"non_termination": 0.0, "successful_length": 0.0},
+        {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+        {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
     ]
     assert filtered["loop_advantages"] == [[-0.05, -0.05], [0.0, -0.2]]
     assert filtered["reward_shaping_loop_spans"] == [

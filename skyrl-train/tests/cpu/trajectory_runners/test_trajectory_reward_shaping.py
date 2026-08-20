@@ -130,17 +130,72 @@ def test_successful_length_penalty_only_changes_positive_outcomes():
     assert output["rewards"] == pytest.approx([1.0, 0.7, 0.0])
     assert output["reward_shaping_components"][0] == {
         "non_termination": 0.0,
+        "overlong": 0.0,
         "successful_length": 0.0,
     }
     assert output["reward_shaping_components"][1]["successful_length"] == pytest.approx(-0.3)
     assert output["reward_shaping_components"][2] == {
         "non_termination": 0.0,
+        "overlong": 0.0,
         "successful_length": 0.0,
     }
 
     mean_reward, pass_at_two = get_metrics_from_trajectory_batch(output, ["short", "short", "failure"])
     assert mean_reward == pytest.approx((1.0 + 0.7) / 3)
     assert pass_at_two == pytest.approx(0.5)
+
+
+def test_soft_overlong_penalty_applies_to_successful_and_failed_responses():
+    output = _output(
+        responses=[
+            [1, 2],
+            [1, 2, 3, 4],
+            [1, 2, 3, 4],
+            [1, 2, 3, 4, 5, 6, 7],
+        ],
+        rewards=[1.0, 1.0, 0.0, 0.0],
+        stop_reasons=["stop", "stop", "stop", "length"],
+    )
+
+    shape_trajectory_rewards(
+        output,
+        {
+            "enabled": True,
+            "overlong": {"l_max": 6, "l_cache": 4},
+        },
+    )
+
+    assert output["unshaped_rewards"] == [1.0, 1.0, 0.0, 0.0]
+    assert output["rewards"] == pytest.approx([1.0, 0.5, -0.5, -1.0])
+    assert [component["overlong"] for component in output["reward_shaping_components"]] == pytest.approx(
+        [0.0, -0.5, -0.5, -1.0]
+    )
+    assert all(component["successful_length"] == 0.0 for component in output["reward_shaping_components"])
+    assert output["rollout_metrics"]["generate/reward_shaping/overlong_penalty_mean"] == pytest.approx(-0.5)
+    assert output["rollout_metrics"]["generate/reward_shaping/overlong_incidence"] == pytest.approx(0.75)
+
+
+def test_step_wise_soft_overlong_penalty_uses_each_response_length():
+    output = _output(
+        responses=[[1, 2, 3], [4, 5, 6, 7, 8]],
+        rewards=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 1.0]],
+        stop_reasons=["stop", "complete"],
+    )
+    output["is_last_step"] = [False, True]
+
+    shape_trajectory_rewards(
+        output,
+        {
+            "enabled": True,
+            "overlong": {"l_max": 6, "l_cache": 2},
+        },
+    )
+
+    # The first response is below the four-token threshold. The second is
+    # halfway through the two-token penalty window. The combined eight-token
+    # trajectory length must not trigger the full penalty.
+    assert output["rewards"] == [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, pytest.approx(0.5)]]
+    assert [component["overlong"] for component in output["reward_shaping_components"]] == pytest.approx([0.0, -0.5])
 
 
 def test_loop_advantage_stays_separate_from_scalar_trajectory_penalties():
@@ -174,7 +229,9 @@ def test_loop_advantage_stays_separate_from_scalar_trajectory_penalties():
     )
 
     assert output["rewards"] == pytest.approx([0.5])
-    assert output["reward_shaping_components"] == [{"non_termination": -0.3, "successful_length": -0.2}]
+    assert output["reward_shaping_components"] == [
+        {"non_termination": -0.3, "overlong": 0.0, "successful_length": -0.2}
+    ]
     assert output["reward_shaping_loop_spans"] == [[{"start": 6, "end": 10}]]
     assert output["loop_advantages"] == [pytest.approx([0.0] * 6 + [-0.05] * 4)]
     assert output["reward_shaping_versions"] == [2]
@@ -292,6 +349,9 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
         ({"non_termination": {"penalty": -0.1}}, "non_termination.penalty"),
         ({"non_termination": {"accepted_stop_reasons": "stop"}}, "accepted_stop_reasons"),
         ({"successful_length": {"free_tokens": -1}}, "successful_length.free_tokens"),
+        ({"overlong": {"l_max": 0, "l_cache": -1}}, "overlong.l_cache must be non-negative"),
+        ({"overlong": {"l_max": 8, "l_cache": 0}}, "overlong.l_cache must be positive"),
+        ({"overlong": {"l_max": 8, "l_cache": 9}}, "overlong.l_cache must not exceed overlong.l_max"),
     ],
 )
 def test_invalid_shaping_config_fails_before_generation(config, message):

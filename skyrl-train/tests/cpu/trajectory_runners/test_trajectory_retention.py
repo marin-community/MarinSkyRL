@@ -125,9 +125,9 @@ def _output() -> TrajectoryBatch:
         "rewards": [1.0, -0.25, 0.0],
         "unshaped_rewards": [1.0, 0.0, 0.0],
         "reward_shaping_components": [
-            {"non_termination": 0.0, "successful_length": 0.0},
-            {"non_termination": -0.25, "successful_length": 0.0},
-            {"non_termination": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"non_termination": -0.25, "overlong": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
         ],
         "reward_shaping_loop_spans": [[], [], [{"start": 0, "end": 2}]],
         "loop_advantages": [[0.0, 0.0], [0.0, 0.0, 0.0], [-0.1, -0.1]],
@@ -282,6 +282,46 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
         {"row_index": 1, "token_start": 1, "token_end": 3, "stop_reason": "stop", "is_last_step": True},
     ]
     assert record["reward"] == {"outcome": 1.0, "shaped": 1.0, "components": None}
+
+
+def test_step_wise_retention_aggregates_per_response_overlong_penalties():
+    input_batch = _input()
+    for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
+        input_batch[key] = [input_batch[key][0]]
+    trajectory_id = input_batch["trajectory_ids"][0]
+    output = _output()
+    output.update(
+        {
+            "prompt_token_ids": [[1], [1]],
+            "response_ids": [[10], [20, 21]],
+            "rewards": [0.0, 0.5],
+            "unshaped_rewards": [0.0, 1.0],
+            "reward_shaping_components": [
+                {"non_termination": 0.0, "overlong": -0.25, "successful_length": 0.0},
+                {"non_termination": 0.0, "overlong": -0.25, "successful_length": 0.0},
+            ],
+            "reward_shaping_loop_spans": [[], []],
+            "reward_shaping_versions": [2, 2],
+            "loss_masks": [[1], [1, 1]],
+            "stop_reasons": ["tool", "stop"],
+            "trajectory_ids": [trajectory_id, trajectory_id],
+            "is_last_step": [False, True],
+        }
+    )
+
+    record = build_trajectory_records(
+        input_batch,
+        output,
+        _config(Path("/unused")),
+        _Tokenizer(),
+        runner_name="SkyRLGymTrajectoryRunner",
+    )[0].to_json()
+
+    assert record["reward"] == {
+        "outcome": 1.0,
+        "shaped": 0.5,
+        "components": {"non_termination": 0.0, "overlong": -0.5, "successful_length": 0.0},
+    }
 
 
 def test_train_phase_retains_sample_and_anomalies(tmp_path):
