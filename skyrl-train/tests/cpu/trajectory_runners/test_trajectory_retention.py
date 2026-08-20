@@ -369,6 +369,25 @@ def test_retention_publishes_a_full_training_batch_as_one_bounded_archive(tmp_pa
     assert archives[0].stat().st_size <= config.max_bytes_per_step
 
 
+def test_retention_trims_an_oversized_archive_to_the_actual_byte_bound(tmp_path):
+    sizing_path = tmp_path / "sizing"
+    input_batch = _input()
+    output = _output()
+    _sink(_config(sizing_path)).retain(input_batch, output)
+    full_archive_bytes = next(sizing_path.rglob("*.zip")).stat().st_size
+
+    bounded_path = tmp_path / "bounded"
+    config = _config(bounded_path, max_bytes_per_step=full_archive_bytes - 1)
+    metrics = _sink(config).retain(input_batch, output)
+
+    archives = list(bounded_path.rglob("*.zip"))
+    assert metrics["generate/trajectory_retention/written"] == 2.0
+    assert metrics["generate/trajectory_retention/dropped_by_bounds"] == 1.0
+    assert len(_records(bounded_path)) == 2
+    assert len(archives) == 1
+    assert archives[0].stat().st_size <= config.max_bytes_per_step
+
+
 def test_custom_stop_contract_controls_non_termination_selection(tmp_path):
     output = _output()
     for index in range(3):
