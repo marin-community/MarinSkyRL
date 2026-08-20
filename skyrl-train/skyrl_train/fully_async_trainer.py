@@ -929,7 +929,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file
-            with Timer("dump_data_batch"):
+            with Timer("dump_data_batch", self.all_timings):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model

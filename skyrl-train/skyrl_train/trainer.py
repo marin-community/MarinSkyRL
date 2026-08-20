@@ -433,7 +433,7 @@ class RayPPOTrainer:
         await self.inference_engine_client.wake_up(tags=["weights"])
         with Timer("sync_weights", self.all_timings):
             ray.get(self.sync_policy_weights_to_inference_engines())
-        with Timer("offload_policy_model_to_cpu"):
+        with Timer("offload_policy_model_to_cpu", self.all_timings):
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
@@ -594,7 +594,7 @@ class RayPPOTrainer:
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
-                        with Timer("dump_data_batch"):
+                        with Timer("dump_data_batch", self.all_timings):
                             self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
                     # 4. train policy/critic model
