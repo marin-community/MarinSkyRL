@@ -504,7 +504,9 @@ def test_handle_filter_sampling_sufficient_prompts():
     trajectory_batch = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
-        "rewards": [1.0, 2.0, 3.0, 3.0],  # uid1: [1.0, 2.0] (good), uid2: [3.0, 3.0] (bad)
+        # Shaping varies for uid1, but only uid2 has varying verifier outcomes.
+        "rewards": [1.0, 2.0, 3.0, 3.0],
+        "unshaped_rewards": [0.0, 0.0, 0.0, 1.0],
         "loss_masks": [[1, 1]] * 4,
         "stop_reasons": ["stop"] * 4,
         "rollout_metrics": None,
@@ -527,10 +529,10 @@ def test_handle_filter_sampling_sufficient_prompts():
     assert keep_sampling is False
     assert state is None
 
-    # Should only keep the good uid1 samples
+    # Should only keep uid2, whose unshaped outcomes vary.
     assert len(result_output["prompt_token_ids"]) == 2
     assert len(result_uids) == 2
-    assert all(uid == "uid1" for uid in result_uids)
+    assert all(uid == "uid2" for uid in result_uids)
 
 
 def test_handle_filter_sampling_insufficient_prompts_continue():
@@ -539,6 +541,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 2.0],  # Only 1 good prompt
+        "unshaped_rewards": [1.0, 2.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -576,6 +579,7 @@ def test_handle_filter_sampling_accumulation():
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 2.0],  # Good prompt
+        "unshaped_rewards": [1.0, 2.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -588,6 +592,7 @@ def test_handle_filter_sampling_accumulation():
         "prompt_token_ids": [[9, 10], [11, 12]],
         "response_ids": [[13, 14], [15, 16]],
         "rewards": [3.0, 4.0],  # Another good prompt
+        "unshaped_rewards": [3.0, 4.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -631,6 +636,7 @@ def test_handle_filter_sampling_single_sample_per_prompt():
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 1.0],  # Same rewards but single sample per prompt
+        "unshaped_rewards": [1.0, 1.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,

@@ -473,8 +473,10 @@ def handle_filter_sampling(
     target_batch_size = sampling_config["train_batch_size"]
     n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
 
-    # Extract rewards from collected output
-    rewards_list = trajectory_batch["rewards"]
+    # Filter on verifier outcomes, not shaped optimization rewards.
+    rewards_list = trajectory_batch.get("unshaped_rewards")
+    if rewards_list is None:
+        raise ValueError("dynamic sampling filter requires unshaped_rewards")
     if rewards_list and isinstance(rewards_list[0], list):
         # Token-level rewards: sum to get sequence rewards
         rewards = np.array([sum(r) for r in rewards_list])

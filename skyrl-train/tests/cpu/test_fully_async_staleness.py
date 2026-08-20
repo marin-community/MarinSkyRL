@@ -10,15 +10,25 @@ from skyrl_train.fully_async_trainer import (
     _AsyncStalenessManager,
     _GenerationQueues,
 )
-from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant, GroupSelectionPolicy
 from skyrl_train.trajectory_runners.base import TrajectoryID
 
 
-def _generated_group(uid: str, earliest_model_step: int, *, fully_masked: bool = False) -> GeneratedOutputGroup:
+def _generated_group(
+    uid: str,
+    earliest_model_step: int,
+    *,
+    fully_masked: bool = False,
+    rewards: list[float] | None = None,
+    unshaped_rewards: list[float] | None = None,
+) -> GeneratedOutputGroup:
+    rewards = rewards or [0.0, 1.0]
+    unshaped_rewards = unshaped_rewards or [0.0, 1.0]
     trajectory_batch = {
         "prompt_token_ids": [[1], [1]],
         "response_ids": [[2], [3]],
-        "rewards": [0.0, 1.0],
+        "rewards": rewards,
+        "unshaped_rewards": unshaped_rewards,
         "loss_masks": [[0], [0]] if fully_masked else [[1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_metrics": {},
@@ -38,7 +48,13 @@ def _generated_group(uid: str, earliest_model_step: int, *, fully_masked: bool =
     )
 
 
-def _batch_assembly_state(mini_batch_size: int, accepted: int):
+def _batch_assembly_state(
+    mini_batch_size: int,
+    accepted: int,
+    *,
+    dynamic_sampling_type: str | None = None,
+    max_sample_batches: int = 30,
+):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = 10
     trainer.max_staleness_steps = 2
@@ -47,6 +63,10 @@ def _batch_assembly_state(mini_batch_size: int, accepted: int):
     trainer._groups_rejected_since_step = 0
     trainer._rejection_reasons_since_step = collections.Counter()
     trainer._groups_inspected_since_step = 0
+    trainer._dynamic_sampling_type = dynamic_sampling_type
+    trainer._dynamic_sampling_max_sample_batches = max_sample_batches
+    trainer._dynamic_sampling_max_candidate_groups = max_sample_batches * mini_batch_size
+    trainer._group_selection_policy = GroupSelectionPolicy(filter_uniform_outcomes=dynamic_sampling_type == "filter")
     trainer._step_time_history = collections.deque([1000.0], maxlen=5)
     trainer._active_generator_tasks = []
     trainer._staleness_manager = _AsyncStalenessManager(
@@ -144,6 +164,68 @@ async def test_batch_assembly_retries_fully_masked_group_and_waits_for_replaceme
 
     assert [group.uid for group in batch] == ["replacement"]
     assert trainer.all_metrics["async/rejected_count/fully_masked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_discards_uniform_outcomes_and_waits_for_fresh_prompt():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1, dynamic_sampling_type="filter")
+    queues.completed.put_nowait(
+        _generated_group(
+            "uniform",
+            earliest_model_step=10,
+            rewards=[0.0, -0.1],
+            unshaped_rewards=[0.0, 0.0],
+        )
+    )
+
+    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    done, _ = await asyncio.wait({pending_batch}, timeout=0)
+    assert pending_batch not in done
+    assert queues.retries.empty()
+
+    async with queues.condition:
+        queues.completed.put_nowait(_generated_group("fresh", earliest_model_step=10))
+        queues.condition.notify_all()
+    batch = await asyncio.wait_for(pending_batch, timeout=1)
+
+    assert [group.uid for group in batch] == ["fresh"]
+    assert trainer.all_metrics["async/dynamic_sampling/discarded_count"] == 1
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_routes_stale_and_uniform_groups_differently():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=2, dynamic_sampling_type="filter")
+    queues.completed.put_nowait(_generated_group("stale", earliest_model_step=7))
+    queues.completed.put_nowait(_generated_group("uniform", earliest_model_step=10, unshaped_rewards=[1.0, 1.0]))
+
+    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    done, _ = await asyncio.wait({pending_batch}, timeout=0)
+    assert pending_batch not in done
+    assert queues.retries.get_nowait()[0]["uid"] == "stale"
+    assert queues.retries.empty()
+
+    async with queues.condition:
+        queues.completed.put_nowait(_generated_group("fresh", earliest_model_step=10))
+        queues.condition.notify_all()
+    batch = await asyncio.wait_for(pending_batch, timeout=1)
+
+    assert [group.uid for group in batch] == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_fails_when_dynamic_sampling_exhausts_candidate_budget():
+    trainer, queues = _batch_assembly_state(
+        mini_batch_size=2,
+        accepted=2,
+        dynamic_sampling_type="filter",
+        max_sample_batches=1,
+    )
+    queues.completed.put_nowait(_generated_group("uniform-1", earliest_model_step=10, unshaped_rewards=[0.0, 0.0]))
+    queues.completed.put_nowait(_generated_group("uniform-2", earliest_model_step=10, unshaped_rewards=[1.0, 1.0]))
+
+    with pytest.raises(RuntimeError, match="dynamic sampling limit"):
+        await trainer._get_admitted_generation_group_mini_batch(queues)
 
 
 @pytest.mark.asyncio

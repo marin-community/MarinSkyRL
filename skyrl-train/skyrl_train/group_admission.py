@@ -92,6 +92,64 @@ class AdmissionDecision:
         return self.rejections[0] if self.rejections else None
 
 
+class SelectionRejection(StrEnum):
+    """Reasons to consume a prompt without admitting its generated group."""
+
+    UNIFORM_OUTCOMES = "uniform_outcomes"
+
+
+@dataclass(frozen=True)
+class SelectionDecision:
+    """Result of applying dataset-sampling policy to an eligible group."""
+
+    rejections: tuple[SelectionRejection, ...] = ()
+
+    @property
+    def accepted(self) -> bool:
+        return not self.rejections
+
+
+class GroupSelectionPolicy:
+    """Apply prompt-consuming selection rules after training eligibility checks."""
+
+    def __init__(self, *, filter_uniform_outcomes: bool) -> None:
+        self.filter_uniform_outcomes = filter_uniform_outcomes
+
+    @classmethod
+    def from_sampling_type(cls, sampling_type: str | None) -> GroupSelectionPolicy:
+        if sampling_type not in (None, "filter"):
+            raise ValueError(
+                f"fully asynchronous training supports dynamic_sampling.type=filter or null; got {sampling_type!r}"
+            )
+        return cls(filter_uniform_outcomes=sampling_type == "filter")
+
+    def evaluate(self, group: GeneratedGroup) -> SelectionDecision:
+        if not self.filter_uniform_outcomes:
+            return SelectionDecision()
+
+        batch = group.trajectory_batch
+        response_ids = batch.get("response_ids")
+        if not isinstance(response_ids, Sequence) or isinstance(response_ids, (str, bytes)):
+            raise ValueError("response_ids must be a sequence")
+        row_count = len(response_ids)
+        outcomes = _aligned_sequence(batch, "unshaped_rewards", row_count)
+        if outcomes is None:
+            raise ValueError("dynamic sampling filter requires unshaped_rewards for every generated group")
+
+        is_last_step = _aligned_sequence(batch, "is_last_step", row_count)
+        final_outcomes = (
+            list(outcomes)
+            if is_last_step is None
+            else [outcome for outcome, final in zip(outcomes, is_last_step, strict=True) if final]
+        )
+        if len(final_outcomes) <= 1:
+            return SelectionDecision()
+        first_outcome = float(final_outcomes[0])
+        if all(float(outcome) == first_outcome for outcome in final_outcomes[1:]):
+            return SelectionDecision((SelectionRejection.UNIFORM_OUTCOMES,))
+        return SelectionDecision()
+
+
 class GeneratedGroup(Protocol):
     trajectory_batch: Mapping[str, object]
     earliest_model_step: int
