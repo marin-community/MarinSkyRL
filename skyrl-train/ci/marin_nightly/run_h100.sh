@@ -86,7 +86,11 @@ export VLLM_USE_DEEP_GEMM=0
 # sequences into one relies on flash-attn's varlen kernel, so model_wrapper asserts
 # flash_attention_2 whenever use_sample_packing is true.
 START=$(date +%s)
-"$PYTHON" -m skyrl_train.entrypoints.main_base \
+# This lane runs the trainer directly in an Iris task rather than through
+# cloud/iris/task_runtime.py, so it resolves the telemetry environment itself. Without
+# it the run emits nothing and the nightly cannot tell whether the producers work.
+"$PYTHON" -m cloud.iris.telemetry_env -- \
+  "$PYTHON" -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator=grpo \

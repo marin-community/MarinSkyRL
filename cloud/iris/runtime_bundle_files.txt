@@ -15,6 +15,7 @@ cloud/iris/runtime_bundle.py
 cloud/iris/runtime_environment.py
 cloud/iris/tasks_parquet.py
 cloud/iris/task_runtime.py
+cloud/iris/telemetry_env.py
 cloud/iris/training_driver.py
 marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py

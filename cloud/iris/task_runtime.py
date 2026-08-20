@@ -46,10 +46,13 @@ from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
+    RUN_ID_ENV,
+    TELEMETRY_ENDPOINT_ENV,
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
+from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
@@ -630,6 +633,17 @@ def pin_socket_ifname() -> str | None:
     os.environ["GLOO_SOCKET_IFNAME"] = iface
     _log(f"[fabric] GLOO_SOCKET_IFNAME={iface} (derived from {ip})")
     return iface
+
+
+def export_telemetry_environment(run_id: str | None) -> dict[str, str]:
+    """Publish this task's telemetry endpoint and run identity into the process env."""
+    resolved = telemetry_environment(run_id=run_id)
+    if not resolved:
+        _log("[telemetry] no in-cluster Iris context; MarinSkyRL telemetry stays inert")
+        return {}
+    os.environ.update(resolved)
+    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}")
+    return resolved
 
 
 def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
@@ -1799,6 +1813,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Immutable object-store data locators to materialize before Ray starts.",
     )
     parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Experiment identity telemetry rows join on. Defaults to the Iris job id.",
+    )
+    parser.add_argument(
         "--prestage-model",
         default=os.environ.get("OT_AGENT_IRIS_PRESTAGE_MODEL", ""),
         help="HF repo ID of the policy model to pre-download into the node-local HF "
@@ -1881,6 +1900,11 @@ def main() -> None:
     # name is node-local; training_driver_env keeps it out of the driver, which
     # would otherwise broadcast the head's name to every node.
     derived_gloo_ifname = pin_socket_ifname()
+    # Resolve the telemetry endpoint and run identity from THIS task's Iris context,
+    # before `ray start`, so the raylet and every actor it spawns inherit them. Nothing
+    # else writes them: skyrl_train.telemetry reads them and exports nothing when they
+    # are unset, which is why the merged emitters have produced no rows.
+    export_telemetry_environment(args.run_id)
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
