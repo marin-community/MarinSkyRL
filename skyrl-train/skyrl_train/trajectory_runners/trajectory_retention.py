@@ -857,7 +857,7 @@ class TrajectorySink:
         ledger: _RetentionLedger,
         metrics: dict[str, float],
     ) -> _SelectedArchive | None:
-        """Build the approximately bounded archive and next ledger."""
+        """Return a payload-bounded priority prefix, or none when no record qualifies or fits."""
         selection_ledger = _copy_ledger(ledger)
         selected = []
         for record in sorted(records, key=self._sample_score):
