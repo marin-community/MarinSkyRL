@@ -81,7 +81,7 @@ _process_state = _ProcessState()
 @dataclass(frozen=True)
 class TelemetryConfig:
     endpoint: str | None = None
-    root_run_uid: str | None = None
+    run_id: str | None = None
     execution_uid: str | None = None
     serving_job_id: str | None = None
 
@@ -93,10 +93,26 @@ class TelemetryConfig:
 
         return cls(
             endpoint=text("SKYRL_TELEMETRY_ENDPOINT"),
-            root_run_uid=text("SKYRL_ROOT_RUN_UID"),
-            execution_uid=text("SKYRL_EXECUTION_UID"),
+            run_id=text("SKYRL_RUN_ID"),
+            execution_uid=text("SKYRL_EXECUTION_UID") or _task_attempt_uid(),
             serving_job_id=text("SKYRL_SERVING_JOB_ID"),
         )
+
+
+def _task_attempt_uid() -> str | None:
+    """Identify this task attempt from its own Iris task id.
+
+    One attempt spans several nodes, and Ray hands an actor its node's environment
+    rather than the driver's, so each process derives this rather than inheriting one
+    node's value. The spelling matches what Iris stamps for its own producers.
+    """
+    task_with_attempt = os.environ.get("IRIS_TASK_ID")
+    if not task_with_attempt:
+        return None
+    task_id, separator, attempt = task_with_attempt.rpartition(":")
+    if not separator or "/" in attempt:
+        task_id, attempt = task_with_attempt, "0"
+    return f"iris:{task_id}:attempt:{attempt or '0'}"
 
 
 def _iris_resources() -> dict[str, str]:
@@ -156,7 +172,7 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
         **_iris_resources(),
         **_ray_resources(),
         "host": socket.gethostname(),
-        "root_run_uid": config.root_run_uid or "",
+        "run_id": config.run_id or "",
         "execution_uid": config.execution_uid or "",
         "role": role,
     }
@@ -237,8 +253,8 @@ class ProcessTelemetry:
             return self
         if self._config.endpoint is None:
             return self
-        if self._config.root_run_uid is None or self._config.execution_uid is None:
-            logger.warning("Telemetry requires root_run_uid and execution_uid; export remains inert")
+        if self._config.run_id is None or self._config.execution_uid is None:
+            logger.warning("Telemetry requires run_id and execution_uid; export remains inert")
             return self
         telemetry.configure(
             endpoint=self._config.endpoint,

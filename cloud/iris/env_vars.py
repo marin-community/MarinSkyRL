@@ -77,6 +77,9 @@ LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
+TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
+RUN_ID_ENV = "SKYRL_RUN_ID"
+EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -157,6 +160,29 @@ ENV_VAR_SPECS = (
         "trainer.placement.enable_numa_affinity",
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+    # The endpoint and the run identity are properties of the whole run, so every
+    # process that emits has to agree on them. The execution uid identifies one task
+    # attempt: it is resolved per task and must not be broadcast from the driver's
+    # node to actors on other nodes, so it stops at the driver. A process that reaches
+    # a Ray worker without it derives its own from IRIS_TASK_ID.
+    EnvVarSpec(
+        TELEMETRY_ENDPOINT_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        ALL_RUNTIME_SCOPES,
+    ),
+    EnvVarSpec(
+        RUN_ID_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        ALL_RUNTIME_SCOPES,
+    ),
+    EnvVarSpec(
+        EXECUTION_UID_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME, EnvVarScope.DRIVER}),
     ),
 )
 
@@ -348,6 +374,11 @@ class EnvVarManager:
             values[LD_LIBRARY_PATH_ENV] = library_path
         if nvrtc_home := ambient.get(NVRTC_HOME_ENV):
             values[NVRTC_HOME_ENV] = nvrtc_home
+        # The task runtime resolved these from its own Iris context before Ray started.
+        # Carry them into the scopes the trainer's Ray actors and inference engines read.
+        for telemetry_name in (TELEMETRY_ENDPOINT_ENV, RUN_ID_ENV, EXECUTION_UID_ENV):
+            if telemetry_value := ambient.get(telemetry_name):
+                values[telemetry_name] = telemetry_value
         if _config_value(config, "trainer.algorithm.batch_invariant", False):
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
         if _config_value(config, "generator.fuse_weights", False):
