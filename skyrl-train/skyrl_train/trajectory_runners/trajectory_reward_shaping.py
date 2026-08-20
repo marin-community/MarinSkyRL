@@ -48,8 +48,13 @@ class SuccessfulLengthPenaltyConfig:
 
 @dataclass(frozen=True)
 class OverlongPenaltyConfig:
+    """DAPO soft-overlong parameters, named to match the paper's formula."""
+
     l_max: int = 0
+    """Maximum generated response length."""
+
     l_cache: int = 0
+    """Penalty-window width below ``l_max``; zero disables the component."""
 
 
 @dataclass(frozen=True)
@@ -175,8 +180,6 @@ def _validate_config(config: TrajectoryRewardShapingConfig) -> None:
         raise ValueError("overlong.l_max must be non-negative")
     if config.overlong.l_cache < 0:
         raise ValueError("overlong.l_cache must be non-negative")
-    if config.overlong.l_max > 0 and config.overlong.l_cache <= 0:
-        raise ValueError("overlong.l_cache must be positive when overlong.l_max is positive")
     if config.overlong.l_cache > config.overlong.l_max:
         raise ValueError("overlong.l_cache must not exceed overlong.l_max")
 
@@ -292,6 +295,12 @@ def _empty_components() -> RewardShapingComponents:
     return {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0}
 
 
+def aggregate_reward_shaping_components(
+    components: Sequence[RewardShapingComponents], indices: Sequence[int]
+) -> RewardShapingComponents:
+    return {name: sum(components[index][name] for index in indices) for name in REWARD_SHAPING_COMPONENT_NAMES}
+
+
 def _soft_overlong_penalty(response_length: int, config: OverlongPenaltyConfig) -> float:
     if config.l_cache == 0:
         return 0.0
@@ -348,10 +357,7 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
         stop_reasons = [None] * batch_size
     groups = _trajectory_groups(output, batch_size)
     response_lengths = [sum(bool(value) for value in loss_mask) for loss_mask in output["loss_masks"]]
-    trajectory_components = [
-        {name: sum(components[index][name] for index in group) for name in REWARD_SHAPING_COMPONENT_NAMES}
-        for group in groups
-    ]
+    trajectory_components = [aggregate_reward_shaping_components(components, group) for group in groups]
     shaped_totals = [NormalizedReward.from_output(output["rewards"][group[-1]]).total for group in groups]
     penalties = [sum(values.values()) for values in trajectory_components]
     trajectory_lengths = [sum(response_lengths[index] for index in group) for group in groups]
@@ -477,7 +483,7 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
     for group in groups:
         final_index = group[-1]
         trajectory_length = sum(response_lengths[index] for index in group)
-        sample_components = _empty_components()
+        final_components = components[final_index]
 
         if not excluded[final_index]:
             for index in group:
@@ -486,16 +492,14 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
                 None if stop_reasons[final_index] is None else str(stop_reasons[final_index]).strip().lower()
             )
             if normalized_stop not in accepted_stops:
-                sample_components["non_termination"] = -config.non_termination.penalty
+                final_components["non_termination"] = -config.non_termination.penalty
             if outcomes[final_index] > 0:
                 charged_tokens = max(0, trajectory_length - config.successful_length.free_tokens)
-                sample_components["successful_length"] = -min(
+                final_components["successful_length"] = -min(
                     config.successful_length.max_penalty,
                     charged_tokens * config.successful_length.penalty_per_token,
                 )
 
-        components[final_index]["non_termination"] = sample_components["non_termination"]
-        components[final_index]["successful_length"] = sample_components["successful_length"]
         penalty = sum(sum(components[index].values()) for index in group)
         shaped_rewards[final_index] = normalized_rewards[final_index].with_penalty(loss_masks[final_index], penalty)
 

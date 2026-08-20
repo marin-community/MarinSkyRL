@@ -17,7 +17,6 @@ from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.trajectory_runners.types import (
-    REWARD_SHAPING_COMPONENT_NAMES,
     TrajectoryRequestBatch,
     TrajectoryBatch,
     RewardShapingComponents,
@@ -35,7 +34,10 @@ from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
     PublicationResult,
     TrajectoryPublisher,
 )
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
+    NormalizedReward,
+    aggregate_reward_shaping_components,
+)
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.utils.io import io
 
@@ -396,9 +398,7 @@ def build_trajectory_records(
         outcome = float(unshaped[final_index]) if unshaped is not None else normalized_reward.outcome
         trajectory_components = None
         if components is not None:
-            trajectory_components = {
-                name: sum(components[index][name] for index in row_indices) for name in REWARD_SHAPING_COMPONENT_NAMES
-            }
+            trajectory_components = aggregate_reward_shaping_components(components, row_indices)
         response_text = _decode(tokenizer, response_ids)
         record = TrajectoryRecord(
             schema_version=RETENTION_SCHEMA_VERSION,

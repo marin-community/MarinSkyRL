@@ -343,7 +343,7 @@ generator:
       penalty: 0.0
       accepted_stop_reasons: [stop, complete, eos, end_turn]
     overlong:
-      l_max: 0
+      l_max: ${generator.sampling_params.max_generate_length}
       l_cache: 0
     successful_length:
       free_tokens: 0

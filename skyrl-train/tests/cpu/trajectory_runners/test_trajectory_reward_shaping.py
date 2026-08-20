@@ -198,6 +198,15 @@ def test_step_wise_soft_overlong_penalty_uses_each_response_length():
     assert [component["overlong"] for component in output["reward_shaping_components"]] == pytest.approx([0.0, -0.5])
 
 
+def test_zero_cache_disables_soft_overlong_penalty():
+    output = _output([[1, 2, 3, 4, 5, 6, 7, 8]], [1.0], ["length"])
+
+    shape_trajectory_rewards(output, {"enabled": True, "overlong": {"l_max": 8, "l_cache": 0}})
+
+    assert output["rewards"] == [1.0]
+    assert output["reward_shaping_components"][0]["overlong"] == 0.0
+
+
 def test_loop_advantage_stays_separate_from_scalar_trajectory_penalties():
     output = _output(
         responses=[[7, 8] * 5],
@@ -350,7 +359,6 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
         ({"non_termination": {"accepted_stop_reasons": "stop"}}, "accepted_stop_reasons"),
         ({"successful_length": {"free_tokens": -1}}, "successful_length.free_tokens"),
         ({"overlong": {"l_max": 0, "l_cache": -1}}, "overlong.l_cache must be non-negative"),
-        ({"overlong": {"l_max": 8, "l_cache": 0}}, "overlong.l_cache must be positive"),
         ({"overlong": {"l_max": 8, "l_cache": 9}}, "overlong.l_cache must not exceed overlong.l_max"),
     ],
 )
