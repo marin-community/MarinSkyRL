@@ -46,6 +46,10 @@ timeouts, and best-effort backpressure. The broader trajectory-runner suite pass
 run with access to its Hugging Face tokenizer fixtures; its first sandboxed attempt failed only at those fixture
 downloads. Changed-file Ruff checks and formatting pass.
 
+The advisory branch review found a stale design-doc sentence about reserved overhead and duplicated record-entry
+name construction across the manifest, size projection, and writer. The documentation now describes exact
+layout accounting, and one helper defines the entry name for all three paths.
+
 ## Future work
 
 - [x] Add a regression test for the nightly's 256-trajectory batch shape.

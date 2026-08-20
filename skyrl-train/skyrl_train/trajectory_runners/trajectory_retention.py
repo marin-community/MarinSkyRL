@@ -467,6 +467,10 @@ def _copy_ledger(ledger: _RetentionLedger) -> _RetentionLedger:
     )
 
 
+def _archive_record_entry_name(record_id: str) -> str:
+    return f"records/{record_id}.json.gz"
+
+
 def _archive_manifest(selected: Sequence[_SelectedRecord]) -> dict[str, Any]:
     return {
         "schema_version": RETENTION_SCHEMA_VERSION,
@@ -477,7 +481,7 @@ def _archive_manifest(selected: Sequence[_SelectedRecord]) -> dict[str, Any]:
                 "reasons": item.selection.reasons,
                 "sample_score": TrajectorySink._sample_score(item.record),
                 "bytes": len(item.payload),
-                "entry": f"records/{item.record.record_id}.json.gz",
+                "entry": _archive_record_entry_name(item.record.record_id),
             }
             for item in selected
         ],
@@ -492,7 +496,8 @@ def _stored_zip_entry_size(name: str, payload_size: int) -> int:
 def _archive_size(selected: Sequence[_SelectedRecord]) -> int:
     manifest_payload = canonical_json_bytes(_archive_manifest(selected))
     records_size = sum(
-        _stored_zip_entry_size(f"records/{item.record.record_id}.json.gz", len(item.payload)) for item in selected
+        _stored_zip_entry_size(_archive_record_entry_name(item.record.record_id), len(item.payload))
+        for item in selected
     )
     return records_size + _stored_zip_entry_size(_ARCHIVE_MANIFEST, len(manifest_payload)) + _ZIP_END_RECORD_BYTES
 
@@ -501,7 +506,7 @@ def _archive_payload(selected: Sequence[_SelectedRecord]) -> bytes:
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_STORED, strict_timestamps=True) as archive:
         for item in selected:
-            entry_name = f"records/{item.record.record_id}.json.gz"
+            entry_name = _archive_record_entry_name(item.record.record_id)
             info = zipfile.ZipInfo(entry_name)
             info.date_time = (1980, 1, 1, 0, 0, 0)
             info.compress_type = zipfile.ZIP_STORED
