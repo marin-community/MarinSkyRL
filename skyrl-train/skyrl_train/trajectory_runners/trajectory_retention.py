@@ -130,12 +130,6 @@ class _SelectedRecord:
 
 
 @dataclass(frozen=True)
-class _EncodedArchive:
-    records: tuple[_SelectedRecord, ...]
-    payload: bytes
-
-
-@dataclass(frozen=True)
 class _SelectedArchive:
     path: str
     payload: bytes
@@ -468,66 +462,32 @@ def _copy_ledger(ledger: _RetentionLedger) -> _RetentionLedger:
     )
 
 
-def _archive_record_entry_name(record_id: str) -> str:
-    return f"records/{record_id}.json.gz"
-
-
-def _archive_manifest(selected: Sequence[_SelectedRecord]) -> dict[str, Any]:
-    return {
-        "schema_version": RETENTION_SCHEMA_VERSION,
-        "records": [
-            {
-                "record_id": item.record.record_id,
-                "step": f"{item.record.phase}:{item.record.global_step}",
-                "reasons": item.selection.reasons,
-                "sample_score": TrajectorySink._sample_score(item.record),
-                "bytes": len(item.payload),
-                "entry": _archive_record_entry_name(item.record.record_id),
-            }
-            for item in selected
-        ],
-    }
-
-
 def _archive_payload(selected: Sequence[_SelectedRecord]) -> bytes:
+    manifest_records = []
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_STORED, strict_timestamps=True) as archive:
         for item in selected:
-            entry_name = _archive_record_entry_name(item.record.record_id)
+            entry_name = f"records/{item.record.record_id}.json.gz"
             info = zipfile.ZipInfo(entry_name)
             info.date_time = (1980, 1, 1, 0, 0, 0)
             info.compress_type = zipfile.ZIP_STORED
             archive.writestr(info, item.payload)
+            manifest_records.append(
+                {
+                    "record_id": item.record.record_id,
+                    "step": f"{item.record.phase}:{item.record.global_step}",
+                    "reasons": item.selection.reasons,
+                    "sample_score": TrajectorySink._sample_score(item.record),
+                    "bytes": len(item.payload),
+                    "entry": entry_name,
+                }
+            )
+        manifest = {"schema_version": RETENTION_SCHEMA_VERSION, "records": manifest_records}
         info = zipfile.ZipInfo(_ARCHIVE_MANIFEST)
         info.date_time = (1980, 1, 1, 0, 0, 0)
         info.compress_type = zipfile.ZIP_STORED
-        archive.writestr(info, canonical_json_bytes(_archive_manifest(selected)))
+        archive.writestr(info, canonical_json_bytes(manifest))
     return buffer.getvalue()
-
-
-def _largest_bounded_archive(selected: Sequence[_SelectedRecord], max_bytes: int) -> _EncodedArchive | None:
-    """Encode all selected records, or the largest priority prefix that fits."""
-    records = tuple(selected)
-    if not records or max_bytes <= 0:
-        return None
-
-    payload = _archive_payload(records)
-    if len(payload) <= max_bytes:
-        return _EncodedArchive(records=records, payload=payload)
-
-    lower = 1
-    upper = len(records) - 1
-    bounded: _EncodedArchive | None = None
-    while lower <= upper:
-        count = (lower + upper) // 2
-        candidate_records = records[:count]
-        candidate_payload = _archive_payload(candidate_records)
-        if len(candidate_payload) <= max_bytes:
-            bounded = _EncodedArchive(records=candidate_records, payload=candidate_payload)
-            lower = count + 1
-        else:
-            upper = count - 1
-    return bounded
 
 
 def _read_archive_manifest(payload: bytes) -> dict[str, Any]:
@@ -897,7 +857,7 @@ class TrajectorySink:
         ledger: _RetentionLedger,
         metrics: dict[str, float],
     ) -> _SelectedArchive | None:
-        """Build the bounded archive and next ledger, or return none when no record qualifies."""
+        """Build the approximately bounded archive and next ledger."""
         selection_ledger = _copy_ledger(ledger)
         selected = []
         for record in sorted(records, key=self._sample_score):
@@ -918,22 +878,28 @@ class TrajectorySink:
 
         first = selected[0].record
         step_key = self._step_key(first)
-        max_archive_bytes = min(
+        max_payload_bytes = min(
             self.config.max_bytes_per_step - ledger.step_bytes.get(step_key, 0),
             self.config.max_bytes_per_run - ledger.total_bytes,
         )
-        encoded_archive = _largest_bounded_archive(selected, max_archive_bytes)
-        retained_count = 0 if encoded_archive is None else len(encoded_archive.records)
-        metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_bounds"] += float(len(selected) - retained_count)
-        if encoded_archive is None:
+        retained = []
+        retained_payload_bytes = 0
+        for selected_record in selected:
+            candidate_bytes = retained_payload_bytes + len(selected_record.payload)
+            if candidate_bytes > max_payload_bytes:
+                break
+            retained.append(selected_record)
+            retained_payload_bytes = candidate_bytes
+        metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_bounds"] += float(len(selected) - len(retained))
+        if not retained:
             return None
 
         next_ledger = _copy_ledger(ledger)
-        for selected_record in encoded_archive.records:
+        for selected_record in retained:
             self._add_selected_record(next_ledger, selected_record)
-        archive_payload = encoded_archive.payload
+        archive_payload = _archive_payload(retained)
         archive_path = self._archive_path(first, archive_payload)
-        record_ids = tuple(item.record.record_id for item in encoded_archive.records)
+        record_ids = tuple(item.record.record_id for item in retained)
         for record_id in record_ids:
             next_ledger.records[record_id] = replace(next_ledger.records[record_id], path=archive_path)
         next_ledger.archives[archive_path] = _ArchiveEntry(
@@ -947,7 +913,7 @@ class TrajectorySink:
             path=archive_path,
             payload=archive_payload,
             ledger=next_ledger,
-            record_count=retained_count,
+            record_count=len(retained),
         )
 
     def _add_selected_record(self, ledger: _RetentionLedger, selected: _SelectedRecord) -> None:
