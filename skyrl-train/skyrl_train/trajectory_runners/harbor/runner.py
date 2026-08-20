@@ -16,7 +16,6 @@ from skyrl_gym.verification import (
     VerificationStatus,
 )
 from loguru import logger
-from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.projections import project_loss_mask
 from skyrl_train.metric_names import TIS_LCS_FALLBACK_ALERT_METRIC, TIS_METRIC_PREFIX
@@ -960,8 +959,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             prompt = input_batch["prompts"][i]
             trajectory_id = input_batch["trajectory_ids"][i]
 
-            # Generate session_id for sticky routing to inference engines
-            session_id = uuid4().hex
+            # Routes every turn of this trajectory to one engine, and is stable across steps,
+            # so that engine keeps its prefix cache for this task.
+            session_id = trajectory_id.to_string()
 
             trial_config = self._harbor_config_builder.build_trial_config(
                 task_path=prompt,

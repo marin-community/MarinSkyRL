@@ -110,9 +110,7 @@ class StepWiseRolloutCollector:
         # Create a new environment instance
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
-        session_id = (
-            f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
-        )
+        session_id = trajectory_id.to_string() if trajectory_id is not None else uuid4().hex
         done = False
 
         # Need copy here since the prompt is a list of messages and we are going to modify it.
