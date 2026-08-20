@@ -18,11 +18,11 @@ What was lifted / changed vs prime-rl:
     collapse (+ ALIGN_SIZE_M pad) to the decorator. Mirrors prime-rl exactly
     (``@expert_parallel`` grouped-mm whose inner ``_impl`` does only
     ``cumsum -> _grouped_mm``; the DeepEP path calls ``_impl`` bare).
-  * ``TokenChoiceTopKRouter`` — kept as-is. Its native ``routed_experts`` arg
-    (gather ``top_scores = scores.gather(1, routed_experts)``) IS the R3 replay
-    hook: it re-gathers weights from the LIVE ``self.gate(x)`` softmax, exactly
-    the Stage-2 monkeypatch semantics. ``expert_bias`` / ``force_balanced`` kept
-    for API compatibility but unused on the swap path.
+  * ``TokenChoiceTopKRouter`` — its native ``routed_experts`` arg is the R3
+    replay hook. Both native selection and replay gather weights from the LIVE
+    ``self.gate(x)`` scores so activation-checkpoint recomputation records the
+    same autograd operations. ``expert_bias`` / ``force_balanced`` are kept for
+    API compatibility but unused on the swap path.
   * token reorder/combine — shared with native Grug through ``moe_routing``.
   * ``MoE`` — adapted: ``MoEArgs`` / ``ep_comm_backend`` / DeepEP /
     aux-loss-free ``expert_bias`` / ``tokens_per_expert`` / ``routing_confidence``
@@ -316,12 +316,12 @@ class TokenChoiceTopKRouter(nn.Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        if routed_experts is not None:
-            # R3 replay: indices forced; weights re-gathered from the LIVE softmax.
-            top_scores = scores.gather(dim=1, index=routed_experts)
-            selected_experts_indices = routed_experts
-        else:
-            top_scores, selected_experts_indices = torch.topk(scores, k=self.top_k, dim=1)
+        _, native_experts_indices = torch.topk(scores, k=self.top_k, dim=1)
+        selected_experts_indices = native_experts_indices if routed_experts is None else routed_experts
+
+        # Native selection and checkpoint replay must record the same autograd
+        # operations. Replay changes only which indices supply the live weights.
+        top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
