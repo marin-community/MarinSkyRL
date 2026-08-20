@@ -47,9 +47,7 @@ def group_is_informative_for_dynamic_sampling(
     is_last_step = _aligned_sequence(trajectory_batch, "is_last_step", row_count)
 
     final_outcomes = [
-        float(outcomes[index])
-        for index in row_indices
-        if is_last_step is None or bool(is_last_step[index])
+        float(outcomes[index]) for index in row_indices if is_last_step is None or bool(is_last_step[index])
     ]
     if not final_outcomes:
         raise ValueError("dynamic sampling group must contain at least one final trial row")
@@ -69,8 +67,7 @@ class GroupSelectionPolicy:
         resolved_type = DynamicSamplingType(sampling_type) if sampling_type is not None else None
         if resolved_type not in (None, DynamicSamplingType.FILTER):
             raise ValueError(
-                "fully asynchronous training supports dynamic_sampling.type=filter or null; "
-                f"got {sampling_type!r}"
+                f"fully asynchronous training supports dynamic_sampling.type=filter or null; got {sampling_type!r}"
             )
         return cls(resolved_type)
 
