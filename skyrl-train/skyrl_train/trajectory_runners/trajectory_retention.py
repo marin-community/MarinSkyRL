@@ -47,8 +47,11 @@ _SELECTION_FRACTION = "fraction"
 _SELECTION_MANDATORY = "mandatory"
 _ARCHIVE_DIRECTORY = "archives"
 _ARCHIVE_MANIFEST = "manifest.json"
-_ARCHIVE_BASE_OVERHEAD_BYTES = 2048
-_ARCHIVE_RECORD_OVERHEAD_BYTES = 512
+# ZIP_STORED on a seekable buffer has no data descriptors or extra fields. Each entry has one local header and
+# one central-directory header, followed by one end-of-central-directory record for the archive.
+_ZIP_LOCAL_FILE_HEADER_BYTES = 30
+_ZIP_CENTRAL_DIRECTORY_HEADER_BYTES = 46
+_ZIP_END_RECORD_BYTES = 22
 
 
 @dataclass(frozen=True)
@@ -464,8 +467,37 @@ def _copy_ledger(ledger: _RetentionLedger) -> _RetentionLedger:
     )
 
 
+def _archive_manifest(selected: Sequence[_SelectedRecord]) -> dict[str, Any]:
+    return {
+        "schema_version": RETENTION_SCHEMA_VERSION,
+        "records": [
+            {
+                "record_id": item.record.record_id,
+                "step": f"{item.record.phase}:{item.record.global_step}",
+                "reasons": item.selection.reasons,
+                "sample_score": TrajectorySink._sample_score(item.record),
+                "bytes": len(item.payload),
+                "entry": f"records/{item.record.record_id}.json.gz",
+            }
+            for item in selected
+        ],
+    }
+
+
+def _stored_zip_entry_size(name: str, payload_size: int) -> int:
+    name_size = len(name.encode("utf-8"))
+    return payload_size + _ZIP_LOCAL_FILE_HEADER_BYTES + _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES + 2 * name_size
+
+
+def _archive_size(selected: Sequence[_SelectedRecord]) -> int:
+    manifest_payload = canonical_json_bytes(_archive_manifest(selected))
+    records_size = sum(
+        _stored_zip_entry_size(f"records/{item.record.record_id}.json.gz", len(item.payload)) for item in selected
+    )
+    return records_size + _stored_zip_entry_size(_ARCHIVE_MANIFEST, len(manifest_payload)) + _ZIP_END_RECORD_BYTES
+
+
 def _archive_payload(selected: Sequence[_SelectedRecord]) -> bytes:
-    manifest_records = []
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_STORED, strict_timestamps=True) as archive:
         for item in selected:
@@ -474,21 +506,10 @@ def _archive_payload(selected: Sequence[_SelectedRecord]) -> bytes:
             info.date_time = (1980, 1, 1, 0, 0, 0)
             info.compress_type = zipfile.ZIP_STORED
             archive.writestr(info, item.payload)
-            manifest_records.append(
-                {
-                    "record_id": item.record.record_id,
-                    "step": f"{item.record.phase}:{item.record.global_step}",
-                    "reasons": item.selection.reasons,
-                    "sample_score": TrajectorySink._sample_score(item.record),
-                    "bytes": len(item.payload),
-                    "entry": entry_name,
-                }
-            )
-        manifest = {"schema_version": RETENTION_SCHEMA_VERSION, "records": manifest_records}
         info = zipfile.ZipInfo(_ARCHIVE_MANIFEST)
         info.date_time = (1980, 1, 1, 0, 0, 0)
         info.compress_type = zipfile.ZIP_STORED
-        archive.writestr(info, canonical_json_bytes(manifest))
+        archive.writestr(info, canonical_json_bytes(_archive_manifest(selected)))
     return buffer.getvalue()
 
 
@@ -862,7 +883,6 @@ class TrajectorySink:
         """Build the bounded archive and next ledger, or return none when no record qualifies."""
         next_ledger = _copy_ledger(ledger)
         selected = []
-        reserved_bytes = _ARCHIVE_BASE_OVERHEAD_BYTES
         for record in sorted(records, key=self._sample_score):
             if record.record_id in next_ledger.records:
                 metrics[f"{RETENTION_METRIC_PREFIX}/duplicates"] += 1.0
@@ -872,12 +892,12 @@ class TrajectorySink:
                 continue
             metrics[f"{RETENTION_METRIC_PREFIX}/selected"] += 1.0
             payload = self._encode_record(record)
-            estimated_bytes = len(payload) + _ARCHIVE_RECORD_OVERHEAD_BYTES
+            selected_record = _SelectedRecord(record=record, payload=payload, selection=selection)
+            projected_archive_bytes = _archive_size((*selected, selected_record))
             step_key = self._step_key(record)
             if (
-                next_ledger.step_bytes.get(step_key, 0) + reserved_bytes + estimated_bytes
-                > self.config.max_bytes_per_step
-                or next_ledger.total_bytes + reserved_bytes + estimated_bytes > self.config.max_bytes_per_run
+                next_ledger.step_bytes.get(step_key, 0) + projected_archive_bytes > self.config.max_bytes_per_step
+                or next_ledger.total_bytes + projected_archive_bytes > self.config.max_bytes_per_run
             ):
                 metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_bounds"] += 1.0
                 continue
@@ -890,14 +910,12 @@ class TrajectorySink:
                 reasons=selection.reasons,
                 sample_score=self._sample_score(record),
             )
-            selected.append(_SelectedRecord(record=record, payload=payload, selection=selection))
-            reserved_bytes += estimated_bytes
+            selected.append(selected_record)
 
         if not selected:
             return None
         archive_payload = _archive_payload(selected)
-        if len(archive_payload) > reserved_bytes:
-            raise ValueError("trajectory retention archive overhead exceeded its reserved bound")
+        assert len(archive_payload) == _archive_size(selected)
         first = selected[0].record
         archive_path = self._archive_path(first, archive_payload)
         record_ids = tuple(item.record.record_id for item in selected)

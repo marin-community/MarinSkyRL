@@ -334,6 +334,41 @@ def test_retention_is_deterministic_and_enforces_compressed_byte_bound_before_wr
     assert _records(tmp_path) == []
 
 
+def test_retention_publishes_a_full_training_batch_as_one_bounded_archive(tmp_path):
+    batch_size = 256
+    input_batch = _input()
+    output = _output()
+    trajectory_ids = [TrajectoryID(instance_id=f"sample-{index}", repetition_id=0) for index in range(batch_size)]
+    for key in ("prompts", "env_classes", "env_extras"):
+        values = input_batch[key]
+        input_batch[key] = [values[index % len(values)] for index in range(batch_size)]
+    input_batch["trajectory_ids"] = trajectory_ids
+    for key in (
+        "prompt_token_ids",
+        "response_ids",
+        "rewards",
+        "reward_shaping_components",
+        "reward_shaping_loop_spans",
+        "loop_advantages",
+        "reward_shaping_versions",
+        "loss_masks",
+        "stop_reasons",
+    ):
+        values = output[key]
+        output[key] = [values[index % len(values)] for index in range(batch_size)]
+    output["unshaped_rewards"] = [0.0] * batch_size
+    output["trajectory_ids"] = trajectory_ids
+    config = _config(tmp_path)
+
+    metrics = _sink(config).retain(input_batch, output)
+
+    archives = list(tmp_path.rglob("*.zip"))
+    assert metrics["generate/trajectory_retention/written"] == batch_size
+    assert len(_records(tmp_path)) == batch_size
+    assert len(archives) == 1
+    assert archives[0].stat().st_size <= config.max_bytes_per_step
+
+
 def test_custom_stop_contract_controls_non_termination_selection(tmp_path):
     output = _output()
     for index in range(3):
