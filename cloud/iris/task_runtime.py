@@ -76,7 +76,7 @@ except ImportError as error:
     CONTROLLER_ROLE = "controller"
     WORKER_ROLE = "worker"
 
-    def ray_metrics_telemetry(node_ip: str, metrics_port: int, role: str):
+    def ray_metrics_telemetry(node_ip: str, metrics_port: int, role: str = "controller"):
         _log(f"Ray metric forwarding is unavailable: {_RAY_METRICS_UNAVAILABLE_REASON}")
         return contextlib.nullcontext()
 

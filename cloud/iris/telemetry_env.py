@@ -22,8 +22,16 @@ from cloud.iris.env_vars import EXECUTION_UID_ENV, RUN_ID_ENV, TELEMETRY_ENDPOIN
 logger = logging.getLogger(__name__)
 
 
-def execution_uid(task_id: str, attempt_id: int) -> str:
-    """Spell one task attempt the way Iris's own producers spell it."""
+def execution_uid(task_id: str, attempt_id: int, attempt_uid: str | None = None) -> str:
+    """Spell one task attempt the way Iris's own producers spell it.
+
+    The pinned `marin-iris` builds this from the task id and attempt number alone. Newer Iris
+    prefers an attempt uid when the runtime sets one, so this reads the uid first and falls back
+    to the same formula: the string matches whichever version is installed, rather than matching
+    the pin today and silently diverging when it is bumped.
+    """
+    if attempt_uid:
+        return f"iris:{attempt_uid}"
     return f"iris:{task_id}:attempt:{attempt_id}"
 
 
@@ -44,7 +52,9 @@ def telemetry_environment(*, run_id: str | None = None) -> dict[str, str]:
         return {
             TELEMETRY_ENDPOINT_ENV: endpoint,
             RUN_ID_ENV: run_id or str(job_info.job_id),
-            EXECUTION_UID_ENV: execution_uid(str(job_info.task_id), job_info.attempt_id),
+            EXECUTION_UID_ENV: execution_uid(
+                str(job_info.task_id), job_info.attempt_id, getattr(job_info, "attempt_uid", None)
+            ),
         }
     except Exception:
         logger.warning("could not resolve the MarinSkyRL telemetry environment", exc_info=True)
