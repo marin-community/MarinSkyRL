@@ -23,6 +23,7 @@ SERVICE = "marinskyrl"
 DRIVER_ROLE = "driver"
 TRAINER_ROLE = "trainer"
 CONTROLLER_ROLE = "controller"
+WORKER_ROLE = "worker"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
