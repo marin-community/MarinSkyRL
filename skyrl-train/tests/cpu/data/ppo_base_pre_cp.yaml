@@ -228,6 +228,7 @@ trainer:
   fully_async:
     max_staleness_steps: 4
     num_parallel_generation_workers: 768
+    admission_stall_timeout_seconds: 21600
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42

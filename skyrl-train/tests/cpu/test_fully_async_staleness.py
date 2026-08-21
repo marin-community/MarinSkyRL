@@ -72,6 +72,7 @@ def _batch_assembly_state(
     trainer._dynamic_sampling_max_sample_batches = max_sample_batches
     trainer._dynamic_sampling_max_candidate_groups = max_sample_batches * mini_batch_size
     trainer._step_time_history = collections.deque([1000.0], maxlen=5)
+    trainer.admission_stall_timeout_seconds = 21_600
     trainer._active_generator_tasks = []
     trainer._staleness_manager = _AsyncStalenessManager(
         max_concurrent_generation_groups=accepted,
@@ -368,7 +369,7 @@ async def test_resume_skips_uids_owned_by_restored_completed_groups_and_retries(
 @pytest.mark.asyncio
 async def test_batch_assembly_rejected_only_progress_terminates_instead_of_livelocking():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
-    trainer._generation_stall_timeout = lambda: 0.0
+    trainer._admission_stall_timeout = lambda: 0.0
     queues.completed.put_nowait(_generated_group("always-masked", earliest_model_step=10, fully_masked=True))
 
     with pytest.raises(GenerationStalledError):

@@ -29,11 +29,17 @@ def _make_queues() -> _GenerationQueues:
     )
 
 
-def _bare_trainer(mini_batch_size=2, step_times=None, tasks=None) -> FullyAsyncRayPPOTrainer:
+def _bare_trainer(
+    mini_batch_size=2,
+    step_times=None,
+    tasks=None,
+    admission_stall_timeout_seconds=21_600,
+) -> FullyAsyncRayPPOTrainer:
     """Create a trainer shell with just enough state for stall-detection tests."""
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.mini_batch_size = mini_batch_size
     trainer._step_time_history = collections.deque(step_times or [], maxlen=5)
+    trainer.admission_stall_timeout_seconds = admission_stall_timeout_seconds
     trainer._active_trajectory_tasks = tasks or []
     trainer.global_step = 0
     trainer.all_metrics = {}
@@ -52,7 +58,7 @@ def _bare_trainer(mini_batch_size=2, step_times=None, tasks=None) -> FullyAsyncR
 
 
 # --------------------------------------------------------------------------- #
-# _generation_stall_timeout — adaptive computation                            #
+# Stall timeout computation                                                    #
 # --------------------------------------------------------------------------- #
 
 
@@ -60,13 +66,19 @@ def _bare_trainer(mini_batch_size=2, step_times=None, tasks=None) -> FullyAsyncR
     ("history", "expected"),
     [
         ([], 1800.0),
-        ([100.0, 200.0, 300.0], 1000.0),  # median 200 × 5
-        ([1.0, 2.0, 3.0], 600.0),  # median 2 × 5 = 10, floored to 600
+        ([100.0, 200.0, 300.0], 1000.0),
+        ([1.0, 2.0, 3.0], 600.0),
     ],
 )
 def test_generation_stall_timeout(history, expected):
     trainer = _bare_trainer(step_times=history)
     assert trainer._generation_stall_timeout() == expected
+
+
+@pytest.mark.parametrize("history", [[], [100.0, 200.0, 300.0], [10_000.0, 20_000.0, 30_000.0]])
+def test_admission_stall_timeout_is_independent_of_step_duration(history):
+    trainer = _bare_trainer(step_times=history, admission_stall_timeout_seconds=21_600)
+    assert trainer._admission_stall_timeout() == 21_600
 
 
 # --------------------------------------------------------------------------- #
@@ -102,7 +114,7 @@ async def test_get_admitted_batch_raises_when_generators_dead(monkeypatch):
     """When all generators have exited and the buffer is short, raise immediately."""
     trainer = _bare_trainer(mini_batch_size=2, tasks=[])
     # Patch the timeout to 0.05s so the test runs fast.
-    monkeypatch.setattr(trainer, "_generation_stall_timeout", lambda: 0.05)
+    monkeypatch.setattr(trainer, "_admission_stall_timeout", lambda: 0.05)
 
     queues = _make_queues()
 
@@ -113,7 +125,7 @@ async def test_get_admitted_batch_raises_when_generators_dead(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_admitted_batch_returns_complete_group_set(monkeypatch):
     trainer = _bare_trainer(mini_batch_size=2, tasks=[])
-    monkeypatch.setattr(trainer, "_generation_stall_timeout", lambda: 10.0)
+    monkeypatch.setattr(trainer, "_admission_stall_timeout", lambda: 10.0)
 
     queues = _make_queues()
     for i in range(2):
