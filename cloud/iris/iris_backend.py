@@ -77,6 +77,7 @@ from iris.cluster.constraints import (
 )
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
+from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
@@ -401,11 +402,6 @@ class IrisBackend:
                 storage_user=storage_user_from_resource_path(request.output.checkpoint_root),
             )
         )
-
-
-def iris_job_state_name(state: int) -> str:
-    """Return the protocol spelling for an Iris job state enum."""
-    return job_pb2.JobState.Name(state).removeprefix("JOB_STATE_").lower()
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -2578,8 +2574,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
         )
         try:
             status = job.wait(stream_logs=True, timeout=float("inf"), raise_on_failure=False)
-            exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1
-            job_state = iris_job_state_name(status.state)
+            exit_code = 0 if status.state is JobState.SUCCEEDED else 1
+            job_state = status.state.value
         except KeyboardInterrupt:
             print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
             job.terminate()
