@@ -6,6 +6,7 @@ from skyrl_train.group_admission import (
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
+    assert_training_groups_eligible,
     resolve_group_advantage_invariant,
 )
 
@@ -153,6 +154,20 @@ def test_malformed_group_fails_instead_of_being_retried():
 
     with pytest.raises(ValueError, match="loss_masks"):
         policy.evaluate(group, global_step=10)
+
+
+def test_training_group_error_reports_observed_and_expected_physical_counts():
+    group = _group(loss_masks=[[1], [1], [1], [1]])
+
+    with pytest.raises(
+        ValueError,
+        match=r"physical_count=4, expected=2, row_count=4, row_indices=\[0, 1, 2, 3\]",
+    ):
+        assert_training_groups_eligible(
+            group.trajectory_batch,
+            ["duplicate"] * 4,
+            GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        )
 
 
 def test_stepwise_group_counts_final_trials_but_checks_all_transitions_for_training():

@@ -68,13 +68,14 @@ class GroupAdvantageInvariant:
 
 
 class AdmissionRejection(StrEnum):
-    """Retryable reasons that prevent a completed group from entering training."""
+    """Reasons that prevent a completed group from entering training."""
 
     STALE = "stale"
     FULLY_MASKED = "fully_masked"
     PHYSICAL_GROUP_SIZE = "physical_group_size"
     BELOW_MINIMUM_GROUP_SIZE = "below_minimum_group_size"
     MISSING_ROLLOUT_LOGPROBS = "missing_rollout_logprobs"
+    DUPLICATE_UID = "duplicate_uid"
 
 
 @dataclass(frozen=True)
@@ -271,7 +272,13 @@ def assert_training_groups_eligible(
             value = _aligned_sequence(trajectory_batch, key, len(response_ids))
             if value is not None:
                 group_batch[key] = [value[index] for index in indices]
-        decision = policy.evaluate(_BatchGroup(group_batch), global_step=0)
+        batch_group = _BatchGroup(group_batch)
+        facts = _inspect_group(batch_group)
+        decision = policy.evaluate(batch_group, global_step=0)
         if not decision.accepted:
             reasons = ", ".join(rejection.value for rejection in decision.rejections)
-            raise ValueError(f"training group {uid!r} violates the resolved group invariant: {reasons}")
+            raise ValueError(
+                f"training group {uid!r} violates the resolved group invariant: {reasons} "
+                f"(physical_count={facts.physical_count}, expected={invariant.physical_group_size}, "
+                f"row_count={len(indices)}, row_indices={indices})"
+            )

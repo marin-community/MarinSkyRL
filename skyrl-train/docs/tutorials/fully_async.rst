@@ -289,8 +289,12 @@ Checkpointing semantics
 
 Checkpoint artifacts record consumed dataset state, every completed group in the generation buffer, and every source
 row waiting for stale-group regeneration. Resume restores completed groups and pending retries before generation
-workers start. Partially generated groups are not checkpointed and are scheduled again through the restored dataset
-state. Buffer persistence fails the checkpoint operation if it cannot save a complete artifact.
+workers start. The restored groups and retries reserve their dataset UIDs, so restarting dataset iteration cannot
+generate a second copy of pending work. Partially generated groups are not checkpointed or reserved and are scheduled
+again through the restored dataset state. Buffer persistence fails the checkpoint operation if it cannot save a
+complete artifact. See the `fully asynchronous resume UID ownership design
+<https://github.com/marin-community/MarinSkyRL/blob/main/docs/design/fully-async-resume-uid-ownership.md>`_ for the UID
+ownership contract.
 
 .. note::
 

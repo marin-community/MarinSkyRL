@@ -111,6 +111,7 @@ class _GroupFreshness(Enum):
 class _AdmissionPartition:
     accepted_groups: List[GeneratedOutputGroup]
     rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
+    discarded_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
 
 
 @dataclass
@@ -257,7 +258,12 @@ class _AsyncDataloader:
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
         self._data_tracker = data_tracker
+        self._pending_uids: set[str] = set()
         self._exhausted: bool = False
+
+    def reserve_pending_uids(self, uids: set[str]) -> None:
+        """Exclude checkpointed pending work from restarted dataset iteration."""
+        self._pending_uids.update(uids)
 
     def load_state_from_checkpoint(self) -> None:
         """
@@ -284,6 +290,7 @@ class _AsyncDataloader:
         async with self._lock:
             self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
             self._iter = enumerate(self._train_dataloader)
+            self._pending_uids.clear()
             self._exhausted = False
 
     async def get_next_non_consumed_data(self):
@@ -294,7 +301,7 @@ class _AsyncDataloader:
         """
         assert self._iter is not None and self._lock is not None, "Dataloader not initialized; call reset() first"
         # Read the skip set from the tracker (epoch-scoped consumed UIDs)
-        skip_set = self._data_tracker.get_consumed_uids_in_epoch()
+        skip_set = self._data_tracker.get_consumed_uids_in_epoch() | self._pending_uids
         async with self._lock:
             try:
                 while True:
@@ -457,6 +464,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 f"Checkpoint contains {len(buffer_state.completed_groups)} completed groups, exceeding buffer capacity "
                 f"{queues.completed.maxsize}"
             )
+        self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
         for prompts in buffer_state.retry_prompts:
@@ -1099,17 +1107,37 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self._rejection_reasons_since_step[decision.primary_rejection.value] += 1
         self._groups_inspected_since_step += inspected_count
 
-    def _partition_completed_groups(self, completed_groups: List[GeneratedOutputGroup]) -> _AdmissionPartition:
-        """Evaluate every completed group without mutating async lifecycle state."""
+    def _partition_completed_groups(
+        self, completed_groups: List[GeneratedOutputGroup], occupied_uids: set[str]
+    ) -> _AdmissionPartition:
+        """Evaluate completed work and select at most one representative per UID."""
+        decisions = [
+            self._group_admission_policy.evaluate(group, global_step=self.global_step) for group in completed_groups
+        ]
+        selected_index_by_uid: dict[str, int] = {}
+        for index, (group, decision) in enumerate(zip(completed_groups, decisions, strict=True)):
+            if group.uid in occupied_uids:
+                continue
+            selected_index = selected_index_by_uid.get(group.uid)
+            if selected_index is None or (decision.accepted and not decisions[selected_index].accepted):
+                selected_index_by_uid[group.uid] = index
+
+        duplicate_decision = AdmissionDecision((AdmissionRejection.DUPLICATE_UID,))
         accepted_groups = []
         rejected_groups = []
-        for group in completed_groups:
-            decision = self._group_admission_policy.evaluate(group, global_step=self.global_step)
-            if decision.accepted:
+        discarded_groups = []
+        for index, (group, decision) in enumerate(zip(completed_groups, decisions, strict=True)):
+            if group.uid in occupied_uids or selected_index_by_uid[group.uid] != index:
+                discarded_groups.append((group, duplicate_decision))
+            elif decision.accepted:
                 accepted_groups.append(group)
             else:
                 rejected_groups.append((group, decision))
-        return _AdmissionPartition(accepted_groups=accepted_groups, rejected_groups=rejected_groups)
+        return _AdmissionPartition(
+            accepted_groups=accepted_groups,
+            rejected_groups=rejected_groups,
+            discarded_groups=discarded_groups,
+        )
 
     def _publish_admission_metrics(self, *, dynamic_candidate_count: int, dynamic_discarded_count: int) -> None:
         rejected = self._groups_rejected_since_step
@@ -1254,7 +1282,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         last_admitted_progress = loop.time()
 
                 completed_groups = _drain_queue(queues.completed)
-                partition = self._partition_completed_groups(completed_groups)
+                partition = self._partition_completed_groups(
+                    completed_groups,
+                    occupied_uids={group.uid for group in accepted_groups},
+                )
                 for group, decision in partition.rejected_groups:
                     queues.retries.put_nowait(group.source_prompts)
                     assert decision.primary_rejection is not None
@@ -1284,8 +1315,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     batch = None
                 queues.condition.notify_all()
 
-            self._record_admission_scan(partition.rejected_groups, inspected_count=len(completed_groups))
-            discarded_count = len(partition.rejected_groups) + dynamic_discarded_this_scan
+            self._record_admission_scan(
+                partition.rejected_groups + partition.discarded_groups,
+                inspected_count=len(completed_groups),
+            )
+            discarded_count = (
+                len(partition.rejected_groups) + len(partition.discarded_groups) + dynamic_discarded_this_scan
+            )
             if discarded_count:
                 await self._staleness_manager.on_rollouts_discarded(discarded_count)
 

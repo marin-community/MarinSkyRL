@@ -2,17 +2,20 @@ import asyncio
 import collections
 
 import pytest
+import torch
 
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GenerationStalledError,
     GeneratedOutputGroup,
+    _AsyncDataloader,
     _AsyncStalenessManager,
     _GenerationQueues,
 )
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.base import TrajectoryID
+from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 
 def _generated_group(
@@ -84,6 +87,23 @@ def _batch_assembly_state(
     )
     queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
     return trainer, queues
+
+
+class _DatasetRows:
+    def __init__(self, uids: list[str]):
+        self._rows = [[{"uid": uid}] for uid in uids]
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self):
+        return len(self._rows)
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state):
+        assert state == {}
 
 
 @pytest.mark.asyncio
@@ -245,6 +265,104 @@ async def test_batch_assembly_scans_rejections_and_preserves_accepted_surplus():
     assert [group.uid for group in batch] == ["accepted-1", "accepted-2"]
     assert queues.retries.get_nowait()[0]["uid"] == "masked-beyond-batch"
     assert queues.completed.get_nowait().uid == "accepted-surplus"
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_discards_duplicate_uid_and_fills_the_batch():
+    trainer, queues = _batch_assembly_state(mini_batch_size=2, accepted=3)
+    queues.completed.put_nowait(_generated_group("duplicate", earliest_model_step=10))
+    queues.completed.put_nowait(_generated_group("duplicate", earliest_model_step=10))
+    queues.completed.put_nowait(_generated_group("unique", earliest_model_step=10))
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+
+    assert [group.uid for group in batch] == ["duplicate", "unique"]
+    assert queues.retries.empty()
+    assert queues.completed.empty()
+    assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_discards_duplicate_uid_received_in_a_later_scan():
+    trainer, queues = _batch_assembly_state(mini_batch_size=2, accepted=3)
+    queues.completed.put_nowait(_generated_group("first", earliest_model_step=10))
+
+    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    done, _ = await asyncio.wait({pending_batch}, timeout=0)
+    assert pending_batch not in done
+
+    async with queues.condition:
+        queues.completed.put_nowait(_generated_group("first", earliest_model_step=10))
+        queues.completed.put_nowait(_generated_group("second", earliest_model_step=10))
+        queues.condition.notify_all()
+
+    batch = await asyncio.wait_for(pending_batch, timeout=1)
+
+    assert [group.uid for group in batch] == ["first", "second"]
+    assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_prefers_eligible_duplicate_without_scheduling_a_retry():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=2)
+    queues.completed.put_nowait(_generated_group("same", earliest_model_step=10, fully_masked=True))
+    queues.completed.put_nowait(_generated_group("same", earliest_model_step=10))
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+
+    assert [group.uid for group in batch] == ["same"]
+    assert queues.retries.empty()
+    assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_retries_duplicate_uid_at_most_once_when_all_copies_are_masked():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=3)
+    queues.completed.put_nowait(_generated_group("masked", earliest_model_step=10, fully_masked=True))
+    queues.completed.put_nowait(_generated_group("masked", earliest_model_step=10, fully_masked=True))
+    queues.completed.put_nowait(_generated_group("replacement", earliest_model_step=10))
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+
+    assert [group.uid for group in batch] == ["replacement"]
+    assert queues.retries.qsize() == 1
+    assert queues.retries.get_nowait()[0]["uid"] == "masked"
+    assert trainer.all_metrics["async/rejected_count/fully_masked"] == 1
+    assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_uids_owned_by_restored_completed_groups_and_retries(tmp_path):
+    tracker = DataConsumptionTracker(mini_batch_size=1, num_steps_per_epoch=4)
+    await tracker.mark_consumed(["consumed"])
+    dataloader = _AsyncDataloader(
+        _DatasetRows(["consumed", "completed", "retry", "unscheduled"]),
+        mini_batch_size=1,
+        data_tracker=tracker,
+    )
+    dataloader.load_state_from_checkpoint()
+
+    trainer, _ = _batch_assembly_state(mini_batch_size=1, accepted=0)
+    trainer.async_train_dataloader = dataloader
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=4), retries=asyncio.Queue(), condition=asyncio.Condition()
+    )
+    torch_state = {
+        "completed_groups": [
+            {
+                "trajectory_batch": dict(_generated_group("completed", 10).trajectory_batch),
+                "uid": "completed",
+                "earliest_model_step": 10,
+                "source_prompts": [{"uid": "completed"}],
+            }
+        ],
+        "retry_prompts": [[{"uid": "retry"}]],
+    }
+    torch.save(torch_state, tmp_path / "generation_buffer_state.pt")
+
+    trainer._restore_buffer_from_checkpoint(queues, str(tmp_path))
+
+    assert (await dataloader.get_next_non_consumed_data())[0]["uid"] == "unscheduled"
 
 
 @pytest.mark.asyncio
