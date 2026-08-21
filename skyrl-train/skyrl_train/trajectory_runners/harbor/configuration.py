@@ -392,7 +392,7 @@ def _get_all_known_harbor_fields() -> Set[str]:
     known.update(EnvironmentConfig.model_fields.keys())
     # From VerifierConfig
     known.update(VerifierConfig.model_fields.keys())
-    # From TrialConfig (excluding component configs built by dedicated sections)
+    # From TrialConfig, excluding nested component configs and the derived timeout summary
     nested_trial_fields = {"task", "agent", "environment", "verifier", "resolved_timeouts"}
     known.update(TrialConfig.model_fields.keys() - nested_trial_fields)
     return known
