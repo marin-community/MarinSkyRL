@@ -499,10 +499,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         num_coordinators = int(getattr(rollout_cfg, "num_coordinators", 4))
         cpus_per_coordinator = int(getattr(rollout_cfg, "cpus_per_coordinator", 8))
+        coordinator_rpc_timeout = float(rollout_cfg.coordinator_rpc_timeout)
         logger.info(
             f"Rollout fan-out ENABLED: replacing single-process runner with "
             f"RolloutDispatcher (K={num_coordinators}, cpus_per_coordinator="
-            f"{cpus_per_coordinator})."
+            f"{cpus_per_coordinator}, coordinator_rpc_timeout={coordinator_rpc_timeout:g}s)."
         )
         self.trajectory_runner = RolloutDispatcher(
             cfg=self.cfg,
@@ -510,6 +511,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             terminal_bench_cfg=terminal_bench_cfg,
             num_coordinators=num_coordinators,
             cpus_per_coordinator=cpus_per_coordinator,
+            coordinator_rpc_timeout=coordinator_rpc_timeout,
         )
 
     async def train(self):

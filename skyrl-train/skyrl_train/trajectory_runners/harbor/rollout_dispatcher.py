@@ -52,110 +52,19 @@ from __future__ import annotations
 import asyncio
 import itertools
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import List, Optional, Protocol
+from typing import List, Optional
 
 import ray
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
-from skyrl_train.utils.harbor_errors import AGENT_TIMEOUT_ERROR
 from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
 
 
-OUTER_AGENT_TIMEOUT_METRIC = "generate/outer_agent_timeouts"
-
-
-class _RetryConfig(Protocol):
-    max_retries: int
-    include_exceptions: set[str] | None
-    exclude_exceptions: set[str] | None
-    min_wait_sec: float
-    max_wait_sec: float
-    wait_multiplier: float
-
-
-class _ShardRunner(Protocol):
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
-
-    async def agent_timeout_output(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch: ...
-
-
-def _retry_backoff_seconds(retry_config: _RetryConfig, attempt: int) -> float:
-    return min(
-        retry_config.min_wait_sec * retry_config.wait_multiplier**attempt,
-        retry_config.max_wait_sec,
-    )
-
-
-@dataclass(frozen=True)
-class ShardTimeoutPolicy:
-    """Apply the outer shard deadline using Harbor's AgentTimeoutError policy."""
-
-    timeout_seconds: float
-    retry_config: _RetryConfig
-
-    @classmethod
-    def from_config(
-        cls,
-        *,
-        configured_timeout: float | None,
-        agent_timeout: float,
-        retry_config: _RetryConfig,
-    ) -> "ShardTimeoutPolicy":
-        if agent_timeout <= 0:
-            raise ValueError("Harbor agent timeout must be greater than zero")
-        if configured_timeout is not None:
-            if configured_timeout <= 0:
-                raise ValueError("rollout.fanout.shard_timeout_seconds must be greater than zero")
-            return cls(timeout_seconds=float(configured_timeout), retry_config=retry_config)
-
-        backoff_budget = sum(
-            _retry_backoff_seconds(retry_config, attempt) for attempt in range(retry_config.max_retries)
-        )
-        attempt_budget = agent_timeout * (retry_config.max_retries + 1)
-        return cls(timeout_seconds=attempt_budget + backoff_budget, retry_config=retry_config)
-
-    def _should_retry_agent_timeout(self) -> bool:
-        excluded = self.retry_config.exclude_exceptions
-        if excluded and AGENT_TIMEOUT_ERROR in excluded:
-            return False
-        included = self.retry_config.include_exceptions
-        return not included or AGENT_TIMEOUT_ERROR in included
-
-    async def run(self, runner: _ShardRunner, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        """Generate one shard, converting the outer deadline to AgentTimeoutError semantics."""
-        timeout_count = 0
-        for attempt in range(self.retry_config.max_retries + 1):
-            try:
-                output = await asyncio.wait_for(
-                    runner.run(input_batch),
-                    timeout=self.timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                timeout_count += 1
-                if attempt < self.retry_config.max_retries and self._should_retry_agent_timeout():
-                    delay = _retry_backoff_seconds(self.retry_config, attempt)
-                    _log().warning(
-                        f"Shard exceeded its {self.timeout_seconds:g}s outer deadline; "
-                        f"refiling as {AGENT_TIMEOUT_ERROR} and retrying after {delay:g}s "
-                        f"({attempt + 1}/{self.retry_config.max_retries})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                _log().warning(
-                    f"Shard exceeded its {self.timeout_seconds:g}s outer deadline; "
-                    f"returning a terminal {AGENT_TIMEOUT_ERROR} after {timeout_count} timeout(s)"
-                )
-                output = await runner.agent_timeout_output(input_batch)
-
-            metrics = output.setdefault("rollout_metrics", {})
-            metrics[OUTER_AGENT_TIMEOUT_METRIC] = metrics.get(OUTER_AGENT_TIMEOUT_METRIC, 0) + timeout_count
-            return output
-
-        raise AssertionError("Shard timeout retry loop exhausted without returning an output")
+class RolloutCoordinatorRPCTimeoutError(TimeoutError):
+    """The rollout coordinator did not return before its RPC watchdog expired."""
 
 
 def _log():
@@ -302,17 +211,9 @@ class RolloutCoordinator:
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
-        configured_timeout = cfg.get("rollout", {}).get("fanout", {}).get("shard_timeout_seconds", None)
-        self._shard_timeout_policy = ShardTimeoutPolicy.from_config(
-            configured_timeout=configured_timeout,
-            agent_timeout=self._runner.agent_timeout_seconds,
-            retry_config=self._runner.retry_config,
-        )
-
         _log().info(
             f"[RolloutCoordinator {shard_idx}/{num_coordinators}] constructed "
-            f"(http={trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}, "
-            f"shard_timeout={self._shard_timeout_policy.timeout_seconds:g}s)"
+            f"(http={trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port})"
         )
 
     async def startup(self) -> None:
@@ -357,7 +258,7 @@ class RolloutCoordinator:
         if global_step is not None:
             self._runner.global_step_fn = lambda: global_step
 
-        return await self._shard_timeout_policy.run(self._runner, sub_batch)
+        return await self._runner.run(sub_batch)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
     async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
@@ -390,6 +291,7 @@ class RolloutDispatcher:
         terminal_bench_cfg: DictConfig,
         num_coordinators: int,
         cpus_per_coordinator: int,
+        coordinator_rpc_timeout: float,
     ):
         # Detach each config to a parent-ref-free, object-free OmegaConf copy
         # BEFORE it can cross a `.remote()` boundary. The live `cfg` tree (under
@@ -437,6 +339,9 @@ class RolloutDispatcher:
             )
         self._num_coordinators = num_coordinators
         self._cpus_per_coordinator = cpus_per_coordinator
+        if coordinator_rpc_timeout <= 0:
+            raise ValueError("rollout.fanout.coordinator_rpc_timeout must be positive")
+        self._coordinator_rpc_timeout = coordinator_rpc_timeout
 
         # Trainer sets this; default returns None until then.
         self.global_step_fn = None
@@ -450,7 +355,7 @@ class RolloutDispatcher:
 
         _log().info(
             f"[RolloutDispatcher] configured num_coordinators={num_coordinators}, "
-            f"cpus_per_coordinator={cpus_per_coordinator}"
+            f"cpus_per_coordinator={cpus_per_coordinator}, coordinator_rpc_timeout={coordinator_rpc_timeout:g}s"
         )
 
     def _current_global_step(self) -> Optional[int]:
@@ -531,11 +436,24 @@ class RolloutDispatcher:
         """
         del disable_tqdm
         if self._eval_session_active:
+            coordinator_index = 0
             actor = self._actors[0]
         else:
-            actor = self._actors[next(self._rr)]
+            coordinator_index = next(self._rr)
+            actor = self._actors[coordinator_index]
         global_step = self._current_global_step()
-        return await actor.run_shard.remote(input_batch, global_step)
+        rpc = actor.run_shard.remote(input_batch, global_step)
+        rpc_deadline = asyncio.timeout(self._coordinator_rpc_timeout)
+        try:
+            async with rpc_deadline:
+                return await asyncio.shield(rpc)
+        except TimeoutError as error:
+            if not rpc_deadline.expired():
+                raise
+            raise RolloutCoordinatorRPCTimeoutError(
+                f"Rollout coordinator {coordinator_index} RPC did not return within "
+                f"{self._coordinator_rpc_timeout:g} seconds"
+            ) from error
 
     async def shutdown(self) -> None:
         if self._actors:

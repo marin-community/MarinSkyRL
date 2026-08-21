@@ -412,7 +412,7 @@ rollout:
     enabled: true
     num_coordinators: 4
     cpus_per_coordinator: 8
-    shard_timeout_seconds: null
+    coordinator_rpc_timeout: 21600
 deepspeed_config:
   train:
     zero_optimization:
