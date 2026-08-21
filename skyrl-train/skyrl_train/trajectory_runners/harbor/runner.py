@@ -39,7 +39,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
 from skyrl_train.utils.harbor_errors import (
-    AGENT_TIMEOUT_ERROR,
     ErrorTreatment,
     classify_exception_type,
     passthrough_logprob_error_type,
@@ -61,7 +60,6 @@ from skyrl_train.trajectory_runners.harbor._harbor_compat import (
 )
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
-from harbor.models.job.config import RetryConfig
 from harbor.utils.traces_utils import normalize_message
 
 # Schema-driven Harbor config mapping
@@ -405,7 +403,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
-        self.agent_timeout_seconds = self._harbor_config_builder.get_agent_timeout_seconds()
 
         # Configure Harbor log level (default WARNING to reduce noise)
         harbor_log_level = self._harbor_config_builder.get_log_level(default="WARNING")
@@ -920,20 +917,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "rollout_logprobs": None,
             "exclude_from_baseline": [not disposition.baseline_eligible for _ in range(num_trials)],
         }
-
-    @property
-    def retry_config(self) -> RetryConfig:
-        return self._retry_config
-
-    async def agent_timeout_output(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        """Create the configured terminal result for a shard-level AgentTimeoutError."""
-        treatment, exception_type = self._classify_exception_type(AGENT_TIMEOUT_ERROR)
-        output = self._create_all_failed_output(
-            input_batch["trajectory_ids"],
-            exception_type,
-            exclude_from_baseline=treatment_excludes_from_baseline(treatment, verifier_available=False),
-        )
-        return await self._finalize_output(input_batch, output)
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """

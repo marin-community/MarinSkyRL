@@ -49,7 +49,7 @@ class _BlockingCoordinator:
         return self._cancelled
 
 
-def _dispatcher(call: Callable[[], Awaitable[dict]], *, timeout: float) -> RolloutDispatcher:
+def _dispatcher(actor: object, *, timeout: float) -> RolloutDispatcher:
     dispatcher = RolloutDispatcher(
         cfg=OmegaConf.create({}),
         trajectory_runner_cfg=OmegaConf.create({}),
@@ -58,7 +58,7 @@ def _dispatcher(call: Callable[[], Awaitable[dict]], *, timeout: float) -> Rollo
         cpus_per_coordinator=1,
         coordinator_rpc_timeout=timeout,
     )
-    dispatcher._actors = [_Coordinator(call)]
+    dispatcher._actors = [actor]
     return dispatcher
 
 
@@ -69,7 +69,7 @@ async def test_coordinator_rpc_returns_trajectory_batch():
     async def completed_rpc():
         return expected
 
-    dispatcher = _dispatcher(completed_rpc, timeout=1)
+    dispatcher = _dispatcher(_Coordinator(completed_rpc), timeout=1)
 
     assert await dispatcher.run({"prompts": ["task"]}) is expected
 
@@ -77,8 +77,7 @@ async def test_coordinator_rpc_returns_trajectory_batch():
 @pytest.mark.asyncio
 async def test_coordinator_rpc_timeout_does_not_cancel_remote_work(ray_init):
     actor = _BlockingCoordinator.remote()
-    dispatcher = _dispatcher(lambda: asyncio.sleep(0), timeout=0.1)
-    dispatcher._actors = [actor]
+    dispatcher = _dispatcher(actor, timeout=0.1)
 
     with pytest.raises(RolloutCoordinatorRPCTimeoutError):
         await dispatcher.run({"prompts": ["task"]})
@@ -94,7 +93,7 @@ async def test_coordinator_rpc_preserves_remote_timeout_error():
     async def failed_rpc():
         raise remote_error
 
-    dispatcher = _dispatcher(failed_rpc, timeout=1)
+    dispatcher = _dispatcher(_Coordinator(failed_rpc), timeout=1)
 
     with pytest.raises(TimeoutError) as raised:
         await dispatcher.run({"prompts": ["task"]})
