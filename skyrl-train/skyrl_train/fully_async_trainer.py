@@ -300,7 +300,7 @@ class _AsyncDataloader:
         If we loaded from a checkpoint, it will skip the already-consumed data. Returns None if the dataloader is exhausted.
         """
         assert self._iter is not None and self._lock is not None, "Dataloader not initialized; call reset() first"
-        # Read the skip set from the tracker (epoch-scoped consumed UIDs)
+        # Resume skips groups that already trained and groups restored as pending work.
         skip_set = self._data_tracker.get_consumed_uids_in_epoch() | self._pending_uids
         async with self._lock:
             try:

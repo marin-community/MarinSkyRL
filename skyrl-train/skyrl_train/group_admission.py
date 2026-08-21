@@ -93,6 +93,31 @@ class AdmissionDecision:
         return self.rejections[0] if self.rejections else None
 
 
+class TrainingGroupInvariantError(ValueError):
+    """A concatenated training group violates its resolved run contract."""
+
+    def __init__(
+        self,
+        *,
+        uid: str,
+        decision: AdmissionDecision,
+        physical_count: int,
+        expected_physical_count: int,
+        row_indices: Sequence[int],
+    ) -> None:
+        self.uid = uid
+        self.rejections = decision.rejections
+        self.physical_count = physical_count
+        self.expected_physical_count = expected_physical_count
+        self.row_indices = tuple(row_indices)
+        reasons = ", ".join(rejection.value for rejection in decision.rejections)
+        super().__init__(
+            f"training group {uid!r} violates the resolved group invariant: {reasons} "
+            f"(physical_count={physical_count}, expected={expected_physical_count}, "
+            f"row_count={len(row_indices)}, row_indices={list(row_indices)})"
+        )
+
+
 class GeneratedGroup(Protocol):
     trajectory_batch: Mapping[str, object]
     earliest_model_step: int
@@ -276,9 +301,10 @@ def assert_training_groups_eligible(
         facts = _inspect_group(batch_group)
         decision = policy.evaluate(batch_group, global_step=0)
         if not decision.accepted:
-            reasons = ", ".join(rejection.value for rejection in decision.rejections)
-            raise ValueError(
-                f"training group {uid!r} violates the resolved group invariant: {reasons} "
-                f"(physical_count={facts.physical_count}, expected={invariant.physical_group_size}, "
-                f"row_count={len(indices)}, row_indices={indices})"
+            raise TrainingGroupInvariantError(
+                uid=uid,
+                decision=decision,
+                physical_count=facts.physical_count,
+                expected_physical_count=invariant.physical_group_size,
+                row_indices=indices,
             )
