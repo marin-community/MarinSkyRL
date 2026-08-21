@@ -109,7 +109,7 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
-- ``trainer.fully_async.admission_stall_timeout_seconds``: The maximum time to assemble one admitted training mini-batch.
+- ``trainer.fully_async.admission_stall_timeout``: The maximum number of seconds to assemble one admitted training mini-batch.
   The default is six hours so long agent episodes and dynamic-sampling rejection do not terminate a healthy run. This deadline is
   independent of episode, collective, and recent training-step durations. Increase it when a valid batch can take longer than six
   hours; decrease it only when false-positive termination is preferable to a long rejected-only wait.
