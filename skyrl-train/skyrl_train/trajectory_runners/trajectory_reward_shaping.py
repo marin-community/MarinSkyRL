@@ -51,7 +51,7 @@ class OverlongPenaltyConfig:
     """DAPO soft-overlong parameters, named to match the paper's formula."""
 
     l_max: int = 0
-    """Maximum generated response length."""
+    """Maximum generated trajectory length."""
 
     l_cache: int = 0
     """Penalty-window width below ``l_max``; zero disables the component."""
@@ -393,7 +393,7 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
                 np.mean([values["successful_length"] for values in trajectory_components])
             ),
             f"{SHAPING_METRIC_PREFIX}/overlong_penalty_mean": float(
-                np.mean([values["overlong"] for values in components])
+                np.mean([values["overlong"] for values in trajectory_components])
             ),
             f"{SHAPING_METRIC_PREFIX}/loop_incidence": float(np.mean(loop_incidence)),
             f"{SHAPING_METRIC_PREFIX}/loop_incidence_correct": float(
@@ -411,7 +411,7 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
                 np.mean([values["successful_length"] < 0 for values in trajectory_components])
             ),
             f"{SHAPING_METRIC_PREFIX}/overlong_incidence": float(
-                np.mean([values["overlong"] < 0 for values in components])
+                np.mean([values["overlong"] < 0 for values in trajectory_components])
             ),
             f"{SHAPING_METRIC_PREFIX}/response_tokens_mean": float(np.mean(trajectory_lengths)),
             f"{SHAPING_METRIC_PREFIX}/response_tokens_max": float(max(trajectory_lengths, default=0)),
@@ -486,8 +486,7 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
         final_components = components[final_index]
 
         if not excluded[final_index]:
-            for index in group:
-                components[index]["overlong"] = _soft_overlong_penalty(response_lengths[index], config.overlong)
+            final_components["overlong"] = _soft_overlong_penalty(trajectory_length, config.overlong)
             normalized_stop = (
                 None if stop_reasons[final_index] is None else str(stop_reasons[final_index]).strip().lower()
             )

@@ -312,7 +312,7 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
     assert record["reward"] == {"outcome": 1.0, "shaped": 1.0, "components": None}
 
 
-def test_step_wise_retention_aggregates_per_response_overlong_penalties():
+def test_step_wise_retention_aggregates_final_row_overlong_penalty():
     input_batch = _input()
     for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
         input_batch[key] = [input_batch[key][0]]
@@ -325,8 +325,8 @@ def test_step_wise_retention_aggregates_per_response_overlong_penalties():
             "rewards": [0.0, 0.5],
             "unshaped_rewards": [0.0, 1.0],
             "reward_shaping_components": [
-                {"non_termination": 0.0, "overlong": -0.25, "successful_length": 0.0},
-                {"non_termination": 0.0, "overlong": -0.25, "successful_length": 0.0},
+                {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+                {"non_termination": 0.0, "overlong": -0.5, "successful_length": 0.0},
             ],
             "reward_shaping_loop_spans": [[], []],
             "reward_shaping_versions": [2, 2],

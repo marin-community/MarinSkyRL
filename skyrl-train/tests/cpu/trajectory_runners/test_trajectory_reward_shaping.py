@@ -175,10 +175,10 @@ def test_soft_overlong_penalty_applies_to_successful_and_failed_responses():
     assert output["rollout_metrics"]["generate/reward_shaping/overlong_incidence"] == pytest.approx(0.75)
 
 
-def test_step_wise_soft_overlong_penalty_uses_each_response_length():
+def test_step_wise_soft_overlong_penalty_uses_full_trajectory_length():
     output = _output(
-        responses=[[1, 2, 3], [4, 5, 6, 7, 8]],
-        rewards=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 1.0]],
+        responses=[[1, 2, 3, 4], [5, 6, 7, 8]],
+        rewards=[[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
         stop_reasons=["stop", "complete"],
     )
     output["is_last_step"] = [False, True]
@@ -187,15 +187,16 @@ def test_step_wise_soft_overlong_penalty_uses_each_response_length():
         output,
         {
             "enabled": True,
-            "overlong": {"l_max": 6, "l_cache": 2},
+            "overlong": {"l_max": 8, "l_cache": 2},
         },
     )
 
-    # The first response is below the four-token threshold. The second is
-    # halfway through the two-token penalty window. The combined eight-token
-    # trajectory length must not trigger the full penalty.
-    assert output["rewards"] == [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, pytest.approx(0.5)]]
-    assert [component["overlong"] for component in output["reward_shaping_components"]] == pytest.approx([0.0, -0.5])
+    # Neither four-token turn reaches the six-token penalty window. The complete
+    # eight-token trajectory reaches l_max and receives the full penalty.
+    assert output["rewards"] == [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, pytest.approx(0.0)]]
+    assert [component["overlong"] for component in output["reward_shaping_components"]] == pytest.approx([0.0, -1.0])
+    assert output["rollout_metrics"]["generate/reward_shaping/overlong_penalty_mean"] == pytest.approx(-1.0)
+    assert output["rollout_metrics"]["generate/reward_shaping/overlong_incidence"] == 1.0
 
 
 def test_zero_cache_disables_soft_overlong_penalty():
