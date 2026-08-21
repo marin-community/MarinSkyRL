@@ -74,6 +74,7 @@ class WholeTrajectoryProjection:
             rewards,
             [output.env_metrics for output in outputs],
             request["env_classes"],
+            loss_masks=loss_masks,
             successes=_verification_successes(outputs),
         )
         rollout_metrics.update(_token_provenance_metrics(outputs))
@@ -132,7 +133,9 @@ class StepWiseTrajectoryProjection:
             else None
         )
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, successes=_verification_successes(steps))
+        rollout_metrics = get_rollout_metrics(
+            responses, rewards, loss_masks=loss_masks, successes=_verification_successes(steps)
+        )
         rollout_metrics.update(_token_provenance_metrics(steps))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],

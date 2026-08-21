@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
+    compute_turn_token_counts,
     concatenate_trajectory_batches,
     minimum_captured_global_step,
     encode_messages_subset,
@@ -137,6 +138,38 @@ def test_apply_overlong_filtering_length_mismatch_assertion(loss_masks, response
     eos_token_id = 4
     with pytest.raises(AssertionError, match="loss_masks and response_ids must have the same length"):
         apply_overlong_filtering(loss_masks, response_ids, eos_token_id)
+
+
+def test_compute_turn_token_counts():
+    """`compute_turn_token_counts` returns one count per turn (maximal run of non-zero loss-mask
+    entries), flattened across trajectories. Observation/non-assistant tokens (0) split turns;
+    empty or all-zero masks contribute nothing."""
+    # Single turn: all assistant tokens.
+    assert compute_turn_token_counts([[1, 1, 1]]) == [3]
+
+    # Observation tokens (0) split assistant runs into separate turns.
+    assert compute_turn_token_counts([[1, 1, 0, 0, 1, 1, 1]]) == [2, 3]
+
+    # Leading/trailing zeros don't create or extend turns.
+    assert compute_turn_token_counts([[0, 0, 1, 1, 0]]) == [2]
+
+    # Isolated single non-zero tokens are length-1 turns.
+    assert compute_turn_token_counts([[0, 1, 0, 1, 0]]) == [1, 1]
+
+    # Multiple trajectories: flat list across all, preserving order.
+    assert compute_turn_token_counts([[1, 1], [1, 0, 1, 1]]) == [2, 1, 2]
+
+    # All-zero mask (e.g. dropped by overlong filtering) contributes no turns.
+    assert compute_turn_token_counts([[0, 0, 0]]) == []
+
+    # Empty mask is skipped.
+    assert compute_turn_token_counts([[]]) == []
+
+    # Empty batch.
+    assert compute_turn_token_counts([]) == []
+
+    # Mixed batch: only the trajectory with assistant tokens contributes.
+    assert compute_turn_token_counts([[], [0, 0], [1, 1, 1]]) == [3]
 
 
 dummy_chat_template = (

@@ -1142,9 +1142,14 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         # Calculate rollout metrics for successful outputs
         if len(successful_outputs) > 0:
+            successful_responses = [list(output.evidence.response_token_ids) for output in successful_outputs]
             rollout_metrics = get_rollout_metrics(
-                [list(output.evidence.response_token_ids) for output in successful_outputs],
+                successful_responses,
                 [output.reward_result.optimization_reward for output in successful_outputs],
+                loss_masks=[
+                    project_loss_mask(output, response)
+                    for output, response in zip(successful_outputs, successful_responses)
+                ],
             )
             rollout_metrics["generate/trajectories_summarized"] = sum(
                 1 for output in successful_outputs if output.summarization_count > 0

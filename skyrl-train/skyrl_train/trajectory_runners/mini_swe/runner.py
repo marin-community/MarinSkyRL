@@ -266,7 +266,7 @@ class MiniSweTrajectoryRunner(TrajectoryRunner):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
             )
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+        rollout_metrics = get_rollout_metrics(responses, rewards, loss_masks=loss_masks)
 
         trajectory_batch: TrajectoryBatch = {
             "prompt_token_ids": prompt_token_ids,

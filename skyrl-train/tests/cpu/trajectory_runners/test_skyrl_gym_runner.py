@@ -676,6 +676,14 @@ def test_trajectory_batch_concatenation():
         "generate/std_num_tokens": np.std([2, 2, 3, 1]).item(),
         "generate/avg_tokens_non_zero_rewards": 2.0,
         "generate/avg_tokens_zero_rewards": 0,
+        "generate/avg_assistant_tokens": 2.0,
+        "generate/min_assistant_tokens": 1,
+        "generate/max_assistant_tokens": 3,
+        "generate/std_assistant_tokens": np.std([2, 2, 3, 1]).item(),
+        # Each response is a single run of 1s, so per-turn counts match response lengths [2, 2, 3, 1].
+        "generate/tokens_per_turn_mean": 2.0,
+        "generate/tokens_per_turn_std": np.std([2, 2, 3, 1]).item(),
+        "generate/tokens_per_turn_max": 3,
     }
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():

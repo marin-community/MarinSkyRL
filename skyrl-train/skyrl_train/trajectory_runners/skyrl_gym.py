@@ -636,6 +636,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             rewards,
             env_metrics,
             env_classes,
+            loss_masks=loss_masks,
             successes=successes,
         )
 

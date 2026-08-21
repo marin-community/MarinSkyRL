@@ -657,7 +657,7 @@ def concatenate_trajectory_batches(
         result[key] = sum([trajectory_batch[key] for trajectory_batch in trajectory_batches], [])
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"], loss_masks=result["loss_masks"])
 
     # Preserve the TIS alignment metrics (generate/tis/*). get_rollout_metrics
     # only derives reward/length stats, so without this the per-batch TIS
@@ -776,11 +776,35 @@ def apply_overlong_filtering(
     ]
 
 
+def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
+    """Compute per-turn assistant token counts across a batch of trajectories.
+
+    Each turn's generated tokens are the maximal runs of consecutive non-zero entries in the
+    loss mask; observation/non-assistant tokens are masked to 0 and thus separate turns. Returns
+    a flat list with one entry per turn (across all trajectories). Trajectories whose loss mask is
+    entirely zero (e.g. dropped by overlong filtering) contribute no turns.
+    """
+    turn_token_counts: List[int] = []
+    for mask in loss_masks:
+        if not mask:
+            continue
+        nz = (np.asarray(mask) != 0).astype(np.int8)
+        if nz.sum() == 0:
+            continue
+        # Pad with zeros on both ends so run starts/ends are detected via the first difference.
+        diffs = np.diff(np.concatenate(([0], nz, [0])))
+        starts = np.where(diffs == 1)[0]
+        ends = np.where(diffs == -1)[0]
+        turn_token_counts.extend((ends - starts).tolist())
+    return turn_token_counts
+
+
 def get_rollout_metrics(
     responses: List[List[int]],
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
+    loss_masks: Optional[List[List[int]]] = None,
     successes: Optional[List[bool]] = None,
 ):
     """
@@ -791,6 +815,7 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
+        loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
         successes: Optional verifier-defined success predicate for each trajectory
 
     Returns:
@@ -827,6 +852,29 @@ def get_rollout_metrics(
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+    if loss_masks is not None:
+        assistant_tokens_arr = np.array([sum(mask) for mask in loss_masks])
+        rollout_metrics.update(
+            {
+                "generate/avg_assistant_tokens": np.mean(assistant_tokens_arr).item(),
+                "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
+                "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
+                "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
+            }
+        )
+
+        # Per-turn token stats: run lengths of consecutive non-zero loss-mask entries (one run per turn).
+        turn_token_counts = compute_turn_token_counts(loss_masks)
+        if turn_token_counts:
+            turn_token_counts_arr = np.array(turn_token_counts)
+            rollout_metrics.update(
+                {
+                    "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
+                }
+            )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
