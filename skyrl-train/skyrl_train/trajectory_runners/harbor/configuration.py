@@ -217,6 +217,7 @@ VERIFIER_SCHEMA = SectionSchema(
 TRIAL_SCHEMA = SectionSchema(
     fields={
         "timeout_multiplier": FieldMapping("timeout_multiplier", default=1.0),
+        "trial_attempt_timeout_sec": FieldMapping("trial_attempt_timeout_sec"),
     }
 )
 
@@ -391,8 +392,9 @@ def _get_all_known_harbor_fields() -> Set[str]:
     known.update(EnvironmentConfig.model_fields.keys())
     # From VerifierConfig
     known.update(VerifierConfig.model_fields.keys())
-    # From TrialConfig (excluding nested configs)
-    known.update({"timeout_multiplier", "trial_name"})
+    # From TrialConfig (excluding component configs built by dedicated sections)
+    nested_trial_fields = {"task", "agent", "environment", "verifier", "resolved_timeouts"}
+    known.update(TrialConfig.model_fields.keys() - nested_trial_fields)
     return known
 
 

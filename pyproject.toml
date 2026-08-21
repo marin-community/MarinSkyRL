@@ -139,6 +139,8 @@ dev = [
     "pytest-asyncio",
     "universal-pathlib",
 ]
+harbor-test = ["harbor; sys_platform == 'linux'"]
+
 [tool.hatch.build.targets.wheel.force-include]
 "chat_templates" = "chat_templates"
 "cloud/iris" = "cloud/iris"
