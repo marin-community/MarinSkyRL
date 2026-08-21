@@ -10,7 +10,7 @@ from rigging import telemetry as rigging_telemetry
 from rigging.telemetry.metrics import MetricSnapshot, MetricSnapshotPublisher
 from rigging.telemetry.prometheus import PrometheusCollector, PrometheusScraper
 
-from skyrl_train.telemetry import CONTROLLER_ROLE, process_telemetry
+from skyrl_train.telemetry import process_telemetry
 
 
 MAX_RAY_METRIC_SNAPSHOTS = 512
@@ -117,9 +117,9 @@ def transform_ray_metrics(families: tuple[Metric, ...]) -> tuple[MetricSnapshot,
 
 
 @contextlib.contextmanager
-def ray_metrics_telemetry(node_ip: str, metrics_port: int) -> Iterator[None]:
-    """Own one bounded local Ray Prometheus collector for this controller process."""
-    with process_telemetry(CONTROLLER_ROLE) as owner:
+def ray_metrics_telemetry(node_ip: str, metrics_port: int, role: str) -> Iterator[None]:
+    """Own one bounded local Ray Prometheus collector for this node's process."""
+    with process_telemetry(role) as owner:
         collector = owner.collector_or_inert(
             PrometheusCollector(
                 metric_source="ray",
