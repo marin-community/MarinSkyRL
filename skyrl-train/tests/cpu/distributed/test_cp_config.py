@@ -97,6 +97,9 @@ ADDITIVE_POLICY_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
 }
+ADDITIVE_POLICY_FIELDS = {
+    "grug_query_bias_interpolation_weight": None,
+}
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was
 # snapshotted, so — like the CP fields — it must be stripped from each role's
@@ -157,6 +160,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["teacher"].pop(k, None)
     for k in ADDITIVE_POLICY_MODEL_FIELDS:
         container["trainer"]["policy"]["model"].pop(k, None)
+    for k in ADDITIVE_POLICY_FIELDS:
+        container["trainer"]["policy"].pop(k, None)
     container["trainer"]["placement"].pop("enable_numa_affinity", None)
     container["trainer"]["policy"].pop("host_memory_monitor", None)
     container["trainer"]["algorithm"].pop("tis_splice", None)

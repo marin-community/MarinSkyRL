@@ -24,6 +24,8 @@ class GrugQueryBiasCaptureModel(Protocol):
 
     def take_query_bias_observation(self, *, candidate_count: int) -> "GrugQueryBiasObservation": ...
 
+    def get_query_bias(self) -> torch.Tensor: ...
+
     def set_query_bias(self, bias: torch.Tensor) -> None: ...
 
 
@@ -197,10 +199,15 @@ class GrugQueryBiasWindow:
         model: GrugQueryBiasCaptureModel,
         valid_tokens: int,
         capture_plan: GrugQueryBiasCapturePlan,
+        *,
+        target_weight: float,
     ) -> None:
+        if not 0.0 < target_weight <= 1.0:
+            raise ValueError(f"target_weight must be in (0, 1], got {target_weight}")
         config = model.config
         self.model = model
         self.capture_plan = capture_plan
+        self.target_weight = target_weight
         self.candidate_count = query_bias_candidate_count(
             valid_tokens,
             config.num_experts_per_tok,
@@ -239,5 +246,6 @@ class GrugQueryBiasWindow:
         if self._closed:
             return
         if optimizer_step_succeeded:
-            self.model.set_query_bias(next_query_bias(self.accumulator.finalize_betas()))
+            target = next_query_bias(self.accumulator.finalize_betas())
+            self.model.set_query_bias(torch.lerp(self.model.get_query_bias().float(), target, self.target_weight))
         self._closed = True

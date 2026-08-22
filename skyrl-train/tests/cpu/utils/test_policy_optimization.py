@@ -502,6 +502,31 @@ def test_validate_cfg_requires_grug_query_bias_update_mode():
         validate_cfg(cfg)
 
 
+@pytest.mark.parametrize("weight", [None, 0.0, 1.0, float("inf"), [0.1]])
+def test_validate_cfg_rejects_invalid_grug_query_bias_interpolation_weight(weight):
+    pytest.importorskip("hydra")
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = _validatable_dummy_config()
+    cfg.trainer.policy.grug_query_bias_update_mode = "interpolate"
+    cfg.trainer.policy.grug_query_bias_interpolation_weight = weight
+
+    with pytest.raises(AssertionError, match="grug_query_bias_interpolation_weight"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_interpolation_weight_for_other_grug_query_bias_modes():
+    pytest.importorskip("hydra")
+    from skyrl_train.utils.utils import validate_cfg
+
+    cfg = _validatable_dummy_config()
+    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
+    cfg.trainer.policy.grug_query_bias_interpolation_weight = 0.1
+
+    with pytest.raises(AssertionError, match="only valid"):
+        validate_cfg(cfg)
+
+
 def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
     pytest.importorskip("hydra")
     from skyrl_train.utils.utils import validate_cfg

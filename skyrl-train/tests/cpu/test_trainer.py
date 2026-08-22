@@ -209,6 +209,9 @@ class _ObservableGrugCausalLM(GrugMoeForCausalLM):
     def set_query_bias(self, query_bias):
         self.query_bias = query_bias.clone()
 
+    def get_query_bias(self):
+        return self.query_bias.clone()
+
 
 class _FixedQueryBiasAccumulator:
     def __init__(self, betas):
@@ -222,7 +225,7 @@ def _window_with_grug_query_bias_accumulator(accumulator):
     causal_lm = _ObservableGrugCausalLM()
     shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
     capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
-    window = GrugQueryBiasWindow(causal_lm, valid_tokens=1, capture_plan=capture_plan)
+    window = GrugQueryBiasWindow(causal_lm, valid_tokens=1, capture_plan=capture_plan, target_weight=1.0)
     window.accumulator = accumulator
     return window, causal_lm
 
@@ -328,6 +331,27 @@ def test_successful_step_applies_grug_query_bias_once():
     causal_lm.query_bias.fill_(17)
     window.finish(optimizer_step_succeeded=True)
     torch.testing.assert_close(causal_lm.query_bias, torch.full_like(causal_lm.query_bias, 17))
+
+
+def test_successful_step_interpolates_toward_grug_query_bias_target():
+    betas = torch.tensor([[1.0, -2.0]])
+    accumulator = _FixedQueryBiasAccumulator(betas)
+    causal_lm = _ObservableGrugCausalLM()
+    previous_bias = causal_lm.query_bias.clone()
+    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
+    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
+    window = GrugQueryBiasWindow(
+        causal_lm,
+        valid_tokens=1,
+        capture_plan=capture_plan,
+        target_weight=0.25,
+    )
+    window.accumulator = accumulator
+
+    window.finish(optimizer_step_succeeded=True)
+
+    expected = torch.lerp(previous_bias, next_query_bias(betas), 0.25)
+    torch.testing.assert_close(causal_lm.query_bias, expected)
 
 
 def test_grug_query_bias_virtual_shards_partition_optimizer_window():
@@ -1195,7 +1219,8 @@ def test_default_grug_ppo_train_keeps_query_bias_exact_across_optimizer_steps():
     assert not torch.equal(causal_lm.lm_head.weight, initial_lm_head)
 
 
-def test_replace_mode_updates_grug_query_bias_through_policy_training():
+def _grug_query_bias_after_policy_training(mode, interpolation_weight=None):
+    torch.manual_seed(1234)
     causal_lm = GrugMoeForCausalLM.from_pretrained(
         ORACLE_FIXTURE_DIR,
         local_files_only=True,
@@ -1206,7 +1231,8 @@ def test_replace_mode_updates_grug_query_bias_through_policy_training():
     initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
 
     cfg = get_default_config()
-    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
+    cfg.trainer.policy.grug_query_bias_update_mode = mode
+    cfg.trainer.policy.grug_query_bias_interpolation_weight = interpolation_weight
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.loss_reduction = "token_mean"
@@ -1219,7 +1245,21 @@ def test_replace_mode_updates_grug_query_bias_through_policy_training():
     _run_grug_ppo_train(worker, batch)
 
     actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
+    return initial_bias, actual_bias
+
+
+def test_replace_mode_updates_grug_query_bias_through_policy_training():
+    initial_bias, actual_bias = _grug_query_bias_after_policy_training("replace")
+
     assert not torch.equal(actual_bias, initial_bias)
+
+
+def test_interpolate_mode_applies_configured_fraction_through_policy_training():
+    replace_initial, replace_bias = _grug_query_bias_after_policy_training("replace")
+    interpolate_initial, interpolate_bias = _grug_query_bias_after_policy_training("interpolate", 0.25)
+
+    torch.testing.assert_close(interpolate_initial, replace_initial, rtol=0, atol=0)
+    torch.testing.assert_close(interpolate_bias, torch.lerp(replace_initial, replace_bias, 0.25), rtol=1e-6, atol=1e-7)
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

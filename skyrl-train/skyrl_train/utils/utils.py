@@ -18,7 +18,10 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
-from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
+from skyrl_train.config.query_bias import (
+    resolve_grug_query_bias_target_weight,
+    resolve_grug_query_bias_update_mode,
+)
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -601,7 +604,8 @@ def validate_cfg(cfg: DictConfig):
     )
 
     try:
-        resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+        grug_query_bias_update_mode = resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+        resolve_grug_query_bias_target_weight(cfg.trainer.policy, grug_query_bias_update_mode)
     except ValueError as error:
         raise AssertionError(str(error)) from error
 

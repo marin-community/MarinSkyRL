@@ -22,7 +22,11 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.config.query_bias import GrugQueryBiasUpdateMode, resolve_grug_query_bias_update_mode
+from skyrl_train.config.query_bias import (
+    GrugQueryBiasUpdateMode,
+    resolve_grug_query_bias_target_weight,
+    resolve_grug_query_bias_update_mode,
+)
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.utils.io import io
@@ -1064,9 +1068,13 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
+        grug_query_bias_update_mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
+        grug_query_bias_target_weight = resolve_grug_query_bias_target_weight(
+            self.cfg.trainer.policy,
+            grug_query_bias_update_mode,
+        )
         grug_query_bias_updates_enabled = (
-            grug_causal_lm is not None
-            and resolve_grug_query_bias_update_mode(self.cfg.trainer.policy) is GrugQueryBiasUpdateMode.REPLACE
+            grug_causal_lm is not None and grug_query_bias_update_mode is not GrugQueryBiasUpdateMode.FROZEN
         )
         grug_capture_plan = None
         if grug_query_bias_updates_enabled:
@@ -1099,6 +1107,7 @@ class PolicyWorkerBase(Worker):
                         grug_causal_lm,
                         valid_tokens,
                         grug_capture_plan,
+                        target_weight=grug_query_bias_target_weight,
                     )
                 diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
                 with _phase_diagnostics.region(

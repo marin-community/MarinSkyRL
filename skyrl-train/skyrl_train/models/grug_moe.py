@@ -806,6 +806,11 @@ class GrugMoeModel(GrugMoePreTrainedModel):
             candidate_count=candidate_count,
         )
 
+    def get_query_bias(self) -> torch.Tensor:
+        """Return the stacked FP32 router query-bias buffers."""
+
+        return torch.stack([layer.mlp.router.bias for layer in self.layers])
+
     @torch.no_grad()
     def set_query_bias(self, bias: torch.Tensor) -> None:
         expected = (len(self.layers), self.config.num_local_experts)
@@ -899,6 +904,9 @@ class GrugMoeForCausalLM(GrugMoePreTrainedModel):
 
     def take_query_bias_observation(self, *, candidate_count: int) -> GrugQueryBiasObservation:
         return self.model.take_query_bias_observation(candidate_count=candidate_count)
+
+    def get_query_bias(self) -> torch.Tensor:
+        return self.model.get_query_bias()
 
     def set_query_bias(self, bias: torch.Tensor) -> None:
         self.model.set_query_bias(bias)
