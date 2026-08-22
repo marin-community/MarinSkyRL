@@ -8,8 +8,6 @@ import math
 import statistics
 from typing import Mapping, Protocol, Sequence
 
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
-
 
 class DynamicSamplingType(StrEnum):
     FILTER = "filter"
@@ -67,6 +65,12 @@ def _aligned_sequence(batch: Mapping[str, object], key: str, row_count: int) -> 
     return value
 
 
+def _reward_total(reward: object) -> float:
+    if isinstance(reward, Sequence) and not isinstance(reward, (str, bytes)):
+        return sum(float(value) for value in reward)
+    return float(reward)
+
+
 def group_is_informative_for_dynamic_sampling(
     trajectory_batch: Mapping[str, object],
     row_indices: Sequence[int] | None = None,
@@ -90,7 +94,7 @@ def group_is_informative_for_dynamic_sampling(
     for index in row_indices:
         if is_last_step is not None and not bool(is_last_step[index]):
             continue
-        final_outcomes.append(NormalizedReward.from_output(outcomes[index]).total)
+        final_outcomes.append(_reward_total(outcomes[index]))
     if not final_outcomes:
         raise ValueError("dynamic sampling group must contain at least one final trial row")
     if len(final_outcomes) == 1:

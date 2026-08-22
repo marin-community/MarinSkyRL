@@ -991,41 +991,17 @@ def test_build_dataloader_seeding(dummy_config):
     """Test that build_dataloader correctly seeds the dataloader for reproducible shuffling."""
     dataset = MultiItemDataset(size=20)
 
-    # Test 1: Same seed should produce same shuffling
-    config1 = dummy_config.copy()
-    config1.trainer.seed = 42
-    config1.trainer.train_batch_size = 5
+    def first_batch(seed):
+        config = dummy_config.copy()
+        config.trainer.seed = seed
+        config.trainer.train_batch_size = 5
+        # This test covers generator seeding, not multiprocessing. Use the existing
+        # single-process loader mode so a small CI host is not asked for eight workers.
+        config.generator.enable_http_endpoint = True
+        return next(iter(build_dataloader(config, dataset, is_train=True)))
 
-    config2 = dummy_config.copy()
-    config2.trainer.seed = 42  # Same seed
-    config2.trainer.train_batch_size = 5
-
-    # Build dataloaders
-    dataloader1 = build_dataloader(config1, dataset, is_train=True)
-    dataloader2 = build_dataloader(config2, dataset, is_train=True)
-
-    # Get first batch from each dataloader
-    first_batch1 = next(iter(dataloader1))
-    first_batch2 = next(iter(dataloader2))
-
-    # With same seed, first batches should be identical
-    assert first_batch1 == first_batch2, (
-        f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
-    )
-
-    # Test 2: Different seeds should produce different shuffling
-    config3 = dummy_config.copy()
-    config3.trainer.seed = 123  # Different seed
-    config3.trainer.train_batch_size = 5
-
-    dataloader3 = build_dataloader(config3, dataset, is_train=True)
-    first_batch3 = next(iter(dataloader3))
-
-    # With different seed, first batch should be different
-    # Note: There's a tiny chance they could be the same by random chance, but very unlikely with 20 items
-    assert first_batch1 != first_batch3, (
-        f"Different seeds should produce different first batches, but both gave {first_batch1}"
-    )
+    assert first_batch(42) == first_batch(42)
+    assert first_batch(42) != first_batch(123)
 
 
 def test_validate_trajectory_batch_invalid_rewards():
