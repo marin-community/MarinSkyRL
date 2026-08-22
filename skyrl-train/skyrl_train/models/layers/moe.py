@@ -55,6 +55,7 @@ from torch.distributed.tensor import DTensor
 
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.models.ep_gradient import ExpertGradientAveraging
+from skyrl_train.models.router_instrumentation import emit_router_forward
 from skyrl_train.models.layers.moe_routing import (
     TokenReorderer,
     grouped_expert_contributions,
@@ -272,6 +273,8 @@ class TokenChoiceTopKRouter(nn.Module):
     expert selection while re-gathering ``top_scores`` from the LIVE softmax —
     the R3 crux (gradients flow through ``self.gate``)."""
 
+    _emits_router_observations = True
+
     def __init__(
         self,
         dim: int,
@@ -306,13 +309,13 @@ class TokenChoiceTopKRouter(nn.Module):
         assert routed_experts is None or routed_experts.shape[-1] == self.top_k, (
             f"routed_experts shape: {routed_experts.shape}, top_k: {self.top_k}"
         )
-        scores = self.gate(x)
+        selection_logits = self.gate(x)
 
         # softmax/sigmoid in float32 to match HF and avoid loss explosion.
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(selection_logits.to(torch.float32))
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(selection_logits.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -327,6 +330,15 @@ class TokenChoiceTopKRouter(nn.Module):
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
+
+        emit_router_forward(
+            router=self,
+            router_inputs=x,
+            selection_logits=selection_logits,
+            natural_selected_experts=native_experts_indices,
+            selected_experts=selected_experts_indices,
+            combine_weights=top_scores,
+        )
 
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.reshape(-1).float(),
