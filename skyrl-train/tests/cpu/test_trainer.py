@@ -221,11 +221,16 @@ class _FixedQueryBiasAccumulator:
         return self.betas
 
 
-def _window_with_grug_query_bias_accumulator(accumulator):
+def _window_with_grug_query_bias_accumulator(accumulator, *, target_weight=1.0):
     causal_lm = _ObservableGrugCausalLM()
     shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
     capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
-    window = GrugQueryBiasWindow(causal_lm, valid_tokens=1, capture_plan=capture_plan, target_weight=1.0)
+    window = GrugQueryBiasWindow(
+        causal_lm,
+        valid_tokens=1,
+        capture_plan=capture_plan,
+        target_weight=target_weight,
+    )
     window.accumulator = accumulator
     return window, causal_lm
 
@@ -336,17 +341,8 @@ def test_successful_step_applies_grug_query_bias_once():
 def test_successful_step_interpolates_toward_grug_query_bias_target():
     betas = torch.tensor([[1.0, -2.0]])
     accumulator = _FixedQueryBiasAccumulator(betas)
-    causal_lm = _ObservableGrugCausalLM()
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
     previous_bias = causal_lm.query_bias.clone()
-    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
-    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
-    window = GrugQueryBiasWindow(
-        causal_lm,
-        valid_tokens=1,
-        capture_plan=capture_plan,
-        target_weight=0.25,
-    )
-    window.accumulator = accumulator
 
     window.finish(optimizer_step_succeeded=True)
 
